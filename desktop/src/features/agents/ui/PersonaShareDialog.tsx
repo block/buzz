@@ -4,17 +4,10 @@ import { toast } from "sonner";
 
 import { useEncodeAgentSnapshotForSendMutation } from "@/features/agents/hooks";
 import { useOpenDmMutation } from "@/features/channels/hooks";
-import {
-  buildOutgoingMessage,
-  formatImetaMediaLine,
-} from "@/features/messages/lib/imetaMediaMarkdown";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
-import {
-  sendChannelMessage,
-  uploadMediaBytes,
-  type BlobDescriptor,
-} from "@/shared/api/tauri";
+import { uploadMediaBytes, type BlobDescriptor } from "@/shared/api/tauri";
+import { copyTextToSystemClipboard } from "@/shared/api/tauriMedia";
 import type { SnapshotMemoryLevel } from "@/shared/api/tauriPersonas";
 import type { AgentPersona, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -37,9 +30,13 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 
-import { PersonaShareRecipients } from "./PersonaShareRecipients";
+import {
+  formatShareRecipientName,
+  PersonaShareRecipients,
+} from "./PersonaShareRecipients";
 import { SnapshotOptionMenu } from "./SnapshotOptionMenu";
 import { resolveSnapshotAvatarPng } from "./snapshotAvatarPng";
+import { useSnapshotSendController } from "./useSnapshotSendController";
 
 type PersonaShareDialogProps = {
   isPending: boolean;
@@ -59,7 +56,15 @@ const SHARE_LEVELS: { value: SnapshotMemoryLevel; label: string }[] = [
 type PendingMemoryShare = {
   action: "copy" | "send";
   memoryLevel: Exclude<SnapshotMemoryLevel, "none">;
+  recipientNames?: string[];
 };
+
+function formatRecipientAudience(names: readonly string[]): string {
+  if (names.length === 0) return "The people you selected";
+  if (names.length === 1) return names[0] ?? "The person you selected";
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names.at(-1)}`;
+}
 
 function MemoryShareConfirmation({
   pendingShare,
@@ -73,6 +78,9 @@ function MemoryShareConfirmation({
   const isLinkShare = pendingShare?.action === "copy";
   const memoryLabel =
     pendingShare?.memoryLevel === "core" ? "core memory" : "all memories";
+  const recipientAudience = formatRecipientAudience(
+    pendingShare?.recipientNames ?? [],
+  );
 
   return (
     <AlertDialog
@@ -88,7 +96,7 @@ function MemoryShareConfirmation({
             This agent includes <strong>plaintext {memoryLabel}</strong>.{" "}
             {isLinkShare
               ? "Anyone with the link can view it."
-              : "The people you selected—and anyone with the file link—can view it."}{" "}
+              : `${recipientAudience}—and anyone with the file link—can view it.`}{" "}
             Only share with people you trust.
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -174,12 +182,12 @@ export function PersonaShareDialog({
 }: PersonaShareDialogProps) {
   const encodeSnapshotMutation = useEncodeAgentSnapshotForSendMutation();
   const openDmMutation = useOpenDmMutation();
+  const snapshotSendController = useSnapshotSendController(open);
   const profileQuery = useProfileQuery(open);
   const [selectedRecipients, setSelectedRecipients] = React.useState<
     UserSearchResult[]
   >([]);
   const [isCopying, setIsCopying] = React.useState(false);
-  const [isSending, setIsSending] = React.useState(false);
   const [pendingMemoryShare, setPendingMemoryShare] =
     React.useState<PendingMemoryShare | null>(null);
   const [linkShareLevel, setLinkShareLevel] =
@@ -187,33 +195,47 @@ export function PersonaShareDialog({
   const [recipientShareLevel, setRecipientShareLevel] =
     React.useState<SnapshotMemoryLevel>("none");
 
+  const isSending = ["preparing", "uploading", "sending"].includes(
+    snapshotSendController.state.phase,
+  );
   const isActionPending = isPending || isCopying || isSending;
   const hasLinkedAgent = linkedAgentPubkey !== null;
   const ownerDisplayName =
     profileQuery.data?.displayName?.trim() || "Your account";
+  const excludedRecipientPubkeys = React.useMemo(
+    () =>
+      snapshotSendController.relaySelfPubkey
+        ? [snapshotSendController.relaySelfPubkey]
+        : [],
+    [snapshotSendController.relaySelfPubkey],
+  );
 
   React.useEffect(() => {
     if (open) {
       setSelectedRecipients([]);
       setIsCopying(false);
-      setIsSending(false);
       setPendingMemoryShare(null);
       setLinkShareLevel("none");
       setRecipientShareLevel("none");
       encodeSnapshotMutation.reset();
+      snapshotSendController.reset();
     }
-  }, [open, encodeSnapshotMutation.reset]);
+  }, [open, encodeSnapshotMutation.reset, snapshotSendController.reset]);
 
-  async function uploadSnapshot(
-    memoryLevel: SnapshotMemoryLevel,
-  ): Promise<BlobDescriptor> {
-    const encoded = await encodeSnapshotMutation.mutateAsync({
+  async function encodeSnapshot(memoryLevel: SnapshotMemoryLevel) {
+    return encodeSnapshotMutation.mutateAsync({
       id: persona.id,
       memoryLevel: hasLinkedAgent ? memoryLevel : "none",
       format: "png",
       memorySourcePubkey: linkedAgentPubkey,
       avatarPngDataUrl: await resolveSnapshotAvatarPng(persona.avatarUrl),
     });
+  }
+
+  async function uploadSnapshot(
+    memoryLevel: SnapshotMemoryLevel,
+  ): Promise<BlobDescriptor> {
+    const encoded = await encodeSnapshot(memoryLevel);
     const uploaded = await uploadMediaBytes(
       encoded.fileBytes,
       encoded.fileName,
@@ -232,10 +254,10 @@ export function PersonaShareDialog({
     setIsCopying(true);
     try {
       const uploaded = await uploadSnapshot(memoryLevel);
-      await navigator.clipboard.writeText(uploaded.url);
+      await copyTextToSystemClipboard(uploaded.url);
       toast.success("Link copied");
     } catch {
-      toast.error("Couldn’t copy link");
+      toast.error("Couldn’t copy link. Try again.");
     } finally {
       setIsCopying(false);
     }
@@ -244,25 +266,22 @@ export function PersonaShareDialog({
   async function sendToRecipients(memoryLevel: SnapshotMemoryLevel) {
     if (isActionPending || selectedRecipients.length === 0) return;
 
-    setIsSending(true);
-    try {
-      const directMessage = await openDmMutation.mutateAsync({
-        pubkeys: selectedRecipients.map((recipient) => recipient.pubkey),
-      });
-      const uploaded = await uploadSnapshot(memoryLevel);
-      const outgoingMessage = buildOutgoingMessage("", [uploaded]);
-      await sendChannelMessage(
-        directMessage.id,
-        formatImetaMediaLine(uploaded, { label: persona.displayName }),
-        null,
-        outgoingMessage.mediaTags ?? [],
-      );
+    const sent = await snapshotSendController.beginSend(
+      () => encodeSnapshot(memoryLevel),
+      async () => {
+        const directMessage = await openDmMutation.mutateAsync({
+          pubkeys: selectedRecipients.map((recipient) => recipient.pubkey),
+        });
+        return directMessage.id;
+      },
+      persona.displayName,
+    );
+
+    if (sent) {
       toast.success(`Sent ${persona.displayName}`);
       onOpenChange(false);
-    } catch {
+    } else if (sent === false) {
       toast.error("Couldn’t send agent. Try again.");
-    } finally {
-      setIsSending(false);
     }
   }
 
@@ -274,7 +293,14 @@ export function PersonaShareDialog({
 
     const effectiveMemoryLevel = hasLinkedAgent ? memoryLevel : "none";
     if (effectiveMemoryLevel !== "none") {
-      setPendingMemoryShare({ action, memoryLevel: effectiveMemoryLevel });
+      setPendingMemoryShare({
+        action,
+        memoryLevel: effectiveMemoryLevel,
+        recipientNames:
+          action === "send"
+            ? selectedRecipients.map(formatShareRecipientName)
+            : undefined,
+      });
       return;
     }
 
@@ -322,7 +348,10 @@ export function PersonaShareDialog({
           <div className="space-y-4 pt-4">
             <div className="flex items-start gap-2">
               <PersonaShareRecipients
-                disabled={isActionPending}
+                disabled={
+                  isActionPending || !snapshotSendController.isDmSafetyReady
+                }
+                excludedPubkeys={excludedRecipientPubkeys}
                 onSelectionChange={setSelectedRecipients}
                 open={open}
                 renderEndControl={(handleAccessOpenChange) => (
@@ -343,7 +372,11 @@ export function PersonaShareDialog({
               <Button
                 className="h-10 shrink-0"
                 data-testid="persona-share-send"
-                disabled={isActionPending || selectedRecipients.length === 0}
+                disabled={
+                  isActionPending ||
+                  !snapshotSendController.isDmSafetyReady ||
+                  selectedRecipients.length === 0
+                }
                 onClick={() => requestMemoryShare("send", recipientShareLevel)}
                 type="button"
               >
@@ -403,8 +436,7 @@ export function PersonaShareDialog({
               data-testid="persona-share-copy-link-footer"
             >
               <p className="min-w-0 max-w-64 flex-1 text-xs text-secondary-foreground/75">
-                Anyone in this workspace with the link can duplicate and use
-                this agent.
+                Anyone with the link can duplicate and use this agent.
               </p>
               <Button
                 className="ml-auto shrink-0"

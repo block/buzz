@@ -35,6 +35,7 @@ import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext"
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
+import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
@@ -205,6 +206,14 @@ export const MessageRow = React.memo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
       [message.tags],
     );
+    const snapshotSharedBy = React.useMemo(
+      () =>
+        resolveSnapshotSharedBy(
+          { signerPubkey: message.signerPubkey },
+          profiles,
+        ),
+      [message.signerPubkey, profiles],
+    );
 
     const { customEmoji, emojiOnly } = useMessageEmoji(
       message.body,
@@ -347,7 +356,7 @@ export const MessageRow = React.memo(
               mentionNames={mentionNames}
               mentionPubkeysByName={mentionPubkeysByName}
               searchQuery={searchQuery}
-              snapshotSharedBy={message.author}
+              snapshotSharedBy={snapshotSharedBy}
               videoReviewContext={videoReviewContext}
             />
           );

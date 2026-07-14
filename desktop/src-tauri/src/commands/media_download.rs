@@ -223,6 +223,30 @@ pub async fn copy_image_to_clipboard(
         .map_err(|_| "clipboard result channel closed unexpectedly".to_string())?
 }
 
+/// Write text to the system clipboard through the native shell.
+///
+/// WebKit can revoke browser clipboard permission after a user action awaits a
+/// long-running operation such as snapshot encoding and upload. Keeping the
+/// delayed write in the native layer makes that flow reliable on macOS.
+#[tauri::command]
+pub async fn copy_text_to_clipboard(text: String, app: tauri::AppHandle) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    app.run_on_main_thread(move || {
+        let result = arboard::Clipboard::new()
+            .map_err(|e| format!("clipboard error: {e}"))
+            .and_then(|mut clipboard| {
+                clipboard
+                    .set_text(text)
+                    .map_err(|e| format!("clipboard error: {e}"))
+            });
+        let _ = tx.send(result);
+    })
+    .map_err(|e| format!("main thread dispatch failed: {e}"))?;
+
+    rx.recv()
+        .map_err(|_| "clipboard result channel closed unexpectedly".to_string())?
+}
+
 /// Fetch blob bytes from a (pre-validated) relay media URL through the app's
 /// HTTP client, enforcing the download size cap. The caller is responsible for
 /// validating the URL origin and for any content-type checks on the result.

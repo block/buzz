@@ -360,6 +360,69 @@ test("catalog detail pane shows the full persona details", async ({ page }) => {
   );
 });
 
+type AgentShareCommand = { command: string; payload: unknown };
+
+async function openSafetyShareDialog(
+  page: import("@playwright/test").Page,
+  options: Parameters<typeof installMockBridge>[1] = {},
+) {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:safety-auditor",
+        displayName: "Safety Auditor",
+        systemPrompt: "You audit safety boundaries.",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        displayName: "Charlie",
+      },
+    ],
+    uploadDescriptors: [
+      {
+        url: `https://mock.relay/media/${"d".repeat(64)}.png`,
+        sha256: "d".repeat(64),
+        size: 1234,
+        type: "image/png",
+        uploaded: Math.floor(Date.now() / 1000),
+        filename: "safety-auditor.agent.png",
+      },
+    ],
+    ...options,
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByLabel("Open actions for Safety Auditor").click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  await expect(page.getByTestId("persona-share-dialog")).toBeVisible();
+}
+
+async function selectCharlieRecipient(page: import("@playwright/test").Page) {
+  const search = page.getByTestId("persona-share-recipient-search");
+  await expect(search).toBeEnabled({ timeout: 5_000 });
+  await search.fill("charlie");
+  await page
+    .getByTestId(
+      `persona-share-recipient-option-${TEST_IDENTITIES.charlie.pubkey}`,
+    )
+    .click();
+}
+
+async function readAgentShareCommands(
+  page: import("@playwright/test").Page,
+): Promise<AgentShareCommand[]> {
+  return page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: AgentShareCommand[];
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? [],
+  );
+}
+
 test("custom personas share with people and keep export separate", async ({
   page,
 }) => {
@@ -421,11 +484,11 @@ test("custom personas share with people and keep export separate", async ({
   ).toBeVisible();
   await expect(shareDialog.getByText("Added by You")).toHaveCount(0);
   await expect(shareDialog).toContainText(
-    "Anyone in this workspace with the link can duplicate and use this agent.",
+    "Anyone with the link can duplicate and use this agent.",
   );
   await expect(
     shareDialog.getByText(
-      "Anyone in this workspace with the link can duplicate and use this agent.",
+      "Anyone with the link can duplicate and use this agent.",
     ),
   ).toHaveClass(/text-xs.*text-secondary-foreground\/75/);
   await expect(
@@ -776,7 +839,7 @@ test("share access controls include the selected memories", async ({
   await expect(memoryConfirmation).toBeVisible();
   await expect(memoryConfirmation).toContainText("plaintext all memories");
   await expect(memoryConfirmation).toContainText(
-    "The people you selected—and anyone with the file link—can view it.",
+    "Charlie—and anyone with the file link—can view it.",
   );
   const encodeCountBeforeSendConfirmation = await page.evaluate(
     () =>
@@ -816,6 +879,144 @@ test("share access controls include the selected memories", async ({
       memorySourcePubkey: linkedAgentPubkey,
     }),
   ]);
+});
+
+test("people sharing waits for relay identity and excludes the moderation recipient", async ({
+  page,
+}) => {
+  await openSafetyShareDialog(page, {
+    relaySelf: TEST_IDENTITIES.charlie.pubkey,
+    relaySelfDelayMs: 800,
+  });
+
+  const search = page.getByTestId("persona-share-recipient-search");
+  await expect(search).toBeDisabled();
+  await expect(search).toBeEnabled({ timeout: 5_000 });
+  await search.fill("charlie");
+  await expect(
+    page.getByTestId(
+      `persona-share-recipient-option-${TEST_IDENTITIES.charlie.pubkey}`,
+    ),
+  ).toHaveCount(0);
+  await expect(page.getByText("No people found.")).toBeVisible();
+
+  const commands = await readAgentShareCommands(page);
+  expect(
+    commands.filter((entry) =>
+      [
+        "open_dm",
+        "encode_agent_snapshot_for_send",
+        "upload_media_bytes",
+        "send_channel_message",
+      ].includes(entry.command),
+    ),
+  ).toEqual([]);
+});
+
+test("people sharing blocks a timeout before encoding or upload", async ({
+  page,
+}) => {
+  await openSafetyShareDialog(page);
+  await selectCharlieRecipient(page);
+  await page.evaluate(() => {
+    (
+      window as Window & {
+        __BUZZ_E2E_ACTIVATE_TIMEOUT__?: (expiresAtMs: number) => void;
+      }
+    ).__BUZZ_E2E_ACTIVATE_TIMEOUT__?.(Date.now() + 60_000);
+  });
+
+  await page.getByTestId("persona-share-send").click();
+  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible();
+
+  const commands = await readAgentShareCommands(page);
+  expect(
+    commands.filter((entry) =>
+      [
+        "encode_agent_snapshot_for_send",
+        "upload_media_bytes",
+        "send_channel_message",
+      ].includes(entry.command),
+    ),
+  ).toEqual([]);
+});
+
+test("people sharing rechecks destination eligibility after encoding", async ({
+  page,
+}) => {
+  await openSafetyShareDialog(page, { encodeDelayMs: 800 });
+  await selectCharlieRecipient(page);
+  await page.getByTestId("persona-share-send").click();
+
+  await expect
+    .poll(async () => {
+      const commands = await readAgentShareCommands(page);
+      return commands.filter(
+        (entry) => entry.command === "encode_agent_snapshot_for_send",
+      ).length;
+    })
+    .toBe(1);
+
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E_MUTATE_CHANNEL__?: (options: {
+        channelId: string;
+        channelType: "forum";
+      }) => void;
+      __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+    };
+    testWindow.__BUZZ_E2E_MUTATE_CHANNEL__?.({
+      channelId: "d1ec7000-d000-4000-8000-000000000001",
+      channelType: "forum",
+    });
+    return testWindow.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+  });
+
+  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible({
+    timeout: 5_000,
+  });
+  const commands = await readAgentShareCommands(page);
+  expect(
+    commands.filter(
+      (entry) => entry.command === "encode_agent_snapshot_for_send",
+    ),
+  ).toHaveLength(1);
+  expect(
+    commands.filter((entry) => entry.command === "upload_media_bytes"),
+  ).toHaveLength(0);
+  expect(
+    commands.filter((entry) => entry.command === "send_channel_message"),
+  ).toHaveLength(0);
+});
+
+test("people sharing guards the full action against duplicate sends", async ({
+  page,
+}) => {
+  await openSafetyShareDialog(page, { encodeDelayMs: 500 });
+  await selectCharlieRecipient(page);
+  await page.getByTestId("persona-share-send").evaluate((button) => {
+    if (!(button instanceof HTMLButtonElement)) return;
+    button.click();
+    button.click();
+  });
+
+  await expect(page.getByText("Sent Safety Auditor")).toBeVisible({
+    timeout: 5_000,
+  });
+  await expect(page.getByText("Couldn’t send agent. Try again.")).toHaveCount(
+    0,
+  );
+  const commands = await readAgentShareCommands(page);
+  for (const command of [
+    "open_dm",
+    "encode_agent_snapshot_for_send",
+    "upload_media_bytes",
+    "send_channel_message",
+  ]) {
+    expect(commands.filter((entry) => entry.command === command)).toHaveLength(
+      1,
+    );
+  }
 });
 
 test("export from share aligns selections and animates memory details", async ({

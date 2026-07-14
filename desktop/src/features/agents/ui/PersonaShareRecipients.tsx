@@ -20,7 +20,7 @@ import { Skeleton } from "@/shared/ui/skeleton";
 
 const RECIPIENT_LIMIT = 8;
 
-function formatRecipientName(user: UserSearchResult) {
+export function formatShareRecipientName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
@@ -30,12 +30,14 @@ function formatRecipientName(user: UserSearchResult) {
 
 export function PersonaShareRecipients({
   disabled,
+  excludedPubkeys = [],
   onSelectionChange,
   open,
   renderEndControl,
   selectedUsers,
 }: {
   disabled: boolean;
+  excludedPubkeys?: readonly string[];
   onSelectionChange: (users: UserSearchResult[]) => void;
   open: boolean;
   renderEndControl?: (onOpenChange: (open: boolean) => void) => React.ReactNode;
@@ -50,6 +52,10 @@ export function PersonaShareRecipients({
   const selectedPubkeys = React.useMemo(
     () => new Set(selectedUsers.map((user) => normalizePubkey(user.pubkey))),
     [selectedUsers],
+  );
+  const excludedPubkeySet = React.useMemo(
+    () => new Set(excludedPubkeys.map(normalizePubkey)),
+    [excludedPubkeys],
   );
   const userSearchQuery = useInfiniteUserSearchQuery(deferredSearchQuery, {
     allowEmpty: true,
@@ -66,6 +72,7 @@ export function PersonaShareRecipients({
       return (
         !user.isAgent &&
         pubkey !== currentPubkey &&
+        !excludedPubkeySet.has(pubkey) &&
         !selectedPubkeys.has(pubkey) &&
         !isArchived(pubkey)
       );
@@ -74,12 +81,13 @@ export function PersonaShareRecipients({
     return rankUserCandidatesBySearch({
       allowEmptyQuery: true,
       candidates,
-      getLabel: formatRecipientName,
+      getLabel: formatShareRecipientName,
       limit: 50,
       query: deferredSearchQuery,
     });
   }, [
     deferredSearchQuery,
+    excludedPubkeySet,
     identityQuery.data?.pubkey,
     isArchived,
     selectedPubkeys,
@@ -145,7 +153,7 @@ export function PersonaShareRecipients({
               ) : null}
               {selectedUsers.map((user) => (
                 <button
-                  aria-label={`Remove ${formatRecipientName(user)}`}
+                  aria-label={`Remove ${formatShareRecipientName(user)}`}
                   className="inline-flex h-7 max-w-48 items-center gap-1.5 rounded-full bg-muted py-1 pl-1 pr-2 text-xs font-medium transition-colors hover:bg-muted/80 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
                   data-testid={`persona-share-recipient-chip-${user.pubkey}`}
                   disabled={disabled}
@@ -160,9 +168,11 @@ export function PersonaShareRecipients({
                     avatarUrl={user.avatarUrl}
                     className="h-5 w-5 text-3xs shadow-none"
                     iconClassName="h-2.5 w-2.5"
-                    label={formatRecipientName(user)}
+                    label={formatShareRecipientName(user)}
                   />
-                  <span className="truncate">{formatRecipientName(user)}</span>
+                  <span className="truncate">
+                    {formatShareRecipientName(user)}
+                  </span>
                   <X aria-hidden="true" className="h-3 w-3 shrink-0" />
                 </button>
               ))}
@@ -261,7 +271,7 @@ export function PersonaShareRecipients({
             ) : visibleSearchResults.length > 0 ? (
               visibleSearchResults.map((user) => (
                 <button
-                  aria-label={`Add ${formatRecipientName(user)}`}
+                  aria-label={`Add ${formatShareRecipientName(user)}`}
                   className="flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-hidden"
                   data-testid={`persona-share-recipient-option-${user.pubkey}`}
                   key={user.pubkey}
@@ -273,10 +283,10 @@ export function PersonaShareRecipients({
                     avatarUrl={user.avatarUrl}
                     className="h-8 w-8 text-xs shadow-none"
                     iconClassName="h-4 w-4"
-                    label={formatRecipientName(user)}
+                    label={formatShareRecipientName(user)}
                   />
                   <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                    {formatRecipientName(user)}
+                    {formatShareRecipientName(user)}
                   </span>
                 </button>
               ))

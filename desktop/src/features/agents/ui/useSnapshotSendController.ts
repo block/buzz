@@ -2,11 +2,9 @@
  * useSnapshotSendController
  *
  * Payload-agnostic upload → send controller for sharing a snapshot to a Buzz
- * channel or DM.  The caller supplies an encode function and a destination;
- * the controller drives prepare → encode → upload → send with honest progress,
- * idempotent double-send protection, and fail-closed eligibility checks at two
- * action-boundary checkpoints that read from live query-cache sources, not from
- * render-captured snapshots.
+ * DM. The caller supplies an encode function and an async destination resolver;
+ * the controller guards destination creation plus prepare → encode → upload →
+ * send, with fail-closed eligibility checks at both action boundaries.
  *
  * This hook does not know what kind of snapshot the bytes contain.  A future
  * team-snapshot or other payload can reuse it unchanged by passing different
@@ -23,7 +21,7 @@ import {
   buildOutgoingMessage,
   formatImetaMediaLine,
 } from "@/features/messages/lib/imetaMediaMarkdown";
-import { channelsQueryKey, useChannelsQuery } from "@/features/channels/hooks";
+import { channelsQueryKey } from "@/features/channels/hooks";
 import { isModerationDm } from "@/features/moderation/lib/moderationDm";
 import {
   relaySelfQueryKey,
@@ -33,8 +31,6 @@ import { getTimeoutSnapshot } from "@/features/moderation/lib/timeoutStore";
 import { isTimeoutActive } from "@/features/moderation/lib/timeout";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useSendMessageMutation } from "@/features/messages/hooks";
-import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels";
 import type { Channel, Identity } from "@/shared/api/types";
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -53,22 +49,8 @@ export type SnapshotSendState = {
 };
 
 /**
- * A channel annotated with a resolved display label.  For non-DM channels the
- * label equals `ch.name`; for DMs it resolves participant display names so the
- * picker, memory-gate warning, and success copy are consistent.
- */
-export type ResolvedChannel = Channel & {
-  /** Human-readable label for the channel (participant names for DMs). */
-  displayLabel: string;
-};
-
-/**
- * A joined, non-archived, non-moderation-DM destination: channelType "stream"
- * or "dm", isMember true, archivedAt null.
- *
- * Moderation DM exclusion requires the relay `self` pubkey and the current
- * user pubkey; those are applied in `useSendableChannels` below so callers
- * always receive a fully-filtered list.
+ * A joined, non-archived, non-forum destination. Moderation DM exclusion is
+ * handled separately because it requires the current identity and relay self.
  */
 export function isSendableDestination(ch: Channel): boolean {
   return ch.isMember && ch.archivedAt === null && ch.channelType !== "forum";
@@ -317,11 +299,13 @@ export async function runSendPipeline(deps: {
 }
 
 /**
- * Compose the single-concurrency guard with the send pipeline.
+ * Compose the single-concurrency guard with destination resolution and the
+ * send pipeline.
  *
  * This is the exact production composition that `beginSend` uses: a second
  * concurrent call to `runGuardedSend` with the same guard receives `false`
- * immediately — encode never starts for the blocked call.
+ * immediately — destination creation and encode never start for the blocked
+ * call.
  *
  * Exported so unit tests can import and call this exact function twice
  * concurrently with injected counters, proving one encode/upload/send and one
@@ -330,24 +314,46 @@ export async function runSendPipeline(deps: {
  */
 export function runGuardedSend(
   guard: ReturnType<typeof createSendGuard>,
-  pipelineDeps: Parameters<typeof runSendPipeline>[0],
+  resolveChannelId: () => Promise<string>,
+  buildPipelineDeps: (
+    channelId: string,
+  ) => Parameters<typeof runSendPipeline>[0],
+  setStateFn: (state: SnapshotSendState) => void,
 ): Promise<boolean> {
-  return guard.runGuarded(() => runSendPipeline(pipelineDeps));
+  return guard.runGuarded(async () => {
+    // Mark the action pending before opening the DM so the active UI disables
+    // immediately. The in-memory guard still protects same-tick invocations
+    // that arrive before React commits that state.
+    setStateFn({ phase: "preparing", error: null });
+
+    let channelId: string;
+    try {
+      channelId = await resolveChannelId();
+    } catch (error) {
+      setStateFn({
+        phase: "error",
+        error:
+          error instanceof Error
+            ? `Couldn’t open the conversation: ${error.message}`
+            : "Couldn’t open the conversation.",
+      });
+      return false;
+    }
+
+    return runSendPipeline(buildPipelineDeps(channelId));
+  });
 }
 
 export type UseSnapshotSendControllerResult = {
-  /**
-   * Sendable destinations with resolved display labels.  DMs are omitted
-   * while identity or relay-self are loading (fail-closed moderation-DM race).
-   */
-  sendableChannels: ResolvedChannel[];
-  /** True while channels, identity, or relay-self are loading. */
-  isLoadingChannels: boolean;
+  /** Whether identity and relay-self are resolved for safe DM classification. */
+  isDmSafetyReady: boolean;
+  /** Relay moderation identity to exclude from the people picker. */
+  relaySelfPubkey: string | null;
   state: SnapshotSendState;
   /**
-   * Execute the full prepare → encode → upload → send sequence behind a
-   * single-concurrency guard.  A second call while the first is in-flight
-   * returns `false` immediately — encode never starts for the blocked call.
+   * Execute destination creation plus prepare → encode → upload → send behind
+   * one concurrency guard. A second call while the first is in flight returns
+   * false before opening another DM or encoding another snapshot.
    *
    * Eligibility is checked at two internal checkpoints by reading directly
    * from the React Query cache and the timeout external store — not from
@@ -362,48 +368,22 @@ export type UseSnapshotSendControllerResult = {
    */
   beginSend: (
     encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
-    channelId: string,
+    resolveChannelId: () => Promise<string>,
     attachmentLabel?: string,
-  ) => Promise<boolean>;
-  /** Set state to error with a message (for pre-send gate failures). */
-  setErrorState: (message: string) => void;
+  ) => Promise<boolean | null>;
   reset: () => void;
 };
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
-export function useSnapshotSendController(): UseSnapshotSendControllerResult {
-  const channelsQuery = useChannelsQuery();
+export function useSnapshotSendController(
+  enableDmSafety: boolean,
+): UseSnapshotSendControllerResult {
   const identityQuery = useIdentityQuery();
   const queryClient = useQueryClient();
-
-  // Only fetch relay self when there are DM candidates — same gate as ChannelPane.
-  const hasDmCandidates = React.useMemo(
-    () =>
-      (channelsQuery.data ?? []).some(
-        (ch) => ch.channelType === "dm" && isSendableDestination(ch),
-      ),
-    [channelsQuery.data],
-  );
-  const relaySelfQuery = useRelaySelfQuery(hasDmCandidates);
-
-  // Collect the "other participant" pubkeys from all DM candidates so we can
-  // resolve their display names.  Kept stable by memo so the batch query key
-  // doesn't flap on every render.
-  const dmParticipantPubkeys = React.useMemo(() => {
-    const currentPubkey = identityQuery.data?.pubkey?.toLowerCase();
-    return (channelsQuery.data ?? [])
-      .filter((ch) => ch.channelType === "dm" && isSendableDestination(ch))
-      .flatMap((ch) =>
-        ch.participantPubkeys.filter(
-          (pk) => pk.toLowerCase() !== currentPubkey,
-        ),
-      );
-  }, [channelsQuery.data, identityQuery.data]);
-
-  const dmProfilesQuery = useUsersBatchQuery(dmParticipantPubkeys, {
-    enabled: dmParticipantPubkeys.length > 0,
-  });
+  // The people picker can create the first DM in a workspace, so relay-self
+  // readiness cannot depend on an already-cached DM candidate.
+  const relaySelfQuery = useRelaySelfQuery(enableDmSafety);
 
   const [state, setState] = React.useState<SnapshotSendState>({
     phase: "idle",
@@ -417,87 +397,57 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
   // Pass null channel here — we supply the captured channelId per-send instead.
   const sendMutation = useSendMessageMutation(null, identityQuery.data);
 
-  const sendableChannels = React.useMemo<ResolvedChannel[]>(() => {
-    const currentPubkey = identityQuery.data?.pubkey;
-    const relaySelf = relaySelfQuery.data;
-    // Fail-closed: withhold ALL DMs until BOTH identity AND relay-self have
-    // successfully resolved (`status === "success"`).  Absent, pending,
-    // fetching, and errored states are all unknown — we cannot classify
-    // whether a DM is a moderation DM without valid identity + relay-self.
-    // A successfully resolved `relaySelf === null` IS known: the relay
-    // advertises no self, and the moderation helper's fail-open applies.
-    const identitySuccess = identityQuery.status === "success";
-    const relaySelfSuccess = relaySelfQuery.status === "success";
-    const dmGateOpen =
-      !hasDmCandidates || (identitySuccess && relaySelfSuccess);
-    const dmProfiles = dmProfilesQuery.data?.profiles;
-
-    return (channelsQuery.data ?? [])
-      .filter(
-        (ch) =>
-          isSendableDestination(ch) &&
-          !isModerationDm(ch, currentPubkey, relaySelf) &&
-          (ch.channelType !== "dm" || dmGateOpen),
-      )
-      .map((ch) => ({
-        ...ch,
-        displayLabel: resolveChannelDisplayLabel(ch, currentPubkey, dmProfiles),
-      }));
-  }, [
-    channelsQuery.data,
-    identityQuery.data,
-    identityQuery.status,
-    relaySelfQuery.data,
-    relaySelfQuery.status,
-    hasDmCandidates,
-    dmProfilesQuery.data,
-  ]);
-
   async function beginSend(
     encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
-    channelId: string,
+    resolveChannelId: () => Promise<string>,
     attachmentLabel?: string,
-  ): Promise<boolean> {
-    return runGuardedSend(guardRef.current, {
-      encodeFn,
-      channelId,
-      // Eligibility is checked by reading directly from the React Query cache
-      // and the timeout external store — not from rendered React state.
-      checkEligibilityFn: () => checkSendEligibility(queryClient, channelId),
-      uploadFn: (bytes, filename) => uploadMediaBytes(bytes, filename),
-      sendFn: (args) => sendMutation.mutateAsync(args),
-      setStateFn: setState,
-      buildMessageFn: (descriptor) => {
-        const message = buildOutgoingMessage("", [descriptor]);
-        return attachmentLabel?.trim()
-          ? {
-              ...message,
-              content: formatImetaMediaLine(descriptor, {
-                label: attachmentLabel,
-              }),
-            }
-          : message;
-      },
-    });
+  ): Promise<boolean | null> {
+    // A duplicate action is intentionally ignored; distinguish it from a
+    // failed send so the caller does not show a false failure toast.
+    if (guardRef.current.inFlight) return null;
+
+    return runGuardedSend(
+      guardRef.current,
+      resolveChannelId,
+      (channelId) => ({
+        encodeFn,
+        channelId,
+        // Eligibility is checked from live query-cache and timeout sources,
+        // not render-captured state.
+        checkEligibilityFn: () => checkSendEligibility(queryClient, channelId),
+        uploadFn: (bytes, filename) => uploadMediaBytes(bytes, filename),
+        sendFn: (args) => sendMutation.mutateAsync(args),
+        setStateFn: setState,
+        buildMessageFn: (descriptor) => {
+          const message = buildOutgoingMessage("", [descriptor]);
+          return attachmentLabel?.trim()
+            ? {
+                ...message,
+                content: formatImetaMediaLine(descriptor, {
+                  label: attachmentLabel,
+                }),
+              }
+            : message;
+        },
+      }),
+      setState,
+    );
   }
 
-  function reset() {
+  const reset = React.useCallback(() => {
     if (!guardRef.current.inFlight) {
       setState({ phase: "idle", error: null });
     }
-  }
+  }, []);
 
   return {
-    sendableChannels,
-    isLoadingChannels:
-      channelsQuery.isLoading ||
-      (hasDmCandidates &&
-        (relaySelfQuery.isLoading || identityQuery.isLoading)),
+    isDmSafetyReady:
+      !enableDmSafety ||
+      (identityQuery.status === "success" &&
+        relaySelfQuery.status === "success"),
+    relaySelfPubkey: relaySelfQuery.data ?? null,
     state,
     beginSend,
-    setErrorState: (message: string) => {
-      setState({ phase: "error", error: message });
-    },
     reset,
   };
 }
