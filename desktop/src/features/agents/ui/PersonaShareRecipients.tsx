@@ -1,4 +1,4 @@
-import { Search, X } from "lucide-react";
+import { Search } from "lucide-react";
 import * as React from "react";
 
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
@@ -12,6 +12,7 @@ import {
   rankUserCandidatesBySearch,
 } from "@/features/profile/lib/userCandidateSearch";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { UserSearchResult } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
@@ -45,6 +46,8 @@ export function PersonaShareRecipients({
 }) {
   const [searchQuery, setSearchQuery] = React.useState("");
   const [isPickerOpen, setIsPickerOpen] = React.useState(false);
+  const [inspectedRecipientPubkey, setInspectedRecipientPubkey] =
+    React.useState<string | null>(null);
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const deferredSearchQuery = React.useDeferredValue(searchQuery.trim());
   const identityQuery = useIdentityQuery();
@@ -105,6 +108,7 @@ export function PersonaShareRecipients({
     if (!open) {
       setSearchQuery("");
       setIsPickerOpen(false);
+      setInspectedRecipientPubkey(null);
     }
   }, [open]);
 
@@ -117,6 +121,9 @@ export function PersonaShareRecipients({
   }
 
   function removeUser(pubkey: string) {
+    setInspectedRecipientPubkey((current) =>
+      current === pubkey ? null : current,
+    );
     onSelectionChange(
       selectedUsers.filter(
         (user) => normalizePubkey(user.pubkey) !== normalizePubkey(pubkey),
@@ -129,7 +136,9 @@ export function PersonaShareRecipients({
     <div className="min-w-0 flex-1">
       <Popover
         modal={false}
-        onOpenChange={setIsPickerOpen}
+        onOpenChange={(pickerOpen) => {
+          setIsPickerOpen(pickerOpen || inspectedRecipientPubkey !== null);
+        }}
         open={isPickerOpen && !disabled}
       >
         <PopoverAnchor asChild>
@@ -152,29 +161,22 @@ export function PersonaShareRecipients({
                 <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
               ) : null}
               {selectedUsers.map((user) => (
-                <button
-                  aria-label={`Remove ${formatShareRecipientName(user)}`}
-                  className="inline-flex h-7 max-w-48 items-center gap-1.5 rounded-full bg-muted py-1 pl-1 pr-2 text-xs font-medium transition-colors hover:bg-muted/80 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                  data-testid={`persona-share-recipient-chip-${user.pubkey}`}
+                <SelectedRecipientChip
                   disabled={disabled}
+                  inspectionOpen={inspectedRecipientPubkey === user.pubkey}
                   key={user.pubkey}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    removeUser(user.pubkey);
+                  label={formatShareRecipientName(user)}
+                  onInspectionOpenChange={(inspectionOpen) => {
+                    setInspectedRecipientPubkey(
+                      inspectionOpen ? user.pubkey : null,
+                    );
                   }}
-                  type="button"
-                >
-                  <ProfileAvatar
-                    avatarUrl={user.avatarUrl}
-                    className="h-5 w-5 text-3xs shadow-none"
-                    iconClassName="h-2.5 w-2.5"
-                    label={formatShareRecipientName(user)}
-                  />
-                  <span className="truncate">
-                    {formatShareRecipientName(user)}
-                  </span>
-                  <X aria-hidden="true" className="h-3 w-3 shrink-0" />
-                </button>
+                  onRemove={() => removeUser(user.pubkey)}
+                  testIds={{
+                    chip: `persona-share-recipient-chip-${user.pubkey}`,
+                  }}
+                  user={user}
+                />
               ))}
               <input
                 aria-autocomplete="list"
@@ -246,6 +248,15 @@ export function PersonaShareRecipients({
           className="w-(--radix-popover-trigger-width) overflow-hidden p-0"
           data-testid="persona-share-recipient-popover"
           onCloseAutoFocus={(event) => event.preventDefault()}
+          onInteractOutside={(event) => {
+            const target = event.detail.originalEvent.target;
+            if (
+              target instanceof Element &&
+              target.closest("[data-recipient-key-popover]")
+            ) {
+              event.preventDefault();
+            }
+          }}
           onOpenAutoFocus={(event) => event.preventDefault()}
           sideOffset={6}
         >
