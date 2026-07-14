@@ -563,7 +563,7 @@ export function OnboardingFlow({
   return (
     <>
       <div
-        className={`buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground ${
+        className={`buzz-startup-shell flex items-start justify-center overflow-y-auto bg-background px-4 py-8 text-foreground ${
           currentPage === "profile" ||
           currentPage === "backup" ||
           currentPage === "avatar" ||
@@ -576,7 +576,7 @@ export function OnboardingFlow({
       >
         <StartupWindowDragRegion />
         <div
-          className={`relative flex w-full flex-col items-center text-center ${
+          className={`relative my-auto flex w-full flex-col items-center text-center ${
             currentPage === "theme"
               ? "max-w-[1180px]"
               : currentPage === "avatar"
