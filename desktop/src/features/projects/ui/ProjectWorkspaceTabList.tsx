@@ -3,8 +3,12 @@ import { BookOpen } from "lucide-react";
 import type { ProjectPullRequest } from "@/features/projects/hooks";
 import { TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
-const PROJECT_TAB_TRIGGER_CLASS =
-  "h-7 gap-1.5 rounded-full px-2 text-xs text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-sidebar-active data-[state=active]:text-sidebar-active-foreground data-[state=active]:shadow-xs data-[state=active]:hover:bg-sidebar-active data-[state=active]:hover:text-sidebar-active-foreground xl:px-2.5 xl:text-sm";
+const PROJECT_TAB_TRIGGER_BASE_CLASS =
+  "rounded-full text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-sidebar-active data-[state=active]:text-sidebar-active-foreground data-[state=active]:shadow-xs data-[state=active]:hover:bg-sidebar-active data-[state=active]:hover:text-sidebar-active-foreground";
+
+const PROJECT_TAB_TRIGGER_CLASS = `${PROJECT_TAB_TRIGGER_BASE_CLASS} h-7 gap-1.5 px-2 text-xs xl:px-2.5 xl:text-sm`;
+
+const PROJECT_ICON_TAB_TRIGGER_CLASS = `${PROJECT_TAB_TRIGGER_BASE_CLASS} h-8 w-8 shrink-0 border border-border/60 p-2 data-[state=active]:border-transparent`;
 
 const PROJECT_TAB_SELECTED_CLASS =
   " bg-sidebar-active text-sidebar-active-foreground shadow-xs hover:bg-sidebar-active hover:text-sidebar-active-foreground";
@@ -14,11 +18,11 @@ export function ProjectTabsList({ prsActive }: { prsActive?: boolean }) {
     <TabsList className="h-9 w-fit justify-start gap-1 bg-transparent p-0">
       <TabsTrigger
         aria-label="Overview"
-        className={`${PROJECT_TAB_TRIGGER_CLASS} h-8 w-8 border border-border/60 px-0 data-[state=active]:border-transparent`}
+        className={PROJECT_ICON_TAB_TRIGGER_CLASS}
         title="Overview"
         value="overview"
       >
-        <BookOpen className="h-3.5 w-3.5" />
+        <BookOpen className="h-full w-full" strokeWidth={2} />
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="files">
         Code

@@ -28,10 +28,7 @@ import {
   usePushProjectLocalRepositoryMutation,
 } from "@/features/projects/repoSyncHooks";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
-import {
-  mergeCurrentProfileIntoLookup,
-  resolveUserLabel,
-} from "@/features/profile/lib/identity";
+import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import {
   type ProfilePanelTab,
   type ProfilePanelView,
@@ -56,6 +53,7 @@ import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { Button } from "@/shared/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useProjectCommitDiffQuery } from "@/features/projects/useProjectCommitDiff";
 import { useGitIdentityQuery } from "@/features/projects/useGitIdentity";
@@ -66,7 +64,7 @@ import {
   projectTerminalLabel,
   useOpenProjectTerminal,
 } from "./useOpenProjectTerminal";
-import { ProfileIdentityButton } from "./ProjectProfileIdentity";
+import { CopyTextButton } from "./ProjectCommitCopyButton";
 
 /** Tooltip for the push/pull sync buttons, e.g. "Pull 2 remote commits". */
 function pushPullTitle(
@@ -529,8 +527,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     );
   }
 
-  const ownerProfile = profiles?.[normalizePubkey(project.owner)];
-  const ownerLabel = resolveUserLabel({ pubkey: project.owner, profiles });
   const repoContributors = repoSnapshotQuery.data?.contributors ?? [];
   const safeWebUrl =
     project.webUrl && isSafeUrl(project.webUrl) ? project.webUrl : null;
@@ -717,6 +713,18 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                           </a>
                         </Button>
                       ) : null}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="inline-flex shrink-0">
+                            <CopyTextButton
+                              ariaLabel="Copy repo address"
+                              className="h-6 w-6"
+                              text={project.repoAddress}
+                            />
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>Copy repo address</TooltipContent>
+                      </Tooltip>
                     </div>
                   </div>
                 </div>
@@ -760,26 +768,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 sourceControls={filesSourceControls}
                 viewerGitIdentity={viewerGitIdentity}
               />
-
-              <section className="flex min-w-0 items-center gap-2 border border-border/60 bg-card px-4 py-3 text-sm text-muted-foreground">
-                <span className="shrink-0 font-medium text-foreground">
-                  Details:
-                </span>
-                <span className="min-w-0 truncate">
-                  Repo: {project.repoAddress}
-                </span>
-                <span className="shrink-0 text-border">•</span>
-                <span className="shrink-0">Creator:</span>
-                <ProfileIdentityButton
-                  align="center"
-                  avatarClassName="mt-0.5"
-                  avatarSize="xs"
-                  avatarUrl={ownerProfile?.avatarUrl ?? null}
-                  isAgent={ownerProfile?.isAgent === true}
-                  label={ownerLabel}
-                  pubkey={project.owner}
-                />
-              </section>
             </div>
           </div>
         </div>

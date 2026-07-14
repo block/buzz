@@ -160,7 +160,7 @@ function isDeletedByA(project: Project, deletionEvents: RelayEvent[]): boolean {
   );
 }
 
-function eventToProject(event: RelayEvent): Project {
+export function eventToProject(event: RelayEvent): Project {
   const d = getTag(event, "d") ?? event.id;
   const name = getTag(event, "name") || d;
   const description = getTag(event, "description") || event.content || "";
@@ -210,7 +210,7 @@ function dedup(events: RelayEvent[]): RelayEvent[] {
   return [...best.values()];
 }
 
-async function fetchProjects(): Promise<Project[]> {
+export async function fetchProjects(): Promise<Project[]> {
   const [events, deletionEvents] = await Promise.all([
     relayClient.fetchEvents({
       kinds: [KIND_REPO_ANNOUNCEMENT],

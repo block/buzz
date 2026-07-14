@@ -31,7 +31,7 @@ export function ProjectsContributionLegend() {
       {LEVEL_CLASSES.map((levelClass, level) => (
         <Tooltip key={levelClass}>
           <TooltipTrigger asChild>
-            <span className={cn("h-2.5 w-2.5 rounded-[3px]", levelClass)} />
+            <span className={cn("h-2.5 w-2.5 rounded", levelClass)} />
           </TooltipTrigger>
           <TooltipContent>{LEVEL_LABELS[level]}</TooltipContent>
         </Tooltip>
@@ -127,7 +127,7 @@ export function ProjectsContributionGraph({
               return (
                 <span
                   aria-hidden
-                  className="aspect-square rounded-[3px] border border-border/40 dark:border-border/30"
+                  className="aspect-square rounded-[22%] border border-border/40 dark:border-border/30"
                   key={key}
                 />
               );
@@ -142,7 +142,7 @@ export function ProjectsContributionGraph({
                 <TooltipTrigger asChild>
                   <span
                     className={cn(
-                      "aspect-square w-full rounded-[3px]",
+                      "aspect-square w-full rounded-[22%]",
                       LEVEL_CLASSES[levelFor(count)],
                     )}
                   />

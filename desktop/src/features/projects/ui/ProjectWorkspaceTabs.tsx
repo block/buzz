@@ -1,4 +1,4 @@
-import { Terminal } from "lucide-react";
+import { SquareTerminal } from "lucide-react";
 import * as React from "react";
 
 import type {
@@ -191,9 +191,7 @@ export function WorkspaceTabs({
             title={terminalTitle ?? "Open terminal"}
             variant="ghost"
           >
-            <span className="flex h-4 w-4 items-center justify-center rounded-[3px] bg-current">
-              <Terminal className="h-3 w-3 text-background" />
-            </span>
+            <SquareTerminal className="h-[1.125rem] w-[1.125rem]" />
           </Button>
         ) : null}
       </div>
@@ -220,6 +218,7 @@ export function WorkspaceTabs({
                     error={pullRequestsError}
                     isLoading={pullRequestsLoading}
                     mode={mode}
+                    onOpenCommit={onSelectedCommitHashChange}
                     onSelectedPullRequestIdChange={
                       onSelectedPullRequestIdChange
                     }
@@ -299,6 +298,7 @@ export function WorkspaceTabs({
         <PullRequestsPanel
           error={pullRequestsError}
           isLoading={pullRequestsLoading}
+          onOpenCommit={onSelectedCommitHashChange}
           onSelectedPullRequestIdChange={onSelectedPullRequestIdChange}
           profiles={profiles}
           project={project}
@@ -322,7 +322,7 @@ export function WorkspaceTabs({
       <TabsContent className="m-0" value="files">
         {repoSource === "local" && !localSnapshot && !localSnapshotLoading ? (
           <div className="mb-3">
-            <div className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+            <div className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
               No local checkout found.
             </div>
           </div>

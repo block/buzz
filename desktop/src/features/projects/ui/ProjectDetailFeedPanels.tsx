@@ -91,14 +91,14 @@ export function ContributorsPanel({
 
   if (rows.length === 0) {
     return (
-      <p className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+      <p className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
         No git contributors are available yet.
       </p>
     );
   }
 
   return (
-    <div className="overflow-hidden border border-border/60 bg-card">
+    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
       {rows.map((row, index) => (
         <div
           className={cn(
@@ -189,7 +189,7 @@ export function ActivityPanel({
 
   if (isLoading) {
     return (
-      <p className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+      <p className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
         Loading activity…
       </p>
     );
@@ -197,7 +197,7 @@ export function ActivityPanel({
 
   if (commits.length === 0) {
     return (
-      <p className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+      <p className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
         {error
           ? "Could not load repository activity from git."
           : "No commits are available yet."}

@@ -169,7 +169,7 @@ export function RepoSyncActionButton({
         onClick={controls.onPull}
         size="sm"
         title={controls.pullTitle ?? "Pull remote commits"}
-        variant="default"
+        variant="ghost"
       >
         {controls.pullPending ? (
           <Loader2 className="h-3 w-3 animate-spin" />
@@ -190,7 +190,7 @@ export function RepoSyncActionButton({
         onClick={controls.onPush}
         size="sm"
         title={controls.pushTitle ?? "Push local commits"}
-        variant="default"
+        variant="ghost"
       >
         {controls.pushPending ? (
           <Loader2 className="h-3 w-3 animate-spin" />

@@ -230,9 +230,9 @@ function IssueDetail({
         </header>
 
         <section className="space-y-3 p-4">
-          <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <h4 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
             <MessageSquare className="h-3.5 w-3.5" />
-            Discussion
+            Add Your Comment
           </h4>
           {issue.comments.length > 0 ? (
             <div className="space-y-3">

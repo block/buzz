@@ -1,3 +1,4 @@
+import { Plus } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -14,6 +15,7 @@ import {
   useProjectsPullRequestsQuery,
   useProjectsQuery,
 } from "@/features/projects/hooks";
+import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
 import { ProjectsActivityFeed } from "@/features/projects/ui/ProjectsActivityFeed";
 import {
@@ -23,6 +25,7 @@ import {
   ProjectListRow,
   ProjectRailRow,
 } from "@/features/projects/ui/ProjectCards";
+import { CreateProjectDialog } from "@/features/projects/ui/CreateProjectDialog";
 import { ProjectsIssuesList } from "@/features/projects/ui/ProjectsIssuesList";
 import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPanel";
 import { ProjectsOverviewRail } from "@/features/projects/ui/ProjectsOverviewRail";
@@ -101,6 +104,8 @@ export function ProjectsView() {
     activeWorkspace?.reposDir,
   );
   const [searchOpen, setSearchOpen] = React.useState(false);
+  const [createProjectOpen, setCreateProjectOpen] = React.useState(false);
+  const createProjectMutation = useCreateProjectMutation();
   const [storedViewMode, setStoredViewMode] =
     React.useState<ProjectsViewMode | null>(() => readStoredViewMode());
   const [sort, setSort] = React.useState<ProjectsSort>(() => readStoredSort());
@@ -498,6 +503,35 @@ export function ProjectsView() {
         topChromeInset.divider,
       )}
     >
+      {/* Pinned above the scroll container so it stays put while scrolling. */}
+      <div className="absolute right-4 top-4 z-40">
+        <Button
+          aria-label="Create project"
+          className="group h-8 gap-0 rounded-full px-2 transition-all duration-200 ease-out hover:gap-1.5 hover:px-3"
+          data-testid="create-project-button"
+          onClick={() => setCreateProjectOpen(true)}
+          size="sm"
+          type="button"
+          variant="default"
+        >
+          <Plus className="h-4 w-4 shrink-0" />
+          <span className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 ease-out group-hover:max-w-[4.5rem] group-hover:opacity-100">
+            Project
+          </span>
+        </Button>
+      </div>
+      <CreateProjectDialog
+        isCreating={createProjectMutation.isPending}
+        onCreate={async (input) => {
+          const project = await createProjectMutation.mutateAsync(input);
+          toast.success(`Project "${project.name}" created.`);
+          // Land on the list that actually shows the new project — the
+          // Overview only surfaces the top few most-active repositories.
+          handleFilterChange("repositories");
+        }}
+        onOpenChange={setCreateProjectOpen}
+        open={createProjectOpen}
+      />
       {searchOpen ? (
         <>
           <div
@@ -517,7 +551,7 @@ export function ProjectsView() {
           />
         </>
       ) : (
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto">
+        <div className="buzz-content-scrollbar flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto">
           {projectsHeader}
           {filter === "all" ? null : (
             <div className="sticky top-0 z-30 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55">

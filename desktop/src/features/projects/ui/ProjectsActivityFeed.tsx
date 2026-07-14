@@ -377,13 +377,13 @@ function ActivityCard({
             ) : null}
           </div>
           <div className={compact ? "mt-2" : "mt-3"}>
-            <p className="min-w-0 truncate text-sm font-semibold text-foreground">
+            <p className="min-w-0 truncate text-base font-semibold text-foreground">
               {item.title}
             </p>
             {item.body ? (
               <p
                 className={cn(
-                  "mt-1.5 text-xs leading-5 text-muted-foreground",
+                  "mt-1.5 text-sm leading-6 text-muted-foreground",
                   compact ? "line-clamp-1" : "line-clamp-2",
                 )}
               >
