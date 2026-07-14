@@ -1,6 +1,7 @@
 use super::{
-    merge_mcp_servers, replace_mcp_servers, validate_effective_mcp_cap, validate_mcp_servers,
-    AgentDefinition, ManagedAgentRecord, McpServerConfig, McpServerEnvVar, MAX_USER_MCP_SERVERS,
+    merge_mcp_servers, replace_mcp_servers, validate_effective_mcp_cap,
+    validate_effective_mcp_cap_for_records, validate_mcp_servers, AgentDefinition,
+    ManagedAgentRecord, McpServerConfig, McpServerEnvVar, MAX_USER_MCP_SERVERS,
 };
 use std::path::PathBuf;
 
@@ -866,4 +867,120 @@ fn effective_cap_skips_non_buzz_agent_runtime() {
     // Non-buzz-agent runtime → effective check returns Ok (skip).
     validate_effective_mcp_cap(&record, &[], &global, "goose")
         .expect("non-buzz-agent runtime should skip the cap");
+}
+
+// ── validate_effective_mcp_cap_for_records — inherited-layer gates ───────
+
+/// Build a buzz-agent record with a persona reference and custom mcp_servers.
+fn buzz_agent_record_with_persona(
+    name: &str,
+    persona_id: &str,
+    mcp_servers: Vec<McpServerConfig>,
+) -> ManagedAgentRecord {
+    serde_json::from_value(serde_json::json!({
+        "pubkey": format!("pk-{name}"),
+        "name": name,
+        "persona_id": persona_id,
+        "relay_url": "",
+        "acp_command": "buzz-acp",
+        "agent_command": "buzz-agent",
+        "agent_args": [],
+        "mcp_command": "",
+        "turn_timeout_seconds": 320,
+        "system_prompt": null,
+        "mcp_servers": mcp_servers,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }))
+    .expect("minimal record should deserialize")
+}
+
+/// Build a minimal AgentDefinition (persona) with the given mcp_servers.
+fn persona_with_mcp(id: &str, mcp_servers: Vec<McpServerConfig>) -> AgentDefinition {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "display_name": format!("Persona {id}"),
+        "system_prompt": "",
+        "mcp_servers": mcp_servers,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }))
+    .expect("minimal persona should deserialize")
+}
+
+#[test]
+fn inherited_gate_rejects_global_14_to_15_with_1_local_agent() {
+    // Agent has 1 local enabled server. Global goes from 14 → 15. Effective
+    // would be 16 — the gate must reject with the agent's name.
+    let record = buzz_agent_record(vec![mcp_server("local-0", "cmd", true)]);
+    let prospective_global: Vec<_> = (0..MAX_USER_MCP_SERVERS)
+        .map(|i| mcp_server(&format!("global-{i}"), "cmd", true))
+        .collect();
+    let err = validate_effective_mcp_cap_for_records(&[record], &[], &prospective_global)
+        .expect_err("global 14→15 with 1 local must reject");
+    assert!(
+        err.contains("test"),
+        "error must name the offending agent: {err}"
+    );
+    assert!(
+        err.contains("saving would push agent"),
+        "error must use the required phrasing: {err}"
+    );
+}
+
+#[test]
+fn inherited_gate_allows_global_14_with_1_local_agent() {
+    // Agent has 1 local. Global stays at 14. Effective = 15 (at cap) — OK.
+    let record = buzz_agent_record(vec![mcp_server("local-0", "cmd", true)]);
+    let prospective_global: Vec<_> = (0..MAX_USER_MCP_SERVERS - 1)
+        .map(|i| mcp_server(&format!("global-{i}"), "cmd", true))
+        .collect();
+    validate_effective_mcp_cap_for_records(&[record], &[], &prospective_global)
+        .expect("15 effective should pass");
+}
+
+#[test]
+fn inherited_gate_rejects_persona_unmask_pushing_agent_over_cap() {
+    // Agent has 1 local enabled. Global has 14. Persona goes from 0 → 1
+    // unique enabled server. Effective = 16 — reject.
+    let persona_id = "p1";
+    let record = buzz_agent_record_with_persona(
+        "agent-a",
+        persona_id,
+        vec![mcp_server("local-0", "cmd", true)],
+    );
+    let global: Vec<_> = (0..MAX_USER_MCP_SERVERS - 1)
+        .map(|i| mcp_server(&format!("global-{i}"), "cmd", true))
+        .collect();
+    let persona = persona_with_mcp(persona_id, vec![mcp_server("persona-0", "cmd", true)]);
+    let err = validate_effective_mcp_cap_for_records(&[record], &[persona], &global)
+        .expect_err("persona add pushing over cap must reject");
+    assert!(
+        err.contains("agent-a"),
+        "error must name the offending agent: {err}"
+    );
+}
+
+#[test]
+fn inherited_gate_skips_non_buzz_agent_records() {
+    // A goose-runtime agent should be unaffected by the cap.
+    let mut record = buzz_agent_record(vec![mcp_server("local-0", "cmd", true)]);
+    // record_agent_command resolves via agent_command_override first.
+    record.agent_command_override = Some("goose".to_string());
+    let prospective_global: Vec<_> = (0..=MAX_USER_MCP_SERVERS)
+        .map(|i| mcp_server(&format!("global-{i}"), "cmd", true))
+        .collect();
+    validate_effective_mcp_cap_for_records(&[record], &[], &prospective_global)
+        .expect("non-buzz-agent runtime should skip the cap");
+}
+
+#[test]
+fn inherited_gate_allows_unaffected_agent() {
+    // Agent with no local servers. Global at 15 → effective = 15. OK.
+    let record = buzz_agent_record(vec![]);
+    let prospective_global: Vec<_> = (0..MAX_USER_MCP_SERVERS)
+        .map(|i| mcp_server(&format!("global-{i}"), "cmd", true))
+        .collect();
+    validate_effective_mcp_cap_for_records(&[record], &[], &prospective_global)
+        .expect("agent with no local servers at cap should pass");
 }

@@ -209,7 +209,31 @@ pub async fn update_persona(
             apply_persona_behavior(persona, input.behavior)?;
             persona.updated_at = now_iso();
 
+            // Clone before the cap check so the mutable borrow from
+            // `personas.iter_mut().find()` ends here.
             let result = persona.clone();
+
+            // Reject persona save if the prospective MCP config would push
+            // any existing buzz-agent referencing this persona over the
+            // effective-server cap.
+            {
+                let agents = load_managed_agents(&app)?;
+                let global_config =
+                    crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+                // Filter to agents referencing this persona — the rest are
+                // unaffected and skipped by the resolver (wrong persona_id).
+                let referencing: Vec<_> = agents
+                    .iter()
+                    .filter(|a| a.persona_id.as_deref() == Some(input.id.as_str()))
+                    .cloned()
+                    .collect();
+                crate::managed_agents::validate_effective_mcp_cap_for_records(
+                    &referencing,
+                    &personas,
+                    &global_config.mcp_servers,
+                )?;
+            }
+
             save_personas(&app, &personas)?;
 
             retain_persona_pending(&app, &state, &result);

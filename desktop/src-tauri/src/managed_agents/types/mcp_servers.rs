@@ -269,3 +269,29 @@ pub(crate) fn validate_effective_mcp_cap(
     effective_buzz_agent_mcp_servers(record, personas, global, effective_command)?;
     Ok(())
 }
+
+/// Validate the effective MCP cap across all existing agent records against a
+/// prospective inherited layer (global or persona). Called at global-config
+/// save and persona update to prevent an inherited-layer mutation that would
+/// silently push an existing agent over the cap.
+///
+/// Non–buzz-agent runtimes are skipped (they don't use `BUZZ_ACP_MCP_SERVERS`).
+/// Returns the first offending agent's name in the error message.
+pub(crate) fn validate_effective_mcp_cap_for_records(
+    records: &[super::ManagedAgentRecord],
+    personas: &[super::AgentDefinition],
+    global: &[McpServerConfig],
+) -> Result<(), String> {
+    for record in records {
+        let effective_cmd = crate::managed_agents::record_agent_command(record, personas);
+        if let Err(merge_err) =
+            effective_buzz_agent_mcp_servers(record, personas, global, &effective_cmd)
+        {
+            return Err(format!(
+                "saving would push agent `{}` over the MCP server limit: {merge_err}",
+                record.name
+            ));
+        }
+    }
+    Ok(())
+}
