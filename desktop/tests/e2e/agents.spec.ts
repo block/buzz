@@ -604,6 +604,51 @@ test("custom personas share with people and keep export separate", async ({
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
     .toBe(sharedAgentUrl);
 
+  const copiedAgent = await page.evaluate(() => {
+    const commands =
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: { html?: string; text?: string };
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+    return commands.findLast(
+      (entry) => entry.command === "copy_text_to_clipboard",
+    )?.payload;
+  });
+  expect(copiedAgent?.text).toBe(sharedAgentUrl);
+  expect(copiedAgent?.html).toContain("data-buzz-agent-snapshot");
+
+  await page.keyboard.press("Escape");
+  await expect(shareDialog).toHaveCount(0);
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(async ({ html, text }) => {
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        "text/html": new Blob([html ?? ""], { type: "text/html" }),
+        "text/plain": new Blob([text ?? ""], { type: "text/plain" }),
+      }),
+    ]);
+  }, copiedAgent ?? {});
+  await page
+    .getByTestId("message-composer")
+    .locator("[contenteditable='true']")
+    .click();
+  await page.keyboard.press("ControlOrMeta+V");
+  await expect(page.getByTestId("send-message")).toBeEnabled();
+  await page.getByTestId("send-message").click();
+
+  const pastedAgentCard = page.getByTestId("agent-snapshot-card").last();
+  await expect(pastedAgentCard).toBeVisible();
+  await expect(pastedAgentCard).toContainText("Animation Auditor");
+
+  await page.getByTestId("open-agents-view").click();
+  await actionsButton.click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  await expect(shareDialog).toBeVisible();
+
   const recipientSearch = page.getByTestId("persona-share-recipient-search");
   await recipientSearch.fill("charlie");
   await page

@@ -471,6 +471,21 @@ test("buildOutgoingMessage: team snapshot PNG uses the snapshot-card link path",
   );
 });
 
+test("buildOutgoingMessage: copied agent snapshot keeps its display label", () => {
+  const out = buildOutgoingMessage("", [
+    {
+      url: "https://b/analyst.png",
+      type: "image/png",
+      sha256: "x",
+      size: 1,
+      uploaded: 0,
+      filename: "analyst.agent.png",
+      displayLabel: "Animation Auditor",
+    },
+  ]);
+  assert.equal(out.content, "\n[Animation Auditor](https://b/analyst.png)");
+});
+
 test("buildOutgoingMessage: wraps spoilered image and video attachments", () => {
   const out = buildOutgoingMessage(
     "hi",

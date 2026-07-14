@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import { useEncodeAgentSnapshotForSendMutation } from "@/features/agents/hooks";
 import { useOpenDmMutation } from "@/features/channels/hooks";
+import { buildAgentSnapshotClipboardHtml } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { uploadMediaBytes, type BlobDescriptor } from "@/shared/api/tauri";
@@ -254,7 +255,13 @@ export function PersonaShareDialog({
     setIsCopying(true);
     try {
       const uploaded = await uploadSnapshot(memoryLevel);
-      await copyTextToSystemClipboard(uploaded.url);
+      await copyTextToSystemClipboard(
+        uploaded.url,
+        buildAgentSnapshotClipboardHtml({
+          attachment: uploaded,
+          displayName: persona.displayName,
+        }),
+      );
       toast.success("Link copied");
     } catch {
       toast.error("Couldn’t copy link. Try again.");

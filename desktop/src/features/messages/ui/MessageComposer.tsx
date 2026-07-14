@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
+import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
 import { useDrafts } from "@/features/messages/lib/useDrafts";
@@ -810,12 +811,10 @@ function MessageComposerImpl({
             return true;
           }
 
-          // --- Mention / channel-link normalization ---
-          // When copying from the chat area the browser puts styled HTML
-          // on the clipboard. The mention/channel-link wrappers have
-          // font-weight:600 which Tiptap's Bold extension misinterprets
-          // as bold. Strip those wrappers and use ProseMirror's pasteHTML
-          // to parse the cleaned HTML into proper rich content nodes.
+          // Restore Buzz snapshots before normal styled-HTML normalization.
+          if (handleAgentSnapshotPaste(event, media.setPendingImeta))
+            return true;
+          // Strip mention/channel wrappers that Tiptap would misread as bold.
           const html = event.clipboardData?.getData("text/html");
           if (html && hasMentionClipboardHtml(html)) {
             const cleanHtml = normalizeMentionClipboardHtml(html);
@@ -833,7 +832,7 @@ function MessageComposerImpl({
         },
       },
     });
-  }, [richText.editor, scrollComposerToBottom]);
+  }, [media.setPendingImeta, richText.editor, scrollComposerToBottom]);
 
   // ── Send button state ───────────────────────────────────────────────
   const sendDisabled = React.useMemo(

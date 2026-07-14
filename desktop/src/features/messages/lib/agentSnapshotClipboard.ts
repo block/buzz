@@ -1,0 +1,142 @@
+import type { BlobDescriptor } from "@/shared/api/tauri";
+import type { ImetaMedia } from "./imetaMediaMarkdown";
+
+const CLIPBOARD_ATTRIBUTE = "data-buzz-agent-snapshot";
+const MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024;
+const MAX_DISPLAY_NAME_LENGTH = 200;
+const MAX_FILENAME_LENGTH = 255;
+
+type AgentSnapshotClipboardPayload = {
+  version: 1;
+  displayName: string;
+  filename: string;
+  sha256: string;
+  size: number;
+  type: string;
+  url: string;
+};
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function isSafeSnapshotUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/** Build Buzz-specific clipboard HTML with the raw URL as its visible link. */
+export function buildAgentSnapshotClipboardHtml({
+  attachment,
+  displayName,
+}: {
+  attachment: ImetaMedia;
+  displayName: string;
+}): string {
+  const payload: AgentSnapshotClipboardPayload = {
+    version: 1,
+    displayName,
+    filename: attachment.filename ?? "agent.agent.png",
+    sha256: attachment.sha256,
+    size: attachment.size,
+    type: attachment.type,
+    url: attachment.url,
+  };
+  const encodedPayload = encodeURIComponent(JSON.stringify(payload));
+
+  return `<a ${CLIPBOARD_ATTRIBUTE}="${encodedPayload}" href="${escapeHtml(attachment.url)}">${escapeHtml(displayName)}</a>`;
+}
+
+/**
+ * Restore a copied agent snapshot as composer attachment state.
+ *
+ * Clipboard HTML is untrusted input, so every field is checked before it can
+ * become an outbound imeta tag. Invalid or non-agent payloads fall through to
+ * the composer's normal paste behavior.
+ */
+export function parseAgentSnapshotClipboardHtml(
+  html: string,
+): ImetaMedia | null {
+  const match = html.match(
+    /\bdata-buzz-agent-snapshot=(?:"([^"]+)"|'([^']+)')/i,
+  );
+  const encodedPayload = match?.[1] ?? match?.[2];
+  if (!encodedPayload) return null;
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(decodeURIComponent(encodedPayload));
+  } catch {
+    return null;
+  }
+
+  if (!payload || typeof payload !== "object") return null;
+  const candidate = payload as Partial<AgentSnapshotClipboardPayload>;
+  const displayName = candidate.displayName?.trim();
+  const filename = candidate.filename?.trim();
+  const sha256 = candidate.sha256?.trim().toLowerCase();
+
+  if (
+    candidate.version !== 1 ||
+    !displayName ||
+    displayName.length > MAX_DISPLAY_NAME_LENGTH ||
+    !filename ||
+    filename.length > MAX_FILENAME_LENGTH ||
+    filename.includes("/") ||
+    filename.includes("\\") ||
+    !filename.toLowerCase().endsWith(".agent.png") ||
+    !sha256 ||
+    !/^[0-9a-f]{64}$/.test(sha256) ||
+    typeof candidate.size !== "number" ||
+    !Number.isInteger(candidate.size) ||
+    candidate.size <= 0 ||
+    candidate.size > MAX_SNAPSHOT_BYTES ||
+    candidate.type !== "image/png" ||
+    typeof candidate.url !== "string" ||
+    !isSafeSnapshotUrl(candidate.url)
+  ) {
+    return null;
+  }
+
+  return {
+    displayLabel: displayName,
+    filename,
+    sha256,
+    size: candidate.size,
+    type: "image/png",
+    uploaded: 0,
+    url: candidate.url,
+  };
+}
+
+/** Convert a Buzz snapshot clipboard payload into one pending attachment. */
+export function handleAgentSnapshotPaste(
+  event: Pick<ClipboardEvent, "clipboardData" | "preventDefault">,
+  setPendingImeta: (
+    update: (current: BlobDescriptor[]) => BlobDescriptor[],
+  ) => void,
+): boolean {
+  const html = event.clipboardData?.getData("text/html") ?? "";
+  const pastedSnapshot = parseAgentSnapshotClipboardHtml(html);
+  if (!pastedSnapshot) return false;
+
+  event.preventDefault();
+  setPendingImeta((current) =>
+    current.some(
+      (attachment) =>
+        attachment.url === pastedSnapshot.url &&
+        attachment.sha256 === pastedSnapshot.sha256,
+    )
+      ? current
+      : [...current, pastedSnapshot],
+  );
+  return true;
+}

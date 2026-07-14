@@ -229,15 +229,25 @@ pub async fn copy_image_to_clipboard(
 /// long-running operation such as snapshot encoding and upload. Keeping the
 /// delayed write in the native layer makes that flow reliable on macOS.
 #[tauri::command]
-pub async fn copy_text_to_clipboard(text: String, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn copy_text_to_clipboard(
+    text: String,
+    html: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
     app.run_on_main_thread(move || {
         let result = arboard::Clipboard::new()
             .map_err(|e| format!("clipboard error: {e}"))
             .and_then(|mut clipboard| {
-                clipboard
-                    .set_text(text)
-                    .map_err(|e| format!("clipboard error: {e}"))
+                if let Some(html) = html {
+                    clipboard
+                        .set_html(html, Some(text))
+                        .map_err(|e| format!("clipboard error: {e}"))
+                } else {
+                    clipboard
+                        .set_text(text)
+                        .map_err(|e| format!("clipboard error: {e}"))
+                }
             });
         let _ = tx.send(result);
     })

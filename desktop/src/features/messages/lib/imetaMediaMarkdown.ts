@@ -28,7 +28,10 @@
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import { parseImetaTags } from "./parseImeta";
 
-export type ImetaMedia = BlobDescriptor;
+export type ImetaMedia = BlobDescriptor & {
+  /** Composer-only label used for attachment links; not emitted in imeta. */
+  displayLabel?: string;
+};
 
 /**
  * Project a Nostr event's imeta tags into the `BlobDescriptor[]` shape the
@@ -286,6 +289,7 @@ export function buildOutgoingMessage(
   let content = body;
   for (const d of pendingImeta) {
     content += formatImetaMediaLine(d, {
+      label: d.displayLabel,
       spoiler: spoileredMediaUrls.has(d.url),
     });
   }
