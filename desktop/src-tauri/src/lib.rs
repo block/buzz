@@ -458,8 +458,10 @@ pub fn run() {
             // that will be lost on restart, as that silently breaks channel
             // memberships, DMs, and relay identity.
             let state = app_handle.state::<AppState>();
-            resolve_persisted_identity(&app_handle, &state)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            if let Err(e) = resolve_persisted_identity(&app_handle, &state) {
+                eprintln!("buzz-desktop: fatal: identity resolution failed: {e}");
+                std::process::exit(1);
+            }
 
             // When the identity is in recovery mode (lost = keyring empty after
             // migration, or keyring-locked = keyring unreachable but marker
@@ -476,11 +478,13 @@ pub fn run() {
 
             // Snapshot owner keys after identity resolution; the best-effort
             // event reconcile itself runs off the synchronous setup path below.
-            let owner_keys = state
-                .keys
-                .lock()
-                .map(|k| k.clone())
-                .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            let owner_keys = match state.keys.lock() {
+                Ok(k) => k.clone(),
+                Err(e) => {
+                    eprintln!("buzz-desktop: fatal: owner keys lock poisoned: {e}");
+                    std::process::exit(1);
+                }
+            };
 
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
