@@ -637,6 +637,9 @@ test("custom personas share with people and keep export separate", async ({
     .locator("[contenteditable='true']")
     .click();
   await page.keyboard.press("ControlOrMeta+V");
+  const composerAgentCard = page.getByTestId("composer-agent-snapshot-card");
+  await expect(composerAgentCard).toBeVisible();
+  await expect(composerAgentCard).toContainText("Animation Auditor");
   await expect(page.getByTestId("send-message")).toBeEnabled();
   await page.getByTestId("send-message").click();
 

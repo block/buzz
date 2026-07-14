@@ -1,9 +1,10 @@
 import * as React from "react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { FileText, HatGlasses, Pencil, Play, X } from "lucide-react";
+import { Bot, FileText, HatGlasses, Pencil, Play, X } from "lucide-react";
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
+import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import {
   shortHash,
@@ -11,6 +12,15 @@ import {
 } from "@/features/messages/lib/useMediaUpload";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import {
+  Attachment,
+  AttachmentAction,
+  AttachmentActions,
+  AttachmentContent,
+  AttachmentDescription,
+  AttachmentMedia,
+  AttachmentTitle,
+} from "@/shared/ui/attachment";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Progress } from "@/shared/ui/progress";
 import { Toggle } from "@/shared/ui/toggle";
@@ -34,7 +44,7 @@ export function DropZoneOverlay({ className }: { className?: string }) {
 }
 
 type ComposerAttachmentsProps = {
-  attachments: BlobDescriptor[];
+  attachments: ImetaMedia[];
   isUploading?: boolean;
   onCancelUpload?: (previewId: number) => void;
   uploadingCount?: number;
@@ -49,6 +59,101 @@ type ComposerAttachmentsProps = {
   onToggleSpoiler?: (url: string) => void;
   spoileredUrls?: ReadonlySet<string>;
 };
+
+function formatAttachmentSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isAgentSnapshot(attachment: ImetaMedia): boolean {
+  const filename = attachment.filename?.toLowerCase();
+  return (
+    attachment.sha256.length === 64 &&
+    (filename?.endsWith(".agent.png") === true ||
+      filename?.endsWith(".agent.json") === true)
+  );
+}
+
+function ComposerAgentSnapshotCard({
+  attachment,
+  onRemove,
+}: {
+  attachment: ImetaMedia;
+  onRemove: (url: string) => void;
+}) {
+  const [thumbError, setThumbError] = React.useState(false);
+  const isPng = attachment.filename?.toLowerCase().endsWith(".agent.png");
+  const showThumb = isPng && !thumbError;
+  const displayName =
+    attachment.displayLabel?.trim() ||
+    attachment.filename?.replace(/\.agent\.(?:png|json)$/i, "") ||
+    "Agent";
+
+  return (
+    <motion.div
+      animate={{ opacity: 1, scale: 1 }}
+      className="min-w-0 max-w-full"
+      exit={{ opacity: 0, scale: 0.8 }}
+      initial={false}
+      layout
+      transition={{ type: "spring", stiffness: 500, damping: 30 }}
+    >
+      <Attachment
+        className="w-fit max-w-full shadow-none"
+        data-testid="composer-agent-snapshot-card"
+        size="sm"
+      >
+        <AttachmentMedia
+          className={
+            showThumb
+              ? "relative h-9 w-9"
+              : "bg-primary/10 text-primary ring-1 ring-primary/20 dark:bg-primary/15"
+          }
+          variant={showThumb ? "image" : "icon"}
+        >
+          {showThumb ? (
+            <>
+              <img
+                alt=""
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 h-full w-full scale-150 object-cover"
+                src={rewriteRelayUrl(attachment.url)}
+              />
+              <img
+                alt=""
+                className="relative h-full w-full object-cover"
+                src={rewriteRelayUrl(attachment.url)}
+                onError={() => setThumbError(true)}
+              />
+            </>
+          ) : (
+            <Bot />
+          )}
+        </AttachmentMedia>
+        <AttachmentContent>
+          <AttachmentTitle className="overflow-visible whitespace-normal text-clip">
+            {displayName}
+          </AttachmentTitle>
+          <AttachmentDescription className="text-secondary-foreground/75">
+            {formatAttachmentSize(attachment.size)}
+          </AttachmentDescription>
+        </AttachmentContent>
+        <AttachmentActions className="ml-4">
+          <AttachmentAction
+            aria-label={`Remove ${displayName}`}
+            data-testid="composer-agent-snapshot-remove"
+            onClick={() => onRemove(attachment.url)}
+            title="Remove"
+            type="button"
+          >
+            <X />
+          </AttachmentAction>
+        </AttachmentActions>
+      </Attachment>
+    </motion.div>
+  );
+}
 
 const LIGHTBOX_BUTTON_CLASS =
   "rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30";
@@ -409,6 +514,16 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
             const isVideo = attachment.type.startsWith("video/");
             const isImage = attachment.type.startsWith("image/");
             const isFile = !isVideo && !isImage;
+
+            if (isAgentSnapshot(attachment)) {
+              return (
+                <ComposerAgentSnapshotCard
+                  attachment={attachment}
+                  key={attachment.url}
+                  onRemove={onRemove}
+                />
+              );
+            }
 
             // Generic file: compact chip with a file icon + filename, plus the
             // same remove button. No lightbox (nothing to preview).
