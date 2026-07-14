@@ -1,8 +1,24 @@
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use url::Url;
 
 use crate::nostr_bind;
+
+fn activate_main_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    if let Err(error) = window.unminimize() {
+        eprintln!("buzz-desktop: failed to unminimize main window for deep link: {error}");
+    }
+    if let Err(error) = window.show() {
+        eprintln!("buzz-desktop: failed to show main window for deep link: {error}");
+    }
+    if let Err(error) = window.set_focus() {
+        eprintln!("buzz-desktop: failed to focus main window for deep link: {error}");
+    }
+}
 
 /// Parse the query string of a `buzz://message?…` URL into the JSON
 /// payload emitted on `deep-link-message`. Returns `None` when a required
@@ -169,6 +185,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                     return;
                 }
             }
+            activate_main_window(app);
             let _ = app.emit("deep-link-connect", relay_url);
         }
         Some("join") => {
@@ -179,6 +196,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 eprintln!("buzz-desktop: join deep link missing/invalid relay or code: {url_str}");
                 return;
             };
+            activate_main_window(app);
             let _ = app.emit("deep-link-join", payload);
         }
         Some("message") => {
@@ -194,10 +212,12 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 eprintln!("buzz-desktop: message deep link missing channel or id: {url_str}");
                 return;
             };
+            activate_main_window(app);
             let _ = app.emit("deep-link-message", payload);
         }
         Some("nostr-bind") => match parse_nostr_bind_deep_link(&url) {
             Ok(payload) => {
+                activate_main_window(app);
                 let _ = app.emit("deep-link-nostr-bind", payload);
             }
             Err(error) => {
