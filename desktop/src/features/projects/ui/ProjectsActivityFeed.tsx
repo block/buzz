@@ -377,7 +377,7 @@ function ActivityCard({
             ) : null}
           </div>
           <div className={compact ? "mt-2" : "mt-3"}>
-            <p className="min-w-0 truncate text-base font-semibold text-foreground">
+            <p className="min-w-0 truncate text-sm font-semibold text-foreground">
               {item.title}
             </p>
             {item.body ? (
