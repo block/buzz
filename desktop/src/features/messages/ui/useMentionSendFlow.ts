@@ -121,6 +121,9 @@ function isProviderBackedAgent(agent: ManagedAgent) {
   return agent.backend.type === "provider";
 }
 
+const DM_THREAD_AGENT_MENTION_ERROR =
+  "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
+
 export function useMentionSendFlow({
   channelId,
   channelLinks,
@@ -478,6 +481,36 @@ export function useMentionSendFlow({
     [channelType, mentions.hasResolvedMembers, mentions.memberPubkeys],
   );
 
+  const hasUnavailableDmThreadAgentMention = React.useCallback(
+    (
+      trimmed: string,
+      capturedThreadContext: SendMessageWithMentionFlowInput["capturedThreadContext"],
+    ) => {
+      if (channelType !== "dm" || capturedThreadContext == null) {
+        return false;
+      }
+
+      if (mentions.extractMentionPersonas(trimmed).length > 0) {
+        return true;
+      }
+
+      return mentions
+        .extractMentionPubkeys(trimmed)
+        .some(
+          (pubkey) =>
+            mentions.isAgentPubkey(pubkey) &&
+            !mentions.memberPubkeys.has(normalizePubkey(pubkey)),
+        );
+    },
+    [
+      channelType,
+      mentions.extractMentionPersonas,
+      mentions.extractMentionPubkeys,
+      mentions.isAgentPubkey,
+      mentions.memberPubkeys,
+    ],
+  );
+
   const sendMessageWithMentionFlow = React.useCallback(
     async ({
       capturedChannelId,
@@ -494,6 +527,14 @@ export function useMentionSendFlow({
       isMentionSendPendingRef.current = true;
       setIsMentionSendPending(true);
       try {
+        if (
+          hasUnavailableDmThreadAgentMention(trimmed, capturedThreadContext)
+        ) {
+          setNonMemberPromptError(DM_THREAD_AGENT_MENTION_ERROR);
+          toast.error(DM_THREAD_AGENT_MENTION_ERROR);
+          return;
+        }
+
         let effectiveChannelId = capturedChannelId;
         if (!effectiveChannelId && onPrepareSendChannel) {
           effectiveChannelId = await onPrepareSendChannel();
@@ -586,6 +627,7 @@ export function useMentionSendFlow({
       customEmoji,
       getManagedAgentsByPubkey,
       getNonMemberMentionPubkeys,
+      hasUnavailableDmThreadAgentMention,
       mentions.extractMentionPubkeys,
       mentions.isManagedAgentPubkey,
       onPrepareSendChannel,

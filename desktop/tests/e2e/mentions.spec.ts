@@ -286,6 +286,59 @@ test("thread autocomplete keeps multiple long names readable in a narrow panel",
   }
 });
 
+test("blocks non-participant persona mentions in DM threads", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-bob-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
+  await waitForMockLiveSubscription(page, "bob-tyler");
+
+  const threadRoot = await emitMockMessage(
+    page,
+    "bob-tyler",
+    "Thread before adding an agent",
+  );
+  await emitMockMessage(page, "bob-tyler", "Existing thread reply", {
+    parentEventId: threadRoot.id,
+  });
+  const threadSummary = page.getByTestId("message-thread-summary").first();
+  await expect(threadSummary).toBeVisible();
+  await threadSummary.click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const input = threadPanel.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    threadPanel
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" in this thread");
+  const baselineCommands = await readCommandLog(page);
+
+  await threadPanel.getByTestId("send-message").click();
+
+  await expect(
+    page.getByText(
+      "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.",
+    ),
+  ).toBeVisible();
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "create_managed_agent")).toBe(
+    commandCount(baselineCommands, "create_managed_agent"),
+  );
+  expect(commandCount(commands, "add_channel_members")).toBe(
+    commandCount(baselineCommands, "add_channel_members"),
+  );
+  await expect(input).toContainText("Fizz");
+  await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
+});
+
 test("autocomplete filters suggestions as user types", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
