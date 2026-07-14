@@ -44,6 +44,8 @@ import {
   requestHistoryGated,
 } from "@/shared/api/relayGateBoundary";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
+import { handleRelayNoticeFrame } from "@/shared/api/relayNotices";
+import { withMentionReferenceTags } from "@/shared/lib/mentionReferenceTags";
 import {
   isServiceRestartClose,
   isWebSocketClose,
@@ -258,9 +260,7 @@ export class RelayClient {
     for (const pubkey of mentionPubkeys) {
       tags.push(["p", pubkey]);
     }
-    for (const tag of extraTags) {
-      tags.push(tag);
-    }
+    tags.push(...withMentionReferenceTags(extraTags, mentionPubkeys));
 
     const event = await signRelayEvent({
       kind: KIND_STREAM_MESSAGE,
@@ -775,6 +775,8 @@ export class RelayClient {
     if (!Array.isArray(data) || data.length === 0) {
       return;
     }
+
+    if (handleRelayNoticeFrame(data)) return;
 
     const [type, ...rest] = data;
     if (type === "AUTH" && typeof rest[0] === "string") {

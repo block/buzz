@@ -57,6 +57,7 @@ import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityAp
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
 import { EncryptedBackupProvider } from "@/features/settings/EncryptedBackupProvider";
+import { useRelayNoticeToasts } from "@/shared/api/useRelayNoticeToasts";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { getProfile } from "@/shared/api/tauriProfiles";
@@ -323,6 +324,7 @@ function CommunityApp({
   // as toasts. Mounted before useCommunityInit so the listeners are registered
   // ahead of the first apply_workspace call.
   useNestNotifications();
+  useRelayNoticeToasts();
 
   // Composite key: changes when community ID changes OR when
   // the active community's config is updated (relayUrl/token).
