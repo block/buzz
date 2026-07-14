@@ -79,7 +79,9 @@ class _DetailConnectionBanner extends StatelessWidget {
             ),
             child: Center(
               child: Text(
-                'Connection lost — Retry',
+                state.lastError is RelayAuthRejectedException
+                    ? 'Authentication rejected — Retry'
+                    : 'Connection lost — Retry',
                 style: context.textTheme.labelSmall?.copyWith(
                   color: context.colors.onSurfaceVariant,
                 ),

@@ -207,7 +207,10 @@ void main() {
     await tester.pump();
 
     expect(find.text('Authentication rejected by the relay'), findsOneWidget);
-    expect(find.text('access revoked'), findsOneWidget);
+    expect(
+      find.text('Check your workspace access or credentials, then retry.'),
+      findsOneWidget,
+    );
     expect(find.textContaining('Cloudflare WARP'), findsNothing);
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });

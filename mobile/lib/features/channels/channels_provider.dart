@@ -75,7 +75,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         return;
       }
       if (next.status != SessionStatus.connected) return;
-      if (initiallyFailed) {
+      if (initiallyFailed ||
+          (waitingForInitialConnection &&
+              connected.isCompleted &&
+              !_hasLoaded)) {
         ref.invalidateSelf();
       } else if (waitingForInitialConnection &&
           !_hasLoaded &&

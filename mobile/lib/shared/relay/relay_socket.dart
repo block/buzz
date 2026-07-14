@@ -156,6 +156,7 @@ class RelaySocket {
   }
 
   void _resetConnection() {
+    _failAuth(null);
     _state = SocketState.disconnected;
     _subscription?.cancel();
     _subscription = null;

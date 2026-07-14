@@ -57,7 +57,10 @@ class _ChannelsBody extends StatelessWidget {
             left: 0,
             right: 0,
             child: connectionLost
-                ? _ConnectionLostBanner(onRetry: onRetryConnection)
+                ? _ConnectionLostBanner(
+                    error: sessionState.lastError,
+                    onRetry: onRetryConnection,
+                  )
                 : showConnectionBanner
                 ? _ConnectionBanner(state: sessionState)
                 : const SizedBox.shrink(),

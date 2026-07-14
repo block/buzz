@@ -125,12 +125,16 @@ class _ConnectionBanner extends StatelessWidget {
 }
 
 class _ConnectionLostBanner extends StatelessWidget {
+  final Object? error;
   final VoidCallback onRetry;
 
-  const _ConnectionLostBanner({required this.onRetry});
+  const _ConnectionLostBanner({required this.error, required this.onRetry});
 
   @override
   Widget build(BuildContext context) {
+    final message = error is RelayAuthRejectedException
+        ? 'Authentication rejected — Retry'
+        : 'Connection lost — Retry';
     return Material(
       color: context.colors.surfaceContainerHighest,
       child: InkWell(
@@ -139,7 +143,7 @@ class _ConnectionLostBanner extends StatelessWidget {
           height: _kBannerHeight,
           child: Center(
             child: Text(
-              'Connection lost — Retry',
+              message,
               style: context.textTheme.labelSmall?.copyWith(
                 color: context.colors.onSurfaceVariant,
               ),
@@ -169,11 +173,9 @@ class _OfflineView extends StatelessWidget {
         ? 'Authentication rejected by the relay'
         : "Can't reach your workspace";
     final body = authRejected
-        ? (error as RelayAuthRejectedException).message
+        ? 'Check your workspace access or credentials, then retry.'
         : 'Check your network or VPN (e.g. Cloudflare WARP), then retry.';
-    final detail = authRejected
-        ? relayHost
-        : '$relayHost\n${error ?? 'Connection failed'}';
+    final detail = relayHost;
 
     return Center(
       child: Padding(
