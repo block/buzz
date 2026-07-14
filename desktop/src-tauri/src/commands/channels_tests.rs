@@ -210,3 +210,33 @@ fn classify_pending_owner_matches_only_the_owning_identity() {
     // No `d` tag on the event at all: must not match.
     assert!(!classify_pending_owner(&state, PK_A, None));
 }
+
+#[test]
+fn pending_owner_mark_uses_signer_captured_before_identity_swap() {
+    // Regression for the write-side IMPORTANT Thufir flagged in pass 3:
+    // `create_channel` used to re-read `state.keys` *after* the submit
+    // await, so an identity swap that lands during the in-flight request
+    // could mark the overlay under the new identity instead of the one that
+    // actually signed the create. The fix captures the signer up front and
+    // marks with that captured identity, so a swap that happens afterward
+    // (i.e. during what would be the submit await) can't retarget the mark.
+    let state = crate::app_state::build_app_state();
+
+    // Mirrors `create_channel`'s new capture-before-submit step: read the
+    // signer identity once, before anything that could race with a swap.
+    let creator_keys = state.signing_keys().expect("signable");
+    let creator_pubkey = creator_keys.public_key().to_hex();
+
+    // Simulate an in-process identity swap landing during the (here,
+    // implicit) submit await — e.g. `import_identity` replacing
+    // `state.keys` while the create request is in flight.
+    *state.keys.lock().expect("lock keys") = Keys::generate();
+
+    // The mark must use the captured signer, not whatever `state.keys`
+    // holds now.
+    state.mark_pending_owned_channel(&creator_pubkey, "chan-1");
+
+    assert!(state.is_pending_owned_channel(&creator_pubkey, "chan-1"));
+    let post_swap_pubkey = state.keys.lock().expect("lock keys").public_key().to_hex();
+    assert!(!state.is_pending_owned_channel(&post_swap_pubkey, "chan-1"));
+}

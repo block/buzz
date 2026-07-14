@@ -5,7 +5,7 @@ use crate::{
     events,
     models::{ChannelDetailInfo, ChannelInfo, ChannelMembersResponse},
     nostr_convert,
-    relay::{query_relay, submit_event},
+    relay::{query_relay, submit_event, submit_event_with_keys},
 };
 
 // ── Reads (pure-nostr via /query) ────────────────────────────────────────────
@@ -473,20 +473,24 @@ pub async fn create_channel(
         description.as_deref(),
         ttl_seconds,
     )?;
-    submit_event(builder, &state).await?;
+
+    // Capture the signing identity before submission so the pending-owner
+    // mark below is bound to whoever actually signed this create — not
+    // whoever `state.keys` holds once the network round-trip completes. An
+    // in-process identity swap while the request is in flight must not be
+    // able to retarget the mark onto the new identity.
+    let creator_keys = state.signing_keys()?;
+    let creator_pubkey = creator_keys.public_key().to_hex();
+    submit_event_with_keys(builder, &state, &creator_keys, None).await?;
 
     // Mark this channel pending-owner: we just created it, so we know we're
     // the owner, but the relay's kind:39002 membership entry (#1761) is
     // provisioned asynchronously. `get_channels` consults this overlay to
     // classify us as `is_member=true` until that entry is observable. Bound
-    // to our own pubkey so an in-process identity swap can't inherit this
-    // entry.
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    // to the identity that signed the create above, so an in-process
+    // identity swap can neither inherit nor retarget this entry.
     let channel_uuid_string = channel_uuid.to_string();
-    state.mark_pending_owned_channel(&my_pubkey, &channel_uuid_string);
+    state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
 
     // Re-fetch the canonical metadata event to return ChannelInfo.
     let events = query_relay(
