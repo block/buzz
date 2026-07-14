@@ -216,6 +216,8 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
     Ok(raw.trim_end_matches('/').to_string())
 }
 
+const DEFAULT_PUSH_GATEWAY_DELIVERY_URL: &str = "https://push.buzz.xyz/v1/deliveries/apns";
+
 fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
     let url = url::Url::parse(raw.trim()).map_err(|e| {
         ConfigError::InvalidValue(format!(
@@ -535,11 +537,13 @@ impl Config {
                 "BUZZ_PUSH_EXECUTOR_KEY_ID must contain 1..=64 bytes".to_string(),
             ));
         }
-        let push_gateway_delivery_url = std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL")
-            .ok()
-            .filter(|raw| !raw.trim().is_empty())
-            .map(|raw| parse_push_gateway_delivery_url(&raw))
-            .transpose()?;
+        let push_gateway_delivery_url = match std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL") {
+            Ok(raw) if raw.trim().is_empty() => None,
+            Ok(raw) => Some(parse_push_gateway_delivery_url(&raw)?),
+            Err(_) => Some(parse_push_gateway_delivery_url(
+                DEFAULT_PUSH_GATEWAY_DELIVERY_URL,
+            )?),
+        };
         let push_gateway_timeout_millis = match std::env::var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS") {
             Ok(raw) => raw
                 .parse::<u64>()
@@ -737,6 +741,31 @@ mod tests {
             result,
             Err(ConfigError::InvalidValue(ref msg)) if msg.contains("must be an http(s) origin")
         ));
+    }
+
+    #[test]
+    fn push_gateway_defaults_to_buzz_and_can_be_disabled() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        let config = Config::from_env().expect("default config");
+        assert_eq!(
+            config
+                .push_gateway_delivery_url
+                .as_ref()
+                .map(url::Url::as_str),
+            Some(DEFAULT_PUSH_GATEWAY_DELIVERY_URL)
+        );
+
+        std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", "");
+        let config = Config::from_env().expect("disabled push config");
+        assert!(config.push_gateway_delivery_url.is_none());
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", value);
+        } else {
+            std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        }
     }
 
     #[test]
