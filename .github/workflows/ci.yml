@@ -610,6 +610,33 @@ jobs:
         run: cargo test --profile ci -p buzz-test-client --test e2e_event_reminder -- --ignored
         env:
           RELAY_URL: ws://localhost:3000
+      - name: NIP-37 draft wrap e2e
+        # Feature e2e for NIP-37 draft wraps (kind:31234), channel-bound
+        # contract: h-tag validation, channel existence + membership gates,
+        # immutable channel binding, author-only privacy (WS REQ, WS COUNT,
+        # HTTP /query, /count, live fan-out), known-d privacy tripwires,
+        # FTS/NIP-50 exclusion, workflow exclusion, tenant confinement, and
+        # NIP-11 advertisement.
+        run: cargo test --profile ci -p buzz-test-client --test e2e_nip37_draft -- --ignored
+        env:
+          RELAY_URL: ws://localhost:3000
+      - name: NIP-37 draft wrap DB tests
+        # DB-layer tests for NIP-37 draft wraps: tenant confinement (A/B
+        # independent heads across communities), immutable channel-binding
+        # (sequential rebind → DraftChannelMismatch), and race-guard
+        # (concurrent writes → exactly one winner + one DraftChannelMismatch).
+        # These run directly against Postgres without a relay process.
+        run: cargo test --profile ci -p buzz-db -- draft --ignored
+        env:
+          DATABASE_URL: postgres://buzz:buzz_dev@localhost:5432/buzz
+      - name: buzz-search FTS integration tests
+        # Storage-layer FTS guarantee tests, including the NIP-37 draft exclusion:
+        # kind:31234 rows must have NULL search_tsv so they never surface in
+        # NIP-50 results regardless of content.  These tests are #[ignore]
+        # because they require a live Postgres; the CI job already provisions one.
+        run: cargo test --profile ci -p buzz-search --tests -- --include-ignored
+        env:
+          BUZZ_TEST_DATABASE_URL: postgres://buzz:buzz_dev@localhost:5432/buzz
       - name: Upload relay log
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

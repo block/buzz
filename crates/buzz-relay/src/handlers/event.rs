@@ -38,12 +38,13 @@ fn bounded_kind_label(kind: u32) -> String {
         8000..=8003 | 9000..=9022 | 9030..=9036 => kind.to_string(),
         13534..=13535 => kind.to_string(),
         20000..=29999 => kind.to_string(),
-        30023 | 30315 | 39000..=39003 => kind.to_string(),
+        30023 | 30078 | 30174 | 30175..=30177 | 30300 | 30315 | 31234 | 39000..=39003 => {
+            kind.to_string()
+        }
         40002..=40100 => kind.to_string(),
         41001 | 41010..=41012 => kind.to_string(),
         43001..=43006 => kind.to_string(),
-        44100..=44101 => kind.to_string(),
-        44200 => kind.to_string(),
+        44100..=44101 | 44200 => kind.to_string(),
         45001..=45003 => kind.to_string(),
         46001..=46012 | 46020 | 46030..=46031 => kind.to_string(),
         48001 | 48100..=48103 | 48106 => kind.to_string(),
@@ -130,12 +131,12 @@ pub async fn filter_fanout_by_access(
         })
         .collect();
 
-    // Author-only kinds (NIP-ER reminders) may only ever be delivered to the
-    // event's own author. This gate lives here — the chokepoint shared by the
-    // ingest fan-out path and the Redis cross-node `subscribe_local` path, the
-    // only paths that route author-only kinds — so no such delivery can bypass
-    // it. It runs before (and independent of) the channel-membership filter
-    // below because author-only kinds are stored globally (channel_id = None).
+    // Author-only kinds (NIP-ER reminders, NIP-37 draft wraps) may only ever
+    // be delivered to the event's own author. This gate lives here — the
+    // chokepoint shared by the ingest fan-out path and the Redis cross-node
+    // `subscribe_local` path, the only paths that route author-only kinds —
+    // so no such delivery can bypass it. It runs before (and independent of)
+    // the channel-membership filter below.
     let matches = if AUTHOR_ONLY_KINDS.contains(&event_kind_u32(&stored_event.event)) {
         let author = stored_event.event.pubkey.to_bytes();
         matches
@@ -369,6 +370,31 @@ pub(crate) async fn dispatch_persistent_event(
     0
 }
 
+/// Returns `true` when an event of `kind_u32` should trigger workspace-level
+/// workflow dispatch.
+///
+/// This is the single canonical gate that `dispatch_persistent_event_inner`
+/// uses.  Extracting it as a named function lets tests call the real predicate
+/// rather than maintaining a parallel closure that can silently diverge.
+///
+/// Excluded from dispatch:
+/// - Workflow-execution kinds (avoid re-triggering the engine on its own output)
+/// - Command kinds (internal relay commands)
+/// - Relay-signed workflow messages (tagged `buzz:workflow`)
+/// - `KIND_GIFT_WRAP` (encrypted payloads — content is opaque)
+/// - `AUTHOR_ONLY_KINDS` (NIP-37 draft wraps, NIP-ER reminders — private
+///   per-user state that must never reach workspace-level automations)
+pub(crate) fn should_dispatch_workflow(kind_u32: u32, is_relay_workflow_msg: bool) -> bool {
+    !buzz_core::kind::is_workflow_execution_kind(kind_u32)
+        && !buzz_core::kind::is_command_kind(kind_u32)
+        && !is_relay_workflow_msg
+        && kind_u32 != KIND_GIFT_WRAP
+        // Author-only kinds (NIP-ER reminders, NIP-37 draft wraps) are private
+        // per-user state that must not trigger workspace-level workflows.
+        // AUTHOR_ONLY_KINDS.contains is the permanent guard at this seam.
+        && !AUTHOR_ONLY_KINDS.contains(&kind_u32)
+}
+
 /// Run post-commit delivery/side effects for a stored event.
 async fn dispatch_persistent_event_inner(
     tenant: &TenantContext,
@@ -502,11 +528,7 @@ async fn dispatch_persistent_event_inner(
             .iter()
             .any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("buzz:workflow"));
 
-    if !buzz_core::kind::is_workflow_execution_kind(kind_u32)
-        && !buzz_core::kind::is_command_kind(kind_u32)
-        && !is_relay_workflow_msg
-        && kind_u32 != KIND_GIFT_WRAP
-    {
+    if should_dispatch_workflow(kind_u32, is_relay_workflow_msg) {
         let workflow_engine = Arc::clone(&state.workflow_engine);
         let workflow_event = stored_event.clone();
         let trigger_kind = kind_u32.to_string();
@@ -2419,6 +2441,53 @@ mod tests {
                 out.is_empty(),
                 "Inv_NonInterference: a connection bound to community A \
                  must not receive a community-B event. Got: {out:?}"
+            );
+        }
+
+        /// Dispatch-predicate tripwire: kind:31234 (NIP-37 draft wrap) and
+        /// kind:30300 (NIP-ER reminder) are in `AUTHOR_ONLY_KINDS` so
+        /// `should_dispatch_workflow` returns `false` for them, permanently
+        /// suppressing workflow triggers for author-only events.
+        ///
+        /// The test calls `should_dispatch_workflow` — the same function
+        /// that `dispatch_persistent_event_inner` calls — so deleting or
+        /// changing the guard in the production path reds this test.
+        /// A kind:9 positive control proves the predicate is not trivially
+        /// always-false.
+        #[test]
+        fn draft_kind_is_excluded_from_workflow_dispatch_by_author_only_guard() {
+            // kind:31234 must be excluded from workflow dispatch.
+            // is_relay_workflow_msg=false for any user-submitted event.
+            assert!(
+                !super::super::should_dispatch_workflow(buzz_core::kind::KIND_DRAFT, false),
+                "should_dispatch_workflow must return false for kind:31234 — \
+                 a draft wrap must NEVER reach the workflow engine"
+            );
+
+            // kind:30300 (NIP-ER reminder) is also AUTHOR_ONLY and must be excluded.
+            assert!(
+                !super::super::should_dispatch_workflow(
+                    buzz_core::kind::KIND_EVENT_REMINDER,
+                    false
+                ),
+                "should_dispatch_workflow must return false for kind:30300 — \
+                 reminders are author-only and must not trigger workspace workflows"
+            );
+
+            // Positive control: a plain channel message (kind:9) must return true
+            // so we know the predicate is not trivially always-false.
+            let kind_channel_message: u32 = 9;
+            assert!(
+                super::super::should_dispatch_workflow(kind_channel_message, false),
+                "should_dispatch_workflow must return true for kind:9 channel messages \
+                 (positive control) — the gate must be live, not trivially always-false"
+            );
+
+            // is_relay_workflow_msg=true must suppress dispatch for any kind.
+            assert!(
+                !super::super::should_dispatch_workflow(kind_channel_message, true),
+                "should_dispatch_workflow must return false when is_relay_workflow_msg=true \
+                 (relay-signed workflow messages must not re-trigger the engine)"
             );
         }
     }

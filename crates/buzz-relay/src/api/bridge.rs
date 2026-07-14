@@ -367,6 +367,7 @@ const WINDOW_AUX_DELETE_KINDS: [u32; 2] = [
 /// Validation errors (missing `#h`, half a cursor) are deterministic client
 /// mistakes and return `400`; an inaccessible channel is an access-scope skip
 /// that still emits nothing, matching every other read path here.
+#[allow(clippy::too_many_arguments)]
 async fn handle_channel_window_filter(
     state: &AppState,
     tenant: &buzz_core::TenantContext,
@@ -374,6 +375,8 @@ async fn handle_channel_window_filter(
     filter: &nostr::Filter,
     accessible_channels: &[uuid::Uuid],
     events: &mut Vec<Value>,
+    pubkey_bytes: &[u8],
+    reader_pubkey_hex: &str,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     use buzz_core::kind::{KIND_THREAD_SUMMARY, KIND_WINDOW_BOUNDS};
 
@@ -436,13 +439,23 @@ async fn handle_channel_window_filter(
             limit,
             cursor.clone(),
             kind_filter.as_deref(),
+            Some(pubkey_bytes),
         )
         .await
         .map_err(|e| internal_error(&format!("channel window error: {e}")))?;
 
-    // 1. Rows, in keyset order.
+    // 1. Rows, in keyset order. Gate each row through the canonical read-
+    //    authorization predicate so draft-expiry (and any future per-event
+    //    predicates) apply consistently with every other read surface.
     let mut row_ids_hex = Vec::with_capacity(window.rows.len());
     for row in &window.rows {
+        if !buzz_core::filter::reader_can_receive_event(
+            &row.stored_event.event,
+            reader_pubkey_hex,
+            pubkey_bytes,
+        ) {
+            continue;
+        }
         row_ids_hex.push(row.stored_event.event.id.to_hex());
         let v = serde_json::to_value(&row.stored_event.event)
             .map_err(|e| internal_error(&format!("window row serialize: {e}")))?;
@@ -768,6 +781,8 @@ pub async fn query_events(
             filter,
             &accessible_channels,
             &mut events,
+            &pubkey_bytes,
+            &authed_pubkey_hex,
         )
         .await?;
         handled.insert(idx);
@@ -843,10 +858,15 @@ pub async fn query_events(
                 if !event_in_accessible_channel(&se, &accessible_channels) {
                     continue;
                 }
-                // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
-                // or kind:30622) to a non-owner via the feed path, even though feed SQL
-                // kind allowlists already exclude these kinds.
-                if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
+                // Canonical per-event read gate: covers result-gated (p-owned) kinds
+                // and author-only kinds (e.g. kind:31234). Feed SQL kind allowlists
+                // exclude these kinds in practice, but this gate closes any future
+                // latent hole if the allowlist drifts.
+                if !buzz_core::filter::reader_can_receive_event(
+                    &se.event,
+                    &authed_pubkey_hex,
+                    &pubkey_bytes,
+                ) {
                     continue;
                 }
                 if let Ok(v) = serde_json::to_value(&se.event) {
@@ -909,10 +929,15 @@ pub async fn query_events(
             if !event_in_accessible_channel(&se, &accessible_channels) {
                 continue;
             }
-            // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
-            // or kind:30622) to a non-owner via the thread path, even though
-            // requires_h_channel_scope already excludes these kinds from thread metadata.
-            if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
+            // Canonical per-event read gate: covers result-gated (p-owned) kinds
+            // and author-only kinds (e.g. kind:31234). Both guards are needed here
+            // even though requires_h_channel_scope already excludes these from thread
+            // metadata, because thread replies can reach this path through other routes.
+            if !buzz_core::filter::reader_can_receive_event(
+                &se.event,
+                &authed_pubkey_hex,
+                &pubkey_bytes,
+            ) {
                 continue;
             }
             if let Ok(v) = serde_json::to_value(&se.event) {
@@ -1003,15 +1028,13 @@ pub async fn query_events(
                     if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se) {
                         continue;
                     }
-                    // Result-level read auth: never hand a viewer-private snapshot
-                    // (kind:30622) to anyone but its owner, even via kindless `ids`.
-                    if !buzz_core::filter::reader_authorized_for_event(
+                    // Canonical per-event read gate: covers both result-gated (p-owned)
+                    // and author-only kinds in a single call.
+                    if !buzz_core::filter::reader_can_receive_event(
                         &se.event,
                         &authed_pubkey_hex,
+                        &pubkey_bytes,
                     ) {
-                        continue;
-                    }
-                    if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes) {
                         continue;
                     }
                     if let Ok(v) = serde_json::to_value(&se.event) {
@@ -1140,6 +1163,7 @@ pub async fn count_events(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !crate::handlers::req::filter_can_match_draft(filter)
             {
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
@@ -1165,13 +1189,10 @@ pub async fn count_events(
                             {
                                 continue;
                             }
-                            if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes)
-                            {
-                                continue;
-                            }
-                            if !buzz_core::filter::reader_authorized_for_event(
+                            if !buzz_core::filter::reader_can_receive_event(
                                 &se.event,
                                 &authed_pubkey_hex,
+                                &pubkey_bytes,
                             ) {
                                 continue;
                             }
@@ -1204,6 +1225,7 @@ pub async fn count_events(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !crate::handlers::req::filter_can_match_draft(filter)
             {
                 query.limit = None;
                 match state.db.count_events(&query).await {
@@ -1229,13 +1251,10 @@ pub async fn count_events(
                             {
                                 continue;
                             }
-                            if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes)
-                            {
-                                continue;
-                            }
-                            if !buzz_core::filter::reader_authorized_for_event(
+                            if !buzz_core::filter::reader_can_receive_event(
                                 &se.event,
                                 &authed_pubkey_hex,
+                                &pubkey_bytes,
                             ) {
                                 continue;
                             }
@@ -1274,6 +1293,7 @@ fn search_hit_accepted(
     stored: &buzz_core::StoredEvent,
     accessible_channels: &[uuid::Uuid],
     reader_pubkey_hex: &str,
+    reader_pubkey_bytes: &[u8],
 ) -> bool {
     if !buzz_core::filter::filters_match(std::slice::from_ref(filter), stored) {
         return false;
@@ -1283,7 +1303,11 @@ fn search_hit_accepted(
             return false;
         }
     }
-    if !buzz_core::filter::reader_authorized_for_event(&stored.event, reader_pubkey_hex) {
+    if !buzz_core::filter::reader_can_receive_event(
+        &stored.event,
+        reader_pubkey_hex,
+        reader_pubkey_bytes,
+    ) {
         return false;
     }
     true
@@ -1407,10 +1431,13 @@ async fn handle_bridge_search(
                 Some(ev) => ev,
                 None => continue,
             };
-            if !search_hit_accepted(filter, stored, accessible_channels, reader_pubkey_hex) {
-                continue;
-            }
-            if crate::handlers::req::is_author_only_event(&stored.event, pubkey_bytes) {
+            if !search_hit_accepted(
+                filter,
+                stored,
+                accessible_channels,
+                reader_pubkey_hex,
+                pubkey_bytes,
+            ) {
                 continue;
             }
             // Dedup across filters.
@@ -2509,11 +2536,11 @@ mod tests {
         // 30174 is not owner-gated, so any reader hex is fine here.
         let reader = Keys::generate().public_key().to_hex();
         assert!(
-            search_hit_accepted(&filter, &env_for_a, &[], &reader),
+            search_hit_accepted(&filter, &env_for_a, &[], &reader, &[]),
             "envelope addressed to owner_a must be returned"
         );
         assert!(
-            !search_hit_accepted(&filter, &env_for_b, &[], &reader),
+            !search_hit_accepted(&filter, &env_for_b, &[], &reader, &[]),
             "envelope addressed to owner_b must NOT be returned for a #p=[owner_a] search"
         );
     }
@@ -2536,9 +2563,9 @@ mod tests {
             .author(agent_a.public_key());
 
         let reader = Keys::generate().public_key().to_hex();
-        assert!(search_hit_accepted(&filter, &env_a, &[], &reader));
+        assert!(search_hit_accepted(&filter, &env_a, &[], &reader, &[]));
         assert!(
-            !search_hit_accepted(&filter, &env_b, &[], &reader),
+            !search_hit_accepted(&filter, &env_b, &[], &reader, &[]),
             "authors=[agent_a] search must not return events authored by agent_b"
         );
     }
@@ -2560,11 +2587,11 @@ mod tests {
 
         let reader = Keys::generate().public_key().to_hex();
         assert!(
-            !search_hit_accepted(&filter, &stored, &[], &reader),
+            !search_hit_accepted(&filter, &stored, &[], &reader, &[]),
             "channel-scoped hit must be rejected when caller has no channel access"
         );
         assert!(
-            search_hit_accepted(&filter, &stored, &[scoped_channel], &reader),
+            search_hit_accepted(&filter, &stored, &[scoped_channel], &reader, &[]),
             "channel-scoped hit must be accepted when caller has access to that channel"
         );
     }
@@ -2866,11 +2893,11 @@ mod tests {
         let filter = nostr::Filter::new().id(ev.id);
 
         assert!(
-            !search_hit_accepted(&filter, &stored, &[], &third_party),
+            !search_hit_accepted(&filter, &stored, &[], &third_party, &[]),
             "third party must not receive a DM-visibility snapshot via kindless ids search"
         );
         assert!(
-            search_hit_accepted(&filter, &stored, &[], &viewer),
+            search_hit_accepted(&filter, &stored, &[], &viewer, &[]),
             "owner must still receive their own snapshot"
         );
     }

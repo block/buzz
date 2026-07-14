@@ -5,6 +5,7 @@
 use nostr::Filter;
 
 use crate::event::StoredEvent;
+use crate::kind::{event_kind_u32, DRAFT_MAX_TTL_SECS, KIND_DRAFT};
 
 /// Returns `true` if the event matches any of the provided NIP-01 filters.
 pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
@@ -30,6 +31,71 @@ pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str
         .tags
         .filter(nostr::TagKind::SingleLetter(p))
         .any(|t| t.content() == Some(reader_pubkey_hex))
+}
+
+/// Returns `true` if the event is an author-only kind and the requester is NOT
+/// the author. Used as a per-event filter during historical delivery and fan-out
+/// to silently omit unauthorized events from mixed-kind result sets.
+pub fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes: &[u8]) -> bool {
+    let kind_u32 = crate::kind::event_kind_u32(event);
+    crate::kind::AUTHOR_ONLY_KINDS.contains(&kind_u32)
+        && event.pubkey.to_bytes() != requester_pubkey_bytes
+}
+
+/// Returns `true` if a draft event should be suppressed at read time due to expiry.
+///
+/// Only applies to `KIND_DRAFT` events; all other kinds return `false`.
+///
+/// Effective expiry is `min(client_expiration_tag, created_at + DRAFT_MAX_TTL_SECS)`.
+/// When no `expiration` tag is present the server ceiling (`created_at + 30d`) governs.
+/// A client tag shorter than the 30-day ceiling is honoured; one longer is clamped to it.
+/// Tombstones (empty-content drafts) follow the same rule — expiry is a property of the
+/// event envelope, not its payload.
+///
+/// The `now` parameter is supplied by the caller so unit tests can inject an arbitrary
+/// clock. Production call sites pass `nostr::Timestamp::now()`.
+pub fn draft_expired(event: &nostr::Event, now: nostr::Timestamp) -> bool {
+    if event_kind_u32(event) != KIND_DRAFT {
+        return false;
+    }
+    let server_ceil = event
+        .created_at
+        .as_secs()
+        .saturating_add(DRAFT_MAX_TTL_SECS);
+    let effective_expiry = event
+        .tags
+        .iter()
+        .find_map(|t| {
+            if t.kind().to_string() == "expiration" {
+                t.content().and_then(|v| v.parse::<u64>().ok())
+            } else {
+                None
+            }
+        })
+        .map(|client_exp| client_exp.min(server_ceil))
+        .unwrap_or(server_ceil);
+    now.as_secs() >= effective_expiry
+}
+
+/// Canonical per-event read-authorization gate: combines `reader_authorized_for_event`
+/// (p-gated/result-gated kinds), `is_author_only_event` (author-private kinds), and
+/// `draft_expired` (time-based draft suppression) into a single predicate.
+///
+/// Every delivery surface — WS historical pull, WS fan-out, HTTP bridge (all
+/// branches: feed, thread, search, catchall, channel-window), and COUNT fallback
+/// — must pass each event through this function before serializing it to the wire.
+/// Using one canonical gate instead of composing the predicates at each call site
+/// prevents future read surfaces from accidentally omitting half the privacy model.
+///
+/// Returns `true` if `reader` MAY receive the event.
+pub fn reader_can_receive_event(
+    event: &nostr::Event,
+    reader_pubkey_hex: &str,
+    reader_pubkey_bytes: &[u8],
+) -> bool {
+    reader_authorized_for_event(event, reader_pubkey_hex)
+        && !is_author_only_event(event, reader_pubkey_bytes)
+        && !draft_expired(event, nostr::Timestamp::now())
 }
 
 fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {
@@ -295,6 +361,117 @@ mod tests {
         assert!(
             !reader_authorized_for_event(&metric, &agent_keys.public_key().to_hex()),
             "the authoring agent must NOT be authorized to read its own metric event (owner-only)"
+        );
+    }
+
+    // --- draft_expired unit tests ---
+    //
+    // All tests inject an explicit `now` so they don't depend on the wall clock.
+    // Draft events use KIND_DRAFT (31234). Non-draft events are TextNote.
+
+    fn make_draft(keys: &Keys, created_at_secs: u64, expiration_tag: Option<u64>) -> nostr::Event {
+        use crate::kind::KIND_DRAFT;
+        let mut builder = EventBuilder::new(Kind::Custom(KIND_DRAFT as u16), "ciphertext")
+            .custom_created_at(Timestamp::from(created_at_secs));
+        if let Some(exp) = expiration_tag {
+            builder = builder.tags([Tag::parse(["expiration", &exp.to_string()]).unwrap()]);
+        }
+        builder.sign_with_keys(keys).expect("sign")
+    }
+
+    #[test]
+    fn draft_expired_tag_in_past_returns_true() {
+        let keys = Keys::generate();
+        let now = nostr::Timestamp::now();
+        // created 1 day ago, expiration 1 hour ago
+        let created = now.as_secs() - 86400;
+        let exp = now.as_secs() - 3600;
+        let draft = make_draft(&keys, created, Some(exp));
+        assert!(draft_expired(&draft, now), "expired tag must be suppressed");
+    }
+
+    #[test]
+    fn draft_expired_tag_in_future_returns_false() {
+        let keys = Keys::generate();
+        let now = nostr::Timestamp::now();
+        let created = now.as_secs() - 3600;
+        let exp = now.as_secs() + 86400; // expires tomorrow
+        let draft = make_draft(&keys, created, Some(exp));
+        assert!(!draft_expired(&draft, now), "future tag must be served");
+    }
+
+    #[test]
+    fn draft_expired_no_tag_over_30d_returns_true() {
+        use crate::kind::DRAFT_MAX_TTL_SECS;
+        let keys = Keys::generate();
+        let now = nostr::Timestamp::now();
+        // created 31 days ago, no expiration tag
+        let created = now.as_secs() - DRAFT_MAX_TTL_SECS - 86400;
+        let draft = make_draft(&keys, created, None);
+        assert!(
+            draft_expired(&draft, now),
+            "draft older than 30d with no tag must be suppressed"
+        );
+    }
+
+    #[test]
+    fn draft_expired_no_tag_under_30d_returns_false() {
+        let keys = Keys::generate();
+        let now = nostr::Timestamp::now();
+        // created 1 day ago, no expiration tag
+        let created = now.as_secs() - 86400;
+        let draft = make_draft(&keys, created, None);
+        assert!(
+            !draft_expired(&draft, now),
+            "draft under 30d with no tag must be served"
+        );
+    }
+
+    #[test]
+    fn draft_expired_tag_longer_than_30d_capped_at_ceiling() {
+        use crate::kind::DRAFT_MAX_TTL_SECS;
+        let keys = Keys::generate();
+        let now = nostr::Timestamp::now();
+        // created 31 days ago; client tag says 40 days — should be clamped to 30d ceiling
+        let created = now.as_secs() - DRAFT_MAX_TTL_SECS - 86400;
+        let long_exp = created + DRAFT_MAX_TTL_SECS + (10 * 86400); // created + 40d
+        let draft = make_draft(&keys, created, Some(long_exp));
+        assert!(
+            draft_expired(&draft, now),
+            "tag longer than 30d must be clamped to server ceiling — draft must be suppressed"
+        );
+    }
+
+    #[test]
+    fn draft_expired_non_draft_kind_never_suppressed() {
+        let keys = Keys::generate();
+        let now = nostr::Timestamp::now();
+        // TextNote with an expiration tag that is in the past — must NOT suppress
+        let past_exp = now.as_secs() - 3600;
+        let event = EventBuilder::new(Kind::TextNote, "hello")
+            .tags([Tag::parse(["expiration", &past_exp.to_string()]).unwrap()])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        assert!(
+            !draft_expired(&event, now),
+            "non-draft kinds must never be suppressed by draft_expired"
+        );
+    }
+
+    #[test]
+    fn draft_expired_tombstone_follows_same_expiry_rule() {
+        use crate::kind::DRAFT_MAX_TTL_SECS;
+        let keys = Keys::generate();
+        let now = nostr::Timestamp::now();
+        // Tombstone (empty content) created 31 days ago — same rule as regular draft
+        let created = now.as_secs() - DRAFT_MAX_TTL_SECS - 86400;
+        let tombstone = EventBuilder::new(Kind::Custom(crate::kind::KIND_DRAFT as u16), "")
+            .custom_created_at(Timestamp::from(created))
+            .sign_with_keys(&keys)
+            .expect("sign");
+        assert!(
+            draft_expired(&tombstone, now),
+            "tombstone draft must be suppressed by the same expiry rule"
         );
     }
 }

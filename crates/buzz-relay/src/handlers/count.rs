@@ -7,7 +7,7 @@ use tracing::warn;
 
 use crate::connection::{AuthState, ConnectionState};
 use crate::handlers::req::{
-    filter_can_match_result_gated_kinds, is_author_only_event, result_gated_count_safe_for_pushdown,
+    filter_can_match_result_gated_kinds, result_gated_count_safe_for_pushdown,
 };
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
@@ -160,6 +160,7 @@ pub async fn handle_count(
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !super::req::filter_can_match_draft(filter)
             {
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
@@ -187,12 +188,10 @@ pub async fn handle_count(
                             {
                                 continue;
                             }
-                            if is_author_only_event(&se.event, &pubkey_bytes) {
-                                continue;
-                            }
-                            if !buzz_core::filter::reader_authorized_for_event(
+                            if !buzz_core::filter::reader_can_receive_event(
                                 &se.event,
                                 &authed_pubkey_hex,
+                                &pubkey_bytes,
                             ) {
                                 continue;
                             }
@@ -230,6 +229,7 @@ pub async fn handle_count(
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !super::req::filter_can_match_draft(filter)
             {
                 query.limit = None; // COUNT doesn't need a row limit
                 match state.db.count_events(&query).await {
@@ -257,12 +257,10 @@ pub async fn handle_count(
                             {
                                 continue;
                             }
-                            if is_author_only_event(&se.event, &pubkey_bytes) {
-                                continue;
-                            }
-                            if !buzz_core::filter::reader_authorized_for_event(
+                            if !buzz_core::filter::reader_can_receive_event(
                                 &se.event,
                                 &authed_pubkey_hex,
+                                &pubkey_bytes,
                             ) {
                                 continue;
                             }

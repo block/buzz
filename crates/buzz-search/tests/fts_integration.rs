@@ -3,12 +3,12 @@
 //! Run with a local PG: `BUZZ_TEST_DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz cargo test -p buzz-search --tests -- --include-ignored`
 //!
 //! Each test creates a uniquely-named schema, applies the full migration chain
-//! (0001 through 0008) into it, exercises a scenario, and drops it. Tests are
+//! (0001 through 0012) into it, exercises a scenario, and drops it. Tests are
 //! parallel-safe.
 
 use buzz_core::{
     kind::{
-        AUTHOR_ONLY_KINDS, KIND_AGENT_TURN_METRIC, KIND_MEMBER_ADDED_NOTIFICATION,
+        AUTHOR_ONLY_KINDS, KIND_AGENT_TURN_METRIC, KIND_DRAFT, KIND_MEMBER_ADDED_NOTIFICATION,
         KIND_MEMBER_REMOVED_NOTIFICATION, P_GATED_KINDS,
     },
     CommunityId,
@@ -27,6 +27,13 @@ const MIGRATION_0006_SQL: &str = include_str!("../../../migrations/0006_moderati
 const MIGRATION_0007_SQL: &str = include_str!("../../../migrations/0007_nip_rs_retention.sql");
 const MIGRATION_0008_SQL: &str =
     include_str!("../../../migrations/0008_fresh_install_search_allowlist.sql");
+const MIGRATION_0009_SQL: &str =
+    include_str!("../../../migrations/0009_nip_rs_database_guards.sql");
+const MIGRATION_0010_SQL: &str =
+    include_str!("../../../migrations/0010_nip_rs_exact_replay_guard.sql");
+const MIGRATION_0011_SQL: &str =
+    include_str!("../../../migrations/0011_nip_rs_exact_tag_cardinality.sql");
+const MIGRATION_0012_SQL: &str = include_str!("../../../migrations/0012_draft_wrap_fts.sql");
 
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
@@ -37,6 +44,31 @@ async fn setup() -> (PgPool, String) {
         .connect(&url)
         .await
         .expect("connect");
+
+    // Serialize the pgcrypto extension install across all parallel test workers.
+    //
+    // `CREATE EXTENSION IF NOT EXISTS pgcrypto` targets `pg_extension`, which is
+    // database-global with a unique index on `extname`.  PostgreSQL's IF NOT EXISTS
+    // is a check-then-insert, not an atomic upsert: when many test workers run
+    // concurrently they all see the extension as absent, all attempt the insert,
+    // and all but one hit SQLSTATE 23505 (unique violation).  A session-level
+    // advisory lock (arbitrary but stable key) serializes the install so that
+    // exactly one worker does the real CREATE; the rest treat it as a no-op when
+    // they enter the lock.  The lock is released automatically when the session
+    // ends, so there is no risk of wedging subsequent runs.
+    sqlx::query("SELECT pg_advisory_lock(3723742987654321)")
+        .execute(&admin_pool)
+        .await
+        .expect("acquire pgcrypto advisory lock");
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+        .execute(&admin_pool)
+        .await
+        .expect("install pgcrypto extension");
+    sqlx::query("SELECT pg_advisory_unlock(3723742987654321)")
+        .execute(&admin_pool)
+        .await
+        .expect("release pgcrypto advisory lock");
+
     let create_sql = format!("CREATE SCHEMA \"{schema}\"");
     sqlx::query(sqlx::AssertSqlSafe(create_sql))
         .execute(&admin_pool)
@@ -77,6 +109,18 @@ async fn setup() -> (PgPool, String) {
     pool.execute(MIGRATION_0008_SQL)
         .await
         .expect("apply 0008 migration");
+    pool.execute(MIGRATION_0009_SQL)
+        .await
+        .expect("apply 0009 migration");
+    pool.execute(MIGRATION_0010_SQL)
+        .await
+        .expect("apply 0010 migration");
+    pool.execute(MIGRATION_0011_SQL)
+        .await
+        .expect("apply 0011 migration");
+    pool.execute(MIGRATION_0012_SQL)
+        .await
+        .expect("apply 0012 migration");
     (pool, schema)
 }
 
@@ -1087,11 +1131,12 @@ async fn very_long_query_is_bounded_before_pg_parse() {
 ///   - 1059  = `KIND_GIFT_WRAP`      (NIP-17 ciphertext)
 ///   - 30300 = `KIND_EVENT_REMINDER` (in `AUTHOR_ONLY_KINDS`)
 ///   - 30622 = `KIND_DM_VISIBILITY`  (per-viewer private hide state)
+///   - 31234 = `KIND_DRAFT`          (NIP-37: channel-bound author-private draft)
 ///   - 44100 = `KIND_MEMBER_ADDED_NOTIFICATION`  (p-gated membership notice)
 ///   - 44101 = `KIND_MEMBER_REMOVED_NOTIFICATION` (p-gated membership notice)
 ///   - 44200 = `KIND_AGENT_TURN_METRIC` (NIP-AM: p-gated encrypted turn metrics)
 ///
-/// All seven events are inserted with the same unique token in their content
+/// All eight events are inserted with the same unique token in their content
 /// so a single search query exercises every kind in one round-trip. Only
 /// the kind:9 control must surface — the excluded kinds must not.
 ///
@@ -1158,6 +1203,19 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
     )
     .await;
 
+    // kind:31234 draft wrap (NIP-37, AUTHOR_ONLY_KINDS) — MUST NOT be searchable.
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        rand_bytes32(),
+        KIND_DRAFT as i32,
+        &format!("draft wrap — {token}"),
+        None,
+        1_700_000_004,
+    )
+    .await;
+
     // kind:44100 member-added notification — p-gated and MUST NOT be searchable.
     insert_event(
         &pool,
@@ -1167,7 +1225,7 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
         KIND_MEMBER_ADDED_NOTIFICATION as i32,
         &format!("member added — {token}"),
         None,
-        1_700_000_004,
+        1_700_000_005,
     )
     .await;
 
@@ -1180,7 +1238,7 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
         KIND_MEMBER_REMOVED_NOTIFICATION as i32,
         &format!("member removed — {token}"),
         None,
-        1_700_000_005,
+        1_700_000_006,
     )
     .await;
 
@@ -1193,7 +1251,7 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
         KIND_AGENT_TURN_METRIC as i32,
         &format!("agent turn metric — {token}"),
         None,
-        1_700_000_006,
+        1_700_000_007,
     )
     .await;
 
@@ -1227,6 +1285,7 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
         1059,
         30300,
         30622,
+        KIND_DRAFT as i32,
         KIND_MEMBER_ADDED_NOTIFICATION as i32,
         KIND_MEMBER_REMOVED_NOTIFICATION as i32,
         KIND_AGENT_TURN_METRIC as i32,
@@ -1438,6 +1497,329 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
         1,
         "expected exactly 1 hit (the kind:9 control), got {} (kinds={kinds:?})",
         result.hits.len(),
+    );
+
+    teardown(pool, &schema).await;
+}
+
+/// Set up a schema with the LEGACY blocklist expression (pre-#1771 state).
+///
+/// Applies 0001–0007 (establishing the legacy negative-blocklist `search_tsv`),
+/// inserts a dummy row so the `events` table is non-empty, then applies 0008
+/// (which skips on non-empty tables) and 0009–0011 (NIP-RS guards, no FTS
+/// changes). The resulting schema has the legacy blocklist expression where
+/// kind 31234 is NOT excluded — exactly the brownfield state that 0012's
+/// rewrite branch must handle.
+///
+/// Does NOT apply 0012 — the caller controls that step.
+async fn setup_legacy_blocklist() -> (PgPool, String) {
+    let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
+    let schema = format!("fts_legacy_{}", Uuid::new_v4().simple());
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect");
+
+    sqlx::query("SELECT pg_advisory_lock(3723742987654321)")
+        .execute(&admin_pool)
+        .await
+        .expect("acquire pgcrypto advisory lock");
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+        .execute(&admin_pool)
+        .await
+        .expect("install pgcrypto extension");
+    sqlx::query("SELECT pg_advisory_unlock(3723742987654321)")
+        .execute(&admin_pool)
+        .await
+        .expect("release pgcrypto advisory lock");
+
+    let create_sql = format!("CREATE SCHEMA \"{schema}\"");
+    sqlx::query(sqlx::AssertSqlSafe(create_sql))
+        .execute(&admin_pool)
+        .await
+        .expect("create schema");
+    admin_pool.close().await;
+
+    let url_with_search_path = format!("{url}?options=-c%20search_path%3D{schema}");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url_with_search_path)
+        .await
+        .expect("connect with search_path");
+
+    // Apply 0001–0007: establishes the legacy negative-blocklist search_tsv.
+    pool.execute(MIGRATION_0001_SQL)
+        .await
+        .expect("apply 0001 migration");
+    pool.execute(MIGRATION_0002_SQL)
+        .await
+        .expect("apply 0002 migration");
+    pool.execute(MIGRATION_0003_SQL)
+        .await
+        .expect("apply 0003 migration");
+    pool.execute(MIGRATION_0004_SQL)
+        .await
+        .expect("apply 0004 migration");
+    pool.execute(MIGRATION_0005_SQL)
+        .await
+        .expect("apply 0005 migration");
+    pool.execute(MIGRATION_0006_SQL)
+        .await
+        .expect("apply 0006 migration");
+    pool.execute(MIGRATION_0007_SQL)
+        .await
+        .expect("apply 0007 migration");
+
+    // Insert a dummy community + event so the table is non-empty.
+    // 0008 checks `IF NOT EXISTS (SELECT 1 FROM events LIMIT 1)` and SKIPS
+    // on non-empty tables, preserving the legacy blocklist expression.
+    let dummy_community_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO communities (id, host, signing_key) VALUES ($1, $2, $3)")
+        .bind(dummy_community_id)
+        .bind("legacy-seed.example")
+        .bind(b"signingkey".as_slice())
+        .execute(&pool)
+        .await
+        .expect("insert seed community");
+    sqlx::query(
+        "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+         VALUES ($1, $2, $3, to_timestamp($4), $5, '[]'::jsonb, $6, $7)",
+    )
+    .bind(dummy_community_id)
+    .bind(&rand_bytes32()[..])
+    .bind(&rand_bytes32()[..])
+    .bind(1_600_000_000_i64)
+    .bind(9_i32)
+    .bind("seed event for non-empty table")
+    .bind(b"signature".as_slice())
+    .execute(&pool)
+    .await
+    .expect("insert seed event");
+
+    // Apply 0008: skips because table is non-empty → legacy blocklist preserved.
+    pool.execute(MIGRATION_0008_SQL)
+        .await
+        .expect("apply 0008 migration");
+    // Apply 0009–0011: NIP-RS guards, no FTS changes.
+    pool.execute(MIGRATION_0009_SQL)
+        .await
+        .expect("apply 0009 migration");
+    pool.execute(MIGRATION_0010_SQL)
+        .await
+        .expect("apply 0010 migration");
+    pool.execute(MIGRATION_0011_SQL)
+        .await
+        .expect("apply 0011 migration");
+
+    (pool, schema)
+}
+
+/// Behavioral test for migration 0012's legacy-blocklist rewrite branch.
+///
+/// This is the operationally risky path: populated production databases still
+/// on the pre-#1771 negative blocklist need 0012 to DROP + re-ADD `search_tsv`
+/// with kind 31234 added to the exclusion list. The fresh-install (allowlist)
+/// path is covered by the existing tests via `setup()`.
+///
+/// The test constructs the legacy state, seeds control and draft rows, applies
+/// 0012, and asserts:
+///   1. 0012 took the REWRITE branch (the live expression now contains 31234).
+///   2. The GIN index was rebuilt.
+///   3. The kind:9 control row remains searchable via `search_tsv`.
+///   4. The kind:31234 draft row's `search_tsv` IS NULL (storage-level unsearchable).
+///   5. The discriminator correctly classifies both forms: the post-rewrite
+///      expression remains blocklist-shaped (not ELSE NULL).
+///
+/// Bite-proof: temporarily commenting out the DROP+re-ADD in 0012's legacy
+/// branch causes assertions 1 and 4 to fail (31234 not in exclusion list,
+/// draft row's `search_tsv` is non-NULL).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_0012_rewrites_legacy_blocklist_to_exclude_drafts() {
+    let (pool, schema) = setup_legacy_blocklist().await;
+
+    // Verify we have the legacy blocklist expression BEFORE applying 0012.
+    let pre_expr: String = sqlx::query_scalar(
+        "SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef \
+         WHERE adrelid = 'events'::regclass \
+           AND adnum = (SELECT attnum FROM pg_attribute \
+                        WHERE attrelid = 'events'::regclass AND attname = 'search_tsv')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read pre-0012 search_tsv expression");
+
+    // Legacy blocklist: THEN NULL (not ELSE NULL) — 0012 must NOT see this as allowlist.
+    assert!(
+        !pre_expr.contains("ELSE NULL"),
+        "pre-0012 expression should be legacy blocklist (THEN NULL, not ELSE NULL), got: {pre_expr}"
+    );
+    assert!(
+        !pre_expr.contains("31234"),
+        "pre-0012 expression should not already exclude 31234, got: {pre_expr}"
+    );
+
+    // Seed test rows: a kind:9 control and a kind:31234 draft.
+    let community_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM communities WHERE host = 'legacy-seed.example'")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch seed community");
+    let community = CommunityId::from_uuid(community_id);
+
+    let control_id = rand_bytes32();
+    let draft_id = rand_bytes32();
+    let token = "legacy_rewrite_marker_unique";
+
+    insert_event(
+        &pool,
+        community,
+        control_id,
+        rand_bytes32(),
+        9,
+        &format!("public chat — {token}"),
+        None,
+        1_700_000_000,
+    )
+    .await;
+    insert_event(
+        &pool,
+        community,
+        draft_id,
+        rand_bytes32(),
+        KIND_DRAFT as i32,
+        &format!("draft wrap — {token}"),
+        None,
+        1_700_000_001,
+    )
+    .await;
+
+    // Before 0012: the draft row IS searchable under the legacy blocklist
+    // (31234 is not in the exclusion list).
+    let pre_tsv: Option<String> =
+        sqlx::query_scalar("SELECT search_tsv::text FROM events WHERE id = $1")
+            .bind(&draft_id[..])
+            .fetch_one(&pool)
+            .await
+            .expect("read pre-0012 draft search_tsv");
+    assert!(
+        pre_tsv.is_some(),
+        "before 0012, kind:31234 should have non-NULL search_tsv under legacy blocklist"
+    );
+
+    // Apply 0012: should take the rewrite branch.
+    pool.execute(MIGRATION_0012_SQL)
+        .await
+        .expect("apply 0012 migration");
+
+    // 1. Verify 0012 took the REWRITE branch: expression now contains 31234.
+    let post_expr: String = sqlx::query_scalar(
+        "SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef \
+         WHERE adrelid = 'events'::regclass \
+           AND adnum = (SELECT attnum FROM pg_attribute \
+                        WHERE attrelid = 'events'::regclass AND attname = 'search_tsv')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read post-0012 search_tsv expression");
+    assert!(
+        post_expr.contains("31234"),
+        "after 0012, legacy-rewrite expression must include 31234, got: {post_expr}"
+    );
+
+    // 2. Verify GIN index was rebuilt.
+    let index_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE tablename = 'events' \
+         AND indexname = 'idx_events_search_tsv')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("check GIN index existence");
+    assert!(
+        index_exists,
+        "GIN index idx_events_search_tsv must exist after rewrite"
+    );
+
+    // 3. Control row (kind:9) remains searchable.
+    let svc = SearchService::new(pool.clone());
+    let result = svc
+        .search(&SearchQuery {
+            community,
+            q: token.into(),
+            channel_scope: ChannelScope::Any,
+            kinds: None,
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 10,
+            mode: buzz_search::SearchMode::FullText,
+        })
+        .await
+        .expect("search ok");
+    let kinds: Vec<i32> = result.hits.iter().map(|h| h.kind).collect();
+    assert!(
+        kinds.contains(&9),
+        "kind:9 control row MUST remain searchable after legacy rewrite, got kinds={kinds:?}"
+    );
+
+    // 4. Draft row's search_tsv is now NULL (storage-level unsearchable).
+    let post_tsv: Option<String> =
+        sqlx::query_scalar("SELECT search_tsv::text FROM events WHERE id = $1")
+            .bind(&draft_id[..])
+            .fetch_one(&pool)
+            .await
+            .expect("read post-0012 draft search_tsv");
+    assert!(
+        post_tsv.is_none(),
+        "after 0012, kind:31234 draft row's search_tsv MUST be NULL, got: {post_tsv:?}"
+    );
+    assert!(
+        !kinds.contains(&(KIND_DRAFT as i32)),
+        "kind:31234 MUST NOT appear in search results after legacy rewrite, got kinds={kinds:?}"
+    );
+
+    // 5. Verify discriminator correctness: the post-rewrite expression is still
+    //    blocklist-shaped (THEN NULL, not ELSE NULL) — 0012 extended it, didn't
+    //    flip to allowlist. And the allowlist form (from a fresh setup) has ELSE NULL.
+    assert!(
+        !post_expr.contains("ELSE NULL"),
+        "post-rewrite expression should remain blocklist-shaped (not allowlist ELSE NULL), \
+         got: {post_expr}"
+    );
+
+    teardown(pool, &schema).await;
+}
+
+/// Companion to `migration_0012_rewrites_legacy_blocklist_to_exclude_drafts`:
+/// verifies that 0012 correctly no-ops on the fresh-install allowlist form
+/// and that the discriminator classifies it as allowlist (ELSE NULL shape).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_0012_noops_on_fresh_install_allowlist() {
+    let (pool, schema) = setup().await;
+
+    let expr: String = sqlx::query_scalar(
+        "SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef \
+         WHERE adrelid = 'events'::regclass \
+           AND adnum = (SELECT attnum FROM pg_attribute \
+                        WHERE attrelid = 'events'::regclass AND attname = 'search_tsv')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read search_tsv expression");
+
+    // The allowlist expression (from 0008) must have the ELSE NULL shape
+    // that 0012's discriminator detects.
+    assert!(
+        expr.contains("ELSE NULL"),
+        "fresh-install expression must contain ELSE NULL (allowlist shape), got: {expr}"
+    );
+    // 31234 should NOT appear in the expression — it's excluded by omission.
+    assert!(
+        !expr.contains("31234"),
+        "fresh-install allowlist should not mention 31234, got: {expr}"
     );
 
     teardown(pool, &schema).await;

@@ -12,21 +12,21 @@ use uuid::Uuid;
 use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS, KIND_MODERATION_BAN,
-    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
-    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
-    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
-    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    is_relay_admin_kind, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE,
+    KIND_AGENT_TURN_METRIC, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST,
+    KIND_BOOKMARK_SET, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
+    KIND_DM_HIDE, KIND_DM_OPEN, KIND_DRAFT, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
+    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS,
+    KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
+    KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP,
+    KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA,
+    KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
     KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
     KIND_PRESENCE_UPDATE, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
     KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
@@ -157,6 +157,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT => {
             Ok(Scope::UsersWrite)
         }
+        // NIP-37: draft wraps are author-private channel-bound state (UsersWrite scope).
+        KIND_DRAFT => Ok(Scope::UsersWrite),
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
         KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
         // NIP-56 reports are ordinary member writes into the mod-only queue.
@@ -281,6 +283,13 @@ pub(crate) enum ReactionChannelResult {
 }
 
 /// Derive channel_id from the target event for NIP-25 reactions.
+///
+/// Author-only targets (kind:31234, kind:30300 — see `AUTHOR_ONLY_KINDS`) are
+/// rejected for ALL actors, including the author themselves: a reaction writes
+/// the draft id into a public kind:7 row, creating durable public state that
+/// leaks the draft's existence.  The caller receives `NotFound` regardless of
+/// whether the actor authored the target, making the response byte-identical
+/// to the missing-target branch — no oracle.
 pub(crate) async fn derive_reaction_channel(
     community_id: CommunityId,
     db: &buzz_db::Db,
@@ -309,10 +318,19 @@ pub(crate) async fn derive_reaction_channel(
     };
 
     match db.get_event_by_id(community_id, &id_bytes).await {
-        Ok(Some(target)) => match target.channel_id {
-            Some(ch_id) => ReactionChannelResult::Channel(ch_id),
-            None => ReactionChannelResult::NoChannel,
-        },
+        Ok(Some(target)) => {
+            // Author-only targets (drafts, reminders) are rejected for everyone
+            // — including the author — because a successful reaction writes the
+            // draft id into a public kind:7 row (durable public state, id oracle).
+            // Return NotFound so the response is byte-identical to a random id.
+            if AUTHOR_ONLY_KINDS.contains(&event_kind_u32(&target.event)) {
+                return ReactionChannelResult::NotFound;
+            }
+            match target.channel_id {
+                Some(ch_id) => ReactionChannelResult::Channel(ch_id),
+                None => ReactionChannelResult::NoChannel,
+            }
+        }
         Ok(None) => ReactionChannelResult::NotFound,
         Err(e) => ReactionChannelResult::DbError(e.to_string()),
     }
@@ -434,7 +452,27 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_HUDDLE_PARTICIPANT_LEFT
             | KIND_HUDDLE_ENDED
             | KIND_HUDDLE_GUIDELINES
+            // NIP-37: draft wraps are channel-bound author-private events.
+            // Each draft is scoped to a specific channel or DM; the `h` tag
+            // carries the channel UUID. The relay resolves and validates the
+            // channel, enforces membership, and persists the draft with
+            // channel_id set.
+            | KIND_DRAFT
     )
+}
+
+/// Kinds that participate in NIP-10 thread metadata (reply chains, depth,
+/// thread summaries, live-summary fan-out).
+///
+/// This is a strict subset of `requires_h_channel_scope`: all threaded kinds
+/// must be channel-scoped, but NOT all channel-scoped kinds are threaded.
+/// Kind:31234 draft wraps are channel-bound but are author-private and must
+/// NOT participate in thread metadata — an outer thread reference would
+/// expose the fact that a draft is a reply to a specific event, and the
+/// live thread-summary side effect (`emit_live_thread_summary`) would
+/// broadcast that information to channel subscribers.
+pub(crate) fn participates_in_thread_metadata(kind: u32) -> bool {
+    requires_h_channel_scope(kind) && kind != KIND_DRAFT
 }
 
 /// Check channel membership: member OR open-visibility channel.
@@ -562,6 +600,15 @@ pub(crate) async fn resolve_nip10_thread_meta(
     let parent_event = parent_event_result
         .map_err(|e| format!("db error looking up parent: {e}"))?
         .ok_or_else(|| "reply parent not found".to_string())?;
+
+    // Author-only targets (drafts, reminders) are rejected as thread parents
+    // for EVERYONE, including the author themselves: the NIP-10 thread metadata
+    // row (and the live thread-summary fan-out) would write the draft id into
+    // public state.  Return the same not-found string so the response is
+    // byte-identical to the missing-parent branch — no oracle.
+    if AUTHOR_ONLY_KINDS.contains(&event_kind_u32(&parent_event.event)) {
+        return Err("reply parent not found".to_string());
+    }
 
     match parent_event.channel_id {
         Some(parent_ch) if parent_ch != channel_id => {
@@ -710,6 +757,56 @@ pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::Publ
     event.pubkey.to_bytes().to_vec()
 }
 
+/// Post-lookup visibility predicate for e-tag target resolution on write paths.
+///
+/// Returns `Ok(true)` if `actor_bytes` may use `target_event` as an e-tag
+/// reference target.  Returns `Ok(false)` if the reference must be rejected
+/// (caller uses its own site-specific not-found string for the error, so the
+/// response is byte-identical to the missing-target branch).
+///
+/// **Public-reference paths** (reaction target, NIP-10 thread parent): caller
+/// must reject for EVERYONE — pass `allow_author_reference: false`.  An author-
+/// only event written into a public row (kind:7, thread metadata) leaks the
+/// draft id as durable public state; the author has no legitimate use case for
+/// threading or reacting to their own draft either.
+///
+/// **Owner-mutation paths** (kind:5 e-tag deletion, stream-edit, forum-vote):
+/// pass `allow_author_reference: true`.  Non-authors/non-agent-owners receive
+/// the byte-identical not-found mask; the author falls through to the site's
+/// natural validation errors (tombstone-guidance for kind:5, etc.).
+///
+/// Generalizes over all `AUTHOR_ONLY_KINDS` (currently kind:31234 draft wraps
+/// and kind:30300 reminders) so adding a new author-only kind in one place
+/// automatically extends the mask here.
+pub(crate) async fn actor_can_reference_target(
+    target_event: &buzz_core::StoredEvent,
+    actor_bytes: &[u8],
+    allow_author_reference: bool,
+    community_id: CommunityId,
+    state: &AppState,
+) -> Result<bool, String> {
+    let target_kind = event_kind_u32(&target_event.event);
+    if !AUTHOR_ONLY_KINDS.contains(&target_kind) {
+        return Ok(true);
+    }
+    if allow_author_reference {
+        let target_author =
+            effective_message_author(&target_event.event, &state.relay_keypair.public_key());
+        if target_author == actor_bytes {
+            return Ok(true);
+        }
+        if state
+            .db
+            .is_agent_owner(community_id, &target_author, actor_bytes)
+            .await
+            .map_err(|e| format!("db error checking agent ownership: {e}"))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Validate kind:40003 edit ownership — event.pubkey must match target's effective author,
 /// or the actor must be the owning human of the agent that authored the target message.
 async fn validate_edit_ownership(
@@ -744,6 +841,14 @@ async fn validate_edit_ownership(
         .map_err(|e| format!("db error: {e}"))?
         .ok_or_else(|| "edit target event not found".to_string())?;
 
+    // Author-only targets (drafts, reminders): non-author/non-agent-owner receives
+    // "edit target event not found" (byte-identical to the missing-target branch —
+    // no oracle).  The author falls through to the natural validation errors below.
+    let actor_bytes = event.pubkey.to_bytes().to_vec();
+    if !actor_can_reference_target(&target_event, &actor_bytes, true, community_id, state).await? {
+        return Err("edit target event not found".to_string());
+    }
+
     // Verify target belongs to the same channel as the edit event.
     let edit_channel_id = extract_channel_id(event);
     match (edit_channel_id, target_event.channel_id) {
@@ -757,13 +862,12 @@ async fn validate_edit_ownership(
     }
 
     let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-    let actor = event.pubkey.to_bytes().to_vec();
-    if author == actor {
+    if author == actor_bytes {
         // Author editing their own message: re-gate on membership/open visibility so that
         // a removed private-channel member cannot mutate old messages after access is revoked.
         if let Some(ch_id) = target_event.channel_id {
             let is_member = state
-                .is_member_cached(community_id, ch_id, &actor)
+                .is_member_cached(community_id, ch_id, &actor_bytes)
                 .await
                 .map_err(|e| format!("db error checking membership: {e}"))?;
             if !is_member {
@@ -782,7 +886,7 @@ async fn validate_edit_ownership(
         // Allow the owning human to edit messages authored by their agent.
         let is_owner = state
             .db
-            .is_agent_owner(community_id, &author, &actor)
+            .is_agent_owner(community_id, &author, &actor_bytes)
             .await
             .map_err(|e| format!("db error checking agent ownership: {e}"))?;
         if !is_owner {
@@ -824,6 +928,15 @@ async fn validate_forum_vote_target(
         .await
         .map_err(|e| format!("db error: {e}"))?
         .ok_or_else(|| "vote target event not found".to_string())?;
+
+    // Author-only targets (drafts, reminders): non-author/non-agent-owner receives
+    // "vote target event not found" (byte-identical to missing-target — no oracle).
+    // The author falls through; their draft fails the forum-post/comment kind check
+    // below with a natural validation error.
+    let actor_bytes = event.pubkey.to_bytes().to_vec();
+    if !actor_can_reference_target(&target_event, &actor_bytes, true, community_id, state).await? {
+        return Err("vote target event not found".to_string());
+    }
 
     let target_kind = event_kind_u32(&target_event.event);
     if target_kind != KIND_FORUM_POST && target_kind != KIND_FORUM_COMMENT {
@@ -1192,6 +1305,182 @@ fn validate_not_before(tag_value: &str) -> Result<u64, &'static str> {
     Ok(value)
 }
 
+/// Validate the public envelope of a NIP-37 `kind:31234` draft wrap before it
+/// reaches NIP-33 parameterized replacement.
+///
+/// The relay cannot decrypt or verify the payload; it enforces the mandatory outer
+/// tag shape so a malformed event cannot win replacement against a valid head:
+///
+/// 1. Exactly one non-empty `d` tag within `D_TAG_MAX_LEN`. Grammar is unrestricted
+///    (NIP-37 does not prescribe it); the relay accepts any non-empty opaque identifier.
+/// 2. Exactly one `k` tag with a canonical ASCII-decimal inner kind value in the
+///    unsigned 16-bit range (0..=65535) with no leading zeros (except bare "0").
+/// 3. Exactly one `h` tag with a canonical UUID value — the channel or DM this
+///    draft is bound to. The relay resolves and validates the channel separately;
+///    this check only validates the tag's syntactic shape.
+/// 4. No outer `p` tag — prevents this event from entering the mention/feed index.
+///    Recipient/reply/edit details remain encrypted inside the payload.
+/// 5. No outer `e` tag — thread-reference context (reply-to, root) belongs inside
+///    the NIP-44 encrypted payload, not as plain outer metadata.  An outer `e` tag
+///    would be visible to anyone with relay access, leaking the fact that this draft
+///    is a reply or edit of a specific event.
+/// 6. Non-empty content must be a syntactically plausible NIP-44 v2 ciphertext
+///    (reuses `validate_engram_nip44_content`). Empty content is the NIP-37
+///    deletion tombstone and is explicitly valid.
+/// 7. At most one `expiration` tag, whose value must be canonical ASCII decimal,
+///    strictly greater than both `event.created_at` and the relay's current time.
+///    If present, it must be in the safe-integer range for JSON interoperability.
+fn validate_draft_wrap_envelope(event: &Event) -> Result<(), String> {
+    let now_secs = chrono::Utc::now().timestamp() as u64;
+    let event_created_at = event.created_at.as_secs();
+
+    let mut d_count = 0usize;
+    let mut d_value: Option<&str> = None;
+    let mut k_count = 0usize;
+    let mut k_value: Option<&str> = None;
+    let mut h_count = 0usize;
+    let mut h_value: Option<&str> = None;
+    let mut expiration_count = 0usize;
+    let mut expiration_value: Option<&str> = None;
+
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() < 2 {
+            continue;
+        }
+        match parts[0].as_str() {
+            "d" => {
+                d_count += 1;
+                d_value = Some(&parts[1]);
+            }
+            "k" => {
+                k_count += 1;
+                k_value = Some(&parts[1]);
+            }
+            "h" => {
+                h_count += 1;
+                h_value = Some(&parts[1]);
+            }
+            "p" => {
+                return Err(
+                    "draft-wrap event must not have a `p` tag (prevents mention/feed indexing)"
+                        .to_string(),
+                );
+            }
+            "e" => {
+                return Err("draft-wrap event must not have an outer `e` tag \
+                     (thread-reference context belongs inside the encrypted payload)"
+                    .to_string());
+            }
+            "expiration" => {
+                expiration_count += 1;
+                expiration_value = Some(&parts[1]);
+            }
+            _ => {}
+        }
+    }
+
+    // Validate `d` tag.
+    if d_count != 1 {
+        return Err(format!(
+            "draft-wrap event must have exactly one `d` tag (got {d_count})"
+        ));
+    }
+    let d = d_value.unwrap();
+    if d.is_empty() {
+        return Err("draft-wrap `d` tag must not be empty".to_string());
+    }
+    if d.len() > buzz_db::event::D_TAG_MAX_LEN {
+        return Err(format!(
+            "draft-wrap `d` tag too long ({} bytes, max {})",
+            d.len(),
+            buzz_db::event::D_TAG_MAX_LEN,
+        ));
+    }
+
+    // Validate `k` tag — canonical decimal, fits u16, no leading zeros.
+    if k_count != 1 {
+        return Err(format!(
+            "draft-wrap event must have exactly one `k` tag (got {k_count})"
+        ));
+    }
+    let k = k_value.unwrap();
+    if k.is_empty() || !k.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("draft-wrap `k` tag must be a canonical decimal integer".to_string());
+    }
+    if k.len() > 1 && k.starts_with('0') {
+        return Err("draft-wrap `k` tag must not have leading zeros".to_string());
+    }
+    let _inner_kind: u16 = k.parse().map_err(|_| {
+        "draft-wrap `k` tag value out of range (must fit unsigned 16-bit kind)".to_string()
+    })?;
+
+    // Validate `h` tag — required, exactly one, must be a well-formed UUID.
+    if h_count != 1 {
+        return Err(format!(
+            "draft-wrap event must have exactly one `h` tag (got {h_count}); \
+             draft wraps are channel-bound"
+        ));
+    }
+    let h = h_value.unwrap();
+    match uuid::Uuid::parse_str(h) {
+        Err(_) => {
+            return Err(format!(
+                "draft-wrap `h` tag must be a canonical UUID (channel or DM id), got: {h:?}"
+            ));
+        }
+        Ok(parsed) if parsed.to_string() != h => {
+            return Err(format!(
+                "draft-wrap `h` tag must be lowercase hyphenated UUID, got: {h:?}"
+            ));
+        }
+        Ok(_) => {}
+    }
+
+    // Validate `expiration` tag (optional, at most one).
+    if expiration_count > 1 {
+        return Err(format!(
+            "draft-wrap event must have at most one `expiration` tag (got {expiration_count})"
+        ));
+    }
+    if let Some(exp_str) = expiration_value {
+        if exp_str.is_empty() || !exp_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(
+                "draft-wrap `expiration` tag must be a canonical decimal Unix timestamp"
+                    .to_string(),
+            );
+        }
+        if exp_str.len() > 1 && exp_str.starts_with('0') {
+            return Err("draft-wrap `expiration` tag must not have leading zeros".to_string());
+        }
+        const MAX_SAFE_INT: u64 = 9_007_199_254_740_991;
+        let exp: u64 = exp_str.parse().map_err(|_| {
+            "draft-wrap `expiration` tag value out of safe-integer range".to_string()
+        })?;
+        if exp > MAX_SAFE_INT {
+            return Err(
+                "draft-wrap `expiration` tag value exceeds JSON safe-integer limit".to_string(),
+            );
+        }
+        if exp <= event_created_at {
+            return Err(
+                "draft-wrap `expiration` must be strictly after event `created_at`".to_string(),
+            );
+        }
+        if exp <= now_secs {
+            return Err("draft-wrap `expiration` must be in the future".to_string());
+        }
+    }
+
+    // Validate content: either empty (tombstone) or NIP-44 v2 ciphertext.
+    if !event.content.is_empty() {
+        validate_engram_nip44_content(&event.content)
+            .map_err(|e| e.replace("agent-engram", "draft-wrap"))?;
+    }
+
+    Ok(())
+}
+
 /// Validate the public tag envelope of a NIP-ER `kind:30300` event before it
 /// reaches NIP-33 parameterized replacement.
 ///
@@ -1521,6 +1810,16 @@ async fn ingest_event_inner(
         }
     }
 
+    // NIP-37 draft wraps: validate the envelope (d/k/h/p/expiration/content)
+    // BEFORE channel extraction so that missing/malformed/duplicate h-tag errors
+    // are reported as structural validation failures rather than channel-scope
+    // failures.  This also ensures the `p`-tag guard fires before the channel
+    // membership check.
+    if kind_u32 == KIND_DRAFT {
+        validate_draft_wrap_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     let mut channel_id = if kind_u32 == KIND_REACTION {
         match derive_reaction_channel(tenant.community(), &state.db, &event).await {
             ReactionChannelResult::Channel(ch_id) => Some(ch_id),
@@ -1835,6 +2134,33 @@ async fn ingest_event_inner(
                 "invalid: deletion events must reference exactly one target via e or a tag (got e={e_count}, a={a_count})"
             )));
         }
+
+        // NIP-37 draft wraps (kind:31234) do NOT support NIP-09 a-tag deletion.
+        // Accepting it would erase the head row, after which a write with a
+        // different channel could bypass the immutable-binding invariant.
+        // The correct NIP-37 deletion mechanism is an empty-content tombstone
+        // (kind:31234 with "" content) that keeps the address visible and
+        // preserves the channel binding.
+        if a_count == 1 {
+            let targets_draft = event.tags.iter().any(|t| {
+                if t.kind().to_string() == "a" {
+                    t.content()
+                        .and_then(|v| v.split(':').next())
+                        .and_then(|k| k.parse::<u32>().ok())
+                        .map(|k| k == KIND_DRAFT)
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            });
+            if targets_draft {
+                return Err(IngestError::Rejected(
+                    "invalid: NIP-09 a-tag deletion of kind:31234 draft wraps is not supported; \
+                     use an empty-content tombstone (kind:31234 with empty content) instead"
+                        .into(),
+                ));
+            }
+        }
     }
 
     if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
@@ -2044,7 +2370,7 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    let thread_meta = if requires_h_channel_scope(kind_u32) {
+    let thread_meta = if participates_in_thread_metadata(kind_u32) {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(tenant.community(), &event, ch_id, state)
                 .await
@@ -2209,11 +2535,24 @@ async fn ingest_event_inner(
                 buzz_db::event::D_TAG_MAX_LEN,
             )));
         }
+
+        // replace_parameterized_event enforces the immutable-binding invariant
+        // for kind:31234 draft wraps atomically inside the advisory lock by
+        // inferring the check from event.kind — no separate expected_channel_id
+        // parameter needed.  All other parameterized-replaceable kinds have no
+        // channel binding constraint.
         state
             .db
             .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| match e {
+                buzz_db::DbError::DraftChannelMismatch => IngestError::Rejected(
+                    "invalid: draft-wrap channel binding is immutable — \
+                     `h` tag must match the existing head's channel"
+                        .into(),
+                ),
+                other => IngestError::Internal(format!("error: {other}")),
+            })?
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         match state
@@ -3385,5 +3724,509 @@ mod tests {
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
         // error comes from validate_engram_nip44_content with label replaced
         assert!(err.contains("agent-turn-metric"), "got: {err}");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // validate_draft_wrap_envelope tests (kind:31234 / NIP-37)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    fn make_draft(tags: &[&[&str]], content: &str) -> Event {
+        make_event_with_tags(KIND_DRAFT, content, tags)
+    }
+
+    // ── acceptance ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_accepts_ciphertext_content() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "9"], &["h", &ch]], &fake_nip44_v2());
+        assert!(
+            validate_draft_wrap_envelope(&ev).is_ok(),
+            "canonical draft with ciphertext content must be accepted"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_accepts_blank_tombstone() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "9"], &["h", &ch]], "");
+        assert!(
+            validate_draft_wrap_envelope(&ev).is_ok(),
+            "tombstone (empty content) must be accepted"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_accepts_various_valid_k_values() {
+        for k in ["0", "1", "9", "1000", "30023", "65535"] {
+            let d = uuid::Uuid::new_v4().to_string();
+            let ch = uuid::Uuid::new_v4().to_string();
+            let ev = make_draft(&[&["d", &d], &["k", k], &["h", &ch]], "");
+            assert!(
+                validate_draft_wrap_envelope(&ev).is_ok(),
+                "k={k} must be accepted"
+            );
+        }
+    }
+
+    // ── d-tag validation ──────────────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_rejects_missing_d_tag() {
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["k", "9"], &["h", &ch]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_empty_d_tag() {
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", ""], &["k", "9"], &["h", &ch]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_duplicate_d_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(
+            &[&["d", &d], &["d", &d], &["k", "9"], &["h", &ch]],
+            &fake_nip44_v2(),
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    // ── k-tag validation ──────────────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_rejects_missing_k_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["h", &ch]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`k` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_duplicate_k_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(
+            &[&["d", &d], &["k", "9"], &["k", "9"], &["h", &ch]],
+            &fake_nip44_v2(),
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`k` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_k_tag_non_decimal() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "0x9"], &["h", &ch]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("canonical decimal"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_k_tag_leading_zero() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "09"], &["h", &ch]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("leading zero"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_k_tag_out_of_u16_range() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        // 65536 = u16::MAX + 1
+        let ev = make_draft(
+            &[&["d", &d], &["k", "65536"], &["h", &ch]],
+            &fake_nip44_v2(),
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("range"), "got: {err}");
+    }
+
+    // ── p outer-tag exclusion ─────────────────────────────────────────────────
+    // Note: `h` is now *required* (not forbidden); see h-tag validation section.
+
+    #[test]
+    fn draft_wrap_rejects_p_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let keys = nostr::Keys::generate();
+        let ev = make_draft(
+            &[
+                &["d", &d],
+                &["k", "9"],
+                &["h", &ch],
+                &["p", &keys.public_key().to_hex()],
+            ],
+            &fake_nip44_v2(),
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`p` tag"), "got: {err}");
+    }
+
+    // ── content validation ────────────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_rejects_non_base64_content() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "9"], &["h", &ch]], "not-a-ciphertext");
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("base64") || err.contains("NIP-44"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_rejects_wrong_nip44_version_byte() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        // 132 chars of valid base64 but version byte decodes to 0x00, not 0x02.
+        let bad = "A".repeat(132);
+        let ev = make_draft(&[&["d", &d], &["k", "9"], &["h", &ch]], &bad);
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("NIP-44 v2") || err.contains("0x02"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_rejects_short_ciphertext() {
+        // 1-byte decoded (version prefix only, no payload) — too short.
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "9"], &["h", &ch]], "Ag==");
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("too short"), "got: {err}");
+    }
+
+    // ── expiration tag validation ─────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_accepts_valid_future_expiration() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        // A timestamp far in the future (year 2100).
+        let ev = make_draft(
+            &[
+                &["d", &d],
+                &["k", "9"],
+                &["h", &ch],
+                &["expiration", "4102444800"],
+            ],
+            "",
+        );
+        assert!(
+            validate_draft_wrap_envelope(&ev).is_ok(),
+            "valid future expiration must be accepted"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_rejects_duplicate_expiration_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(
+            &[
+                &["d", &d],
+                &["k", "9"],
+                &["h", &ch],
+                &["expiration", "4102444800"],
+                &["expiration", "4102444800"],
+            ],
+            "",
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("expiration"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_expiration_in_past() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(
+            &[
+                &["d", &d],
+                &["k", "9"],
+                &["h", &ch],
+                &["expiration", "1000000000"],
+            ],
+            "",
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("expiration"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_non_decimal_expiration() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(
+            &[
+                &["d", &d],
+                &["k", "9"],
+                &["h", &ch],
+                &["expiration", "not-a-number"],
+            ],
+            "",
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("expiration"), "got: {err}");
+    }
+
+    // ── routing invariants ────────────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_requires_h_channel_scope() {
+        // Draft wraps are channel-bound; compose context exposed via `h` tag.
+        assert!(
+            requires_h_channel_scope(KIND_DRAFT),
+            "KIND_DRAFT must require an `h` tag (channel-bound)"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_does_not_participate_in_thread_metadata() {
+        // Draft wraps must NOT participate in NIP-10 thread metadata.
+        // An outer reply/root `e` tag on a draft would expose that the draft is
+        // a reply to a specific event; the live-summary fan-out would broadcast
+        // that information to channel subscribers, breaking author-privacy.
+        assert!(
+            !participates_in_thread_metadata(KIND_DRAFT),
+            "KIND_DRAFT must be excluded from thread-metadata processing"
+        );
+        // Sanity: a plain channel message DOES participate.
+        assert!(
+            participates_in_thread_metadata(KIND_STREAM_MESSAGE),
+            "KIND_STREAM_MESSAGE must participate in thread metadata (positive control)"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_is_not_global_only() {
+        // Draft wraps have a required `h` tag — they are channel-scoped, not global.
+        assert!(
+            !is_global_only_kind(KIND_DRAFT),
+            "KIND_DRAFT must not be global-only (it requires an h tag)"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_requires_users_write_scope() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_DRAFT, &dummy).unwrap(),
+            Scope::UsersWrite,
+            "KIND_DRAFT must require UsersWrite scope"
+        );
+    }
+
+    // ── h-tag validation ──────────────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_accepts_valid_h_tag_uuid() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "9"], &["h", &ch]], &fake_nip44_v2());
+        assert!(
+            validate_draft_wrap_envelope(&ev).is_ok(),
+            "draft with valid UUID h tag must be accepted"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_rejects_missing_h_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "9"]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("`h` tag") || err.contains("channel-bound"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_rejects_duplicate_h_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(
+            &[&["d", &d], &["k", "9"], &["h", &ch], &["h", &ch]],
+            &fake_nip44_v2(),
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("`h` tag") || err.contains("channel-bound"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_rejects_non_uuid_h_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(
+            &[&["d", &d], &["k", "9"], &["h", "not-a-uuid"]],
+            &fake_nip44_v2(),
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("`h` tag") || err.contains("UUID"),
+            "got: {err}"
+        );
+    }
+
+    /// `Uuid::parse_str` accepts uppercase hex — the relay must reject it so the
+    /// only accepted form is the canonical lowercase-hyphenated representation.
+    #[test]
+    fn draft_wrap_rejects_uppercase_uuid_h_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        // Convert the canonical form to UPPERCASE — still parse-valid, non-canonical.
+        let ch_upper = ch.to_uppercase();
+        assert_ne!(ch, ch_upper, "test setup: uppercase must differ");
+        let ev = make_draft(
+            &[&["d", &d], &["k", "9"], &["h", &ch_upper]],
+            &fake_nip44_v2(),
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("lowercase") || err.contains("canonical") || err.contains("UUID"),
+            "expected canonical/lowercase/UUID rejection, got: {err}"
+        );
+    }
+
+    /// `Uuid::parse_str` accepts the 32-hex-char form without hyphens — the relay
+    /// must reject it so that `h` is always the canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+    /// form and NIP-33 address derivation is unambiguous.
+    #[test]
+    fn draft_wrap_rejects_simple_hex_uuid_h_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        // Strip hyphens to get the 32-char simple hex form.
+        let ch_simple = ch.replace('-', "");
+        assert_eq!(
+            ch_simple.len(),
+            32,
+            "test setup: simple form is 32 hex chars"
+        );
+        let ev = make_draft(
+            &[&["d", &d], &["k", "9"], &["h", &ch_simple]],
+            &fake_nip44_v2(),
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("lowercase") || err.contains("canonical") || err.contains("UUID"),
+            "expected canonical/lowercase/UUID rejection, got: {err}"
+        );
+    }
+
+    /// Outer `e` tags on a draft wrap must be rejected: thread-reference context
+    /// (reply-to, root-event) belongs inside the NIP-44 encrypted payload, not as
+    /// plain outer metadata visible to any relay reader.
+    #[test]
+    fn draft_wrap_rejects_outer_e_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ch = uuid::Uuid::new_v4().to_string();
+        let target_id = hex::encode([0u8; 32]);
+        let ev = make_draft(
+            &[&["d", &d], &["k", "9"], &["h", &ch], &["e", &target_id]],
+            &fake_nip44_v2(),
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("`e` tag") || err.contains("e tag"),
+            "expected outer-e-tag rejection, got: {err}"
+        );
+    }
+
+    // ── actor_can_reference_target: author-only mask ───────────────────────────
+    // These unit tests verify AUTHOR_ONLY_KINDS membership for kind:31234 and
+    // kind:30300 — the constant that `actor_can_reference_target` (and the
+    // inline guards in `derive_reaction_channel` / `resolve_nip10_thread_meta`)
+    // derive their mask from.  They do NOT exercise the async helper or any
+    // call site directly (no live Postgres is available here).
+    //
+    // Behavioral coverage — that the guard actually fires in the live relay for
+    // both draft and reminder targets — is provided by the e2e tests:
+    //   - e2e_nip37_draft.rs: test_draft_target_reaction_oracle_closed (kind:31234)
+    //   - e2e_nip37_draft.rs: test_reminder_target_reaction_oracle_closed (kind:30300)
+
+    #[test]
+    fn author_only_kinds_covers_draft_and_reminder() {
+        // AUTHOR_ONLY_KINDS must contain both KIND_DRAFT and KIND_EVENT_REMINDER.
+        // actor_can_reference_target derives its mask from this constant, so any
+        // author-only kind not in the list escapes the guard.
+        assert!(
+            buzz_core::kind::AUTHOR_ONLY_KINDS.contains(&buzz_core::kind::KIND_DRAFT),
+            "AUTHOR_ONLY_KINDS must contain KIND_DRAFT (31234)"
+        );
+        assert!(
+            buzz_core::kind::AUTHOR_ONLY_KINDS.contains(&buzz_core::kind::KIND_EVENT_REMINDER),
+            "AUTHOR_ONLY_KINDS must contain KIND_EVENT_REMINDER (30300)"
+        );
+        // Positive control: a non-author-only kind must NOT be in the list.
+        let kind_channel_msg: u32 = 9;
+        assert!(
+            !buzz_core::kind::AUTHOR_ONLY_KINDS.contains(&kind_channel_msg),
+            "kind:9 must NOT be in AUTHOR_ONLY_KINDS (positive control)"
+        );
+    }
+
+    #[test]
+    fn derive_reaction_channel_masks_draft_target() {
+        // derive_reaction_channel returns NotFound for a stored draft target —
+        // it must never return Channel/NoChannel and allow the reaction to proceed.
+        //
+        // We test via participates_in_thread_metadata / AUTHOR_ONLY_KINDS membership
+        // since derive_reaction_channel is async and uses the DB.  The logic is:
+        //   `if AUTHOR_ONLY_KINDS.contains(&event_kind_u32(&target.event)) => NotFound`
+        // so this test verifies the constant + kind function used by the guard.
+        let kind_val = buzz_core::kind::KIND_DRAFT;
+        assert!(
+            buzz_core::kind::AUTHOR_ONLY_KINDS.contains(&kind_val),
+            "KIND_DRAFT must be in AUTHOR_ONLY_KINDS — derive_reaction_channel \
+             relies on this to return NotFound for draft targets"
+        );
+        let reminder_kind = buzz_core::kind::KIND_EVENT_REMINDER;
+        assert!(
+            buzz_core::kind::AUTHOR_ONLY_KINDS.contains(&reminder_kind),
+            "KIND_EVENT_REMINDER must be in AUTHOR_ONLY_KINDS — derive_reaction_channel \
+             also masks reminders (Q15 generalizes over all AUTHOR_ONLY_KINDS)"
+        );
+    }
+
+    #[test]
+    fn resolve_nip10_thread_meta_masks_draft_parent() {
+        // participates_in_thread_metadata(KIND_DRAFT) must be false — draft kinds
+        // are excluded from NIP-10 thread metadata processing.  The Q15 guard
+        // in resolve_nip10_thread_meta uses AUTHOR_ONLY_KINDS; this test verifies
+        // the membership that drives it.
+        assert!(
+            !participates_in_thread_metadata(KIND_DRAFT),
+            "KIND_DRAFT must not participate in thread metadata"
+        );
+        // The AUTHOR_ONLY_KINDS membership check gates the explicit not-found
+        // masking added in Q15.  Verify both draft and reminder are covered.
+        assert!(
+            buzz_core::kind::AUTHOR_ONLY_KINDS.contains(&KIND_DRAFT),
+            "KIND_DRAFT must be in AUTHOR_ONLY_KINDS for the Q15 not-found mask"
+        );
+        assert!(
+            buzz_core::kind::AUTHOR_ONLY_KINDS.contains(&buzz_core::kind::KIND_EVENT_REMINDER),
+            "KIND_EVENT_REMINDER must be in AUTHOR_ONLY_KINDS for the Q15 not-found mask"
+        );
     }
 }

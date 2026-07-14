@@ -8,10 +8,10 @@ use uuid::Uuid;
 
 use buzz_core::kind::{
     event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_DM_VISIBILITY,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
-    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    KIND_DRAFT, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST,
+    KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -215,6 +215,36 @@ pub async fn validate_standard_deletion_event(
             .get_event_by_id_including_deleted(tenant.community(), &target_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("target event not found"))?;
+
+        // Author-only kinds (drafts, reminders): mask existence for non-authors.
+        // The authz check below produces "must be event author" for a real event
+        // vs "target event not found" for a random id — that differential IS an
+        // oracle.  Placing the author-only check before authz ensures that a
+        // non-author/non-agent-owner receives "target event not found" regardless,
+        // collapsing the oracle.  The author falls through to the informative
+        // tombstone-guidance error below.
+        if buzz_core::kind::AUTHOR_ONLY_KINDS
+            .contains(&buzz_core::kind::event_kind_u32(&target_event.event))
+        {
+            let draft_author =
+                effective_message_author(&target_event.event, &state.relay_keypair.public_key());
+            let is_owner = state
+                .db
+                .is_agent_owner(tenant.community(), &draft_author, &actor_bytes)
+                .await
+                .unwrap_or(false);
+            if draft_author != actor_bytes && !is_owner {
+                // Non-author: respond byte-identical to the missing-target branch.
+                return Err(anyhow::anyhow!("target event not found"));
+            }
+            // Author or agent-owner: informative tombstone-guidance error.
+            return Err(anyhow::anyhow!(
+                "NIP-09 e-tag deletion of kind:{} events is not supported; \
+                 use an empty-content tombstone (kind:{} with empty content) instead",
+                buzz_core::kind::event_kind_u32(&target_event.event),
+                buzz_core::kind::event_kind_u32(&target_event.event),
+            ));
+        }
 
         let target_author =
             effective_message_author(&target_event.event, &state.relay_keypair.public_key());
@@ -557,6 +587,38 @@ pub async fn validate_admin_event(
                 .await
                 .map_err(|e| anyhow::anyhow!("db error looking up target: {e}"))?
                 .ok_or_else(|| anyhow::anyhow!("target event not found"))?;
+
+            // NIP-37: kind:9005 deletion of kind:31234 draft wraps is not
+            // supported. Accepting it would erase the live head row, enabling a
+            // subsequent write to rebind the immutable (community, author, kind,
+            // d) address to a different channel. The correct deletion mechanism
+            // is an empty-content tombstone (kind:31234 with "" content).
+            //
+            // Placement: before the channel-match and actor-authz checks so that
+            // channel admins cannot probe `e=<id>` to distinguish a draft from a
+            // nonexistent event. Author and agent-owner get the informative
+            // tombstone-guidance error; everyone else gets the generic
+            // "target event not found" response (byte-identical to the
+            // missing-target branch above).
+            if event_kind_u32(&target_event.event) == KIND_DRAFT {
+                let draft_author = effective_message_author(
+                    &target_event.event,
+                    &state.relay_keypair.public_key(),
+                );
+                if draft_author == actor_bytes
+                    || state
+                        .db
+                        .is_agent_owner(tenant.community(), &draft_author, &actor_bytes)
+                        .await?
+                {
+                    return Err(anyhow::anyhow!(
+                        "kind:9005 deletion of kind:31234 draft wraps is not supported; \
+                         use an empty-content tombstone (kind:31234 with empty content) instead"
+                    ));
+                } else {
+                    return Err(anyhow::anyhow!("target event not found"));
+                }
+            }
 
             match target_event.channel_id {
                 Some(target_ch) if target_ch != channel_id => {
@@ -1984,6 +2046,27 @@ async fn handle_a_tag_deletion(
     let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
 
     match kind_num {
+        // Defensive guard: draft wraps (kind:31234) do NOT use NIP-09 a-tag
+        // soft-deletion — they use an empty-content tombstone (a replacement
+        // write with empty content) instead.  Accepting an a-tag soft-delete
+        // would erase the head row and allow a different-channel write to
+        // rebind the (author, d_tag) address, breaking the immutable-binding
+        // invariant.
+        //
+        // This branch is unreachable via normal ingest: the pre-storage gate at
+        // `ingest.rs` rejects any NIP-09 kind:5 event whose a-tag targets
+        // kind:31234 before it is ever stored.  This guard is a second-line
+        // defensive check in case side_effects is called from a future path
+        // that bypasses the pre-storage gate.  It does NOT surface as a
+        // client-facing validation error — errors returned by side-effect
+        // handlers after storage are logged only (callers do not propagate
+        // them to the client).
+        buzz_core::kind::KIND_DRAFT => {
+            return Err(anyhow::anyhow!(
+                "NIP-09 a-tag deletion of kind:31234 draft wraps is not supported; \
+                 use an empty-content tombstone (kind:31234 with empty content) instead"
+            ));
+        }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
             // Try UUID first (workflow_id); fall back to name-based lookup.
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {

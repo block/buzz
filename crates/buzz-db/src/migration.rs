@@ -542,7 +542,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 11);
+        assert_eq!(migrations.len(), 12);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -710,6 +710,24 @@ mod tests {
             .contains("CREATE OR REPLACE FUNCTION purge_soft_deleted_nip_rs"));
         assert!(migrations[10].sql.as_str().contains("tag->>0 = 'd'"));
         assert!(migrations[10].sql.as_str().contains(") = 1"));
+
+        // NIP-37 (kind 31234) FTS exclusion: additive conditional migration.
+        // On legacy-blocklist DBs: drops and re-adds search_tsv with 31234.
+        // On fresh-install allowlist DBs: no-op (31234 already unsearchable).
+        // 0001 must NOT carry 31234; migration 12 must carry it separately.
+        assert_eq!(migrations[11].version, 12);
+        assert!(
+            migrations[11].sql.as_str().contains("search_tsv"),
+            "migration 0012 must reference the search_tsv generated column"
+        );
+        assert!(
+            migrations[11].sql.as_str().contains("31234"),
+            "migration 0012 must add kind 31234 to the FTS exclusion list"
+        );
+        assert!(
+            !migrations[0].sql.as_str().contains("31234"),
+            "kind 31234 must not be folded into the initial migration"
+        );
     }
 
     #[test]

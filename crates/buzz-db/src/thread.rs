@@ -562,6 +562,12 @@ pub async fn get_thread_summary(
 /// predicates (deletion, top-level, kinds). The sentinel row is dropped here
 /// and never reaches the wire; callers must not re-derive exhaustion from row
 /// counts (`rows < limit` proves nothing on an exact-multiple final page).
+///
+/// `author_pubkey`: when `Some`, author-only kinds (as listed in
+/// `buzz_core::kind::AUTHOR_ONLY_KINDS`) are excluded for rows whose `pubkey`
+/// does not match the requester. Pass the authenticated requester's pubkey bytes
+/// on all bridge read paths. `None` skips the filter (internal/test callers
+/// that don't need author-only visibility control).
 pub async fn get_channel_window(
     pool: &PgPool,
     community_id: CommunityId,
@@ -569,6 +575,7 @@ pub async fn get_channel_window(
     limit: u32,
     cursor: Option<(DateTime<Utc>, Vec<u8>)>,
     kind_filter: Option<&[u32]>,
+    author_pubkey: Option<&[u8]>,
 ) -> Result<ChannelWindow> {
     let mut param_idx = 3u32; // $1 is community_id, $2 is channel_id
     let mut sql = String::from(
@@ -624,6 +631,27 @@ pub async fn get_channel_window(
         }
     }
 
+    // Author-only kinds (kind:31234 drafts, kind:30300 reminders) must never
+    // be returned for a requester who is not their author. The filter is
+    // applied at the SQL layer so that `has_more` and `next_cursor` are also
+    // computed over the already-restricted row set — a bridge-level skip would
+    // leave those values pointing at or counting draft rows for non-authors.
+    if author_pubkey.is_some() {
+        let pk_idx = param_idx;
+        // Derive the exclusion list from AUTHOR_ONLY_KINDS (buzz_core) so that
+        // adding a new author-only kind in one place automatically extends this
+        // filter without a separate hardcoded list here.
+        let ao_list = buzz_core::kind::AUTHOR_ONLY_KINDS
+            .iter()
+            .map(|k| k.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        sql.push_str(&format!(
+            " AND (e.kind NOT IN ({ao_list}) OR e.pubkey = ${pk_idx})"
+        ));
+        param_idx += 1;
+    }
+
     sql.push_str(&format!(
         " ORDER BY e.created_at DESC, e.id ASC LIMIT ${param_idx}"
     ));
@@ -633,6 +661,9 @@ pub async fn get_channel_window(
         .bind(channel_id);
     if let Some((ts, id)) = &cursor {
         q = q.bind(*ts).bind(id.clone());
+    }
+    if let Some(pk) = author_pubkey {
+        q = q.bind(pk);
     }
     // The +1 probe row is the server-internal has_more evidence.
     q = q.bind(limit as i64 + 1);
@@ -1531,7 +1562,7 @@ mod tests {
         let quiet_reply = make_stream_event(&author, "quiet reply");
         insert_reply(&pool, community, channel.id, &root, &quiet_reply, false).await;
 
-        let window = get_channel_window(&pool, community, channel.id, 50, None, None)
+        let window = get_channel_window(&pool, community, channel.id, 50, None, None, None)
             .await
             .expect("fetch window");
 
@@ -1596,7 +1627,7 @@ mod tests {
         let mut collected: Vec<Vec<u8>> = Vec::new();
         let mut cursor: Option<(DateTime<Utc>, Vec<u8>)> = None;
         loop {
-            let window = get_channel_window(&pool, community, channel.id, 2, cursor, None)
+            let window = get_channel_window(&pool, community, channel.id, 2, cursor, None, None)
                 .await
                 .expect("fetch window page");
             for row in &window.rows {
@@ -1646,14 +1677,14 @@ mod tests {
             insert_root(&pool, community, channel.id, &event).await;
         }
 
-        let page1 = get_channel_window(&pool, community, channel.id, 2, None, None)
+        let page1 = get_channel_window(&pool, community, channel.id, 2, None, None, None)
             .await
             .expect("fetch page 1");
         assert_eq!(page1.rows.len(), 2);
         assert!(page1.has_more, "two more rows exist past page 1");
         let cursor = page1.next_cursor.expect("has_more implies next_cursor");
 
-        let page2 = get_channel_window(&pool, community, channel.id, 2, Some(cursor), None)
+        let page2 = get_channel_window(&pool, community, channel.id, 2, Some(cursor), None, None)
             .await
             .expect("fetch page 2");
         assert_eq!(page2.rows.len(), 2, "final page is exactly full");
@@ -1695,7 +1726,7 @@ mod tests {
             insert_reply(&pool, community, channel.id, &discussed, &reply, false).await;
         }
 
-        let window = get_channel_window(&pool, community, channel.id, 50, None, None)
+        let window = get_channel_window(&pool, community, channel.id, 50, None, None, None)
             .await
             .expect("fetch window");
 
