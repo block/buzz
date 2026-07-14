@@ -504,6 +504,9 @@ test("custom personas share with people and keep export separate", async ({
   const accessOwner = page.getByTestId("persona-share-access-owner");
   const accessSection = page.getByTestId("persona-share-access");
   const copyLinkFooter = page.getByTestId("persona-share-copy-link-footer");
+  await expect(page.getByTestId("persona-share-copy-link")).toHaveClass(
+    /bg-secondary/,
+  );
   await expect(accessLink).toContainText("Anyone with a link");
   await expect(page.getByTestId("persona-share-link-access")).toHaveText(
     "Agent",
