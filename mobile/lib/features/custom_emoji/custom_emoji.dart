@@ -2,10 +2,10 @@ import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/nostr_models.dart';
 
-/// A workspace custom emoji: a `:shortcode:` mapped to an image URL.
+/// A community custom emoji: a `:shortcode:` mapped to an image URL.
 ///
 /// Mirrors desktop's NIP-30 model (kind:30030, per-user sets unioned into one
-/// workspace palette). Identity downstream is shortcode-only — the palette must
+/// community palette). Identity downstream is shortcode-only — the palette must
 /// never carry two URLs under one shortcode.
 @immutable
 class CustomEmoji {
@@ -67,7 +67,7 @@ List<CustomEmoji> customEmojiFromTags(List<List<String>> tags) {
   return emoji;
 }
 
-/// Union every member's kind:30030 set into the workspace palette, collapsed to
+/// Union every member's kind:30030 set into the community palette, collapsed to
 /// one entry per shortcode. When members disagree on a shortcode's URL, the
 /// most recently published set wins (`created_at` is signed event data, so the
 /// result stays deterministic and fetch-order-independent); equal timestamps
@@ -126,7 +126,7 @@ List<List<String>> buildCustomEmojiTags(
 }
 
 /// Resolve the image URL for a reaction whose content is a custom-emoji
-/// `:shortcode:`, from the workspace palette. Returns null for unicode
+/// `:shortcode:`, from the community palette. Returns null for unicode
 /// reactions or unknown shortcodes.
 String? reactionEmojiUrl(String emoji, List<CustomEmoji>? palette) {
   if (palette == null) return null;

@@ -104,7 +104,7 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
               native: emoji.skins[0]?.native ?? "",
             }))
             .filter((e) => e.native !== "");
-          // Custom emoji first (workspace-specific), then standard, capped.
+          // Custom emoji first (community-specific), then standard, capped.
           const merged = [...customMatches, ...standard].slice(0, MAX_RESULTS);
           setSuggestions(merged);
           setEmojiSelectedIndex(0);

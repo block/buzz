@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import 'profile_provider.dart';
 import 'user_profile.dart';
 
@@ -45,20 +46,16 @@ class ProfileAvatar extends ConsumerWidget {
       onTap: onTap,
       child: Stack(
         children: [
-          CircleAvatar(
+          AvatarImage(
+            imageUrl: profile?.avatarUrl,
             radius: 16,
             backgroundColor: context.colors.primaryContainer,
-            backgroundImage: profile?.avatarUrl != null
-                ? NetworkImage(profile!.avatarUrl!)
-                : null,
-            child: profile?.avatarUrl == null
-                ? Text(
-                    profile?.initial ?? '?',
-                    style: context.textTheme.labelMedium?.copyWith(
-                      color: context.colors.onPrimaryContainer,
-                    ),
-                  )
-                : null,
+            fallback: Text(
+              profile?.initial ?? '?',
+              style: context.textTheme.labelMedium?.copyWith(
+                color: context.colors.onPrimaryContainer,
+              ),
+            ),
           ),
           if (showPresence)
             Positioned(

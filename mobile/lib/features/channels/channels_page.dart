@@ -9,6 +9,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../profile/profile_avatar.dart';
@@ -39,7 +40,7 @@ part 'channels_page/sections.dart';
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';
-part 'channels_page/workspace.dart';
+part 'channels_page/community.dart';
 
 enum _QuickAction { createChannel, newDm }
 
@@ -53,7 +54,7 @@ const double _kChannelLabelGap = Grid.xxs;
 const double _kChannelRowVerticalPadding = Grid.xxs + Grid.quarter;
 const double _kChannelLabelInset =
     _kChannelSectionInset + _kChannelLeadingWidth + _kChannelLabelGap;
-const double _kWorkspaceAvatarInset =
+const double _kCommunityAvatarInset =
     _kChannelSectionInset - Grid.quarter; // FrostedAppBar adds Grid.quarter.
 const Duration _kSectionExpandDuration = Duration(milliseconds: 220);
 const Duration _kSectionCollapseDuration = Duration(milliseconds: 170);
@@ -135,17 +136,17 @@ class ChannelsPage extends HookConsumerWidget {
 
     // Cache the last successfully loaded channels so the UI never flashes
     // back to a loading state when the provider rebuilds (e.g. reconnect).
-    // Clear the cache on workspace switch so we show a full loader instead of
-    // stale channels from the previous workspace. unwrapPrevious() ensures the
-    // selector sees null during loading (not the previous workspace's ID).
-    final activeWorkspaceId = ref.watch(
-      activeWorkspaceProvider.select((v) => v.unwrapPrevious().value?.id),
+    // Clear the cache on community switch so we show a full loader instead of
+    // stale channels from the previous community. unwrapPrevious() ensures the
+    // selector sees null during loading (not the previous community's ID).
+    final activeCommunityId = ref.watch(
+      activeCommunityProvider.select((v) => v.unwrapPrevious().value?.id),
     );
     final cachedChannels = useRef<List<Channel>?>(null);
-    final lastWorkspaceId = useRef<String?>(null);
-    if (lastWorkspaceId.value != activeWorkspaceId) {
+    final lastCommunityId = useRef<String?>(null);
+    if (lastCommunityId.value != activeCommunityId) {
       cachedChannels.value = null;
-      lastWorkspaceId.value = activeWorkspaceId;
+      lastCommunityId.value = activeCommunityId;
     }
     if (channelsAsync.asData?.value case final data?) {
       cachedChannels.value = data;
@@ -238,11 +239,11 @@ class ChannelsPage extends HookConsumerWidget {
 
     return FrostedScaffold(
       appBar: FrostedAppBar(
-        leading: _WorkspaceIndicator(
+        leading: _CommunityIndicator(
           onTap: () => showModalBottomSheet<void>(
             context: context,
             showDragHandle: true,
-            builder: (_) => const _WorkspaceSwitcherSheet(),
+            builder: (_) => const _CommunitySwitcherSheet(),
           ),
         ),
         title: const SizedBox.shrink(),

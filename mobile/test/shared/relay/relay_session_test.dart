@@ -168,7 +168,7 @@ void main() {
   });
 
   test(
-    'stops reconnecting without deleting workspace after auth rejection',
+    'stops reconnecting without deleting community after auth rejection',
     () async {
       final session = RelaySessionNotifier();
       final auth = _FakeAuthNotifier();
@@ -236,7 +236,7 @@ void main() {
     expect(sockets, hasLength(2));
 
     sockets.first.disconnectWith(
-      const RelayAuthRejectedException('blocked: stale workspace'),
+      const RelayAuthRejectedException('blocked: stale community'),
     );
     sockets.first.connectSuccessfully();
     expect(session.state.status, SessionStatus.connecting);

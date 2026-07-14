@@ -765,18 +765,24 @@ mod tests {
             .as_str()
             .contains("_operator_global_tables"));
 
-        // Product feedback is a deployment-private sidecar; community_id is
-        // provenance, not an operator-review authorization boundary.
         assert_eq!(migrations[15].version, 16);
         assert!(migrations[15]
             .sql
             .as_str()
+            .contains("ADD COLUMN archived_at"));
+
+        // Product feedback is a deployment-private sidecar; community_id is
+        // provenance, not an operator-review authorization boundary.
+        assert_eq!(migrations[16].version, 17);
+        assert!(migrations[16]
+            .sql
+            .as_str()
             .contains("CREATE TABLE product_feedback"));
-        assert!(migrations[15]
+        assert!(migrations[16]
             .sql
             .as_str()
             .contains("community_id UUID NOT NULL"));
-        assert!(migrations[15]
+        assert!(migrations[16]
             .sql
             .as_str()
             .contains("('product_feedback', 'deployment product inbox"));
@@ -1032,7 +1038,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(16));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(17));
     }
 
     #[tokio::test]

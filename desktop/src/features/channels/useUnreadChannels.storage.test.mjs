@@ -131,18 +131,18 @@ test("round-trip: A→B→A — A rows absent in B, A rows return on switch back
     const relayA = "wss://relay-a.example.com";
     const relayB = "wss://relay-b.example.com";
 
-    // Workspace A accumulates two activity rows.
+    // Community A accumulates two activity rows.
     const itemsA = [
       makeItem("reply-a1", "channel-a1", 1),
       makeItem("reply-a2", "channel-a2", 2),
     ];
     writeActivityToStorage(pubkey, relayA, itemsA);
 
-    // Workspace B has its own rows.
+    // Community B has its own rows.
     const itemsB = [makeItem("reply-b1", "channel-b1", 3)];
     writeActivityToStorage(pubkey, relayB, itemsB);
 
-    // While in workspace B, reading relay A gives B's rows (not A's).
+    // While in community B, reading relay A gives B's rows (not A's).
     const inB = readActivityFromStorage(pubkey, relayB);
     assert.equal(inB.length, 1);
     assert.equal(inB[0].id, "reply-b1");

@@ -12,7 +12,7 @@ import { installMockBridge } from "../helpers/bridge";
 // The `:buzz:` shortcode lives in a member-authored kind:30030 set
 // (d=`buzz:custom-emoji`) served by the mock bridge from two distinct
 // pubkeys. `listCustomEmoji` reads every member's set over the relay WS and
-// unions them (deduped by shortcode+url) into the workspace palette — which is
+// unions them (deduped by shortcode+url) into the community palette — which is
 // live even in mock-bridge mode (the mock only intercepts Tauri commands), so
 // this spec uses the simpler mock-bridge setup like messaging.spec.ts.
 const SHORTCODE = "buzz";

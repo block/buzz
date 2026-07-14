@@ -47,20 +47,16 @@ class _MentionSuggestions extends StatelessWidget {
           return ListTile(
             dense: true,
             visualDensity: VisualDensity.compact,
-            leading: CircleAvatar(
+            leading: AvatarImage(
+              imageUrl: avatarUrl,
               radius: 14,
               backgroundColor: context.colors.primaryContainer,
-              backgroundImage: avatarUrl != null
-                  ? NetworkImage(avatarUrl)
-                  : null,
-              child: avatarUrl == null
-                  ? Text(
-                      name[0].toUpperCase(),
-                      style: context.textTheme.labelSmall?.copyWith(
-                        color: context.colors.onPrimaryContainer,
-                      ),
-                    )
-                  : null,
+              fallback: Text(
+                name[0].toUpperCase(),
+                style: context.textTheme.labelSmall?.copyWith(
+                  color: context.colors.onPrimaryContainer,
+                ),
+              ),
             ),
             title: Text(name, style: context.textTheme.bodyMedium),
             subtitle: _MentionSuggestionInfo.build(

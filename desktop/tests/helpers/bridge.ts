@@ -161,7 +161,7 @@ type MockBridgeOptions = {
   feedReadError?: string;
   canvasReadError?: string;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
-  applyWorkspaceDelayMs?: number;
+  applyCommunityDelayMs?: number;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
   /** Reject successive kind-9 sends with these messages, then resume. */
@@ -318,7 +318,7 @@ type BridgeOptions = {
   relayHttpUrl?: string;
   relayWsUrl?: string;
   skipOnboardingSeed?: boolean;
-  skipWorkspaceSeed?: boolean;
+  skipCommunitySeed?: boolean;
   /**
    * When true (default), seed every preview feature in preview-features.json as
    * enabled in localStorage so E2E tests can interact with gated UI without
@@ -477,21 +477,21 @@ async function seedOnboardingCompletionForKnownIdentities(
   );
 }
 
-async function seedDefaultWorkspace(page: Page, relayWsUrl?: string) {
+async function seedDefaultCommunity(page: Page, relayWsUrl?: string) {
   await page.addInitScript(
     ({ relayUrl }) => {
-      const workspaceId = "e2e-default-workspace";
-      const workspace = {
-        id: workspaceId,
+      const communityId = "e2e-default-community";
+      const community = {
+        id: communityId,
         name: "E2E Test",
         relayUrl,
         addedAt: new Date().toISOString(),
       };
       window.localStorage.setItem(
-        "buzz-workspaces",
-        JSON.stringify([workspace]),
+        "buzz-communities",
+        JSON.stringify([community]),
       );
-      window.localStorage.setItem("buzz-active-workspace-id", workspaceId);
+      window.localStorage.setItem("buzz-active-community-id", communityId);
     },
     { relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL },
   );
@@ -514,10 +514,10 @@ export async function installBridge(page: Page, options: BridgeOptions) {
       ? TEST_IDENTITIES[options.user ?? "tyler"]
       : undefined;
 
-  // Most specs seed a workspace so useWorkspaceInit doesn't show WelcomeSetup.
+  // Most specs seed a community so useCommunityInit doesn't show WelcomeSetup.
   // skipOnboardingSeed only controls the onboarding-completion flag.
-  if (!options.skipWorkspaceSeed) {
-    await seedDefaultWorkspace(page, options.relayWsUrl);
+  if (!options.skipCommunitySeed) {
+    await seedDefaultCommunity(page, options.relayWsUrl);
   }
   if (!options.skipOnboardingSeed) {
     await seedOnboardingCompletionForKnownIdentities(page, options.relayWsUrl);
@@ -618,7 +618,7 @@ export async function installMockBridge(
   options?: {
     relayWsUrl?: string;
     skipOnboardingSeed?: boolean;
-    skipWorkspaceSeed?: boolean;
+    skipCommunitySeed?: boolean;
     seedPreviewFeatures?: boolean;
   },
 ) {
@@ -627,7 +627,7 @@ export async function installMockBridge(
     mock,
     relayWsUrl: options?.relayWsUrl,
     skipOnboardingSeed: options?.skipOnboardingSeed,
-    skipWorkspaceSeed: options?.skipWorkspaceSeed,
+    skipCommunitySeed: options?.skipCommunitySeed,
     seedPreviewFeatures: options?.seedPreviewFeatures,
   });
 }

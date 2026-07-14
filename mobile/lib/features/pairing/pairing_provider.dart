@@ -434,16 +434,16 @@ class PairingNotifier extends Notifier<PairingState> {
       // Send complete only after credentials are validated.
       _sendComplete(true);
 
-      // Store as workspace and switch to it.
-      final workspace = Workspace.create(
-        name: Workspace.nameFromUrl(relayUrl),
+      // Store as community and switch to it.
+      final community = Community.create(
+        name: Community.nameFromUrl(relayUrl),
         relayUrl: relayUrl,
         pubkey: pubkey,
         nsec: nsec,
       );
       await ref
           .read(authProvider.notifier)
-          .authenticateWithWorkspace(workspace);
+          .authenticateWithCommunity(community);
 
       _cleanup();
       state = const PairingState(status: PairingStatus.success);
@@ -532,16 +532,16 @@ class PairingNotifier extends Notifier<PairingState> {
     state = const PairingState(status: PairingStatus.connecting);
 
     try {
-      final workspace = _parseLegacyInput(rawInput);
+      final community = _parseLegacyInput(rawInput);
 
       await _validateCredentials(
-        relayUrl: workspace.relayUrl,
-        nsec: workspace.nsec,
+        relayUrl: community.relayUrl,
+        nsec: community.nsec,
       );
 
       await ref
           .read(authProvider.notifier)
-          .authenticateWithWorkspace(workspace);
+          .authenticateWithCommunity(community);
       state = const PairingState(status: PairingStatus.success);
     } on FormatException catch (e) {
       state = PairingState(
@@ -590,7 +590,7 @@ class PairingNotifier extends Notifier<PairingState> {
     }
   }
 
-  Workspace _parseLegacyInput(String raw) {
+  Community _parseLegacyInput(String raw) {
     var payload = raw.trim();
 
     if (payload.startsWith('buzz://')) {
@@ -611,8 +611,8 @@ class PairingNotifier extends Notifier<PairingState> {
 
     _validateRelayUrl(relayUrl);
 
-    return Workspace.create(
-      name: Workspace.nameFromUrl(relayUrl),
+    return Community.create(
+      name: Community.nameFromUrl(relayUrl),
       relayUrl: relayUrl,
       pubkey: decoded['pubkey'] as String?,
       nsec: decoded['nsec'] as String?,

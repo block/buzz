@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../profile/user_cache_provider.dart';
@@ -569,19 +570,17 @@ class _Avatar extends StatelessWidget {
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
     final avatarUrl = profile?.avatarUrl;
 
-    return CircleAvatar(
+    return AvatarImage(
+      imageUrl: avatarUrl,
       radius: 14,
       backgroundColor: context.colors.primaryContainer,
-      backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-      child: avatarUrl == null
-          ? Text(
-              initial,
-              style: context.textTheme.labelSmall?.copyWith(
-                color: context.colors.onPrimaryContainer,
-                fontWeight: FontWeight.w600,
-              ),
-            )
-          : null,
+      fallback: Text(
+        initial,
+        style: context.textTheme.labelSmall?.copyWith(
+          color: context.colors.onPrimaryContainer,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
     );
   }
 }

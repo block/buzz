@@ -385,7 +385,7 @@ export function AgentSessionThreadPanel({
                 canStopCurrentTurn
                   ? "Interrupt the current ACP turn without stopping the agent process."
                   : isWorking
-                    ? "Only locally managed agents can be interrupted from this workspace."
+                    ? "Only locally managed agents can be interrupted from this community."
                     : "Available while the agent is working."
               }
             >

@@ -18,7 +18,7 @@ import {
   getWelcomeGuideAgentPubkeys,
 } from "@/features/onboarding/welcomeGuide";
 import { useProfileQuery } from "@/features/profile/hooks";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
   createChannel,
@@ -55,16 +55,16 @@ async function initializeWelcomeChannel(
   {
     focus,
     pubkey,
-    workspaceScope,
+    communityScope,
   }: {
     focus: boolean;
     pubkey: string | null;
-    workspaceScope: string | null;
+    communityScope: string | null;
   },
 ) {
   try {
     const allowedMemberPubkeys = await getWelcomeGuideAgentPubkeys(
-      workspaceScope,
+      communityScope,
     ).catch(() => []);
     const welcomeChannel = await ensureWelcomeChannel(
       {
@@ -79,7 +79,7 @@ async function initializeWelcomeChannel(
     );
     let didInitializeWelcomeGuide = false;
     try {
-      await ensureWelcomeGuideIntro(welcomeChannel.id, workspaceScope);
+      await ensureWelcomeGuideIntro(welcomeChannel.id, communityScope);
       didInitializeWelcomeGuide = true;
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
@@ -89,7 +89,7 @@ async function initializeWelcomeChannel(
       console.warn("Failed to initialize Welcome guide.", error);
     }
     if (didInitializeWelcomeGuide) {
-      markWelcomeChannelEnsured(pubkey, workspaceScope);
+      markWelcomeChannelEnsured(pubkey, communityScope);
     }
     if (focus) {
       rememberPendingWelcomeChannel(welcomeChannel.id);
@@ -398,11 +398,11 @@ export function useFirstRunOnboardingGate({
 
 export function useAppOnboardingState(isSharedIdentity: boolean) {
   const queryClient = useQueryClient();
-  const { activeWorkspace } = useWorkspaces();
+  const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
   const identity = identityQuery.data;
   const currentPubkey = identity?.pubkey ?? null;
-  const welcomeChannelWorkspaceScope = activeWorkspace?.relayUrl ?? null;
+  const welcomeChannelCommunityScope = activeCommunity?.relayUrl ?? null;
   const welcomeChannelInitPromisesRef = React.useRef(
     new Map<string, Promise<void>>(),
   );
@@ -438,11 +438,11 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   const gateComplete = onboardingGate.complete;
   const requestWelcomeChannel = React.useCallback(
     (focus: boolean) => {
-      if (!currentPubkey || !welcomeChannelWorkspaceScope) {
+      if (!currentPubkey || !welcomeChannelCommunityScope) {
         return Promise.resolve();
       }
 
-      const welcomeChannelInitKey = `${welcomeChannelWorkspaceScope}:${currentPubkey}`;
+      const welcomeChannelInitKey = `${welcomeChannelCommunityScope}:${currentPubkey}`;
       const currentPromise = welcomeChannelInitPromisesRef.current.get(
         welcomeChannelInitKey,
       );
@@ -453,7 +453,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
       const promise = initializeWelcomeChannel(queryClient, {
         focus,
         pubkey: currentPubkey,
-        workspaceScope: welcomeChannelWorkspaceScope,
+        communityScope: welcomeChannelCommunityScope,
       });
       welcomeChannelInitPromisesRef.current.set(welcomeChannelInitKey, promise);
       void promise.finally(() => {
@@ -461,16 +461,16 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
       });
       return promise;
     },
-    [currentPubkey, queryClient, welcomeChannelWorkspaceScope],
+    [currentPubkey, queryClient, welcomeChannelCommunityScope],
   );
 
   React.useEffect(() => {
     if (
       onboardingGate.stage !== "ready" ||
       !currentPubkey ||
-      !welcomeChannelWorkspaceScope ||
+      !welcomeChannelCommunityScope ||
       !readOnboardingCompletion(currentPubkey) ||
-      hasEnsuredWelcomeChannel(currentPubkey, welcomeChannelWorkspaceScope)
+      hasEnsuredWelcomeChannel(currentPubkey, welcomeChannelCommunityScope)
     ) {
       return;
     }
@@ -480,7 +480,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     currentPubkey,
     onboardingGate.stage,
     requestWelcomeChannel,
-    welcomeChannelWorkspaceScope,
+    welcomeChannelCommunityScope,
   ]);
 
   const completeAndShowWelcome = React.useCallback(() => {

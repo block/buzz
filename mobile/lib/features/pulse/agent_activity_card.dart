@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../profile/user_cache_provider.dart';
 import 'note_card.dart';
 import 'pulse_models.dart';
@@ -41,15 +42,11 @@ class AgentActivityCard extends HookConsumerWidget {
               children: [
                 Stack(
                   children: [
-                    CircleAvatar(
+                    AvatarImage(
+                      imageUrl: profile?.avatarUrl,
                       radius: 18,
                       backgroundColor: context.colors.primaryContainer,
-                      backgroundImage: profile?.avatarUrl != null
-                          ? NetworkImage(profile!.avatarUrl!)
-                          : null,
-                      child: profile?.avatarUrl == null
-                          ? const Icon(LucideIcons.bot, size: 18)
-                          : null,
+                      fallback: const Icon(LucideIcons.bot, size: 18),
                     ),
                     Positioned(
                       right: 0,
