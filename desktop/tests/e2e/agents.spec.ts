@@ -552,6 +552,24 @@ test("custom personas share with people and keep export separate", async ({
   await expect(shareDialog.getByLabel("Recipient access")).toHaveCount(0);
   await expect(accessOwner).toContainText("(You)");
   await expect(accessOwner).toContainText("Owner");
+  const linkAccessControl = page.getByTestId("persona-share-link-access");
+  const ownerLabel = accessOwner.getByText("Owner");
+  const [linkAccessBox, linkAccessPaddingRight, ownerLabelBox] =
+    await Promise.all([
+      linkAccessControl.boundingBox(),
+      linkAccessControl.evaluate((element) =>
+        Number.parseFloat(getComputedStyle(element).paddingRight),
+      ),
+      ownerLabel.boundingBox(),
+    ]);
+  expect(
+    Math.abs(
+      (linkAccessBox?.x ?? 0) +
+        (linkAccessBox?.width ?? 0) -
+        linkAccessPaddingRight -
+        ((ownerLabelBox?.x ?? 0) + (ownerLabelBox?.width ?? 0)),
+    ),
+  ).toBeLessThanOrEqual(1);
   const accessLinkBox = await accessLink.boundingBox();
   const accessOwnerBox = await accessOwner.boundingBox();
   expect(accessLinkBox?.y).toBeLessThan(accessOwnerBox?.y ?? 0);
@@ -772,6 +790,28 @@ test("custom personas share with people and keep export separate", async ({
       .getByTestId("persona-share-recipient-field")
       .getByTestId("persona-share-recipient-access"),
   ).toHaveText("Agent");
+  const staticRecipientAccess = page.getByTestId(
+    "persona-share-recipient-access",
+  );
+  const [
+    staticRecipientAccessBox,
+    recipientAccessPaddingRight,
+    recipientFieldBox,
+  ] = await Promise.all([
+    staticRecipientAccess.boundingBox(),
+    staticRecipientAccess.evaluate((element) =>
+      Number.parseFloat(getComputedStyle(element).paddingRight),
+    ),
+    recipientField.boundingBox(),
+  ]);
+  const staticRecipientTextInset =
+    (recipientFieldBox?.x ?? 0) +
+    (recipientFieldBox?.width ?? 0) -
+    ((staticRecipientAccessBox?.x ?? 0) +
+      (staticRecipientAccessBox?.width ?? 0) -
+      recipientAccessPaddingRight);
+  expect(staticRecipientTextInset).toBeGreaterThanOrEqual(8);
+  expect(staticRecipientTextInset).toBeLessThanOrEqual(10);
   await expect(page.getByTestId("persona-share-send")).toBeVisible();
 
   await recipientSearch.fill("bob");

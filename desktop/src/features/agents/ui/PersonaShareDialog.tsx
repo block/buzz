@@ -398,12 +398,12 @@ export function PersonaShareDialog({
                   renderEndControl={(handleAccessOpenChange) => (
                     <ShareLevelControl
                       ariaLabel="Recipient access"
-                      className="h-7"
+                      className="-mr-2 h-7"
                       disabled={isActionPending}
                       hasLinkedAgent={hasLinkedAgent}
                       onChange={setRecipientShareLevel}
                       onOpenChange={handleAccessOpenChange}
-                      staticClassName="h-7 w-auto"
+                      staticClassName="-mr-2 h-7 w-auto"
                       testId="persona-share-recipient-access"
                       value={recipientShareLevel}
                     />
@@ -464,6 +464,7 @@ export function PersonaShareDialog({
                   disabled={isActionPending}
                   hasLinkedAgent={hasLinkedAgent}
                   onChange={setLinkShareLevel}
+                  staticClassName="-mr-2"
                   testId="persona-share-link-access"
                   value={linkShareLevel}
                 />
