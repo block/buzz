@@ -623,14 +623,13 @@ test("snaps custom avatar colors to the dot grid", async ({ page }) => {
   await expect(page.getByTestId("profile-avatar-done")).toBeVisible();
 });
 
-test("hides Send feedback when no destination is configured", async ({
-  page,
-}) => {
+test("opens Send feedback from the profile menu", async ({ page }) => {
   await page.goto("/");
-
   await openProfileMenu(page);
-  await expect(page.getByTestId("profile-popover-send-feedback")).toHaveCount(
-    0,
+  await page.getByTestId("profile-popover-send-feedback").click();
+  await expect(page.getByTestId("send-feedback-dialog")).toBeVisible();
+  await expect(page.getByTestId("feedback-privacy-disclosure")).toContainText(
+    "not posted to a channel",
   );
 });
 

@@ -57,15 +57,11 @@ export type SendFeedbackInput = {
  * diagnostics" checkbox. Selecting a positive category fires the heart-burst
  * emitter.
  *
- * Delivery (channel resolution, upload, send) is delegated to `onSubmit`, and
+ * Delivery (upload and private feedback submission) is delegated to `onSubmit`, and
  * image attachment to `onAttachImage`, so this shell stays presentational.
  */
 export function SendFeedbackDialog({
   attachedImageUrl,
-  destinationChannelId,
-  destinationChannelName,
-  destinationRelayUrl,
-  destinationWorkspaceName,
   isPending,
   onAttachImage,
   onOpenChange,
@@ -75,14 +71,6 @@ export function SendFeedbackDialog({
 }: {
   /** Preview URL of the currently-attached image, or null when none. */
   attachedImageUrl: string | null;
-  /** Build-configured private destination channel ID. */
-  destinationChannelId: string;
-  /** Resolved channel name, when the current workspace exposes it. */
-  destinationChannelName: string | null;
-  /** Current relay URL disclosed to the sender. */
-  destinationRelayUrl: string;
-  /** Current workspace/operator label disclosed to the sender. */
-  destinationWorkspaceName: string;
   isPending: boolean;
   /** Opens a file picker and uploads; the parent owns the resulting URL. */
   onAttachImage: () => Promise<void>;
@@ -174,25 +162,10 @@ export function SendFeedbackDialog({
           </div>
           <p
             className="pt-2 text-sm text-muted-foreground"
-            data-testid="feedback-destination-disclosure"
+            data-testid="feedback-privacy-disclosure"
           >
-            This report goes to the private{" "}
-            <span className="font-medium text-foreground">
-              {destinationChannelName
-                ? `#${destinationChannelName}`
-                : `feedback channel ${destinationChannelId}`}
-            </span>{" "}
-            in{" "}
-            <span className="font-medium text-foreground">
-              {destinationWorkspaceName}
-            </span>{" "}
-            via{" "}
-            <span className="font-medium text-foreground">
-              {destinationRelayUrl}
-            </span>
-            . Attaching an image uploads it immediately to that relay. If you
-            send this report, the image and any diagnostics are shared in the
-            same channel.
+            Feedback is sent privately to this Buzz deployment and is not posted
+            to a channel. Attachments are uploaded before you send.
           </p>
         </DialogHeader>
 
