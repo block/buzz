@@ -314,7 +314,7 @@ impl EventQueue {
         // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
         let queue = self.queues.entry(channel_id).or_default();
         let drain_count = MAX_BATCH_EVENTS.min(queue.len());
-        let events: Vec<BatchEvent> = queue
+        let mut events: Vec<BatchEvent> = queue
             .drain(..drain_count)
             .map(|qe| BatchEvent {
                 event: qe.event,
@@ -322,6 +322,11 @@ impl EventQueue {
                 received_at: qe.received_at,
             })
             .collect();
+        // Relay replay delivers stored events newest-first (`ORDER BY
+        // created_at DESC`), but batch consumers — `format_prompt` scope and
+        // reply-anchor selection — require the LAST event to be the newest.
+        // Stable sort: same-second events keep delivery order.
+        events.sort_by_key(|be| be.event.created_at);
 
         // Remove the queue entry if now empty.
         if self.queues.get(&channel_id).is_some_and(|q| q.is_empty()) {
