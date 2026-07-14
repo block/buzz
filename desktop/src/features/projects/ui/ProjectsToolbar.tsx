@@ -59,10 +59,18 @@ export function ProjectsToolbar({
   searchOpen,
   onSearchOpenChange,
 }: ProjectsToolbarProps) {
-  const filterOptions: Array<{ label: string; value: ProjectsFilter }> = [
+  const filterOptions: Array<{
+    compactLabel?: string;
+    label: string;
+    value: ProjectsFilter;
+  }> = [
     { label: "Overview", value: "all" },
-    { label: "Repositories", value: "repositories" },
-    { label: "Pull Requests", value: "prs" },
+    {
+      compactLabel: "Repos",
+      label: "Repositories",
+      value: "repositories",
+    },
+    { compactLabel: "PRs", label: "Pull Requests", value: "prs" },
     { label: "Issues", value: "issues" },
     { label: "Mine", value: "mine" },
     { label: "Local", value: "local" },
@@ -72,15 +80,15 @@ export function ProjectsToolbar({
 
   return (
     <div
-      className="pointer-events-auto flex min-h-[3.25rem] flex-wrap items-center justify-between gap-3 px-4 py-2"
+      className="pointer-events-auto flex min-h-[3.25rem] min-w-0 items-center px-4 py-2"
       data-tauri-drag-region
     >
-      <div className="flex min-w-0 flex-wrap items-center gap-0.5">
+      <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
         <Button
           aria-expanded={searchOpen}
           aria-label="Ask an agent about your projects"
           className={cn(
-            "h-8 w-8 rounded-full px-0",
+            "h-8 w-8 shrink-0 rounded-full px-0",
             searchOpen && SELECTED_MENU_ITEM_CLASSES,
           )}
           onClick={() => onSearchOpenChange(!searchOpen)}
@@ -90,13 +98,14 @@ export function ProjectsToolbar({
         >
           <Search className="h-4 w-4" />
         </Button>
-        <fieldset className="flex min-w-0 flex-wrap items-center gap-0.5">
+        <fieldset className="flex min-w-0 flex-1 flex-nowrap items-center gap-0.5 overflow-x-auto scrollbar-none [&::-webkit-scrollbar]:hidden">
           <legend className="sr-only">Project owner filter</legend>
           {filterOptions.map((option) => (
             <Button
+              aria-label={option.label}
               aria-pressed={filter === option.value}
               className={cn(
-                "h-8 gap-1.5 rounded-full px-3 text-sm",
+                "h-8 shrink-0 gap-1.5 rounded-full px-2.5 text-xs xl:px-3 xl:text-sm",
                 !searchOpen &&
                   filter === option.value &&
                   SELECTED_MENU_ITEM_CLASSES,
@@ -107,7 +116,14 @@ export function ProjectsToolbar({
               type="button"
               variant="ghost"
             >
-              {option.label}
+              {option.compactLabel ? (
+                <>
+                  <span className="xl:hidden">{option.compactLabel}</span>
+                  <span className="hidden xl:inline">{option.label}</span>
+                </>
+              ) : (
+                option.label
+              )}
             </Button>
           ))}
         </fieldset>

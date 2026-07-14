@@ -70,7 +70,7 @@ export function ProjectsOverviewRail({
   const languages = overviewLanguages(snapshots);
 
   return (
-    <div className="flex h-full flex-col gap-[1.125rem]">
+    <div className="grid h-full grid-cols-1 gap-4 sm:grid-cols-2 xl:flex xl:flex-col xl:gap-[1.125rem]">
       <OverviewRailSection title="People">
         {people.length > 0 ? (
           <div className="flex flex-wrap gap-1.5">
@@ -111,9 +111,11 @@ export function ProjectsOverviewRail({
         )}
       </OverviewRailSection>
 
-      <OverviewRailSection title="Active Repositories">
-        {children}
-      </OverviewRailSection>
+      <div className="sm:col-span-2 xl:col-span-1">
+        <OverviewRailSection title="Active Repositories">
+          {children}
+        </OverviewRailSection>
+      </div>
     </div>
   );
 }

@@ -99,6 +99,7 @@ function snapshotHasContent(snapshot: ProjectRepoSnapshot | null | undefined) {
 }
 
 type ProjectDetailScreenProps = {
+  commitHash?: string;
   projectId: string;
   pullRequestId?: string;
   issueId?: string;
@@ -111,7 +112,7 @@ const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
 ] as const;
 
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
-  const { projectId, pullRequestId, issueId } = props;
+  const { commitHash, projectId, pullRequestId, issueId } = props;
   const { goChannel, goProjects } = useAppNavigation();
   const { activeWorkspace } = useWorkspaces();
   const mainInsetRef = useMainInsetRef();
@@ -156,22 +157,17 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   React.useEffect(() => setSelectedIssueId(issueId ?? null), [issueId]);
   const [selectedCommitHash, setSelectedCommitHash] = React.useState<
     string | null
-  >(null);
+  >(commitHash ?? null);
+  React.useEffect(
+    () => setSelectedCommitHash(commitHash ?? null),
+    [commitHash],
+  );
   // Bumped when breadcrumb navigation should land on the project Overview
   // tab; remounts WorkspaceTabs, which owns the selected-tab state.
   const [tabsResetKey, setTabsResetKey] = React.useState(0);
   // Mirror of the WorkspaceTabs selection so the breadcrumb can name the
   // active sub-tab. The Overview (readme) tab is "home" and gets no crumb.
   const [activeTab, setActiveTab] = React.useState("overview");
-  // Commit selection has no URL param, so reset it when navigating to a
-  // different project within the same mounted route.
-  const commitProjectIdRef = React.useRef(projectId);
-  React.useEffect(() => {
-    if (commitProjectIdRef.current !== projectId) {
-      commitProjectIdRef.current = projectId;
-      setSelectedCommitHash(null);
-    }
-  }, [projectId]);
   // Commit, PR, and issue details are mutually exclusive views, so opening
   // one clears the others.
   const handleSelectedPullRequestIdChange = React.useCallback(

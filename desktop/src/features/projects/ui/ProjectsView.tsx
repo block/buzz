@@ -269,6 +269,13 @@ export function ProjectsView() {
     [goProject],
   );
 
+  const handleOpenCommit = React.useCallback(
+    (project: Project, commitHash: string) => {
+      void goProject(project.id, { commitHash });
+    },
+    [goProject],
+  );
+
   const handleOpenPullRequest = React.useCallback(
     (project: Project, pullRequest: ProjectPullRequest) => {
       void goProject(project.id, { pullRequestId: pullRequest.id });
@@ -447,6 +454,7 @@ export function ProjectsView() {
         projectIssuesQuery.isLoading
       }
       issues={projectIssuesQuery.data ?? []}
+      onOpenCommit={handleOpenCommit}
       onOpenIssue={handleOpenIssue}
       onOpenProject={handleOpenProject}
       onOpenPullRequest={handleOpenPullRequest}
@@ -486,8 +494,8 @@ export function ProjectsView() {
           workspaceId={activeWorkspace?.id ?? null}
         />
       ) : (
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
-          <div className="pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1rem)]">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto px-4 pb-4">
+          <div className="w-full min-w-0 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1rem)]">
             {filter === "all" ? (
               <ProjectsOverviewPanel
                 localRepositoryCount={localProjectCount}

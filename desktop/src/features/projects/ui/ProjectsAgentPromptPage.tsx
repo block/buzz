@@ -1,4 +1,11 @@
-import { ChevronDown, Loader2, SendHorizontal, Trash2 } from "lucide-react";
+import { EditorContent } from "@tiptap/react";
+import {
+  ALargeSmall,
+  ChevronDown,
+  Loader2,
+  SendHorizontal,
+  Trash2,
+} from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -18,6 +25,12 @@ import {
   useChannelMessagesQuery,
   useChannelSubscription,
 } from "@/features/messages/hooks";
+import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
+import {
+  type LinkSelectionInfo,
+  useRichTextEditor,
+} from "@/features/messages/lib/useRichTextEditor";
+import { FormattingToolbar } from "@/features/messages/ui/FormattingToolbar";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Project } from "@/features/projects/hooks";
 import {
@@ -322,9 +335,17 @@ export function ProjectsAgentPromptPage({
     () => storedConversation?.agentPubkey ?? null,
   );
   const [isSending, setIsSending] = React.useState(false);
+  const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
   const [conversation, setConversation] =
     React.useState<ProjectAgentConversation | null>(null);
-  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const submitPromptRef = React.useRef<() => void>(() => {});
+  const onEditLinkRef = React.useRef<
+    ((info: LinkSelectionInfo) => void) | null
+  >(null);
+  const onLinkSelectionChangeRef = React.useRef<
+    ((info: LinkSelectionInfo | null) => void) | null
+  >(null);
+  const onLinkShortcutRef = React.useRef<(() => boolean) | null>(null);
 
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
@@ -394,6 +415,28 @@ export function ProjectsAgentPromptPage({
     candidates.find((candidate) => candidate.pubkey === selectedPubkey) ??
     candidates[0] ??
     null;
+  const richText = useRichTextEditor({
+    editable: !isSending,
+    onEditLink: (info) => onEditLinkRef.current?.(info),
+    onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
+    onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
+    onSubmit: () => submitPromptRef.current(),
+    onUpdate: ({ text }) => setPrompt(text),
+    placeholder: conversation
+      ? `Reply to ${conversation.agent.name}…`
+      : "Are we safe to release this week?",
+  });
+  const linkEditor = useLinkEditor(richText);
+  onEditLinkRef.current = linkEditor.openFromClick;
+  onLinkSelectionChangeRef.current = linkEditor.showFromCursor;
+  onLinkShortcutRef.current = linkEditor.openFromShortcut;
+
+  React.useEffect(() => {
+    if (!richText.editor) return;
+    const frame = window.requestAnimationFrame(richText.focusPreserve);
+    return () => window.cancelAnimationFrame(frame);
+  }, [richText.editor, richText.focusPreserve]);
+
   const suggestions = React.useMemo(
     () => buildSuggestions(projects),
     [projects],
@@ -401,7 +444,7 @@ export function ProjectsAgentPromptPage({
   const canSubmit = Boolean(prompt.trim() && selectedAgent && !isSending);
 
   const handleSubmit = React.useCallback(async () => {
-    const trimmed = prompt.trim();
+    const trimmed = richText.getMarkdown().trim();
     if (!trimmed || !selectedAgent || isSending) return;
 
     setIsSending(true);
@@ -437,6 +480,7 @@ export function ProjectsAgentPromptPage({
         writeStoredProjectsAgentConversation(workspaceId, stored);
       }
       setPrompt("");
+      richText.clearContent();
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Failed to reach the agent",
@@ -450,11 +494,15 @@ export function ProjectsAgentPromptPage({
     isSending,
     openDmMutation,
     projects,
-    prompt,
+    richText.clearContent,
+    richText.getMarkdown,
     selectedAgent,
     startAgentMutation,
     workspaceId,
   ]);
+  submitPromptRef.current = () => {
+    void handleSubmit();
+  };
 
   const handleClearConversation = React.useCallback(() => {
     const nextClearedAt = Date.now();
@@ -464,116 +512,130 @@ export function ProjectsAgentPromptPage({
     setConversation(null);
     setSelectedPubkey(null);
     setPrompt("");
-  }, [workspaceId]);
+    richText.clearContent();
+  }, [richText.clearContent, workspaceId]);
 
   const promptBox = (
-    <div className="rounded-2xl border border-border/60 bg-card p-3 shadow-sm">
-      <textarea
-        aria-label="Ask an agent"
-        // biome-ignore lint/a11y/noAutofocus: this page exists only to type a prompt
-        autoFocus
-        className="max-h-40 w-full resize-none bg-transparent text-base text-foreground outline-hidden placeholder:text-muted-foreground/55"
-        onChange={(event) => setPrompt(event.target.value)}
-        onKeyDown={(event) => {
-          if (
-            event.key === "Enter" &&
-            !event.shiftKey &&
-            !event.nativeEvent.isComposing
-          ) {
-            event.preventDefault();
-            void handleSubmit();
-            return;
-          }
-          if (event.key === "Escape") {
-            event.preventDefault();
-            onClose();
-          }
-        }}
-        placeholder={
-          conversation
-            ? `Reply to ${conversation.agent.name}…`
-            : "Are we safe to release this week?"
-        }
-        ref={textareaRef}
-        rows={2}
-        value={prompt}
-      />
-      <div className="flex items-center justify-between gap-2 pt-2">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              className="h-7 max-w-56 gap-1.5 rounded-full px-2.5 text-xs"
-              data-testid="projects-agent-picker"
-              disabled={candidates.length === 0 || conversation !== null}
-              size="sm"
-              type="button"
-              variant="ghost"
-            >
-              {selectedAgent ? (
-                <UserAvatar
-                  accent
-                  avatarUrl={avatarUrlFor(selectedAgent.pubkey)}
-                  className="shrink-0"
-                  displayName={selectedAgent.name}
-                  size="xs"
-                />
-              ) : null}
-              <span className="min-w-0 truncate">
-                {selectedAgent?.name ?? "No agents available"}
-              </span>
-              {candidates.length > 0 && conversation === null ? (
-                <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
-              ) : null}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="min-w-52">
-            <DropdownMenuRadioGroup
-              onValueChange={setSelectedPubkey}
-              value={selectedAgent?.pubkey ?? ""}
-            >
-              {candidates.map((candidate) => (
-                <DropdownMenuRadioItem
-                  key={candidate.pubkey}
-                  value={candidate.pubkey}
-                >
-                  <UserAvatar
-                    accent
-                    avatarUrl={avatarUrlFor(candidate.pubkey)}
-                    className="mr-2 shrink-0"
-                    displayName={candidate.name}
-                    size="xs"
-                  />
-                  <span className="min-w-0 truncate">{candidate.name}</span>
-                  <span
-                    className={cn(
-                      "ml-2 h-1.5 w-1.5 shrink-0 rounded-full",
-                      candidate.isActive
-                        ? "bg-emerald-500"
-                        : "bg-muted-foreground/40",
-                    )}
-                  />
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <Button
-          className="h-7 gap-1.5 rounded-full px-3 text-xs"
-          disabled={!canSubmit}
-          onClick={() => void handleSubmit()}
-          size="sm"
-          type="button"
-          variant="default"
+    <>
+      <div className="rounded-2xl border border-border/60 bg-card p-3 shadow-sm">
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: Escape closes the full-page prompt while Tiptap owns text input */}
+        <div
+          className="rich-text-composer relative max-h-40 min-h-10 overflow-y-auto"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              onClose();
+            }
+          }}
         >
-          {isSending ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <SendHorizontal className="h-3.5 w-3.5" />
-          )}
-          Ask
-        </Button>
+          <EditorContent editor={richText.editor} />
+        </div>
+        <div className="flex items-center justify-between gap-2 pt-2">
+          <div className="flex min-w-0 items-center gap-1">
+            <Button
+              aria-label="Toggle formatting"
+              aria-pressed={isFormattingOpen}
+              className="h-7 w-7 shrink-0 px-0"
+              disabled={isSending}
+              onClick={() => setIsFormattingOpen((open) => !open)}
+              size="icon"
+              title="Formatting"
+              type="button"
+              variant={isFormattingOpen ? "default" : "ghost"}
+            >
+              <ALargeSmall className="h-4 w-4" />
+            </Button>
+            {isFormattingOpen ? (
+              <div className="min-w-0 overflow-x-auto">
+                <FormattingToolbar
+                  disabled={isSending}
+                  editor={richText.editor}
+                  onLinkButton={linkEditor.openFromToolbar}
+                />
+              </div>
+            ) : (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    className="h-7 max-w-56 gap-1.5 rounded-full px-2.5 text-xs"
+                    data-testid="projects-agent-picker"
+                    disabled={candidates.length === 0 || conversation !== null}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                  >
+                    {selectedAgent ? (
+                      <UserAvatar
+                        accent
+                        avatarUrl={avatarUrlFor(selectedAgent.pubkey)}
+                        className="shrink-0"
+                        displayName={selectedAgent.name}
+                        size="xs"
+                      />
+                    ) : null}
+                    <span className="min-w-0 truncate">
+                      {selectedAgent?.name ?? "No agents available"}
+                    </span>
+                    {candidates.length > 0 && conversation === null ? (
+                      <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+                    ) : null}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="min-w-52">
+                  <DropdownMenuRadioGroup
+                    onValueChange={setSelectedPubkey}
+                    value={selectedAgent?.pubkey ?? ""}
+                  >
+                    {candidates.map((candidate) => (
+                      <DropdownMenuRadioItem
+                        key={candidate.pubkey}
+                        value={candidate.pubkey}
+                      >
+                        <UserAvatar
+                          accent
+                          avatarUrl={avatarUrlFor(candidate.pubkey)}
+                          className="mr-2 shrink-0"
+                          displayName={candidate.name}
+                          size="xs"
+                        />
+                        <span className="min-w-0 truncate">
+                          {candidate.name}
+                        </span>
+                        <span
+                          className={cn(
+                            "ml-2 h-1.5 w-1.5 shrink-0 rounded-full",
+                            candidate.isActive
+                              ? "bg-emerald-500"
+                              : "bg-muted-foreground/40",
+                          )}
+                        />
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </div>
+          <Button
+            className="h-7 gap-1.5 rounded-full px-3 text-xs"
+            disabled={!canSubmit}
+            onClick={() => void handleSubmit()}
+            size="sm"
+            type="button"
+            variant="default"
+          >
+            {isSending ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <SendHorizontal className="h-3.5 w-3.5" />
+            )}
+            Ask
+          </Button>
+        </div>
       </div>
-    </div>
+      {linkEditor.card}
+      {linkEditor.dialog}
+    </>
   );
 
   if (conversation) {
@@ -632,7 +694,8 @@ export function ProjectsAgentPromptPage({
                 key={suggestion.label}
                 onClick={() => {
                   setPrompt(suggestion.prompt);
-                  textareaRef.current?.focus();
+                  richText.setContent(suggestion.prompt);
+                  richText.focusEnd();
                 }}
                 type="button"
               >
