@@ -246,10 +246,6 @@ export function AgentInstanceEditDialog({
     return options;
   }, [sortedRuntimes, selectedRuntimeId]);
 
-  const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection(
-    selectedRuntime?.id ?? selectedRuntimeId,
-  );
-
   // Resolve the dialog-opening command as the catalog loads. Edit-state runtime
   // ids mutate during selection changes and cannot identify the original state.
   const originalRuntimeSupportsProvider = React.useMemo(() => {
@@ -259,49 +255,6 @@ export function AgentInstanceEditDialog({
       runtimes.find((r) => r.id === originalCommand);
     return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
   }, [runtimes, originalAgentCommand]);
-
-  // One-shot focus: when the dialog opens from a card deep-link, scroll and
-  // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
-  // changes so a provider-field focus request fires once the field materializes
-  // (the runtime catalog may still be loading at click time). A one-shot fired
-  // ref prevents re-focusing on unrelated re-renders after the target is ready.
-  const normalizedFieldFocusFiredRef = React.useRef(false);
-  // Reset the fired guard whenever the focus request changes (new open, new
-  // focus target, or dialog switched to a different agent).
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — reset guard on these three; llmProviderFieldVisible drives the focus attempt below
-  React.useEffect(() => {
-    normalizedFieldFocusFiredRef.current = false;
-  }, [open, initialFocus, agent.pubkey]);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — llmProviderFieldVisible is the availability signal that re-triggers the focus attempt; agent.pubkey handles agent-switch
-  React.useEffect(() => {
-    if (!open || !initialFocus) return;
-    if (initialFocus.type !== "normalized_field") return;
-    if (normalizedFieldFocusFiredRef.current) return;
-
-    // For "provider" focus: the provider dropdown is only rendered when
-    // llmProviderFieldVisible is true (runtime catalog resolved). Bail until
-    // it materializes — this effect re-runs when llmProviderFieldVisible flips.
-    const targetId =
-      initialFocus.field === "provider"
-        ? "edit-agent-llm-provider"
-        : "edit-agent-model";
-    const el = document.getElementById(targetId);
-    // PersonaDropdownField renders a <button> (DropdownMenuTrigger), not a
-    // native <select> — guard against HTMLElement (focus + scrollIntoView
-    // both exist on HTMLElement).
-    if (!(el instanceof HTMLElement)) return;
-
-    normalizedFieldFocusFiredRef.current = true;
-
-    const id = requestAnimationFrame(() => {
-      el.scrollIntoView({ block: "nearest" });
-      el.focus();
-    });
-
-    return () => cancelAnimationFrame(id);
-  }, [open, initialFocus, agent.pubkey, llmProviderFieldVisible]);
-  // env_key is handled by EnvVarsEditor via focusKey prop below.
 
   // The runtime id that will actually be active after submit. When inheriting,
   // resolve from the LINKED PERSONA's runtime — that is what will run once the
@@ -340,6 +293,41 @@ export function AgentInstanceEditDialog({
     selectedRuntime?.id,
     selectedRuntimeId,
   ]);
+
+  const llmProviderFieldVisible =
+    runtimeSupportsLlmProviderSelection(prospectiveRuntimeId);
+
+  // One-shot focus: when the dialog opens from a card deep-link, scroll and
+  // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
+  // changes so a provider-field focus request fires once the field materializes.
+  const normalizedFieldFocusFiredRef = React.useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — reset guard on these three; llmProviderFieldVisible drives the focus attempt below
+  React.useEffect(() => {
+    normalizedFieldFocusFiredRef.current = false;
+  }, [open, initialFocus, agent.pubkey]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — llmProviderFieldVisible is the availability signal that re-triggers the focus attempt; agent.pubkey handles agent-switch
+  React.useEffect(() => {
+    if (!open || !initialFocus) return;
+    if (initialFocus.type !== "normalized_field") return;
+    if (normalizedFieldFocusFiredRef.current) return;
+
+    const targetId =
+      initialFocus.field === "provider"
+        ? "edit-agent-llm-provider"
+        : "edit-agent-model";
+    const el = document.getElementById(targetId);
+    if (!(el instanceof HTMLElement)) return;
+
+    normalizedFieldFocusFiredRef.current = true;
+
+    const id = requestAnimationFrame(() => {
+      el.scrollIntoView({ block: "nearest" });
+      el.focus();
+    });
+
+    return () => cancelAnimationFrame(id);
+  }, [open, initialFocus, agent.pubkey, llmProviderFieldVisible]);
 
   // Provider + env to PERSIST on submit — also fed to the credential gate so
   // gate, saved record, and spawn snapshot all agree on one resolved value.
@@ -386,15 +374,20 @@ export function AgentInstanceEditDialog({
   // provider is empty (global-provider-only configs must surface required keys).
   // Pass globalEnvVars so keys satisfied by global config are excluded from
   // requiredEnvKeys and do not block Save (display and gate agree).
-  const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
-    useRequiredCredentialState({
-      open,
-      prospectiveRuntimeId,
-      provider: inheritedSubmission.provider ?? "",
-      globalProvider: inheritedProviderDefault.value,
-      envVars: inheritedSubmission.envVars,
-      globalEnvVars: globalConfig.env_vars,
-    });
+  const {
+    requiredEnvKeys,
+    fileSatisfiedEnvKeys,
+    requiredEnvKeyMissing,
+    settled: credentialSettled,
+  } = useRequiredCredentialState({
+    open,
+    prospectiveRuntimeId,
+    provider: inheritedSubmission.provider ?? "",
+    globalProvider: inheritedProviderDefault.value,
+    envVars: inheritedSubmission.envVars,
+    globalEnvVars: globalConfig.env_vars,
+    personaEnvVars: inheritHarness ? inheritedEnvVars : undefined,
+  });
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
 
@@ -446,6 +439,7 @@ export function AgentInstanceEditDialog({
     personaSatisfied,
     provider: effectiveProvider,
     requiredEnvKeys,
+    satisfactionSettled: credentialSettled,
     setShowAdvancedFields,
   });
   const {

@@ -21,6 +21,8 @@ export interface RequiredCredentialState {
   fileSatisfiedEnvKeys: string[];
   /** Whether any required env key is still missing (blocks Save). */
   requiredEnvKeyMissing: boolean;
+  /** True once all async satisfaction sources (baked, file config) have resolved. */
+  settled: boolean;
 }
 
 /**
@@ -55,6 +57,10 @@ export function useRequiredCredentialState(params: {
   /** Global config env vars; keys satisfied here are excluded from required
    *  rows and do not block Save — mirrors the agent→global→file precedence. */
   globalEnvVars?: Record<string, string>;
+  /** Persona env vars; keys satisfied here are excluded from required rows
+   *  (mirrors backend readiness.rs which layers live_persona_env under record
+   *  env). An explicit local empty shadows the persona value. */
+  personaEnvVars?: Record<string, string>;
 }): RequiredCredentialState {
   const {
     open,
@@ -63,6 +69,7 @@ export function useRequiredCredentialState(params: {
     globalProvider = "",
     envVars,
     globalEnvVars = {},
+    personaEnvVars = {},
   } = params;
 
   const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
@@ -71,12 +78,13 @@ export function useRequiredCredentialState(params: {
     ? provider.trim() || globalProvider.trim()
     : "";
 
-  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
-    prospectiveRuntimeId,
-    { enabled: open },
-  );
+  const { data: runtimeFileConfig, isLoading: fileConfigLoading } =
+    useRuntimeFileConfigQuery(prospectiveRuntimeId, { enabled: open });
 
-  const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
+  const { data: bakedEnvKeys, isLoading: bakedLoading } =
+    useBakedBuildEnvKeysQuery({ enabled: open });
+
+  const settled = !fileConfigLoading && !bakedLoading;
 
   // All required keys for this runtime + provider combination.
   const allRequiredKeys = React.useMemo(
@@ -107,16 +115,15 @@ export function useRequiredCredentialState(params: {
         (key) =>
           !bakedSatisfiedKeys.includes(key) &&
           !fileSatisfiedEnvKeys.includes(key) &&
-          // isGloballySatisfiedCredentialKey returns true when global has the key
-          // AND agent-local has NOT explicitly shadowed it with "" — same semantics
-          // as computeLocalModeGate, preventing create/edit gate drift.
-          !isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars),
+          !isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars) &&
+          !isGloballySatisfiedCredentialKey(key, personaEnvVars, envVars),
       ),
     [
       allRequiredKeys,
       bakedSatisfiedKeys,
       fileSatisfiedEnvKeys,
       globalEnvVars,
+      personaEnvVars,
       envVars,
     ],
   );
@@ -126,5 +133,10 @@ export function useRequiredCredentialState(params: {
     [requiredEnvKeys, envVars],
   );
 
-  return { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing };
+  return {
+    requiredEnvKeys,
+    fileSatisfiedEnvKeys,
+    requiredEnvKeyMissing,
+    settled,
+  };
 }

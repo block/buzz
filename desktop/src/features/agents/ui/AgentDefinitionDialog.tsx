@@ -318,9 +318,8 @@ export function AgentDefinitionDialog({
   // locked rows in the env vars editor.
   // File-layer config for the selected runtime (e.g. goose config.yaml).
   // Used to silence requirements already satisfied there.
-  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
-    enabled: open,
-  });
+  const { data: runtimeFileConfig, isLoading: fileConfigLoading } =
+    useRuntimeFileConfigQuery(runtime, { enabled: open });
   const {
     advancedInheritedSummary,
     globalConfig,
@@ -330,7 +329,9 @@ export function AgentDefinitionDialog({
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ open });
-  const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
+  const { data: bakedEnvKeys, isLoading: bakedLoading } =
+    useBakedBuildEnvKeysQuery({ enabled: open });
+  const credentialSettled = !fileConfigLoading && !bakedLoading;
   const localModeGate = React.useMemo(
     () =>
       computeLocalModeGate({
@@ -380,6 +381,7 @@ export function AgentDefinitionDialog({
     open,
     provider: effectiveProvider,
     requiredEnvKeys,
+    satisfactionSettled: credentialSettled,
     setShowAdvancedFields,
   });
   const {
