@@ -1010,6 +1010,66 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn populated_upgrade_preserves_search_policy_except_for_push_leases() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(7, &pool)
+            .await
+            .expect("apply migrations 1-7");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("pre-0008-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+
+        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32)] {
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
+                 VALUES ($1, $2, $3, NOW(), $4, '[]'::jsonb, 'brownfield needle', $5, NOW())",
+            )
+            .bind(community_id)
+            .bind(vec![marker; 32])
+            .bind(vec![marker + 10; 32])
+            .bind(kind)
+            .bind(vec![marker + 20; 64])
+            .execute(&pool)
+            .await
+            .expect("insert brownfield event");
+        }
+
+        MIGRATOR
+            .run_to(11, &pool)
+            .await
+            .expect("apply main migrations through 11");
+        let before: Vec<(i32, bool)> = sqlx::query_as(
+            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
+             FROM events ORDER BY kind",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read pre-push search behavior");
+        assert_eq!(before, vec![(1, true), (30_350, true)]);
+
+        run_migrations(&pool)
+            .await
+            .expect("apply push migrations to populated database");
+        let after: Vec<(i32, Option<bool>)> = sqlx::query_as(
+            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
+             FROM events ORDER BY kind",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read post-push search behavior");
+        assert_eq!(after, vec![(1, Some(true)), (30_350, None)]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn run_migrations_applies_consolidated_initial_schema_on_fresh_database() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
