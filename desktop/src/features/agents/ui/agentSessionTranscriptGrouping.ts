@@ -778,7 +778,7 @@ export function getDisplayBlockKey(block: TranscriptDisplayBlock): string {
 export function deriveTranscriptBlockIds(
   events: readonly ObserverEvent[],
 ): string[] {
-  const items = buildTranscriptState(events as ObserverEvent[]).items;
+  const items = buildTranscriptState(events).items;
   const blocks = buildTranscriptDisplayBlocks(items);
   return blocks.map(getDisplayBlockKey);
 }

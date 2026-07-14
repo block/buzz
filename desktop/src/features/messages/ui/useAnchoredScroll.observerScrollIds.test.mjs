@@ -270,6 +270,7 @@ test("mid-history: same message ids → zero scrollTo writes", async () => {
     container: { current: null },
     content: { current: {} },
   };
+  const onScrollRef = { current: null };
   const root = createRoot(document.createElement("div"));
 
   const container = makeContainer({
@@ -277,6 +278,14 @@ test("mid-history: same message ids → zero scrollTo writes", async () => {
     scrollHeight: 2000,
     scrollTop: 0,
   });
+  // Fake [data-message-id] row so computeAnchor can find a mid-history anchor.
+  const fakeRow = {
+    dataset: { messageId: "turn:t1" },
+    getBoundingClientRect() {
+      return { top: 100, bottom: 140, height: 40 };
+    },
+  };
+  container.querySelectorAll = () => [fakeRow];
   refs.container.current = container;
 
   const messages = [{ id: "turn:t1" }, { id: "turn:t2" }, { id: "turn:t3" }];
@@ -288,23 +297,34 @@ test("mid-history: same message ids → zero scrollTo writes", async () => {
         channelId: "agent:chan:transcript",
         isLoading: false,
         messages,
+        onScrollRef,
         refs,
       }),
     );
   });
   await flushRaf();
 
-  // Simulate user scrolling up to mid-history (scrollTop < scrollHeight).
+  // Latch mid-history: double onScroll to clear the settle guard + latch anchor.
   container.scrollTop = 500;
-  const writesAfterScroll = container.writes.length;
+  await act(async () => {
+    onScrollRef.current?.();
+  });
+  container.scrollTop = 500;
+  await act(async () => {
+    onScrollRef.current?.();
+  });
+  await flushRaf();
 
-  // Re-render with the SAME messages reference while mid-history.
+  const writesAfterLatch = container.writes.length;
+
+  // Re-render with the SAME messages reference while genuinely mid-history.
   await act(async () => {
     root.render(
       React.createElement(ObserverFeedHarness, {
         channelId: "agent:chan:transcript",
         isLoading: false,
         messages, // same reference
+        onScrollRef,
         refs,
       }),
     );
@@ -313,7 +333,7 @@ test("mid-history: same message ids → zero scrollTo writes", async () => {
 
   assert.equal(
     container.writes.length,
-    writesAfterScroll,
+    writesAfterLatch,
     "same messages reference mid-history → zero scrollTo writes (no yank)",
   );
 

@@ -12,6 +12,7 @@ import {
 } from "@/features/agents/observerRelayStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
+import { useStableArrayShallow } from "@/shared/hooks/useStableReference";
 import { cn } from "@/shared/lib/cn";
 import {
   Dialog,
@@ -155,13 +156,27 @@ export function AgentSessionTranscriptList({
     () => buildTranscriptDisplayBlocks(items, latestLiveSessionId),
     [items, latestLiveSessionId],
   );
+  // Derive the same block keys the DOM renders as `data-message-id` so
+  // useAnchoredScroll anchors on real DOM rows. Value-stabilized so the
+  // hook's restoration effect only fires when the ordered block sequence
+  // actually changes (same pattern as AgentSessionThreadPanel).
+  const blockKeys = React.useMemo(
+    () => (autoTail ? displayBlocks.map(getDisplayBlockKey) : []),
+    [autoTail, displayBlocks],
+  );
+  const stableBlockKeys = useStableArrayShallow(blockKeys);
+  const scrollMessages = React.useMemo(
+    () => stableBlockKeys.map((id) => ({ id })),
+    [stableBlockKeys],
+  );
+
   const scrollContainerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
   const anchoredScroll = useAnchoredScroll({
     channelId: autoTail ? (scrollScopeKey ?? agentPubkey) : null,
     contentRef,
     isLoading: false,
-    messages: items,
+    messages: scrollMessages,
     scrollContainerRef,
   });
 

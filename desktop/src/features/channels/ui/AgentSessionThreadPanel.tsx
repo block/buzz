@@ -177,8 +177,8 @@ export function AgentSessionThreadPanel({
   // never keys (agentSessionTranscriptGrouping.ts:557-574), so we avoid
   // subscribing to the observer store from the outer panel.
   const transcriptBlockIds = React.useMemo(
-    () => deriveTranscriptBlockIds(combinedHeaderEvents),
-    [combinedHeaderEvents],
+    () => (showRawFeed ? [] : deriveTranscriptBlockIds(combinedHeaderEvents)),
+    [combinedHeaderEvents, showRawFeed],
   );
 
   // Stabilize the id array by VALUE so the hook's restoration effect (keyed on
