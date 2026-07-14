@@ -688,6 +688,9 @@ test("custom personas share with people and keep export separate", async ({
       `persona-share-recipient-chip-${TEST_IDENTITIES.charlie.pubkey}`,
     ),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Verify charlie public key" }),
+  ).toHaveCount(0);
   await expect(recipientSearch).toHaveValue("");
   await expect(recipientSearch).toHaveAttribute("placeholder", "");
   await expect(

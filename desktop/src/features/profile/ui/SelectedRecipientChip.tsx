@@ -20,12 +20,13 @@ type SelectedRecipientChipTestIds = {
 
 /**
  * The selected-recipient pill shared by recipient pickers. Its avatar becomes
- * the remove affordance on hover/focus, while the name exposes the full key for
- * identity verification.
+ * the remove affordance on hover/focus. Surfaces that need identity
+ * verification can also make the name open the recipient's full key.
  */
 export function SelectedRecipientChip({
   disabled,
-  inspectionOpen,
+  inspectable = true,
+  inspectionOpen = false,
   label,
   onInspectionOpenChange,
   onRemove,
@@ -33,9 +34,10 @@ export function SelectedRecipientChip({
   user,
 }: {
   disabled: boolean;
-  inspectionOpen: boolean;
+  inspectable?: boolean;
+  inspectionOpen?: boolean;
   label: string;
-  onInspectionOpenChange: (open: boolean) => void;
+  onInspectionOpenChange?: (open: boolean) => void;
   onRemove: () => void;
   testIds?: SelectedRecipientChipTestIds;
   user: UserSearchResult;
@@ -74,41 +76,45 @@ export function SelectedRecipientChip({
           <X aria-hidden="true" className="h-3 w-3" />
         </span>
       </button>
-      <Popover onOpenChange={onInspectionOpenChange} open={inspectionOpen}>
-        <PopoverAnchor asChild>
-          <button
-            aria-expanded={inspectionOpen}
-            aria-haspopup="dialog"
-            aria-label={`Verify ${label} public key`}
-            className="min-w-0 cursor-pointer truncate rounded font-medium hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-            data-testid={testIds?.name}
-            onClick={(event) => {
-              event.stopPropagation();
-              onInspectionOpenChange(!inspectionOpen);
-            }}
-            type="button"
+      {inspectable ? (
+        <Popover onOpenChange={onInspectionOpenChange} open={inspectionOpen}>
+          <PopoverAnchor asChild>
+            <button
+              aria-expanded={inspectionOpen}
+              aria-haspopup="dialog"
+              aria-label={`Verify ${label} public key`}
+              className="min-w-0 cursor-pointer truncate rounded font-medium hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+              data-testid={testIds?.name}
+              onClick={(event) => {
+                event.stopPropagation();
+                onInspectionOpenChange?.(!inspectionOpen);
+              }}
+              type="button"
+            >
+              {label}
+            </button>
+          </PopoverAnchor>
+          <PopoverContent
+            align="start"
+            className="w-96 max-w-[90vw] space-y-2"
+            data-recipient-key-popover=""
+            data-testid={testIds?.keyPopover}
+            onOpenAutoFocus={(event) => event.preventDefault()}
           >
-            {label}
-          </button>
-        </PopoverAnchor>
-        <PopoverContent
-          align="start"
-          className="w-96 max-w-[90vw] space-y-2"
-          data-recipient-key-popover=""
-          data-testid={testIds?.keyPopover}
-          onOpenAutoFocus={(event) => event.preventDefault()}
-        >
-          <p className="text-sm font-medium">Verify {label}</p>
-          <PubKey
-            pubkey={user.pubkey}
-            testId={testIds?.pubkey}
-            variant="full"
-          />
-          <p className="break-all font-mono text-xs text-muted-foreground">
-            {user.pubkey}
-          </p>
-        </PopoverContent>
-      </Popover>
+            <p className="text-sm font-medium">Verify {label}</p>
+            <PubKey
+              pubkey={user.pubkey}
+              testId={testIds?.pubkey}
+              variant="full"
+            />
+            <p className="break-all font-mono text-xs text-muted-foreground">
+              {user.pubkey}
+            </p>
+          </PopoverContent>
+        </Popover>
+      ) : (
+        <span className="min-w-0 truncate font-medium">{label}</span>
+      )}
       {user.isAgent ? (
         <Bot
           aria-label="agent"

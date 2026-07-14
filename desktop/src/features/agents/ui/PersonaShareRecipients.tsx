@@ -46,8 +46,6 @@ export function PersonaShareRecipients({
 }) {
   const [searchQuery, setSearchQuery] = React.useState("");
   const [isPickerOpen, setIsPickerOpen] = React.useState(false);
-  const [inspectedRecipientPubkey, setInspectedRecipientPubkey] =
-    React.useState<string | null>(null);
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const deferredSearchQuery = React.useDeferredValue(searchQuery.trim());
   const identityQuery = useIdentityQuery();
@@ -108,7 +106,6 @@ export function PersonaShareRecipients({
     if (!open) {
       setSearchQuery("");
       setIsPickerOpen(false);
-      setInspectedRecipientPubkey(null);
     }
   }, [open]);
 
@@ -121,9 +118,6 @@ export function PersonaShareRecipients({
   }
 
   function removeUser(pubkey: string) {
-    setInspectedRecipientPubkey((current) =>
-      current === pubkey ? null : current,
-    );
     onSelectionChange(
       selectedUsers.filter(
         (user) => normalizePubkey(user.pubkey) !== normalizePubkey(pubkey),
@@ -136,9 +130,7 @@ export function PersonaShareRecipients({
     <div className="min-w-0 flex-1">
       <Popover
         modal={false}
-        onOpenChange={(pickerOpen) => {
-          setIsPickerOpen(pickerOpen || inspectedRecipientPubkey !== null);
-        }}
+        onOpenChange={setIsPickerOpen}
         open={isPickerOpen && !disabled}
       >
         <PopoverAnchor asChild>
@@ -163,14 +155,9 @@ export function PersonaShareRecipients({
               {selectedUsers.map((user) => (
                 <SelectedRecipientChip
                   disabled={disabled}
-                  inspectionOpen={inspectedRecipientPubkey === user.pubkey}
+                  inspectable={false}
                   key={user.pubkey}
                   label={formatShareRecipientName(user)}
-                  onInspectionOpenChange={(inspectionOpen) => {
-                    setInspectedRecipientPubkey(
-                      inspectionOpen ? user.pubkey : null,
-                    );
-                  }}
                   onRemove={() => removeUser(user.pubkey)}
                   testIds={{
                     chip: `persona-share-recipient-chip-${user.pubkey}`,
@@ -248,15 +235,6 @@ export function PersonaShareRecipients({
           className="w-(--radix-popover-trigger-width) overflow-hidden p-0"
           data-testid="persona-share-recipient-popover"
           onCloseAutoFocus={(event) => event.preventDefault()}
-          onInteractOutside={(event) => {
-            const target = event.detail.originalEvent.target;
-            if (
-              target instanceof Element &&
-              target.closest("[data-recipient-key-popover]")
-            ) {
-              event.preventDefault();
-            }
-          }}
           onOpenAutoFocus={(event) => event.preventDefault()}
           sideOffset={6}
         >
