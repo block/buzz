@@ -69,10 +69,19 @@ harness_cli_manifest="$resource_root/harness-clis.json"
 rm -f "$harness_cli_manifest"
 harness_cli_entries=()
 
+# Ad-hoc signing failure is a warning, not a hard stop: an unsignable Mach-O
+# fragment that never executes should not sink the stage, and release builds
+# re-sign everything with the real identity anyway. But it must be visible —
+# a silently unsigned binary surfaces much later as Gatekeeper killing a
+# subprocess mid-session, which is undiagnosable from build output.
 codesign_if_darwin() {
   local file="$1"
+  local output
   if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
-    codesign --force --sign - "$file" >/dev/null 2>&1 || true
+    if ! output="$(codesign --force --sign - "$file" 2>&1)"; then
+      echo "Warning: ad-hoc codesign failed for $file — Gatekeeper may kill it at spawn time:" >&2
+      echo "$output" >&2
+    fi
   fi
 }
 
