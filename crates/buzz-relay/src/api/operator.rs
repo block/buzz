@@ -394,7 +394,7 @@ pub async fn transfer_community(
     // Best-effort NIP-43 membership snapshot publication — same pattern as
     // provision_community. The DB mutation is already committed; a publication
     // failure must not turn a success into an HTTP error.
-    if state.config.require_relay_membership {
+    if state.config.can_publish_membership_metadata() {
         if let Some(host) = state
             .db
             .lookup_community_host(community)

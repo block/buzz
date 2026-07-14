@@ -269,6 +269,14 @@ fn ensure_git_repo_path(
 }
 
 impl Config {
+    /// Whether this relay can publish durable, relay-signed membership metadata.
+    ///
+    /// Open relays use the same metadata to expose owner/admin capabilities to
+    /// clients without enforcing membership for reads or writes.
+    pub fn can_publish_membership_metadata(&self) -> bool {
+        self.relay_private_key.is_some()
+    }
+
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
         let bind_addr_raw =
@@ -682,6 +690,21 @@ mod tests {
     // Parallel env-var mutation causes `defaults_are_valid` to see the invalid
     // value set by `invalid_bind_addr_returns_error`, causing a flaky failure.
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn stable_signing_key_enables_membership_metadata_on_open_relay() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var(
+            "BUZZ_RELAY_PRIVATE_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        std::env::remove_var("BUZZ_REQUIRE_RELAY_MEMBERSHIP");
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("BUZZ_RELAY_PRIVATE_KEY");
+
+        assert!(!config.require_relay_membership);
+        assert!(config.can_publish_membership_metadata());
+    }
 
     #[test]
     fn defaults_are_valid() {

@@ -452,9 +452,12 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // NIP-43: publish the initial membership list on startup so clients can
-    // REQ kind:13534 immediately without waiting for the next membership change.
-    if config.require_relay_membership {
+    // NIP-43 membership metadata: publish the initial role snapshot so clients
+    // can discover owner/admin capabilities immediately. Closed relays require
+    // this for NIP-43 enforcement; open relays with a stable signing key publish
+    // the same metadata so owner-only settings remain discoverable without
+    // turning membership enforcement on.
+    if config.require_relay_membership || config.can_publish_membership_metadata() {
         let startup_state = Arc::clone(&state);
         tokio::spawn(async move {
             // Resolve the deployment's community from the configured relay URL
