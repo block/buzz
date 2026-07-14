@@ -26,6 +26,7 @@ import { AvatarStep } from "./AvatarStep";
 import { BackupStep } from "./BackupStep";
 import { MembershipDenied } from "./MembershipDenied";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import {
   type OnboardingTransitionDirection,
@@ -150,6 +151,8 @@ export function OnboardingFlow({
   initialProfile,
 }: OnboardingFlowProps) {
   const { complete, skipForNow } = actions;
+  const { activeCommunity, communities, updateCommunity, switchCommunity } =
+    useCommunities();
   const queryClient = useQueryClient();
   const savedProfile = resolveSavedProfile(initialProfile);
   const profileUpdateMutation = useUpdateProfileMutation();
@@ -472,16 +475,50 @@ export function OnboardingFlow({
     }
   }, [queryClient]);
 
+  const handleInviteRedeemed = React.useCallback(
+    (relayWsUrl: string) => {
+      if (!activeCommunity) return;
+      // Same-relay: membership claim updated this relay — just retry.
+      if (relayWsUrl === activeCommunity.relayUrl) {
+        void saveProfileAndContinue(membershipRetryPage);
+        return;
+      }
+      // Cross-relay: point the active community at the invite's relay.
+      // If that relay already exists as another community, switch to it.
+      const result = updateCommunity(activeCommunity.id, {
+        relayUrl: relayWsUrl,
+      });
+      if (result.kind === "duplicate-relay") {
+        const existing = communities.find((w) => w.relayUrl === relayWsUrl);
+        if (existing) {
+          switchCommunity(existing.id);
+        }
+      }
+      // On "updated", the reinitKey bump triggers a remount that re-runs the
+      // membership gate automatically.
+    },
+    [
+      activeCommunity,
+      communities,
+      membershipRetryPage,
+      saveProfileAndContinue,
+      switchCommunity,
+      updateCommunity,
+    ],
+  );
+
   if (currentPage === "membership-denied") {
     return (
       <>
         <MembershipDenied
+          activeRelayUrl={activeCommunity?.relayUrl ?? ""}
           onBack={() => {
             setTransitionDirection("backward");
             setCurrentPage(deniedFromPage);
           }}
           onChangeCommunity={() => setIsCommunityChangeOpen(true)}
           onImportKey={importExistingKey}
+          onInviteRedeemed={handleInviteRedeemed}
           onRetry={() => {
             void saveProfileAndContinue(membershipRetryPage);
           }}

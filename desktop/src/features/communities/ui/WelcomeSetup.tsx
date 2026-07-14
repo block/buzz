@@ -5,6 +5,9 @@ import {
   getIdentity,
   importIdentity as tauriImportIdentity,
 } from "@/shared/api/tauriIdentity";
+import { claimInvite } from "@/shared/api/invites";
+import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
+import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
 import { NostrKeyImportForm } from "@/features/onboarding/ui/NostrKeyImportForm";
 import {
   type OnboardingTransitionDirection,
@@ -19,7 +22,7 @@ import type { Community } from "../types";
 import { initFirstCommunity } from "../communityStorage";
 import { CommunityEditForm } from "./CommunityEditForm";
 
-type WelcomeSetupPage = "welcome" | "create-community" | "nostr-key";
+type WelcomeSetupPage = "welcome" | "create-community" | "invite" | "nostr-key";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
@@ -92,6 +95,8 @@ export function WelcomeSetup({
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
   const [isConnecting, setIsConnecting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [isRedeeming, setIsRedeeming] = React.useState(false);
+  const [inviteError, setInviteError] = React.useState<string | null>(null);
   const systemColorScheme = useSystemColorScheme();
 
   const handleConnect = React.useCallback(
@@ -153,10 +158,32 @@ export function WelcomeSetup({
     [defaultRelayUrl, handleConnect],
   );
 
+  const handleWelcomeInviteRedeem = React.useCallback(
+    async (relayWsUrl: string, code: string) => {
+      setIsRedeeming(true);
+      setInviteError(null);
+      try {
+        await claimInvite(relayWsUrl, code);
+        await handleConnect(relayWsUrl);
+      } catch (err) {
+        setInviteError(inviteErrorMessage(err));
+      } finally {
+        setIsRedeeming(false);
+      }
+    },
+    [handleConnect],
+  );
+
   const showCreateCommunityPage = React.useCallback(() => {
     setError(null);
     setTransitionMode("forward");
     setPage("create-community");
+  }, []);
+
+  const showInvitePage = React.useCallback(() => {
+    setInviteError(null);
+    setTransitionMode("forward");
+    setPage("invite");
   }, []);
 
   const showNostrKeyPage = React.useCallback(() => {
@@ -167,12 +194,19 @@ export function WelcomeSetup({
 
   const showWelcomePage = React.useCallback(() => {
     setError(null);
+    setInviteError(null);
     setTransitionMode("backward");
     setPage("welcome");
   }, []);
 
   const currentStep =
-    page === "welcome" ? (isConnecting ? 2 : 1) : page === "nostr-key" ? 1 : 2;
+    page === "welcome"
+      ? isConnecting
+        ? 2
+        : 1
+      : page === "nostr-key" || page === "invite"
+        ? 1
+        : 2;
   const transitionDirection =
     transitionMode === "backward" ? "backward" : "forward";
   const welcomeEffect =
@@ -250,6 +284,21 @@ export function WelcomeSetup({
               <Button
                 className="h-10 w-full"
                 aria-disabled={isConnecting}
+                onClick={() => {
+                  if (isConnecting) {
+                    return;
+                  }
+                  showInvitePage();
+                }}
+                type="button"
+                variant="ghost"
+              >
+                Have an invite?
+              </Button>
+
+              <Button
+                className="h-10 w-full"
+                aria-disabled={isConnecting}
                 data-testid="welcome-continue-nostr"
                 onClick={() => {
                   if (isConnecting) {
@@ -303,6 +352,38 @@ export function WelcomeSetup({
                   {error}
                 </p>
               ) : null}
+            </div>
+          </OnboardingSlideTransition>
+        ) : page === "invite" ? (
+          <OnboardingSlideTransition
+            className="flex w-full flex-col items-center text-center"
+            direction={transitionDirection}
+            transitionKey={`invite-${transitionDirection}`}
+          >
+            <div className="w-full max-w-[440px]">
+              <h1 className="text-3xl font-semibold tracking-tight">
+                Redeem an invite
+              </h1>
+              <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                Paste an invite link or code from a relay admin to join their
+                community.
+              </p>
+            </div>
+
+            <div className="mt-8 w-full">
+              <InviteRedeemForm
+                defaultRelayUrl={
+                  isLocalDevRelayUrl(defaultRelayUrl)
+                    ? undefined
+                    : defaultRelayUrl
+                }
+                error={inviteError}
+                isRedeeming={isRedeeming}
+                onCancel={showWelcomePage}
+                onRedeem={(relayWsUrl, code) => {
+                  void handleWelcomeInviteRedeem(relayWsUrl, code);
+                }}
+              />
             </div>
           </OnboardingSlideTransition>
         ) : (

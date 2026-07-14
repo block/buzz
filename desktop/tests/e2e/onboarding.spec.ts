@@ -1648,3 +1648,68 @@ test("cancel from profile Back preserves drafts and denied Back returns to inter
   await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
   await expect(nameInput).toHaveValue("Morty QA");
 });
+
+test("denied on relay A then paste relay B invite URL switches community to B", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      relayRole: null,
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  // Record the initial relay URL (relay A).
+  const initialRelayUrl = await page.evaluate(() => {
+    const raw = window.localStorage.getItem("buzz-communities");
+    const communities = raw
+      ? (JSON.parse(raw) as Array<{ relayUrl?: string }>)
+      : [];
+    return communities[0]?.relayUrl ?? null;
+  });
+  expect(initialRelayUrl).not.toBeNull();
+
+  // Fill name, advance → denied on relay A.
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+  await expect(page.getByTestId("membership-denied")).toBeVisible();
+
+  // Intercept the claimInvite POST to relay B so it succeeds.
+  const relayBUrl = "wss://relay-b.example.com";
+  const relayBHttpUrl = "https://relay-b.example.com";
+  await page.route(`${relayBHttpUrl}/api/invites/claim`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: "joined",
+        community_id: "mock-community",
+        host: "relay-b.example.com",
+        role: "member",
+      }),
+    });
+  });
+
+  // Click "Have an invite?" and enter an HTTPS invite URL for relay B.
+  await page.getByTestId("membership-denied-redeem-invite").click();
+  await page
+    .getByTestId("invite-redeem-input")
+    .fill(`${relayBHttpUrl}/invite/test-invite-code`);
+  await page.getByTestId("invite-redeem-submit").click();
+
+  // After successful claim, the community should switch to relay B's URL.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const raw = window.localStorage.getItem("buzz-communities");
+        const communities = raw
+          ? (JSON.parse(raw) as Array<{ relayUrl?: string }>)
+          : [];
+        return communities[0]?.relayUrl ?? null;
+      }),
+    )
+    .toBe(relayBUrl);
+});
