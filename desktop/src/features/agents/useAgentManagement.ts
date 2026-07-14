@@ -24,6 +24,7 @@ import {
   type BackendIntent,
 } from "./lib/instanceInputForDefinition";
 import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
+import { classifyAgentManagementSender } from "./agentManagementBuffer";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
@@ -75,27 +76,62 @@ export function useAgentManagement() {
   const seenRequestIds = React.useRef(new Set<string>());
   const pendingRequestId = React.useRef<string | null>(null);
   const sourceAgentPubkey = React.useRef<string | null>(null);
+  const managedAgentsRef = React.useRef(managedAgentsQuery.data);
+  const bufferedRequestsRef = React.useRef<
+    Array<{ agentPubkey: string; request: AgentManagementRequest }>
+  >([]);
+
+  const acceptOwnedRequest = React.useEffectEvent(
+    (agentPubkey: string, next: AgentManagementRequest) => {
+      if (
+        classifyAgentManagementSender(managedAgentsRef.current, agentPubkey) !==
+          "accept" ||
+        seenRequestIds.current.has(next.requestId)
+      ) {
+        return;
+      }
+      seenRequestIds.current.add(next.requestId);
+      setError(null);
+      if (pendingRequestId.current === null) {
+        pendingRequestId.current = next.requestId;
+        sourceAgentPubkey.current = agentPubkey;
+        setRequest(next);
+      }
+    },
+  );
+
+  React.useEffect(() => {
+    managedAgentsRef.current = managedAgentsQuery.data;
+    if (managedAgentsQuery.data) {
+      const buffered = bufferedRequestsRef.current.splice(0);
+      for (const candidate of buffered) {
+        acceptOwnedRequest(candidate.agentPubkey, candidate.request);
+      }
+    }
+  }, [managedAgentsQuery.data]);
 
   React.useEffect(
     () =>
       subscribeAgentManagementRequests((agentPubkey, next) => {
         // Observer frames are owner-scoped and authenticated. Any managed agent
-        // this Desktop owns may draft an agent change; the normal create/edit
-        // modal remains the owner-confirmed write gate. Frames from unknown
-        // pubkeys cannot open a configuration surface.
-        const isOwnedAgent = (managedAgentsQuery.data ?? []).some(
-          (agent) => agent.pubkey.toLowerCase() === agentPubkey.toLowerCase(),
-        );
-        if (!isOwnedAgent || seenRequestIds.current.has(next.requestId)) return;
-        seenRequestIds.current.add(next.requestId);
-        setError(null);
-        if (pendingRequestId.current === null) {
-          pendingRequestId.current = next.requestId;
-          sourceAgentPubkey.current = agentPubkey;
-          setRequest(next);
+        // this Desktop owns may draft a change; defer the ownership decision
+        // until the managed-agent query has initialized so ephemeral requests
+        // cannot disappear during startup.
+        if (
+          classifyAgentManagementSender(
+            managedAgentsRef.current,
+            agentPubkey,
+          ) === "buffer"
+        ) {
+          bufferedRequestsRef.current.push({ agentPubkey, request: next });
+          if (bufferedRequestsRef.current.length > 100) {
+            bufferedRequestsRef.current.shift();
+          }
+          return;
         }
+        acceptOwnedRequest(agentPubkey, next);
       }),
-    [managedAgentsQuery.data],
+    [],
   );
 
   const matchingPersonas = React.useMemo(() => {

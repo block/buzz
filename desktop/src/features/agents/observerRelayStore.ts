@@ -26,6 +26,7 @@ import {
 } from "./ui/agentSessionTranscript";
 
 const MAX_OBSERVER_EVENTS = 3000;
+const MAX_PENDING_UNKNOWN_AGENT_FRAMES = 100;
 
 export type ObserverSnapshot = {
   connectionState: ConnectionState;
@@ -113,6 +114,7 @@ const agentManagementListeners = new Set<
 // recompute the union, so co-mounted callers no longer clobber each other.
 const knownAgentPubkeys = new Set<string>();
 const knownAgentsBySubscription = new Map<string, Set<string>>();
+const pendingUnknownAgentFrames: RelayEvent[] = [];
 
 // Callback invoked when session_config_captured is received, so React Query
 // can invalidate the config-surface query for the affected agent. Wired up
@@ -143,6 +145,14 @@ function registerKnownAgents(
     new Set(pubkeys.map((pubkey) => normalizePubkey(pubkey))),
   );
   recomputeKnownAgentPubkeys();
+  if (knownAgentPubkeys.size > 0 && pendingUnknownAgentFrames.length > 0) {
+    const pending = pendingUnknownAgentFrames.splice(0);
+    for (const event of pending) {
+      eventProcessingQueue = eventProcessingQueue.then(() =>
+        handleRelayObserverEvent(event, generation),
+      );
+    }
+  }
 }
 
 function unregisterKnownAgents(subscriptionId: string) {
@@ -337,9 +347,16 @@ async function handleRelayObserverEvent(
     return;
   }
 
-  // Verify agent is known/trusted before decrypting.
-  // Silently drop events from agents we are not managing.
+  // Ownership data arrives asynchronously during startup. Buffer raw signed
+  // frames until the first trusted-agent set is registered, then re-run this
+  // same gate. Once initialized, unknown agents are rejected immediately.
   if (!knownAgentPubkeys.has(normalizePubkey(agentPubkey))) {
+    if (knownAgentsBySubscription.size === 0 || knownAgentPubkeys.size === 0) {
+      pendingUnknownAgentFrames.push(event);
+      if (pendingUnknownAgentFrames.length > MAX_PENDING_UNKNOWN_AGENT_FRAMES) {
+        pendingUnknownAgentFrames.shift();
+      }
+    }
     return;
   }
 
@@ -723,6 +740,7 @@ export function resetAgentObserverStore() {
   archiveEventsByChannel.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
+  pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
   agentManagementListeners.clear();
   onSessionConfigCaptured = null;
