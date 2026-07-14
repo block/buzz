@@ -702,7 +702,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         let predicate = format!("NEW.kind IN ({kinds})");
-        let migration = include_str!("../../../../migrations/0017_push_match_queue.sql");
+        let migration = include_str!("../../../../migrations/0018_push_match_queue.sql");
         assert!(
             migration.contains(&predicate),
             "migration trigger must use PUSH_KINDS exactly: {predicate}"
