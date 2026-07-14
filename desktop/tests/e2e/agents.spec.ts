@@ -691,6 +691,32 @@ test("share access controls include the selected memories", async ({
     .click();
   await expect(linkAccess).toHaveText("Agent + core memory");
   await page.getByTestId("persona-share-copy-link").click();
+  const memoryConfirmation = page.getByTestId(
+    "persona-share-memory-confirmation",
+  );
+  await expect(memoryConfirmation).toBeVisible();
+  await expect(
+    memoryConfirmation.getByRole("heading", { name: "Share memories?" }),
+  ).toBeVisible();
+  await expect(memoryConfirmation).toContainText("plaintext core memory");
+  await expect(memoryConfirmation).toContainText(
+    "Anyone with the link can view it.",
+  );
+  await expect(memoryConfirmation).toContainText(
+    "Only share with people you trust.",
+  );
+  const encodeCountBeforeLinkConfirmation = await page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__?.filter(
+        (entry) => entry.command === "encode_agent_snapshot_for_send",
+      ).length ?? 0,
+  );
+  expect(encodeCountBeforeLinkConfirmation).toBe(0);
+  await memoryConfirmation.getByTestId("persona-share-memory-confirm").click();
   await expect(page.getByText("Link copied")).toBeVisible();
 
   const recipientSearch = page.getByTestId("persona-share-recipient-search");
@@ -747,6 +773,23 @@ test("share access controls include the selected memories", async ({
       .evaluate((element) => element.scrollWidth <= element.clientWidth),
   ).toBe(true);
   await page.getByTestId("persona-share-send").click();
+  await expect(memoryConfirmation).toBeVisible();
+  await expect(memoryConfirmation).toContainText("plaintext all memories");
+  await expect(memoryConfirmation).toContainText(
+    "The people you selected—and anyone with the file link—can view it.",
+  );
+  const encodeCountBeforeSendConfirmation = await page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__?.filter(
+        (entry) => entry.command === "encode_agent_snapshot_for_send",
+      ).length ?? 0,
+  );
+  expect(encodeCountBeforeSendConfirmation).toBe(1);
+  await memoryConfirmation.getByTestId("persona-share-memory-confirm").click();
   await expect(page.getByText("Sent Animation Auditor")).toBeVisible();
 
   const encodePayloads = await page.evaluate(() =>

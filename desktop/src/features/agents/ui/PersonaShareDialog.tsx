@@ -18,6 +18,16 @@ import {
 import type { SnapshotMemoryLevel } from "@/shared/api/tauriPersonas";
 import type { AgentPersona, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -45,6 +55,65 @@ const SHARE_LEVELS: { value: SnapshotMemoryLevel; label: string }[] = [
   { value: "core", label: "Agent + core memory" },
   { value: "everything", label: "Agent + all memories" },
 ];
+
+type PendingMemoryShare = {
+  action: "copy" | "send";
+  memoryLevel: Exclude<SnapshotMemoryLevel, "none">;
+};
+
+function MemoryShareConfirmation({
+  pendingShare,
+  onCancel,
+  onConfirm,
+}: {
+  pendingShare: PendingMemoryShare | null;
+  onCancel: () => void;
+  onConfirm: (pendingShare: PendingMemoryShare) => void;
+}) {
+  const isLinkShare = pendingShare?.action === "copy";
+  const memoryLabel =
+    pendingShare?.memoryLevel === "core" ? "core memory" : "all memories";
+
+  return (
+    <AlertDialog
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onCancel();
+      }}
+      open={pendingShare !== null}
+    >
+      <AlertDialogContent data-testid="persona-share-memory-confirmation">
+        <AlertDialogHeader>
+          <AlertDialogTitle>Share memories?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This agent includes <strong>plaintext {memoryLabel}</strong>.{" "}
+            {isLinkShare
+              ? "Anyone with the link can view it."
+              : "The people you selected—and anyone with the file link—can view it."}{" "}
+            Only share with people you trust.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel asChild>
+            <Button type="button" variant="outline">
+              Cancel
+            </Button>
+          </AlertDialogCancel>
+          <AlertDialogAction asChild>
+            <Button
+              data-testid="persona-share-memory-confirm"
+              onClick={() => {
+                if (pendingShare) onConfirm(pendingShare);
+              }}
+              type="button"
+            >
+              {isLinkShare ? "Copy link" : "Send"}
+            </Button>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
 
 function ShareLevelControl({
   ariaLabel,
@@ -111,6 +180,8 @@ export function PersonaShareDialog({
   >([]);
   const [isCopying, setIsCopying] = React.useState(false);
   const [isSending, setIsSending] = React.useState(false);
+  const [pendingMemoryShare, setPendingMemoryShare] =
+    React.useState<PendingMemoryShare | null>(null);
   const [linkShareLevel, setLinkShareLevel] =
     React.useState<SnapshotMemoryLevel>("none");
   const [recipientShareLevel, setRecipientShareLevel] =
@@ -126,6 +197,7 @@ export function PersonaShareDialog({
       setSelectedRecipients([]);
       setIsCopying(false);
       setIsSending(false);
+      setPendingMemoryShare(null);
       setLinkShareLevel("none");
       setRecipientShareLevel("none");
       encodeSnapshotMutation.reset();
@@ -154,12 +226,12 @@ export function PersonaShareDialog({
     };
   }
 
-  async function handleCopyLink() {
+  async function copyLink(memoryLevel: SnapshotMemoryLevel) {
     if (isActionPending) return;
 
     setIsCopying(true);
     try {
-      const uploaded = await uploadSnapshot(linkShareLevel);
+      const uploaded = await uploadSnapshot(memoryLevel);
       await navigator.clipboard.writeText(uploaded.url);
       toast.success("Link copied");
     } catch {
@@ -169,7 +241,7 @@ export function PersonaShareDialog({
     }
   }
 
-  async function handleSend() {
+  async function sendToRecipients(memoryLevel: SnapshotMemoryLevel) {
     if (isActionPending || selectedRecipients.length === 0) return;
 
     setIsSending(true);
@@ -177,7 +249,7 @@ export function PersonaShareDialog({
       const directMessage = await openDmMutation.mutateAsync({
         pubkeys: selectedRecipients.map((recipient) => recipient.pubkey),
       });
-      const uploaded = await uploadSnapshot(recipientShareLevel);
+      const uploaded = await uploadSnapshot(memoryLevel);
       const outgoingMessage = buildOutgoingMessage("", [uploaded]);
       await sendChannelMessage(
         directMessage.id,
@@ -191,6 +263,34 @@ export function PersonaShareDialog({
       toast.error("Couldn’t send agent. Try again.");
     } finally {
       setIsSending(false);
+    }
+  }
+
+  function requestMemoryShare(
+    action: PendingMemoryShare["action"],
+    memoryLevel: SnapshotMemoryLevel,
+  ) {
+    if (isActionPending) return;
+
+    const effectiveMemoryLevel = hasLinkedAgent ? memoryLevel : "none";
+    if (effectiveMemoryLevel !== "none") {
+      setPendingMemoryShare({ action, memoryLevel: effectiveMemoryLevel });
+      return;
+    }
+
+    if (action === "copy") {
+      void copyLink("none");
+    } else {
+      void sendToRecipients("none");
+    }
+  }
+
+  function confirmMemoryShare(pendingShare: PendingMemoryShare) {
+    setPendingMemoryShare(null);
+    if (pendingShare.action === "copy") {
+      void copyLink(pendingShare.memoryLevel);
+    } else {
+      void sendToRecipients(pendingShare.memoryLevel);
     }
   }
 
@@ -244,9 +344,7 @@ export function PersonaShareDialog({
                 className="h-10 shrink-0"
                 data-testid="persona-share-send"
                 disabled={isActionPending || selectedRecipients.length === 0}
-                onClick={() => {
-                  void handleSend();
-                }}
+                onClick={() => requestMemoryShare("send", recipientShareLevel)}
                 type="button"
               >
                 {isSending ? "Sending…" : "Send"}
@@ -312,9 +410,7 @@ export function PersonaShareDialog({
                 className="ml-auto shrink-0"
                 data-testid="persona-share-copy-link"
                 disabled={isActionPending}
-                onClick={() => {
-                  void handleCopyLink();
-                }}
+                onClick={() => requestMemoryShare("copy", linkShareLevel)}
                 size="sm"
                 type="button"
               >
@@ -340,6 +436,11 @@ export function PersonaShareDialog({
           <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
         </button>
       </DialogContent>
+      <MemoryShareConfirmation
+        onCancel={() => setPendingMemoryShare(null)}
+        onConfirm={confirmMemoryShare}
+        pendingShare={pendingMemoryShare}
+      />
     </Dialog>
   );
 }
