@@ -520,7 +520,7 @@ test("custom personas share with people and keep export separate", async ({
   ).toHaveClass(/text-xs.*text-secondary-foreground\/75/);
   await expect(
     shareDialog.getByRole("heading", { name: "Who has access" }),
-  ).toBeVisible();
+  ).toHaveClass(/text-xs/);
   const accessLink = page.getByTestId("persona-share-access-link");
   const accessOwner = page.getByTestId("persona-share-access-owner");
   const accessSection = page.getByTestId("persona-share-access");

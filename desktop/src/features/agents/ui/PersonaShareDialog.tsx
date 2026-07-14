@@ -445,7 +445,7 @@ export function PersonaShareDialog({
               className="space-y-3 pt-2"
               data-testid="persona-share-access"
             >
-              <h3 className="text-sm font-semibold text-secondary-foreground/75">
+              <h3 className="text-xs font-semibold text-secondary-foreground/75">
                 Who has access
               </h3>
               <div
