@@ -23,6 +23,35 @@ const INSTALL_URL: &str = "https://git-scm.com/download/win";
 const INSTALL_HINT: &str =
     "Install Git for Windows and select \"Git from the command line and also from 3rd-party software\" for its PATH option.";
 
+/// Install hint for error messages when `install_shell_command` can't find a shell on Windows.
+#[cfg(windows)]
+pub(crate) const GIT_BASH_INSTALL_HINT: &str = INSTALL_HINT;
+
+/// Resolve the Git Bash executable path using the same resolver chain as Doctor.
+///
+/// Returns `Some(path)` on Windows when a usable bash is found, `None` otherwise
+/// (including all non-Windows platforms). Used by `install_shell_command` to keep
+/// a single contract: Doctor prereq green ⇒ install shell spawns.
+#[allow(dead_code)] // used only on Windows, from install_shell_command + login_shell_candidates
+pub(crate) fn resolve_git_bash_path() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let env = GitBashEnv::from_process();
+        return resolve_git_bash(
+            &env.path,
+            env.shell_override,
+            env.git_bash_override,
+            env.system_root,
+            env.program_files,
+            env.program_files_x86,
+            env.local_app_data,
+        );
+    }
+
+    #[cfg(not(windows))]
+    None
+}
+
 pub(crate) fn discover_git_bash() -> Option<GitBashPrerequisite> {
     #[cfg(windows)]
     {

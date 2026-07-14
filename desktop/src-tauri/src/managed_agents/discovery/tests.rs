@@ -1026,3 +1026,80 @@ fn find_nvm_default_bin_rejects_absolute_hop_tag() {
     let result = find_nvm_default_bin(home.path());
     assert_eq!(result, None, "absolute-path hop tag must be rejected");
 }
+
+// ── Phase C: command_basenames ──────────────────────────────────────────────
+
+/// On non-Windows, command_basenames returns only the executable_basename.
+#[cfg(not(windows))]
+#[test]
+fn test_command_basenames_single_candidate_on_unix() {
+    let candidates = super::command_basenames("codex-acp");
+    assert_eq!(
+        candidates,
+        vec!["codex-acp"],
+        "Unix must produce a single candidate"
+    );
+}
+
+/// command_basenames with a dotted name never adds .cmd/.bat.
+#[test]
+fn test_command_basenames_dotted_name_no_extra_candidates() {
+    let candidates = super::command_basenames("codex-acp.exe");
+    // Should contain the executable_basename only, no .cmd/.bat.
+    assert_eq!(
+        candidates.len(),
+        1,
+        "dotted name must produce exactly one candidate"
+    );
+}
+
+// ── Phase B: cli_install_commands_for_os ────────────────────────────────────
+
+/// Claude and Codex have non-empty default cli_install_commands (install.sh).
+#[test]
+fn test_claude_and_codex_have_cli_install_commands() {
+    let claude = super::known_acp_runtime_exact("claude").unwrap();
+    let codex = super::known_acp_runtime_exact("codex").unwrap();
+    assert!(
+        !claude.cli_install_commands.is_empty(),
+        "claude must have cli install commands"
+    );
+    assert!(
+        !codex.cli_install_commands.is_empty(),
+        "codex must have cli install commands"
+    );
+}
+
+/// cli_install_commands_for_os returns a non-empty slice for claude and codex.
+#[test]
+fn test_cli_install_commands_for_os_non_empty_for_claude_codex() {
+    let claude = super::known_acp_runtime_exact("claude").unwrap();
+    let codex = super::known_acp_runtime_exact("codex").unwrap();
+    assert!(
+        !claude.cli_install_commands_for_os().is_empty(),
+        "claude must have install commands on every platform"
+    );
+    assert!(
+        !codex.cli_install_commands_for_os().is_empty(),
+        "codex must have install commands on every platform"
+    );
+}
+
+// ── Phase C: login_shell_candidates ─────────────────────────────────────────
+
+/// On Unix, login_shell_candidates returns at least one candidate.
+#[cfg(unix)]
+#[test]
+fn test_login_shell_candidates_non_empty_on_unix() {
+    let candidates = super::login_shell_candidates();
+    assert!(
+        !candidates.is_empty(),
+        "Unix must have at least one login shell candidate"
+    );
+    // The first candidate should be /bin/zsh or /bin/bash.
+    let first = &candidates[0];
+    assert!(
+        first == std::path::Path::new("/bin/zsh") || first == std::path::Path::new("/bin/bash"),
+        "expected /bin/zsh or /bin/bash, got {first:?}"
+    );
+}

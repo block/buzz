@@ -152,7 +152,7 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     // preflight and classifier to this loop.
     if let Some(cli) = runtime.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
-            for cmd in runtime.cli_install_commands {
+            for cmd in runtime.cli_install_commands_for_os() {
                 let result = run_install_command("cli", cmd);
                 let success = result.success;
                 steps.push(result);
@@ -541,14 +541,13 @@ fn persist_last_error_on_install(
 /// the shell selection and environment cleanup shared by `run_install_command`
 /// and `resolve_npm_prefix` — keeping them in sync so the hermit-strip list
 /// can't drift between the two paths.
-fn install_shell_command(command: &str) -> std::process::Command {
-    let shell = if std::path::Path::new("/bin/zsh").exists() {
-        "/bin/zsh"
-    } else {
-        "/bin/bash"
-    };
+///
+/// On Windows, resolves Git Bash via the same chain Doctor's prereq uses
+/// (`resolve_git_bash_path`). Returns `Err` when no shell can be found.
+fn install_shell_command(command: &str) -> Result<std::process::Command, String> {
+    let shell: std::path::PathBuf = resolve_install_shell()?;
 
-    let mut cmd = std::process::Command::new(shell);
+    let mut cmd = std::process::Command::new(&shell);
     cmd.args(["-l", "-c", command]);
 
     // Strip hermit env vars so npm/node use the user's normal registry and
@@ -575,11 +574,52 @@ fn install_shell_command(command: &str) -> std::process::Command {
         }
     }
 
-    cmd
+    // Suppress the console window on Windows.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    Ok(cmd)
+}
+
+/// Resolve the shell binary for install commands.
+///
+/// Unix: `/bin/zsh` if present, else `/bin/bash`.
+/// Windows: Git Bash via the Doctor resolver chain (`resolve_git_bash_path`).
+fn resolve_install_shell() -> Result<std::path::PathBuf, String> {
+    #[cfg(not(windows))]
+    {
+        if std::path::Path::new("/bin/zsh").exists() {
+            return Ok(std::path::PathBuf::from("/bin/zsh"));
+        }
+        Ok(std::path::PathBuf::from("/bin/bash"))
+    }
+
+    #[cfg(windows)]
+    {
+        crate::managed_agents::git_bash::resolve_git_bash_path()
+            .ok_or_else(|| crate::managed_agents::git_bash::GIT_BASH_INSTALL_HINT.to_string())
+    }
 }
 
 fn run_install_command(step: &str, command: &str) -> InstallStepResult {
-    let mut cmd = install_shell_command(command);
+    let mut cmd = match install_shell_command(command) {
+        Ok(cmd) => cmd,
+        Err(hint) => {
+            return InstallStepResult {
+                step: step.to_string(),
+                command: command.to_string(),
+                success: false,
+                stdout: String::new(),
+                stderr: "no suitable shell found for install commands".to_string(),
+                exit_code: None,
+                hint: Some(hint),
+            };
+        }
+    };
 
     let mut child = match cmd
         .stdin(std::process::Stdio::null())
@@ -640,6 +680,10 @@ fn run_install_command(step: &str, command: &str) -> InstallStepResult {
             #[cfg(unix)]
             unsafe {
                 libc::kill(child_pid as i32, libc::SIGTERM);
+            }
+            #[cfg(windows)]
+            {
+                let _ = crate::managed_agents::taskkill_tree(child_pid);
             }
             drop(rx);
             let _ = wait_thread.join();
@@ -776,7 +820,10 @@ enum NpmPrefix {
 /// `npm prefix -g` to discover where npm would install global packages.
 #[cfg(unix)]
 fn resolve_npm_prefix() -> NpmPrefix {
-    let mut cmd = install_shell_command("npm prefix -g");
+    let mut cmd = match install_shell_command("npm prefix -g") {
+        Ok(cmd) => cmd,
+        Err(_) => return NpmPrefix::Unavailable,
+    };
     let mut child = match cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1341,6 +1388,64 @@ mod tests {
         assert!(
             !availability_drift(None, Some(AcpAvailabilityStatus::AdapterMissing)),
             "non-codex agent (None stamp) must never trigger drift badge"
+        );
+    }
+
+    // ── Phase A: install shell selection ─────────────────────────────────────
+
+    /// On Unix, resolve_install_shell always succeeds (returns zsh or bash).
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_install_shell_succeeds_on_unix() {
+        let result = super::resolve_install_shell();
+        assert!(result.is_ok(), "Unix must always resolve a shell");
+        let shell = result.unwrap();
+        assert!(
+            shell == std::path::Path::new("/bin/zsh") || shell == std::path::Path::new("/bin/bash"),
+            "expected /bin/zsh or /bin/bash, got {shell:?}"
+        );
+    }
+
+    /// install_shell_command returns a valid Command on Unix.
+    #[cfg(unix)]
+    #[test]
+    fn test_install_shell_command_returns_ok_on_unix() {
+        let result = super::install_shell_command("echo test");
+        assert!(result.is_ok(), "install_shell_command must succeed on Unix");
+    }
+
+    // ── Phase B: per-OS install commands ──────────────────────────────────────
+
+    /// On non-Windows, cli_install_commands_for_os returns the default commands.
+    #[cfg(not(windows))]
+    #[test]
+    fn test_cli_install_commands_for_os_returns_default_on_unix() {
+        let claude = crate::managed_agents::known_acp_runtime_exact("claude").unwrap();
+        assert_eq!(
+            claude.cli_install_commands_for_os(),
+            claude.cli_install_commands,
+            "on Unix, cli_install_commands_for_os must return the default install.sh commands"
+        );
+    }
+
+    /// Goose install commands are the same on all platforms (script is Windows-aware).
+    #[test]
+    fn test_goose_install_commands_same_on_all_platforms() {
+        let goose = crate::managed_agents::known_acp_runtime_exact("goose").unwrap();
+        assert_eq!(
+            goose.cli_install_commands_for_os(),
+            goose.cli_install_commands,
+            "goose install commands must be identical across platforms"
+        );
+    }
+
+    /// buzz-agent has no install commands on any platform.
+    #[test]
+    fn test_buzz_agent_has_no_install_commands() {
+        let buzz = crate::managed_agents::known_acp_runtime_exact("buzz-agent").unwrap();
+        assert!(
+            buzz.cli_install_commands_for_os().is_empty(),
+            "buzz-agent ships with the app — must never have install commands"
         );
     }
 }

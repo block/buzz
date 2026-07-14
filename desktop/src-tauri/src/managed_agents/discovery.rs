@@ -22,6 +22,10 @@ pub(crate) struct KnownAcpRuntime {
     pub underlying_cli: Option<&'static str>,
     /// Shell commands to install the runtime CLI itself (run sequentially).
     pub cli_install_commands: &'static [&'static str],
+    /// Windows-specific CLI install commands (e.g. PowerShell installers).
+    /// When non-empty on Windows, these are used instead of `cli_install_commands`.
+    #[allow(dead_code)] // read only on Windows via cli_install_commands_for_os()
+    pub cli_install_commands_windows: &'static [&'static str],
     /// Shell commands to install the ACP adapter (run sequentially, after CLI).
     pub adapter_install_commands: &'static [&'static str],
     /// Link to docs/repo for manual instructions.
@@ -66,6 +70,23 @@ pub(crate) struct KnownAcpRuntime {
     pub auth_probe_args: Option<&'static [&'static str]>,
 }
 
+impl KnownAcpRuntime {
+    /// Return the CLI install commands for the current platform.
+    ///
+    /// On Windows, returns `cli_install_commands_windows` when non-empty,
+    /// falling back to the default `cli_install_commands`. On other platforms
+    /// always returns `cli_install_commands`.
+    pub fn cli_install_commands_for_os(&self) -> &[&str] {
+        #[cfg(windows)]
+        {
+            if !self.cli_install_commands_windows.is_empty() {
+                return self.cli_install_commands_windows;
+            }
+        }
+        self.cli_install_commands
+    }
+}
+
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
@@ -90,6 +111,22 @@ fn common_binary_paths() -> &'static [PathBuf] {
                 home.join(".asdf/shims"),
             ]);
         }
+        // Windows well-known dirs for npm global shims and standalone installer targets.
+        #[cfg(windows)]
+        {
+            if let Some(appdata) = std::env::var_os("APPDATA") {
+                paths.push(PathBuf::from(appdata).join("npm"));
+            }
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                paths.push(
+                    PathBuf::from(local)
+                        .join("Programs")
+                        .join("OpenAI")
+                        .join("Codex")
+                        .join("bin"),
+                );
+            }
+        }
         paths
     })
 }
@@ -105,6 +142,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("goose"),
         cli_install_commands: &["curl -fsSL https://github.com/block-open-source/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
+        cli_install_commands_windows: &[], // goose install script is already Windows-aware
         adapter_install_commands: &[],
         install_instructions_url: "https://block.github.io/goose/",
         cli_install_hint: "Install Goose via the official install script.",
@@ -135,6 +173,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("claude"),
         cli_install_commands: &["curl -fsSL https://claude.ai/install.sh | bash"],
+        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\""],
         adapter_install_commands: &["npm install -g @agentclientprotocol/claude-agent-acp"],
         install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
         cli_install_hint: "Install the Claude Code CLI via the official install script.",
@@ -165,6 +204,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("codex"),
         cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
+        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://chatgpt.com/codex/install.ps1 | iex\""],
         adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
         install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
         cli_install_hint: "Install the Codex CLI via the official install script.",
@@ -196,6 +236,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: true,
         underlying_cli: None,
         cli_install_commands: &[],
+        cli_install_commands_windows: &[],
         adapter_install_commands: &[],
         install_instructions_url: "https://github.com/block/buzz",
         cli_install_hint: "Ships with the Buzz desktop app.",
@@ -567,6 +608,26 @@ pub(crate) fn availability_drift(
     }
 }
 
+/// Return all candidate basenames for `command` on the current platform.
+///
+/// Always includes `executable_basename(command)` (appends `.exe` on Windows).
+/// On Windows also includes `.cmd` and `.bat` variants so npm-generated shims
+/// (e.g. `codex-acp.cmd` in `%APPDATA%\npm`) are discoverable.
+fn command_basenames(command: &str) -> Vec<String> {
+    let candidates = vec![executable_basename(command)];
+    #[cfg(windows)]
+    {
+        let mut candidates = candidates;
+        if !command.contains('.') {
+            candidates.push(format!("{command}.cmd"));
+            candidates.push(format!("{command}.bat"));
+        }
+        return candidates;
+    }
+    #[allow(unreachable_code)]
+    candidates
+}
+
 fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     if let Some(path) = resolve_workspace_command(command) {
         return Some(path);
@@ -583,13 +644,28 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
         }
     }
 
+    // On Windows, also scan PATH for .cmd/.bat shims (npm globals).
+    #[cfg(windows)]
+    {
+        for basename in command_basenames(command).iter().skip(1) {
+            for candidate in path_candidates_from_env_raw(basename) {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
     if let Some(path) = find_via_login_shell(command) {
         return Some(path);
     }
+    let basenames = command_basenames(command);
     for dir in common_binary_paths() {
-        let candidate = dir.join(executable_basename(command));
-        if is_executable_file(&candidate) {
-            return Some(candidate);
+        for basename in &basenames {
+            let candidate = dir.join(basename);
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
         }
     }
 
@@ -599,9 +675,11 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     // invisible.
     if let Some(home) = dirs::home_dir() {
         if let Some(nvm_bin) = find_nvm_default_bin(&home) {
-            let candidate = nvm_bin.join(executable_basename(command));
-            if is_executable_file(&candidate) {
-                return Some(candidate);
+            for basename in &basenames {
+                let candidate = nvm_bin.join(basename);
+                if is_executable_file(&candidate) {
+                    return Some(candidate);
+                }
             }
         }
     }
@@ -619,11 +697,41 @@ fn path_candidates_from_env(command: &str) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// Run a command in a login shell (tries zsh then bash).
+/// Like `path_candidates_from_env` but joins `basename` as-is (no `.exe` suffix).
+/// Used for `.cmd`/`.bat` shim resolution on Windows.
+#[cfg(windows)]
+fn path_candidates_from_env_raw(basename: &str) -> Vec<PathBuf> {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(basename))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// Collect login shell candidates for the current platform.
+///
+/// On Unix: `/bin/zsh`, `/bin/bash` (the historical defaults).
+/// On Windows: the resolved Git Bash (via the same chain Doctor uses).
+fn login_shell_candidates() -> Vec<PathBuf> {
+    #[cfg(not(windows))]
+    {
+        vec![PathBuf::from("/bin/zsh"), PathBuf::from("/bin/bash")]
+    }
+    #[cfg(windows)]
+    {
+        super::git_bash::resolve_git_bash_path()
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Run a command in a login shell (tries zsh then bash on Unix, Git Bash on Windows).
 /// Returns trimmed stdout if the command succeeds with non-empty output.
 fn run_in_login_shell(args: &[&str]) -> Option<String> {
-    for shell in ["/bin/zsh", "/bin/bash"] {
-        let Ok(output) = Command::new(shell).args(args).output() else {
+    for shell in login_shell_candidates() {
+        let Ok(output) = Command::new(&shell).args(args).output() else {
             continue;
         };
         if !output.status.success() {
@@ -1129,7 +1237,7 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 .map(|cmd| normalize_agent_args(cmd, Vec::new()))
                 .unwrap_or_default();
 
-            let can_auto_install = !runtime.cli_install_commands.is_empty()
+            let can_auto_install = !runtime.cli_install_commands_for_os().is_empty()
                 || !runtime.adapter_install_commands.is_empty();
 
             let cli_hint = runtime.cli_install_hint;
