@@ -109,7 +109,7 @@ type MessageComposerProps = {
     threadHeadId: string | null;
   } | null;
   /** Resolves the channel required to prepare mentions before sending. */
-  onPrepareSendChannel?: () => Promise<string | null>;
+  onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
   onPreparingMentionSendChange?: (isPreparing: boolean) => void;
   onSend: (
     content: string,

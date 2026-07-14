@@ -626,6 +626,7 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
   await page.keyboard.type(" for a hand");
 
   const baselineCommands = await readCommandLog(page);
+  const baselineCommandPayloads = await readCommandPayloadLog(page);
   const baselineOpenDmCount = commandCount(baselineCommands, "open_dm");
   const baselineCreateCount = commandCount(
     baselineCommands,
@@ -653,10 +654,54 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
   const sendCommands = (await readCommandLog(page)).slice(
     baselineCommands.length,
   );
+  const sendCommandPayloads = (await readCommandPayloadLog(page)).slice(
+    baselineCommandPayloads.length,
+  );
   expect(sendCommands.indexOf("open_dm")).toBeLessThan(
     sendCommands.indexOf("create_managed_agent"),
   );
-  expect(commandCount(sendCommands, "open_dm")).toBe(1);
+  expect(commandCount(sendCommands, "open_dm")).toBe(2);
+
+  const addMemberCommand = sendCommandPayloads.find(
+    (entry) => entry.command === "add_channel_members",
+  );
+  const originalDmId = (
+    addMemberCommand?.payload as { channelId?: string } | undefined
+  )?.channelId;
+  expect(originalDmId).toBeTruthy();
+
+  const sentMessageCommand = sendCommandPayloads.find((entry) => {
+    if (entry.command !== "plugin:websocket|send") {
+      return false;
+    }
+    const data = (entry.payload as { message?: { data?: string } } | undefined)
+      ?.message?.data;
+    if (!data) {
+      return false;
+    }
+    const frame = JSON.parse(data) as unknown[];
+    return (
+      frame[0] === "EVENT" &&
+      (frame[1] as { content?: string } | undefined)?.content.includes(
+        "for a hand",
+      )
+    );
+  });
+  const sentMessageData = (
+    sentMessageCommand?.payload as { message?: { data?: string } } | undefined
+  )?.message?.data;
+  expect(sentMessageData).toBeTruthy();
+  const sentMessageEvent = (
+    JSON.parse(sentMessageData ?? "[]") as [string, { tags?: string[][] }]
+  )[1];
+  const sentChannelId = sentMessageEvent.tags?.find(
+    (tag) => tag[0] === "h",
+  )?.[1];
+  expect(sentChannelId).toBeTruthy();
+  expect(sentChannelId).not.toBe(originalDmId);
+  await expect(
+    page.locator("[data-active='true'][data-channel-id]"),
+  ).toHaveAttribute("data-channel-id", sentChannelId ?? "");
   await expect(page.getByTestId("message-timeline")).toContainText(
     "for a hand",
   );

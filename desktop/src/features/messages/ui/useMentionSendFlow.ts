@@ -66,7 +66,9 @@ type UseMentionSendFlowOptions = {
   drafts: Pick<UseDraftsResult, "markDraftSent">;
   emojiAutocomplete: Pick<UseEmojiAutocompleteResult, "clearEmojis">;
   mentions: UseMentionsResult;
-  onPrepareSendChannel?: () => Promise<string | null>;
+  onPrepareSendChannel?: (
+    additionalParticipantPubkeys?: string[],
+  ) => Promise<string | null>;
   onSendRef: React.MutableRefObject<
     (
       content: string,
@@ -195,11 +197,15 @@ export function useMentionSendFlow({
   const ensureManagedAgentMentionsReady = React.useCallback(
     async (mentionPubkeys: string[], capturedChannelId: string) => {
       if (!capturedChannelId || mentionPubkeys.length === 0) {
-        return [];
+        return {
+          errors: [] as string[],
+          pubkeys: [] as string[],
+        };
       }
 
       const managedAgentsByPubkey = await getManagedAgentsByPubkey();
       const errors: string[] = [];
+      const pubkeys: string[] = [];
 
       for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
         const agent = managedAgentsByPubkey.get(pubkey);
@@ -223,6 +229,7 @@ export function useMentionSendFlow({
               role: "bot",
             });
           }
+          pubkeys.push(pubkey);
         } catch (error) {
           errors.push(
             `${agent.name}: ${getErrorMessage(
@@ -233,7 +240,10 @@ export function useMentionSendFlow({
         }
       }
 
-      return errors;
+      return {
+        errors,
+        pubkeys: uniqueNormalizedPubkeys(pubkeys),
+      };
     },
     [
       attachAgentMutation,
@@ -365,22 +375,34 @@ export function useMentionSendFlow({
         const readyAgentPubkeys = new Set(
           (draft.readyAgentPubkeys ?? []).map(normalizePubkey),
         );
-        const agentReadinessErrors = await ensureManagedAgentMentionsReady(
+        const agentReadiness = await ensureManagedAgentMentionsReady(
           mentionPubkeys.filter(
             (pubkey) => !readyAgentPubkeys.has(normalizePubkey(pubkey)),
           ),
           draft.capturedChannelId ?? "",
         );
-        if (agentReadinessErrors.length > 0) {
+        if (agentReadiness.errors.length > 0) {
           const message =
-            agentReadinessErrors.length === 1
-              ? `Could not start agent mention: ${agentReadinessErrors[0]}`
-              : `Could not start agent mentions: ${agentReadinessErrors.join(
+            agentReadiness.errors.length === 1
+              ? `Could not start agent mention: ${agentReadiness.errors[0]}`
+              : `Could not start agent mentions: ${agentReadiness.errors.join(
                   "; ",
                 )}`;
           setNonMemberPromptError(message);
           toast.error(message);
           return;
+        }
+
+        const preparedAgentPubkeys = uniqueNormalizedPubkeys([
+          ...readyAgentPubkeys,
+          ...agentReadiness.pubkeys,
+        ]);
+        let sendChannelId = draft.capturedChannelId;
+        if (preparedAgentPubkeys.length > 0 && onPrepareSendChannel) {
+          sendChannelId = await onPrepareSendChannel(preparedAgentPubkeys);
+          if (!sendChannelId) {
+            return;
+          }
         }
 
         // Only clear the composer if the user has not switched channels since
@@ -395,14 +417,14 @@ export function useMentionSendFlow({
             draft.finalContent,
             mentionPubkeys,
             outgoingTags,
-            draft.capturedChannelId,
+            sendChannelId,
             draft.capturedThreadContext,
           );
           if (draft.sentDraftKey) {
             drafts.markDraftSent(
               draft.sentDraftKey,
               draft.savedContent,
-              draft.capturedChannelId ?? draft.sentDraftKey,
+              sendChannelId ?? draft.sentDraftKey,
               draft.savedImeta,
               [...draft.savedSpoileredAttachmentUrls],
             );
@@ -430,6 +452,7 @@ export function useMentionSendFlow({
       contentRef,
       drafts,
       ensureManagedAgentMentionsReady,
+      onPrepareSendChannel,
       onSendRef,
       richText.setContent,
       setContent,

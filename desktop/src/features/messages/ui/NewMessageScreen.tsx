@@ -12,6 +12,7 @@ import { getKeyboardSearchSelection } from "@/features/profile/lib/userCandidate
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   POOF_ORIGIN_CLASS,
   POOF_TRIGGER_CLASS,
@@ -172,37 +173,71 @@ export function NewMessageScreen() {
     [handleSelectUser, selectedUsers, setSearchQuery],
   );
 
-  const openDirectMessage = React.useCallback(async () => {
-    if (preparedDirectMessageRef.current) {
-      return preparedDirectMessageRef.current;
-    }
-
-    if (isPending || selectedUsers.length === 0) {
-      return null;
-    }
-
-    setSubmitErrorMessage(null);
-
-    try {
-      const directMessage = await openDmMutation.mutateAsync({
-        pubkeys: selectedUsers.map((user) => user.pubkey),
-      });
-      preparedDirectMessageRef.current = directMessage;
-      return directMessage;
-    } catch (error) {
-      setSubmitErrorMessage(
-        error instanceof Error
-          ? error.message
-          : "Failed to open direct message.",
+  const openDirectMessage = React.useCallback(
+    async (additionalParticipantPubkeys: string[] = []) => {
+      const requestedPubkeys = [
+        ...new Set(
+          [
+            ...selectedUsers.map((user) => user.pubkey),
+            ...additionalParticipantPubkeys,
+          ].map(normalizePubkey),
+        ),
+      ].filter(Boolean);
+      const preparedDirectMessage = preparedDirectMessageRef.current;
+      const preparedParticipantPubkeys = new Set(
+        preparedDirectMessage?.participantPubkeys.map(normalizePubkey) ?? [],
       );
-      return null;
-    }
-  }, [isPending, openDmMutation, selectedUsers]);
+      if (
+        preparedDirectMessage &&
+        requestedPubkeys.every((pubkey) =>
+          preparedParticipantPubkeys.has(pubkey),
+        )
+      ) {
+        return preparedDirectMessage;
+      }
 
-  const prepareSendChannel = React.useCallback(async () => {
-    const directMessage = await openDirectMessage();
-    return directMessage?.id ?? null;
-  }, [openDirectMessage]);
+      if (
+        openDmMutation.isPending ||
+        sendMessageMutation.isPending ||
+        requestedPubkeys.length === 0
+      ) {
+        return null;
+      }
+
+      setSubmitErrorMessage(null);
+
+      try {
+        const directMessage = await openDmMutation.mutateAsync({
+          pubkeys: requestedPubkeys,
+        });
+        preparedDirectMessageRef.current = directMessage;
+        return directMessage;
+      } catch (error) {
+        setSubmitErrorMessage(
+          error instanceof Error
+            ? error.message
+            : "Failed to open direct message.",
+        );
+        return null;
+      }
+    },
+    [
+      openDmMutation.isPending,
+      openDmMutation.mutateAsync,
+      selectedUsers,
+      sendMessageMutation.isPending,
+    ],
+  );
+
+  const prepareSendChannel = React.useCallback(
+    async (additionalParticipantPubkeys: string[] = []) => {
+      const directMessage = await openDirectMessage(
+        additionalParticipantPubkeys,
+      );
+      return directMessage?.id ?? null;
+    },
+    [openDirectMessage],
+  );
 
   const sendFirstMessage = React.useCallback(
     async (
