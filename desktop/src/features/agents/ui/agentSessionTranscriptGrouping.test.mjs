@@ -5,6 +5,7 @@ import {
   buildTranscriptDisplayBlocks,
   flattenDisplayBlocks,
   formatTurnSetupLabel,
+  getDisplayBlockKey,
 } from "./agentSessionTranscriptGrouping.ts";
 import { isObserverEventAfter } from "../observerRelayStore.ts";
 
@@ -1707,5 +1708,168 @@ test("buildTranscriptDisplayBlocks_leadingSingleBeforeSessionNew_emittedInline",
   assert.ok(
     spIdx < toolAIdx,
     `sp (${spIdx}) must precede toolA (${toolAIdx}) — system-prompt must be hoisted even after a leading item`,
+  );
+});
+
+// ── getDisplayBlockKey ──────────────────────────────────────────────────────────
+
+test("getDisplayBlockKey_single_returnsItemId", () => {
+  const block = { kind: "single", item: { id: "item-42" } };
+  assert.equal(getDisplayBlockKey(block), "item-42");
+});
+
+test("getDisplayBlockKey_turn_returnsPrefixedTurnId", () => {
+  const block = { kind: "turn", turnId: "t-99", segments: [] };
+  assert.equal(getDisplayBlockKey(block), "turn:t-99");
+});
+
+test("getDisplayBlockKey_sessionBoundary_usesFirstItemIdNotRunIndex", () => {
+  const block = {
+    kind: "session-boundary",
+    sessionId: "sess-2",
+    sessionStartTimestamp: "2026-07-08T00:00:00.000Z",
+    labelState: "most-recent",
+    runIndex: 3,
+    firstItemId: "first-item-abc",
+  };
+  assert.equal(
+    getDisplayBlockKey(block),
+    "session-boundary:sess-2:first-item-abc",
+    "key must use firstItemId, not runIndex",
+  );
+});
+
+test("getDisplayBlockKey_independentOfLatestLiveSessionId", () => {
+  // Build blocks for the same items with different latestLiveSessionId values.
+  // Keys must be identical — only labelState differs.
+  const items = [
+    sessionItem("a", "sess-1", "2026-07-08T00:00:01.000Z"),
+    sessionItem("b", "sess-2", "2026-07-08T00:00:02.000Z"),
+  ];
+
+  const blocksLive = buildTranscriptDisplayBlocks(items, "sess-2");
+  const blocksNoLive = buildTranscriptDisplayBlocks(items, null);
+  const blocksDiffLive = buildTranscriptDisplayBlocks(items, "sess-other");
+
+  const keysLive = blocksLive.map(getDisplayBlockKey);
+  const keysNoLive = blocksNoLive.map(getDisplayBlockKey);
+  const keysDiffLive = blocksDiffLive.map(getDisplayBlockKey);
+
+  assert.deepEqual(
+    keysLive,
+    keysNoLive,
+    "keys must not vary with latestLiveSessionId=null",
+  );
+  assert.deepEqual(
+    keysLive,
+    keysDiffLive,
+    "keys must not vary with latestLiveSessionId=other",
+  );
+
+  // Sanity check: labelState DID change (proves the test setup matters).
+  const boundaryLive = blocksLive.find((b) => b.kind === "session-boundary");
+  const boundaryNoLive = blocksNoLive.find(
+    (b) => b.kind === "session-boundary",
+  );
+  assert.notEqual(
+    boundaryLive.labelState,
+    boundaryNoLive.labelState,
+    "labelState must differ (test setup sanity check)",
+  );
+});
+
+test("getDisplayBlockKey_parity_matchesBuildTranscriptDisplayBlocksOutput", () => {
+  // End-to-end: derive keys from buildTranscriptDisplayBlocks and assert they
+  // match the expected key for each block kind (the load-bearing invariant that
+  // outer-panel-derived ids match inner DOM data-message-id).
+  const items = [
+    sessionItem("orphan", "sess-1", "2026-07-08T00:00:00.000Z"),
+    // Multi-session to get a boundary block.
+    sessionItem("tool-a", "sess-2", "2026-07-08T00:00:01.000Z"),
+  ];
+
+  // Give orphan no turnId so it becomes a "single" block.
+  items[0].turnId = undefined;
+
+  const blocks = buildTranscriptDisplayBlocks(items, null);
+  const keys = blocks.map(getDisplayBlockKey);
+
+  // Expect: [single:orphan, boundary:sess-2:tool-a, turn:turn-tool-a]
+  assert.ok(keys.includes("orphan"), "single block key = item.id");
+  assert.ok(
+    keys.some((k) => k.startsWith("session-boundary:sess-2:")),
+    "boundary block key uses session-boundary: prefix",
+  );
+  assert.ok(
+    keys.some((k) => k.startsWith("turn:")),
+    "turn block key uses turn: prefix",
+  );
+
+  // No duplicates.
+  assert.equal(new Set(keys).size, keys.length, "all keys must be unique");
+});
+
+// ── Key-parity invariant: transient [turn, single] → [single, turn] reorder ──
+
+test("getDisplayBlockKey_firstTurnReorder_keysStableAcrossReorder", () => {
+  // Partial sequence: turn_started → session/new (two items, before session_resolved).
+  // At this point the key set is some combination of single + turn keys.
+  const ts = "2026-07-08T10:00:00.000Z";
+  const partialItems = [
+    {
+      id: "turn-started",
+      type: "lifecycle",
+      renderClass: "lifecycle",
+      title: "Turn started",
+      text: "",
+      timestamp: ts,
+      acpSource: "turn_started",
+      turnId: "turn-001",
+      sessionId: null,
+      channelId: "chan-1",
+    },
+    {
+      id: "system-prompt:chan-1",
+      type: "metadata",
+      renderClass: "raw-rail",
+      title: "System prompt",
+      sections: [{ title: "Base", body: "You are a helpful AI assistant." }],
+      timestamp: ts,
+      acpSource: "session/new",
+      turnId: null,
+      sessionId: null,
+      channelId: "chan-1",
+    },
+  ];
+
+  const partialBlocks = buildTranscriptDisplayBlocks(partialItems);
+  const partialKeys = new Set(partialBlocks.map(getDisplayBlockKey));
+
+  // Full sequence: add session_resolved (same turnId) — this seals the open
+  // batch and may reorder [turn, single] → [single, turn].
+  const fullItems = [
+    ...partialItems,
+    {
+      id: "session-resolved",
+      type: "lifecycle",
+      renderClass: "lifecycle",
+      title: "Session ready",
+      text: "",
+      timestamp: ts,
+      acpSource: "session_resolved",
+      turnId: "turn-001",
+      sessionId: "session-001",
+      channelId: "chan-1",
+    },
+  ];
+
+  const fullBlocks = buildTranscriptDisplayBlocks(fullItems);
+  const fullKeys = new Set(fullBlocks.map(getDisplayBlockKey));
+
+  // The KEY IDENTITIES must be identical — only the ORDER may differ.
+  assert.deepEqual(
+    partialKeys,
+    fullKeys,
+    "block key identities must be identical before and after session_resolved seals the open batch (order may differ)",
   );
 });

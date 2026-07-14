@@ -48,6 +48,7 @@ import type { FileEditDiff } from "./agentSessionFileEditDiff";
 import {
   buildTranscriptDisplayBlocks,
   formatTurnSetupLabel,
+  getDisplayBlockKey,
   turnSetupDetail,
   turnSetupTimestamp,
   type TranscriptDisplayBlock,
@@ -331,18 +332,6 @@ function TranscriptAcpSourceBadge({ source }: { source: string }) {
       {source}
     </span>
   );
-}
-
-function getDisplayBlockKey(block: TranscriptDisplayBlock) {
-  if (block.kind === "single") {
-    return block.item.id;
-  }
-  if (block.kind === "session-boundary") {
-    // Use firstItemId (stable across prepend) rather than runIndex (shifts when
-    // older sessions are prepended, causing unnecessary boundary remounts).
-    return `session-boundary:${block.sessionId}:${block.firstItemId}`;
-  }
-  return `turn:${block.turnId}`;
 }
 
 function TranscriptDisplayBlockView({

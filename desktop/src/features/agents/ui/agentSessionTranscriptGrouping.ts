@@ -742,6 +742,26 @@ export function flattenDisplayBlocks(
   return result;
 }
 
+/**
+ * Stable display key for a transcript block — used as the React list key and
+ * as the `data-message-id` attribute that `useAnchoredScroll` anchors on.
+ *
+ * Must be kept in sync with the `data-message-id` rendered by
+ * `AgentSessionTranscriptList` so outer scroll-anchor ids and inner DOM ids
+ * always agree 1:1.
+ */
+export function getDisplayBlockKey(block: TranscriptDisplayBlock): string {
+  if (block.kind === "single") {
+    return block.item.id;
+  }
+  if (block.kind === "session-boundary") {
+    // Use firstItemId (stable across prepend) rather than runIndex (shifts when
+    // older sessions are prepended, causing unnecessary boundary remounts).
+    return `session-boundary:${block.sessionId}:${block.firstItemId}`;
+  }
+  return `turn:${block.turnId}`;
+}
+
 /** Human-readable labels for a collapsed turn setup row. */
 export function formatTurnSetupLabel(
   items: Extract<TranscriptItem, { type: "lifecycle" }>[],
