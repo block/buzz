@@ -523,7 +523,7 @@ export function DoctorSettingsPanel() {
     <section className="min-w-0" data-testid="settings-doctor">
       <SettingsSectionHeader
         title="Doctor"
-        description="Verify the ACP runtime commands available to the desktop app."
+        description="Check that everything needed to run AI agents is set up on this computer."
         action={
           <Button
             disabled={isRefreshing}
@@ -559,16 +559,15 @@ export function DoctorSettingsPanel() {
             </>
           ) : null}
           <div className="px-4 py-3 text-sm">
-            <h3 className="text-sm font-medium">Agent CLIs and ACP runtimes</h3>
+            <h3 className="text-sm font-medium">AI agents</h3>
             <p className="mt-1 text-sm font-normal text-muted-foreground">
-              Installation status of supported agent CLIs and their ACP
-              runtimes.
+              Whether each supported agent is installed and signed in.
             </p>
           </div>
 
           {runtimesQuery.isLoading ? (
             <div className="px-4 py-3 text-sm font-normal text-muted-foreground">
-              Looking for ACP runtimes...
+              Checking for installed agents…
             </div>
           ) : runtimes.length > 0 ? (
             runtimes.map((runtime) => (
@@ -583,7 +582,7 @@ export function DoctorSettingsPanel() {
             ))
           ) : (
             <div className="bg-amber-500/10 px-4 py-3 text-sm text-warning">
-              No known ACP runtimes found.
+              No supported AI agents found on this computer.
             </div>
           )}
 
