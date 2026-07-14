@@ -1,11 +1,12 @@
 use nostr::Keys;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::app_state::AppState;
 use crate::managed_agents::{
-    effective_repos_dir, ensure_repos_symlink, nest_dir, try_regenerate_nest,
-    write_persisted_repos_dir,
+    effective_repos_dir, ensure_repos_symlink, nest_dir, restore_managed_agents_on_launch,
+    try_regenerate_nest, write_persisted_repos_dir,
 };
 use crate::relay;
 
@@ -104,6 +105,7 @@ pub async fn apply_workspace(
     repos_dir: Option<String>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let restore_app = app.clone();
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
 
@@ -168,8 +170,31 @@ pub async fn apply_workspace(
 
         try_regenerate_nest(&app);
 
-        Ok(())
+        Ok::<(), String>(())
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+
+    let state = restore_app.state::<AppState>();
+    if state
+        .managed_agent_restore_pending
+        .swap(false, Ordering::AcqRel)
+    {
+        let app = restore_app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
+            #[cfg(feature = "mesh-llm")]
+            if let Err(error) = crate::commands::mesh_llm::restore_mesh_sharing(&app, &state).await
+            {
+                eprintln!("buzz-desktop: failed to restore Share Compute: {error}");
+            }
+            if let Err(error) =
+                restore_managed_agents_on_launch(&app, &state.shutdown_started).await
+            {
+                eprintln!("buzz-desktop: failed to restore managed agents: {error}");
+            }
+        });
+    }
+
+    Ok(())
 }

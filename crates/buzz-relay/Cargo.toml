@@ -23,6 +23,9 @@ buzz-auth = { workspace = true }
 buzz-pubsub = { workspace = true }
 buzz-audit = { workspace = true }
 buzz-search = { workspace = true }
+buzz-relay-mesh = { workspace = true }
+async-trait = "0.1"
+postcard = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 # `io` (ReaderStream) is needed to stream git subprocess stdout straight into
@@ -54,6 +57,7 @@ redis = { workspace = true }
 # main(). Mirrors buzz-acp's rustls setup for wss://.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 sqlx = { workspace = true }
+reqwest = { workspace = true }
 base64 = "0.22"
 buzz-sdk = { workspace = true }
 buzz-workflow = { workspace = true, features = ["reqwest"] }

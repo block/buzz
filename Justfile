@@ -250,6 +250,9 @@ test-unit:
         # replay — so it belongs in the unit job. Run all targets (lib + the
         # tests/replay_fixtures.rs integration test), not just --lib.
         cargo nextest run -p buzz-conformance
+        # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
+        # contract/race tests run in the dedicated CI job below.
+        cargo nextest run -p buzz-push-gateway
     else
         ./scripts/run-tests.sh unit
     fi
@@ -462,6 +465,10 @@ mobile-check:
 # Run mobile tests
 mobile-test:
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test
+
+# Compile an unsigned Android debug APK
+mobile-build-android:
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter build apk --debug --no-pub
 
 # Run the mobile app on iOS simulator
 mobile-dev:

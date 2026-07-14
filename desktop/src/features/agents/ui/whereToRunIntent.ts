@@ -27,18 +27,14 @@ export function providerConfigComplete(draft: WhereToRunDraft): boolean {
   );
 }
 
-export function canSubmitWhereToRun(
-  draft: WhereToRunDraft,
-  startAfterCreate: boolean,
-): boolean {
-  return !startAfterCreate || providerConfigComplete(draft);
+export function canSubmitWhereToRun(draft: WhereToRunDraft): boolean {
+  return providerConfigComplete(draft);
 }
 
 export function resolveBackendIntent(
   draft: WhereToRunDraft,
-  startAfterCreate: boolean,
 ): BackendIntent | null {
-  if (!startAfterCreate || draft.runOn === "local") return null;
+  if (draft.runOn === "local") return null;
   return {
     type: "provider",
     id: draft.runOn,

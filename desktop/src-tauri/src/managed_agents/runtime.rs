@@ -1332,10 +1332,12 @@ pub fn build_managed_agent_summary(
         let state = app.state::<crate::app_state::AppState>();
         let global_for_hash =
             crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+        let teams_for_hash = crate::managed_agents::load_teams(app).unwrap_or_default();
         let hash_drift = runtime.spawn_config_hash
             != crate::managed_agents::spawn_hash::spawn_config_hash(
                 record,
                 personas,
+                &teams_for_hash,
                 &crate::relay::relay_ws_url_with_override(&state),
                 &global_for_hash,
             );
@@ -1498,6 +1500,7 @@ pub fn spawn_agent_child(
     // command, so we recompute them from the effective value rather than the
     // frozen record snapshot. Mirrors the model resolution below.
     let personas = super::load_personas(app).unwrap_or_default();
+    let teams = super::load_teams(app).unwrap_or_default();
     // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
     // and for the env-var merge at spawn time.
     let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
@@ -1716,17 +1719,17 @@ pub fn spawn_agent_child(
             }
         }
     }
-    if let (Some(team_dir), Some(persona_name)) =
-        (&record.persona_team_dir, &record.persona_name_in_team)
-    {
-        command.env("BUZZ_ACP_PERSONA_PACK", team_dir);
-        command.env("BUZZ_ACP_PERSONA_NAME", persona_name);
+    let team_instructions = super::spawn_hash::effective_team_instructions(record, &teams);
+    if let Some(instructions) = &team_instructions {
+        command.env("BUZZ_ACP_TEAM_INSTRUCTIONS", instructions);
+    } else {
+        command.env_remove("BUZZ_ACP_TEAM_INSTRUCTIONS");
     }
 
     // System prompt via the shared spawn-effective filter — the SAME function the
     // config hash digests, so env write and badge cannot disagree (see
-    // `effective_spawn_prompt` for the Some("")/None collapse and the
-    // team-pack suppression exception). Model and provider use the shared
+    // `effective_spawn_prompt` for the Some("")/None collapse). Model and provider
+    // use the shared
     // resolver: agent → persona → global → None, so a global-default-only agent
     // spawns with the correct provider/model env.
     let effective_prompt = super::spawn_hash::effective_spawn_prompt(record);
@@ -1890,8 +1893,13 @@ pub fn spawn_agent_child(
     // needs_restart when disk state drifts from what this process runs.
     // `effective_relay_url` is already resolved, and resolution is idempotent,
     // so it serves as the workspace-relay input here.
-    let spawn_config_hash =
-        super::spawn_hash::spawn_config_hash(record, &personas, &effective_relay_url, &global);
+    let spawn_config_hash = super::spawn_hash::spawn_config_hash(
+        record,
+        &personas,
+        &teams,
+        &effective_relay_url,
+        &global,
+    );
 
     // Stamp the adapter availability for runtimes with a version gate (codex
     // only). The summary builder compares this against the current cached value

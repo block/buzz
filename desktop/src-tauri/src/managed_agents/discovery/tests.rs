@@ -256,6 +256,7 @@ fn record_with(
         backend: Default::default(),
         backend_agent_id: None,
         provider_binary_path: None,
+        team_id: None,
         persona_team_dir: None,
         persona_name_in_team: None,
         env_vars: std::collections::BTreeMap::new(),
@@ -1025,4 +1026,245 @@ fn find_nvm_default_bin_rejects_absolute_hop_tag() {
     std::fs::write(lts_dir.join("testing"), "/tmp/evil\n").unwrap();
     let result = find_nvm_default_bin(home.path());
     assert_eq!(result, None, "absolute-path hop tag must be rejected");
+}
+
+// ── Phase C: command_basenames ──────────────────────────────────────────────
+
+/// On non-Windows, command_basenames returns only the executable_basename.
+#[cfg(not(windows))]
+#[test]
+fn test_command_basenames_single_candidate_on_unix() {
+    let candidates = super::command_basenames("codex-acp");
+    assert_eq!(
+        candidates,
+        vec!["codex-acp"],
+        "Unix must produce a single candidate"
+    );
+}
+
+/// On Windows, command_basenames adds .exe, .cmd, and .bat candidates.
+#[cfg(windows)]
+#[test]
+fn test_command_basenames_includes_cmd_bat_on_windows() {
+    let candidates = super::command_basenames("codex-acp");
+    assert_eq!(
+        candidates,
+        vec![
+            "codex-acp.exe".to_string(),
+            "codex-acp.cmd".to_string(),
+            "codex-acp.bat".to_string(),
+        ],
+        "Windows must produce .exe, .cmd, and .bat candidates"
+    );
+}
+
+/// command_basenames with a dotted name never adds .cmd/.bat.
+#[test]
+fn test_command_basenames_dotted_name_no_extra_candidates() {
+    let candidates = super::command_basenames("codex-acp.exe");
+    // Should contain the executable_basename only, no .cmd/.bat.
+    assert_eq!(
+        candidates.len(),
+        1,
+        "dotted name must produce exactly one candidate"
+    );
+}
+
+// ── Phase B: cli_install_commands_for_os ────────────────────────────────────
+
+/// Claude and Codex have non-empty default cli_install_commands (install.sh).
+#[test]
+fn test_claude_and_codex_have_cli_install_commands() {
+    let claude = super::known_acp_runtime_exact("claude").unwrap();
+    let codex = super::known_acp_runtime_exact("codex").unwrap();
+    assert!(
+        !claude.cli_install_commands.is_empty(),
+        "claude must have cli install commands"
+    );
+    assert!(
+        !codex.cli_install_commands.is_empty(),
+        "codex must have cli install commands"
+    );
+}
+
+/// cli_install_commands_for_os returns a non-empty slice for claude and codex.
+#[test]
+fn test_cli_install_commands_for_os_non_empty_for_claude_codex() {
+    let claude = super::known_acp_runtime_exact("claude").unwrap();
+    let codex = super::known_acp_runtime_exact("codex").unwrap();
+    assert!(
+        !claude.cli_install_commands_for_os().is_empty(),
+        "claude must have install commands on every platform"
+    );
+    assert!(
+        !codex.cli_install_commands_for_os().is_empty(),
+        "codex must have install commands on every platform"
+    );
+}
+
+/// On Windows, Claude and Codex select the PowerShell install commands.
+#[cfg(windows)]
+#[test]
+fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
+    let claude = super::known_acp_runtime_exact("claude").unwrap();
+    let codex = super::known_acp_runtime_exact("codex").unwrap();
+
+    // Windows must select the PowerShell commands, not the curl|bash ones.
+    let claude_cmds = claude.cli_install_commands_for_os();
+    let codex_cmds = codex.cli_install_commands_for_os();
+
+    assert_ne!(
+        claude_cmds, claude.cli_install_commands,
+        "Windows must NOT use the default curl|bash commands for claude"
+    );
+    assert_ne!(
+        codex_cmds, codex.cli_install_commands,
+        "Windows must NOT use the default curl|bash commands for codex"
+    );
+
+    // Verify they are the PowerShell installers.
+    assert!(
+        claude_cmds.iter().any(|c| c.contains("powershell")),
+        "claude Windows install must use powershell; got: {claude_cmds:?}"
+    );
+    assert!(
+        codex_cmds.iter().any(|c| c.contains("powershell")),
+        "codex Windows install must use powershell; got: {codex_cmds:?}"
+    );
+
+    // Goose and buzz-agent must NOT use Windows-specific commands.
+    let goose = super::known_acp_runtime_exact("goose").unwrap();
+    assert_eq!(
+        goose.cli_install_commands_for_os(),
+        goose.cli_install_commands,
+        "goose must use the same commands on all platforms"
+    );
+}
+
+// ── Phase C: login_shell_candidates ─────────────────────────────────────────
+
+/// On Unix, login_shell_candidates returns at least one candidate.
+#[cfg(unix)]
+#[test]
+fn test_login_shell_candidates_non_empty_on_unix() {
+    let candidates = super::login_shell_candidates();
+    assert!(
+        !candidates.is_empty(),
+        "Unix must have at least one login shell candidate"
+    );
+    // The first candidate should be /bin/zsh or /bin/bash.
+    let first = &candidates[0];
+    assert!(
+        first == std::path::Path::new("/bin/zsh") || first == std::path::Path::new("/bin/bash"),
+        "expected /bin/zsh or /bin/bash, got {first:?}"
+    );
+}
+
+// ── Regression: POSIX PATH must never reach native Windows consumers ───────
+
+/// `login_shell_path()` must return `None` on Windows so native-process
+/// consumers (`agent_models`, `build_augmented_path`, `cli_probe`) inherit
+/// the real Windows PATH instead of a POSIX colon-delimited string from
+/// Git Bash's `echo $PATH`.
+#[cfg(windows)]
+#[test]
+fn test_login_shell_path_returns_none_on_windows() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+
+    // Force a fresh fetch — don't rely on whatever prior tests cached.
+    refresh_login_shell_path();
+    let path = super::login_shell_path();
+
+    assert_eq!(
+        path, None,
+        "login_shell_path() must return None on Windows to prevent POSIX PATH leaking into native children"
+    );
+}
+
+// ── Phase C: .cmd shim resolution on Windows ───────────────────────────────
+
+/// `resolve_command_uncached` finds `.cmd` shims via the Windows PATH scan
+/// (discovery.rs lines 648-657). Creates a temp dir with ONLY a `.cmd` shim
+/// (no `.exe`), mutates PATH under the serialized lock, and calls the actual
+/// resolver — proving the full resolution chain finds `.cmd` extensions.
+#[cfg(windows)]
+#[test]
+fn test_cmd_shim_resolves_from_path() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+
+    // Create a temp dir with only a .cmd shim — no .exe.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let shim = temp.path().join("test-shim-cmd-resolve.cmd");
+    std::fs::write(&shim, "@echo off\r\n").expect("write shim");
+
+    // Prepend the temp dir to PATH so the resolver sees it.
+    // path_candidates_from_env_raw reads PATH live (std::env::var_os each call).
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut new_path = std::env::split_paths(&old_path).collect::<Vec<_>>();
+    new_path.insert(0, temp.path().to_path_buf());
+    let joined = std::env::join_paths(&new_path).expect("join PATH");
+    std::env::set_var("PATH", &joined);
+
+    let result = super::resolve_command_uncached("test-shim-cmd-resolve");
+
+    // Restore PATH before any assertion can panic.
+    std::env::set_var("PATH", &old_path);
+
+    assert_eq!(
+        result.as_deref(),
+        Some(shim.as_path()),
+        "resolve_command_uncached must find a .cmd shim on PATH when no .exe exists"
+    );
+}
+
+// ── Phase A: no-shell-resolved error on Windows ────────────────────────────
+
+/// When all resolution sources are empty AND the registry is disabled,
+/// `resolve_git_bash_no_registry` returns `None` deterministically —
+/// regardless of the CI runner's installed software.
+#[cfg(windows)]
+#[test]
+fn test_no_git_bash_resolved_returns_none() {
+    use crate::managed_agents::git_bash;
+
+    // Empty PATH, no overrides, no well-known dirs, registry disabled.
+    let result = git_bash::resolve_git_bash_no_registry("", None, None, None, None, None, None);
+    assert_eq!(
+        result, None,
+        "empty environment with registry disabled must not resolve a Git Bash"
+    );
+}
+
+/// When `resolve_bash_path` returns `None` (no Git Bash anywhere),
+/// `install_shell_from` maps it to `Err(GIT_BASH_INSTALL_HINT)` — the exact
+/// Doctor hint shown to the user. Tests the pure error-mapping seam, not the
+/// resolution chain.
+#[cfg(windows)]
+#[test]
+fn test_install_shell_from_none_returns_hint() {
+    use crate::commands::install_shell_from;
+    use crate::managed_agents::git_bash;
+
+    let result = install_shell_from(None);
+    assert_eq!(
+        result,
+        Err(git_bash::GIT_BASH_INSTALL_HINT.to_string()),
+        "install_shell_from(None) must return the Git Bash install hint"
+    );
+}
+
+/// When `resolve_bash_path` returns `Some(path)`, `install_shell_from`
+/// passes it through as `Ok`.
+#[cfg(windows)]
+#[test]
+fn test_install_shell_from_some_returns_path() {
+    use crate::commands::install_shell_from;
+
+    let path = std::path::PathBuf::from(r"C:\Git\bin\bash.exe");
+    let result = install_shell_from(Some(path.clone()));
+    assert_eq!(
+        result,
+        Ok(path),
+        "install_shell_from(Some) must return the path as Ok"
+    );
 }

@@ -53,6 +53,41 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.minio.enabled }}
+      # Quickstart only: the bundled MinIO bucket is created by a concurrent
+      # init Job (templates/quickstart-minio-init.yaml). The relay's A3 S3
+      # conformance probe is startup-fatal, so without this gate the relay Pods
+      # CrashLoopBackOff (with growing backoff) until the bucket appears. Block
+      # relay start until the bucket exists — deterministic, no crash-loops.
+      initContainers:
+        - name: wait-for-bucket
+          image: {{ .Values.minio.mcImage | quote }}
+          securityContext:
+            {{- toYaml .Values.relay.containerSecurityContext | nindent 12 }}
+          env:
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.chartSecretName" . }}
+                  key: BUZZ_S3_ACCESS_KEY
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.chartSecretName" . }}
+                  key: BUZZ_S3_SECRET_KEY
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              export MC_CONFIG_DIR=/tmp/.mc
+              until mc alias set local {{ include "buzz.minioEndpoint" . }} "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null 2>&1; do
+                echo "waiting for MinIO..."; sleep 2
+              done
+              until mc stat local/{{ .Values.s3.bucket }} >/dev/null 2>&1; do
+                echo "waiting for bucket {{ .Values.s3.bucket }}..."; sleep 2
+              done
+              echo "bucket {{ .Values.s3.bucket }} present"
+      {{- end }}
       containers:
         - name: relay
           image: {{ include "buzz.image" . }}

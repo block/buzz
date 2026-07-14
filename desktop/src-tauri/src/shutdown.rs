@@ -7,6 +7,32 @@ use crate::managed_agents::{
 };
 use crate::util;
 
+/// Install SIGINT/SIGTERM/SIGHUP cleanup on ctrlc's dedicated handler thread.
+#[cfg(unix)]
+pub(crate) fn install_signal_handler(
+    app: tauri::AppHandle,
+    shutdown_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+
+    if let Err(error) = ctrlc::set_handler(move || {
+        app.state::<AppState>()
+            .shutdown_started
+            .store(true, Ordering::SeqCst);
+        if !shutdown_done.swap(true, Ordering::SeqCst) {
+            let _ = shutdown_managed_agents(&app);
+            #[cfg(feature = "mesh-llm")]
+            shutdown_mesh_runtime(&app);
+        }
+        #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+        hard_exit_after_mesh_shutdown();
+        #[cfg(not(all(feature = "mesh-llm", target_os = "macos")))]
+        std::process::exit(0);
+    }) {
+        eprintln!("buzz-desktop: failed to register signal handler: {error}");
+    }
+}
+
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
 pub(crate) fn hard_exit_after_mesh_shutdown() -> ! {
     // SAFETY: all Buzz-managed subprocesses and the embedded Mesh runtime have
@@ -37,6 +63,10 @@ pub(crate) fn shutdown_mesh_runtime(app: &tauri::AppHandle) {
 
 pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
+    let _restore_transition = state
+        .managed_agent_restore_transition
+        .lock()
+        .map_err(|error| error.to_string())?;
     let _store_guard = state
         .managed_agents_store_lock
         .lock()

@@ -260,8 +260,8 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await expect(page.locator("#persona-parallelism")).toBeVisible();
   await page.locator("#persona-parallelism").fill("3");
 
-  // The start-after-create toggle defaults ON, so submitting mints a running
-  // instance whose behavioral quad resolves from the definition.
+  // Submitting mints a running instance whose behavioral quad resolves from
+  // the definition (agents always start after creation).
   await page.getByTestId("persona-dialog-submit").click();
 
   await expect(

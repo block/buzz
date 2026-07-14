@@ -30,9 +30,9 @@ const KnownAgentPubkeysContext = React.createContext<ReadonlySet<string>>(
  * published set's identity changes, which `useStableSet` restricts to actual
  * membership change.
  *
- * Mounted once per workspace inside `AppReady` (under the workspace-keyed
- * `WorkspaceQueryProvider` remount boundary), so the observers tear down and
- * re-create on workspace switch without a `resetWorkspaceState()` entry.
+ * Mounted once per community inside `AppReady` (under the community-keyed
+ * `CommunityQueryProvider` remount boundary), so the observers tear down and
+ * re-create on community switch without a `resetCommunityState()` entry.
  */
 export function KnownAgentPubkeysProvider({
   children,
@@ -56,7 +56,7 @@ export function KnownAgentPubkeysProvider({
 }
 
 /**
- * The workspace-scoped "known agent pubkeys" baseline: locally managed agents
+ * The community-scoped "known agent pubkeys" baseline: locally managed agents
  * ∪ relay-registered agents, normalised via `normalizePubkey`. Home-feed agent
  * activity is intentionally excluded: it is a display category, not an
  * authenticated agent-identity source.

@@ -8,11 +8,11 @@ import '../../shared/theme/theme.dart';
 import 'pairing_provider.dart';
 
 class PairingPage extends HookConsumerWidget {
-  /// When true, the pairing page is being used to add a new workspace
-  /// (user is already authenticated with at least one workspace).
-  final bool addingWorkspace;
+  /// When true, the pairing page is being used to add a new community
+  /// (user is already authenticated with at least one community).
+  final bool addingCommunity;
 
-  const PairingPage({super.key, this.addingWorkspace = false});
+  const PairingPage({super.key, this.addingCommunity = false});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -23,8 +23,8 @@ class PairingPage extends HookConsumerWidget {
         pairingState.status == PairingStatus.transferring ||
         pairingState.status == PairingStatus.storing;
 
-    // When adding a workspace and pairing succeeds, pop back.
-    if (addingWorkspace && pairingState.status == PairingStatus.success) {
+    // When adding a community and pairing succeeds, pop back.
+    if (addingCommunity && pairingState.status == PairingStatus.success) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (context.mounted) {
           ref.read(pairingProvider.notifier).reset();
@@ -40,13 +40,13 @@ class PairingPage extends HookConsumerWidget {
         }
       },
       child: Scaffold(
-        appBar: addingWorkspace
+        appBar: addingCommunity
             ? AppBar(
                 leading: IconButton(
                   icon: const Icon(LucideIcons.arrowLeft),
                   onPressed: () => Navigator.of(context).pop(),
                 ),
-                title: const Text('Add Workspace'),
+                title: const Text('Add Community'),
               )
             : null,
         body: SafeArea(

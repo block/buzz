@@ -6,8 +6,8 @@ use crate::{
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
+        load_teams, managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args,
+        provider_deploy, resolve_provider_binary, save_managed_agents, start_managed_agent_process,
         stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
         validate_provider_config, BackendKind, CreateManagedAgentRequest,
         CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
@@ -585,20 +585,17 @@ pub async fn create_managed_agent(
             None => String::new(),
         };
 
-        // For pack-backed personas, resolve the installed pack path and the
-        // persona's internal name (slug). ACP's resolve_persona_by_name()
-        // matches on this internal name, NOT display_name.
-        let pack_metadata: Option<(std::path::PathBuf, String)> =
-            requested_persona_id.as_deref().and_then(|pid| {
-                let persona = personas.iter().find(|p| p.id == pid)?;
-                let team_id = persona.source_team.as_deref()?;
-                let slug = persona.source_team_persona_slug.as_deref()?;
-                let base = managed_agents_base_dir(&app).ok()?;
-                let team_path = base.join("teams").join(team_id);
-                // Use the validated slug stored during import — no need to
-                // re-resolve the pack. The slug is [a-zA-Z0-9_-]+ by construction.
-                Some((team_path, slug.to_owned()))
-            });
+        let team_id = input
+            .team_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if let Some(team_id) = &team_id {
+            if !load_teams(&app)?.iter().any(|team| &team.id == team_id) {
+                return Err(format!("team {team_id} not found"));
+            }
+        }
 
         // Resolve the avatar URL once at creation and persist it on the record.
         // Explicit input wins, then the persona's own avatar, then the runtime
@@ -665,6 +662,7 @@ pub async fn create_managed_agent(
             pubkey: pubkey.clone(),
             name: name.clone(),
             persona_id: requested_persona_id.clone(),
+            team_id,
             private_key_nsec: private_key_nsec.clone(),
             auth_tag: auth_tag.clone(),
             relay_url: resolved_relay_url.clone(),
@@ -710,11 +708,8 @@ pub async fn create_managed_agent(
             backend: input.backend.clone(),
             backend_agent_id: None,
             provider_binary_path,
-            // Team-backed personas: record path + internal slug so the runtime
-            // can resolve team config at startup. Must be the slug (e.g., "lep"),
-            // NOT the display_name — ACP's resolve_persona_by_name() matches slugs.
-            persona_team_dir: pack_metadata.as_ref().map(|(path, _)| path.clone()),
-            persona_name_in_team: pack_metadata.as_ref().map(|(_, name)| name.clone()),
+            persona_team_dir: None,
+            persona_name_in_team: None,
             env_vars: input.env_vars.clone(),
             created_at: now_iso(),
             updated_at: now_iso(),

@@ -334,6 +334,26 @@ pub(crate) async fn run_playout_recv_loop(
                                         }
                                     }
                                 }
+                                Some("roster") => {
+                                    if let Some(peer_list) = v["peers"].as_array() {
+                                        let mut replacement = std::collections::HashMap::new();
+                                        for p in peer_list {
+                                            if let (Some(pk), Some(idx)) = (
+                                                p["pubkey"].as_str(),
+                                                p["peer_index"].as_u64(),
+                                            ) {
+                                                replacement.insert(idx as u8, pk.to_string());
+                                            }
+                                        }
+                                        let identity_unchanged = |idx: &u8| {
+                                            replacement.get(idx) == index_to_pubkey.get(idx)
+                                        };
+                                        peers.retain(|idx, _| identity_unchanged(idx));
+                                        frame_counts.retain(|idx, _| identity_unchanged(idx));
+                                        active_indices.retain(identity_unchanged);
+                                        index_to_pubkey = replacement;
+                                    }
+                                }
                                 Some("left") => {
                                     if let Some(idx) = v["peer_index"].as_u64() {
                                         let key = idx as u8;

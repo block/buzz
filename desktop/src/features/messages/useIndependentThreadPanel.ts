@@ -47,7 +47,6 @@ export function useIndependentThreadPanel(args: {
         args.personaLookup,
         args.respondToLookup,
       ),
-    // biome-ignore lint/correctness/useExhaustiveDependencies: fields listed explicitly — see comment above
     [
       args.channelEvents,
       args.threadReplyEvents,

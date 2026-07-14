@@ -48,7 +48,7 @@ test("relay invalidation excludes local Tauri and disk-only query roots", () => 
     ["acp-runtimes"],
     ["backend-providers"],
     ["managed-agent-log", "agent-1", 200],
-    ["workspace-icon", "wss://relay.example"],
+    ["community-icon", "wss://relay.example"],
     ["agent-memory", "agent-1"],
   ]) {
     assert.equal(isRelayDependentQueryKey(queryKey), false, queryKey.join("/"));

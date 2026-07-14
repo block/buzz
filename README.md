@@ -146,6 +146,7 @@ just setup && just build
 
 **Every day:**
 ```bash
+. ./bin/activate-hermit
 just dev   # starts the relay + desktop app together
 ```
 

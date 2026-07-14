@@ -30,7 +30,7 @@
 ⚠ QUICKSTART / EVALUATION PROFILE
   {{ if .Values.postgresql.enabled }}- In-cluster Postgres subchart (CloudPirates){{ end }}
   {{ if .Values.redis.enabled }}- In-cluster Redis subchart (CloudPirates){{ end }}
-  {{ if .Values.minio.enabled }}- In-cluster MinIO (eval-only, single replica; bucket "{{ .Values.s3.bucket }}" created by post-install Job){{ end }}
+  {{ if .Values.minio.enabled }}- In-cluster MinIO (eval-only, single replica; bucket "{{ .Values.s3.bucket }}" created by a bundled init Job){{ end }}
   - Chart auto-generates secrets via the `lookup` pattern. This is NOT
     GitOps-safe — secrets will silently rotate under ArgoCD/Flux. For
     production, see examples/argocd-app.yaml or examples/flux-helmrelease.yaml.

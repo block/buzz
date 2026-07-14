@@ -6,16 +6,16 @@ import {
   isInviteExpiredError,
 } from "@/shared/api/inviteHelpers";
 import { claimInvite } from "@/shared/api/invites";
-import type { Workspace } from "@/features/workspaces/types";
+import type { Community } from "@/features/communities/types";
 import {
-  deriveWorkspaceName,
+  deriveCommunityName,
   normalizeRelayUrl,
-} from "@/features/workspaces/workspaceStorage";
+} from "@/features/communities/communityStorage";
 
 export interface DeepLinkDeps {
-  addWorkspace: (workspace: Workspace) => string;
-  switchWorkspace: (id: string) => void;
-  reconnectWorkspace: () => void;
+  addCommunity: (community: Community) => string;
+  switchCommunity: (id: string) => void;
+  reconnectCommunity: () => void;
 }
 
 /**
@@ -54,13 +54,13 @@ export type JoinDeepLinkPayload = {
  * Register listeners for deep-link events emitted by the Rust backend.
  *
  * When a `buzz://connect?relay=<url>` link is opened, the handler
- * adds a workspace for the relay (deduplicating by URL) and switches
+ * adds a community for the relay (deduplicating by URL) and switches
  * to it. Returns an unlisten function to tear down all listeners.
  *
  * When a `buzz://join?relay=<url>&code=<invite>` link is opened (relay
  * invite landing page), the handler first claims the invite against the
  * relay's HTTP API — signed by this app's identity key — and only adds and
- * switches to the workspace once the relay has admitted the key.
+ * switches to the community once the relay has admitted the key.
  *
  * `buzz://message?…` is handled separately by `listenForMessageDeepLinks`,
  * because it needs to dispatch into the router which only exists below the
@@ -69,17 +69,17 @@ export type JoinDeepLinkPayload = {
 export function listenForDeepLinks(deps: DeepLinkDeps): Promise<UnlistenFn> {
   const addAndSwitch = (rawRelayUrl: string) => {
     const relayUrl = normalizeRelayUrl(rawRelayUrl);
-    const name = deriveWorkspaceName(relayUrl);
-    const id = deps.addWorkspace({
+    const name = deriveCommunityName(relayUrl);
+    const id = deps.addCommunity({
       id: crypto.randomUUID(),
       name,
       relayUrl,
       addedAt: new Date().toISOString(),
     });
-    deps.switchWorkspace(id);
-    // If addWorkspace returned the already-active workspace (same relay URL),
-    // switchWorkspace is a no-op — force re-init so the connection refreshes.
-    deps.reconnectWorkspace();
+    deps.switchCommunity(id);
+    // If addCommunity returned the already-active community (same relay URL),
+    // switchCommunity is a no-op — force re-init so the connection refreshes.
+    deps.reconnectCommunity();
     return name;
   };
 

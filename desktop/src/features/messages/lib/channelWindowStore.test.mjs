@@ -154,12 +154,36 @@ test("live backdated rows stay outside pages and render in order", () => {
   );
 });
 
-test("live rows below the oldest retained boundary wait for paging", () => {
+test("live rows below an open oldest boundary wait for paging", () => {
   const store = replaceNewestChannelWindow(
     emptyChannelWindowStore(),
     page(null, [event("n", 110), event("a", 100)]),
   );
   assert.equal(mergeLiveChannelWindowEvent(store, event("old", 90)), store);
+});
+
+test("same-second live rows enter an exhausted short window regardless of id order", () => {
+  const store = replaceNewestChannelWindow(
+    emptyChannelWindowStore(),
+    page(null, [event("a", 100), event("m", 100)], { hasMore: false }),
+  );
+  const live = event("z", 100);
+  const withLive = mergeLiveChannelWindowEvent(store, live);
+
+  assert.notEqual(withLive, store);
+  assert.deepEqual(
+    flattenChannelWindowEvents(withLive).map((item) => item.content),
+    ["z", "m", "a"],
+  );
+});
+
+test("older live rows stay below an exhausted window", () => {
+  const store = replaceNewestChannelWindow(
+    emptyChannelWindowStore(),
+    page(null, [event("a", 100)], { hasMore: false }),
+  );
+
+  assert.equal(mergeLiveChannelWindowEvent(store, event("old", 99)), store);
 });
 
 test("live aux stays separate from authoritative page closure", () => {

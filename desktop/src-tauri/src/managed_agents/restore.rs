@@ -236,6 +236,18 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
+    // Serialize spawning and runtime registration with shutdown cleanup. The
+    // shutdown flag is rechecked after taking the lock so shutdown either
+    // prevents this transition or waits until every child is tracked and can
+    // be terminated.
+    let restore_transition = state
+        .managed_agent_restore_transition
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if shutdown_started.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
     // ── Phase B (no locks): resolve commands and spawn processes in parallel ──
     let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
         let owner_hex_ref = owner_hex.as_deref();
@@ -328,6 +340,9 @@ pub async fn restore_managed_agents_on_launch(
             .collect();
 
     save_managed_agents(app, &records)?;
+    drop(runtimes);
+    drop(_store_guard);
+    drop(restore_transition);
 
     // ── Profile reconciliation (fire-and-forget) ────────────────────────────
     // Spawn background tasks to ensure each restored agent's kind:0 profile is

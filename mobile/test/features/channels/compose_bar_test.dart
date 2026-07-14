@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,6 +15,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -110,24 +113,39 @@ void _setMockMediaUploadPlatformHandler(
 Widget _buildComposeBar({
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
+  List<ChannelMember> members = const <ChannelMember>[],
+  Future<List<ChannelMember>>? membersFuture,
+  List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
+  List<Channel> channels = const <Channel>[],
+  String? currentPubkey,
+  bool? supportsShowingSystemContextMenu,
 }) {
   return ProviderScope(
     overrides: [
       mediaUploadServiceProvider.overrideWithValue(uploadService),
-      currentPubkeyProvider.overrideWith((ref) => null),
+      currentPubkeyProvider.overrideWith((ref) => currentPubkey),
       channelMembersProvider(
         'channel-1',
-      ).overrideWith((ref) async => const <ChannelMember>[]),
-      agentDirectoryProvider.overrideWith(
-        (ref) async => const <AgentDirectoryEntry>[],
-      ),
+      ).overrideWith((ref) => membersFuture ?? Future.value(members)),
+      agentDirectoryProvider.overrideWith((ref) async => relayAgents),
       agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
+      relayConfigProvider.overrideWith(() => _FakeRelayConfigNotifier()),
+      channelsProvider.overrideWith(() => _FakeChannelsNotifier(channels)),
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
+      builder: supportsShowingSystemContextMenu == null
+          ? null
+          : (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                supportsShowingSystemContextMenu:
+                    supportsShowingSystemContextMenu,
+              ),
+              child: child!,
+            ),
       home: Scaffold(
         body: SafeArea(
           child: ComposeBar(channelId: 'channel-1', onSend: onSend),
@@ -135,6 +153,60 @@ Widget _buildComposeBar({
       ),
     ),
   );
+}
+
+class _FakeRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => RelayConfig(
+    baseUrl: 'http://localhost:3000',
+    nsec: nostr.Keys.generate().nsec,
+  );
+}
+
+class _RecordingRelaySocket extends RelaySocket {
+  final List<Map<String, dynamic>> events;
+  final void Function(List<dynamic> message) handleMessage;
+
+  _RecordingRelaySocket(this.events, this.handleMessage)
+    : super(
+        wsUrl: 'ws://localhost',
+        nsec: null,
+        onMessage: handleMessage,
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+
+  @override
+  SocketState get state => SocketState.connected;
+
+  @override
+  void send(List<dynamic> payload) {
+    if (payload case ['EVENT', final Map<String, dynamic> event]) {
+      events.add(event);
+      final id = event['id'] as String;
+      super.debugHandleOkForTest(['OK', id, true, '']);
+    }
+  }
+
+  @override
+  Future<void> disconnect() async {}
+
+  @override
+  void dispose() {}
+}
+
+class _FakeChannelsNotifier extends ChannelsNotifier {
+  final List<Channel> _channels;
+
+  _FakeChannelsNotifier(this._channels);
+
+  @override
+  Future<List<Channel>> build() async => _channels;
+
+  @override
+  Future<void> refresh() async {
+    state = AsyncData(_channels);
+  }
 }
 
 void main() {
@@ -148,6 +220,8 @@ void main() {
           return arguments['bytes'] as Uint8List;
         case 'transcodeImageToJpeg':
           return _pngBytes;
+        case 'clipboardHasImage':
+          return true;
         default:
           return null;
       }
@@ -222,6 +296,415 @@ void main() {
         contains('url https://relay.example/media/test.png'),
       );
       expect(find.byTooltip('Remove attachment'), findsNothing);
+    });
+
+    testWidgets('pasted image follows the attachment preview and send path', (
+      tester,
+    ) async {
+      final keychain = nostr.Keys.generate();
+      var galleryPickerCalled = false;
+      Uint8List? uploadedBytes;
+      String? uploadedMimeType;
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: keychain.nsec,
+        httpClient: http_testing.MockClient((request) async {
+          uploadedBytes = request.bodyBytes;
+          uploadedMimeType = request.headers['Content-Type'];
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/pasted.png',
+              'sha256':
+                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'size': 16,
+              'type': 'image/png',
+              'uploaded': 1,
+              'thumb': 'https://relay.example/media/pasted.thumb.jpg',
+            }),
+            200,
+          );
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async {
+          galleryPickerCalled = true;
+          return null;
+        },
+      );
+
+      String? sentContent;
+      List<List<String>> sentMediaTags = const [];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+                sentMediaTags = mediaTags;
+              },
+        ),
+      );
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      final insertionConfiguration = textField.contentInsertionConfiguration;
+      expect(insertionConfiguration, isNotNull);
+      expect(
+        insertionConfiguration!.allowedMimeTypes,
+        containsAll(['image/jpeg', 'image/png', 'image/webp']),
+      );
+
+      insertionConfiguration.onContentInserted(
+        KeyboardInsertedContent(
+          mimeType: 'image/png',
+          uri: 'content://clipboard/pasted.png',
+          data: _pngBytes,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(galleryPickerCalled, isFalse);
+      expect(uploadedBytes, _pngBytes);
+      expect(uploadedMimeType, 'image/png');
+      expect(
+        find.byKey(
+          const ValueKey(
+            'compose-attachment:https://relay.example/media/pasted.png',
+          ),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
+
+      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.pumpAndSettle();
+
+      expect(sentContent, '\n![image](https://relay.example/media/pasted.png)');
+      expect(sentMediaTags, hasLength(1));
+      expect(
+        sentMediaTags.single,
+        contains('url https://relay.example/media/pasted.png'),
+      );
+    });
+
+    testWidgets('iOS native context menu preserves defaults and pastes image', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          httpClient: http_testing.MockClient(
+            (request) async => http.Response(
+              jsonEncode({
+                'url': 'https://relay.example/media/ios-native-paste.png',
+                'sha256':
+                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'size': 16,
+                'type': 'image/png',
+                'uploaded': 1,
+              }),
+              200,
+            ),
+          ),
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          readClipboardImage: () async => _pngBytes,
+        );
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            supportsShowingSystemContextMenu: true,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        final editableTextState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final defaultItems = SystemContextMenu.getDefaultItems(
+          editableTextState,
+        );
+        final menu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as SystemContextMenu;
+        final pasteImage = menu.items.first as IOSSystemContextMenuItemCustom;
+
+        expect(pasteImage.title, 'Paste Image');
+        expect(menu.items.skip(1), orderedEquals(defaultItems));
+        pasteImage.onPressed();
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const ValueKey(
+              'compose-attachment:https://relay.example/media/ios-native-paste.png',
+            ),
+          ),
+          findsOneWidget,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('iOS hides Paste Image when clipboard has no image', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      _setMockMediaUploadPlatformHandler((call) async {
+        if (call.method == 'clipboardHasImage') return false;
+        return null;
+      });
+      try {
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+        );
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            supportsShowingSystemContextMenu: true,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await tester.pump();
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        final editableTextState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final menu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as SystemContextMenu;
+
+        expect(menu.items.whereType<IOSSystemContextMenuItemCustom>(), isEmpty);
+      } finally {
+        _setMockMediaUploadPlatformHandler((call) async {
+          switch (call.method) {
+            case 'sanitizeImageForUpload':
+              final arguments = call.arguments as Map<Object?, Object?>;
+              return arguments['bytes'] as Uint8List;
+            case 'transcodeImageToJpeg':
+              return _pngBytes;
+            case 'clipboardHasImage':
+              return true;
+            default:
+              return null;
+          }
+        });
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('iOS adaptive Paste Image reads the clipboard into shared path', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          httpClient: http_testing.MockClient(
+            (request) async => http.Response(
+              jsonEncode({
+                'url': 'https://relay.example/media/ios-paste.png',
+                'sha256':
+                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'size': 16,
+                'type': 'image/png',
+                'uploaded': 1,
+              }),
+              200,
+            ),
+          ),
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          readClipboardImage: () async => _pngBytes,
+        );
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        final editableTextState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final menu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as AdaptiveTextSelectionToolbar;
+        final pasteImage = menu.buttonItems!.singleWhere(
+          (item) => item.label == 'Paste Image',
+        );
+        pasteImage.onPressed!();
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const ValueKey(
+              'compose-attachment:https://relay.example/media/ios-paste.png',
+            ),
+          ),
+          findsOneWidget,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('shows an error when pasted image bytes are unavailable', (
+      tester,
+    ) async {
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      textField.contentInsertionConfiguration!.onContentInserted(
+        const KeyboardInsertedContent(
+          mimeType: 'image/png',
+          uri: 'content://clipboard/unavailable.png',
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Unable to read pasted image'), findsOneWidget);
+      expect(find.byTooltip('Remove attachment'), findsNothing);
+    });
+
+    testWidgets('iOS Paste Image reports an unavailable clipboard image', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          readClipboardImage: () async => null,
+        );
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        final editableTextState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final menu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as AdaptiveTextSelectionToolbar;
+        menu.buttonItems!
+            .singleWhere((item) => item.label == 'Paste Image')
+            .onPressed!();
+        await tester.pumpAndSettle();
+
+        expect(find.text('Unable to read pasted image'), findsOneWidget);
+        expect(find.byTooltip('Remove attachment'), findsNothing);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('does not add Paste Image to non-iOS context menus', (
+      tester,
+    ) async {
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      final editableTextState = tester.state<EditableTextState>(
+        find.byType(EditableText),
+      );
+      final menu =
+          textField.contextMenuBuilder!(
+                tester.element(find.byType(TextField)),
+                editableTextState,
+              )
+              as AdaptiveTextSelectionToolbar;
+
+      expect(
+        menu.buttonItems!.where((item) => item.label == 'Paste Image'),
+        isEmpty,
+      );
     });
 
     testWidgets('keeps the remove button pinned to the attachment corner', (
@@ -359,6 +842,181 @@ void main() {
         find.textContaining('GIF uploads are not supported on mobile yet'),
         findsOneWidget,
       );
+    });
+
+    testWidgets('adds a selected non-member agent as a bot before sending', (
+      tester,
+    ) async {
+      final agentPubkey = 'c' * 64;
+      final signer = nostr.Keys.generate();
+      final publishedEvents = <Map<String, dynamic>>[];
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: signer.nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+      String? sentContent;
+      List<String> sentMentionPubkeys = const <String>[];
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          currentPubkey: signer.public,
+          relayAgents: [
+            AgentDirectoryEntry(
+              pubkey: agentPubkey,
+              displayName: 'Helper Bot',
+              respondTo: 'anyone',
+              channelIds: const ['shared-channel'],
+            ),
+          ],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+                sentMentionPubkeys = mentionPubkeys;
+              },
+        ),
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      final socket = _RecordingRelaySocket(
+        publishedEvents,
+        session.debugHandleSocketMessageForTest,
+      );
+      session.debugAttachSocketForTest(socket);
+
+      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.pumpAndSettle();
+
+      expect(sentContent, 'hello @Helper Bot');
+      expect(sentMentionPubkeys, [agentPubkey]);
+      final addMemberEvent = publishedEvents.singleWhere(
+        (event) => event['kind'] == 9000,
+      );
+      expect(addMemberEvent['tags'], [
+        ['h', 'channel-1'],
+        ['p', agentPubkey],
+        ['role', 'bot'],
+      ]);
+    });
+
+    testWidgets('does not mutate a DM when mentioning a non-member agent', (
+      tester,
+    ) async {
+      final agentPubkey = 'd' * 64;
+      final signer = nostr.Keys.generate();
+      final publishedEvents = <Map<String, dynamic>>[];
+      String? sentContent;
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          relayAgents: [_testAgent(agentPubkey)],
+          channels: [
+            _makeCurrentChannel(channelType: 'dm'),
+            _makeSharedMemberChannel(),
+          ],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+              },
+        ),
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      final socket = _RecordingRelaySocket(
+        publishedEvents,
+        session.debugHandleSocketMessageForTest,
+      );
+      session.debugAttachSocketForTest(socket);
+
+      await _selectAndSendAgentMention(tester);
+
+      expect(sentContent, 'hello @Helper Bot');
+      expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
+    });
+
+    testWidgets('waits for current member data before adding an agent', (
+      tester,
+    ) async {
+      final agentPubkey = 'e' * 64;
+      final signer = nostr.Keys.generate();
+      final membersCompleter = Completer<List<ChannelMember>>();
+      final publishedEvents = <Map<String, dynamic>>[];
+      var didSend = false;
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          membersFuture: membersCompleter.future,
+          relayAgents: [_testAgent(agentPubkey)],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                didSend = true;
+              },
+        ),
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      final socket = _RecordingRelaySocket(
+        publishedEvents,
+        session.debugHandleSocketMessageForTest,
+      );
+      session.debugAttachSocketForTest(socket);
+
+      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.pump();
+
+      expect(didSend, isFalse);
+      expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
+
+      membersCompleter.complete([
+        ChannelMember(
+          pubkey: agentPubkey,
+          role: 'admin',
+          joinedAt: DateTime(2024),
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(didSend, isTrue);
+      expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
     });
 
     testWidgets('shows a clean error when an animated PNG is picked', (
@@ -674,6 +1332,62 @@ void main() {
       expect(controller.selection.baseOffset, 6);
     });
   });
+}
+
+MediaUploadService _testUploadService(String nsec) {
+  return MediaUploadService(
+    baseUrl: 'https://relay.example',
+    nsec: nsec,
+    pickGalleryImage: () async => null,
+    pickGalleryVideo: () async => null,
+  );
+}
+
+AgentDirectoryEntry _testAgent(String pubkey) {
+  return AgentDirectoryEntry(
+    pubkey: pubkey,
+    displayName: 'Helper Bot',
+    respondTo: 'anyone',
+    channelIds: const ['shared-channel'],
+  );
+}
+
+Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
+  await tester.enterText(find.byType(TextField), '@hel');
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Helper Bot'));
+  await tester.pumpAndSettle();
+  await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+  await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+  await tester.pumpAndSettle();
+}
+
+Channel _makeCurrentChannel({String channelType = 'stream'}) {
+  return Channel(
+    id: 'channel-1',
+    name: 'current',
+    channelType: channelType,
+    visibility: 'open',
+    description: '',
+    createdBy: 'pubkey123',
+    createdAt: DateTime(2024),
+    memberCount: 2,
+    isMember: true,
+  );
+}
+
+Channel _makeSharedMemberChannel() {
+  return Channel(
+    id: 'shared-channel',
+    name: 'shared',
+    channelType: 'stream',
+    visibility: 'open',
+    description: '',
+    createdBy: 'pubkey123',
+    createdAt: DateTime(2024),
+    memberCount: 5,
+    isMember: true,
+  );
 }
 
 Channel _makeChannel({required String name, required String channelType}) {

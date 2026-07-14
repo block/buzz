@@ -1,12 +1,17 @@
+import 'dart:collection';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../custom_emoji/custom_emoji.dart';
@@ -24,6 +29,13 @@ part 'compose_bar/suggestions.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
 part 'compose_bar/send_button.dart';
+
+const _pastedImageMimeTypes = <String>[
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+];
 
 /// Rich compose bar with @mention autocomplete, emoji picker, and a markdown
 /// formatting toolbar. Used in both channel and thread views — the caller
@@ -64,6 +76,7 @@ class ComposeBar extends HookConsumerWidget {
     final attachments = useState<List<BlobDescriptor>>([]);
     final uploadError = useState<String?>(null);
     final uploadingCount = useState(0);
+    final clipboardHasImage = useState(false);
     final hasAttachments = attachments.value.isNotEmpty;
     final hasPendingUploads = uploadingCount.value > 0;
     final customEmoji = ref.watch(customEmojiListProvider);
@@ -72,12 +85,42 @@ class ComposeBar extends HookConsumerWidget {
         hintText ??
         (channelName.isNotEmpty ? 'Message #$channelName' : 'Message\u2026');
 
+    useEffect(() {
+      if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+
+      var disposed = false;
+      Future<void> refreshClipboardAvailability() async {
+        final hasImage = await ref
+            .read(mediaUploadServiceProvider)
+            .clipboardHasImage();
+        if (!disposed && context.mounted) {
+          clipboardHasImage.value = hasImage;
+        }
+      }
+
+      void refreshWhenFocused() {
+        if (focusNode.hasFocus) refreshClipboardAvailability();
+      }
+
+      final lifecycleListener = AppLifecycleListener(
+        onResume: refreshClipboardAvailability,
+      );
+      focusNode.addListener(refreshWhenFocused);
+      refreshClipboardAvailability();
+      return () {
+        disposed = true;
+        focusNode.removeListener(refreshWhenFocused);
+        lifecycleListener.dispose();
+      };
+    }, [focusNode]);
+
     // Mention state --------------------------------------------------------
     final mentionQuery = useState<String?>(null);
     final mentionStartIdx = useState(-1);
-    // Map of displayName → pubkey built as the user selects mentions.
-    // Used to pass resolved pubkeys directly to onSend, avoiding regex.
-    final mentionMap = useRef(<String, String>{});
+    // Map of displayName → selected mention candidate built as the user selects
+    // mentions. Used to pass resolved pubkeys directly to onSend and to attach
+    // selected non-member agents before the message is published.
+    final mentionMap = useRef(<String, MentionCandidate>{});
 
     // Channel autocomplete state ----------------------------------------------
     final channelQuery = useState<String?>(null);
@@ -213,8 +256,9 @@ class ComposeBar extends HookConsumerWidget {
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
       final name = candidate.label;
-      // Track the resolved pubkey so we can pass it at send time.
-      mentionMap.value[name] = candidate.pubkey;
+      // Track the resolved candidate so we can pass its pubkey and prepare
+      // selected non-member agents at send time.
+      mentionMap.value[name] = candidate;
 
       final start = mentionStartIdx.value.clamp(0, controller.text.length);
       spliceAndMoveCursor(
@@ -269,10 +313,34 @@ class ComposeBar extends HookConsumerWidget {
       }
 
       // Extract pubkeys for mentions present in the final text.
-      final pubkeys = <String>[
+      final selectedMentions = <MentionCandidate>[
         for (final entry in mentionMap.value.entries)
-          if (text.contains('@${entry.key}')) entry.value,
+          if (hasMention(text, entry.key)) entry.value,
       ];
+      final pubkeys = LinkedHashSet<String>.from(
+        selectedMentions.map((candidate) => candidate.pubkey.toLowerCase()),
+      ).toList();
+      final selectedAgentPubkeys = LinkedHashSet<String>.from(
+        selectedMentions
+            .where((candidate) => candidate.isAgent)
+            .map((candidate) => candidate.pubkey.toLowerCase()),
+      );
+      final nonMemberAgentPubkeys = <String>[];
+      if (selectedAgentPubkeys.isNotEmpty) {
+        final currentChannel = (await ref.read(
+          channelsProvider.future,
+        )).firstWhere((channel) => channel.id == channelId);
+        if (!currentChannel.isDm) {
+          final memberPubkeys = (await ref.read(
+            channelMembersProvider(channelId).future,
+          )).map((member) => member.pubkey.toLowerCase()).toSet();
+          nonMemberAgentPubkeys.addAll(
+            selectedAgentPubkeys.where(
+              (pubkey) => !memberPubkeys.contains(pubkey),
+            ),
+          );
+        }
+      }
 
       final payload = _ComposeDraftPayload.fromDraft(
         text: text,
@@ -282,6 +350,15 @@ class ComposeBar extends HookConsumerWidget {
 
       isSending.value = true;
       try {
+        if (nonMemberAgentPubkeys.isNotEmpty) {
+          await ref
+              .read(channelActionsProvider)
+              .addMembers(
+                channelId: channelId,
+                pubkeys: nonMemberAgentPubkeys,
+                role: 'bot',
+              );
+        }
         await onSend(payload.content, pubkeys, mediaTags: payload.mediaTags);
         if (context.mounted) {
           clearComposer();
@@ -308,6 +385,60 @@ class ComposeBar extends HookConsumerWidget {
           uploadingCount.value -= 1;
         }
       }
+    }
+
+    Widget buildContextMenu(
+      BuildContext context,
+      EditableTextState editableTextState,
+    ) {
+      void pasteImage() {
+        ContextMenuController.removeAny();
+        pickAndUpload(
+          ref.read(mediaUploadServiceProvider).readAndUploadClipboardImage,
+        );
+      }
+
+      if (defaultTargetPlatform == TargetPlatform.iOS &&
+          SystemContextMenu.isSupportedByField(editableTextState)) {
+        return SystemContextMenu.editableText(
+          editableTextState: editableTextState,
+          items: [
+            if (clipboardHasImage.value)
+              IOSSystemContextMenuItemCustom(
+                title: 'Paste Image',
+                onPressed: pasteImage,
+              ),
+            ...SystemContextMenu.getDefaultItems(editableTextState),
+          ],
+        );
+      }
+
+      final buttonItems = [...editableTextState.contextMenuButtonItems];
+      if (defaultTargetPlatform == TargetPlatform.iOS &&
+          clipboardHasImage.value) {
+        buttonItems.insert(
+          0,
+          ContextMenuButtonItem(label: 'Paste Image', onPressed: pasteImage),
+        );
+      }
+      return AdaptiveTextSelectionToolbar.buttonItems(
+        anchors: editableTextState.contextMenuAnchors,
+        buttonItems: buttonItems,
+      );
+    }
+
+    void uploadPastedImage(KeyboardInsertedContent content) {
+      final bytes = content.data;
+      if (bytes == null || bytes.isEmpty) {
+        uploadError.value = 'Unable to read pasted image';
+        return;
+      }
+
+      pickAndUpload(
+        () => ref
+            .read(mediaUploadServiceProvider)
+            .uploadImage(XFile.fromData(bytes)),
+      );
     }
 
     // Insert an emoji at the cursor.
@@ -441,6 +572,11 @@ class ComposeBar extends HookConsumerWidget {
                 controller: controller,
                 focusNode: focusNode,
                 textInputAction: TextInputAction.send,
+                contextMenuBuilder: buildContextMenu,
+                contentInsertionConfiguration: ContentInsertionConfiguration(
+                  allowedMimeTypes: _pastedImageMimeTypes,
+                  onContentInserted: uploadPastedImage,
+                ),
                 onSubmitted: (_) => send(),
                 minLines: 1,
                 maxLines: 5,

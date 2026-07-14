@@ -561,7 +561,7 @@ export function useActiveAgentTurnsBridge(
 
 /**
  * Clears all live turn state (active turns, offsets, watermarks, tombstones).
- * Intentionally preserves `savedByWorkspace` — workspace-switch snapshots
+ * Intentionally preserves `savedByCommunity` — community-switch snapshots
  * must survive the reset that runs between save and restore.
  */
 export function resetActiveAgentTurnsStore() {
@@ -575,7 +575,7 @@ export function resetActiveAgentTurnsStore() {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace-switch save / restore
+// Community-switch save / restore
 // ---------------------------------------------------------------------------
 
 type TurnsStoreSnapshot = {
@@ -585,11 +585,11 @@ type TurnsStoreSnapshot = {
   terminals: Map<string, Map<string, number>>;
 };
 
-/** Per-workspace snapshots. Keyed by workspace ID. */
-const savedByWorkspace = new Map<string, TurnsStoreSnapshot>();
+/** Per-community snapshots. Keyed by community ID. */
+const savedByCommunity = new Map<string, TurnsStoreSnapshot>();
 
 /**
- * Snapshot the current active-turns state under `workspaceId` so it can be
+ * Snapshot the current active-turns state under `communityId` so it can be
  * restored when the user switches back.  If both the turns map and the
  * tombstone map are empty there is nothing worth restoring — discard any
  * previously-saved snapshot instead.
@@ -597,9 +597,9 @@ const savedByWorkspace = new Map<string, TurnsStoreSnapshot>();
  * Deep-clones all four maps so subsequent mutations on the live maps do not
  * corrupt the snapshot.
  */
-export function saveActiveAgentTurnsForWorkspace(workspaceId: string): void {
+export function saveActiveAgentTurnsForCommunity(communityId: string): void {
   if (activeTurnsByAgent.size === 0 && terminalAtByAgent.size === 0) {
-    savedByWorkspace.delete(workspaceId);
+    savedByCommunity.delete(communityId);
     return;
   }
 
@@ -624,17 +624,17 @@ export function saveActiveAgentTurnsForWorkspace(workspaceId: string): void {
     terminals.set(agentKey, new Map(tombstones));
   }
 
-  savedByWorkspace.set(workspaceId, { turns, offsets, watermarks, terminals });
+  savedByCommunity.set(communityId, { turns, offsets, watermarks, terminals });
 }
 
 /**
- * Restore a previously saved active-turns snapshot for `workspaceId` into the
+ * Restore a previously saved active-turns snapshot for `communityId` into the
  * module maps.  No-op when no snapshot exists.
  *
  * Clears all four module maps before writing so the function is
  * self-contained — it replaces rather than merging, regardless of whether the
- * caller pre-cleared.  At the primary call site (`useWorkspaceInit`) the maps
- * are already empty after `resetWorkspaceState()`, but this guard makes the
+ * caller pre-cleared.  At the primary call site (`useCommunityInit`) the maps
+ * are already empty after `resetCommunityState()`, but this guard makes the
  * contract explicit.
  *
  * Refreshes `lastActivityAt` on every restored turn so the prune interval
@@ -642,13 +642,13 @@ export function saveActiveAgentTurnsForWorkspace(workspaceId: string): void {
  * threshold).  New observer events arriving after restore will update
  * `lastActivityAt` normally via `recordActivity`.
  *
- * Consumes the snapshot (deletes it from `savedByWorkspace`) — a given
- * workspace's snapshot is only usable once per round-trip.
+ * Consumes the snapshot (deletes it from `savedByCommunity`) — a given
+ * community's snapshot is only usable once per round-trip.
  */
-export function restoreActiveAgentTurnsForWorkspace(workspaceId: string): void {
-  const snap = savedByWorkspace.get(workspaceId);
+export function restoreActiveAgentTurnsForCommunity(communityId: string): void {
+  const snap = savedByCommunity.get(communityId);
   if (!snap) return;
-  savedByWorkspace.delete(workspaceId);
+  savedByCommunity.delete(communityId);
 
   // Clear before writing so this is a replace, not a merge.
   activeTurnsByAgent.clear();
@@ -684,10 +684,10 @@ export function restoreActiveAgentTurnsForWorkspace(workspaceId: string): void {
 }
 
 /**
- * Discard the saved turn-state snapshot for a workspace that has been
+ * Discard the saved turn-state snapshot for a community that has been
  * permanently deleted so the entry doesn't sit in memory indefinitely.
- * Call this alongside the other relay-specific GC in `removeWorkspace`.
+ * Call this alongside the other relay-specific GC in `removeCommunity`.
  */
-export function clearSavedWorkspaceSnapshot(workspaceId: string): void {
-  savedByWorkspace.delete(workspaceId);
+export function clearSavedCommunitySnapshot(communityId: string): void {
+  savedByCommunity.delete(communityId);
 }

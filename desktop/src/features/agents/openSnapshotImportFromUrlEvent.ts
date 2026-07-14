@@ -12,6 +12,7 @@
 export type PendingSnapshotImport = {
   fileBytes: number[];
   fileName: string;
+  snapshotKind: "agent" | "team";
 };
 
 const OPEN_SNAPSHOT_IMPORT_EVENT = "buzz:open-snapshot-import";
@@ -24,7 +25,11 @@ let pendingImport: PendingSnapshotImport | null = null;
  * Clears any prior pending import so double-clicks don't stack.
  */
 export function requestOpenSnapshotImport(payload: PendingSnapshotImport) {
-  pendingImport = { fileBytes: payload.fileBytes, fileName: payload.fileName };
+  pendingImport = {
+    fileBytes: payload.fileBytes,
+    fileName: payload.fileName,
+    snapshotKind: payload.snapshotKind,
+  };
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event(OPEN_SNAPSHOT_IMPORT_EVENT));
   }

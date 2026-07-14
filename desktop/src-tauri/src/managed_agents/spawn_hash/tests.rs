@@ -31,6 +31,7 @@ fn record() -> ManagedAgentRecord {
         backend: Default::default(),
         backend_agent_id: None,
         provider_binary_path: None,
+        team_id: None,
         persona_team_dir: None,
         persona_name_in_team: None,
         created_at: "now".into(),
@@ -84,8 +85,8 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
 fn hash_is_deterministic() {
     let rec = record();
     assert_eq!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -106,8 +107,20 @@ fn materializing_runtime_keeps_hash_stable() {
     post.runtime = Some("goose".into());
 
     assert_eq!(
-        spawn_config_hash(&pre, &personas, "wss://ws.example", &Default::default()),
-        spawn_config_hash(&post, &personas, "wss://ws.example", &Default::default())
+        spawn_config_hash(
+            &pre,
+            &personas,
+            &[],
+            "wss://ws.example",
+            &Default::default()
+        ),
+        spawn_config_hash(
+            &post,
+            &personas,
+            &[],
+            "wss://ws.example",
+            &Default::default()
+        )
     );
 }
 
@@ -119,8 +132,8 @@ fn record_env_var_edit_changes_hash() {
         .env_vars
         .insert("SOME_KEY".into(), "some-value".into());
     assert_ne!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -130,8 +143,8 @@ fn record_prompt_edit_changes_hash() {
     let mut edited = record();
     edited.system_prompt = Some("Edited prompt.".into());
     assert_ne!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -144,8 +157,8 @@ fn persona_runtime_edit_changes_hash() {
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_ne!(
-        spawn_config_hash(&rec, &before, "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &after, "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -159,8 +172,8 @@ fn persona_prompt_edit_changes_hash() {
     let before = [persona("pers", Some("goose"), "old prompt")];
     let after = [persona("pers", Some("goose"), "new prompt")];
     assert_ne!(
-        spawn_config_hash(&rec, &before, "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &after, "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -171,8 +184,8 @@ fn workspace_relay_change_trips_hash_for_blank_record_relay() {
     let mut rec = record();
     rec.relay_url = String::new();
     assert_ne!(
-        spawn_config_hash(&rec, &[], "wss://relay-a.example", &Default::default()),
-        spawn_config_hash(&rec, &[], "wss://relay-b.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://relay-a.example", &Default::default()),
+        spawn_config_hash(&rec, &[], &[], "wss://relay-b.example", &Default::default())
     );
 }
 
@@ -182,8 +195,8 @@ fn workspace_relay_change_ignored_for_pinned_record_relay() {
     // a workspace relay change must NOT badge a pinned agent.
     let rec = record();
     assert_eq!(
-        spawn_config_hash(&rec, &[], "wss://relay-a.example", &Default::default()),
-        spawn_config_hash(&rec, &[], "wss://relay-b.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://relay-a.example", &Default::default()),
+        spawn_config_hash(&rec, &[], &[], "wss://relay-b.example", &Default::default())
     );
 }
 
@@ -194,8 +207,8 @@ fn respond_to_allowlist_edit_changes_hash() {
     edited.respond_to = RespondTo::Allowlist;
     edited.respond_to_allowlist = vec!["a".repeat(64)];
     assert_ne!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -207,8 +220,8 @@ fn allowlist_ignored_when_mode_is_not_allowlist() {
     let mut edited = record();
     edited.respond_to_allowlist = vec!["a".repeat(64)];
     assert_eq!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -225,8 +238,8 @@ fn allowlist_normalization_equivalent_edits_do_not_change_hash() {
         "a".repeat(64),                  // duplicate
     ];
     assert_eq!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -238,8 +251,8 @@ fn allowlist_content_edit_still_changes_hash() {
     let mut edited = rec.clone();
     edited.respond_to_allowlist = vec!["b".repeat(64)];
     assert_ne!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -252,8 +265,8 @@ fn explicit_default_max_turn_duration_does_not_change_hash() {
     edited.max_turn_duration_seconds =
         Some(crate::managed_agents::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS);
     assert_eq!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -263,8 +276,8 @@ fn non_default_max_turn_duration_changes_hash() {
     let mut edited = record();
     edited.max_turn_duration_seconds = Some(42);
     assert_ne!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -279,8 +292,8 @@ fn non_spawn_bookkeeping_fields_do_not_change_hash() {
     edited.last_started_at = Some("later".into());
     edited.last_exit_code = Some(0);
     assert_eq!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], "wss://ws.example", &Default::default())
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -308,12 +321,14 @@ fn resnapshot_does_not_clobber_record_quad_with_definition_absent_quad() {
         spawn_config_hash(
             &rec,
             &quadless_definition,
+            &[],
             "wss://ws.example",
             &Default::default()
         ),
         spawn_config_hash(
             &rec,
             &definition_with_quad,
+            &[],
             "wss://ws.example",
             &Default::default()
         ),
@@ -331,29 +346,8 @@ fn empty_prompt_hashes_like_absent_prompt() {
     let mut empty = record();
     empty.system_prompt = Some(String::new());
     assert_eq!(
-        spawn_config_hash(&absent, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&empty, &[], "wss://ws.example", &Default::default()),
-    );
-}
-
-#[test]
-fn team_pack_records_keep_empty_vs_absent_prompt_distinction() {
-    // Wrinkle-1 exception (Pinky): with BUZZ_ACP_PERSONA_PACK set, buzz-acp
-    // inherits the pack persona's prompt when the env var is ABSENT, while
-    // set-but-empty suppresses it. For team records the two states spawn
-    // differently, so they must hash differently.
-    let mut absent = record();
-    absent.persona_team_dir = Some(std::path::PathBuf::from("/teams/alpha"));
-    absent.persona_name_in_team = Some("lep".into());
-    absent.system_prompt = None;
-
-    let mut empty = absent.clone();
-    empty.system_prompt = Some(String::new());
-
-    assert_ne!(
-        spawn_config_hash(&absent, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&empty, &[], "wss://ws.example", &Default::default()),
-        "suppressed pack prompt is a different spawn than inherited pack prompt"
+        spawn_config_hash(&absent, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&empty, &[], &[], "wss://ws.example", &Default::default()),
     );
 }
 
@@ -369,8 +363,8 @@ fn definition_runtime_edit_changes_hash_for_materialized_record() {
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_ne!(
-        spawn_config_hash(&rec, &before, "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &after, "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
         "definition runtime edit must badge a materialized, override-free instance"
     );
 }
@@ -387,8 +381,8 @@ fn agent_command_override_beats_definition_runtime_change() {
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_eq!(
-        spawn_config_hash(&rec, &before, "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &after, "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
         "explicit override must win regardless of definition runtime change"
     );
 }
@@ -407,10 +401,17 @@ fn missing_definition_leaves_materialized_runtime_in_hash() {
     no_runtime.runtime = None;
 
     assert_ne!(
-        spawn_config_hash(&rec, no_personas, "wss://ws.example", &Default::default()),
+        spawn_config_hash(
+            &rec,
+            no_personas,
+            &[],
+            "wss://ws.example",
+            &Default::default()
+        ),
         spawn_config_hash(
             &no_runtime,
             no_personas,
+            &[],
             "wss://ws.example",
             &Default::default()
         ),
@@ -432,12 +433,4 @@ fn effective_spawn_prompt_matches_hash_semantics() {
     );
     r.system_prompt = Some("real".into());
     assert_eq!(effective_spawn_prompt(&r).as_deref(), Some("real"));
-    r.system_prompt = Some(String::new());
-    r.persona_team_dir = Some(std::path::PathBuf::from("/teams/alpha"));
-    r.persona_name_in_team = Some("lep".into());
-    assert_eq!(
-        effective_spawn_prompt(&r).as_deref(),
-        Some(""),
-        "team-pack set-but-empty survives (deliberate suppression)"
-    );
 }

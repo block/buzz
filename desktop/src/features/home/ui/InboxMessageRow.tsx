@@ -64,7 +64,7 @@ export function InboxMessageRow({
     errorMessage: reactionErrorMessage,
     select: handleReactionSelect,
   } = useReactionHandler(timelineMessage, onToggleReaction);
-  // "Is this pubkey an agent" = the workspace-scoped baseline every surface
+  // "Is this pubkey an agent" = the community-scoped baseline every surface
   // shares plus this surface's extras passed via `agentPubkeys` (HomeView
   // folds feed-profile `isAgent` flags in). Mirrors MessageRow's predicate.
   const knownAgentPubkeys = useKnownAgentPubkeys();

@@ -1156,7 +1156,9 @@ export function processTranscriptEvent(
   };
 }
 
-export function buildTranscriptState(events: ObserverEvent[]): TranscriptState {
+export function buildTranscriptState(
+  events: readonly ObserverEvent[],
+): TranscriptState {
   let state = createEmptyTranscriptState();
   for (const event of events) {
     state = processTranscriptEvent(state, event);
@@ -1164,6 +1166,8 @@ export function buildTranscriptState(events: ObserverEvent[]): TranscriptState {
   return state;
 }
 
-export function buildTranscript(events: ObserverEvent[]): TranscriptItem[] {
+export function buildTranscript(
+  events: readonly ObserverEvent[],
+): TranscriptItem[] {
   return buildTranscriptState(events).items;
 }

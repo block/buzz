@@ -183,7 +183,7 @@
  * `data-buzz-glass-footer-wrap`) so they join the same visual layer. Two
  * chrome surfaces rendered outside the wrapper also get precise selectors: the
  * portaled mobile sidebar (`[data-sidebar="sidebar"][data-mobile="true"]`) and
- * the workspace rail (`[data-testid="workspace-rail"]`).
+ * the community rail (`[data-testid="community-rail"]`).
  * Scoping this way keeps the branding on the app chrome and off unrelated
  * `bg-sidebar` consumers rendered in portals outside the shell (e.g. the
  * persona catalog dialog). `background-attachment: fixed` anchors the gradient
@@ -239,7 +239,7 @@
   .bg-sidebar:not([data-buzz-flat]),
 :root[data-buzz-sidebar]
   [data-sidebar="sidebar"][data-mobile="true"].bg-sidebar,
-:root[data-buzz-sidebar] [data-testid="workspace-rail"].bg-sidebar {
+:root[data-buzz-sidebar] [data-testid="community-rail"].bg-sidebar {
   background-color: transparent;
   background-image: linear-gradient(
     to bottom,
@@ -475,7 +475,7 @@
 :root[data-buzz-translucent] .group\/sidebar-wrapper,
 :root[data-buzz-translucent]
   [data-sidebar="sidebar"][data-mobile="true"].bg-sidebar,
-:root[data-buzz-translucent] [data-testid="workspace-rail"].bg-sidebar {
+:root[data-buzz-translucent] [data-testid="community-rail"].bg-sidebar {
   background-color: transparent;
   /* Buzz color wash above a neutral frost wash. */
   background-image:

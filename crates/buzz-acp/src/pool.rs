@@ -343,13 +343,22 @@ pub enum SteerAck {
     PromptCompletedNeutral,
 }
 
+/// Whether a turn was cut by the idle clock or the hard wall-clock cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutKind {
+    /// No ACP wire activity for `idle_timeout` seconds.
+    Idle,
+    /// Turn ran for `max_turn_duration` seconds of wall-clock time.
+    Hard,
+}
+
 /// Outcome of a prompt task.
 #[allow(dead_code)]
 pub enum PromptOutcome {
     Ok(StopReason),
     Error(AcpError),
     AgentExited,
-    Timeout,
+    Timeout(TimeoutKind),
     /// Intentional cancel via `!cancel` command or interrupt mode.
     /// Agent is healthy — no respawn, no retry penalty.
     Cancelled,
@@ -370,6 +379,7 @@ pub struct PromptContext {
     pub turn_liveness_interval: Duration,
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
+    pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
     /// Base prompt content, or `None` if `--no-base-prompt` was passed.
     ///
@@ -685,7 +695,10 @@ async fn create_session_and_apply_model(
     let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
         with_canvas(
             with_core(
-                framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                with_team(
+                    framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                    ctx.team_instructions.as_deref(),
+                ),
                 agent_core,
             ),
             agent_canvas,
@@ -1015,6 +1028,21 @@ fn workspace_section(cwd: &str) -> Option<String> {
         ))
     } else {
         None
+    }
+}
+
+/// Append the team-owned instruction section after `[System]` and before core memory.
+fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
+    let instructions = instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (prompt, instructions) {
+        (Some(prompt), Some(instructions)) => {
+            Some(format!("{prompt}\n\n[Team Instructions]\n{instructions}"))
+        }
+        (None, Some(instructions)) => Some(format!("[Team Instructions]\n{instructions}")),
+        (Some(prompt), None) => Some(prompt),
+        (None, None) => None,
     }
 }
 
@@ -1448,7 +1476,7 @@ pub async fn run_prompt_task(
                         &result_tx,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                     return;
@@ -1464,7 +1492,7 @@ pub async fn run_prompt_task(
                         &result_tx,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Hard),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                     return;
@@ -1543,6 +1571,7 @@ pub async fn run_prompt_task(
                 has_system_prompt_support: agent.protocol_version >= 2,
                 base_prompt: ctx.base_prompt,
                 system_prompt: ctx.system_prompt.as_deref(),
+                team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
             },
         )
@@ -1698,8 +1727,8 @@ pub async fn run_prompt_task(
                                 );
                                 return;
                             }
-                            Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout) => {
-                                // Cancel drain timed out — agent state uncertain.
+                            Err(AcpError::IdleTimeout(_)) => {
+                                // Cancel drain idle timed out — agent state uncertain.
                                 agent.state.invalidate(&source);
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
@@ -1718,7 +1747,32 @@ pub async fn run_prompt_task(
                                     &result_tx,
                                     agent,
                                     source,
-                                    PromptOutcome::Timeout,
+                                    PromptOutcome::Timeout(TimeoutKind::Idle),
+                                    retry_batch,
+                                );
+                                return;
+                            }
+                            Err(AcpError::HardTimeout) => {
+                                // Cancel drain hard timed out — agent state uncertain.
+                                agent.state.invalidate(&source);
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+
+                                let usage = agent.acp.take_turn_usage();
+                                publish_agent_turn_metric(
+                                    &ctx,
+                                    usage,
+                                    observer_channel_id,
+                                    &session_id,
+                                    &turn_id,
+                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                )
+                                .await;
+                                send_prompt_result(
+                                    &result_tx,
+                                    agent,
+                                    source,
+                                    PromptOutcome::Timeout(TimeoutKind::Hard),
                                     retry_batch,
                                 );
                                 return;
@@ -1912,7 +1966,7 @@ pub async fn run_prompt_task(
                         &result_tx,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                 }
@@ -1961,7 +2015,7 @@ pub async fn run_prompt_task(
                         &result_tx,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                 }
@@ -1988,7 +2042,7 @@ pub async fn run_prompt_task(
                 &result_tx,
                 agent,
                 source,
-                PromptOutcome::Timeout,
+                PromptOutcome::Timeout(TimeoutKind::Hard),
                 requeue_batch_if_queue(&ctx, batch),
             );
         }
@@ -4493,6 +4547,7 @@ mod tests {
             turn_liveness_interval: Duration::ZERO,
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
+            team_instructions: None,
             heartbeat_prompt: None,
             base_prompt: None,
             cwd: ".".to_string(),

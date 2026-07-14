@@ -21,11 +21,12 @@ import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSl
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
 import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
 import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequiredScreen";
-import type { Workspace } from "@/features/workspaces/types";
-import { useWorkspaceInit } from "@/features/workspaces/useWorkspaceInit";
-import { useNestNotifications } from "@/features/workspaces/useNestNotifications";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
-import { WelcomeSetup } from "@/features/workspaces/ui/WelcomeSetup";
+import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
+import type { Community } from "@/features/communities/types";
+import { useCommunityInit } from "@/features/communities/useCommunityInit";
+import { useNestNotifications } from "@/features/communities/useNestNotifications";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { listenForDeepLinks } from "@/shared/deep-link";
@@ -38,10 +39,10 @@ import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 
-const LOADING_TEXT = "Setting up your workspace...";
+const LOADING_TEXT = "Setting up your community...";
 
 // Minimum time the cold-boot splash stays on screen. A real boot resolves the
-// workspace in well under 100ms, and the native window setup plus first paint
+// community in well under 100ms, and the native window setup plus first paint
 // can take longer than that — without a hold, the bee is unmounted before it is
 // ever visible. The hold runs as an overlay above the already-mounted app, so
 // time-to-interactive is unchanged; only the reveal waits.
@@ -130,7 +131,7 @@ function BeeLoader({
 // Cold boot gate: the theme-adaptive grainient background with a single
 // centered Buzz bee flying over it — the same static mark as before, now with
 // its wings flapping (ported from the Buzz website's wing-flap). Replaces the
-// old "Setting up your workspace" text, which stays as an sr-only caption.
+// old "Setting up your community" text, which stays as an sr-only caption.
 function AppLoadingGate() {
   return (
     <div
@@ -146,9 +147,9 @@ function AppLoadingGate() {
   );
 }
 
-// Quiet gate for switching between already-set-up workspaces: visually empty
+// Quiet gate for switching between already-set-up communities: visually empty
 // unless the switch takes long, so fast switches don't flash the boot splash.
-function WorkspaceSwitchGate() {
+function CommunitySwitchGate() {
   const [showSpinner, setShowSpinner] = useState(false);
 
   useEffect(() => {
@@ -159,14 +160,14 @@ function WorkspaceSwitchGate() {
   return (
     <div
       className="flex min-h-dvh items-center justify-center bg-background"
-      data-testid="workspace-switch-gate"
+      data-testid="community-switch-gate"
       role="status"
     >
       <StartupWindowDragRegion />
-      <span className="sr-only">Switching workspace…</span>
+      <span className="sr-only">Switching community…</span>
       {showSpinner ? (
         <BeeLoader
-          ariaLabel="Switching workspace…"
+          ariaLabel="Switching community…"
           className="h-auto w-20"
           tintClassName="text-muted-foreground"
         />
@@ -197,7 +198,7 @@ function OnboardingLoadingGate() {
           className="flex w-full flex-col items-center text-center"
           direction="forward"
           effect="none"
-          transitionKey="workspace-connecting"
+          transitionKey="community-connecting"
         >
           <div className="flex h-14 w-14 items-center justify-center rounded-lg border border-border bg-background text-foreground shadow-xs">
             <Hexagon className="h-7 w-7" aria-hidden="true" />
@@ -207,7 +208,7 @@ function OnboardingLoadingGate() {
             Welcome to Buzz
           </h1>
           <p className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground">
-            Choose your first workspace to get started.
+            Choose your first community to get started.
           </p>
 
           <div className="mt-8 flex w-full max-w-[500px] flex-col gap-3">
@@ -217,7 +218,7 @@ function OnboardingLoadingGate() {
               tabIndex={-1}
               type="button"
             >
-              Continue with default workspace
+              Continue with default community
             </Button>
 
             <Button
@@ -227,7 +228,7 @@ function OnboardingLoadingGate() {
               type="button"
               variant="secondary"
             >
-              Join a workspace
+              Join a community
             </Button>
 
             <Button
@@ -247,7 +248,7 @@ function OnboardingLoadingGate() {
   );
 }
 
-function WorkspaceQueryProvider({ children }: { children: ReactNode }) {
+function CommunityQueryProvider({ children }: { children: ReactNode }) {
   const [queryClient] = useState(createBuzzQueryClient);
 
   useEffect(() => {
@@ -273,31 +274,35 @@ function WorkspaceQueryProvider({ children }: { children: ReactNode }) {
 }
 
 function AppReady({
-  canBackToWorkspaceSetup,
-  isCompletingFirstRunWorkspace,
+  canBackToCommunitySetup,
+  isCompletingFirstRunCommunity,
   isSharedIdentity,
-  isWorkspaceSwitch,
-  onFirstRunWorkspaceSettled,
-  onBackToWorkspaceSetup,
+  isCommunitySwitch,
+  onFirstRunCommunitySettled,
+  onBackToCommunitySetup,
 }: {
-  canBackToWorkspaceSetup: boolean;
-  isCompletingFirstRunWorkspace: boolean;
+  canBackToCommunitySetup: boolean;
+  isCompletingFirstRunCommunity: boolean;
   isSharedIdentity: boolean;
-  isWorkspaceSwitch: boolean;
-  onFirstRunWorkspaceSettled: () => void;
-  onBackToWorkspaceSetup: () => void;
+  isCommunitySwitch: boolean;
+  onFirstRunCommunitySettled: () => void;
+  onBackToCommunitySetup: () => void;
 }) {
   const onboarding = useAppOnboardingState(isSharedIdentity);
 
   useEffect(() => {
-    if (isCompletingFirstRunWorkspace && onboarding.stage !== "blocking") {
-      onFirstRunWorkspaceSettled();
+    if (isCompletingFirstRunCommunity && onboarding.stage !== "blocking") {
+      onFirstRunCommunitySettled();
     }
   }, [
-    isCompletingFirstRunWorkspace,
+    isCompletingFirstRunCommunity,
     onboarding.stage,
-    onFirstRunWorkspaceSettled,
+    onFirstRunCommunitySettled,
   ]);
+
+  if (onboarding.stage === "reset-failed") {
+    return <ResetFailedScreen />;
+  }
 
   if (onboarding.stage === "keyring-locked") {
     return <KeyringLockedScreen />;
@@ -311,21 +316,21 @@ function AppReady({
     return (
       <OnboardingFlow
         actions={onboarding.flow.actions}
-        canBackToWorkspaceSetup={canBackToWorkspaceSetup}
+        canBackToCommunitySetup={canBackToCommunitySetup}
         identityLost={onboarding.identityLost}
         initialProfile={onboarding.flow.initialProfile}
         key={onboarding.currentPubkey ?? "anonymous"}
-        onBackToWorkspaceSetup={onBackToWorkspaceSetup}
+        onBackToCommunitySetup={onBackToCommunitySetup}
       />
     );
   }
 
   if (onboarding.stage === "blocking") {
-    if (isCompletingFirstRunWorkspace) {
+    if (isCompletingFirstRunCommunity) {
       return <OnboardingLoadingGate />;
     }
 
-    return isWorkspaceSwitch ? <WorkspaceSwitchGate /> : <AppLoadingGate />;
+    return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
   }
 
   return (
@@ -352,75 +357,75 @@ export function App() {
   }, []);
 
   const {
-    activeWorkspace,
+    activeCommunity,
     reinitKey,
-    addWorkspace,
-    clearWorkspaces,
-    switchWorkspace,
-    reconnectWorkspace,
-  } = useWorkspaces();
-  const [isCompletingFirstRunWorkspace, setIsCompletingFirstRunWorkspace] =
+    addCommunity,
+    clearCommunities,
+    switchCommunity,
+    reconnectCommunity,
+  } = useCommunities();
+  const [isCompletingFirstRunCommunity, setIsCompletingFirstRunCommunity] =
     useState(false);
-  const [canBackToWorkspaceSetup, setCanBackToWorkspaceSetup] = useState(false);
+  const [canBackToCommunitySetup, setCanBackToCommunitySetup] = useState(false);
   const [welcomeTransitionMode, setWelcomeTransitionMode] = useState<
     "initial" | "backward"
   >("initial");
 
   useEffect(() => {
     const unlisten = listenForDeepLinks({
-      addWorkspace,
-      switchWorkspace,
-      reconnectWorkspace,
+      addCommunity,
+      switchCommunity,
+      reconnectCommunity,
     });
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, [addWorkspace, switchWorkspace, reconnectWorkspace]);
+  }, [addCommunity, switchCommunity, reconnectCommunity]);
   // Surface nest-related backend events (repos-dir errors, legacy migration)
-  // as toasts. Mounted before useWorkspaceInit so the listeners are registered
+  // as toasts. Mounted before useCommunityInit so the listeners are registered
   // ahead of the first apply_workspace call.
   useNestNotifications();
 
-  // Composite key: changes when workspace ID changes OR when
-  // the active workspace's config is updated (relayUrl/token).
-  const workspaceKey = `${activeWorkspace?.id ?? "none"}-${reinitKey}`;
+  // Composite key: changes when community ID changes OR when
+  // the active community's config is updated (relayUrl/token).
+  const communityKey = `${activeCommunity?.id ?? "none"}-${reinitKey}`;
 
-  // Latch once the workspace key deviates from its cold-boot value: from then
+  // Latch once the community key deviates from its cold-boot value: from then
   // on, loading phases are in-app switches and get the quiet gate instead of
-  // the full "Setting up your workspace" splash.
-  const initialWorkspaceKeyRef = useRef(workspaceKey);
-  const hasSwitchedWorkspaceRef = useRef(false);
-  if (workspaceKey !== initialWorkspaceKeyRef.current) {
-    hasSwitchedWorkspaceRef.current = true;
+  // the full "Setting up your community" splash.
+  const initialCommunityKeyRef = useRef(communityKey);
+  const hasSwitchedCommunityRef = useRef(false);
+  if (communityKey !== initialCommunityKeyRef.current) {
+    hasSwitchedCommunityRef.current = true;
   }
-  const isWorkspaceSwitch = hasSwitchedWorkspaceRef.current;
+  const isCommunitySwitch = hasSwitchedCommunityRef.current;
 
-  const workspace = useWorkspaceInit(
-    activeWorkspace,
-    workspaceKey,
+  const community = useCommunityInit(
+    activeCommunity,
+    communityKey,
     sharedIdentity ?? false,
   );
 
   const handleSetupComplete = useCallback(
-    (workspace: Workspace) => {
+    (community: Community) => {
       setWelcomeTransitionMode("initial");
-      setIsCompletingFirstRunWorkspace(true);
-      setCanBackToWorkspaceSetup(true);
-      const workspaceId = addWorkspace(workspace);
-      switchWorkspace(workspaceId);
+      setIsCompletingFirstRunCommunity(true);
+      setCanBackToCommunitySetup(true);
+      const communityId = addCommunity(community);
+      switchCommunity(communityId);
     },
-    [addWorkspace, switchWorkspace],
+    [addCommunity, switchCommunity],
   );
 
-  const handleBackToWorkspaceSetup = useCallback(() => {
+  const handleBackToCommunitySetup = useCallback(() => {
     setWelcomeTransitionMode("backward");
-    setIsCompletingFirstRunWorkspace(false);
-    setCanBackToWorkspaceSetup(false);
-    clearWorkspaces();
-  }, [clearWorkspaces]);
+    setIsCompletingFirstRunCommunity(false);
+    setCanBackToCommunitySetup(false);
+    clearCommunities();
+  }, [clearCommunities]);
 
-  const handleFirstRunWorkspaceSettled = useCallback(() => {
-    setIsCompletingFirstRunWorkspace(false);
+  const handleFirstRunCommunitySettled = useCallback(() => {
+    setIsCompletingFirstRunCommunity(false);
   }, []);
 
   const bootSplashPhase = useBootSplashHold();
@@ -432,47 +437,47 @@ export function App() {
     return <AppLoadingGate />;
   }
 
-  // Show welcome setup for first-run users with no workspaces
-  if (workspace.needsSetup) {
+  // Show welcome setup for first-run users with no communities
+  if (community.needsSetup) {
     return (
       <WelcomeSetup
-        defaultRelayUrl={workspace.defaultRelayUrl}
+        defaultRelayUrl={community.defaultRelayUrl}
         initialTransitionMode={welcomeTransitionMode}
         onComplete={handleSetupComplete}
       />
     );
   }
 
-  // Wait for this exact workspace config to be applied to the backend before
+  // Wait for this exact community config to be applied to the backend before
   // rendering anything that connects to the relay. The appliedKey check avoids
-  // a one-render race where React sees the new active workspace while the Tauri
+  // a one-render race where React sees the new active community while the Tauri
   // backend is still configured for the previous one.
-  if (!workspace.isReady || workspace.appliedKey !== workspaceKey) {
-    if (isCompletingFirstRunWorkspace) {
+  if (!community.isReady || community.appliedKey !== communityKey) {
+    if (isCompletingFirstRunCommunity) {
       return <OnboardingLoadingGate />;
     }
 
-    return isWorkspaceSwitch ? <WorkspaceSwitchGate /> : <AppLoadingGate />;
+    return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
   }
 
   // The app mounts (and starts loading data) beneath the splash overlay; the
   // overlay just keeps the bee on screen long enough to be seen, then fades.
-  // Workspace switches and first-run completion keep their quiet gates.
+  // Community switches and first-run completion keep their quiet gates.
   const showBootSplashOverlay =
     bootSplashPhase !== "done" &&
-    !isWorkspaceSwitch &&
-    !isCompletingFirstRunWorkspace;
+    !isCommunitySwitch &&
+    !isCompletingFirstRunCommunity;
 
   return (
-    <WorkspaceQueryProvider key={workspaceKey}>
+    <CommunityQueryProvider key={communityKey}>
       <AppReady
-        canBackToWorkspaceSetup={canBackToWorkspaceSetup}
-        isCompletingFirstRunWorkspace={isCompletingFirstRunWorkspace}
-        isWorkspaceSwitch={isWorkspaceSwitch}
-        key={workspaceKey}
+        canBackToCommunitySetup={canBackToCommunitySetup}
+        isCompletingFirstRunCommunity={isCompletingFirstRunCommunity}
+        isCommunitySwitch={isCommunitySwitch}
+        key={communityKey}
         isSharedIdentity={sharedIdentity}
-        onFirstRunWorkspaceSettled={handleFirstRunWorkspaceSettled}
-        onBackToWorkspaceSetup={handleBackToWorkspaceSetup}
+        onFirstRunCommunitySettled={handleFirstRunCommunitySettled}
+        onBackToCommunitySetup={handleBackToCommunitySetup}
       />
       {showBootSplashOverlay ? (
         <div
@@ -487,6 +492,6 @@ export function App() {
           <AppLoadingGate />
         </div>
       ) : null}
-    </WorkspaceQueryProvider>
+    </CommunityQueryProvider>
   );
 }

@@ -67,7 +67,7 @@ test("commit detail opens from the commits feed with a diff", async ({
     timeout: 10_000,
   });
   await expect(
-    page.getByText("WorkspaceTabs({ selectedCommitHash })"),
+    page.getByText("CommunityTabs({ selectedCommitHash })"),
   ).toBeVisible();
 
   await waitForAnimations(page);
@@ -143,7 +143,7 @@ test("pull request and issue feeds share the commit row structure", async ({
     page.getByRole("navigation", { name: "Project breadcrumb" }),
   ).toContainText("PRs");
 
-  // Step back to the feed so the workspace tabs are available again.
+  // Step back to the feed so the community tabs are available again.
   await page
     .getByRole("navigation", { name: "Project breadcrumb" })
     .getByRole("button", { name: "PRs", exact: true })

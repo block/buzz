@@ -26,6 +26,15 @@ use crate::filter::SubscriptionRule;
 /// Override via `--idle-timeout` / `BUZZ_ACP_IDLE_TIMEOUT`.
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 
+/// Default absolute wall-clock cap per agent turn (2 hours).
+/// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
+pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
+
+/// Upper bound for `max_turn_duration` (7 days). Any higher is operationally
+/// meaningless and risks arithmetic overflow when deriving the in-flight
+/// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
+pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to parse nostr keys: {0}")]
@@ -220,7 +229,7 @@ pub struct CliArgs {
     pub idle_timeout: Option<u64>,
 
     /// Absolute wall-clock cap per turn (safety valve).
-    #[arg(long, env = "BUZZ_ACP_MAX_TURN_DURATION", default_value = "3600")]
+    #[arg(long, env = "BUZZ_ACP_MAX_TURN_DURATION", default_value_t = DEFAULT_MAX_TURN_DURATION_SECS)]
     pub max_turn_duration: u64,
 
     /// Deprecated: alias for --idle-timeout. If both set, --idle-timeout wins.
@@ -413,14 +422,9 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_ALLOWED_RESPOND_TO", value_delimiter = ',')]
     pub allowed_respond_to: Option<Vec<String>>,
 
-    /// Path to a persona pack directory. Used with --persona-name to configure
-    /// the agent from a .persona.md pack instead of CLI flags.
-    #[arg(long, env = "BUZZ_ACP_PERSONA_PACK")]
-    pub persona_pack: Option<PathBuf>,
-
-    /// Name of the persona within the pack to use. Required when --persona-pack is set.
-    #[arg(long, env = "BUZZ_ACP_PERSONA_NAME")]
-    pub persona_name: Option<String>,
+    /// Team-owned instructions layered after `[System]` and before agent memory.
+    #[arg(long, env = "BUZZ_ACP_TEAM_INSTRUCTIONS")]
+    pub team_instructions: Option<String>,
 
     /// Publish encrypted ACP observer frames over the relay.
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
@@ -453,6 +457,8 @@ pub struct Config {
     pub turn_liveness_secs: u64,
     pub heartbeat_prompt: Option<String>,
     pub system_prompt: Option<String>,
+    /// Team-owned instructions layered separately from the agent system prompt.
+    pub team_instructions: Option<String>,
     pub initial_message: Option<String>,
     pub subscribe_mode: SubscribeMode,
     pub dedup_mode: DedupMode,
@@ -696,7 +702,7 @@ impl Config {
             .replace_range(.., &"0".repeat(args.private_key.len()));
         args.private_key.clear();
 
-        let mut system_prompt = if let Some(text) = args.system_prompt {
+        let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
         } else if let Some(ref path) = args.system_prompt_file {
             Some(std::fs::read_to_string(path)?)
@@ -831,6 +837,11 @@ impl Config {
             if raw == 0 {
                 tracing::warn!("max turn duration of 0 is invalid — using 60s minimum");
                 60
+            } else if raw > MAX_TURN_DURATION_CEILING_SECS {
+                return Err(ConfigError::ConfigFile(format!(
+                    "max_turn_duration ({}s) exceeds ceiling ({}s / 7 days)",
+                    raw, MAX_TURN_DURATION_CEILING_SECS
+                )));
             } else {
                 raw
             }
@@ -888,52 +899,10 @@ impl Config {
             Vec::new()
         };
 
-        //
-        // Precedence: CLI/env args > persona values > built-in defaults.
-        // Persona fills in what's missing. Explicit flags always win.
-        let (persona_system_prompt, persona_model, mut persona_env_vars) =
-            match (&args.persona_pack, &args.persona_name) {
-                (Some(pack_dir), Some(name)) => {
-                    let pack = buzz_persona::resolve::resolve_pack(pack_dir).map_err(|e| {
-                        ConfigError::ConfigFile(format!(
-                            "failed to resolve pack {}: {e}",
-                            pack_dir.display()
-                        ))
-                    })?;
-                    let persona = pack
-                        .personas
-                        .into_iter()
-                        .find(|p| p.name == *name)
-                        .ok_or_else(|| {
-                            ConfigError::ConfigFile(format!(
-                                "persona '{name}' not found in pack {}",
-                                pack_dir.display()
-                            ))
-                        })?;
-                    (
-                        Some(persona.system_prompt),
-                        persona.model,
-                        persona.runtime_env_vars,
-                    )
-                }
-                (Some(_), None) => {
-                    return Err(ConfigError::ConfigFile(
-                        "--persona-pack requires --persona-name".into(),
-                    ));
-                }
-                (None, Some(_)) => {
-                    return Err(ConfigError::ConfigFile(
-                        "--persona-name requires --persona-pack".into(),
-                    ));
-                }
-                (None, None) => (None, None, vec![]),
-            };
-
-        // Apply persona defaults: CLI/env wins, persona fills gaps.
-        if system_prompt.is_none() {
-            system_prompt = persona_system_prompt;
-        }
-        let model = args.model.or(persona_model);
+        // Spawned desktop agents now carry a complete instance snapshot. Team
+        // instructions arrive independently so they can be layered at runtime.
+        let mut persona_env_vars = Vec::new();
+        let model = args.model;
 
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
@@ -961,6 +930,12 @@ impl Config {
             turn_liveness_secs,
             heartbeat_prompt,
             system_prompt,
+            team_instructions: args
+                .team_instructions
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
             initial_message: args.initial_message,
             subscribe_mode: args.subscribe,
             dedup_mode: args.dedup,
@@ -1326,12 +1301,13 @@ mod tests {
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
-            max_turn_duration_secs: 3600,
+            max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
+            team_instructions: None,
             initial_message: None,
             subscribe_mode: mode,
             dedup_mode: DedupMode::Queue,
@@ -2231,7 +2207,7 @@ channels = "ALL"
             "summary should include {expected_idle}: {summary}"
         );
         assert!(
-            summary.contains("max_turn=3600s"),
+            summary.contains(&format!("max_turn={DEFAULT_MAX_TURN_DURATION_SECS}s")),
             "summary should include max_turn: {summary}"
         );
     }
@@ -2436,13 +2412,10 @@ channels = "ALL"
             "test precondition: idle must be >= max_turn to trigger guard"
         );
 
-        // And the valid case:
-        let idle_valid = 900u64;
-        let max_turn_valid = 3600u64;
-        assert!(
-            idle_valid < max_turn_valid,
-            "default idle (900) must be less than default max_turn (3600)"
-        );
+        // And the valid case (const assertion so clippy doesn't flag it):
+        const {
+            assert!(DEFAULT_IDLE_TIMEOUT_SECS < DEFAULT_MAX_TURN_DURATION_SECS);
+        }
     }
 
     // --- BUZZ_ACP_ALLOWED_RESPOND_TO gate ---
@@ -2626,5 +2599,58 @@ channels = "ALL"
             result.is_ok(),
             "from_args should accept any mode when allowed list is unset: {result:?}"
         );
+    }
+
+    // --- max_turn_duration ceiling gate ---
+
+    #[test]
+    fn max_turn_duration_at_ceiling_is_accepted() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--max-turn-duration",
+            &MAX_TURN_DURATION_CEILING_SECS.to_string(),
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+
+        assert!(
+            result.is_ok(),
+            "from_args should accept max_turn_duration at the ceiling: {result:?}"
+        );
+    }
+
+    #[test]
+    fn max_turn_duration_above_ceiling_is_rejected() {
+        let over = MAX_TURN_DURATION_CEILING_SECS + 1;
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--max-turn-duration",
+            &over.to_string(),
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+
+        assert!(
+            result.is_err(),
+            "from_args should reject max_turn_duration above the ceiling"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("exceeds ceiling"),
+            "error should mention 'exceeds ceiling': {msg}"
+        );
+    }
+
+    #[test]
+    fn max_turn_duration_ceiling_cannot_overflow_in_flight_deadline() {
+        // The in-flight deadline is max_turn + 100s buffer (IN_FLIGHT_DEADLINE_BUFFER_SECS).
+        // Verify that even at the ceiling, this addition cannot overflow u64.
+        const {
+            assert!(MAX_TURN_DURATION_CEILING_SECS < u64::MAX - 100);
+        }
     }
 }

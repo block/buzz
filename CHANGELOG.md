@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.4.4
+
+- fix(desktop): allow staged updater commands ([#1870](https://github.com/block/buzz/pull/1870)) ([`109c2c526`](https://github.com/block/buzz/commit/109c2c52641c5edd50890bffef9a236a10ea6106))
+- feat(teams): unify team model, snapshot sharing, and PNG memory parity ([#1846](https://github.com/block/buzz/pull/1846)) ([`448baeef7`](https://github.com/block/buzz/commit/448baeef770478411678e2f0be1729f04b6800d7))
+- fix(desktop): always start agents and hide unavailable mesh ([#1860](https://github.com/block/buzz/pull/1860)) ([`37bc962cb`](https://github.com/block/buzz/commit/37bc962cb8fb60857337bbfb97eb4d31c359de15))
+- Relay mesh: cross-pod tunnel + huddle transport (buzz-relay-mesh) ([#1670](https://github.com/block/buzz/pull/1670)) ([`ccb021d71`](https://github.com/block/buzz/commit/ccb021d71339009aabedc383c8f3d8e5c23e1e42))
+- feat(desktop): add Sign Out to Settings to reset and relaunch ([#1842](https://github.com/block/buzz/pull/1842)) ([`cf9723796`](https://github.com/block/buzz/commit/cf97237965a5ed9870f1c1f73ce9952e963b418b))
+
+
+## v0.4.3
+
+- Stabilize persona and stream end-to-end tests ([#1865](https://github.com/block/buzz/pull/1865)) ([`916de4e4d`](https://github.com/block/buzz/commit/916de4e4dbbf9299695a91defa6e3802b1820256))
+- refactor(clients): standardize product naming on community ([#1858](https://github.com/block/buzz/pull/1858)) ([`3e76481a1`](https://github.com/block/buzz/commit/3e76481a149bb3de459298cc989505c470c2372c))
+- fix(desktop): retain live rows after window exhaustion ([#1810](https://github.com/block/buzz/pull/1810)) ([`fa6f4819b`](https://github.com/block/buzz/commit/fa6f4819b3468a5a3725356dd71463bb37cc30c7))
+- Add private product feedback sidecar ([#1857](https://github.com/block/buzz/pull/1857)) ([`af190c93e`](https://github.com/block/buzz/commit/af190c93e1048af64c3fbfb3831c689cb703997c))
+- fix(desktop): resolve Doctor install shell and command detection on Windows ([#1854](https://github.com/block/buzz/pull/1854)) ([`1aec7ea7a`](https://github.com/block/buzz/commit/1aec7ea7a798c8bdb131a802dcd3d2ea0fb8692a))
+- fix(desktop): navigate to channel from inbox thread header ([#1847](https://github.com/block/buzz/pull/1847)) ([`ff11f26bc`](https://github.com/block/buzz/commit/ff11f26bcdc8e107d7d04f5682b2d17f586536d6))
+- feat(desktop): surface needsRestart badge on live UI surfaces ([#1853](https://github.com/block/buzz/pull/1853)) ([`b1d323c4e`](https://github.com/block/buzz/commit/b1d323c4e7ddbabbe52a868f3699a523bb6c010e))
+- fix(desktop): prevent menu-to-dialog UI lockups ([#1839](https://github.com/block/buzz/pull/1839)) ([`7f81d93eb`](https://github.com/block/buzz/commit/7f81d93eb1cf6a10c84d948d91c45a1fd4778060))
+- feat(desktop): add conversation-style DM composer ([#1768](https://github.com/block/buzz/pull/1768)) ([`bb9d9b0c0`](https://github.com/block/buzz/commit/bb9d9b0c049b9561458414b24eff157c6bbbd446))
+- feat(push): add public APNs gateway ([#1770](https://github.com/block/buzz/pull/1770)) ([`1c006822e`](https://github.com/block/buzz/commit/1c006822e4484d68e33fce14f9139c2f70ce9d66))
+- fix(desktop): stabilize agent identity restore ([#1831](https://github.com/block/buzz/pull/1831)) ([`3370cd083`](https://github.com/block/buzz/commit/3370cd0836e458f519cf90fe6299279cde6c7463))
+- fix(observer): align scroll-anchor ids with transcript display-block keys ([#1849](https://github.com/block/buzz/pull/1849)) ([`1df4a4e77`](https://github.com/block/buzz/commit/1df4a4e77da732cadad91738bc0271a926c22040))
+- [codex] Add view activity label to agent popover ([#1748](https://github.com/block/buzz/pull/1748)) ([`458c7f915`](https://github.com/block/buzz/commit/458c7f9154fc9580a766117cad0e3e378ffe5ac0))
+- ci(desktop): surface flaky E2E tests instead of retry-masking them ([#1838](https://github.com/block/buzz/pull/1838)) ([`a65340630`](https://github.com/block/buzz/commit/a653406309aa6dab8122cf3e84ddeca0c87013be))
+- fix(desktop): treat channel creator as member before 39002 provisioning ([#1830](https://github.com/block/buzz/pull/1830)) ([`7e62a25af`](https://github.com/block/buzz/commit/7e62a25af0bc71df17de806673ed02514e556e6e))
+
+
 ## v0.4.2
 
 - fix(desktop): unify observer feed scroll onto useAnchoredScroll ([#1825](https://github.com/block/buzz/pull/1825)) ([`d75c2e913`](https://github.com/block/buzz/commit/d75c2e913eef763e8ea2e748c58353c3a22d544d))

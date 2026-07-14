@@ -1,13 +1,13 @@
 /**
  * Per-relay cache of the last successfully fetched channel list.
  *
- * Each workspace mounts a fresh React-Query client, so switching workspaces
+ * Each community mounts a fresh React-Query client, so switching communities
  * (or switching back to one just visited) starts cold and blocks the sidebar
  * on a multi-round-trip `get_channels()`. This module persists the last-known
  * channel list per relay so the sidebar can paint instantly from the snapshot
  * while the live fetch revalidates in the background.
  *
- * Keyed per relay URL (not workspace id) so equivalent URL formatting maps to
+ * Keyed per relay URL (not community id) so equivalent URL formatting maps to
  * one slot and one relay's list never bleeds into another.
  */
 
@@ -60,7 +60,7 @@ export function writeChannelSnapshot(
 }
 
 /**
- * Removes the channel snapshot for a relay. Called when a workspace is removed.
+ * Removes the channel snapshot for a relay. Called when a community is removed.
  */
 export function removeChannelSnapshotForRelay(relayUrl: string): void {
   try {

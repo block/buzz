@@ -81,8 +81,8 @@ export class RelayClient {
    * the reconnect-timer / retry-wrapper paths racing back to "reconnecting"
    * after we've already declared the session dead.
    *
-   * Cleared only on explicit user re-engagement: `disconnect()` (workspace
-   * switch — the singleton is being reused for a different workspace) and
+   * Cleared only on explicit user re-engagement: `disconnect()` (community
+   * switch — the singleton is being reused for a different community) and
    * `preconnect()` (caller is asking us to come back up).
    */
   private terminal = false;
@@ -99,11 +99,11 @@ export class RelayClient {
 
   /**
    * Cleanly tear down the connection without scheduling a reconnect.
-   * Used during workspace switches to reset the singleton before the
-   * new workspace applies.
+   * Used during community switches to reset the singleton before the
+   * new community applies.
    */
   disconnect() {
-    const error = new Error("Relay disconnected for workspace switch.");
+    const error = new Error("Relay disconnected for community switch.");
 
     if (this.reconnectTimeout) {
       window.clearTimeout(this.reconnectTimeout);
@@ -119,7 +119,7 @@ export class RelayClient {
     this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
-      void closeWebSocket(this.wsId, "workspace switch");
+      void closeWebSocket(this.wsId, "community switch");
       this.wsId = null;
     }
 

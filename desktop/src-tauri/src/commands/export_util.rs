@@ -1,17 +1,6 @@
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 
-/// Show a save-file dialog for a JSON export and write `data` to the chosen
-/// path. Returns `Ok(true)` when the file was written, `Ok(false)` when the
-/// user cancelled the dialog.
-pub async fn save_json_with_dialog(
-    app: &AppHandle,
-    suggested_filename: &str,
-    data: &[u8],
-) -> Result<bool, String> {
-    save_bytes_with_dialog(app, suggested_filename, "JSON", &["json"], data).await
-}
-
 /// Show a save-file dialog with a custom filter and write `data` to the chosen
 /// path. Returns `Ok(true)` when the file was written, `Ok(false)` when the
 /// user cancelled the dialog.

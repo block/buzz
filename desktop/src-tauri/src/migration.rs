@@ -44,7 +44,7 @@ const SHARED_AGENT_DIRS: &[&str] = &["agents/teams"];
 /// `xyz.block.buzz.app.developer`. This is the authoritative dev/prod
 /// discriminator shared by `run_boot_migrations`, `sync_shared_agent_data`,
 /// and `reconcile_target_dir`.
-fn is_dev_data_dir_name(name: &str) -> bool {
+pub(crate) fn is_dev_data_dir_name(name: &str) -> bool {
     name == CANONICAL_DEV_IDENTIFIER
         || name
             .strip_prefix(CANONICAL_DEV_IDENTIFIER)
@@ -55,7 +55,7 @@ fn canonical_dev_data_dir(current: &Path) -> Option<PathBuf> {
     current.parent().map(|p| p.join(CANONICAL_DEV_IDENTIFIER))
 }
 
-fn legacy_app_data_dir(current: &Path) -> Option<PathBuf> {
+pub(crate) fn legacy_app_data_dir(current: &Path) -> Option<PathBuf> {
     let name = current.file_name()?.to_str()?;
     let legacy_name = if name.starts_with(CANONICAL_DEV_IDENTIFIER) {
         name.replacen(CANONICAL_DEV_IDENTIFIER, LEGACY_CANONICAL_DEV_IDENTIFIER, 1)
@@ -119,6 +119,15 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// readers — reader-first loses a launch (stale harness/`mcp_command` until
 /// the next boot).
 pub fn run_boot_migrations(app: &tauri::AppHandle) {
+    run_boot_migrations_inner(app, false);
+}
+
+/// Entry point when a completed reset must suppress dev-nest re-import.
+pub fn run_boot_migrations_after_reset(app: &tauri::AppHandle) {
+    run_boot_migrations_inner(app, true);
+}
+
+fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // Initialize the process-lifetime nest directory before any filesystem
     // operation that calls nest_dir(). The discriminator matches the existing
     // pattern used by reconcile_target_dir: dev instances have an app-data-dir
@@ -139,8 +148,10 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
     // ensures the dev nest boots with the correct workspace on its first launch,
     // matching what the prod nest had configured. Skip-if-dest-exists so it is
     // idempotent and never clobbers a value the dev nest already set explicitly.
-    if is_dev {
-        migrate_dev_repos_dir();
+    // Uses the composed helper so the gate + migration run through the same
+    // code path that the behavioral test exercises.
+    if let (Some(home), Some(dev_nest)) = (dirs::home_dir(), crate::managed_agents::nest_dir()) {
+        maybe_migrate_dev_repos_dir(is_dev, reset_completed, &home, &dev_nest);
     }
 
     migrate_legacy_app_data_dir(app);
@@ -155,8 +166,6 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
     if is_dev {
         crate::managed_agents::migrate_agent_keys_to_dev_service(app);
     }
-    migrate_packs_to_teams(app);
-    reconcile_persona_team_dirs(app);
     migrate_persona_provider_to_runtime(app);
     reconcile_legacy_command_names(app);
     // Fold personas.json into the unified store HERE: after the JSON-level
@@ -171,9 +180,7 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
     // before event sync republishes — the backfilled link is what flips the
     // 30177 projection to its slim shape.
     backfill_standalone_agents(app);
-    if let Err(e) = crate::managed_agents::sync_team_personas(app) {
-        eprintln!("buzz-desktop: sync-team-personas: {e}");
-    }
+    detach_directory_backed_teams(app);
     reconcile_provider_mcp_commands(app);
     reconcile_databricks_v1_to_v2(app);
     materialize_agent_runtimes(app);
@@ -318,23 +325,21 @@ fn migrate_legacy_nest_at(legacy: &Path, current: &Path) -> bool {
 /// also copies into `~/.buzz-dev` and could otherwise set the sentinel early.
 const DEV_NEST_MIGRATED_SENTINEL: &str = ".dev-nest-migrated";
 
-/// Copy the `.repos-dir` dotfile from `~/.buzz` → `~/.buzz-dev`, non-destructively.
-///
-/// Must be called on dev builds BEFORE `resolve_repos_at_boot()` reads the
-/// dotfile, so the dev nest boots with the correct workspace configuration on
-/// its first launch. Skip-if-dest-exists so it is idempotent and never
-/// overwrites a value set directly by the dev nest.
-fn migrate_dev_repos_dir() {
-    let Some(home) = dirs::home_dir() else {
-        return;
-    };
+/// Returns true when `migrate_dev_repos_dir` should run: dev build AND no
+/// completed reset this boot (a completed reset means the dev nest was just
+/// wiped — re-importing from prod would undo the sign-out).
+pub(crate) fn should_migrate_dev_repos_dir(is_dev: bool, reset_completed: bool) -> bool {
+    is_dev && !reset_completed
+}
+
+/// Injectable core: copy `.repos-dir` from `<home>/.buzz/` into `dev_nest`,
+/// non-destructively. Extracted so tests can inject temp paths without
+/// touching `dirs::home_dir()` or the global `nest_dir()` OnceLock.
+pub(crate) fn migrate_dev_repos_dir_at(home: &Path, dev_nest: &Path) {
     let src = home.join(".buzz").join(".repos-dir");
     if !src.exists() {
         return;
     }
-    let Some(dev_nest) = crate::managed_agents::nest_dir() else {
-        return;
-    };
     let dst = dev_nest.join(".repos-dir");
     // Skip if the dev nest already has its own .repos-dir.
     if dst.exists() {
@@ -342,7 +347,7 @@ fn migrate_dev_repos_dir() {
     }
     // Ensure the dev nest directory itself exists — this migration runs before
     // ensure_nest() in the boot sequence, so the directory may not yet exist.
-    if let Err(e) = std::fs::create_dir_all(&dev_nest) {
+    if let Err(e) = std::fs::create_dir_all(dev_nest) {
         eprintln!(
             "buzz-desktop: dev-nest-migration: failed to create dev nest {}: {e}",
             dev_nest.display()
@@ -355,6 +360,21 @@ fn migrate_dev_repos_dir() {
             dst.display()
         ),
         Err(e) => eprintln!("buzz-desktop: dev-nest-migration: failed to migrate .repos-dir: {e}"),
+    }
+}
+
+/// Composed gate + migration: applies `should_migrate_dev_repos_dir` and, if
+/// the gate passes, runs the injectable migration core. This is the seam that
+/// `run_boot_migrations_inner` calls with real paths — a future mis-wired flag
+/// or inverted gate breaks tests at this level, not just the predicate.
+pub(crate) fn maybe_migrate_dev_repos_dir(
+    is_dev: bool,
+    reset_completed: bool,
+    home: &Path,
+    dev_nest: &Path,
+) {
+    if should_migrate_dev_repos_dir(is_dev, reset_completed) {
+        migrate_dev_repos_dir_at(home, dev_nest);
     }
 }
 
@@ -690,294 +710,6 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
         eprintln!(
             "buzz-desktop: shared-agent-sync: {synced} item(s) linked to {}",
             canonical_dir.display()
-        );
-    }
-}
-
-fn reconcile_team_dirs_in_file(path: &Path, target_dir: &Path) {
-    // Build per-component so the persisted value uses native separators on
-    // every platform, matching fresh writes (agents.rs builds the same path as
-    // base.join("teams").join(id)). A single join("agents/teams") would embed a
-    // literal '/' on Windows, persisting a mixed-separator path into the store.
-    let target_teams = target_dir.join("agents").join("teams");
-    patch_json_records(path, |obj| {
-        // Handle both old field name and new field name
-        let field_name = if obj.contains_key("persona_team_dir") {
-            "persona_team_dir"
-        } else if obj.contains_key("persona_pack_path") {
-            "persona_pack_path"
-        } else {
-            return false;
-        };
-        let team_path = match obj.get(field_name).and_then(|v| v.as_str()) {
-            Some(p) => p,
-            None => return false,
-        };
-        let team_path = Path::new(team_path);
-        // Extract the team ID from the path (component after "teams" or "packs")
-        let mut found_dir = false;
-        let mut team_id: Option<&std::ffi::OsStr> = None;
-        for component in team_path.components() {
-            if found_dir {
-                team_id = Some(component.as_os_str());
-                break;
-            }
-            if component.as_os_str() == "teams" || component.as_os_str() == "packs" {
-                found_dir = true;
-            }
-        }
-        let Some(id) = team_id else {
-            return false;
-        };
-        let expected = target_teams.join(id);
-        if team_path == expected {
-            // Value already correct — still normalize the legacy field name so
-            // stores converge on `persona_team_dir` (runtime reads either via
-            // serde alias).
-            if field_name == "persona_pack_path" {
-                if let Some(val) = obj.remove("persona_pack_path") {
-                    obj.insert("persona_team_dir".to_string(), val);
-                    return true;
-                }
-            }
-            return false;
-        }
-        // Rewriting to a path that does not exist on disk makes things worse
-        // than leaving a stale-but-working path in place. fs::metadata follows
-        // symlinks, so a valid symlinked install passes; a dangling symlink
-        // fails with NotFound.
-        if let Err(e) = std::fs::metadata(&expected) {
-            eprintln!(
-                "buzz-desktop: team-dir-reconcile: {:?}: {:?} expected at {:?} — {e}, leaving as-is",
-                obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-                team_path,
-                expected,
-            );
-            return false;
-        }
-        let Some(expected_str) = expected.to_str() else {
-            eprintln!(
-                "buzz-desktop: team-dir-reconcile: {:?}: expected path {:?} is not valid UTF-8, leaving as-is",
-                obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-                expected,
-            );
-            return false;
-        };
-        eprintln!(
-            "buzz-desktop: team-dir-reconcile: {:?}: {:?} → {:?}",
-            obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-            team_path,
-            expected,
-        );
-        // Always write the new field name
-        obj.remove("persona_pack_path");
-        obj.insert(
-            "persona_team_dir".to_string(),
-            serde_json::Value::String(expected_str.to_owned()),
-        );
-        true
-    });
-}
-
-/// Select the data directory to reconcile against.
-///
-/// Dev instances — identified by the data-dir name starting with
-/// `CANONICAL_DEV_IDENTIFIER` (covers the canonical dir itself and any
-/// worktree variant like `xyz.block.buzz.app.dev.mybranch`) — share
-/// `agents/managed-agents.json` and `agents/teams` via symlinks to the
-/// canonical dev dir, so they should normalize against that canonical dir.
-///
-/// Release builds must reconcile their own data dir — keying off the canonical
-/// dev dir's mere existence would leave release records permanently stale on
-/// developer machines, where that dir is always present.
-fn reconcile_target_dir(current_dir: &Path) -> PathBuf {
-    let is_dev_instance = current_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(is_dev_data_dir_name);
-    if is_dev_instance {
-        match canonical_dev_data_dir(current_dir) {
-            Some(dir) if dir.exists() => dir,
-            _ => current_dir.to_path_buf(),
-        }
-    } else {
-        current_dir.to_path_buf()
-    }
-}
-
-/// Reconcile `persona_team_dir` (and legacy `persona_pack_path`) values in
-/// managed-agents.json to point to the correct `agents/teams/` prefix.
-///
-/// Fixes two classes of stale paths:
-/// - Worktree dev instances whose records point at a sibling data dir rather
-///   than the canonical dev dir (dev instances share managed-agents.json and
-///   agents/teams via symlinks, so they all reconcile against the canonical dir).
-/// - Legacy paths left by historical renames: `agents/packs/` → `agents/teams/`
-///   (the packs→teams consolidation) and bundle-id `xyz.block.sprout.app` →
-///   `xyz.block.buzz.app` (the sprout→buzz rename, which moved the app data dir).
-///
-/// Release builds reconcile their own data dir — choosing the canonical dev dir
-/// whenever it exists would leave release files permanently stale on developer
-/// machines.
-pub fn reconcile_persona_team_dirs(app: &tauri::AppHandle) {
-    let Ok(current_dir) = app.path().app_data_dir() else {
-        return;
-    };
-    // Single-dir on purpose: unlike reconcile_legacy_command_names and
-    // reconcile_provider_mcp_commands, which patch both [current, canonical],
-    // path rewrites are target-dependent — a dual pass through a dev
-    // instance's symlinked store would write worktree-local paths into the
-    // shared canonical file.
-    let target_dir = reconcile_target_dir(&current_dir);
-    let path = target_dir.join("agents/managed-agents.json");
-    if !path.exists() {
-        return;
-    }
-    reconcile_team_dirs_in_file(&path, &target_dir);
-}
-
-/// One-time migration from packs to teams.
-///
-/// Runs on app launch if `agents/packs/` exists or if any record in
-/// `managed-agents.json` still uses the old `persona_pack_path` field name.
-/// Steps (in order, each individually idempotent):
-///
-/// 1. Rename `agents/packs/` → `agents/teams/` on disk
-/// 2. Rewrite `personas.json`: `source_pack` → `source_team`, `source_pack_persona_slug` → `source_team_persona_slug`
-/// 3. Rewrite `managed-agents.json`: `persona_pack_path` → `persona_team_dir` (with `/packs/` → `/teams/` path fix), `persona_name_in_pack` → `persona_name_in_team`
-pub fn migrate_packs_to_teams(app: &tauri::AppHandle) {
-    use crate::managed_agents::MigrationReport;
-
-    let Ok(current_dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let target_dir = reconcile_target_dir(&current_dir);
-
-    let packs_dir = target_dir.join("agents/packs");
-    let teams_dir = target_dir.join("agents/teams");
-    let personas_path = target_dir.join("agents/personas.json");
-    let agents_path = target_dir.join("agents/managed-agents.json");
-
-    // Check if migration is needed: packs dir exists OR agents JSON has old field names
-    let packs_dir_exists = packs_dir.exists() && !packs_dir.is_symlink();
-    let has_old_fields = agents_path.exists()
-        && std::fs::read_to_string(&agents_path)
-            .map(|c| c.contains("persona_pack_path"))
-            .unwrap_or(false);
-    let personas_has_old_fields = personas_path.exists()
-        && std::fs::read_to_string(&personas_path)
-            .map(|c| c.contains("\"source_pack\""))
-            .unwrap_or(false);
-
-    if !packs_dir_exists && !has_old_fields && !personas_has_old_fields {
-        return;
-    }
-
-    let mut report = MigrationReport {
-        packs_migrated: 0,
-        personas_updated: 0,
-        agents_updated: 0,
-        errors: Vec::new(),
-    };
-
-    // Step 1: Rename directory agents/packs/ → agents/teams/
-    if packs_dir_exists {
-        if teams_dir.exists() {
-            // Merge: move contents from packs into teams, skip conflicts
-            if let Ok(entries) = std::fs::read_dir(&packs_dir) {
-                for entry in entries.flatten() {
-                    let dest = teams_dir.join(entry.file_name());
-                    if !dest.exists() {
-                        if let Err(e) = std::fs::rename(entry.path(), &dest) {
-                            report
-                                .errors
-                                .push(format!("failed to move {:?}: {e}", entry.file_name()));
-                        } else {
-                            report.packs_migrated += 1;
-                        }
-                    }
-                }
-            }
-            // Remove packs dir only if empty (external tools like ai-rules
-            // may have recreated symlinks here between migration runs)
-            let _ = std::fs::remove_dir(&packs_dir);
-        } else {
-            // Simple rename
-            if let Some(parent) = teams_dir.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            match std::fs::rename(&packs_dir, &teams_dir) {
-                Ok(_) => {
-                    if let Ok(entries) = std::fs::read_dir(&teams_dir) {
-                        report.packs_migrated = entries.count();
-                    }
-                }
-                Err(e) => {
-                    report
-                        .errors
-                        .push(format!("failed to rename packs → teams: {e}"));
-                    eprintln!("buzz-desktop: packs→teams migration: directory rename failed: {e}");
-                    return;
-                }
-            }
-        }
-    }
-
-    // Step 2: Rewrite personas.json field names
-    if personas_path.exists() {
-        patch_json_records(&personas_path, |obj| {
-            let mut changed = false;
-            if let Some(val) = obj.remove("source_pack") {
-                obj.insert("source_team".to_string(), val);
-                changed = true;
-            }
-            if let Some(val) = obj.remove("source_pack_persona_slug") {
-                obj.insert("source_team_persona_slug".to_string(), val);
-                changed = true;
-            }
-            if changed {
-                report.personas_updated += 1;
-            }
-            changed
-        });
-    }
-
-    // Step 3: Rewrite managed-agents.json field names and paths
-    if agents_path.exists() {
-        patch_json_records(&agents_path, |obj| {
-            let mut changed = false;
-            if let Some(val) = obj.remove("persona_pack_path") {
-                // Also fix the path: replace /packs/ with /teams/
-                let new_val = if let Some(s) = val.as_str() {
-                    serde_json::Value::String(s.replace("/packs/", "/teams/"))
-                } else {
-                    val
-                };
-                obj.insert("persona_team_dir".to_string(), new_val);
-                changed = true;
-            }
-            if let Some(val) = obj.remove("persona_name_in_pack") {
-                obj.insert("persona_name_in_team".to_string(), val);
-                changed = true;
-            }
-            if changed {
-                report.agents_updated += 1;
-            }
-            changed
-        });
-    }
-
-    if report.packs_migrated > 0 || report.personas_updated > 0 || report.agents_updated > 0 {
-        eprintln!(
-            "buzz-desktop: packs→teams migration complete: {} dirs, {} personas, {} agents{}",
-            report.packs_migrated,
-            report.personas_updated,
-            report.agents_updated,
-            if report.errors.is_empty() {
-                String::new()
-            } else {
-                format!(" ({} errors)", report.errors.len())
-            }
         );
     }
 }
@@ -1385,6 +1117,8 @@ pub use fold::fold_personas_into_agent_store;
 use fold::load_persona_runtimes;
 mod backfill;
 pub use backfill::backfill_standalone_agents;
+mod detach;
+pub use detach::detach_directory_backed_teams;
 
 #[cfg(test)]
 #[path = "migration_test_support.rs"]

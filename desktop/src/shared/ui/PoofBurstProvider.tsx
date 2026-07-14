@@ -16,6 +16,9 @@ const POOF_FRAMES = [
 ] as const;
 
 let poofAudio: HTMLAudioElement | null = null;
+let poofAudioContext: AudioContext | null = null;
+let poofAudioBuffer: AudioBuffer | null = null;
+let poofAudioBufferPromise: Promise<AudioBuffer | null> | null = null;
 let lastPointerDownTrigger: Element | null = null;
 
 type PoofBurst = {
@@ -43,7 +46,46 @@ function getPoofOrigin(target: Element) {
   };
 }
 
-function playPoofSound() {
+function getPoofAudioContext() {
+  try {
+    poofAudioContext ??= new AudioContext({ latencyHint: "interactive" });
+    return poofAudioContext;
+  } catch {
+    return null;
+  }
+}
+
+function loadPoofAudioBuffer() {
+  if (poofAudioBuffer) {
+    return Promise.resolve(poofAudioBuffer);
+  }
+  if (poofAudioBufferPromise) {
+    return poofAudioBufferPromise;
+  }
+
+  const audioContext = getPoofAudioContext();
+  if (!audioContext) {
+    return Promise.resolve(null);
+  }
+
+  poofAudioBufferPromise = fetch(POOF_SOUND_URL)
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error(`Failed to load poof sound: ${response.status}`);
+      }
+      return response.arrayBuffer();
+    })
+    .then((arrayBuffer) => audioContext.decodeAudioData(arrayBuffer))
+    .then((audioBuffer) => {
+      poofAudioBuffer = audioBuffer;
+      return audioBuffer;
+    })
+    .catch(() => null);
+
+  return poofAudioBufferPromise;
+}
+
+function playFallbackPoofSound() {
   try {
     poofAudio ??= new Audio(POOF_SOUND_URL);
     poofAudio.volume = 0.34;
@@ -53,6 +95,34 @@ function playPoofSound() {
     });
   } catch {
     // Best-effort only: audio may be unavailable or blocked.
+  }
+}
+
+function playPoofSound() {
+  const audioContext = getPoofAudioContext();
+  if (!audioContext || !poofAudioBuffer) {
+    playFallbackPoofSound();
+    void loadPoofAudioBuffer();
+    return;
+  }
+
+  try {
+    const source = audioContext.createBufferSource();
+    const gain = audioContext.createGain();
+    source.buffer = poofAudioBuffer;
+    gain.gain.value = 0.34;
+    source.connect(gain);
+    gain.connect(audioContext.destination);
+    if (audioContext.state === "suspended") {
+      void audioContext.resume().then(
+        () => source.start(),
+        () => playFallbackPoofSound(),
+      );
+    } else {
+      source.start();
+    }
+  } catch {
+    playFallbackPoofSound();
   }
 }
 
@@ -67,6 +137,7 @@ export function PoofBurstProvider({ children }: { children: React.ReactNode }) {
       image.src = frame.src;
     }
 
+    void loadPoofAudioBuffer();
     try {
       poofAudio ??= new Audio(POOF_SOUND_URL);
       poofAudio.preload = "auto";

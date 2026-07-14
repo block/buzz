@@ -29,6 +29,19 @@ flutter test
 
 Or from the repo root: `just mobile-check` and `just mobile-test`.
 
+## Android release signing
+
+Android release builds fail unless all upload-key inputs are supplied through the
+environment:
+
+- `BUZZ_ANDROID_UPLOAD_KEYSTORE_PATH`: path to a CI-vended keystore file
+- `BUZZ_ANDROID_UPLOAD_KEYSTORE_PASSWORD`
+- `BUZZ_ANDROID_UPLOAD_KEY_ALIAS`
+- `BUZZ_ANDROID_UPLOAD_KEY_PASSWORD`
+
+The keystore path must be absolute, and the keystore must remain outside the
+repository. Development and debug builds do not require these variables.
+
 ## Architecture
 
 ```

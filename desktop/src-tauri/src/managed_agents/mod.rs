@@ -9,11 +9,10 @@ mod backend;
 pub(crate) mod config_bridge;
 mod discovery;
 mod env_vars;
-mod git_bash;
+pub(crate) mod git_bash;
 pub(crate) mod global_config;
 mod nest;
 mod persona_avatars;
-mod persona_card;
 pub(crate) mod persona_events;
 mod personas;
 #[cfg(windows)]
@@ -26,7 +25,7 @@ mod restore;
 pub mod retention;
 mod runtime;
 pub(crate) mod spawn_hash;
-mod storage;
+pub(crate) mod storage;
 pub(crate) mod team_events;
 mod team_repair;
 mod teams;
@@ -52,7 +51,6 @@ pub(crate) use global_config::{
     validate_global_config, GlobalAgentConfig,
 };
 pub use nest::*;
-pub use persona_card::find_plugin_json;
 pub use personas::*;
 #[cfg(windows)]
 pub use process_lifecycle::*;
@@ -67,7 +65,6 @@ pub use repos::{
 pub use restore::*;
 pub use runtime::*;
 pub use storage::*;
-pub use team_repair::{sync_team_personas, team_persona_key};
 pub use teams::*;
 pub use types::*;
 

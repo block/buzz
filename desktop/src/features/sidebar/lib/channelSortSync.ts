@@ -140,7 +140,7 @@ export class ChannelSortSyncManager {
     try {
       const merged = await this.fetchOwnBlobBeforePublish(store);
       // Guard: manager may have been destroyed while fetchOwnBlobBeforePublish
-      // was awaited (workspace switch during in-flight fetch). If so, abort
+      // was awaited (community switch during in-flight fetch). If so, abort
       // before touching the relay.
       if (this.destroyed) return;
       if (this.isIdenticalToLastPublished(merged)) {
@@ -167,7 +167,7 @@ export class ChannelSortSyncManager {
       });
       // Final guard immediately before the network call — sign/encrypt are
       // synchronous-ish but cheap; the relay socket may have moved to a
-      // different workspace by the time we reach this point.
+      // different community by the time we reach this point.
       if (this.destroyed) return;
       await relayClient.publishEvent(
         event,
@@ -215,7 +215,7 @@ export class ChannelSortSyncManager {
     // in-flight doPublish() calls abort before reaching relayClient. The
     // scoped localStorage write is already durable; when the user returns to
     // this relay the existing seed-publish guard will re-publish from local
-    // state. Flushing here would race against workspace switching and could
+    // state. Flushing here would race against community switching and could
     // publish relay A's sort prefs to relay B via the shared relayClient
     // singleton.
     this.destroyed = true;

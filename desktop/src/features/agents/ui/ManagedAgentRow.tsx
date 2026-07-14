@@ -85,7 +85,7 @@ export function ManagedAgentRow({
   // When the harness recovered a meaningful error string from the agent's
   // log tail (Max's seam in `managed_agents/storage.rs`), promote it to
   // user-visible copy below the process detail. Specifically renders the
-  // friendly "Buzz shared compute denied this agent — check your relay membership."
+  // friendly "Community access denied this agent — check its community membership."
   // for auth failures so the user knows it's a membership thing, not a
   // crash. Generic exits stay verbatim so we don't lie about other failures.
   const friendlyError = friendlyAgentLastError(

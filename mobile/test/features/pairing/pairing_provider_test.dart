@@ -54,7 +54,7 @@ void main() {
       final state = container.read(pairingProvider);
       expect(state.status, PairingStatus.error);
       expect(state.errorMessage, contains('missing nsec'));
-      expect(fakeAuth.lastWorkspace, isNull);
+      expect(fakeAuth.lastCommunity, isNull);
     });
 
     test('accepts buzz scheme prefix', () async {
@@ -66,7 +66,7 @@ void main() {
       final state = container.read(pairingProvider);
       expect(state.status, PairingStatus.error);
       expect(state.errorMessage, contains('missing nsec'));
-      expect(fakeAuth.lastWorkspace, isNull);
+      expect(fakeAuth.lastCommunity, isNull);
     });
 
     test('invalid base64 sets format error', () async {
@@ -171,7 +171,7 @@ String _encodePairingCode({
 /// A fake [AuthNotifier] that records calls instead of touching secure storage.
 class FakeAuthNotifier extends AsyncNotifier<AuthState>
     implements AuthNotifier {
-  Workspace? lastWorkspace;
+  Community? lastCommunity;
   bool signedOut = false;
 
   @override
@@ -185,10 +185,10 @@ class FakeAuthNotifier extends AsyncNotifier<AuthState>
   }
 
   @override
-  Future<void> authenticateWithWorkspace(Workspace workspace) async {
-    lastWorkspace = workspace;
+  Future<void> authenticateWithCommunity(Community community) async {
+    lastCommunity = community;
     state = AsyncData(
-      AuthState(status: AuthStatus.authenticated, workspace: workspace),
+      AuthState(status: AuthStatus.authenticated, community: community),
     );
   }
 }

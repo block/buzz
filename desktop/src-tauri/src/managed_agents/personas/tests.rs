@@ -4,7 +4,6 @@ use super::{
     validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
-use crate::managed_agents::validate_team_id;
 use crate::managed_agents::AgentDefinition;
 
 fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
@@ -319,61 +318,6 @@ fn validate_persona_deletion_allows_safe_custom_personas() {
     let persona = custom_persona("custom:alpha", "Alpha");
 
     assert!(validate_persona_deletion(&persona, false).is_ok());
-}
-
-// ── validate_team_id ──────────────────────────────────────────────────────────
-
-#[test]
-fn pack_id_valid_reverse_dns() {
-    assert!(validate_team_id("com.example.security-team").is_ok());
-}
-
-#[test]
-fn pack_id_valid_simple() {
-    assert!(validate_team_id("my-pack").is_ok());
-}
-
-#[test]
-fn pack_id_rejects_empty() {
-    assert!(validate_team_id("").is_err());
-}
-
-#[test]
-fn pack_id_rejects_dot_dot_path_traversal() {
-    // Critical regression test: ".." must never pass validation.
-    // A pack with id ".." would write into the parent directory.
-    assert!(validate_team_id("..").is_err());
-}
-
-#[test]
-fn pack_id_rejects_single_dot() {
-    assert!(validate_team_id(".").is_err());
-}
-
-#[test]
-fn pack_id_rejects_leading_dot() {
-    assert!(validate_team_id(".hidden").is_err());
-}
-
-#[test]
-fn pack_id_rejects_slashes() {
-    assert!(validate_team_id("../etc/passwd").is_err());
-    assert!(validate_team_id("foo/bar").is_err());
-}
-
-#[test]
-fn pack_id_rejects_no_alphanumeric() {
-    assert!(validate_team_id("---").is_err());
-    assert!(validate_team_id("___").is_err());
-}
-
-#[test]
-fn pack_id_rejects_too_long() {
-    let long_id = "a".repeat(129);
-    assert!(validate_team_id(&long_id).is_err());
-    // 128 chars is fine
-    let max_id = "a".repeat(128);
-    assert!(validate_team_id(&max_id).is_ok());
 }
 
 // ── migrate_retired_personas ──────────────────────────────────────────────────

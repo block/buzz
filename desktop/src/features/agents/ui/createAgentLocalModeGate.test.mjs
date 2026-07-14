@@ -241,36 +241,6 @@ test("localMode_gate_bypassed_for_meshMode", () => {
   );
 });
 
-test("localMode_gate_active_when_mesh_selected_but_startAfterCreate_off", () => {
-  // Regression: when a user selects relay-mesh then turns off "Start agent
-  // after creation", the run draft is hidden and the backend intent is
-  // discarded — the saved definition has no mesh backing. The submit gate
-  // must require provider/model in this case.
-  //
-  // AgentDialog.tsx computes: createRunOnMesh = startAfterCreate && runDraft.runOn === "mesh"
-  // With startAfterCreate=false that evaluates to false regardless of runDraft,
-  // so computeLocalModeGate receives useMesh:false and must enforce the gate.
-  const result = computeLocalModeGate({
-    envVars: {},
-    isProviderMode: false,
-    model: "",
-    provider: "",
-    runtimeId: "buzz-agent",
-    useMesh: false, // = startAfterCreate(false) && runDraft.runOn("mesh")
-  });
-
-  assert.equal(
-    result.satisfied,
-    false,
-    "gate must NOT be bypassed when startAfterCreate is off, even if runDraft was set to mesh",
-  );
-  assert.deepEqual(
-    result.missingNormalizedFields,
-    ["provider", "model"],
-    "both provider and model must be flagged as missing for the stale-mesh path",
-  );
-});
-
 // ── IMPORTANT 2: requiredEnvKeys surfaces correctly ───────────────────────
 
 test("localMode_requiredEnvKeys_surfaces_anthropicKey", () => {

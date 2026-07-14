@@ -23,14 +23,14 @@ import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHea
  * Custom emoji management (NIP-30, kind:30030). Each member owns their own set:
  * adding uploads an image and republishes the caller's own 30030; removing only
  * touches the caller's own set. So this card edits "My emoji" — the only set the
- * caller can publish — and shows the workspace palette (the read-only union of
+ * caller can publish — and shows the community palette (the read-only union of
  * every member's set) separately, since a member cannot remove someone else's
  * emoji. When shortcodes collide across members, the palette shows one
  * deterministic winner (see `unionCustomEmoji`).
  */
 export function CustomEmojiSettingsCard() {
   const { data: own = [], isLoading: ownLoading } = useOwnCustomEmojiQuery();
-  const { data: workspace = [], isLoading: workspaceLoading } =
+  const { data: community = [], isLoading: communityLoading } =
     useCustomEmojiQuery();
   const setEmoji = useSetCustomEmojiMutation();
   const removeEmoji = useRemoveCustomEmojiMutation();
@@ -119,9 +119,9 @@ export function CustomEmojiSettingsCard() {
     [removeEmoji],
   );
 
-  // Workspace emoji owned by someone else (so the caller can't remove them).
+  // Community emoji owned by someone else (so the caller can't remove them).
   const ownShortcodes = new Set(own.map((e) => e.shortcode));
-  const othersEmoji = workspace.filter((e) => !ownShortcodes.has(e.shortcode));
+  const othersEmoji = community.filter((e) => !ownShortcodes.has(e.shortcode));
 
   return (
     <section className="min-w-0" data-testid="settings-custom-emoji">
@@ -303,10 +303,10 @@ export function CustomEmojiSettingsCard() {
           )}
         </div>
 
-        {!workspaceLoading && othersEmoji.length > 0 ? (
-          <div className="space-y-3" data-testid="custom-emoji-workspace">
+        {!communityLoading && othersEmoji.length > 0 ? (
+          <div className="space-y-3" data-testid="custom-emoji-community">
             <h3 className="text-sm font-medium">
-              Workspace emoji ({othersEmoji.length})
+              Community emoji ({othersEmoji.length})
             </h3>
             <p className="text-sm font-normal text-muted-foreground">
               Added by other members. You can use these, but only their owner
