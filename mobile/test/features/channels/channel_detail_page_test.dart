@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
@@ -476,14 +477,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final listView = tester.widget<ListView>(
+      final listView = tester.widget<ScrollablePositionedList>(
         find.byKey(const ValueKey('channel-message-list')),
       );
-      final controller = listView.controller!;
-      expect(controller.position.maxScrollExtent, greaterThan(0));
-
-      controller.jumpTo(controller.position.maxScrollExtent);
-      await tester.pump();
+      listView.itemScrollController!.jumpTo(index: 39);
+      await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('channel-jump-to-latest')),
         findsOneWidget,
@@ -504,7 +502,6 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('channel-jump-to-latest')));
       await tester.pumpAndSettle();
 
-      expect(controller.position.pixels, lessThanOrEqualTo(1));
       expect(findRichText('Newest live update'), findsOneWidget);
     });
 

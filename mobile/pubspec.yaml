@@ -31,6 +31,7 @@ dependencies:
   package_info_plus: ^10.0.0
   app_badge_plus: ^1.2.10
   app_links: ^6.4.0
+  scrollable_positioned_list: ^0.3.8
 
 dev_dependencies:
   flutter_test:

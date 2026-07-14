@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -36,6 +37,7 @@ class ThreadDetailPage extends HookConsumerWidget {
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
+  final String? initialMessageId;
 
   const ThreadDetailPage({
     super.key,
@@ -45,6 +47,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
+    this.initialMessageId,
   });
 
   @override
@@ -73,6 +76,29 @@ class ThreadDetailPage extends HookConsumerWidget {
     }
 
     final replies = childrenByParent[threadHead.id] ?? const [];
+    final itemScrollController = useMemoized(ItemScrollController.new);
+    final didJumpToInitialMessage = useRef(false);
+    useEffect(() {
+      final messageId = initialMessageId;
+      // Wait for the authoritative thread query before consuming the one-shot
+      // jump; the fallback main-timeline list can contain only the linked reply.
+      if (messageId == null || fetchedReplies == null) return null;
+      final chronologicalIndex = replies.indexWhere(
+        (reply) => reply.id == messageId,
+      );
+      final targetIndex = messageId == threadHead.id
+          ? replies.length
+          : chronologicalIndex < 0
+          ? null
+          : replies.length - 1 - chronologicalIndex;
+      if (targetIndex == null || didJumpToInitialMessage.value) return null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted || !itemScrollController.isAttached) return;
+        itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
+        didJumpToInitialMessage.value = true;
+      });
+      return null;
+    }, [initialMessageId, fetchedReplies, replies.length]);
     final readState = ref.watch(readStateProvider);
     final visibleReplyReadKey = replies
         .map((reply) => '${reply.id}:${reply.createdAt}')
@@ -123,7 +149,8 @@ class ThreadDetailPage extends HookConsumerWidget {
       body: Column(
         children: [
           Expanded(
-            child: ListView.builder(
+            child: ScrollablePositionedList.builder(
+              itemScrollController: itemScrollController,
               // Reversed so the list opens pinned to the newest reply,
               // matching the channel message list.
               reverse: true,

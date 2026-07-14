@@ -14,29 +14,47 @@ import 'channels_provider.dart';
 /// the target [ChannelDetailPage] on the enclosing [Navigator]. Links are
 /// held (not dropped) while channels are still loading, so cold-start links
 /// dispatch as soon as the first channel fetch completes.
-class DeepLinkDispatcher extends ConsumerWidget {
-  final Widget child;
+typedef DeepLinkDestinationBuilder =
+    Widget Function(Channel channel, MessageDeepLink link);
 
-  const DeepLinkDispatcher({super.key, required this.child});
+class DeepLinkDispatcher extends ConsumerStatefulWidget {
+  final Widget child;
+  final DeepLinkDestinationBuilder? destinationBuilder;
+
+  const DeepLinkDispatcher({
+    super.key,
+    required this.child,
+    this.destinationBuilder,
+  });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // Re-evaluate dispatch when either a new link arrives or channels load.
-    ref.listen<MessageDeepLink?>(pendingDeepLinkProvider, (_, link) {
-      _maybeDispatch(context, ref, link);
-    });
-    ref.listen<AsyncValue<List<Channel>>>(channelsProvider, (_, _) {
-      _maybeDispatch(context, ref, ref.read(pendingDeepLinkProvider));
-    });
+  ConsumerState<DeepLinkDispatcher> createState() => _DeepLinkDispatcherState();
+}
 
-    return child;
+class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _maybeDispatch(ref.read(pendingDeepLinkProvider));
+    });
   }
 
-  void _maybeDispatch(
-    BuildContext context,
-    WidgetRef ref,
-    MessageDeepLink? link,
-  ) {
+  @override
+  Widget build(BuildContext context) {
+    // Re-evaluate dispatch when either a new link arrives or channels load.
+    ref.listen<MessageDeepLink?>(pendingDeepLinkProvider, (_, link) {
+      _maybeDispatch(link);
+    });
+    ref.listen<AsyncValue<List<Channel>>>(channelsProvider, (_, _) {
+      _maybeDispatch(ref.read(pendingDeepLinkProvider));
+    });
+
+    return widget.child;
+  }
+
+  void _maybeDispatch(MessageDeepLink? link) {
     if (link == null) return;
 
     final channels = ref.read(channelsProvider).asData?.value;
@@ -64,7 +82,13 @@ class DeepLinkDispatcher extends ConsumerWidget {
 
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => ChannelDetailPage(channel: channel),
+        builder: (_) =>
+            widget.destinationBuilder?.call(channel, link) ??
+            ChannelDetailPage(
+              channel: channel,
+              initialMessageId: link.messageId,
+              initialThreadRootId: link.threadRootId,
+            ),
       ),
     );
   }
