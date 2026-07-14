@@ -63,7 +63,7 @@ export function AgentsView() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only shortcut subscription; openUnifiedCreate only calls stable setState-backed callbacks
   React.useEffect(() => {
     // The app-wide "create agent" shortcut routes to the unified definition
-    // flow (B5): one create path, with the start-after-create toggle on.
+    // flow (B5): one create path, always starting the agent after creation.
     if (consumePendingOpenCreateAgent()) {
       openUnifiedCreate();
     }

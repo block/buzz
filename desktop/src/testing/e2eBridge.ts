@@ -764,6 +764,12 @@ declare global {
       command: string;
       payload: unknown;
     }>;
+    /** Results emitted only after a mocked mesh-availability request resolves. */
+    __BUZZ_E2E_MESH_AVAILABILITY_RESULTS__?: Array<{
+      admitted: boolean;
+      available: boolean;
+      reason: string | null;
+    }>;
     __BUZZ_E2E_WEBVIEW_ZOOM__?: number;
     __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
       channelName: string;
@@ -8208,6 +8214,7 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_COMMANDS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
+  window.__BUZZ_E2E_MESH_AVAILABILITY_RESULTS__ = [];
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
   window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
   window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ = ({
@@ -8454,12 +8461,16 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
-      case "mesh_availability":
-        return {
+      case "mesh_availability": {
+        const result = {
           capable: true,
           admitted: mockMeshState.admitted,
-          available: mockMeshState.admitted,
-          reason: mockMeshState.admitted ? null : mockMeshState.denyReason,
+          available: mockMeshState.admitted && mockMeshState.models.length > 0,
+          reason: !mockMeshState.admitted
+            ? mockMeshState.denyReason
+            : mockMeshState.models.length === 0
+              ? "no relay mesh serve targets are available"
+              : null,
           models: mockMeshState.models,
           serveTargets: mockMeshState.models.map((model) => ({
             modelId: model.id,
@@ -8476,6 +8487,17 @@ export function maybeInstallE2eTauriMocks() {
             deviceName: "Mock desktop",
           })),
         };
+        return Promise.resolve(result).then((resolved) => {
+          // Unlike the command log above, record this only after the mocked
+          // result has resolved so E2E can distinguish it from loading.
+          window.__BUZZ_E2E_MESH_AVAILABILITY_RESULTS__?.push({
+            admitted: resolved.admitted,
+            available: resolved.available,
+            reason: resolved.reason,
+          });
+          return resolved;
+        });
+      }
       case "mesh_installed_models":
         return mockMeshState.models;
       case "mesh_node_status":

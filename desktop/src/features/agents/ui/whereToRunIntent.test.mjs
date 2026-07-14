@@ -44,69 +44,45 @@ function meshDraft(overrides = {}) {
   };
 }
 
-// ── Stale-intent edge (Pinky pin 2) ─────────────────────────────────────────
-
-test("start toggle off discards a provider selection at submit", () => {
-  assert.equal(
-    resolveBackendIntent(providerDraft(), false),
-    null,
-    "definition-only create must never carry a backend intent",
-  );
-});
-
-test("start toggle off discards a mesh selection at submit", () => {
-  assert.equal(resolveBackendIntent(meshDraft(), false), null);
-});
-
-test("start toggle off always allows submit regardless of draft state", () => {
-  // Incomplete provider config with the toggle off: no instance is minted,
-  // so the draft must not block the definition-only create.
-  const incomplete = providerDraft({ providerConfig: {} });
-  assert.equal(canSubmitWhereToRun(incomplete, false), true);
-});
-
-// ── Submit gating carries over (Pinky pin 3) ────────────────────────────────
+// ── Submit gating ───────────────────────────────────────────────────────────
 
 test("provider selection blocks submit until the probe completes", () => {
   const unprobed = providerDraft({ probedProvider: null });
-  assert.equal(canSubmitWhereToRun(unprobed, true), false);
+  assert.equal(canSubmitWhereToRun(unprobed), false);
 });
 
 test("provider selection blocks submit while required config is missing", () => {
   const missing = providerDraft({ providerConfig: { size: "3" } });
-  assert.equal(canSubmitWhereToRun(missing, true), false);
+  assert.equal(canSubmitWhereToRun(missing), false);
   assert.equal(providerConfigComplete(missing), false);
 });
 
 test("complete provider config allows submit", () => {
-  assert.equal(canSubmitWhereToRun(providerDraft(), true), true);
+  assert.equal(canSubmitWhereToRun(providerDraft()), true);
 });
 
 test("mesh selection blocks submit without a concrete serve target", () => {
   assert.equal(
-    canSubmitWhereToRun(meshDraft({ meshTarget: null }), true),
+    canSubmitWhereToRun(meshDraft({ meshTarget: null })),
     false,
     "a model name alone is not a startable mesh selection",
   );
-  assert.equal(
-    canSubmitWhereToRun(meshDraft({ meshModelId: "" }), true),
-    false,
-  );
-  assert.equal(canSubmitWhereToRun(meshDraft(), true), true);
+  assert.equal(canSubmitWhereToRun(meshDraft({ meshModelId: "" })), false);
+  assert.equal(canSubmitWhereToRun(meshDraft()), true);
 });
 
 test("local never gates submit", () => {
-  assert.equal(canSubmitWhereToRun(emptyWhereToRunDraft, true), true);
+  assert.equal(canSubmitWhereToRun(emptyWhereToRunDraft), true);
 });
 
 // ── Intent resolution ────────────────────────────────────────────────────────
 
 test("local draft resolves to null intent", () => {
-  assert.equal(resolveBackendIntent(emptyWhereToRunDraft, true), null);
+  assert.equal(resolveBackendIntent(emptyWhereToRunDraft), null);
 });
 
 test("provider draft resolves with coerced config values", () => {
-  const intent = resolveBackendIntent(providerDraft(), true);
+  const intent = resolveBackendIntent(providerDraft());
   assert.deepEqual(intent, {
     type: "provider",
     id: "blox",
@@ -115,7 +91,7 @@ test("provider draft resolves with coerced config values", () => {
 });
 
 test("mesh draft resolves with target and patch", () => {
-  const intent = resolveBackendIntent(meshDraft(), true);
+  const intent = resolveBackendIntent(meshDraft());
   assert.equal(intent.type, "mesh");
   assert.equal(intent.modelId, "mesh/model:Q4");
   assert.equal(intent.target.endpointAddr, "10.0.0.1:9337");
@@ -123,12 +99,6 @@ test("mesh draft resolves with target and patch", () => {
 });
 
 test("mesh draft without patch or target resolves to null, not a broken intent", () => {
-  assert.equal(
-    resolveBackendIntent(meshDraft({ meshPatch: null }), true),
-    null,
-  );
-  assert.equal(
-    resolveBackendIntent(meshDraft({ meshTarget: null }), true),
-    null,
-  );
+  assert.equal(resolveBackendIntent(meshDraft({ meshPatch: null })), null);
+  assert.equal(resolveBackendIntent(meshDraft({ meshTarget: null })), null);
 });

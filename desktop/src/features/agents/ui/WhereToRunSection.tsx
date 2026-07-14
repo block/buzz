@@ -4,6 +4,7 @@ import * as React from "react";
 import { useBackendProvidersQuery } from "@/features/agents/hooks";
 import { RelayMeshAgentSection } from "@/features/mesh-compute/ui/RelayMeshAgentSection";
 import { probeBackendProvider } from "@/shared/api/tauri";
+import type { MeshAvailability } from "@/shared/api/tauriMesh";
 
 import { ProviderConfigFields } from "./ProviderConfigFields";
 import { emptyWhereToRunDraft, type WhereToRunDraft } from "./whereToRunIntent";
@@ -16,11 +17,9 @@ import { emptyWhereToRunDraft, type WhereToRunDraft } from "./whereToRunIntent";
  * (`resolveBackendIntent`) and gates the submit button
  * (`canSubmitWhereToRun`).
  *
- * Only rendered while the start-after-create toggle is ON — "where to run"
- * is instance state, and with the toggle off no instance exists. The parent
- * discards the draft at submit when the toggle is off (the stale-intent
- * guard), so a selection made before toggling off can never silently ride
- * a definition-only create.
+ * Always rendered in the create flow — agents are always started after
+ * creation. The parent owns the availability-flip guard so visibility and the
+ * submit path share one snapshot; this section only renders that snapshot.
  *
  * Honest-copy note: unlike the legacy create dialog, the mesh preset never
  * overwrites the definition's fields — only the minted instance carries the
@@ -30,10 +29,12 @@ import { emptyWhereToRunDraft, type WhereToRunDraft } from "./whereToRunIntent";
 export function WhereToRunSection({
   draft,
   isPending,
+  meshAvailability,
   onDraftChange,
 }: {
   draft: WhereToRunDraft;
   isPending: boolean;
+  meshAvailability: MeshAvailability | null;
   onDraftChange: (next: WhereToRunDraft) => void;
 }) {
   const backendProvidersQuery = useBackendProvidersQuery();
@@ -174,6 +175,7 @@ export function WhereToRunSection({
       {!isProviderMode ? (
         <>
           <RelayMeshAgentSection
+            availability={meshAvailability}
             current={{
               // The definition's own fields are never overwritten by the mesh
               // preset — only the minted instance carries it — so the override

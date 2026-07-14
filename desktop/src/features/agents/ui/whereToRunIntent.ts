@@ -45,16 +45,8 @@ export function providerConfigComplete(draft: WhereToRunDraft): boolean {
  * legacy dialog's gates: provider mode blocks until the probe succeeds and
  * required config is filled; mesh mode blocks until a concrete serve target
  * (not just a model name) is selected. Local always passes.
- *
- * When `startAfterCreate` is false there is no instance, so the draft is
- * irrelevant and submit is always allowed (the intent is discarded — see
- * resolveBackendIntent).
  */
-export function canSubmitWhereToRun(
-  draft: WhereToRunDraft,
-  startAfterCreate: boolean,
-): boolean {
-  if (!startAfterCreate) return true;
+export function canSubmitWhereToRun(draft: WhereToRunDraft): boolean {
   if (draft.runOn === "mesh") {
     return draft.meshModelId.trim().length > 0 && draft.meshTarget != null;
   }
@@ -63,17 +55,12 @@ export function canSubmitWhereToRun(
 
 /**
  * Resolve the draft into the BackendIntent the instance mint should carry.
- *
- * Returns null for local AND whenever `startAfterCreate` is false: with the
- * start toggle off no instance exists, so a leftover provider/mesh selection
- * must be discarded at submit — never silently attached to a definition-only
- * create (the stale-intent edge).
+ * Returns null for local — no backend override needed.
  */
 export function resolveBackendIntent(
   draft: WhereToRunDraft,
-  startAfterCreate: boolean,
 ): BackendIntent | null {
-  if (!startAfterCreate || draft.runOn === "local") {
+  if (draft.runOn === "local") {
     return null;
   }
   if (draft.runOn === "mesh") {

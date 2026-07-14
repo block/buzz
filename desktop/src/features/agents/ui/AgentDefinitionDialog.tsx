@@ -85,8 +85,6 @@ type AgentDefinitionDialogProps = {
   onSubmit: (
     input: CreatePersonaInput | UpdatePersonaInput,
   ) => Promise<unknown>;
-  /** Rendered in the footer’s left slot. */
-  createFooterSlot?: React.ReactNode;
   /** Rendered below the form fields in create mode only ("Where to run"). */
   createRunSection?: React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
@@ -115,7 +113,6 @@ export function AgentDefinitionDialog({
   runtimesLoading = false,
   onOpenChange,
   onSubmit,
-  createFooterSlot,
   createRunSection,
   createSubmitBlocked = false,
   createRunOnMesh = false,
@@ -661,7 +658,7 @@ export function AgentDefinitionDialog({
         title={title}
         footer={
           <div className="flex w-full items-center justify-between gap-3">
-            <div className="flex min-h-9 items-center">{createFooterSlot}</div>
+            <div className="flex min-h-9 items-center" />
 
             <div className="flex items-center gap-2">
               <Button

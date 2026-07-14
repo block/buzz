@@ -6,14 +6,10 @@ import type {
   ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
-import { Switch } from "@/shared/ui/switch";
 import type { BackendIntent } from "../lib/instanceInputForDefinition";
-import {
-  definitionCreateDialogState,
-  intentForStartToggle,
-  type AgentCreateIntent,
-} from "./agentCreateIntent";
+import type { AgentCreateIntent } from "./agentCreateIntent";
 import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
+import { useMeshAvailability } from "@/features/mesh-compute/hooks/useMeshAvailability";
 import { AgentInstanceEditDialog } from "./AgentInstanceEditDialog";
 import { createPersonaDialogState } from "./personaDialogState";
 import { AgentDefinitionDialog } from "./AgentDefinitionDialog";
@@ -79,10 +75,11 @@ type AgentDialogProps =
 /**
  * Unified entry point (Phase 1B.2/1B.3b/1B.3c): routes an intent to the form
  * that owns it. The definition family renders AgentDefinitionDialog — create
- * mode adds a "start after create" toggle, definition-edit passes the caller's
- * PersonaDialogState-derived props through unchanged (edit/duplicate/import).
- * instance-edit renders AgentInstanceEditDialog (persistent mount + `open`
- * toggle — its reset lifecycle is keyed on [open, agent.pubkey]).
+ * mode always starts the agent and includes a WhereToRunSection;
+ * definition-edit passes the caller's PersonaDialogState-derived props
+ * through unchanged (edit/duplicate/import). instance-edit renders
+ * AgentInstanceEditDialog (persistent mount + `open` toggle — its reset
+ * lifecycle is keyed on [open, agent.pubkey]).
  */
 export function AgentDialog(props: AgentDialogProps) {
   if (props.mode === "instance-edit") {
@@ -112,47 +109,44 @@ function AgentCreateDialogRouter({
   runtimesLoading,
   onSubmitDefinition,
 }: AgentDialogCreateProps) {
-  const [startAfterCreate, setStartAfterCreate] = React.useState(true);
   const [runDraft, setRunDraft] = React.useState(emptyWhereToRunDraft);
-  // Stable identity across toggle flips — AgentDefinitionDialog re-initializes its
-  // fields whenever `initialValues` changes.
+  const { availability: meshAvailability } = useMeshAvailability();
+  const meshUnavailable =
+    meshAvailability != null && !meshAvailability.available;
+  // The cleanup effect below resets the persisted draft after this render. The
+  // submit path must not wait for that effect: it uses the local fallback
+  // immediately when a selected mesh target disappears.
+  const effectiveRunDraft =
+    meshUnavailable && runDraft.runOn === "mesh"
+      ? emptyWhereToRunDraft
+      : runDraft;
+  // Persist the fallback after the synchronous guard has made the render safe.
+  // This cleanup keeps a future availability recovery from restoring an invalid
+  // mesh selection.
+  React.useEffect(() => {
+    if (meshUnavailable && runDraft.runOn === "mesh") {
+      setRunDraft(emptyWhereToRunDraft);
+    }
+  }, [meshUnavailable, runDraft.runOn]);
   const initialValues = React.useMemo(
     () => createPersonaDialogState().initialValues,
     [],
   );
 
-  const copy = definitionCreateDialogState(startAfterCreate);
+  const copy = createPersonaDialogState();
 
   return (
     <AgentDefinitionDialog
-      createFooterSlot={
-        <label
-          className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground"
-          htmlFor="agent-dialog-start-toggle"
-        >
-          <Switch
-            checked={startAfterCreate}
-            data-testid="agent-dialog-start-toggle"
-            disabled={isDefinitionPending}
-            id="agent-dialog-start-toggle"
-            onCheckedChange={setStartAfterCreate}
-          />
-          Start agent after creation
-        </label>
-      }
       createRunSection={
-        // "Where to run" is instance state: with the start toggle off no
-        // instance exists, so the section disappears instead of dangling.
-        startAfterCreate ? (
-          <WhereToRunSection
-            draft={runDraft}
-            isPending={isDefinitionPending}
-            onDraftChange={setRunDraft}
-          />
-        ) : null
+        <WhereToRunSection
+          draft={runDraft}
+          isPending={isDefinitionPending}
+          meshAvailability={meshAvailability}
+          onDraftChange={setRunDraft}
+        />
       }
-      createSubmitBlocked={!canSubmitWhereToRun(runDraft, startAfterCreate)}
-      createRunOnMesh={startAfterCreate && runDraft.runOn === "mesh"}
+      createSubmitBlocked={!canSubmitWhereToRun(effectiveRunDraft)}
+      createRunOnMesh={effectiveRunDraft.runOn === "mesh"}
       description={copy.description}
       error={definitionError}
       initialValues={initialValues}
@@ -161,8 +155,8 @@ function AgentCreateDialogRouter({
       onSubmit={async (input) => {
         const submitted = await onSubmitDefinition(
           input,
-          intentForStartToggle(startAfterCreate),
-          resolveBackendIntent(runDraft, startAfterCreate),
+          "definition_start",
+          resolveBackendIntent(effectiveRunDraft),
         );
         if (submitted) {
           onOpenChange(false);
