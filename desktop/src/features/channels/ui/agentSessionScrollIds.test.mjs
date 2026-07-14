@@ -2,11 +2,24 @@
  * Behavior-level tests for the observer feed scroll-id wiring.
  *
  * Corrective actions addressed:
- *  1. Production derivation chain + reference stability via useStableArrayShallow
- *  3. Ordered DOM parity (data-message-id sequence vs outer-derived id list)
- *  4. Mode-toggle reset-key disjointness
+ *  1. Production derivation chain (via `deriveTranscriptBlockIds` — the same
+ *     exported helper AgentSessionThreadPanel calls) + reference stability
+ *     via useStableArrayShallow.
+ *  4. Mode-toggle reset-key disjointness.
  *
- * Hook-level zero-write assertions (corrective action 2) live in
+ * Corrective action 3 (ordered DOM parity) — NAMED RESIDUAL:
+ *  AgentSessionTranscriptList cannot render under node:test — the component
+ *  tree transitively imports a .css file (BuzzLogoAnimation.tsx →
+ *  buzz-logo-animation.css) and the test-loader has no CSS stub. The
+ *  underlying invariant (outer-derived ids = inner data-message-id) is
+ *  structurally guaranteed by both sides calling the same exported
+ *  getDisplayBlockKey, but a full-component render test would additionally
+ *  catch a block being filtered or the attribute being dropped. That
+ *  coverage requires a CSS-stub addition to the test-loader (outside this
+ *  PR's scope). See D1 in Paul's verification at event 8dfadd5f.
+ *
+ * Hook-level zero-write assertions (corrective action 2) and mode-toggle
+ * re-pin behavior (corrective action 4) live in
  * useAnchoredScroll.observerScrollIds.test.mjs alongside the existing hook tests.
  */
 
@@ -14,73 +27,70 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  buildTranscriptDisplayBlocks,
+  deriveTranscriptBlockIds,
   getDisplayBlockKey,
+  buildTranscriptDisplayBlocks,
 } from "@/features/agents/ui/agentSessionTranscriptGrouping.ts";
 import { observerEventScrollId } from "@/features/agents/ui/agentSessionPanelLayout.ts";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
-/** Build a minimal TranscriptItem (tool-call shape). */
-function mkItem(id, sessionId, turnId, ts = "2026-07-08T00:00:00.000Z") {
+const BASE_TS = "2026-07-08T00:00:00.000Z";
+
+/**
+ * Build a minimal ObserverEvent that produces a tool-call TranscriptItem
+ * through `buildTranscriptState`. Uses the `session/update` → `tool_call_update`
+ * method path (the most common tool-producing event in production).
+ */
+function mkToolEvent(
+  seq,
+  { sessionId = "sess-1", turnId = "turn-1", ts } = {},
+) {
   return {
-    id,
-    type: "tool",
-    renderClass: "generic",
-    descriptor: {
-      renderClass: "generic",
-      label: id,
-      preview: id,
-      source: "harness",
-      groupKey: id,
-    },
-    title: id,
-    toolName: id,
-    buzzToolName: null,
-    status: "completed",
-    args: {},
-    result: "",
-    isError: false,
-    timestamp: ts,
-    startedAt: ts,
-    completedAt: ts,
-    turnId,
-    sessionId,
+    seq,
+    timestamp: ts ?? `2026-07-08T00:00:${String(seq).padStart(2, "0")}.000Z`,
+    kind: "acp_read",
+    agentIndex: 0,
     channelId: "chan-1",
+    sessionId,
+    turnId,
+    payload: {
+      method: "session/update",
+      params: {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: `call-${seq}`,
+          toolName: `tool-${seq}`,
+          status: "completed",
+          args: "{}",
+          result: "ok",
+        },
+      },
+    },
   };
 }
 
 /** Build a minimal ObserverEvent for raw-mode id derivation. */
-function mkEvent(seq, ts = "2026-07-08T00:00:00.000Z") {
+function mkRawEvent(seq, ts = BASE_TS) {
   return { seq, timestamp: ts };
-}
-
-/**
- * Derive transcript block ids from pre-built TranscriptItems
- * (for tests that need fine-grained control over item structure).
- */
-function deriveBlockIdsFromItems(items) {
-  const blocks = buildTranscriptDisplayBlocks(items);
-  return blocks.map(getDisplayBlockKey);
 }
 
 // ── Corrective action 1: production derivation chain + reference stability ───
 //
-// These tests derive ids through buildTranscriptState(events) — the actual
-// production chain — and verify structural properties that useStableArrayShallow
-// relies on: value-equality of the string[] when raw events append without
-// producing new blocks, and value-inequality when blocks change.
+// These tests derive ids through the REAL production helper
+// `deriveTranscriptBlockIds(events)` — the exact function
+// `AgentSessionThreadPanel` calls. No mirror code, no pre-built items.
 
-test("derivation chain: same-turn event append produces value-equal block id sequence", () => {
-  const items1 = [mkItem("tool-1", "sess-1", "turn-1")];
-  const ids1 = deriveBlockIdsFromItems(items1);
+test("production chain: same-turn event append produces value-equal block id sequence", () => {
+  const events1 = [mkToolEvent(1)];
+  const ids1 = deriveTranscriptBlockIds(events1);
 
-  // A second item on the same turn — block key unchanged.
-  const items2 = [...items1, mkItem("tool-2", "sess-1", "turn-1")];
-  const ids2 = deriveBlockIdsFromItems(items2);
+  // A second event on the same turn — block key unchanged.
+  const events2 = [...events1, mkToolEvent(2)];
+  const ids2 = deriveTranscriptBlockIds(events2);
 
   // Value-equal: useStableArrayShallow will preserve the prior reference.
   assert.deepEqual(ids1, ids2);
@@ -94,19 +104,15 @@ test("derivation chain: same-turn event append produces value-equal block id seq
   }
 });
 
-test("derivation chain: streaming 10 same-turn events produces stable id sequence", () => {
-  const items5 = Array.from({ length: 5 }, (_, i) =>
-    mkItem(`tool-${i + 1}`, "sess-1", "turn-1"),
-  );
-  const ids5 = deriveBlockIdsFromItems(items5);
+test("production chain: streaming 10 same-turn events produces stable id sequence", () => {
+  const events5 = Array.from({ length: 5 }, (_, i) => mkToolEvent(i + 1));
+  const ids5 = deriveTranscriptBlockIds(events5);
 
-  const items10 = [
-    ...items5,
-    ...Array.from({ length: 5 }, (_, i) =>
-      mkItem(`tool-${i + 6}`, "sess-1", "turn-1"),
-    ),
+  const events10 = [
+    ...events5,
+    ...Array.from({ length: 5 }, (_, i) => mkToolEvent(i + 6)),
   ];
-  const ids10 = deriveBlockIdsFromItems(items10);
+  const ids10 = deriveTranscriptBlockIds(events10);
 
   assert.deepEqual(
     ids5,
@@ -115,32 +121,38 @@ test("derivation chain: streaming 10 same-turn events produces stable id sequenc
   );
 });
 
-test("derivation chain: new session produces value-different id sequence", () => {
-  const items1 = [
-    mkItem("tool-a", "sess-1", "turn-1", "2026-07-08T00:00:01.000Z"),
+test("production chain: new session produces value-different id sequence", () => {
+  const events1 = [
+    mkToolEvent(1, { sessionId: "sess-1", ts: "2026-07-08T00:00:01.000Z" }),
   ];
-  const ids1 = deriveBlockIdsFromItems(items1);
+  const ids1 = deriveTranscriptBlockIds(events1);
 
-  const items2 = [
-    ...items1,
-    mkItem("tool-b", "sess-2", "turn-2", "2026-07-08T00:00:02.000Z"),
+  const events2 = [
+    ...events1,
+    mkToolEvent(2, {
+      sessionId: "sess-2",
+      turnId: "turn-2",
+      ts: "2026-07-08T00:00:02.000Z",
+    }),
   ];
-  const ids2 = deriveBlockIdsFromItems(items2);
+  const ids2 = deriveTranscriptBlockIds(events2);
 
   assert.ok(ids2.length > ids1.length, "new session must grow the id list");
-  // Not value-equal: useStableArrayShallow must propagate the new reference.
   assert.notDeepEqual(ids1, ids2);
 });
 
-test("derivation chain: new turn in same session produces value-different id sequence", () => {
-  const items1 = [mkItem("tool-a", "sess-1", "turn-1")];
-  const ids1 = deriveBlockIdsFromItems(items1);
+test("production chain: new turn in same session produces value-different id sequence", () => {
+  const events1 = [mkToolEvent(1)];
+  const ids1 = deriveTranscriptBlockIds(events1);
 
-  const items2 = [...items1, mkItem("tool-b", "sess-1", "turn-2")];
-  const ids2 = deriveBlockIdsFromItems(items2);
+  const events2 = [...events1, mkToolEvent(2, { turnId: "turn-2" })];
+  const ids2 = deriveTranscriptBlockIds(events2);
 
   assert.equal(ids2.length, ids1.length + 1, "new turn adds one block id");
-  assert.ok(ids2.includes("turn:turn-2"), "new turn key must be present");
+  assert.ok(
+    ids2.some((id) => id.startsWith("turn:turn-2")),
+    "new turn block key must be present",
+  );
 });
 
 // ── Corrective action 1 (cont.): reference stability via useStableArrayShallow ──
@@ -353,15 +365,15 @@ test("useStableArrayShallow: returns new reference for value-different arrays", 
   });
 });
 
-test("stabilization chain: value-equal block ids → same {id}[] reference after memo", async () => {
-  // End-to-end: derive block ids, stabilize, map to {id}[], and verify
-  // reference stability — the exact chain in AgentSessionThreadPanel.
+test("stabilization chain: production helper → useStableArrayShallow → same {id}[] reference", async () => {
+  // End-to-end: call the PRODUCTION deriveTranscriptBlockIds from raw events,
+  // stabilize, map to {id}[] — the exact chain in AgentSessionThreadPanel.
   const messageArrays = [];
-  function Harness({ items }) {
-    const blockIds = React.useMemo(() => {
-      const blocks = buildTranscriptDisplayBlocks(items);
-      return blocks.map(getDisplayBlockKey);
-    }, [items]);
+  function Harness({ events }) {
+    const blockIds = React.useMemo(
+      () => deriveTranscriptBlockIds(events),
+      [events],
+    );
     const stableIds = useStableArrayShallow(blockIds);
     const messages = React.useMemo(
       () => stableIds.map((id) => ({ id })),
@@ -373,16 +385,16 @@ test("stabilization chain: value-equal block ids → same {id}[] reference after
 
   const root = createRoot(document.createElement("div"));
 
-  // First render: one turn block.
-  const items1 = [mkItem("tool-1", "sess-1", "turn-1")];
+  // First render: one tool event → one turn block.
+  const events1 = [mkToolEvent(1)];
   await act(async () => {
-    root.render(React.createElement(Harness, { items: items1 }));
+    root.render(React.createElement(Harness, { events: events1 }));
   });
 
-  // Second render: same turn, new item — block ids unchanged.
-  const items2 = [...items1, mkItem("tool-2", "sess-1", "turn-1")];
+  // Second render: same turn, new event — block ids unchanged.
+  const events2 = [...events1, mkToolEvent(2)];
   await act(async () => {
-    root.render(React.createElement(Harness, { items: items2 }));
+    root.render(React.createElement(Harness, { events: events2 }));
   });
 
   assert.ok(messageArrays.length >= 2);
@@ -394,9 +406,9 @@ test("stabilization chain: value-equal block ids → same {id}[] reference after
   );
 
   // Third render: new turn — block ids change → new reference.
-  const items3 = [...items2, mkItem("tool-3", "sess-1", "turn-2")];
+  const events3 = [...events2, mkToolEvent(3, { turnId: "turn-2" })];
   await act(async () => {
-    root.render(React.createElement(Harness, { items: items3 }));
+    root.render(React.createElement(Harness, { events: events3 }));
   });
 
   assert.ok(messageArrays.length >= 3);
@@ -411,51 +423,17 @@ test("stabilization chain: value-equal block ids → same {id}[] reference after
   });
 });
 
-// ── Corrective action 3: ordered DOM parity ─────────────────────────────────
+// ── Corrective action 3: ordered DOM parity — structural guarantee ──────────
 //
-// Render AgentSessionTranscriptList's block-to-data-message-id mapping and
-// verify it matches the outer-derived id list per commit.
+// AgentSessionTranscriptList cannot render under node:test (CSS import blocker:
+// BuzzLogoAnimation.tsx → buzz-logo-animation.css). The test below verifies the
+// structural guarantee: both sides (outer derivation + inner render) call the
+// SAME getDisplayBlockKey function, and the outer uses the SAME
+// buildTranscriptDisplayBlocks output. This cannot catch a block being filtered
+// or the attribute being dropped by the component, but it does catch key-function
+// drift. Full-component coverage requires a CSS-stub in the test-loader.
 
-test("DOM parity: data-message-id sequence equals outer-derived block ids (multi-turn)", () => {
-  // Build items, derive blocks, and render the data-message-id wrapper.
-  const items = [
-    mkItem("tool-a", "sess-1", "turn-1", "2026-07-08T00:00:01.000Z"),
-    mkItem("tool-b", "sess-1", "turn-1", "2026-07-08T00:00:02.000Z"),
-    mkItem("tool-c", "sess-2", "turn-2", "2026-07-08T00:00:03.000Z"),
-  ];
-  const blocks = buildTranscriptDisplayBlocks(items);
-  const outerIds = blocks.map(getDisplayBlockKey);
-
-  // Render the same blocks through the key function to produce data-message-id.
-  // This mirrors AgentSessionTranscriptList's displayBlocks.map loop.
-  const html = renderToStaticMarkup(
-    React.createElement(
-      "div",
-      null,
-      blocks.map((block) => {
-        const blockKey = getDisplayBlockKey(block);
-        return React.createElement("div", {
-          key: blockKey,
-          "data-message-id": blockKey,
-        });
-      }),
-    ),
-  );
-
-  // Extract ordered data-message-id values from rendered HTML.
-  const domIds = [...html.matchAll(/data-message-id="([^"]+)"/g)].map(
-    (m) => m[1],
-  );
-
-  // ORDERED comparison — not Set.
-  assert.deepEqual(
-    domIds,
-    outerIds,
-    "DOM data-message-id sequence must exactly match outer-derived block ids",
-  );
-});
-
-test("DOM parity: transient [turn, single] → [single, turn] reorder produces matching sequences per commit", () => {
+test("structural parity: getDisplayBlockKey output is ordered and deterministic across reorder", () => {
   const ts = "2026-07-08T10:00:00.000Z";
 
   // Partial sequence: turn_started + session/new — before session_resolved.
@@ -487,14 +465,7 @@ test("DOM parity: transient [turn, single] → [single, turn] reorder produces m
   ];
 
   const partialBlocks = buildTranscriptDisplayBlocks(partialItems);
-  const partialOuterIds = partialBlocks.map(getDisplayBlockKey);
-  const partialDomIds = partialBlocks.map(getDisplayBlockKey); // same fn, always
-
-  assert.deepEqual(
-    partialDomIds,
-    partialOuterIds,
-    "partial commit: DOM ids must match outer ids",
-  );
+  const partialIds = partialBlocks.map(getDisplayBlockKey);
 
   // Full sequence: add session_resolved — may reorder blocks.
   const fullItems = [
@@ -514,21 +485,34 @@ test("DOM parity: transient [turn, single] → [single, turn] reorder produces m
   ];
 
   const fullBlocks = buildTranscriptDisplayBlocks(fullItems);
-  const fullOuterIds = fullBlocks.map(getDisplayBlockKey);
-  const fullDomIds = fullBlocks.map(getDisplayBlockKey);
+  const fullIds = fullBlocks.map(getDisplayBlockKey);
 
-  // Ordered per-commit match.
+  // Both sequences have the same key identities.
   assert.deepEqual(
-    fullDomIds,
-    fullOuterIds,
-    "full commit: DOM ids must match outer ids (reorder is fine as long as both agree)",
+    [...partialIds].sort(),
+    [...fullIds].sort(),
+    "key identities must be stable across session_resolved",
   );
 
-  // Key identities stable across the transition (order may differ).
+  // Each sequence is internally unique (no duplicates).
+  assert.equal(
+    new Set(partialIds).size,
+    partialIds.length,
+    "partial ids must be unique",
+  );
+  assert.equal(
+    new Set(fullIds).size,
+    fullIds.length,
+    "full ids must be unique",
+  );
+
+  // Verify determinism: deriving again produces the same ordered sequence.
+  const fullIds2 =
+    buildTranscriptDisplayBlocks(fullItems).map(getDisplayBlockKey);
   assert.deepEqual(
-    new Set(partialOuterIds),
-    new Set(fullOuterIds),
-    "key identities must be stable across session_resolved — only order may change",
+    fullIds,
+    fullIds2,
+    "block id derivation must be deterministic (same input → same ordered output)",
   );
 });
 
@@ -536,16 +520,21 @@ test("DOM parity: transient [turn, single] → [single, turn] reorder produces m
 
 test("mode toggle: raw and transcript ids are in disjoint namespaces", () => {
   const events = [
-    mkEvent(1, "2026-07-08T00:00:01.000Z"),
-    mkEvent(2, "2026-07-08T00:00:02.000Z"),
+    mkRawEvent(1, "2026-07-08T00:00:01.000Z"),
+    mkRawEvent(2, "2026-07-08T00:00:02.000Z"),
   ];
   const rawIds = new Set(events.map((e) => observerEventScrollId(e)));
 
-  const items = [
-    mkItem("tool-a", "sess-1", "turn-1", "2026-07-08T00:00:01.000Z"),
-    mkItem("tool-b", "sess-2", "turn-2", "2026-07-08T00:00:02.000Z"),
+  // Derive transcript ids through the production helper.
+  const toolEvents = [
+    mkToolEvent(1, { ts: "2026-07-08T00:00:01.000Z" }),
+    mkToolEvent(2, {
+      sessionId: "sess-2",
+      turnId: "turn-2",
+      ts: "2026-07-08T00:00:02.000Z",
+    }),
   ];
-  const blockIds = deriveBlockIdsFromItems(items);
+  const blockIds = deriveTranscriptBlockIds(toolEvents);
 
   for (const blockId of blockIds) {
     assert.ok(

@@ -15,11 +15,7 @@ import {
   observerEventScrollId,
   scopeByChannel,
 } from "@/features/agents/ui/agentSessionPanelLayout";
-import { buildTranscriptState } from "@/features/agents/ui/agentSessionTranscript";
-import {
-  buildTranscriptDisplayBlocks,
-  getDisplayBlockKey,
-} from "@/features/agents/ui/agentSessionTranscriptGrouping";
+import { deriveTranscriptBlockIds } from "@/features/agents/ui/agentSessionTranscriptGrouping";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import {
@@ -180,11 +176,10 @@ export function AgentSessionThreadPanel({
   // latestLiveSessionId is omitted: it only affects boundary `labelState`,
   // never keys (agentSessionTranscriptGrouping.ts:557-574), so we avoid
   // subscribing to the observer store from the outer panel.
-  const transcriptBlockIds = React.useMemo(() => {
-    const items = buildTranscriptState(combinedHeaderEvents).items;
-    const blocks = buildTranscriptDisplayBlocks(items);
-    return blocks.map(getDisplayBlockKey);
-  }, [combinedHeaderEvents]);
+  const transcriptBlockIds = React.useMemo(
+    () => deriveTranscriptBlockIds(combinedHeaderEvents),
+    [combinedHeaderEvents],
+  );
 
   // Stabilize the id array by VALUE so the hook's restoration effect (keyed on
   // the `messages` reference) does not fire on every raw event when the block

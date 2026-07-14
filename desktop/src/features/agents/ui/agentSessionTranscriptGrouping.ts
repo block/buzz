@@ -1,4 +1,5 @@
-import type { TranscriptItem } from "./agentSessionTypes";
+import { buildTranscriptState } from "./agentSessionTranscript";
+import type { ObserverEvent, TranscriptItem } from "./agentSessionTypes";
 import { classifyToolItem } from "./agentSessionToolClassifier";
 
 export type TranscriptTurnSegment =
@@ -760,6 +761,26 @@ export function getDisplayBlockKey(block: TranscriptDisplayBlock): string {
     return `session-boundary:${block.sessionId}:${block.firstItemId}`;
   }
   return `turn:${block.turnId}`;
+}
+
+/**
+ * Derive the ordered display-block key sequence from raw observer events.
+ *
+ * Pure function: `buildTranscriptState(events).items` →
+ * `buildTranscriptDisplayBlocks` → `getDisplayBlockKey`. This is the exact
+ * chain `AgentSessionThreadPanel` uses to produce the id list fed to
+ * `useAnchoredScroll` — extracted so both production and tests share one
+ * code path.
+ *
+ * `latestLiveSessionId` is intentionally omitted: it only affects boundary
+ * `labelState`, never keys.
+ */
+export function deriveTranscriptBlockIds(
+  events: readonly ObserverEvent[],
+): string[] {
+  const items = buildTranscriptState(events as ObserverEvent[]).items;
+  const blocks = buildTranscriptDisplayBlocks(items);
+  return blocks.map(getDisplayBlockKey);
 }
 
 /** Human-readable labels for a collapsed turn setup row. */
