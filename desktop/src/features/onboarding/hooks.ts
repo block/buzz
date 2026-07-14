@@ -425,6 +425,14 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     if (identityLost) setBootedLost(true);
   }, [identityLost]);
 
+  // Sticky boot fact: once identity was locked at boot, this remains true for
+  // the entire session. After import_identity clears the locked flag, the
+  // relaunchRequired derivation uses this to force the relaunch screen.
+  const [bootedLocked, setBootedLocked] = React.useState(false);
+  React.useEffect(() => {
+    if (identityLocked) setBootedLocked(true);
+  }, [identityLocked]);
+
   const profileQuery = useProfileQuery(
     !identityLost && !identityLocked && identityQuery.status === "success",
   );
@@ -513,7 +521,8 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   // pending-event flush) were skipped for the ephemeral key and cannot restart
   // in-process, so nothing else can proceed until the app restarts.
   const relaunchRequired =
-    bootedLost && !identityLost && identityQuery.status === "success";
+    ((bootedLost && !identityLost) || (bootedLocked && !identityLocked)) &&
+    identityQuery.status === "success";
 
   return {
     currentPubkey,
