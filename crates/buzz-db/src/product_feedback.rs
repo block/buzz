@@ -50,7 +50,12 @@ pub struct ProductFeedbackRecord {
     pub received_at: DateTime<Utc>,
 }
 
-/// Insert product feedback, idempotent by signed event id.
+/// Insert product feedback, idempotent deployment-wide by signed event id.
+///
+/// The first accepted submission owns the provenance row. Replaying the exact
+/// same signed event through another community returns the same row without
+/// changing its source community; callers intentionally receive the same
+/// successful acknowledgment in both cases.
 pub async fn insert(
     pool: &PgPool,
     community: CommunityId,
@@ -110,4 +115,74 @@ pub async fn list(pool: &PgPool, limit: i64) -> Result<Vec<ProductFeedbackRecord
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires migrated Postgres"]
+    async fn duplicate_event_keeps_first_community_provenance() {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect("BUZZ_TEST_DATABASE_URL or DATABASE_URL");
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect test DB");
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        for (id, host) in [
+            (first, format!("feedback-first-{first}.test")),
+            (second, format!("feedback-second-{second}.test")),
+        ] {
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(id)
+                .bind(host)
+                .execute(&pool)
+                .await
+                .expect("insert community");
+        }
+
+        let mut event_id = [0_u8; 32];
+        event_id[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        event_id[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        let pubkey = [7_u8; 32];
+        let tags = serde_json::json!([["category", "bug"]]);
+        let feedback = || NewProductFeedback {
+            event_id: &event_id,
+            submitter_pubkey: &pubkey,
+            category: Some("bug"),
+            body: "same signed feedback",
+            tags: &tags,
+            event_created_at: Utc::now(),
+        };
+
+        let first_row = insert(&pool, CommunityId::from_uuid(first), feedback())
+            .await
+            .expect("first insert");
+        let duplicate_row = insert(&pool, CommunityId::from_uuid(second), feedback())
+            .await
+            .expect("duplicate insert");
+        assert_eq!(duplicate_row, first_row);
+
+        let rows: Vec<Uuid> =
+            sqlx::query_scalar("SELECT community_id FROM product_feedback WHERE event_id = $1")
+                .bind(event_id.as_slice())
+                .fetch_all(&pool)
+                .await
+                .expect("read feedback provenance");
+        assert_eq!(rows, vec![first]);
+
+        sqlx::query("DELETE FROM product_feedback WHERE event_id = $1")
+            .bind(event_id.as_slice())
+            .execute(&pool)
+            .await
+            .expect("delete feedback");
+        sqlx::query("DELETE FROM communities WHERE id = ANY($1)")
+            .bind(vec![first, second])
+            .execute(&pool)
+            .await
+            .expect("delete communities");
+    }
 }

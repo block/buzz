@@ -125,6 +125,22 @@ impl IngestAuth {
     }
 }
 
+fn emit_product_feedback_success(
+    tracer: &Arc<dyn buzz_conformance::Tracer>,
+    tenant: &TenantContext,
+    event: &Event,
+    auth: &IngestAuth,
+) {
+    emit(
+        tracer,
+        TraceAction::WriteInsertGlobal {
+            msg_id: msg_id_label(event.id.as_bytes()),
+            claimed_community: claimed_community_from_event(event),
+        },
+        state_for_request(tenant, auth.pubkey()),
+    );
+}
+
 /// Successful ingestion result.
 pub struct IngestResult {
     /// Hex-encoded event ID.
@@ -1451,6 +1467,10 @@ async fn ingest_event_inner(
         super::product_feedback::handle(tenant, &event, state)
             .await
             .map_err(IngestError::Rejected)?;
+        // Feedback is a host-resolved, channel-less write. Although its row is
+        // private to operator tooling rather than ordinary event reads, this is
+        // the matching modeled success action at the ingest isolation seam.
+        emit_product_feedback_success(tracer, tenant, &event, &auth);
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -2415,12 +2435,64 @@ async fn ingest_event_inner(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+    use buzz_conformance::{TraceStep, Tracer};
     use buzz_core::kind::{
         KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_LONG_FORM,
         KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
+    use nostr::{EventBuilder, Kind};
+
+    #[derive(Debug, Default)]
+    struct VecTracer {
+        steps: Mutex<Vec<TraceStep>>,
+    }
+
+    impl Tracer for VecTracer {
+        fn record(&self, step: TraceStep) {
+            self.steps.lock().expect("trace lock").push(step);
+        }
+    }
+
+    #[test]
+    fn feedback_success_action_satisfies_ingest_emit_guard() {
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let tenant = TenantContext::resolved(community, "feedback.test");
+        let keys = nostr::Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_PRODUCT_FEEDBACK as u16),
+            "Useful feedback",
+        )
+        .sign_with_keys(&keys)
+        .expect("sign feedback");
+        let auth = IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let tracer = Arc::new(VecTracer::default());
+        let abstract_state = state_for_request(&tenant, auth.pubkey());
+
+        {
+            let (guard, counting) = EmitGuard::arm(
+                tracer.clone(),
+                abstract_state.clone(),
+                "ingest_event_exited_without_trace",
+            );
+            emit_product_feedback_success(&counting, &tenant, &event, &auth);
+            drop(guard);
+        }
+
+        let steps = tracer.steps.lock().expect("trace lock");
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(
+            steps[0].action,
+            TraceAction::WriteInsertGlobal { .. }
+        ));
+    }
 
     #[test]
     fn nip_ia_requests_are_global_only() {

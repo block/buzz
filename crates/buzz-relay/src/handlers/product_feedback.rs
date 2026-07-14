@@ -10,6 +10,7 @@ use crate::state::AppState;
 
 const CATEGORIES: &[&str] = &["bug", "praise", "needs-work"];
 const MAX_BODY_BYTES: usize = 32 * 1024;
+const MAX_TAGS_BYTES: usize = 64 * 1024;
 
 /// Validate and persist a product-feedback event outside ordinary event storage.
 pub async fn handle(
@@ -20,8 +21,7 @@ pub async fn handle(
     let category = parse_category(event)?;
     validate_body(&event.content)?;
 
-    let tags = serde_json::to_value(&event.tags)
-        .map_err(|e| format!("error: failed to serialize feedback tags: {e}"))?;
+    let tags = serialize_tags(event)?;
     let event_created_at =
         chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
             .ok_or_else(|| "invalid: feedback timestamp is out of range".to_string())?;
@@ -43,6 +43,18 @@ pub async fn handle(
         .map_err(|e| format!("error: database error inserting product feedback: {e}"))?;
 
     Ok(())
+}
+
+fn serialize_tags(event: &Event) -> Result<serde_json::Value, String> {
+    let tags_bytes = serde_json::to_vec(&event.tags)
+        .map_err(|e| format!("error: failed to serialize feedback tags: {e}"))?;
+    if tags_bytes.len() > MAX_TAGS_BYTES {
+        return Err(format!(
+            "invalid: feedback tags exceed maximum size of {MAX_TAGS_BYTES} bytes"
+        ));
+    }
+    serde_json::from_slice(&tags_bytes)
+        .map_err(|e| format!("error: failed to deserialize feedback tags: {e}"))
 }
 
 fn parse_category(event: &Event) -> Result<Option<&str>, String> {
@@ -76,7 +88,7 @@ fn validate_body(body: &str) -> Result<(), String> {
 mod tests {
     use nostr::{Event, EventBuilder, Keys, Kind, Tag};
 
-    use super::{parse_category, validate_body};
+    use super::{parse_category, serialize_tags, validate_body};
     use buzz_core::kind::KIND_PRODUCT_FEEDBACK;
 
     fn feedback(tags: Vec<Tag>) -> Event {
@@ -116,5 +128,22 @@ mod tests {
         assert!(validate_body(" \n ").is_err());
         assert!(validate_body("works").is_ok());
         assert!(validate_body(&"x".repeat(32 * 1024 + 1)).is_err());
+    }
+
+    #[test]
+    fn tags_are_serialized_and_bounded() {
+        let small = feedback(vec![Tag::parse([
+            "imeta",
+            "url https://example.test/a.png",
+        ])
+        .unwrap()]);
+        assert!(serialize_tags(&small).is_ok());
+
+        let oversized = feedback(vec![
+            Tag::parse(["diagnostics", &"x".repeat(64 * 1024)]).unwrap()
+        ]);
+        assert!(serialize_tags(&oversized)
+            .unwrap_err()
+            .contains("tags exceed maximum size"));
     }
 }
