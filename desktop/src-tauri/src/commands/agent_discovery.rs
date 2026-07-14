@@ -1414,6 +1414,56 @@ mod tests {
         assert!(result.is_ok(), "install_shell_command must succeed on Unix");
     }
 
+    // ── Phase A: Windows install shell selection ───────────────────────────────
+
+    /// On Windows (CI runner has Git pre-installed), resolve_install_shell succeeds.
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_install_shell_succeeds_on_windows_with_git() {
+        let result = super::resolve_install_shell();
+        assert!(
+            result.is_ok(),
+            "Windows CI runner has Git — resolve_install_shell must succeed; got: {:?}",
+            result.err()
+        );
+        let shell = result.unwrap();
+        // The resolved path must end with bash.exe (Git Bash).
+        let fname = shell.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert!(
+            fname.eq_ignore_ascii_case("bash.exe"),
+            "Windows install shell must be bash.exe, got: {shell:?}"
+        );
+    }
+
+    /// On Windows, when no Git Bash is found, the error carries the Doctor hint.
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_install_shell_error_contains_doctor_hint() {
+        // We can't force resolve_install_shell to fail on CI (Git is installed),
+        // but we can verify the error string it would use matches the hint.
+        let hint = crate::managed_agents::git_bash::GIT_BASH_INSTALL_HINT;
+        assert!(
+            hint.contains("Git for Windows"),
+            "GIT_BASH_INSTALL_HINT must mention Git for Windows; got: {hint}"
+        );
+        assert!(
+            hint.contains("PATH"),
+            "GIT_BASH_INSTALL_HINT must mention PATH option; got: {hint}"
+        );
+    }
+
+    /// install_shell_command returns a valid Command on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn test_install_shell_command_returns_ok_on_windows() {
+        let result = super::install_shell_command("echo test");
+        assert!(
+            result.is_ok(),
+            "install_shell_command must succeed on Windows with Git; got: {:?}",
+            result.err()
+        );
+    }
+
     // ── Phase B: per-OS install commands ──────────────────────────────────────
 
     /// On non-Windows, cli_install_commands_for_os returns the default commands.

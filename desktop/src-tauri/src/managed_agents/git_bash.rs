@@ -144,7 +144,7 @@ impl GitBashEnv {
 }
 
 #[cfg(windows)]
-fn resolve_git_bash(
+pub(crate) fn resolve_git_bash(
     path_env: &str,
     shell_override: Option<PathBuf>,
     git_bash_override: Option<PathBuf>,

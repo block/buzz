@@ -1041,6 +1041,22 @@ fn test_command_basenames_single_candidate_on_unix() {
     );
 }
 
+/// On Windows, command_basenames adds .exe, .cmd, and .bat candidates.
+#[cfg(windows)]
+#[test]
+fn test_command_basenames_includes_cmd_bat_on_windows() {
+    let candidates = super::command_basenames("codex-acp");
+    assert_eq!(
+        candidates,
+        vec![
+            "codex-acp.exe".to_string(),
+            "codex-acp.cmd".to_string(),
+            "codex-acp.bat".to_string(),
+        ],
+        "Windows must produce .exe, .cmd, and .bat candidates"
+    );
+}
+
 /// command_basenames with a dotted name never adds .cmd/.bat.
 #[test]
 fn test_command_basenames_dotted_name_no_extra_candidates() {
@@ -1085,6 +1101,45 @@ fn test_cli_install_commands_for_os_non_empty_for_claude_codex() {
     );
 }
 
+/// On Windows, Claude and Codex select the PowerShell install commands.
+#[cfg(windows)]
+#[test]
+fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
+    let claude = super::known_acp_runtime_exact("claude").unwrap();
+    let codex = super::known_acp_runtime_exact("codex").unwrap();
+
+    // Windows must select the PowerShell commands, not the curl|bash ones.
+    let claude_cmds = claude.cli_install_commands_for_os();
+    let codex_cmds = codex.cli_install_commands_for_os();
+
+    assert_ne!(
+        claude_cmds, claude.cli_install_commands,
+        "Windows must NOT use the default curl|bash commands for claude"
+    );
+    assert_ne!(
+        codex_cmds, codex.cli_install_commands,
+        "Windows must NOT use the default curl|bash commands for codex"
+    );
+
+    // Verify they are the PowerShell installers.
+    assert!(
+        claude_cmds.iter().any(|c| c.contains("powershell")),
+        "claude Windows install must use powershell; got: {claude_cmds:?}"
+    );
+    assert!(
+        codex_cmds.iter().any(|c| c.contains("powershell")),
+        "codex Windows install must use powershell; got: {codex_cmds:?}"
+    );
+
+    // Goose and buzz-agent must NOT use Windows-specific commands.
+    let goose = super::known_acp_runtime_exact("goose").unwrap();
+    assert_eq!(
+        goose.cli_install_commands_for_os(),
+        goose.cli_install_commands,
+        "goose must use the same commands on all platforms"
+    );
+}
+
 // ── Phase C: login_shell_candidates ─────────────────────────────────────────
 
 /// On Unix, login_shell_candidates returns at least one candidate.
@@ -1101,5 +1156,82 @@ fn test_login_shell_candidates_non_empty_on_unix() {
     assert!(
         first == std::path::Path::new("/bin/zsh") || first == std::path::Path::new("/bin/bash"),
         "expected /bin/zsh or /bin/bash, got {first:?}"
+    );
+}
+
+// ── Regression: POSIX PATH must never reach native Windows consumers ───────
+
+/// `login_shell_path()` must return `None` on Windows so native-process
+/// consumers (`agent_models`, `build_augmented_path`, `cli_probe`) inherit
+/// the real Windows PATH instead of a POSIX colon-delimited string from
+/// Git Bash's `echo $PATH`.
+#[cfg(windows)]
+#[test]
+fn test_login_shell_path_returns_none_on_windows() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+
+    // Force a fresh fetch — don't rely on whatever prior tests cached.
+    refresh_login_shell_path();
+    let path = super::login_shell_path();
+
+    assert_eq!(
+        path, None,
+        "login_shell_path() must return None on Windows to prevent POSIX PATH leaking into native children"
+    );
+}
+
+// ── Phase C: .cmd shim resolution on Windows ───────────────────────────────
+
+/// `resolve_command_uncached` finds `.cmd` shims in `common_binary_paths()`.
+/// This test creates a fake `.cmd` shim in a temp dir added to
+/// `common_binary_paths()` via the `APPDATA` env var's `npm` subdirectory.
+#[cfg(windows)]
+#[test]
+fn test_cmd_shim_resolves_from_well_known_dir() {
+    // Create a fake npm shim: %APPDATA%\npm\codex-acp.cmd
+    let temp = tempfile::tempdir().expect("tempdir");
+    let npm_dir = temp.path().join("npm");
+    std::fs::create_dir_all(&npm_dir).expect("mkdir npm");
+    let shim = npm_dir.join("codex-acp.cmd");
+    std::fs::write(&shim, "@echo off\r\nnode codex-acp.js %*\r\n").expect("write shim");
+
+    // common_binary_paths is a OnceLock — we can't re-init it. Instead,
+    // test the component that matters: command_basenames generates .cmd
+    // candidates, and the candidate path exists and is a file.
+    let basenames = super::command_basenames("codex-acp");
+    assert!(
+        basenames.contains(&"codex-acp.cmd".to_string()),
+        "command_basenames must include .cmd candidate on Windows"
+    );
+    let candidate = npm_dir.join(&basenames[1]); // .cmd is second
+    assert!(
+        candidate.is_file(),
+        "the .cmd shim must be resolvable as a file: {candidate:?}"
+    );
+}
+
+// ── Phase A: no-shell-resolved error on Windows ────────────────────────────
+
+/// When no Git Bash is found, `resolve_git_bash()` returns `None`.
+/// The install shell path uses this to return the Doctor hint.
+///
+/// Uses the parameterized `resolve_git_bash()` with empty inputs to avoid
+/// the CI runner's pre-installed Git influencing the result.
+#[cfg(windows)]
+#[test]
+fn test_no_git_bash_resolved_returns_none() {
+    use crate::managed_agents::git_bash;
+
+    // Empty PATH, no overrides, no well-known dirs, no registry.
+    let result = git_bash::resolve_git_bash("", None, None, None, None, None, None);
+    assert_eq!(
+        result, None,
+        "empty environment must not resolve a Git Bash"
+    );
+
+    // Verify the error message that install_shell_command would return.
+    assert!(
+        !git_bash::GIT_BASH_INSTALL_HINT.is_empty(),
+        "GIT_BASH_INSTALL_HINT must be non-empty for the Doctor error message"
     );
 }

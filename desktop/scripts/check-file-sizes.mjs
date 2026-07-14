@@ -266,13 +266,18 @@ const overrides = new Map([
   // for cli_install_commands_for_os(), command_basenames() + .cmd/.bat resolution,
   // Windows well-known dirs in common_binary_paths(), login_shell_candidates(),
   // path_candidates_from_env_raw(). Load-bearing Windows platform support.
-  ["src-tauri/src/managed_agents/discovery.rs", 1352],
+  // +13: fetch_login_shell_path_inner Windows guard (POSIX PATH → None).
+  // resolve_git_bash made pub(crate) for Windows test access.
+  ["src-tauri/src/managed_agents/discovery.rs", 1365],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
   // Windows Doctor install fix: command_basenames, cli_install_commands_for_os,
   // and login_shell_candidates tests. Load-bearing platform-awareness coverage.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1106],
+  // +132: pass 2 — five cfg(windows) behavioral tests: command_basenames .cmd/.bat
+  // candidates, cli_install_commands_for_os PowerShell selection, login_shell_path
+  // None regression, .cmd shim resolution, no-git-bash error hint.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1238],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -406,7 +411,9 @@ const overrides = new Map([
   // returns Result (Windows Git Bash resolution, CREATE_NO_WINDOW, taskkill timeout
   // kill), cli_install_commands_for_os() callsite, unit tests for shell selection
   // and per-OS install command accessor. Load-bearing Windows platform support.
-  ["src-tauri/src/commands/agent_discovery.rs", 1462],
+  // +53: pass 2 — three cfg(windows) install shell tests (resolve succeeds with
+  // Git, error hint content, install_shell_command succeeds).
+  ["src-tauri/src/commands/agent_discovery.rs", 1515],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

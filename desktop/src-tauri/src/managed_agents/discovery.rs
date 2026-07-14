@@ -769,9 +769,22 @@ fn path_cache() -> &'static std::sync::Mutex<LoginShellPath> {
 }
 
 fn fetch_login_shell_path_inner() -> Option<String> {
-    let stdout = run_in_login_shell(&["-l", "-c", "echo $PATH"])?;
-    let last_line = stdout.lines().rfind(|l| !l.trim().is_empty())?;
-    Some(last_line.trim().to_string())
+    // On Windows, Git Bash's `echo $PATH` returns POSIX colon-delimited paths
+    // (`/mingw64/bin:/c/Users/...`) which poison native Windows children that
+    // split on `;`. login_shell_path() feeds agent_models, runtime, and
+    // cli_probe — all native processes. Return None so they inherit the real
+    // Windows PATH instead.
+    #[cfg(windows)]
+    {
+        return None;
+    }
+
+    #[cfg(not(windows))]
+    {
+        let stdout = run_in_login_shell(&["-l", "-c", "echo $PATH"])?;
+        let last_line = stdout.lines().rfind(|l| !l.trim().is_empty())?;
+        Some(last_line.trim().to_string())
+    }
 }
 
 /// Return the user's full PATH from a login shell.
