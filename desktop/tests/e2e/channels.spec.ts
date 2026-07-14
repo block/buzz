@@ -703,18 +703,15 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
   const sendCommandPayloads = (await readCommandPayloadLog(page)).slice(
     baselineCommandPayloads.length,
   );
-  expect(sendCommands.indexOf("open_dm")).toBeLessThan(
-    sendCommands.indexOf("create_managed_agent"),
-  );
   expect(commandCount(sendCommands, "open_dm")).toBe(2);
-
-  const addMemberCommand = sendCommandPayloads.find(
-    (entry) => entry.command === "add_channel_members",
-  );
-  const originalDmId = (
-    addMemberCommand?.payload as { channelId?: string } | undefined
-  )?.channelId;
-  expect(originalDmId).toBeTruthy();
+  const firstOpenIndex = sendCommands.indexOf("open_dm");
+  const createIndex = sendCommands.indexOf("create_managed_agent");
+  const expandedOpenIndex = sendCommands.lastIndexOf("open_dm");
+  const startIndex = sendCommands.indexOf("start_managed_agent");
+  expect(firstOpenIndex).toBeLessThan(createIndex);
+  expect(createIndex).toBeLessThan(expandedOpenIndex);
+  expect(expandedOpenIndex).toBeLessThan(startIndex);
+  expect(sendCommands).not.toContain("add_channel_members");
 
   const sentMessageCommand = sendCommandPayloads.find((entry) => {
     if (entry.command !== "plugin:websocket|send") {
@@ -744,7 +741,6 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
     (tag) => tag[0] === "h",
   )?.[1];
   expect(sentChannelId).toBeTruthy();
-  expect(sentChannelId).not.toBe(originalDmId);
   await expect(
     page.locator("[data-active='true'][data-channel-id]"),
   ).toHaveAttribute("data-channel-id", sentChannelId ?? "");
@@ -784,6 +780,7 @@ test("routes an agent mention from an existing DM to the expanded conversation",
   ).toBeVisible();
   await input.press("Enter");
   await page.keyboard.type(" in this DM");
+  const baselineCommands = await readCommandPayloadLog(page);
   await page.getByTestId("send-message").click();
 
   await expect
@@ -797,6 +794,52 @@ test("routes an agent mention from an existing DM to the expanded conversation",
   await expect(page.getByTestId("chat-title")).toContainText("alice");
   await expect(page.getByTestId("chat-title")).toContainText("Fizz");
   await expect(sourceDm).not.toContainText("Fizz");
+  const sendCommands = (await readCommandPayloadLog(page)).slice(
+    baselineCommands.length,
+  );
+  expect(sendCommands).not.toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        command: "add_channel_members",
+        payload: expect.objectContaining({ channelId: sourceDmId }),
+      }),
+    ]),
+  );
+  expect(sendCommands.map((entry) => entry.command)).toEqual(
+    expect.arrayContaining(["open_dm", "start_managed_agent"]),
+  );
+});
+
+test("does not reroute an expanded DM after the user navigates away", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+    sendMessageDelayMs: 1_000,
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" while I leave");
+  await page.getByTestId("send-message").click();
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForTimeout(1_250);
+  await expect(page).toHaveURL(
+    new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`),
+  );
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
 test("drops an expanded DM after the first message fails", async ({ page }) => {
@@ -830,12 +873,11 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   await expect(input).toContainText("Fizz");
 
   const commandsAfterFailure = await readCommandPayloadLog(page);
-  const originalDmId = (
-    commandsAfterFailure.find(
-      (entry) => entry.command === "add_channel_members",
-    )?.payload as { channelId?: string } | undefined
-  )?.channelId;
-  expect(originalDmId).toBeTruthy();
+  const failedSendChannelId = await readOutgoingChannelId(page, "for a hand");
+  expect(failedSendChannelId).toBeTruthy();
+  expect(commandsAfterFailure.map((entry) => entry.command)).not.toContain(
+    "add_channel_members",
+  );
   const baselineOpenDmCount = commandCount(
     commandsAfterFailure.map((entry) => entry.command),
     "open_dm",
@@ -880,10 +922,12 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   const retryEvent = (
     JSON.parse(retrySendData ?? "[]") as [string, { tags?: string[][] }]
   )[1];
-  expect(retryEvent.tags).toContainEqual(["h", originalDmId]);
+  const retryChannelId = retryEvent.tags?.find((tag) => tag[0] === "h")?.[1];
+  expect(retryChannelId).toBeTruthy();
+  expect(retryChannelId).not.toBe(failedSendChannelId);
   await expect(
     page.locator("[data-active='true'][data-channel-id]"),
-  ).toHaveAttribute("data-channel-id", originalDmId ?? "");
+  ).toHaveAttribute("data-channel-id", retryChannelId ?? "");
 });
 
 test("closes direct message results while opening", async ({ page }) => {

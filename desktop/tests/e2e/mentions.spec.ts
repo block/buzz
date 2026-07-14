@@ -27,6 +27,8 @@ const CASEY_PROFILE_PUBKEY =
 const PROFILE_ONLY_AGENT_PUBKEY =
   "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
 const SYSTEM_MESSAGE_KIND = 40099;
+const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
+  "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
 
 /** Locator scoped to the mention autocomplete dropdown inside the composer. */
 function autocomplete(page: import("@playwright/test").Page) {
@@ -337,6 +339,52 @@ test("blocks non-participant persona mentions in DM threads", async ({
   );
   await expect(input).toContainText("Fizz");
   await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
+});
+
+test("allows participant agent mentions while DM members are loading", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    channelMembersReadDelayMs: 5_000,
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        name: "alice",
+        status: "running",
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await waitForMockLiveSubscription(page, "alice-tyler");
+
+  const threadRoot = await emitMockMessage(
+    page,
+    "alice-tyler",
+    "Thread while members load",
+  );
+  await emitMockMessage(page, "alice-tyler", "Existing thread reply", {
+    parentEventId: threadRoot.id,
+  });
+  await page.getByTestId("message-thread-summary").first().click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const input = threadPanel.getByTestId("message-input");
+  await input.fill("Ask @ali");
+  await expect(
+    threadPanel
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "alice" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" before members resolve");
+  await threadPanel.getByTestId("send-message").click();
+
+  await expect(page.getByText(DM_THREAD_AGENT_MENTION_ERROR_TEXT)).toHaveCount(
+    0,
+  );
+  await expect(threadPanel).toContainText("before members resolve");
 });
 
 test("autocomplete filters suggestions as user types", async ({ page }) => {

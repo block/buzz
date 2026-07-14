@@ -152,6 +152,7 @@ type MockBridgeOptions = {
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
   addChannelMembersDelayMs?: number;
+  channelMembersReadDelayMs?: number;
   channelsReadError?: string;
   /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
   deepHistoryMessageCount?: number;

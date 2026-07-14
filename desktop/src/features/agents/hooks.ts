@@ -5,6 +5,7 @@ import {
   attachManagedAgentToChannel,
   createChannelManagedAgents,
   ensureChannelAgentPresetInChannel,
+  provisionChannelManagedAgent,
 } from "@/features/agents/channelAgents";
 import { resolveSnapshotAvatarPng } from "@/features/agents/ui/snapshotAvatarPng";
 import {
@@ -21,6 +22,7 @@ import {
   discoverManagedAgentPrereqs,
   getAgentConfigSurface,
   getBakedBuildEnvKeys,
+  getChannelMembers,
   getManagedAgentLog,
   getRuntimeFileConfig,
   installAcpRuntime,
@@ -70,6 +72,7 @@ import type {
   UpdatePersonaInput,
   UpdateTeamInput,
 } from "@/shared/api/types";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type {
   AttachManagedAgentToChannelInput,
   CreateChannelManagedAgentInput,
@@ -77,6 +80,7 @@ import type {
   CreateChannelManagedAgentResult,
   EnsureChannelAgentPresetInput,
   EnsureChannelAgentPresetResult,
+  ProvisionChannelManagedAgentResult,
 } from "@/features/agents/channelAgents";
 export { findReusableAgent } from "@/features/agents/agentReuse";
 export type {
@@ -88,6 +92,7 @@ export type {
   CreateChannelManagedAgentResult,
   EnsureChannelAgentPresetInput,
   EnsureChannelAgentPresetResult,
+  ProvisionChannelManagedAgentResult,
 } from "@/features/agents/channelAgents";
 
 export const relayAgentsQueryKey = ["relay-agents"] as const;
@@ -650,6 +655,53 @@ export function useCreateChannelManagedAgentMutation(channelId: string | null) {
       invalidateAgentQueriesInBackground(queryClient, effectiveChannelId, {
         refetchChannels: isCachedDmChannel(queryClient, effectiveChannelId),
       });
+    },
+  });
+}
+
+export function useProvisionChannelManagedAgentMutation(
+  channelId: string | null,
+) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (
+      input: CreateChannelManagedAgentInput & { channelId?: string },
+    ): Promise<ProvisionChannelManagedAgentResult> => {
+      const { channelId: capturedChannelId, ...rest } = input;
+      const effectiveChannelId = capturedChannelId ?? channelId;
+      if (!effectiveChannelId) {
+        throw new Error("No channel selected.");
+      }
+
+      const [managedAgents, members] = await Promise.all([
+        listManagedAgents(),
+        getChannelMembers(effectiveChannelId),
+      ]);
+      return provisionChannelManagedAgent(rest, {
+        managedAgents,
+        channelMemberPubkeys: new Set(
+          members.map((member) => normalizePubkey(member.pubkey)),
+        ),
+      });
+    },
+    onSuccess: (result) => {
+      queryClient.setQueryData<ManagedAgent[]>(
+        managedAgentsQueryKey,
+        (current) => {
+          const next = current ?? [];
+          return [
+            result.agent,
+            ...next.filter((agent) => agent.pubkey !== result.agent.pubkey),
+          ];
+        },
+      );
+    },
+    onSettled: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
+      ]);
     },
   });
 }

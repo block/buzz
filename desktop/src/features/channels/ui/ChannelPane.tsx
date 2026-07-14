@@ -171,6 +171,8 @@ export const ChannelPane = React.memo(function ChannelPane({
     !activeChannel.archivedAt;
   const hasMainComposerOverlay = !isNonMemberView;
   const activeChannelId = activeChannel?.id ?? null;
+  const activeChannelIdRef = React.useRef(activeChannelId);
+  activeChannelIdRef.current = activeChannelId;
   // Clear the ?autoSend search param once the auto-submit fires so
   // back-navigation cannot re-trigger the send.
   // When `onAutoSendComplete` is provided it does a surgical single-key clear
@@ -355,7 +357,11 @@ export const ChannelPane = React.memo(function ChannelPane({
       messageTimelineRef.current?.scrollToBottomOnNextUpdate();
       await onSendMessage(content, mentionPubkeys, mediaTags, channelId);
 
-      if (channelId && channelId !== activeChannelId) {
+      if (
+        channelId &&
+        channelId !== activeChannelId &&
+        activeChannelIdRef.current === activeChannelId
+      ) {
         await goChannel(channelId, { replace: true });
       }
 

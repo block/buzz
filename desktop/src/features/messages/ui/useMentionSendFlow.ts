@@ -2,10 +2,12 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
+  type CreateChannelManagedAgentInput,
   useAttachManagedAgentToChannelMutation,
   useAvailableAcpRuntimes,
   useCreateChannelManagedAgentMutation,
   useManagedAgentsQuery,
+  useProvisionChannelManagedAgentMutation,
   useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
@@ -37,6 +39,7 @@ type PendingNonMemberMentionSend = {
   mentionPubkeys: string[];
   nonMemberPubkeys: string[];
   outgoingTags?: string[][];
+  preparedManagedAgents?: ManagedAgent[];
   readyAgentPubkeys?: string[];
   savedContent: string;
   savedImeta: ImetaMedia[];
@@ -161,6 +164,8 @@ export function useMentionSendFlow({
   const attachAgentMutation = useAttachManagedAgentToChannelMutation(channelId);
   const createPersonaAgentMutation =
     useCreateChannelManagedAgentMutation(channelId);
+  const provisionPersonaAgentMutation =
+    useProvisionChannelManagedAgentMutation(channelId);
   const availableRuntimesQuery = useAvailableAcpRuntimes();
   const managedAgentsQuery = useManagedAgentsQuery();
   const startAgentMutation = useStartManagedAgentMutation();
@@ -198,7 +203,12 @@ export function useMentionSendFlow({
   ]);
 
   const ensureManagedAgentMentionsReady = React.useCallback(
-    async (mentionPubkeys: string[], capturedChannelId: string) => {
+    async (
+      mentionPubkeys: string[],
+      capturedChannelId: string,
+      preparedParticipantPubkeys: string[] = [],
+      preparedManagedAgents: ManagedAgent[] = [],
+    ) => {
       if (!capturedChannelId || mentionPubkeys.length === 0) {
         return {
           errors: [] as string[],
@@ -207,6 +217,13 @@ export function useMentionSendFlow({
       }
 
       const managedAgentsByPubkey = await getManagedAgentsByPubkey();
+      for (const agent of preparedManagedAgents) {
+        managedAgentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
+      }
+      const participantPubkeys = new Set([
+        ...mentions.memberPubkeys,
+        ...preparedParticipantPubkeys.map(normalizePubkey),
+      ]);
       const errors: string[] = [];
       const pubkeys: string[] = [];
 
@@ -217,7 +234,7 @@ export function useMentionSendFlow({
         }
 
         try {
-          if (mentions.memberPubkeys.has(pubkey)) {
+          if (participantPubkeys.has(pubkey)) {
             if (isProviderBackedAgent(agent)) {
               if (agent.status !== "deployed") {
                 await startAgentMutation.mutateAsync(agent.pubkey);
@@ -262,6 +279,7 @@ export function useMentionSendFlow({
       if (!capturedChannelId || personaMentions.length === 0) {
         return {
           errors: [] as string[],
+          agents: [] as ManagedAgent[],
           pubkeys: [] as string[],
         };
       }
@@ -269,8 +287,11 @@ export function useMentionSendFlow({
       const runtimes = await getAvailableRuntimes();
       const defaultRuntime = runtimes[0] ?? null;
       const errors: string[] = [];
+      const agents: ManagedAgent[] = [];
       const pubkeys: string[] = [];
       const seenPersonaIds = new Set<string>();
+      const shouldProvisionForDm =
+        channelType === "dm" && Boolean(onPrepareSendChannel);
 
       for (const { displayName, persona } of personaMentions) {
         if (seenPersonaIds.has(persona.id)) {
@@ -289,7 +310,9 @@ export function useMentionSendFlow({
         }
 
         try {
-          const result = await createPersonaAgentMutation.mutateAsync({
+          const input: CreateChannelManagedAgentInput & {
+            channelId: string;
+          } = {
             channelId: capturedChannelId,
             runtime,
             name: persona.displayName,
@@ -299,8 +322,12 @@ export function useMentionSendFlow({
             model: persona.model ?? undefined,
             role: "bot",
             ensureRunning: true,
-          });
+          };
+          const result = shouldProvisionForDm
+            ? await provisionPersonaAgentMutation.mutateAsync(input)
+            : await createPersonaAgentMutation.mutateAsync(input);
           const pubkey = normalizePubkey(result.agent.pubkey);
+          agents.push(result.agent);
           pubkeys.push(pubkey);
           mentions.registerMentionPubkey(displayName, pubkey, {
             isAgent: true,
@@ -316,15 +343,19 @@ export function useMentionSendFlow({
       }
 
       return {
+        agents,
         errors,
         pubkeys: uniqueNormalizedPubkeys(pubkeys),
       };
     },
     [
       createPersonaAgentMutation,
+      channelType,
       getAvailableRuntimes,
       mentions.extractMentionPersonas,
       mentions.registerMentionPubkey,
+      onPrepareSendChannel,
+      provisionPersonaAgentMutation,
     ],
   );
 
@@ -378,11 +409,32 @@ export function useMentionSendFlow({
         const readyAgentPubkeys = new Set(
           (draft.readyAgentPubkeys ?? []).map(normalizePubkey),
         );
+        const managedAgentsByPubkey = await getManagedAgentsByPubkey();
+        for (const agent of draft.preparedManagedAgents ?? []) {
+          managedAgentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
+        }
+        const managedMentionPubkeys = uniqueNormalizedPubkeys(
+          mentionPubkeys,
+        ).filter((pubkey) => managedAgentsByPubkey.has(pubkey));
+        const preparedAgentPubkeys = uniqueNormalizedPubkeys([
+          ...readyAgentPubkeys,
+          ...managedMentionPubkeys,
+        ]);
+        let sendChannelId = draft.capturedChannelId;
+        if (preparedAgentPubkeys.length > 0 && onPrepareSendChannel) {
+          sendChannelId = await onPrepareSendChannel(preparedAgentPubkeys);
+          if (!sendChannelId) {
+            return;
+          }
+        }
+
         const agentReadiness = await ensureManagedAgentMentionsReady(
-          mentionPubkeys.filter(
+          managedMentionPubkeys.filter(
             (pubkey) => !readyAgentPubkeys.has(normalizePubkey(pubkey)),
           ),
-          draft.capturedChannelId ?? "",
+          sendChannelId ?? "",
+          onPrepareSendChannel ? preparedAgentPubkeys : [],
+          [...managedAgentsByPubkey.values()],
         );
         if (agentReadiness.errors.length > 0) {
           const message =
@@ -394,18 +446,6 @@ export function useMentionSendFlow({
           setNonMemberPromptError(message);
           toast.error(message);
           return;
-        }
-
-        const preparedAgentPubkeys = uniqueNormalizedPubkeys([
-          ...readyAgentPubkeys,
-          ...agentReadiness.pubkeys,
-        ]);
-        let sendChannelId = draft.capturedChannelId;
-        if (preparedAgentPubkeys.length > 0 && onPrepareSendChannel) {
-          sendChannelId = await onPrepareSendChannel(preparedAgentPubkeys);
-          if (!sendChannelId) {
-            return;
-          }
         }
 
         // Only clear the composer if the user has not switched channels since
@@ -455,6 +495,7 @@ export function useMentionSendFlow({
       contentRef,
       drafts,
       ensureManagedAgentMentionsReady,
+      getManagedAgentsByPubkey,
       onPrepareSendChannel,
       onSendRef,
       richText.setContent,
@@ -494,6 +535,10 @@ export function useMentionSendFlow({
         return true;
       }
 
+      if (!mentions.hasResolvedMembers) {
+        return false;
+      }
+
       return mentions
         .extractMentionPubkeys(trimmed)
         .some(
@@ -506,6 +551,7 @@ export function useMentionSendFlow({
       channelType,
       mentions.extractMentionPersonas,
       mentions.extractMentionPubkeys,
+      mentions.hasResolvedMembers,
       mentions.isAgentPubkey,
       mentions.memberPubkeys,
     ],
@@ -602,7 +648,11 @@ export function useMentionSendFlow({
           mentionPubkeys: pubkeys,
           nonMemberPubkeys: promptNonMemberPubkeys,
           outgoingTags,
-          readyAgentPubkeys: createdPersonaAgentPubkeys,
+          preparedManagedAgents: personaMentionResult.agents,
+          readyAgentPubkeys:
+            channelType === "dm" && onPrepareSendChannel
+              ? []
+              : createdPersonaAgentPubkeys,
           savedContent: trimmed,
           savedImeta: [...pendingImeta],
           savedSpoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
@@ -623,6 +673,7 @@ export function useMentionSendFlow({
     },
     [
       completeSend,
+      channelType,
       createMentionedPersonaAgents,
       customEmoji,
       getManagedAgentsByPubkey,
