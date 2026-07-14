@@ -167,6 +167,8 @@ pub(crate) fn read_config_surface(
     let config_file_path = runtime_meta
         .and_then(|m| m.config_file_path)
         .map(resolve_tilde);
+    let mcp_config_file_path = runtime_meta.and_then(mcp_config_file_path_for_runtime);
+    let extensions = file_config.extensions.clone();
 
     let sources = ConfigSourceReport {
         acp_native: if supports_acp_native {
@@ -197,6 +199,7 @@ pub(crate) fn read_config_surface(
             ConfigTierStatus::NotApplicable
         },
         config_file_path,
+        mcp_config_file_path,
     };
 
     RuntimeConfigSurface {
@@ -205,7 +208,21 @@ pub(crate) fn read_config_surface(
         is_pre_spawn,
         normalized,
         advanced,
+        extensions,
         sources,
+    }
+}
+
+fn mcp_config_file_path_for_runtime(runtime: &KnownAcpRuntime) -> Option<String> {
+    match runtime.id {
+        "goose" => {
+            super::goose::goose_config_path().map(|path| path.to_string_lossy().into_owned())
+        }
+        "claude" => Some(resolve_tilde("~/.claude.json")),
+        "codex" => {
+            super::codex::codex_config_path().map(|path| path.to_string_lossy().into_owned())
+        }
+        _ => None,
     }
 }
 

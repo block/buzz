@@ -49,7 +49,8 @@ export type ConfigNudgeRequirement =
       setup_copy: string;
       /** One-line stderr excerpt from the CLI's parse error. */
       diagnostic: string;
-    };
+    }
+  | { surface: "git_bash" };
 
 /**
  * The structured payload embedded in the `buzz:config-nudge` sentinel block.
@@ -145,6 +146,8 @@ function isConfigNudgeRequirement(v: unknown): v is ConfigNudgeRequirement {
           r.availability === "cli_missing" ||
           r.availability === "not_installed")
       );
+    case "git_bash":
+      return true;
     case "cli_config_invalid":
       return (
         Array.isArray(r.probe_args) &&

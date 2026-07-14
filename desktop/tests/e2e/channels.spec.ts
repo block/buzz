@@ -1301,15 +1301,16 @@ test("shows and clears activity indicators for active channel agents", async ({
   }, TEST_IDENTITIES.alice.pubkey);
 
   await expect(page.getByTestId("bot-activity-composer-trigger")).toBeVisible();
-  await page.getByTestId("bot-activity-composer-trigger").click();
   await expect(
-    page.getByTestId(
-      `bot-activity-composer-item-${TEST_IDENTITIES.alice.pubkey}`,
-    ),
-  ).toBeVisible();
-  await page
-    .getByTestId(`bot-activity-composer-item-${TEST_IDENTITIES.alice.pubkey}`)
-    .click({ force: true });
+    page.getByTestId("bot-activity-composer-trigger"),
+  ).not.toContainText("View activity");
+  await page.getByTestId("bot-activity-composer-trigger").click();
+  const aliceActivityItem = page.getByTestId(
+    `bot-activity-composer-item-${TEST_IDENTITIES.alice.pubkey}`,
+  );
+  await expect(aliceActivityItem).toBeVisible();
+  await expect(aliceActivityItem).toContainText("View activity");
+  await aliceActivityItem.click({ force: true });
   await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
   await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
     "alice",

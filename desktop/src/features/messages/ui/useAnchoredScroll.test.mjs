@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getPinnedCenterDrift,
   settleProgrammaticBottomPin,
+  shouldIgnorePinnedCenterScroll,
   shouldSettleForSplitPanel,
   shouldSettleVirtualizedBottom,
 } from "./useAnchoredScroll.ts";
@@ -122,5 +124,46 @@ test("settleProgrammaticBottomPin keeps settling when the floor is still out of 
   assert.equal(
     container.scrollHeight - container.clientHeight - container.scrollTop,
     2,
+  );
+});
+
+test("pinned center drift re-pins only after meaningful layout growth", () => {
+  assert.equal(
+    getPinnedCenterDrift({ contentTop: 400, currentContentTop: 400.5 }),
+    null,
+  );
+  assert.equal(
+    getPinnedCenterDrift({ contentTop: 400, currentContentTop: 496 }),
+    96,
+  );
+});
+
+test("pinned center programmatic scroll event preserves the anchor", () => {
+  assert.equal(
+    shouldIgnorePinnedCenterScroll({
+      currentScrollTop: 596,
+      expectedScrollTop: 596,
+      isWritingScroll: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldIgnorePinnedCenterScroll({
+      currentScrollTop: 596,
+      expectedScrollTop: null,
+      isWritingScroll: true,
+    }),
+    true,
+  );
+});
+
+test("pinned center real user scroll releases the anchor", () => {
+  assert.equal(
+    shouldIgnorePinnedCenterScroll({
+      currentScrollTop: 620,
+      expectedScrollTop: 596,
+      isWritingScroll: false,
+    }),
+    false,
   );
 });

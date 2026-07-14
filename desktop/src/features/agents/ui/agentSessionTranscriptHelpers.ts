@@ -295,6 +295,36 @@ export function extractBlockText(value: unknown): string {
   return directText || nestedText || rawOutputText || "";
 }
 
+/**
+ * Build markdown checklist text for a `plan` session update.
+ *
+ * The standard ACP shape (`@agentclientprotocol/codex-acp`) sends
+ * `entries[]` — `{ status, content, priority }` — with no top-level
+ * `content` field. Older/non-standard adapters instead send
+ * `content: { type: "text", text }` directly on the update. `entries`
+ * (even empty) is treated as authoritative when present; `content` is
+ * only consulted when `entries` is absent, and the raw update is
+ * stringified only when neither yields usable text.
+ */
+export function extractPlanText(update: Record<string, unknown>): string {
+  if (Array.isArray(update.entries)) {
+    return update.entries
+      .map((entry) => formatPlanEntry(asRecord(entry)))
+      .filter(Boolean)
+      .join("\n");
+  }
+  const contentText = extractContentText(update.content);
+  return contentText || JSON.stringify(update, null, 2);
+}
+
+function formatPlanEntry(entry: Record<string, unknown>): string {
+  const content = asString(entry.content);
+  if (!content) return "";
+  const checkbox = entry.status === "completed" ? "[x]" : "[ ]";
+  const suffix = entry.status === "in_progress" ? " (in progress)" : "";
+  return `- ${checkbox} ${content}${suffix}`;
+}
+
 export function extractToolArgs(
   update: Record<string, unknown>,
 ): Record<string, unknown> {

@@ -192,6 +192,9 @@ pub enum Requirement {
         /// Shown verbatim in the nudge so the user can identify the problem.
         diagnostic: String,
     },
+    /// Git for Windows is missing, so buzz-agent cannot launch buzz-dev-mcp's
+    /// Bash-based shell tool. Doctor owns installation and re-checking.
+    GitBash,
 }
 
 // ── AgentReadiness ────────────────────────────────────────────────────────────
@@ -292,6 +295,11 @@ fn collect_missing_requirements(
 /// Requirements for buzz-agent (provider + model + provider-specific creds).
 fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
     let mut missing = Vec::new();
+
+    #[cfg(windows)]
+    if !crate::managed_agents::git_bash_available(&effective.env) {
+        missing.push(Requirement::GitBash);
+    }
 
     // Provider is required — maps to BUZZ_AGENT_PROVIDER in the effective env.
     // An empty string is treated as absent: a key set to "" is not a valid
@@ -1308,6 +1316,12 @@ mod tests {
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["surface"], "normalized_field");
         assert_eq!(json["field"], "provider");
+    }
+
+    #[test]
+    fn git_bash_requirement_serializes_correctly() {
+        let json = serde_json::to_value(Requirement::GitBash).unwrap();
+        assert_eq!(json, serde_json::json!({ "surface": "git_bash" }));
     }
 
     #[test]

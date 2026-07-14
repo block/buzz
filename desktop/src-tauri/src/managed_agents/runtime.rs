@@ -1645,6 +1645,9 @@ pub fn spawn_agent_child(
                             "setup_copy": setup_copy,
                             "diagnostic": diagnostic,
                         }),
+                        Requirement::GitBash => serde_json::json!({
+                            "surface": "git_bash",
+                        }),
                     })
                     .collect();
                 let payload = serde_json::json!({

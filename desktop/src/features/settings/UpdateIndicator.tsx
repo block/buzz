@@ -51,7 +51,7 @@ const variants: Record<
   },
   ready: {
     Icon: RotateCw,
-    label: "Restart to update",
+    label: "Update now",
     badgeColor: "bg-emerald-500",
   },
 };
@@ -70,7 +70,7 @@ function getVariant(state: UpdateStatus["state"]) {
 }
 
 export function UpdateIndicator({ className }: { className?: string }) {
-  const { status, downloadAndInstall, relaunch } = useUpdaterContext();
+  const { status, installAndRelaunch } = useUpdaterContext();
   const variant = getVariant(status.state);
 
   if (!variant) {
@@ -79,19 +79,15 @@ export function UpdateIndicator({ className }: { className?: string }) {
 
   const { Icon, iconClassName = "h-4 w-4", label, badgeColor } = variant;
   const isActionable =
-    status.state === "available" ||
-    status.state === "ready" ||
-    status.state === "manual-required";
+    status.state === "ready" || status.state === "manual-required";
   const handleClick =
     status.state === "ready"
-      ? relaunch
+      ? installAndRelaunch
       : status.state === "manual-required"
         ? () => {
             void openUrl(status.releaseUrl);
           }
-        : status.state === "available"
-          ? downloadAndInstall
-          : null;
+        : null;
 
   return (
     <Tooltip>

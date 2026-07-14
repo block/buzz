@@ -9,6 +9,7 @@ mod backend;
 pub(crate) mod config_bridge;
 mod discovery;
 mod env_vars;
+mod git_bash;
 pub(crate) mod global_config;
 mod nest;
 mod persona_avatars;
@@ -44,6 +45,9 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
 pub use backend::*;
 pub use discovery::*;
 pub use env_vars::*;
+#[cfg(windows)]
+pub(crate) use git_bash::git_bash_available;
+pub(crate) use git_bash::{discover_git_bash, GitBashPrerequisite};
 pub(crate) use global_config::{
     load_global_agent_config, resolve_effective_model_provider, save_global_agent_config,
     validate_global_config, GlobalAgentConfig,

@@ -6,6 +6,7 @@ import {
   createChannelManagedAgents,
   ensureChannelAgentPresetInChannel,
 } from "@/features/agents/channelAgents";
+import { resolveSnapshotAvatarPng } from "@/features/agents/ui/snapshotAvatarPng";
 import {
   channelsQueryKey,
   upsertCachedChannelMember,
@@ -16,6 +17,7 @@ import {
   deleteManagedAgent,
   discoverAcpRuntimes,
   discoverBackendProviders,
+  discoverGitBashPrerequisite,
   discoverManagedAgentPrereqs,
   getAgentConfigSurface,
   getBakedBuildEnvKeys,
@@ -95,6 +97,7 @@ export const teamsQueryKey = ["teams"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
+export const gitBashPrerequisiteQueryKey = ["git-bash-prerequisite"] as const;
 
 type InvalidateAgentQueriesOptions = {
   refetchChannels?: boolean;
@@ -178,6 +181,14 @@ export function useInstallAcpRuntimeMutation() {
       void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     },
+  });
+}
+
+export function useGitBashPrerequisiteQuery() {
+  return useQuery({
+    queryKey: gitBashPrerequisiteQueryKey,
+    queryFn: discoverGitBashPrerequisite,
+    staleTime: 15_000,
   });
 }
 
@@ -652,17 +663,31 @@ export function useCreateChannelManagedAgentsMutation(
 
 export function useExportAgentSnapshotMutation() {
   return useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       id,
       memoryLevel,
       format,
       memorySourcePubkey,
+      avatarUrl,
     }: {
       id: string;
       memoryLevel: SnapshotMemoryLevel;
       format: SnapshotFormat;
       memorySourcePubkey?: string | null;
-    }) => exportAgentSnapshot(id, memoryLevel, format, memorySourcePubkey),
+      avatarUrl?: string | null;
+    }) => {
+      const avatarPngDataUrl =
+        format === "png"
+          ? await resolveSnapshotAvatarPng(avatarUrl)
+          : undefined;
+      return exportAgentSnapshot(
+        id,
+        memoryLevel,
+        format,
+        memorySourcePubkey,
+        avatarPngDataUrl,
+      );
+    },
   });
 }
 
@@ -673,13 +698,21 @@ export function useEncodeAgentSnapshotForSendMutation() {
       memoryLevel,
       format,
       memorySourcePubkey,
+      avatarPngDataUrl,
     }: {
       id: string;
       memoryLevel: SnapshotMemoryLevel;
       format: SnapshotFormat;
       memorySourcePubkey?: string | null;
+      avatarPngDataUrl?: string;
     }) =>
-      encodeAgentSnapshotForSend(id, memoryLevel, format, memorySourcePubkey),
+      encodeAgentSnapshotForSend(
+        id,
+        memoryLevel,
+        format,
+        memorySourcePubkey,
+        avatarPngDataUrl,
+      ),
   });
 }
 

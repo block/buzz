@@ -8,6 +8,7 @@ export default defineConfig({
   reporter: [
     ["list"],
     ["html", { open: "never", outputFolder: "playwright-report" }],
+    ["json", { outputFile: "playwright-report.json" }],
   ],
   use: {
     baseURL: "http://127.0.0.1:4173",

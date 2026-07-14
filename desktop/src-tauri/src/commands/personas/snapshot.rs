@@ -173,7 +173,6 @@ fn parse_format_is_png(s: &str) -> Result<bool, String> {
 ///
 /// **Invariants preserved (identical for both callers):**
 /// - JSON/PNG format selection from the parsed `is_png` flag (magic-byte sniffing is import-only)
-/// - PNG + memory hard rejection
 /// - Memory-source pubkey validation
 /// - Secret exclusion (env_vars never enter the manifest via `build_snapshot`)
 /// - Output filename derived from the agent display name
@@ -182,18 +181,10 @@ pub(crate) async fn materialize_snapshot_bytes(
     memory_source_pubkey: Option<String>,
     memory_level: MemoryLevel,
     is_png: bool,
+    avatar_png_data_url: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SnapshotPayload, String> {
-    // Eagerly reject PNG + memory — avoid an unnecessary relay round-trip.
-    if is_png && memory_level != MemoryLevel::None {
-        return Err(
-            "Cannot export memory to .agent.png — use JSON format for memory-bearing \
-             snapshots."
-                .to_string(),
-        );
-    }
-
     // ── Load definition record and memory-source instance under lock ─────────
     let (record, memory_pubkey) = {
         let _store_guard = state
@@ -274,7 +265,9 @@ pub(crate) async fn materialize_snapshot_bytes(
     let slug = crate::util::slugify(&display_name, "agent", 50);
 
     if is_png {
-        let png_bytes = encode_snapshot_png(&snapshot, avatar_bytes.as_deref())
+        let png_body_avatar_bytes =
+            resolve_png_body_avatar_bytes(avatar_png_data_url.as_deref(), avatar_bytes);
+        let png_bytes = encode_snapshot_png(&snapshot, png_body_avatar_bytes.as_deref())
             .map_err(|e| format!("Failed to encode .agent.png: {e}"))?;
         validate_snapshot_encode_size(png_bytes.len(), true)?;
         Ok(SnapshotPayload {
@@ -290,6 +283,17 @@ pub(crate) async fn materialize_snapshot_bytes(
             filename: format!("{slug}.agent.json"),
         })
     }
+}
+
+/// Choose bytes for the PNG image body without changing the source avatar the
+/// manifest preserves for import.
+fn resolve_png_body_avatar_bytes(
+    avatar_png_data_url: Option<&str>,
+    store_avatar_bytes: Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    avatar_png_data_url
+        .and_then(crate::managed_agents::agent_snapshot::decode_avatar_data_url)
+        .or(store_avatar_bytes)
 }
 
 /// Export an agent definition as a `buzz-agent-snapshot v1` file.
@@ -309,6 +313,7 @@ pub async fn export_agent_snapshot(
     memory_source_pubkey: Option<String>,
     memory_level: String,
     format: String,
+    avatar_png_data_url: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
@@ -320,6 +325,7 @@ pub async fn export_agent_snapshot(
         memory_source_pubkey,
         memory_level,
         is_png,
+        avatar_png_data_url,
         app.clone(),
         state,
     )
@@ -370,15 +376,23 @@ pub async fn encode_agent_snapshot_for_send(
     memory_source_pubkey: Option<String>,
     memory_level: String,
     format: String,
+    avatar_png_data_url: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<EncodedSnapshotPayload, String> {
     let memory_level = parse_memory_level(&memory_level)?;
     let is_png = parse_format_is_png(&format)?;
 
-    let payload =
-        materialize_snapshot_bytes(id, memory_source_pubkey, memory_level, is_png, app, state)
-            .await?;
+    let payload = materialize_snapshot_bytes(
+        id,
+        memory_source_pubkey,
+        memory_level,
+        is_png,
+        avatar_png_data_url,
+        app,
+        state,
+    )
+    .await?;
 
     Ok(EncodedSnapshotPayload {
         file_bytes: payload.bytes,
@@ -388,3 +402,66 @@ pub async fn encode_agent_snapshot_for_send(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod png_body_tests {
+    use super::*;
+    use base64::Engine as _;
+    use png::Decoder;
+
+    #[test]
+    fn frontend_raster_becomes_png_body_without_replacing_manifest_source() {
+        let avatar = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            3,
+            2,
+            image::Rgb([0x12, 0x34, 0x56]),
+        ));
+        let mut source_png = Vec::new();
+        avatar
+            .write_to(
+                &mut std::io::Cursor::new(&mut source_png),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let avatar_data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&source_png)
+        );
+        let snapshot = crate::managed_agents::agent_snapshot::AgentSnapshot {
+            format: crate::managed_agents::agent_snapshot::FORMAT_DISCRIMINATOR.to_string(),
+            version: crate::managed_agents::agent_snapshot::FORMAT_VERSION,
+            definition: crate::managed_agents::agent_snapshot::AgentSnapshotDefinition {
+                name: "Agent".to_string(),
+                system_prompt: None,
+                runtime: None,
+                model: None,
+                provider: None,
+                parallelism: None,
+                respond_to: None,
+                respond_to_allowlist: vec![],
+                name_pool: vec![],
+                idle_timeout_seconds: None,
+                max_turn_duration_seconds: None,
+            },
+            profile: crate::managed_agents::agent_snapshot::AgentSnapshotProfile {
+                display_name: "Agent".to_string(),
+                about: None,
+                avatar_data_url: None,
+                avatar_url: Some("https://relay.example/media/avatar.png".to_string()),
+            },
+            memory: crate::managed_agents::agent_snapshot::AgentSnapshotMemory {
+                level: MemoryLevel::None,
+                entries: vec![],
+            },
+        };
+        let body_bytes = resolve_png_body_avatar_bytes(Some(&avatar_data_url), None);
+        let png_bytes = encode_snapshot_png(&snapshot, body_bytes.as_deref()).unwrap();
+        let reader = Decoder::new(std::io::Cursor::new(&png_bytes))
+            .read_info()
+            .unwrap();
+        let decoded = import::decode_snapshot_from_bytes(&png_bytes).unwrap();
+
+        assert_eq!((reader.info().width, reader.info().height), (3, 2));
+        assert_eq!(decoded.profile.avatar_url, snapshot.profile.avatar_url);
+    }
+}

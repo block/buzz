@@ -541,6 +541,13 @@ export type ControlResultFrame = {
   modelId?: string;
 };
 
+export type GitBashPrerequisite = {
+  available: boolean;
+  path: string | null;
+  installInstructionsUrl: string;
+  installHint: string;
+};
+
 export type AcpAvailabilityStatus =
   | "available"
   | "adapter_missing"
@@ -679,7 +686,10 @@ export type ConfigSourceReport = {
   envVars: ConfigTierStatus;
   configFile: ConfigTierStatus;
   configFilePath: string | null;
+  mcpConfigFilePath: string | null;
 };
+
+export type ExtensionEntry = { name: string; kind: string; enabled: boolean };
 
 export type NormalizedConfig = {
   model: NormalizedField | null;
@@ -697,6 +707,7 @@ export type RuntimeConfigSurface = {
   isPreSpawn: boolean;
   normalized: NormalizedConfig;
   advanced: ConfigField[];
+  extensions: ExtensionEntry[];
   sources: ConfigSourceReport;
 };
 

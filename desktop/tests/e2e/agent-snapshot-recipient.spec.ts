@@ -21,6 +21,39 @@ async function readCommandLog(page: import("@playwright/test").Page) {
   );
 }
 
+async function invokeMockCommand(
+  page: import("@playwright/test").Page,
+  command: string,
+  payload: Record<string, unknown>,
+) {
+  // The app installs its dynamically imported bridge during bootstrap. Wait for
+  // that installation after navigation instead of racing the first invoke.
+  await page.waitForFunction(
+    () =>
+      typeof (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function",
+    null,
+    { timeout: 5_000 },
+  );
+  return page.evaluate(
+    async ({ command: cmd, payload: request }) => {
+      const invoke = (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__: (
+            command: string,
+            payload: Record<string, unknown>,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      return invoke(cmd, request);
+    },
+    { command, payload },
+  );
+}
+
 const ANALYST_PERSONA_ID = "test-analyst";
 const ANALYST_PUBKEY =
   "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
@@ -63,23 +96,24 @@ async function seedAndSendSnapshot(
       : {}),
   });
   await page.goto("/");
-  await page.getByTestId("open-agents-view").click();
 
-  // Open the send dialog and send to #general.
-  await page.getByLabel("Open actions for Analyst").click();
-  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
-  const sendBtn = page.getByRole("button", { name: "Send in Buzz" });
-  if (await sendBtn.isVisible()) await sendBtn.click();
-  await expect(page.getByTestId("agent-snapshot-send-dialog")).toBeVisible();
-  await page
-    .getByTestId("agent-snapshot-send-channel-list")
-    .getByText("general")
-    .click();
-  await page.getByTestId("agent-snapshot-send-confirm").click();
-  await expect(page.getByTestId("agent-snapshot-send-done")).toBeVisible({
-    timeout: 8000,
+  // JSON snapshots can still arrive from saved files or older clients, even
+  // though new in-app shares always encode PNG. Seed one directly so this
+  // recipient suite retains JSON-card coverage independent of send behavior.
+  await invokeMockCommand(page, "send_channel_message", {
+    channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+    content: `[${SNAPSHOT_UPLOAD_DESCRIPTOR.filename}](${SNAPSHOT_UPLOAD_DESCRIPTOR.url})`,
+    mediaTags: [
+      [
+        "imeta",
+        `url ${SNAPSHOT_UPLOAD_DESCRIPTOR.url}`,
+        `m ${SNAPSHOT_UPLOAD_DESCRIPTOR.type}`,
+        `x ${SNAPSHOT_UPLOAD_DESCRIPTOR.sha256}`,
+        `size ${SNAPSHOT_UPLOAD_DESCRIPTOR.size}`,
+        `filename ${SNAPSHOT_UPLOAD_DESCRIPTOR.filename}`,
+      ],
+    ],
   });
-  await page.getByRole("button", { name: "Close" }).click();
 
   // Navigate to #general.
   await page.getByTestId("channel-general").click();
@@ -194,48 +228,9 @@ test("recipient_import_confirm_calls_confirm_once_and_shows_result", async ({
 test("recipient_fetch_error_shows_error_and_download_remains", async ({
   page,
 }) => {
-  await installMockBridge(page, {
-    personas: [
-      {
-        id: ANALYST_PERSONA_ID,
-        displayName: "Analyst",
-        systemPrompt: "You are an analyst.",
-      },
-    ],
-    managedAgents: [
-      {
-        pubkey: ANALYST_PUBKEY,
-        name: "Analyst",
-        personaId: ANALYST_PERSONA_ID,
-      },
-    ],
-    uploadDescriptors: [
-      {
-        ...SNAPSHOT_UPLOAD_DESCRIPTOR,
-        filename: "bad.agent.json",
-      },
-    ],
+  await seedAndSendSnapshot(page, {
     snapshotFetchError: "hash mismatch: fetched bytes do not match",
   });
-  await page.goto("/");
-  await page.getByTestId("open-agents-view").click();
-
-  // Send to #general.
-  await page.getByLabel("Open actions for Analyst").click();
-  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
-  const sendBtn = page.getByRole("button", { name: "Send in Buzz" });
-  if (await sendBtn.isVisible()) await sendBtn.click();
-  await expect(page.getByTestId("agent-snapshot-send-dialog")).toBeVisible();
-  await page
-    .getByTestId("agent-snapshot-send-channel-list")
-    .getByText("general")
-    .click();
-  await page.getByTestId("agent-snapshot-send-confirm").click();
-  await expect(page.getByTestId("agent-snapshot-send-done")).toBeVisible({
-    timeout: 8000,
-  });
-  await page.getByRole("button", { name: "Close" }).click();
-  await page.getByTestId("channel-general").click();
 
   const card = page.getByTestId("agent-snapshot-card").last();
   await expect(card).toBeVisible({ timeout: 5000 });

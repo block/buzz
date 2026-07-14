@@ -12,6 +12,7 @@ import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import {
   mergeObserverEventWindows,
+  observerEventScrollId,
   scopeByChannel,
 } from "@/features/agents/ui/agentSessionPanelLayout";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
@@ -20,11 +21,11 @@ import {
   useArchivedChannelEvents,
   useObserverEvents,
 } from "@/features/agents/ui/useObserverEvents";
+import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
-import { useStickToBottom } from "@/shared/hooks/useStickToBottom";
 import { useNow } from "@/shared/lib/useNow";
 import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
@@ -103,10 +104,11 @@ export function AgentSessionThreadPanel({
   const canStopCurrentTurn = isWorking && canInterruptTurn;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
-  const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
+  const scrollRef = React.useRef<HTMLDivElement>(null);
+  const contentRef = React.useRef<HTMLDivElement>(null);
   const topSentinelRef = React.useRef<HTMLDivElement>(null);
   const now = useNow(1000);
-  const { events } = useObserverEvents(isLive, agent.pubkey);
+  const { connectionState, events } = useObserverEvents(isLive, agent.pubkey);
   const scopedEvents = React.useMemo(
     () => scopeByChannel(events, sessionChannelId),
     [events, sessionChannelId],
@@ -150,6 +152,30 @@ export function AgentSessionThreadPanel({
     sentinelRef: topSentinelRef,
   });
   const rawFeedScopeKey = `${agent.pubkey}:${sessionChannelId ?? "all"}`;
+  // Live+archived is what actually renders (an idle agent's feed is
+  // archived-only, where scopedEvents alone would be empty and the tail-glue
+  // never fires) — see combinedHeaderEvents above. `observerEventScrollId`
+  // keys on (seq, timestamp), not seq alone: seq resets to 1 after every
+  // agent process restart, so a bare seq id can collide across restarts
+  // within one channel's combined window. The raw event rail below uses the
+  // same helper so both id namespaces always agree.
+  const anchoredScrollMessages = React.useMemo(
+    () =>
+      combinedHeaderEvents.map((event) => ({
+        id: observerEventScrollId(event),
+      })),
+    [combinedHeaderEvents],
+  );
+  const { onScroll } = useAnchoredScroll({
+    // Scoped to the same (agent, channel) pair as the rendered feed, so
+    // switching agents/channels resets the anchor to bottom instead of
+    // carrying over the previous feed's scroll state.
+    channelId: rawFeedScopeKey,
+    contentRef,
+    isLoading: connectionState === "connecting",
+    messages: anchoredScrollMessages,
+    scrollContainerRef: scrollRef,
+  });
   // Scope label input: prefer the passed channel's name; when the pane is
   // channel-scoped without a full Channel object (#1380's channelId prop),
   // resolve the name from the channels cache.
@@ -408,20 +434,22 @@ export function AgentSessionThreadPanel({
         panelPadding
       >
         <div ref={topSentinelRef} aria-hidden className="h-px" />
-        <ManagedAgentSessionPanel
-          agent={agent}
-          channelId={sessionChannelId}
-          className="border-0 bg-transparent px-0 py-2 shadow-none"
-          emptyDescription={
-            sessionChannelId
-              ? `Mention ${agent.name} in the channel to see its work here.`
-              : `Mention ${agent.name} in any channel to see its work here.`
-          }
-          profiles={profiles}
-          rawLayout="exclusive"
-          showHeader={false}
-          showRaw={showRawFeed}
-        />
+        <div ref={contentRef}>
+          <ManagedAgentSessionPanel
+            agent={agent}
+            channelId={sessionChannelId}
+            className="border-0 bg-transparent px-0 py-2 shadow-none"
+            emptyDescription={
+              sessionChannelId
+                ? `Mention ${agent.name} in the channel to see its work here.`
+                : `Mention ${agent.name} in any channel to see its work here.`
+            }
+            profiles={profiles}
+            rawLayout="exclusive"
+            showHeader={false}
+            showRaw={showRawFeed}
+          />
+        </div>
       </AuxiliaryPanelBody>
     </AuxiliaryPanel>
   );

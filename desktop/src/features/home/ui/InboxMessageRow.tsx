@@ -102,6 +102,7 @@ export function InboxMessageRow({
           "group/message relative z-10 mx-1 flex gap-2.5 rounded-2xl px-2 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
           isContinuation ? "items-center" : "items-start",
         )}
+        data-message-id={message.id}
         data-testid={
           message.isSelected
             ? "home-inbox-selected-message"
