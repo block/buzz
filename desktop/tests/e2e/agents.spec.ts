@@ -547,14 +547,26 @@ test("custom personas share with people and keep export separate", async ({
   await waitForAnimations(page);
   const shareMainCardBox = await shareMainCard.boundingBox();
   const exportAgentRowBox = await exportAgentRow.boundingBox();
-  expect(
+  const shareCardGap =
     (exportAgentRowBox?.y ?? 0) -
-      ((shareMainCardBox?.y ?? 0) + (shareMainCardBox?.height ?? 0)),
-  ).toBeGreaterThanOrEqual(16);
-  const [shareMainCardShadow, exportAgentRowShadow] = await Promise.all([
-    shareMainCard.evaluate((element) => getComputedStyle(element).boxShadow),
-    exportAgentRow.evaluate((element) => getComputedStyle(element).boxShadow),
+    ((shareMainCardBox?.y ?? 0) + (shareMainCardBox?.height ?? 0));
+  expect(shareCardGap).toBeGreaterThanOrEqual(12);
+  expect(shareCardGap).toBeLessThan(16);
+  const [shareMainCardStyles, exportAgentRowStyles] = await Promise.all([
+    shareMainCard.evaluate((element) => ({
+      borderRadius: getComputedStyle(element).borderRadius,
+      boxShadow: getComputedStyle(element).boxShadow,
+    })),
+    exportAgentRow.evaluate((element) => ({
+      borderRadius: getComputedStyle(element).borderRadius,
+      boxShadow: getComputedStyle(element).boxShadow,
+    })),
   ]);
+  expect(exportAgentRowStyles.borderRadius).toBe(
+    shareMainCardStyles.borderRadius,
+  );
+  const shareMainCardShadow = shareMainCardStyles.boxShadow;
+  const exportAgentRowShadow = exportAgentRowStyles.boxShadow;
   expect(exportAgentRowShadow).toBe(shareMainCardShadow);
   expect(exportAgentRowShadow).not.toBe("none");
   await expect(exportAgentRow).toHaveCSS("position", "relative");

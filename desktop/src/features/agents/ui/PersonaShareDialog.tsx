@@ -342,7 +342,7 @@ export function PersonaShareDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent
         aria-describedby={undefined}
-        className="max-w-lg gap-4 bg-transparent p-0 shadow-none"
+        className="max-w-lg gap-3 bg-transparent p-0 shadow-none"
         data-testid="persona-share-dialog"
         showCloseButton={false}
       >
