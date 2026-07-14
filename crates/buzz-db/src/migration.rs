@@ -1029,7 +1029,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(16));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(17));
     }
 
     #[tokio::test]
