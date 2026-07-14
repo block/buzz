@@ -4,6 +4,7 @@ import type { UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import {
   POOF_ORIGIN_CLASS,
+  POOF_POINTER_ORIGIN_CLASS,
   POOF_TRIGGER_CLASS,
 } from "@/shared/ui/PoofBurstProvider";
 import { PubKey } from "@/shared/ui/PubKey";
@@ -50,6 +51,7 @@ export function SelectedRecipientChip({
           "group/remove-recipient relative h-5 w-5 shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
           POOF_TRIGGER_CLASS,
           POOF_ORIGIN_CLASS,
+          POOF_POINTER_ORIGIN_CLASS,
         )}
         data-testid={testIds?.chip}
         disabled={disabled}

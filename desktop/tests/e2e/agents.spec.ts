@@ -713,7 +713,29 @@ test("custom personas share with people and keep export separate", async ({
     `persona-share-recipient-chip-${TEST_IDENTITIES.bob.pubkey}`,
   );
   await expect(bobChip).toBeVisible();
-  await bobChip.click();
+  await waitForAnimations(page);
+  const bobChipBox = await bobChip.boundingBox();
+  expect(bobChipBox).not.toBeNull();
+  if (!bobChipBox) return;
+  const removePointer = {
+    x: bobChipBox.x + bobChipBox.width - 3,
+    y: bobChipBox.y + bobChipBox.height / 2,
+  };
+  await page.mouse.move(removePointer.x, removePointer.y);
+  await page.mouse.down();
+  const poofBurst = page.locator(".buzz-poof-burst").last();
+  await expect(poofBurst).toBeVisible();
+  const poofOrigin = await poofBurst.evaluate((element) => ({
+    x: Number.parseFloat(
+      getComputedStyle(element).getPropertyValue("--buzz-poof-x"),
+    ),
+    y: Number.parseFloat(
+      getComputedStyle(element).getPropertyValue("--buzz-poof-y"),
+    ),
+  }));
+  expect(Math.abs(poofOrigin.x - removePointer.x)).toBeLessThanOrEqual(0.5);
+  expect(Math.abs(poofOrigin.y - removePointer.y)).toBeLessThanOrEqual(0.5);
+  await page.mouse.up();
   await expect(bobChip).toHaveCount(0);
 
   await recipientSearch.fill("bob");
