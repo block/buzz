@@ -24,6 +24,10 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
 
+  // The overview no longer lists repository cards — switch to the
+  // Repositories filter to reveal the project cards/rows.
+  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+
   // The "buzz" mock project is owned by the viewer, so status changes and
   // review requests are always permitted regardless of who authored the PR.
   const projectEntry = page

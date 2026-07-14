@@ -26,6 +26,10 @@ test("commit detail opens from the commits feed with a diff", async ({
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
 
+  // The overview no longer lists repository cards — switch to the
+  // Repositories filter to reveal the project cards/rows.
+  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+
   // Open the first mock project (dtag "buzz" from the e2e bridge fixture).
   const projectEntry = page
     .locator(
@@ -118,6 +122,10 @@ test("pull request and issue feeds share the commit row structure", async ({
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
+
+  // The overview no longer lists repository cards — switch to the
+  // Repositories filter to reveal the project cards/rows.
+  await page.getByRole("button", { name: "Repositories", exact: true }).click();
 
   const projectEntry = page
     .locator(
