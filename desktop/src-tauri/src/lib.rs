@@ -226,6 +226,35 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+fn hard_exit_after_mesh_shutdown() -> ! {
+    // SAFETY: all Buzz-managed subprocesses and the embedded Mesh runtime have
+    // been stopped above. `_exit` intentionally skips only process-global C++
+    // destructors and buffered stdio; no Rust or application state remains to
+    // be observed after this point.
+    unsafe { libc::_exit(0) }
+}
+
+#[cfg(feature = "mesh-llm")]
+fn shutdown_mesh_runtime(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let runtime = state.mesh_llm_runtime.lock().await.take();
+        let result = match runtime {
+            Some(runtime) => runtime.stop().await,
+            None => Ok(()),
+        };
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("buzz-desktop: failed to stop Mesh runtime: {error}"),
+        Err(error) => eprintln!("buzz-desktop: timed out stopping Mesh runtime: {error}"),
+    }
+}
+
 pub fn run() {
     // mesh-llm's async chains (model download, node start/join) overflow
     // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
@@ -948,7 +977,12 @@ pub fn run() {
             signal_shutdown_started.store(true, Ordering::SeqCst);
             if !signal_shutdown_done.swap(true, Ordering::SeqCst) {
                 let _ = shutdown_managed_agents(&signal_app);
+                #[cfg(feature = "mesh-llm")]
+                shutdown_mesh_runtime(&signal_app);
             }
+            #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+            hard_exit_after_mesh_shutdown();
+            #[cfg(not(all(feature = "mesh-llm", target_os = "macos")))]
             std::process::exit(0);
         }) {
             eprintln!("buzz-desktop: failed to register signal handler: {e}");
@@ -964,7 +998,17 @@ pub fn run() {
                 if let Err(error) = shutdown_managed_agents(app_handle) {
                     eprintln!("buzz-desktop: failed to stop managed agents: {error}");
                 }
+                #[cfg(feature = "mesh-llm")]
+                shutdown_mesh_runtime(app_handle);
             }
+
+            // AppKit terminates through libc exit(), which runs C++ static
+            // destructors. The embedded ggml/Metal runtime currently aborts in
+            // that destructor phase even after its node has stopped cleanly.
+            // End the process only after Buzz and Mesh shutdown above, while
+            // deliberately skipping those native global destructors.
+            #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+            hard_exit_after_mesh_shutdown();
         }
         _ => {}
     });

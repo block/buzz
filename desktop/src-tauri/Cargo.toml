@@ -86,14 +86,14 @@ buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
 buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
 buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
-mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "002f2d8abb0bce3dbed59dc4e0944a51621ab47f", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
-mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "002f2d8abb0bce3dbed59dc4e0944a51621ab47f", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
+mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "43103c5c40292be688ac0261129bcbab0e7b9132", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
+mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "43103c5c40292be688ac0261129bcbab0e7b9132", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
 # Model catalog + hardware survey for the Share-compute model picker (same
 # diagnose pattern as mesh-console). Lib name of mesh-llm-client is mesh_client.
-mesh-llm-client = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "002f2d8abb0bce3dbed59dc4e0944a51621ab47f", package = "mesh-llm-client", optional = true }
-mesh-llm-node = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "002f2d8abb0bce3dbed59dc4e0944a51621ab47f", package = "mesh-llm-node", optional = true }
-mesh-llm-system = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "002f2d8abb0bce3dbed59dc4e0944a51621ab47f", package = "mesh-llm-system", optional = true }
-mesh-llm-events = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "002f2d8abb0bce3dbed59dc4e0944a51621ab47f", package = "mesh-llm-events", optional = true }
+mesh-llm-client = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "43103c5c40292be688ac0261129bcbab0e7b9132", package = "mesh-llm-client", optional = true }
+mesh-llm-node = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "43103c5c40292be688ac0261129bcbab0e7b9132", package = "mesh-llm-node", optional = true }
+mesh-llm-system = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "43103c5c40292be688ac0261129bcbab0e7b9132", package = "mesh-llm-system", optional = true }
+mesh-llm-events = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "43103c5c40292be688ac0261129bcbab0e7b9132", package = "mesh-llm-events", optional = true }
 base64 = "0.22"
 sha2 = "0.11"
 tar = "0.4"
