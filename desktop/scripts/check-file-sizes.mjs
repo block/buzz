@@ -268,7 +268,8 @@ const overrides = new Map([
   // path_candidates_from_env_raw(). Load-bearing Windows platform support.
   // +13: fetch_login_shell_path_inner Windows guard (POSIX PATH → None).
   // resolve_git_bash made pub(crate) for Windows test access.
-  ["src-tauri/src/managed_agents/discovery.rs", 1365],
+  // +1: login_shell_candidates doc comment expanded for resolve_bash_path.
+  ["src-tauri/src/managed_agents/discovery.rs", 1366],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.

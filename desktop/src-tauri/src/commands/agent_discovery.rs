@@ -542,8 +542,9 @@ fn persist_last_error_on_install(
 /// and `resolve_npm_prefix` — keeping them in sync so the hermit-strip list
 /// can't drift between the two paths.
 ///
-/// On Windows, resolves Git Bash via the same chain Doctor's prereq uses
-/// (`resolve_git_bash_path`). Returns `Err` when no shell can be found.
+/// On Windows, resolves Git Bash via `resolve_bash_path` (skips `BUZZ_SHELL`
+/// since install commands require bash syntax). Returns `Err` when no shell
+/// can be found.
 fn install_shell_command(command: &str) -> Result<std::process::Command, String> {
     let shell: std::path::PathBuf = resolve_install_shell()?;
 
@@ -588,7 +589,9 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
 /// Resolve the shell binary for install commands.
 ///
 /// Unix: `/bin/zsh` if present, else `/bin/bash`.
-/// Windows: Git Bash via the Doctor resolver chain (`resolve_git_bash_path`).
+/// Windows: Git Bash via `resolve_bash_path` — skips `BUZZ_SHELL` because install
+/// commands use bash-only `-l -c` syntax. A `BUZZ_SHELL=pwsh` user gets a green
+/// Doctor prereq (their agents work) but installs use the Git Bash fallback chain.
 fn resolve_install_shell() -> Result<std::path::PathBuf, String> {
     #[cfg(not(windows))]
     {
@@ -600,7 +603,7 @@ fn resolve_install_shell() -> Result<std::path::PathBuf, String> {
 
     #[cfg(windows)]
     {
-        crate::managed_agents::git_bash::resolve_git_bash_path()
+        crate::managed_agents::git_bash::resolve_bash_path()
             .ok_or_else(|| crate::managed_agents::git_bash::GIT_BASH_INSTALL_HINT.to_string())
     }
 }

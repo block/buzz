@@ -713,7 +713,8 @@ fn path_candidates_from_env_raw(basename: &str) -> Vec<PathBuf> {
 /// Collect login shell candidates for the current platform.
 ///
 /// On Unix: `/bin/zsh`, `/bin/bash` (the historical defaults).
-/// On Windows: the resolved Git Bash (via the same chain Doctor uses).
+/// On Windows: Git Bash via `resolve_bash_path` — skips `BUZZ_SHELL` because
+/// login-shell callers use bash-only `-l -c` syntax.
 fn login_shell_candidates() -> Vec<PathBuf> {
     #[cfg(not(windows))]
     {
@@ -721,9 +722,7 @@ fn login_shell_candidates() -> Vec<PathBuf> {
     }
     #[cfg(windows)]
     {
-        super::git_bash::resolve_git_bash_path()
-            .into_iter()
-            .collect()
+        super::git_bash::resolve_bash_path().into_iter().collect()
     }
 }
 

@@ -30,9 +30,9 @@ pub(crate) const GIT_BASH_INSTALL_HINT: &str = INSTALL_HINT;
 /// Resolve the Git Bash executable path using the same resolver chain as Doctor.
 ///
 /// Returns `Some(path)` on Windows when a usable bash is found, `None` otherwise
-/// (including all non-Windows platforms). Used by `install_shell_command` to keep
-/// a single contract: Doctor prereq green ⇒ install shell spawns.
-#[allow(dead_code)] // used only on Windows, from install_shell_command + login_shell_candidates
+/// (including all non-Windows platforms). Honors `BUZZ_SHELL` (any executable) —
+/// correct for the Doctor readiness gate where any shell suffices.
+#[allow(dead_code)] // used only on Windows, from discover_git_bash + git_bash_available
 pub(crate) fn resolve_git_bash_path() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     {
@@ -40,6 +40,33 @@ pub(crate) fn resolve_git_bash_path() -> Option<std::path::PathBuf> {
         return resolve_git_bash(
             &env.path,
             env.shell_override,
+            env.git_bash_override,
+            env.system_root,
+            env.program_files,
+            env.program_files_x86,
+            env.local_app_data,
+        );
+    }
+
+    #[cfg(not(windows))]
+    None
+}
+
+/// Resolve a bash-compatible shell for install commands and login-shell discovery.
+///
+/// Unlike `resolve_git_bash_path`, this skips `BUZZ_SHELL` entirely — that override
+/// intentionally accepts any executable (`cmd`, `pwsh`) for the MCP child, but install
+/// commands and `login_shell_candidates` use bash-only `-l -c` syntax. Skipping the
+/// override means the chain falls through to: `GIT_BASH` → PATH scan → derive-from-git
+/// → well-known locations → registry.
+#[allow(dead_code)] // used only on Windows, from install_shell_command + login_shell_candidates
+pub(crate) fn resolve_bash_path() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let env = GitBashEnv::from_process();
+        return resolve_git_bash(
+            &env.path,
+            None, // skip BUZZ_SHELL — install/login-shell callers require bash
             env.git_bash_override,
             env.system_root,
             env.program_files,
@@ -441,6 +468,65 @@ mod tests {
                 None,
             ),
             Some(shell)
+        );
+    }
+
+    // ── Regression: install/login-shell must skip non-bash BUZZ_SHELL ─────────
+
+    /// When BUZZ_SHELL=pwsh.exe, `resolve_git_bash` with `shell_override=None`
+    /// (the `resolve_bash_path` code path) skips it and falls through to the
+    /// bash.exe on PATH. The readiness gate (`shell_override=Some`) still
+    /// returns pwsh — both contracts hold simultaneously.
+    #[test]
+    fn test_install_path_skips_buzz_shell_pwsh() {
+        let temp = tempdir().expect("tempdir");
+        let pwsh = temp.path().join("pwsh.exe");
+        let bash = temp.path().join("bash.exe");
+        std::fs::write(&pwsh, []).expect("pwsh");
+        std::fs::write(&bash, []).expect("bash");
+
+        let path = std::env::join_paths([temp.path()]).expect("PATH");
+        let path_str = path.to_str().expect("utf8");
+
+        // Readiness gate: BUZZ_SHELL=pwsh accepted (Doctor green).
+        assert_eq!(
+            resolve_git_bash(path_str, Some(pwsh.clone()), None, None, None, None, None),
+            Some(pwsh),
+            "readiness gate must accept BUZZ_SHELL=pwsh"
+        );
+
+        // Install path: shell_override=None skips pwsh, finds bash on PATH.
+        assert_eq!(
+            resolve_git_bash(path_str, None, None, None, None, None, None),
+            Some(bash),
+            "install path must skip BUZZ_SHELL and find bash on PATH"
+        );
+    }
+
+    /// Same as above but with BUZZ_SHELL=cmd.exe.
+    #[test]
+    fn test_install_path_skips_buzz_shell_cmd() {
+        let temp = tempdir().expect("tempdir");
+        let cmd = temp.path().join("cmd.exe");
+        let bash = temp.path().join("bash.exe");
+        std::fs::write(&cmd, []).expect("cmd");
+        std::fs::write(&bash, []).expect("bash");
+
+        let path = std::env::join_paths([temp.path()]).expect("PATH");
+        let path_str = path.to_str().expect("utf8");
+
+        // Readiness gate: BUZZ_SHELL=cmd accepted.
+        assert_eq!(
+            resolve_git_bash(path_str, Some(cmd.clone()), None, None, None, None, None),
+            Some(cmd),
+            "readiness gate must accept BUZZ_SHELL=cmd"
+        );
+
+        // Install path: shell_override=None skips cmd, finds bash on PATH.
+        assert_eq!(
+            resolve_git_bash(path_str, None, None, None, None, None, None),
+            Some(bash),
+            "install path must skip BUZZ_SHELL and find bash on PATH"
         );
     }
 }
