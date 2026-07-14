@@ -68,6 +68,14 @@ pub struct AppState {
     /// `keys` so readers (signing, get_identity, etc.) are not blocked during
     /// keyring I/O.
     pub identity_mutation: Mutex<()>,
+    /// Set when the boot-time Phase 2 reset attempted a wipe but verification
+    /// failed. The sentinel is preserved so the next relaunch retries. All
+    /// identity-dependent setup is skipped; the frontend shows a reset-failed
+    /// recovery screen via `get_identity`.
+    ///
+    /// Ordering: written once in `setup()` with `Ordering::Release`; read in
+    /// `get_identity` with `Ordering::Acquire`.
+    pub reset_failed: AtomicBool,
     /// Cached ACP session config from running agents, keyed by agent pubkey.
     /// Populated when the harness emits `session_config_captured` observer events.
     pub session_config_cache: Mutex<HashMap<String, SessionConfigCache>>,
@@ -142,6 +150,7 @@ pub fn build_app_state() -> AppState {
         )),
         keyring_locked: AtomicBool::new(false),
         identity_lost: AtomicBool::new(false),
+        reset_failed: AtomicBool::new(false),
         #[cfg(feature = "mesh-llm")]
         mesh_llm_runtime: AsyncMutex::new(None),
         #[cfg(feature = "mesh-llm")]

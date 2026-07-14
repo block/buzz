@@ -206,7 +206,8 @@ const overrides = new Map([
   // mcp-readonly-view rebase: PR2 MCP config surface FE-type fields force +1 over the grandfathered ceiling.
   // Git Bash prerequisite payload adds four fields to the shared Tauri API
   // contract. This is the canonical type location; split remains queued.
-  ["src/shared/api/types.ts", 1038],
+  // signout-wipe: resetFailed field added to Identity type (+6 lines).
+  ["src/shared/api/types.ts", 1044],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -319,7 +320,10 @@ const overrides = new Map([
   // load_readonly + load_all_readonly + store_all for safe cross-service reads.
   // sign-out wipe: delete_all() method removes the entire keychain blob under
   // the interprocess advisory lock; +8 lines. Load-bearing; queued to split.
-  ["src-tauri/src/secret_store.rs", 1148],
+  // signout-wipe phase 2: delete_all_with_legacy_cleanup replaces delete_all;
+  // reads blob keys + deletes per-key legacy entries to prevent resurrection.
+  // Net growth ~36 lines over prior cap. Load-bearing correctness fix.
+  ["src-tauri/src/secret_store.rs", 1190],
   // sign-out wipe: Sign Out section (AlertDialog + controlled state) added
   // at the bottom of the Profile settings page. Load-bearing UX feature;
   // queued to split when ProfileSettingsCard is broken into sub-components.

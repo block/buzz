@@ -740,15 +740,55 @@ impl SecretStore {
         }
     }
 
-    /// Delete the entire keychain blob for this service.
+    /// Delete the entire keychain blob for this service, plus all legacy per-key
+    /// entries that could resurrect an identity on next boot.
     ///
-    /// Used by the sign-out wipe path to remove all persisted keys in one shot.
-    /// After this call the OS keychain has no entry for this service; the next
-    /// launch will generate a fresh keypair and show first-run onboarding.
-    pub fn delete_all(&self) -> Result<(), String> {
+    /// Order of operations:
+    /// 1. Read the blob to collect every key name (e.g. `identity`, agent keys).
+    /// 2. Delete legacy per-key DPK entries for every key + the DPK blob itself.
+    /// 3. Delete legacy per-key keyring entries for every key.
+    /// 4. Delete the blob entry.
+    /// 5. Clear the in-memory cache.
+    ///
+    /// This is the correct wipe path for sign-out: the old `delete_all` skipped
+    /// step 1–3 so stale per-key entries could be re-imported on the next launch
+    /// via `migrate_legacy_key`. This method prevents that resurrection.
+    pub fn delete_all_with_legacy_cleanup(&self) -> Result<(), String> {
         #[cfg(feature = "system-keyring")]
         {
             let _lock = acquire_blob_lock(&self.service)?;
+
+            // Step 1: read current blob keys (best-effort; no entry = empty set).
+            let blob_keys: Vec<String> = match self.read_blob_raw() {
+                Ok(Some(bytes)) => {
+                    let json = String::from_utf8(bytes).unwrap_or_default();
+                    serde_json::from_str::<std::collections::HashMap<String, String>>(&json)
+                        .map(|m| m.into_keys().collect())
+                        .unwrap_or_default()
+                }
+                _ => vec![],
+            };
+
+            // Always include "identity" even if the blob is empty or absent —
+            // it may exist only as a legacy per-key entry.
+            let mut all_keys = blob_keys;
+            if !all_keys.contains(&"identity".to_string()) {
+                all_keys.push("identity".to_string());
+            }
+
+            // Steps 2 & 3: delete legacy per-key entries for every key.
+            for key in &all_keys {
+                #[cfg(target_os = "macos")]
+                let _ = delete_generic_password_options(dpk_opts(&self.service, key));
+                if let Ok(entry) = keyring_entry(&self.service, key) {
+                    let _ = entry.delete_credential();
+                }
+            }
+            // Step 2 (cont.): also delete the legacy DPK blob written by #1267.
+            #[cfg(target_os = "macos")]
+            let _ = delete_generic_password_options(dpk_opts(&self.service, BLOB_KEY));
+
+            // Step 4: delete the main blob entry.
             if let Ok(entry) = keyring_entry(&self.service, BLOB_KEY) {
                 match entry.delete_credential() {
                     Ok(()) | Err(keyring::Error::NoEntry) => {}
@@ -756,16 +796,12 @@ impl SecretStore {
                         return Err(format!("keyring unavailable: {e}"));
                     }
                     Err(e) => {
-                        // Non-fatal — log and continue; the blob is gone even if
-                        // the delete_credential call returned a non-standard error.
-                        eprintln!("buzz-desktop sign-out: keychain delete: {e}");
+                        eprintln!("buzz-desktop reset: keychain blob delete: {e}");
                     }
                 }
             }
-            // Best-effort: also remove any legacy DPK blob written by #1267.
-            #[cfg(target_os = "macos")]
-            let _ = delete_generic_password_options(dpk_opts(&self.service, BLOB_KEY));
-            // Clear the in-memory cache so subsequent calls see the clean state.
+
+            // Step 5: clear the in-memory cache.
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             *guard = None;
             Ok(())

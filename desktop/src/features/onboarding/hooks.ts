@@ -413,6 +413,9 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   // the session cannot access it. No in-app recovery is possible; the user
   // must unlock the keyring externally and relaunch. Mutually exclusive with lost.
   const identityLocked = identity?.locked === true;
+  // Boot-time Phase 2 reset failed — wipe was attempted but verification failed.
+  // The sentinel is preserved so the next relaunch retries automatically.
+  const identityResetFailed = identity?.resetFailed === true;
 
   // Sticky boot fact: once identity was lost at boot, this remains true for the
   // entire session. Per-component state in OnboardingFlow cannot carry this
@@ -516,15 +519,18 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     currentPubkey,
     flow,
     identityLost,
-    // keyring-locked is the highest-precedence stage: nothing in-session can
-    // clear a locked keyring, so this fully blocks the UI until relaunch.
+    // reset-failed is the highest-precedence stage: a failed boot-time reset
+    // means identity resolution was skipped entirely. Nothing can proceed until
+    // the user relaunches and the wipe retries.
     stage:
-      identityLocked && identityQuery.status === "success"
-        ? ("keyring-locked" as const)
-        : relaunchRequired
-          ? ("relaunch-required" as const)
-          : isCompletingWelcomeSetup
-            ? ("blocking" as const)
-            : onboardingGate.stage,
+      identityResetFailed && identityQuery.status === "success"
+        ? ("reset-failed" as const)
+        : identityLocked && identityQuery.status === "success"
+          ? ("keyring-locked" as const)
+          : relaunchRequired
+            ? ("relaunch-required" as const)
+            : isCompletingWelcomeSetup
+              ? ("blocking" as const)
+              : onboardingGate.stage,
   };
 }

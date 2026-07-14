@@ -36,12 +36,16 @@ pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> 
     let locked = state
         .keyring_locked
         .load(std::sync::atomic::Ordering::Acquire);
+    let reset_failed = state
+        .reset_failed
+        .load(std::sync::atomic::Ordering::Acquire);
 
     Ok(IdentityInfo {
         pubkey: pubkey_hex,
         display_name,
         lost,
         locked,
+        reset_failed,
     })
 }
 
@@ -220,6 +224,7 @@ pub async fn import_identity(
             display_name,
             lost: false,
             locked: false,
+            reset_failed: false,
         })
     })
     .await
@@ -287,21 +292,20 @@ pub async fn persist_current_identity(
             display_name,
             lost: false,
             locked: false,
+            reset_failed: false,
         })
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
-/// Wipe all local Buzz state and relaunch into first-run onboarding.
+/// Write a reset-intent sentinel and relaunch into Phase 2 (boot-time wipe).
 ///
-/// Deletes, in order: managed-agent processes, keychain blobs for all service
-/// names (prod + dev), App Support directories for all Buzz/Sprout bundle
-/// identifiers, matching WebKit directories, the agent nest, the legacy Sprout
-/// nest, the OAuth token cache, and the CLI symlinks. Then relaunches the app.
-///
-/// Called by the Sign Out action in Settings. The frontend confirms with an
-/// AlertDialog before invoking this.
+/// The actual data destruction is deferred to the next boot: `setup()` in
+/// `lib.rs` checks for the sentinel and performs the wipe before any migration
+/// or identity resolution. This two-phase design means a crash between now and
+/// the relaunch is safe — the sentinel persists and the wipe completes on the
+/// next open.
 ///
 /// Not available in shared-identity mode (`BUZZ_SHARE_IDENTITY=1`): the key
 /// comes from an env var, not the keychain, so wiping would have no effect and
@@ -312,74 +316,26 @@ pub async fn sign_out(app: tauri::AppHandle) -> Result<(), String> {
         return Err("sign-out is not available in shared-identity mode".to_string());
     }
 
-    // Stop all managed agents before touching the directories they write into.
+    // Stop all managed agents before restart so they don't race the wipe.
     if let Err(e) = crate::shutdown::shutdown_managed_agents(&app) {
         eprintln!("buzz-desktop sign-out: agent shutdown: {e}");
     }
 
-    // Wipe keychain blobs for the prod and dev service names.
-    for service in &["buzz-desktop", "buzz-desktop-dev"] {
-        let store = crate::secret_store::SecretStore::keyring(*service);
-        if let Err(e) = store.delete_all() {
-            eprintln!("buzz-desktop sign-out: keychain wipe ({service}): {e}");
-        }
-    }
+    // Write the reset sentinel — destruction happens on next boot.
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    crate::reset::write_sentinel(&data_dir)?;
 
-    // Remove all App Support and WebKit directories whose names begin with one
-    // of the known Buzz or legacy Sprout bundle-identifier prefixes. The prefix
-    // scan catches dev-worktree variants (e.g. `xyz.block.buzz.app.dev.my-branch`)
-    // without hardcoding every possible suffix.
-    if let Ok(app_data_dir) = app.path().app_data_dir() {
-        if let Some(support_root) = app_data_dir.parent() {
-            for prefix in &["xyz.block.buzz.app", "xyz.block.sprout.app"] {
-                remove_dirs_with_prefix(support_root, prefix);
-            }
-            // ~/Library/WebKit is a sibling of ~/Library/Application Support.
-            if let Some(webkit_root) = support_root.parent().map(|p| p.join("WebKit")) {
-                for prefix in &["xyz.block.buzz.app", "xyz.block.sprout.app"] {
-                    remove_dirs_with_prefix(&webkit_root, prefix);
-                }
-            }
-        }
-    }
+    // Attempt relaunch — if it fails, the sentinel is already written,
+    // so a manual reopen completes the reset.
+    let exe = std::env::current_exe().map_err(|e| format!("cannot find executable: {e}"))?;
+    std::process::Command::new(&exe)
+        .spawn()
+        .map_err(|e| format!("relaunch failed: {e}"))?;
 
-    // Remove the agent nest for the running build, plus the legacy Sprout nest.
-    if let Some(nest) = crate::managed_agents::nest_dir() {
-        let _ = std::fs::remove_dir_all(&nest);
-    }
-    if let Ok(home) = app.path().home_dir() {
-        let _ = std::fs::remove_dir_all(home.join(".sprout"));
-        // OAuth token cache written by buzz-agent Databricks PKCE flow.
-        let _ = std::fs::remove_dir_all(home.join(".config").join("buzz-agent"));
-        // CLI symlinks recreated automatically on the next launch.
-        let _ = std::fs::remove_file(home.join(".local").join("bin").join("buzz"));
-        let _ = std::fs::remove_file(home.join(".local").join("bin").join("buzz-dev"));
-    }
-
-    // Relaunch into fresh onboarding. Mirror what tauri-plugin-process::restart
-    // does: spawn a new instance then exit. The new process starts with a clean
-    // keychain and an empty App Support dir, lands on first-run onboarding, and
-    // generates a fresh keypair.
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(&exe).spawn();
-    }
     std::process::exit(0);
-}
-
-/// Remove every immediate child of `parent` whose name starts with `prefix`.
-fn remove_dirs_with_prefix(parent: &std::path::Path, prefix: &str) {
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|n| n.starts_with(prefix))
-        {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
-    }
 }
 
 fn nostr_bind_tag(name: &str, value: &str) -> Result<Tag, String> {

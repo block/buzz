@@ -117,6 +117,10 @@ export type Identity = {
    *  the user must unlock the keyring externally and relaunch.
    *  Mutually exclusive with `lost`. */
   locked?: boolean;
+  /** True when the boot-time Phase 2 reset attempted a wipe but verification
+   *  failed. Identity resolution was skipped; the sentinel is preserved so
+   *  the next relaunch retries the wipe automatically. */
+  resetFailed?: boolean;
 };
 
 export type Profile = {

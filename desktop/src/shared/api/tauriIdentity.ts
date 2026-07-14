@@ -6,6 +6,7 @@ type RawIdentity = {
   display_name: string;
   lost?: boolean;
   locked?: boolean;
+  reset_failed?: boolean;
 };
 
 function fromRawIdentity(raw: RawIdentity): Identity {
@@ -14,6 +15,7 @@ function fromRawIdentity(raw: RawIdentity): Identity {
     displayName: raw.display_name,
     lost: raw.lost === true,
     locked: raw.locked === true,
+    resetFailed: raw.reset_failed === true,
   };
 }
 
