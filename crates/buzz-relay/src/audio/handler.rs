@@ -244,6 +244,20 @@ async fn handle_audio_connection(
     let mut acquired_lease: Option<crate::audio::join::HuddleLease> = None;
     match state.mesh() {
         Some(mesh) => {
+            if mesh.owners.is_draining() {
+                let _ = ws_send
+                    .send(WsMessage::Text(
+                        serde_json::json!({
+                            "type": "error",
+                            "code": "huddle_relay_draining",
+                            "message": "relay is draining; reconnect"
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await;
+                return;
+            }
             match crate::audio::join::resolve_join_owner_ready(
                 &mesh.directory,
                 tenant.community(),
@@ -358,53 +372,107 @@ async fn handle_audio_connection(
         return;
     }
 
-    let (peer_id, peer_index, audio_rx, peer_ctrl_rx) = match room
-        .add_peer(pubkey_hex.clone(), requested_version)
+    // Remote registration happens before ingress admission. The owner-assigned
+    // index is therefore the only index this client ever has; no frame or
+    // `joined` message can escape with an ingress-local placeholder.
+    let mut remote_session: Option<crate::audio::join::RemoteHuddleSession> = None;
+    let mut remote_stream: Option<buzz_relay_mesh::MeshStream> = None;
+    let mut remote_fence: Option<Arc<crate::audio::mesh::GenerationFloor>> = None;
+    if let (Some(mesh), Some(crate::audio::join::JoinOutcome::RemoteOwner { .. })) =
+        (state.mesh(), pending_remote)
     {
-        Ok(v) => v,
-        Err(crate::audio::room::AdmissionError::Full) => {
-            warn!(channel_id = %channel_id, "audio room full (255 peers exhausted)");
-            let _ = ws_send
+        let outcome = pending_remote.expect("RemoteOwner matched above");
+        let fenced = outcome.fenced_header(channel_id, mesh.local_runtime_id);
+        let crate::audio::join::JoinOutcome::RemoteOwner {
+            owner_runtime_id, ..
+        } = outcome
+        else {
+            unreachable!("matched RemoteOwner above");
+        };
+        match crate::audio::join::dial_remote_owner(
+            Arc::clone(&mesh.transport),
+            mesh.local_runtime_id,
+            owner_runtime_id,
+            fenced,
+            tenant.community(),
+            pubkey_hex.clone(),
+            requested_version,
+        )
+        .await
+        {
+            Ok((session, stream)) => {
+                remote_session = Some(session);
+                remote_stream = Some(stream);
+                remote_fence = Some(Arc::clone(&mesh.audio_fence));
+            }
+            Err(crate::audio::join::DialError::Rejected(reason)) => {
+                warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "huddle owner rejected registration: {reason:?}");
+                let _ = ws_send
                     .send(WsMessage::Text(
-                        serde_json::json!({"type":"error","code":"room_full","message":"peer index space exhausted"})
-                            .to_string().into(),
+                        remote_rejection_ws_error(&reason).to_string().into(),
                     ))
                     .await;
-            return;
-        }
-        Err(crate::audio::room::AdmissionError::Ended) => {
-            debug!(channel_id = %channel_id, "room ended before admission");
-            let _ = ws_send
-                    .send(WsMessage::Text(
-                        serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"})
-                            .to_string().into(),
-                    ))
-                    .await;
-            return;
-        }
-        Err(crate::audio::room::AdmissionError::VersionMismatch { pinned, requested }) => {
-            info!(
-                channel_id = %channel_id,
-                pubkey = %pubkey_hex,
-                pinned,
-                requested,
-                "audio: protocol version mismatch — upgrade required"
-            );
-            let _ = ws_send
+                state.audio_rooms.cleanup_if_empty(channel_id);
+                return;
+            }
+            Err(crate::audio::join::DialError::Mesh(e)) => {
+                warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "huddle owner registration failed: {e}");
+                let _ = ws_send
                     .send(WsMessage::Text(
                         serde_json::json!({
-                            "type": "error",
-                            "code": "upgrade_required",
-                            "message": format!(
-                                "this huddle is using audio protocol v{pinned}; your client requested v{requested}"
-                            ),
-                            "pinned_version": pinned,
-                            "requested_version": requested,
+                            "type": "error", "code": "huddle_owner_unreachable",
+                            "message": "could not reach the huddle owner"
                         })
                         .to_string()
                         .into(),
                     ))
                     .await;
+                state.audio_rooms.cleanup_if_empty(channel_id);
+                return;
+            }
+        }
+    }
+
+    let admission = if let Some(session) = remote_session.as_ref() {
+        room.add_peer_at_index(pubkey_hex.clone(), requested_version, session.peer_index())
+            .map(|(id, audio, ctrl)| (id, session.peer_index(), audio, ctrl))
+    } else {
+        room.add_peer(pubkey_hex.clone(), requested_version)
+    };
+    let (peer_id, peer_index, audio_rx, peer_ctrl_rx) = match admission {
+        Ok(v) => v,
+        Err(crate::audio::room::AdmissionError::Full) => {
+            warn!(channel_id = %channel_id, "audio room full (255 peers exhausted)");
+            let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_full","message":"peer index space exhausted"}).to_string().into())).await;
+            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
+            {
+                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+                    .await;
+            }
+            return;
+        }
+        Err(crate::audio::room::AdmissionError::Ended) => {
+            debug!(channel_id = %channel_id, "room ended before admission");
+            let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"}).to_string().into())).await;
+            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
+            {
+                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+                    .await;
+            }
+            return;
+        }
+        Err(crate::audio::room::AdmissionError::VersionMismatch { pinned, requested }) => {
+            info!(channel_id = %channel_id, pubkey = %pubkey_hex, pinned, requested, "audio: protocol version mismatch — upgrade required");
+            let _ = ws_send.send(WsMessage::Text(serde_json::json!({
+                "type": "error", "code": "upgrade_required",
+                "message": format!("this huddle is using audio protocol v{pinned}; your client requested v{requested}"),
+                "pinned_version": pinned, "requested_version": requested,
+            }).to_string().into())).await;
+            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
+            {
+                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+                    .await;
+            }
             return;
         }
     };
@@ -462,91 +530,21 @@ async fn handle_audio_connection(
         }
     }
 
-    // Non-owner path: the huddle is owned by another pod. Register this client
-    // with the owner over a `HuddleControl` stream so the owner fans media back
-    // to us; the returned session forwards the client's Opus to the owner. A
-    // fence/admission rejection from the owner is surfaced to the client as the
-    // same WS error a same-pod join would produce — never a silent media drop.
-    //
-    // NOTE (roster sync): cross-pod roster fan-out (the owner's full participant
-    // list reflected to this client) is the next increment; today this pod's
-    // local `joined`/`peers` reflect only co-located peers. The media + fence
-    // path is complete and correct; roster consistency lands with the owner's
-    // roster-delta messages over the same `HuddleControl` stream.
-    let mut remote_session: Option<crate::audio::join::RemoteHuddleSession> = None;
-    let mut remote_stream: Option<buzz_relay_mesh::MeshStream> = None;
-    let mut remote_fence: Option<Arc<crate::audio::mesh::GenerationFloor>> = None;
-    if let (Some(mesh), Some(crate::audio::join::JoinOutcome::RemoteOwner { .. })) =
-        (state.mesh(), pending_remote)
-    {
-        let outcome = pending_remote.expect("RemoteOwner matched above");
-        let fenced = outcome.fenced_header(channel_id, mesh.local_runtime_id);
-        let crate::audio::join::JoinOutcome::RemoteOwner {
-            owner_runtime_id, ..
-        } = outcome
-        else {
-            unreachable!("matched RemoteOwner above");
-        };
-        match crate::audio::join::dial_remote_owner(
-            Arc::clone(&mesh.transport),
-            mesh.local_runtime_id,
-            owner_runtime_id,
-            fenced,
-            tenant.community(),
-            pubkey_hex.clone(),
-            requested_version,
-        )
-        .await
-        {
-            Ok((session, stream)) => {
-                remote_session = Some(session);
-                remote_stream = Some(stream);
-                remote_fence = Some(Arc::clone(&mesh.audio_fence));
-            }
-            Err(crate::audio::join::DialError::Rejected(reason)) => {
-                warn!(
-                    channel_id = %channel_id,
-                    pubkey = %pubkey_hex,
-                    "huddle owner rejected registration: {reason:?}"
-                );
-                let _ = ws_send
-                    .send(WsMessage::Text(
-                        remote_rejection_ws_error(&reason).to_string().into(),
-                    ))
-                    .await;
-                room.remove_peer(peer_id);
-                state.audio_rooms.cleanup_if_empty(channel_id);
-                return;
-            }
-            Err(crate::audio::join::DialError::Mesh(e)) => {
-                warn!(
-                    channel_id = %channel_id,
-                    pubkey = %pubkey_hex,
-                    "huddle owner registration failed: {e}"
-                );
-                let _ = ws_send
-                    .send(WsMessage::Text(
-                        serde_json::json!({
-                            "type": "error",
-                            "code": "huddle_owner_unreachable",
-                            "message": "could not reach the huddle owner"
-                        })
-                        .to_string()
-                        .into(),
-                    ))
-                    .await;
-                room.remove_peer(peer_id);
-                state.audio_rooms.cleanup_if_empty(channel_id);
-                return;
-            }
-        }
-    }
+    // Remote registration and owner-assigned ingress admission completed above.
 
-    let peers_snapshot: Vec<serde_json::Value> = room
-        .peer_pubkeys()
-        .into_iter()
-        .map(|(pk, idx)| serde_json::json!({"pubkey": pk, "peer_index": idx}))
-        .collect();
+    let peers_snapshot: Vec<serde_json::Value> = if let Some(session) = remote_session.as_ref() {
+        session
+            .roster()
+            .peers
+            .iter()
+            .map(|peer| serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index}))
+            .collect()
+    } else {
+        room.peer_pubkeys()
+            .into_iter()
+            .map(|(pk, idx)| serde_json::json!({"pubkey": pk, "peer_index": idx}))
+            .collect()
+    };
 
     let joined_msg = serde_json::json!({
         "type": "joined",
@@ -556,7 +554,19 @@ async fn handle_audio_connection(
     })
     .to_string();
 
-    room.broadcast_control(joined_msg);
+    if remote_session.is_some() {
+        if ws_send
+            .send(WsMessage::Text(joined_msg.into()))
+            .await
+            .is_err()
+        {
+            room.remove_peer(peer_id);
+            state.audio_rooms.cleanup_if_empty(channel_id);
+            return;
+        }
+    } else {
+        room.broadcast_control(joined_msg);
+    }
 
     // ── Step 6: emit kind:48101 (PARTICIPANT_JOINED) ──────────────────────────
     emit_participant_event(
@@ -614,9 +624,20 @@ async fn handle_audio_connection(
             .expect("remote_session set whenever remote_stream is")
             .pubkey()
             .to_string();
+        let roster_revision = remote_session
+            .as_ref()
+            .expect("remote_session set whenever remote_stream is")
+            .roster()
+            .revision;
+        let roster_ctrl_tx = ctrl_tx.clone();
         tokio::spawn(async move {
             tokio::select! {
-                cause = crate::audio::join::read_teardown_cause(&mut stream) => {
+                cause = crate::audio::join::read_owner_control(
+                    &mut stream,
+                    fenced,
+                    roster_revision,
+                    &roster_ctrl_tx,
+                ) => {
                     teardown_remote_huddle(cause, channel_id, &reader_cancel, &fence);
                 }
                 _ = reader_cancel.cancelled() => {
@@ -703,14 +724,18 @@ async fn handle_audio_connection(
         let _ = owner_teardown_task.await;
     }
 
-    // Atomic remove + end check: remove_peer_and_check_ended holds the
+    // Atomic owner remove + end check: remove_peer_and_check_ended holds the
     // AdmissionGuard lock across index recycling AND the is_empty + ended=true
-    // check. This is the SAME lock that add_peer holds across its ended check
-    // + insert. So they are mutually exclusive — no concurrent add_peer can
-    // succeed between the removal and the ended flag being set.
-    let (_, should_auto_end) = room
-        .remove_peer_and_check_ended(peer_id)
-        .unwrap_or((peer_index, false));
+    // check. Ingress mirrors never archive authoritative huddle state; they
+    // remove locally and let the owner decide room lifetime.
+    let should_auto_end = if remote_session.is_some() {
+        room.remove_peer(peer_id);
+        false
+    } else {
+        room.remove_peer_and_check_ended(peer_id)
+            .map(|(_, ended)| ended)
+            .unwrap_or(false)
+    };
 
     let left_msg = serde_json::json!({
         "type": "left",
@@ -718,7 +743,9 @@ async fn handle_audio_connection(
         "peer_index": peer_index,
     })
     .to_string();
-    room.broadcast_control(left_msg);
+    if remote_session.is_none() {
+        room.broadcast_control(left_msg);
+    }
 
     emit_participant_event(
         &state,

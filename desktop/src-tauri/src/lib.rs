@@ -34,6 +34,7 @@ use deep_link::handle_deep_link_url;
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
 };
+use huddle::reconnect::reconnect_huddle_audio;
 use huddle::{
     add_agent_to_huddle, check_pipeline_hotstart, confirm_huddle_active, download_voice_models,
     end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status, get_voice_input_mode,
@@ -832,6 +833,7 @@ pub fn run() {
             end_huddle,
             get_huddle_state,
             push_audio_pcm,
+            reconnect_huddle_audio,
             start_stt_pipeline,
             set_huddle_transcription_enabled,
             download_voice_models,

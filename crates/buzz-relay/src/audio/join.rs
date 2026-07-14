@@ -51,7 +51,9 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::mesh::spawn_remote_peer_sink;
-use super::room::{AdmissionError, AudioRoomManager};
+use super::room::{
+    AdmissionError, AudioRoomManager, Room, RosterDelta as RoomRosterDelta, RosterPeer,
+};
 use crate::tunnel::directory::{ReleaseResult, RenewResult, SessionDirectory, SessionLease};
 
 /// The slice of the Redis fenced session directory the huddle join path needs.
@@ -580,6 +582,7 @@ fn spawn_huddle_renewer_with_interval<D: HuddleDirectory + ?Sized + 'static>(
 #[derive(Default)]
 pub struct HuddleOwnerRegistry {
     entries: DashMap<Uuid, HuddleOwnerEntry>,
+    draining: std::sync::atomic::AtomicBool,
 }
 
 struct HuddleOwnerEntry {
@@ -615,6 +618,12 @@ impl HuddleOwnerRegistry {
     /// Empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether this runtime has begun shutdown drain. Once true, new huddle
+    /// owner admissions fail closed even if they raced an earlier Redis lookup.
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The room's owner-loss signal, or `None` when this pod holds no live
@@ -659,6 +668,17 @@ impl HuddleOwnerRegistry {
         directory: Arc<D>,
         lease: HuddleLease,
     ) -> HuddleOwnerSignals {
+        if self.is_draining() {
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            spawn_observable_huddle_renewer(directory, lease, cancel);
+            let draining = CancellationToken::new();
+            draining.cancel();
+            return HuddleOwnerSignals {
+                lost: CancellationToken::new(),
+                draining,
+            };
+        }
         let generation = lease.generation();
         if let Some(existing) = self.entries.get(&session_id) {
             // A live entry already owns this room; release our extra lease
@@ -680,10 +700,26 @@ impl HuddleOwnerRegistry {
             HuddleOwnerEntry {
                 lost: lost.clone(),
                 draining: draining.clone(),
-                cancel,
+                cancel: cancel.clone(),
                 generation,
             },
         );
+        // Close the check→insert race with drain_all(): if shutdown began after
+        // the first check but before publication, retract this exact epoch and
+        // release its lease. A newer epoch, if any, is generation-fenced.
+        if self.is_draining() {
+            self.entries.remove_if(&session_id, |_, entry| {
+                if entry.generation == generation {
+                    entry.draining.cancel();
+                    entry.cancel.cancel();
+                    true
+                } else {
+                    false
+                }
+            });
+            draining.cancel();
+            cancel.cancel();
+        }
         HuddleOwnerSignals { lost, draining }
     }
 
@@ -727,6 +763,8 @@ impl HuddleOwnerRegistry {
     /// choreography after readiness has flipped and mesh membership is marked
     /// draining. Each individual room remains generation-fenced by [`Self::drain`].
     pub fn drain_all(&self) -> usize {
+        self.draining
+            .store(true, std::sync::atomic::Ordering::Release);
         let rooms: Vec<(Uuid, u64)> = self
             .entries
             .iter()
@@ -793,7 +831,29 @@ pub enum HuddleControlMsg {
         /// Owner-allocated 0..=254 index; the sole allocator is the owner, so
         /// indices never collide across pods.
         peer_index: u8,
+        /// Complete authoritative roster after this admission. This is in the
+        /// registration reply so no media/client identity can precede it.
+        roster: RosterSnapshot,
     },
+    /// Owner → non-owner: complete authoritative state at `revision`.
+    RosterSnapshot {
+        /// Owner-monotonic roster revision.
+        revision: u64,
+        /// Complete authoritative participants.
+        peers: Vec<RosterEntry>,
+    },
+    /// Owner → non-owner: one ordered roster mutation. A revision gap is
+    /// recovered by `RosterResync`, never applied speculatively.
+    RosterDelta {
+        /// Owner-monotonic roster revision.
+        revision: u64,
+        /// Newly admitted peer, when this is a join.
+        joined: Option<RosterEntry>,
+        /// Removed peer, when this is a leave.
+        left: Option<RosterEntry>,
+    },
+    /// Non-owner → owner: request a complete snapshot after detecting a gap.
+    RosterResync,
     /// Owner → non-owner: registration refused. Surfaced to the client as a
     /// join error (e.g. `room_full`, `upgrade_required`, or a fence rejection),
     /// never a silent media drop.
@@ -811,6 +871,33 @@ pub enum HuddleControlMsg {
         /// Pubkey of the departing client.
         pubkey: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One participant in the authoritative owner roster.
+pub struct RosterEntry {
+    /// Nostr pubkey hex.
+    pub pubkey: String,
+    /// Owner-assigned media routing index.
+    pub peer_index: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Complete authoritative roster at one owner revision.
+pub struct RosterSnapshot {
+    /// Owner-monotonic roster revision.
+    pub revision: u64,
+    /// Complete participants at this revision.
+    pub peers: Vec<RosterEntry>,
+}
+
+impl From<RosterPeer> for RosterEntry {
+    fn from(peer: RosterPeer) -> Self {
+        Self {
+            pubkey: peer.pubkey,
+            peer_index: peer.peer_index,
+        }
+    }
 }
 
 /// Why an owner refused a remote-peer registration. Mirrors the single-pod
@@ -1040,6 +1127,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         // Community (raw UUID) latched from the first RegisterPeer; every later
         // frame must agree. `None` until the first register arrives.
         let mut stream_community: Option<Uuid> = None;
+        let mut roster_rx: Option<tokio::sync::broadcast::Receiver<RoomRosterDelta>> = None;
 
         // Owner teardown latch: set when `lost`/`draining` fires so teardown
         // sends the matching proactive Goodbye. A stream faulting on its own
@@ -1061,6 +1149,12 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                     None => std::future::pending().await,
                 }
             };
+            let roster_event = async {
+                match &mut roster_rx {
+                    Some(rx) => Some(rx.recv().await),
+                    None => std::future::pending().await,
+                }
+            };
             let frame = tokio::select! {
                 _ = drain_fired => {
                     teardown_reason = Some(GoodbyeReason::Draining);
@@ -1069,6 +1163,26 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 _ = lost_fired => {
                     teardown_reason = Some(GoodbyeReason::StaleGeneration);
                     break Ok(());
+                }
+                event = roster_event => {
+                    let Some(event) = event else {
+                        continue;
+                    };
+                    let msg = match event {
+                        Ok(delta) => roster_delta_msg(delta),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let Some(room) = self.rooms.get(session_id) else {
+                                break Ok(());
+                            };
+                            roster_snapshot_msg(&room)
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break Ok(()),
+                    };
+                    stream.send_frame(MeshStreamFrame::Data {
+                        fenced,
+                        payload: encode_control(&msg)?,
+                    }).await?;
+                    continue;
                 }
                 frame = stream.recv_frame() => frame,
             };
@@ -1127,9 +1241,18 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                     // client sees the same taxonomy a same-pod join would. A
                     // *non-fence* validate error (Redis unreachable, decode) is
                     // not a clean rejection — it tears the stream down.
+                    if self.owners.is_draining() {
+                        teardown_reason = Some(GoodbyeReason::Draining);
+                        break Ok(());
+                    }
+                    let room = self.rooms.get_or_create(session_id);
+                    // Subscribe before admission; PeerRegistered carries a
+                    // snapshot after admission, and queued deltas at or below
+                    // that revision are ignored by the receiver.
+                    let new_roster_rx = room.subscribe_roster();
                     let reply = match self.directory.validate(community, &fenced).await {
                         Ok(()) => self.register_remote_peer(
-                            session_id,
+                            Arc::clone(&room),
                             fenced,
                             from,
                             &pubkey,
@@ -1153,17 +1276,44 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                     {
                         break Err(e);
                     }
+                    if matches!(reply, HuddleControlMsg::PeerRegistered { .. }) {
+                        roster_rx = Some(new_roster_rx);
+                    }
                 }
                 HuddleControlMsg::UnregisterPeer { pubkey } => {
                     if let Some(peer_id) = registered.remove(&pubkey) {
                         if let Some(room) = self.rooms.get(session_id) {
+                            let peer_index = room.peers.get(&peer_id).map(|peer| peer.peer_index);
                             room.remove_peer(peer_id);
+                            if let Some(peer_index) = peer_index {
+                                room.broadcast_control(
+                                    serde_json::json!({
+                                        "type": "left",
+                                        "pubkey": pubkey,
+                                        "peer_index": peer_index,
+                                    })
+                                    .to_string(),
+                                );
+                            }
                         }
                     }
+                }
+                HuddleControlMsg::RosterResync => {
+                    let Some(room) = self.rooms.get(session_id) else {
+                        break Ok(());
+                    };
+                    stream
+                        .send_frame(MeshStreamFrame::Data {
+                            fenced,
+                            payload: encode_control(&roster_snapshot_msg(&room))?,
+                        })
+                        .await?;
                 }
                 // Owner→non-owner replies never arrive on the owner's accept
                 // side; a peer sending one is a protocol violation.
                 HuddleControlMsg::PeerRegistered { .. }
+                | HuddleControlMsg::RosterSnapshot { .. }
+                | HuddleControlMsg::RosterDelta { .. }
                 | HuddleControlMsg::RegisterRejected { .. } => {
                     break Err(MeshError::Transport(
                         "huddle-control owner received an owner→non-owner reply".into(),
@@ -1186,8 +1336,19 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         // the loop ended. Dropping the peer drops its `audio_tx`, which ends the
         // matching `spawn_remote_peer_sink` task.
         if let Some(room) = self.rooms.get(session_id) {
-            for (_pubkey, peer_id) in registered {
+            for (pubkey, peer_id) in registered {
+                let peer_index = room.peers.get(&peer_id).map(|peer| peer.peer_index);
                 room.remove_peer(peer_id);
+                if let Some(peer_index) = peer_index {
+                    room.broadcast_control(
+                        serde_json::json!({
+                            "type": "left",
+                            "pubkey": pubkey,
+                            "peer_index": peer_index,
+                        })
+                        .to_string(),
+                    );
+                }
             }
         }
         result
@@ -1197,14 +1358,13 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
     /// to the registering pod as datagrams. Returns the reply to send.
     fn register_remote_peer(
         &self,
-        session_id: Uuid,
+        room: Arc<Room>,
         fenced: FencedHeader,
         from: RuntimeId,
         pubkey: &str,
         protocol_version: u8,
         registered: &mut std::collections::HashMap<String, Uuid>,
     ) -> HuddleControlMsg {
-        let room = self.rooms.get_or_create(session_id);
         match room.add_peer(pubkey.to_string(), protocol_version) {
             Ok((peer_id, peer_index, audio_rx, _peer_ctrl_rx)) => {
                 registered.insert(pubkey.to_string(), peer_id);
@@ -1212,9 +1372,18 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 // the sink drains `audio_rx` and ships each frame as a datagram
                 // to the pod that hosts the client.
                 spawn_remote_peer_sink(Arc::clone(&self.transport), from, fenced, audio_rx);
+                let joined = serde_json::json!({
+                    "type": "joined",
+                    "pubkey": pubkey,
+                    "peer_index": peer_index,
+                    "peers": [{"pubkey": pubkey, "peer_index": peer_index}],
+                })
+                .to_string();
+                room.broadcast_control(joined);
                 HuddleControlMsg::PeerRegistered {
                     pubkey: pubkey.to_string(),
                     peer_index,
+                    roster: roster_snapshot(&room),
                 }
             }
             Err(reason) => HuddleControlMsg::RegisterRejected {
@@ -1222,6 +1391,30 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 reason: admission_to_rejection(reason),
             },
         }
+    }
+}
+
+fn roster_snapshot(room: &Room) -> RosterSnapshot {
+    let snapshot = room.roster_snapshot();
+    RosterSnapshot {
+        revision: snapshot.revision,
+        peers: snapshot.peers.into_iter().map(Into::into).collect(),
+    }
+}
+
+fn roster_snapshot_msg(room: &Room) -> HuddleControlMsg {
+    let snapshot = roster_snapshot(room);
+    HuddleControlMsg::RosterSnapshot {
+        revision: snapshot.revision,
+        peers: snapshot.peers,
+    }
+}
+
+fn roster_delta_msg(delta: RoomRosterDelta) -> HuddleControlMsg {
+    HuddleControlMsg::RosterDelta {
+        revision: delta.revision,
+        joined: delta.joined.map(Into::into),
+        left: delta.left.map(Into::into),
     }
 }
 
@@ -1263,6 +1456,8 @@ pub struct RemoteHuddleSession {
     /// The owner-allocated peer index this client occupies in the owner's room.
     /// Stamped on every media datagram so the owner attributes frames correctly.
     peer_index: u8,
+    /// Latest complete authoritative owner roster.
+    roster: RosterSnapshot,
     /// Fenced header for this session's owner epoch; every datagram carries it.
     fenced: FencedHeader,
     /// The pod that owns the huddle.
@@ -1308,6 +1503,95 @@ impl HuddleTeardownCause {
             GoodbyeReason::StaleGeneration => Self::OwnerLost,
             GoodbyeReason::Draining => Self::OwnerDraining,
             GoodbyeReason::SessionEnded => Self::SessionEnded,
+        }
+    }
+}
+
+/// Forward authoritative roster control to one ingress client until teardown.
+/// Revision gaps trigger a snapshot resync request before any newer delta is applied.
+pub async fn read_owner_control(
+    stream: &mut MeshStream,
+    fenced: FencedHeader,
+    mut revision: u64,
+    ctrl_tx: &tokio::sync::mpsc::Sender<axum::extract::ws::Message>,
+) -> HuddleTeardownCause {
+    loop {
+        match stream.recv_frame().await {
+            Ok(Some(MeshStreamFrame::Goodbye { reason, .. })) => {
+                return HuddleTeardownCause::from_goodbye(reason);
+            }
+            Ok(Some(MeshStreamFrame::Data { payload, .. })) => match decode_control(&payload) {
+                Ok(HuddleControlMsg::RosterSnapshot {
+                    revision: next,
+                    peers,
+                }) => {
+                    revision = next;
+                    let json = serde_json::json!({
+                        "type": "roster", "revision": revision,
+                        "peers": peers.into_iter().map(|p| serde_json::json!({
+                            "pubkey": p.pubkey, "peer_index": p.peer_index,
+                        })).collect::<Vec<_>>()
+                    })
+                    .to_string();
+                    if ctrl_tx
+                        .send(axum::extract::ws::Message::Text(json.into()))
+                        .await
+                        .is_err()
+                    {
+                        return HuddleTeardownCause::SessionEnded;
+                    }
+                }
+                Ok(HuddleControlMsg::RosterDelta {
+                    revision: next,
+                    joined,
+                    left,
+                }) if next == revision.wrapping_add(1) => {
+                    revision = next;
+                    let json = if let Some(peer) = joined {
+                        serde_json::json!({
+                            "type": "joined", "revision": revision,
+                            "pubkey": peer.pubkey, "peer_index": peer.peer_index,
+                            "peers": [{"pubkey": peer.pubkey, "peer_index": peer.peer_index}],
+                        })
+                    } else if let Some(peer) = left {
+                        serde_json::json!({
+                            "type": "left", "revision": revision,
+                            "pubkey": peer.pubkey, "peer_index": peer.peer_index,
+                        })
+                    } else {
+                        continue;
+                    };
+                    if ctrl_tx
+                        .send(axum::extract::ws::Message::Text(json.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return HuddleTeardownCause::SessionEnded;
+                    }
+                }
+                Ok(HuddleControlMsg::RosterDelta { revision: next, .. }) if next <= revision => {}
+                Ok(HuddleControlMsg::RosterDelta { .. }) => {
+                    let payload = match encode_control(&HuddleControlMsg::RosterResync) {
+                        Ok(payload) => payload,
+                        Err(_) => return HuddleTeardownCause::StreamClosed,
+                    };
+                    if stream
+                        .send_frame(MeshStreamFrame::Data { fenced, payload })
+                        .await
+                        .is_err()
+                    {
+                        return HuddleTeardownCause::StreamClosed;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => debug!(owner_stream_error = %e, "invalid huddle owner control"),
+            },
+            Ok(Some(_)) => continue,
+            Ok(None) => return HuddleTeardownCause::StreamClosed,
+            Err(e) => {
+                debug!(owner_stream_error = %e, "huddle owner stream ended abnormally");
+                return HuddleTeardownCause::StreamClosed;
+            }
         }
     }
 }
@@ -1396,9 +1680,12 @@ pub async fn dial_remote_owner(
 
     match stream.recv_frame().await? {
         Some(MeshStreamFrame::Data { payload, .. }) => match decode_control(&payload)? {
-            HuddleControlMsg::PeerRegistered { peer_index, .. } => Ok((
+            HuddleControlMsg::PeerRegistered {
+                peer_index, roster, ..
+            } => Ok((
                 RemoteHuddleSession {
                     peer_index,
+                    roster,
                     fenced,
                     owner,
                     pubkey,
@@ -1429,6 +1716,11 @@ impl RemoteHuddleSession {
     /// The owner-assigned index this client occupies in the owner's room.
     pub fn peer_index(&self) -> u8 {
         self.peer_index
+    }
+
+    /// Complete authoritative roster returned atomically with registration.
+    pub fn roster(&self) -> &RosterSnapshot {
+        &self.roster
     }
 
     /// The session fence — used by the reader task to author the closing
@@ -1730,7 +2022,23 @@ mod tests {
             HuddleControlMsg::PeerRegistered {
                 pubkey: "abc123".into(),
                 peer_index: 42,
+                roster: RosterSnapshot {
+                    revision: 1,
+                    peers: vec![RosterEntry {
+                        pubkey: "abc123".into(),
+                        peer_index: 42,
+                    }],
+                },
             },
+            HuddleControlMsg::RosterDelta {
+                revision: 2,
+                joined: None,
+                left: Some(RosterEntry {
+                    pubkey: "abc123".into(),
+                    peer_index: 42,
+                }),
+            },
+            HuddleControlMsg::RosterResync,
             HuddleControlMsg::RegisterRejected {
                 pubkey: "abc123".into(),
                 reason: RegisterRejection::VersionMismatch {
@@ -1791,6 +2099,70 @@ mod tests {
         let owner = MeshStream::new(Box::new(ChanSend(a_tx)), Box::new(ChanRecv(b_rx)));
         let client = MeshStream::new(Box::new(ChanSend(b_tx)), Box::new(ChanRecv(a_rx)));
         (owner, client)
+    }
+
+    #[tokio::test]
+    async fn roster_revision_gap_requests_resync_before_forwarding_new_state() {
+        let session_id = Uuid::new_v4();
+        let fenced = fenced_owned_by(rt(1), session_id);
+        let (mut owner, mut client) = stream_pair();
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel(4);
+        let reader =
+            tokio::spawn(async move { read_owner_control(&mut client, fenced, 1, &ctrl_tx).await });
+
+        owner
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::RosterDelta {
+                    revision: 3,
+                    joined: Some(RosterEntry {
+                        pubkey: "bob".into(),
+                        peer_index: 7,
+                    }),
+                    left: None,
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+
+        let request = owner.recv_frame().await.unwrap().unwrap();
+        let MeshStreamFrame::Data { payload, .. } = request else {
+            panic!("expected roster resync request");
+        };
+        assert_eq!(
+            decode_control(&payload).unwrap(),
+            HuddleControlMsg::RosterResync
+        );
+        assert!(
+            ctrl_rx.try_recv().is_err(),
+            "gapped delta was not forwarded"
+        );
+
+        owner
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::RosterSnapshot {
+                    revision: 3,
+                    peers: vec![RosterEntry {
+                        pubkey: "bob".into(),
+                        peer_index: 7,
+                    }],
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let message = ctrl_rx.recv().await.expect("replacement roster forwarded");
+        let axum::extract::ws::Message::Text(json) = message else {
+            panic!("expected roster JSON");
+        };
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(json["type"], "roster");
+        assert_eq!(json["revision"], 3);
+
+        drop(owner);
+        assert_eq!(reader.await.unwrap(), HuddleTeardownCause::StreamClosed);
     }
 
     /// Transport whose only exercised method is a no-op `send_datagram` (the
@@ -1880,6 +2252,69 @@ mod tests {
         client.finish().unwrap();
         drop(client);
         served.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn abnormal_control_stream_close_fans_out_remote_leave() {
+        let owner_rt = rt(1);
+        let from = rt(2);
+        let session_id = Uuid::new_v4();
+        let fenced = fenced_owned_by(owner_rt, session_id);
+        let rooms = Arc::new(AudioRoomManager::new());
+        let room = rooms.get_or_create(session_id);
+        let (_local_id, _local_index, _audio_rx, mut local_ctrl_rx) =
+            room.add_peer("owner-local".into(), 2).unwrap();
+        // Discard the local peer's own roster delta; this assertion targets the
+        // websocket-compatible control fanout below.
+
+        let acceptor = HuddleControlAcceptor::new(
+            Arc::clone(&rooms),
+            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+            Arc::new(FakeDir::default()),
+            owner_rt,
+            Arc::new(HuddleOwnerRegistry::new()),
+        );
+        let (owner_stream, mut client) = stream_pair();
+        let hello = huddle_hello(from, fenced);
+        let served =
+            tokio::spawn(async move { acceptor.accept_inbound(from, hello, owner_stream).await });
+
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::RegisterPeer {
+                    community_id: *community().as_uuid(),
+                    pubkey: "remote".into(),
+                    protocol_version: 2,
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let _registered = client.recv_frame().await.unwrap().unwrap();
+        let joined = local_ctrl_rx.recv().await.expect("remote join fanout");
+        let super::super::room::PeerCtrl::Json(joined) = joined else {
+            panic!("expected joined JSON");
+        };
+        let joined: serde_json::Value = serde_json::from_str(&joined).unwrap();
+        assert_eq!(joined["type"], "joined");
+        assert_eq!(joined["pubkey"], "remote");
+        let remote_index = joined["peer_index"].as_u64().unwrap();
+
+        drop(client);
+        served.await.unwrap().unwrap();
+        let left = local_ctrl_rx
+            .recv()
+            .await
+            .expect("abnormal-close leave fanout");
+        let super::super::room::PeerCtrl::Json(left) = left else {
+            panic!("expected left JSON");
+        };
+        let left: serde_json::Value = serde_json::from_str(&left).unwrap();
+        assert_eq!(left["type"], "left");
+        assert_eq!(left["pubkey"], "remote");
+        assert_eq!(left["peer_index"], remote_index);
+        assert_eq!(room.peer_pubkeys(), vec![("owner-local".into(), 0)]);
     }
 
     /// A `RegisterPeer` whose fence is rejected (wrong community keys a lease
@@ -2146,6 +2581,31 @@ mod tests {
         assert!(draining.is_cancelled(), "drain fans out to owners/streams");
         await_release_calls(&dir, 1).await;
         assert!(!lost.is_cancelled(), "drain is not fenced owner-loss");
+    }
+
+    #[test]
+    fn drain_all_permanently_fences_new_owner_admission() {
+        let registry = HuddleOwnerRegistry::new();
+        assert!(!registry.is_draining());
+        assert_eq!(registry.drain_all(), 0);
+        assert!(registry.is_draining());
+    }
+
+    #[tokio::test]
+    async fn attach_after_drain_releases_new_lease_and_returns_cancelled_signal() {
+        let dir = Arc::new(FakeDir::default());
+        let registry = HuddleOwnerRegistry::new();
+        let session = Uuid::new_v4();
+        registry.drain_all();
+
+        let signals = registry.attach_signals(
+            session,
+            Arc::clone(&dir) as Arc<dyn HuddleDirectory>,
+            lease_for(session, 11),
+        );
+        assert!(signals.draining.is_cancelled());
+        assert!(registry.lost_for(session).is_none());
+        await_release_calls(&dir, 1).await;
     }
 
     /// A stale drain racing a fresh re-acquire must not cancel the new epoch's
