@@ -857,6 +857,7 @@ dependencies = [
  "buzz-persona",
  "buzz-sdk",
  "buzz-ws-client",
+ "chrono",
  "clap",
  "diffy",
  "hex",
@@ -927,10 +928,6 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "buzz-cli",
- "buzz-core",
- "buzz-sdk",
- "buzz-ws-client",
- "chrono",
  "git-credential-nostr",
  "git-sign-nostr",
  "ignore",
@@ -949,7 +946,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "uuid",
  "windows-sys 0.61.2",
  "zeroize",
 ]

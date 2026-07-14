@@ -3144,6 +3144,19 @@ fn dispatch_heartbeat(
     tracing::info!(agent = agent_index, "heartbeat_fired");
 }
 
+#[cfg(test)]
+mod agent_draft_prompt_tests {
+    #[test]
+    fn shared_base_prompt_teaches_portable_agent_drafts() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("buzz agents draft-create"));
+        assert!(prompt.contains("ask for at most two things"));
+        assert!(prompt.contains("what it should do day-to-day"));
+        assert!(prompt.contains("owner saves it"));
+        assert!(prompt.contains("Do not ask about runtime, provider, model, credentials"));
+    }
+}
+
 fn default_heartbeat_prompt() -> String {
     let now = chrono::Utc::now().to_rfc3339();
     format!(

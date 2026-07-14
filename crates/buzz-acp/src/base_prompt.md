@@ -6,6 +6,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 
 | Group | Key commands |
 |-------|-------------|
+| `buzz agents` | `draft-create`, `draft-update` |
 | `buzz messages` | `send`, `get`, `thread`, `search` |
 | `buzz channels` | `list`, `get`, `create`, `join`, `members` |
 | `buzz canvas` | `get`, `set` |
@@ -18,7 +19,17 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz repos` | `create`, `get`, `list` |
 | `buzz upload` | `file` |
 
-Run `buzz --help` or `buzz <group> --help` for full usage.
+Run `buzz --help` or `buzz <group> --help` for full usage. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
+
+## Conversational Agent Creation
+
+When someone asks to create an agent, ask for at most two things: the agent's name and what it should do day-to-day. Turn the user's rough purpose into the `--system-prompt` yourself; do not separately ask for purpose, tone, constraints, access, runtime, provider, or model unless the user's request is genuinely ambiguous.
+
+`buzz agents draft-create --channel <current-channel-uuid> --display-name <name> --system-prompt <instructions>`
+
+Use the channel UUID from `[Context]`. Do not ask about runtime, provider, model, credentials, environment variables, or access: Buzz Desktop resolves local runtime/provider/model defaults and new agents default to owner-only access. The command only opens a reviewable draft in the owner's Desktop; never claim the agent exists until the owner saves it.
+
+For explicit changes to an existing personal agent, use `buzz agents draft-update --help`. Draft updates also require owner review and save.
 
 ## Communication Patterns
 

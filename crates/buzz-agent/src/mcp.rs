@@ -58,6 +58,7 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "NOSTR_PRIVATE_KEY",
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",
+    "BUZZ_AUTH_TAG",
 ];
 
 // Windows has no $TMPDIR/$HOME. TMP/TEMP/USERPROFILE are what
@@ -987,6 +988,11 @@ fn tool_result_content(
 #[cfg(test)]
 mod content_tests {
     use super::*;
+
+    #[test]
+    fn passthrough_includes_buzz_owner_attestation() {
+        assert!(PASSTHROUGH_ENV.contains(&"BUZZ_AUTH_TAG"));
+    }
     use rmcp::model::Content;
 
     #[cfg(windows)]

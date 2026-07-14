@@ -10,7 +10,6 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
-mod agent_management;
 mod paths;
 mod read_file;
 mod rg;
@@ -36,28 +35,6 @@ impl DevMcp {
             todos: Arc::new(todo::TodoState::new()),
             tool_router: Self::tool_router(),
         }
-    }
-
-    #[tool(
-        name = "create_agent",
-        description = "Open Buzz Desktop's standard create-agent form for the owner, prefilled with a reusable agent draft for the current channel. Use after collaboratively deciding only the agent's name and instructions. Do not ask about runtime, provider, model, credentials, or access: Buzz Desktop resolves local runtime/provider/model defaults, and new agents default to owner-only access. The owner can review and edit the form and must save it before anything is created. Never ask for or accept API keys, credentials, environment variables, shell commands, or arbitrary MCP setup."
-    )]
-    async fn create_agent(
-        &self,
-        Parameters(params): Parameters<agent_management::CreateAgentParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        agent_management::create(params).await
-    }
-
-    #[tool(
-        name = "update_agent",
-        description = "Open Buzz Desktop's standard edit-agent form for the owner, prefilled with agreed changes to a reusable agent profile. The owner can edit the form and must save it before anything changes. Never ask for or accept API keys, credentials, environment variables, shell commands, or arbitrary MCP setup."
-    )]
-    async fn update_agent(
-        &self,
-        Parameters(params): Parameters<agent_management::UpdateAgentParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        agent_management::update(params).await
     }
 
     #[tool(
