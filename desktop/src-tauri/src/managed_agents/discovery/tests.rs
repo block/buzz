@@ -1182,56 +1182,88 @@ fn test_login_shell_path_returns_none_on_windows() {
 
 // ── Phase C: .cmd shim resolution on Windows ───────────────────────────────
 
-/// `resolve_command_uncached` finds `.cmd` shims in `common_binary_paths()`.
-/// This test creates a fake `.cmd` shim in a temp dir added to
-/// `common_binary_paths()` via the `APPDATA` env var's `npm` subdirectory.
+/// `resolve_command_uncached` finds `.cmd` shims via the Windows PATH scan
+/// (discovery.rs lines 648-657). Creates a temp dir with ONLY a `.cmd` shim
+/// (no `.exe`), mutates PATH under the serialized lock, and calls the actual
+/// resolver — proving the full resolution chain finds `.cmd` extensions.
 #[cfg(windows)]
 #[test]
-fn test_cmd_shim_resolves_from_well_known_dir() {
-    // Create a fake npm shim: %APPDATA%\npm\codex-acp.cmd
-    let temp = tempfile::tempdir().expect("tempdir");
-    let npm_dir = temp.path().join("npm");
-    std::fs::create_dir_all(&npm_dir).expect("mkdir npm");
-    let shim = npm_dir.join("codex-acp.cmd");
-    std::fs::write(&shim, "@echo off\r\nnode codex-acp.js %*\r\n").expect("write shim");
+fn test_cmd_shim_resolves_from_path() {
+    let _guard = crate::managed_agents::lock_path_mutex();
 
-    // common_binary_paths is a OnceLock — we can't re-init it. Instead,
-    // test the component that matters: command_basenames generates .cmd
-    // candidates, and the candidate path exists and is a file.
-    let basenames = super::command_basenames("codex-acp");
-    assert!(
-        basenames.contains(&"codex-acp.cmd".to_string()),
-        "command_basenames must include .cmd candidate on Windows"
-    );
-    let candidate = npm_dir.join(&basenames[1]); // .cmd is second
-    assert!(
-        candidate.is_file(),
-        "the .cmd shim must be resolvable as a file: {candidate:?}"
+    // Create a temp dir with only a .cmd shim — no .exe.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let shim = temp.path().join("test-shim-cmd-resolve.cmd");
+    std::fs::write(&shim, "@echo off\r\n").expect("write shim");
+
+    // Prepend the temp dir to PATH so the resolver sees it.
+    // path_candidates_from_env_raw reads PATH live (std::env::var_os each call).
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut new_path = std::env::split_paths(&old_path).collect::<Vec<_>>();
+    new_path.insert(0, temp.path().to_path_buf());
+    let joined = std::env::join_paths(&new_path).expect("join PATH");
+    std::env::set_var("PATH", &joined);
+
+    let result = super::resolve_command_uncached("test-shim-cmd-resolve");
+
+    // Restore PATH before any assertion can panic.
+    std::env::set_var("PATH", &old_path);
+
+    assert_eq!(
+        result.as_deref(),
+        Some(shim.as_path()),
+        "resolve_command_uncached must find a .cmd shim on PATH when no .exe exists"
     );
 }
 
 // ── Phase A: no-shell-resolved error on Windows ────────────────────────────
 
-/// When no Git Bash is found, `resolve_git_bash()` returns `None`.
-/// The install shell path uses this to return the Doctor hint.
-///
-/// Uses the parameterized `resolve_git_bash()` with empty inputs to avoid
-/// the CI runner's pre-installed Git influencing the result.
+/// When all resolution sources are empty AND the registry is disabled,
+/// `resolve_git_bash_no_registry` returns `None` deterministically —
+/// regardless of the CI runner's installed software.
 #[cfg(windows)]
 #[test]
 fn test_no_git_bash_resolved_returns_none() {
     use crate::managed_agents::git_bash;
 
-    // Empty PATH, no overrides, no well-known dirs, no registry.
-    let result = git_bash::resolve_git_bash("", None, None, None, None, None, None);
+    // Empty PATH, no overrides, no well-known dirs, registry disabled.
+    let result = git_bash::resolve_git_bash_no_registry("", None, None, None, None, None, None);
     assert_eq!(
         result, None,
-        "empty environment must not resolve a Git Bash"
+        "empty environment with registry disabled must not resolve a Git Bash"
     );
+}
 
-    // Verify the error message that install_shell_command would return.
-    assert!(
-        !git_bash::GIT_BASH_INSTALL_HINT.is_empty(),
-        "GIT_BASH_INSTALL_HINT must be non-empty for the Doctor error message"
+/// When `resolve_bash_path` returns `None` (no Git Bash anywhere),
+/// `install_shell_from` maps it to `Err(GIT_BASH_INSTALL_HINT)` — the exact
+/// Doctor hint shown to the user. Tests the pure error-mapping seam, not the
+/// resolution chain.
+#[cfg(windows)]
+#[test]
+fn test_install_shell_from_none_returns_hint() {
+    use crate::commands::install_shell_from;
+    use crate::managed_agents::git_bash;
+
+    let result = install_shell_from(None);
+    assert_eq!(
+        result,
+        Err(git_bash::GIT_BASH_INSTALL_HINT.to_string()),
+        "install_shell_from(None) must return the Git Bash install hint"
+    );
+}
+
+/// When `resolve_bash_path` returns `Some(path)`, `install_shell_from`
+/// passes it through as `Ok`.
+#[cfg(windows)]
+#[test]
+fn test_install_shell_from_some_returns_path() {
+    use crate::commands::install_shell_from;
+
+    let path = std::path::PathBuf::from(r"C:\Git\bin\bash.exe");
+    let result = install_shell_from(Some(path.clone()));
+    assert_eq!(
+        result,
+        Ok(path),
+        "install_shell_from(Some) must return the path as Ok"
     );
 }

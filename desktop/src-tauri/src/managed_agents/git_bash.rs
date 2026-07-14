@@ -171,7 +171,32 @@ pub(crate) fn resolve_git_bash(
     program_files_x86: Option<PathBuf>,
     local_app_data: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    shell_override
+    resolve_git_bash_inner(
+        path_env,
+        shell_override,
+        git_bash_override,
+        system_root,
+        program_files,
+        program_files_x86,
+        local_app_data,
+        true,
+    )
+}
+
+/// Inner resolver with an explicit `check_registry` toggle so tests can
+/// disable the ambient `HKLM/HKCU\SOFTWARE\GitForWindows` lookup.
+#[cfg(windows)]
+fn resolve_git_bash_inner(
+    path_env: &str,
+    shell_override: Option<PathBuf>,
+    git_bash_override: Option<PathBuf>,
+    system_root: Option<PathBuf>,
+    program_files: Option<PathBuf>,
+    program_files_x86: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    check_registry: bool,
+) -> Option<PathBuf> {
+    let result = shell_override
         .and_then(|path| resolve_shell_override(&path, path_env))
         .or_else(|| git_bash_override.filter(|path| path.is_file()))
         .or_else(|| scan_path_for_bash(path_env, system_root.as_deref()))
@@ -181,8 +206,39 @@ pub(crate) fn resolve_git_bash(
         })
         .or_else(|| {
             git_bash_from_standard_paths([program_files, program_files_x86, local_app_data])
-        })
-        .or_else(git_bash_from_registry)
+        });
+    if result.is_some() {
+        return result;
+    }
+    if check_registry {
+        return git_bash_from_registry();
+    }
+    None
+}
+
+/// Like `resolve_git_bash` but skips the ambient Windows registry lookup, so
+/// tests can assert "no resolution" deterministically regardless of the CI
+/// runner's installed software.
+#[cfg(all(windows, test))]
+pub(crate) fn resolve_git_bash_no_registry(
+    path_env: &str,
+    shell_override: Option<PathBuf>,
+    git_bash_override: Option<PathBuf>,
+    system_root: Option<PathBuf>,
+    program_files: Option<PathBuf>,
+    program_files_x86: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+) -> Option<PathBuf> {
+    resolve_git_bash_inner(
+        path_env,
+        shell_override,
+        git_bash_override,
+        system_root,
+        program_files,
+        program_files_x86,
+        local_app_data,
+        false,
+    )
 }
 
 /// Resolve `BUZZ_SHELL` with the same rooted/bare-name semantics as the MCP

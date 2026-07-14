@@ -278,7 +278,8 @@ const overrides = new Map([
   // +132: pass 2 — five cfg(windows) behavioral tests: command_basenames .cmd/.bat
   // candidates, cli_install_commands_for_os PowerShell selection, login_shell_path
   // None regression, .cmd shim resolution, no-git-bash error hint.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1238],
+  // +32: deterministic .cmd resolver + no-registry + install_shell_from tests.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1270],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -414,7 +415,8 @@ const overrides = new Map([
   // and per-OS install command accessor. Load-bearing Windows platform support.
   // +53: pass 2 — three cfg(windows) install shell tests (resolve succeeds with
   // Git, error hint content, install_shell_command succeeds).
-  ["src-tauri/src/commands/agent_discovery.rs", 1515],
+  // +8: install_shell_from pure seam extracted for deterministic testing.
+  ["src-tauri/src/commands/agent_discovery.rs", 1523],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

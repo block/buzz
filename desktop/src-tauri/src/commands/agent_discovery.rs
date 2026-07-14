@@ -603,9 +603,17 @@ fn resolve_install_shell() -> Result<std::path::PathBuf, String> {
 
     #[cfg(windows)]
     {
-        crate::managed_agents::git_bash::resolve_bash_path()
-            .ok_or_else(|| crate::managed_agents::git_bash::GIT_BASH_INSTALL_HINT.to_string())
+        install_shell_from(crate::managed_agents::git_bash::resolve_bash_path())
     }
+}
+
+/// Pure mapping from a resolved bash path to the install-shell result.
+/// `None` → `Err(GIT_BASH_INSTALL_HINT)`, `Some(path)` → `Ok(path)`.
+#[cfg(windows)]
+pub(crate) fn install_shell_from(
+    resolved: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, String> {
+    resolved.ok_or_else(|| crate::managed_agents::git_bash::GIT_BASH_INSTALL_HINT.to_string())
 }
 
 fn run_install_command(step: &str, command: &str) -> InstallStepResult {
