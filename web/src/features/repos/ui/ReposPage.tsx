@@ -45,7 +45,7 @@ function SearchEmptyState() {
   );
 }
 
-function RelayEmptyState() {
+function CommunityEmptyState() {
   return (
     <div className="flex flex-1 items-center justify-center bg-[#F3F3F3] px-4 py-16 text-center dark:bg-[#171717]">
       <div className="flex w-full max-w-xl flex-col items-center px-6 py-10 sm:px-12 sm:py-12">
@@ -56,11 +56,11 @@ function RelayEmptyState() {
           <img alt="Buzz" className="h-full w-full" src={buzzAppIcon} />
         </div>
         <h1 className="mt-6 text-2xl font-semibold tracking-tight text-black dark:text-white">
-          This relay is empty
+          This community is empty
         </h1>
         <p className="mt-2 max-w-md text-sm leading-relaxed text-black/60 dark:text-white/60">
-          Repositories pushed to this relay will show up here. Open this relay
-          in the Buzz desktop app to start pushing code.
+          Repositories pushed to this community will show up here. Open this
+          community in the Buzz desktop app to start pushing code.
         </p>
         <ConnectButton className="mt-6" />
       </div>
@@ -142,7 +142,7 @@ export function ReposPage() {
   }
 
   if (!repos || repos.length === 0) {
-    return <RelayEmptyState />;
+    return <CommunityEmptyState />;
   }
 
   return (

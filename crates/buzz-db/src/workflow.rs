@@ -457,13 +457,15 @@ pub async fn list_enabled_channel_workflows(
 pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
-               status::text AS status, enabled, created_at, updated_at
-        FROM workflows
-        WHERE status = 'active'
-          AND enabled = TRUE
-          AND definition->'trigger'->>'on' = 'schedule'
-        ORDER BY created_at ASC
+        SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash,
+               w.status::text AS status, w.enabled, w.created_at, w.updated_at
+        FROM workflows w
+        JOIN communities c ON c.id = w.community_id
+        WHERE w.status = 'active'
+          AND w.enabled = TRUE
+          AND w.definition->'trigger'->>'on' = 'schedule'
+          AND c.archived_at IS NULL
+        ORDER BY w.created_at ASC
         LIMIT $1
         "#,
     )

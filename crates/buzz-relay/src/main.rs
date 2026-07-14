@@ -19,6 +19,7 @@ use buzz_relay::router::{build_health_router, build_router};
 use buzz_relay::state::AppState;
 use buzz_relay::telemetry;
 use buzz_workflow::WorkflowEngine;
+use tokio_util::sync::CancellationToken;
 
 fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
     value.map(str::trim).is_some_and(|value| {
@@ -781,6 +782,24 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Durable lifecycle backstop: Redis pub/sub cannot deliver to a pod that was
+    // offline. Periodically revalidate only communities with local live sockets
+    // so missed archive commands still converge without a global DB scan.
+    {
+        let lifecycle_state = Arc::clone(&state);
+        let interval_secs = std::env::var("BUZZ_COMMUNITY_REVALIDATE_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(30)
+            .clamp(1, 300);
+        let cancel = lifecycle_state.community_revalidator_cancel.clone();
+        tokio::spawn(run_community_revalidator(
+            lifecycle_state,
+            std::time::Duration::from_secs(interval_secs),
+            cancel,
+        ));
+    }
+
     // Cross-pod connection-control consumer: receive disconnect commands from
     // Redis pub/sub (published by the pod that recorded a ban) and close any
     // matching local sockets. A member's live connections may land on any pod,
@@ -794,6 +813,11 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 match rx.recv().await {
                     Ok(scoped) => match scoped.command {
+                        buzz_pubsub::conn_control::ConnControl::DisconnectCommunity => {
+                            state_for_conn_ctrl
+                                .community_connections
+                                .disconnect_community(scoped.community_id);
+                        }
                         buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {
                             pubkey,
                             event_id,
@@ -896,6 +920,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     serve(router, health_router, Arc::clone(&state)).await?;
+    state.community_revalidator_cancel.cancel();
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
     // exit. Uses a CancellationToken so it works regardless of how many
@@ -912,6 +937,42 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_community_revalidator(
+    state: Arc<AppState>,
+    period: std::time::Duration,
+    cancel: CancellationToken,
+) {
+    run_periodic_until_cancelled(period, cancel, || async {
+        let closed = state.revalidate_live_communities().await;
+        if closed > 0 {
+            tracing::info!(
+                closed,
+                "closed sockets for inactive communities during lifecycle revalidation"
+            );
+        }
+    })
+    .await;
+}
+
+async fn run_periodic_until_cancelled<Tick, TickFuture>(
+    period: std::time::Duration,
+    cancel: CancellationToken,
+    mut tick: Tick,
+) where
+    Tick: FnMut() -> TickFuture,
+    TickFuture: std::future::Future<Output = ()>,
+{
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => tick().await,
+        }
+    }
 }
 
 /// Bind all listeners and run with graceful shutdown.
@@ -1471,7 +1532,37 @@ async fn run_usage_metrics_tick(
 
 #[cfg(test)]
 mod tests {
-    use super::buzz_auto_migrate_enabled;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio_util::sync::CancellationToken;
+
+    use super::{buzz_auto_migrate_enabled, run_periodic_until_cancelled};
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_loop_exits_immediately_on_cancellation() {
+        let cancel = CancellationToken::new();
+        let tick_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_for_tick = Arc::clone(&tick_count);
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            run_periodic_until_cancelled(Duration::from_secs(300), task_cancel, move || {
+                let count = Arc::clone(&count_for_tick);
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+            .await;
+        });
+
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_millis(1), task)
+            .await
+            .expect("loop must not wait for the next interval")
+            .expect("loop task");
+        assert!(tick_count.load(std::sync::atomic::Ordering::Relaxed) <= 1);
+    }
 
     #[test]
     fn buzz_auto_migrate_is_opt_in() {

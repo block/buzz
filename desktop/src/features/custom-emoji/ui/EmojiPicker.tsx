@@ -87,7 +87,7 @@ function disableSearchInputCorrections(
  * drift across call sites (they used to, and that's why custom emoji were
  * missing from some pickers).
  *
- * It always wires the workspace custom-emoji palette in via `useCustomEmoji()`,
+ * It always wires the community custom-emoji palette in via `useCustomEmoji()`,
  * so custom emoji show up everywhere for free. Selection is normalized to a
  * single string: a standard emoji emits its `native` glyph; a custom emoji has
  * no `native`, so it emits its `:shortcode:` (the emoji-mart `id` is the

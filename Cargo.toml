@@ -3,6 +3,7 @@ members = [
     "crates/buzz-relay",
     "crates/buzz-core",
     "crates/buzz-conformance",
+    "crates/buzz-push-gateway",
     "crates/buzz-db",
     "crates/buzz-pubsub",
     "crates/buzz-auth",
@@ -43,8 +44,8 @@ tokio-util  = { version = "0.7", features = ["rt", "codec"] }
 
 # HTTP + WebSocket
 axum        = { version = "0.8", features = ["ws", "macros"] }
-tower       = { version = "0.5", features = ["timeout", "util"] }
-tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip", "limit", "fs"] }
+tower       = { version = "0.5", features = ["timeout", "util", "limit"] }
+tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip", "limit", "timeout", "fs"] }
 
 # Database
 sqlx = { version = "0.9", features = [

@@ -7,7 +7,7 @@ import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
  * Ctrl+R elsewhere), matching browser behavior.
  *
  * `window.location.reload()` is the app's existing reload primitive (see
- * App.tsx, useWorkspaceInit.ts): it triggers a full reinit that re-reads
+ * App.tsx, useCommunityInit.ts): it triggers a full reinit that re-reads
  * localStorage and reconnects relays.
  */
 export function useReloadShortcut() {

@@ -72,7 +72,7 @@ if (typeof window !== "undefined") {
 
 /**
  * Reset module-level caches so the next render re-fetches the proxy port
- * and relay origin for the new workspace.
+ * and relay origin for the new community.
  */
 export function resetMediaCaches(): void {
   cachedPort = null;

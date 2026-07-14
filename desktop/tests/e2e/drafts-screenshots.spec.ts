@@ -67,23 +67,23 @@ const ACTIVE_DRAFTS: StoredDrafts = {
 };
 
 /**
- * Patch the mock workspace to include the pubkey so initDraftStore gets the
- * correct pubkey on app startup. The workspace is seeded by installMockBridge
+ * Patch the mock community to include the pubkey so initDraftStore gets the
+ * correct pubkey on app startup. The community is seeded by installMockBridge
  * without a pubkey field; this addInitScript runs after that seed (init
  * scripts execute in registration order) and adds it.
  */
-async function patchWorkspacePubkey(page: import("@playwright/test").Page) {
+async function patchCommunityPubkey(page: import("@playwright/test").Page) {
   await page.addInitScript(
     ({ pubkey }) => {
-      const raw = window.localStorage.getItem("buzz-workspaces");
-      const workspaces = raw
+      const raw = window.localStorage.getItem("buzz-communities");
+      const communities = raw
         ? (JSON.parse(raw) as Array<Record<string, unknown>>)
         : [];
-      if (workspaces[0]) {
-        workspaces[0].pubkey = pubkey;
+      if (communities[0]) {
+        communities[0].pubkey = pubkey;
         window.localStorage.setItem(
-          "buzz-workspaces",
-          JSON.stringify(workspaces),
+          "buzz-communities",
+          JSON.stringify(communities),
         );
       }
     },
@@ -140,7 +140,7 @@ test.describe("drafts screenshots", () => {
 
   test("01 — drafts section populated", async ({ page }) => {
     await installMockBridge(page);
-    await patchWorkspacePubkey(page);
+    await patchCommunityPubkey(page);
     await seedDraftStore(page, ACTIVE_DRAFTS);
 
     const panel = await openDraftsPanel(page);
@@ -174,7 +174,7 @@ test.describe("drafts screenshots", () => {
 
   test("03 — hover actions visible", async ({ page }) => {
     await installMockBridge(page);
-    await patchWorkspacePubkey(page);
+    await patchCommunityPubkey(page);
     await seedDraftStore(page, ACTIVE_DRAFTS);
 
     const panel = await openDraftsPanel(page);
@@ -228,7 +228,7 @@ test.describe("drafts screenshots", () => {
     // the correct channel and passes the autoSend key so the thread composer
     // (not the main composer) arms the auto-submit.
     await installMockBridge(page);
-    await patchWorkspacePubkey(page);
+    await patchCommunityPubkey(page);
 
     // A fixed fake root event ID — in the mock bridge get_event is unhandled
     // so useDraftRootStatus will map it to `error` (not `deleted`), keeping
@@ -324,7 +324,7 @@ test.describe("drafts screenshots", () => {
     //   2. The badge next to "Drafts" in the filter dropdown.
     // Two active drafts are seeded so the count is 2.
     await installMockBridge(page);
-    await patchWorkspacePubkey(page);
+    await patchCommunityPubkey(page);
     await seedDraftStore(page, ACTIVE_DRAFTS);
 
     await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -365,7 +365,7 @@ test.describe("drafts screenshots", () => {
     const THREAD_DRAFT_KEY = `thread:${DELETED_ROOT_ID}`;
 
     await installMockBridge(page, { deletedEventIds: [DELETED_ROOT_ID] });
-    await patchWorkspacePubkey(page);
+    await patchCommunityPubkey(page);
     await seedDraftStore(page, {
       [THREAD_DRAFT_KEY]: {
         content: "Planning to follow up on the discussion from last week.",

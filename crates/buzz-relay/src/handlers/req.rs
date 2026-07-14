@@ -1604,6 +1604,56 @@ mod tests {
     }
 
     #[test]
+    fn push_lease_requires_self_author_filter_and_count_fallback() {
+        let (owner, other, _) = three_pubkeys();
+        let owner_key = nostr::PublicKey::from_hex(&owner).unwrap();
+        let other_key = nostr::PublicKey::from_hex(&other).unwrap();
+        let own = Filter::new()
+            .kind(nostr::Kind::Custom(buzz_core::kind::KIND_PUSH_LEASE as u16))
+            .author(owner_key);
+        let foreign = Filter::new()
+            .kind(nostr::Kind::Custom(buzz_core::kind::KIND_PUSH_LEASE as u16))
+            .author(other_key);
+        let bare = Filter::new().kind(nostr::Kind::Custom(buzz_core::kind::KIND_PUSH_LEASE as u16));
+
+        assert!(author_only_filters_authorized(
+            std::slice::from_ref(&own),
+            &owner
+        ));
+        assert!(!author_only_filters_authorized(&[foreign], &owner));
+        assert!(!author_only_filters_authorized(&[bare], &owner));
+        assert!(filter_can_match_author_only_kinds(&own));
+    }
+
+    #[test]
+    fn mixed_filter_omits_another_authors_push_lease() {
+        let owner_keys = nostr::Keys::generate();
+        let reader_keys = nostr::Keys::generate();
+        let lease = nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_PUSH_LEASE as u16),
+            "ciphertext",
+        )
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+        let public = nostr::EventBuilder::new(nostr::Kind::TextNote, "public")
+            .sign_with_keys(&owner_keys)
+            .unwrap();
+
+        assert!(is_author_only_event(
+            &lease,
+            &reader_keys.public_key().to_bytes()
+        ));
+        assert!(!is_author_only_event(
+            &lease,
+            &owner_keys.public_key().to_bytes()
+        ));
+        assert!(!is_author_only_event(
+            &public,
+            &reader_keys.public_key().to_bytes()
+        ));
+    }
+
+    #[test]
     fn engram_gate_allows_agent_querying_own() {
         let (agent, owner, _) = three_pubkeys();
         let p_tag = SingleLetterTag::lowercase(Alphabet::P);

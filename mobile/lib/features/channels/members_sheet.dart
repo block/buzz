@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../profile/user_status.dart';
@@ -449,7 +450,7 @@ class _RoleSelector extends StatelessWidget {
   }
 }
 
-class _MemberAvatar extends HookWidget {
+class _MemberAvatar extends StatelessWidget {
   final String? avatarUrl;
   final String initial;
 
@@ -457,21 +458,10 @@ class _MemberAvatar extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    final failed = useState(false);
-
-    useEffect(() {
-      failed.value = false;
-      return null;
-    }, [avatarUrl]);
-
-    final url = avatarUrl;
-    if (url == null || failed.value) {
-      return CircleAvatar(child: Text(initial));
-    }
-    return CircleAvatar(
-      backgroundImage: NetworkImage(url),
-      onBackgroundImageError: (_, _) => failed.value = true,
-      child: null,
+    return AvatarImage(
+      imageUrl: avatarUrl,
+      radius: 20,
+      fallback: Text(initial),
     );
   }
 }

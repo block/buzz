@@ -189,6 +189,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goNewMessage = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/messages/new",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goForumPost = React.useCallback(
     (
       channelId: string,
@@ -288,6 +299,7 @@ export function useAppNavigation() {
     goChannel,
     goForumPost,
     goHome,
+    goNewMessage,
     goProject,
     goProjects,
     goPulse,

@@ -353,20 +353,20 @@ export function ChannelScreen({
     relayAgents,
   });
   // Agent set for ChannelPane's own consumers (DM huddle member resolution,
-  // the agents list): the workspace-scoped baseline shared by every surface,
+  // the agents list): the community-scoped baseline shared by every surface,
   // widened with channel-member roles and this screen's profile lookup.
   // Message rows no longer take this — MessageRow derives agent-ness itself
   // from useKnownAgentPubkeys + per-pubkey profile checks.
-  const workspaceAgentPubkeys = useKnownAgentPubkeys();
+  const communityAgentPubkeys = useKnownAgentPubkeys();
   const agentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set([...workspaceAgentPubkeys, ...knownAgentPubkeys]);
+    const pubkeys = new Set([...communityAgentPubkeys, ...knownAgentPubkeys]);
     for (const [pubkey, profile] of Object.entries(messageProfiles)) {
       if (profile.isAgent) {
         pubkeys.add(normalizePubkey(pubkey));
       }
     }
     return pubkeys;
-  }, [knownAgentPubkeys, messageProfiles, workspaceAgentPubkeys]);
+  }, [knownAgentPubkeys, messageProfiles, communityAgentPubkeys]);
   const personasQuery = usePersonasQuery();
   const { personaLookup, respondToLookup } = React.useMemo(() => {
     const agents = managedAgentsQuery.data ?? [];

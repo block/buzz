@@ -90,7 +90,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     });
 
     if (sessionState.status != SessionStatus.connected) {
-      // Keep the prior workspace's cache visible until the new relay connects.
+      // Keep the prior community's cache visible until the new relay connects.
       if (_hasLoaded) return state.value ?? const [];
       await connected.future;
     }

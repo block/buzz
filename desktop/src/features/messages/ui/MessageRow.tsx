@@ -166,7 +166,7 @@ export const MessageRow = React.memo(
       () => resolveMentionProps(message.tags, profiles),
       [profiles, message.tags],
     );
-    // "Is this pubkey an agent" = the workspace-scoped baseline every surface
+    // "Is this pubkey an agent" = the community-scoped baseline every surface
     // shares (managed ∪ relay) plus the pubkey's own profile `isAgent` flag from this surface's lookup. Both are per-pubkey
     // O(1) checks — no per-row rescan of `profiles` (that duplicated parent
     // work in every mounted row and re-ran on each profile-lookup change).

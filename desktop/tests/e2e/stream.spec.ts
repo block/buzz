@@ -41,47 +41,39 @@ async function getTimelineMetrics(page: Page) {
   });
 }
 
-async function ensureTimelineScrollable(
+async function seedTimelineHistory(
   senderPage: Page,
-  receiverPage: Page,
   channelName: string,
   prefix: string,
-  minDistance = 160,
 ) {
-  for (let index = 0; index < 24; index += 1) {
-    const metrics = await getTimelineMetrics(receiverPage);
-    if (
-      metrics.scrollHeight >
-      metrics.clientHeight + metrics.composerHeight + minDistance
-    ) {
-      return;
-    }
-
-    const message = `${prefix} seed ${index}`;
-
-    await sendChannelMessage(senderPage, {
-      channelName,
-      content: message,
-    });
-    await expectTimelineToContain(receiverPage, message);
-  }
-
-  const metrics = await getTimelineMetrics(receiverPage);
-  expect(metrics.scrollHeight).toBeGreaterThan(
-    metrics.clientHeight + metrics.composerHeight + minDistance,
+  const messages = Array.from(
+    { length: 24 },
+    (_, index) => `${prefix} seed ${index}`,
   );
+  for (const content of messages) {
+    await sendChannelMessage(senderPage, { channelName, content });
+  }
+  const lastSeed = messages.at(-1);
+  if (!lastSeed) throw new Error("Timeline seed set is empty.");
+  return lastSeed;
 }
 
 async function createAndJoinSharedStream(
   ownerPage: Page,
   memberPage: Page,
   channelName: string,
+  seed?: { prefix: string; minDistance?: number },
 ) {
   await openCreateChannelDialog(ownerPage);
   await ownerPage.getByTestId("create-channel-name").fill(channelName);
   await ownerPage.getByTestId("create-channel-submit").click();
   await expect(ownerPage.getByTestId("stream-list")).toContainText(channelName);
   await expect(ownerPage.getByTestId("chat-title")).toHaveText(channelName);
+  await expect(ownerPage.getByTestId("message-input")).toBeEnabled();
+
+  const lastSeed = seed
+    ? await seedTimelineHistory(ownerPage, channelName, seed.prefix)
+    : null;
 
   await openChannelBrowser(memberPage);
   await expect(memberPage.getByTestId("channel-browser-dialog")).toBeVisible();
@@ -94,17 +86,17 @@ async function createAndJoinSharedStream(
     channelName,
   );
 
-  // Channel title/sidebar selection can update before the relay has reconciled
-  // the membership event. Wait until both contexts can participate before a
-  // test relies on live delivery between them. The 30s bound tolerates known
-  // slow convergence; a recurring timeout is evidence to investigate the
-  // membership read-after-write path, not a reason to extend this test wait.
-  await expect(ownerPage.getByTestId("message-input")).toBeEnabled({
-    timeout: 30_000,
-  });
-  await expect(memberPage.getByTestId("message-input")).toBeEnabled({
-    timeout: 30_000,
-  });
+  await expect(memberPage.getByTestId("message-input")).toBeEnabled();
+
+  if (lastSeed) {
+    await expectTimelineToContain(memberPage, lastSeed);
+    const metrics = await getTimelineMetrics(memberPage);
+    expect(metrics.scrollHeight).toBeGreaterThan(
+      metrics.clientHeight +
+        metrics.composerHeight +
+        (seed?.minDistance ?? 160),
+    );
+  }
 }
 
 async function sendChannelMessage(
@@ -353,9 +345,7 @@ test("stays pinned to the latest message when new messages arrive at the bottom"
 
     await pageOne.goto("/");
     await pageTwo.goto("/");
-    await createAndJoinSharedStream(pageOne, pageTwo, channelName);
-
-    await ensureTimelineScrollable(pageOne, pageTwo, channelName, prefix);
+    await createAndJoinSharedStream(pageOne, pageTwo, channelName, { prefix });
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
@@ -400,9 +390,7 @@ test("stays pinned after you send a message and a remote reply arrives right aft
 
     await pageOne.goto("/");
     await pageTwo.goto("/");
-    await createAndJoinSharedStream(pageOne, pageTwo, channelName);
-
-    await ensureTimelineScrollable(pageOne, pageTwo, channelName, prefix);
+    await createAndJoinSharedStream(pageOne, pageTwo, channelName, { prefix });
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
@@ -451,9 +439,7 @@ test("keeps bottom-pinned scrolling after the composer grows", async ({
 
     await pageOne.goto("/");
     await pageTwo.goto("/");
-    await createAndJoinSharedStream(pageOne, pageTwo, channelName);
-
-    await ensureTimelineScrollable(pageOne, pageTwo, channelName, prefix);
+    await createAndJoinSharedStream(pageOne, pageTwo, channelName, { prefix });
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
@@ -509,17 +495,11 @@ test("keeps scroll position when new messages arrive above the fold", async ({
 
     await pageOne.goto("/");
     await pageTwo.goto("/");
-    await createAndJoinSharedStream(pageOne, pageTwo, channelName);
-
-    const minScrollableDistance = 480;
     const minAwayDistance = 80;
-    await ensureTimelineScrollable(
-      pageOne,
-      pageTwo,
-      channelName,
+    await createAndJoinSharedStream(pageOne, pageTwo, channelName, {
       prefix,
-      minScrollableDistance,
-    );
+      minDistance: 480,
+    });
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);

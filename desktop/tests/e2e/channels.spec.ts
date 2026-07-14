@@ -6,7 +6,7 @@ import {
   installMockBridge,
   openChannelBrowser,
   openCreateChannelDialog,
-  openNewDirectMessageDialog,
+  openNewMessagePage,
 } from "../helpers/bridge";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
@@ -18,6 +18,8 @@ const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
 // view-activity gate (memberIsBot && viewerIsOwner) opens for it.
 const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
+const DM_RELAY_AGENT_PUBKEY =
+  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 type MockFeedWindow = Window & {
   __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
@@ -38,6 +40,91 @@ type MockFeedWindow = Window & {
     tags: string[][];
   }) => unknown;
 };
+
+async function hasOutgoingEventWithContent(
+  page: import("@playwright/test").Page,
+  content: string,
+) {
+  return page.evaluate((expectedContent) => {
+    return (
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__?.some((entry) => {
+        if (entry.command !== "plugin:websocket|send") {
+          return false;
+        }
+
+        const data = (
+          entry.payload as {
+            message?: { data?: string; type?: string };
+          }
+        )?.message?.data;
+        if (!data) {
+          return false;
+        }
+
+        try {
+          const frame = JSON.parse(data) as unknown[];
+          const event = frame[1] as { content?: unknown } | undefined;
+          return frame[0] === "EVENT" && event?.content === expectedContent;
+        } catch {
+          return false;
+        }
+      }) ?? false
+    );
+  }, content);
+}
+
+async function readOutgoingChannelId(
+  page: import("@playwright/test").Page,
+  content: string,
+) {
+  return page.evaluate((expectedContent) => {
+    const entries =
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+
+    for (const entry of entries) {
+      if (entry.command !== "plugin:websocket|send") {
+        continue;
+      }
+
+      const data = (
+        entry.payload as { message?: { data?: string } } | undefined
+      )?.message?.data;
+      if (!data) {
+        continue;
+      }
+
+      try {
+        const frame = JSON.parse(data) as [
+          string,
+          { content?: string; tags?: string[][] },
+        ];
+        if (
+          frame[0] !== "EVENT" ||
+          !frame[1]?.content?.includes(expectedContent)
+        ) {
+          continue;
+        }
+        return frame[1].tags?.find((tag) => tag[0] === "h")?.[1] ?? null;
+      } catch {}
+    }
+
+    return null;
+  }, content);
+}
 
 async function openChannelManagement(
   page: import("@playwright/test").Page,
@@ -214,6 +301,10 @@ async function readCommandLog(page: import("@playwright/test").Page) {
         .__BUZZ_E2E_COMMANDS__ ?? []
     );
   });
+}
+
+function commandCount(commands: string[], command: string) {
+  return commands.filter((entry) => entry === command).length;
 }
 
 async function readCommandPayloadLog(page: import("@playwright/test").Page) {
@@ -432,8 +523,11 @@ test("shows presence in sidebar, DM header, and member list", async ({
 test("start a new direct message from the sidebar", async ({ page }) => {
   await page.goto("/");
 
-  await openNewDirectMessageDialog(page);
-  await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
+  await openNewMessagePage(page);
+  await expect(page.getByTestId("new-message-page")).toBeVisible();
+  await expect(page.getByTestId("message-composer")).toBeVisible();
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeVisible();
+  await expect(page.getByTestId("new-message-body")).toBeEmpty();
 
   await page.getByTestId("new-dm-search").fill("charlie");
   await expect(
@@ -444,12 +538,21 @@ test("start a new direct message from the sidebar", async ({ page }) => {
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
   await expect(page.getByTestId("new-dm-search")).toHaveValue("");
-  await page
-    .getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`)
-    .click();
-  await expect(
-    page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
-  ).not.toBeVisible();
+  const selectedCharlie = page.getByTestId(
+    `new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`,
+  );
+  await selectedCharlie.hover();
+  const selectedCharlieBox = await selectedCharlie.boundingBox();
+  expect(selectedCharlieBox).not.toBeNull();
+  if (!selectedCharlieBox) return;
+  await page.mouse.move(
+    selectedCharlieBox.x + selectedCharlieBox.width / 2,
+    selectedCharlieBox.y + selectedCharlieBox.height / 2,
+  );
+  await page.mouse.down();
+  await expect(page.locator(".buzz-poof-burst")).toHaveCount(1);
+  await page.mouse.up();
+  await expect(selectedCharlie).not.toBeVisible();
   await page.getByTestId("new-dm-search").fill("charlie");
   await expect(
     page.getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`),
@@ -462,16 +565,534 @@ test("start a new direct message from the sidebar", async ({ page }) => {
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
 
-  await page.keyboard.press("Enter");
+  await page.getByTestId("message-input").fill("Hello charlie");
+  await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("dm-list")).toContainText("charlie");
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
   await expect(page.getByTestId("section-actions-dms")).not.toBeFocused();
 });
 
-test("keeps direct message row add buttons hidden while opening", async ({
+test("keeps typing focus while arrow keys traverse and select DM recipients", async ({
   page,
 }) => {
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  const search = page.getByTestId("new-dm-search");
+  await expect(search).toBeFocused();
+  const initialActiveDescendant = await search.getAttribute(
+    "aria-activedescendant",
+  );
+  expect(initialActiveDescendant).toMatch(/^new-dm-option-/);
+  await search.press("Enter");
+  await expect(
+    page.locator("button[data-testid^='new-dm-selected-']"),
+  ).toHaveCount(1);
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeVisible();
+
+  await search.fill("o");
+  await expect(
+    page.getByTestId(`new-dm-result-${TEST_IDENTITIES.bob.pubkey}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`new-dm-result-${TEST_IDENTITIES.outsider.pubkey}`),
+  ).toBeVisible();
+
+  await expect(search).toHaveAttribute(
+    "aria-activedescendant",
+    `new-dm-option-${TEST_IDENTITIES.outsider.pubkey}`,
+  );
+  await expect(
+    page.locator(`#new-dm-option-${TEST_IDENTITIES.outsider.pubkey}`),
+  ).toHaveAttribute("aria-selected", "true");
+
+  await search.press("ArrowDown");
+  await expect(search).toBeFocused();
+  await expect(search).toHaveAttribute(
+    "aria-activedescendant",
+    `new-dm-option-${TEST_IDENTITIES.bob.pubkey}`,
+  );
+
+  await search.press("ArrowUp");
+  await expect(search).toHaveAttribute(
+    "aria-activedescendant",
+    `new-dm-option-${TEST_IDENTITIES.outsider.pubkey}`,
+  );
+  await search.press("Enter");
+
+  await expect(search).toBeFocused();
+  await expect(search).toHaveValue("");
+  await expect(search).toHaveAttribute("aria-activedescendant", /.+/);
+  await expect(
+    page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.outsider.pubkey}`),
+  ).toBeVisible();
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeVisible();
+});
+
+test("sends the first message from the new direct message composer", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+
+  const message = "First message from the new conversation";
+  await page.getByTestId("message-input").fill(message);
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+});
+
+test("creates the DM before preparing a persona mention", async ({ page }) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+    createManagedAgentDelayMs: 1_000,
+  });
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" for a hand");
+
+  const baselineCommands = await readCommandLog(page);
+  const baselineCommandPayloads = await readCommandPayloadLog(page);
+  const baselineOpenDmCount = commandCount(baselineCommands, "open_dm");
+  const baselineCreateCount = commandCount(
+    baselineCommands,
+    "create_managed_agent",
+  );
+
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(async () => commandCount(await readCommandLog(page), "open_dm"))
+    .toBeGreaterThan(baselineOpenDmCount);
+  await expect(
+    page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeDisabled();
+  await expect(page.getByTestId("new-dm-search")).toBeDisabled();
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeHidden();
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "create_managed_agent"),
+    )
+    .toBeGreaterThan(baselineCreateCount);
+  await expect(page.getByTestId("chat-title")).toContainText("charlie");
+  await expect(page.getByTestId("chat-title")).toContainText("Fizz");
+
+  const sendCommands = (await readCommandLog(page)).slice(
+    baselineCommands.length,
+  );
+  const sendCommandPayloads = (await readCommandPayloadLog(page)).slice(
+    baselineCommandPayloads.length,
+  );
+  expect(commandCount(sendCommands, "open_dm")).toBe(2);
+  const firstOpenIndex = sendCommands.indexOf("open_dm");
+  const createIndex = sendCommands.indexOf("create_managed_agent");
+  const expandedOpenIndex = sendCommands.lastIndexOf("open_dm");
+  const startIndex = sendCommands.indexOf("start_managed_agent");
+  expect(firstOpenIndex).toBeLessThan(createIndex);
+  expect(createIndex).toBeLessThan(expandedOpenIndex);
+  expect(expandedOpenIndex).toBeLessThan(startIndex);
+  expect(sendCommands).not.toContain("add_channel_members");
+
+  const sentMessageCommand = sendCommandPayloads.find((entry) => {
+    if (entry.command !== "plugin:websocket|send") {
+      return false;
+    }
+    const data = (entry.payload as { message?: { data?: string } } | undefined)
+      ?.message?.data;
+    if (!data) {
+      return false;
+    }
+    const frame = JSON.parse(data) as unknown[];
+    return (
+      frame[0] === "EVENT" &&
+      (frame[1] as { content?: string } | undefined)?.content.includes(
+        "for a hand",
+      )
+    );
+  });
+  const sentMessageData = (
+    sentMessageCommand?.payload as { message?: { data?: string } } | undefined
+  )?.message?.data;
+  expect(sentMessageData).toBeTruthy();
+  const sentMessageEvent = (
+    JSON.parse(sentMessageData ?? "[]") as [string, { tags?: string[][] }]
+  )[1];
+  const sentChannelId = sentMessageEvent.tags?.find(
+    (tag) => tag[0] === "h",
+  )?.[1];
+  expect(sentChannelId).toBeTruthy();
+  await expect(
+    page.locator("[data-active='true'][data-channel-id]"),
+  ).toHaveAttribute("data-channel-id", sentChannelId ?? "");
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "for a hand",
+  );
+  await expect(
+    page
+      .getByTestId("message-row")
+      .last()
+      .locator("[data-mention].agent-mention-highlight", { hasText: "Fizz" }),
+  ).toBeVisible();
+});
+
+test("routes an agent mention from an existing DM to the expanded conversation", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+  });
+  await page.goto("/");
+
+  const sourceDm = page.getByTestId("channel-alice-tyler");
+  const sourceDmId = await sourceDm.getAttribute("data-channel-id");
+  expect(sourceDmId).toBeTruthy();
+  await sourceDm.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const messageTail = "in this DM";
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" in this DM");
+  const baselineCommands = await readCommandPayloadLog(page);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(async () => readOutgoingChannelId(page, messageTail))
+    .not.toBeNull();
+  const sentChannelId = await readOutgoingChannelId(page, messageTail);
+  expect(sentChannelId).not.toBe(sourceDmId);
+  await expect(
+    page.locator("[data-active='true'][data-channel-id]"),
+  ).toHaveAttribute("data-channel-id", sentChannelId ?? "");
+  await expect(page.getByTestId("chat-title")).toContainText("alice");
+  await expect(page.getByTestId("chat-title")).toContainText("Fizz");
+  await expect(sourceDm).not.toContainText("Fizz");
+  const sendCommands = (await readCommandPayloadLog(page)).slice(
+    baselineCommands.length,
+  );
+  expect(sendCommands).not.toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        command: "add_channel_members",
+        payload: expect.objectContaining({ channelId: sourceDmId }),
+      }),
+    ]),
+  );
+  expect(sendCommands.map((entry) => entry.command)).toEqual(
+    expect.arrayContaining(["open_dm", "start_managed_agent"]),
+  );
+});
+
+test("routes a relay-agent mention from an existing DM to the expanded conversation", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: DM_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_IDENTITY_PUBKEY],
+      },
+    ],
+  });
+  await page.goto("/");
+
+  const sourceDm = page.getByTestId("channel-alice-tyler");
+  const sourceDmId = await sourceDm.getAttribute("data-channel-id");
+  expect(sourceDmId).toBeTruthy();
+  await sourceDm.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const messageTail = "with the relay agent";
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @qui");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "quinn" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(` ${messageTail}`);
+  const baselineCommands = await readCommandPayloadLog(page);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(async () => readOutgoingChannelId(page, messageTail))
+    .not.toBeNull();
+  const sentChannelId = await readOutgoingChannelId(page, messageTail);
+  expect(sentChannelId).not.toBe(sourceDmId);
+  await expect(
+    page.locator("[data-active='true'][data-channel-id]"),
+  ).toHaveAttribute("data-channel-id", sentChannelId ?? "");
+  await expect(page.getByTestId("chat-title")).toContainText("alice");
+  await expect(page.getByTestId("chat-title")).toContainText(
+    DM_RELAY_AGENT_PUBKEY.slice(0, 8),
+  );
+
+  const sendCommands = (await readCommandPayloadLog(page)).slice(
+    baselineCommands.length,
+  );
+  expect(sendCommands.map((entry) => entry.command)).toContain("open_dm");
+  expect(sendCommands.map((entry) => entry.command)).not.toContain(
+    "start_managed_agent",
+  );
+  expect(sendCommands.map((entry) => entry.command)).not.toContain(
+    "add_channel_members",
+  );
+});
+
+test("does not reroute an expanded DM after the user navigates away", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+    sendMessageDelayMs: 1_000,
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" while I leave");
+  await page.getByTestId("send-message").click();
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForTimeout(1_250);
+  await expect(page).toHaveURL(
+    new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`),
+  );
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+});
+
+test("does not reroute an expanded DM after the channel pane unmounts", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+    openDmDelayMs: 1_000,
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" while I open settings");
+  await page.getByTestId("send-message").click();
+
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await page.waitForTimeout(1_250);
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await expect
+    .poll(async () => readOutgoingChannelId(page, "while I open settings"))
+    .toBeNull();
+});
+
+test("drops an expanded DM after the first message fails", async ({ page }) => {
+  const retryMessage = "Retry without the agent";
+  const sendError = "Mock first DM send failed.";
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+    sendMessageErrors: [sendError],
+  });
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" for a hand");
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByText(sendError)).toBeVisible();
+  await expect(input).toContainText("Fizz");
+
+  const commandsAfterFailure = await readCommandPayloadLog(page);
+  const failedSendChannelId = await readOutgoingChannelId(page, "for a hand");
+  expect(failedSendChannelId).toBeTruthy();
+  expect(commandsAfterFailure.map((entry) => entry.command)).not.toContain(
+    "add_channel_members",
+  );
+  const baselineOpenDmCount = commandCount(
+    commandsAfterFailure.map((entry) => entry.command),
+    "open_dm",
+  );
+
+  await input.fill(retryMessage);
+  const retryBaseline = commandsAfterFailure.length;
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    retryMessage,
+  );
+
+  const allCommands = await readCommandPayloadLog(page);
+  expect(
+    commandCount(
+      allCommands.map((entry) => entry.command),
+      "open_dm",
+    ),
+  ).toBe(baselineOpenDmCount + 1);
+  const retryCommands = allCommands.slice(retryBaseline);
+  const retrySend = retryCommands.find((entry) => {
+    if (entry.command !== "plugin:websocket|send") {
+      return false;
+    }
+    const data = (entry.payload as { message?: { data?: string } } | undefined)
+      ?.message?.data;
+    if (!data) {
+      return false;
+    }
+    const frame = JSON.parse(data) as unknown[];
+    return (
+      frame[0] === "EVENT" &&
+      (frame[1] as { content?: string } | undefined)?.content === retryMessage
+    );
+  });
+  const retrySendData = (
+    retrySend?.payload as { message?: { data?: string } } | undefined
+  )?.message?.data;
+  expect(retrySendData).toBeTruthy();
+  const retryEvent = (
+    JSON.parse(retrySendData ?? "[]") as [string, { tags?: string[][] }]
+  )[1];
+  const retryChannelId = retryEvent.tags?.find((tag) => tag[0] === "h")?.[1];
+  expect(retryChannelId).toBeTruthy();
+  expect(retryChannelId).not.toBe(failedSendChannelId);
+  await expect(
+    page.locator("[data-active='true'][data-channel-id]"),
+  ).toHaveAttribute("data-channel-id", retryChannelId ?? "");
+});
+
+test("drops an expanded DM after agent startup fails", async ({ page }) => {
+  const retryMessage = "Retry after agent startup failed";
+  const startError = "Mock agent startup failed.";
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+    startManagedAgentErrors: [startError],
+  });
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" before startup fails");
+  await page.getByTestId("send-message").click();
+
+  await expect(
+    page.getByText(startError, { exact: false }).first(),
+  ).toBeVisible();
+  await expect(input).toContainText("Fizz");
+
+  const commandsAfterFailure = await readCommandPayloadLog(page);
+  const openDmCallsAfterFailure = commandsAfterFailure.filter(
+    (entry) => entry.command === "open_dm",
+  );
+  expect(openDmCallsAfterFailure).toHaveLength(2);
+  expect(
+    (openDmCallsAfterFailure.at(-1)?.payload as { pubkeys?: string[] })
+      ?.pubkeys,
+  ).toEqual(expect.arrayContaining([TEST_IDENTITIES.charlie.pubkey]));
+  expect(
+    (openDmCallsAfterFailure.at(-1)?.payload as { pubkeys?: string[] })
+      ?.pubkeys,
+  ).toHaveLength(2);
+
+  await input.fill(retryMessage);
+  const retryBaseline = commandsAfterFailure.length;
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    retryMessage,
+  );
+
+  const retryCommands = (await readCommandPayloadLog(page)).slice(
+    retryBaseline,
+  );
+  const retryOpenDm = retryCommands.find(
+    (entry) => entry.command === "open_dm",
+  );
+  expect(
+    (retryOpenDm?.payload as { pubkeys?: string[] } | undefined)?.pubkeys,
+  ).toEqual([TEST_IDENTITIES.charlie.pubkey]);
+  await expect(page.getByTestId("chat-title")).not.toContainText("Fizz");
+});
+
+test("closes direct message results while opening", async ({ page }) => {
   await page.goto("/");
   await page.evaluate(() => {
     const testWindow = window as Window & {
@@ -482,7 +1103,7 @@ test("keeps direct message row add buttons hidden while opening", async ({
     testWindow.__BUZZ_E2E__.mock.openDmDelayMs = 1_000;
   });
 
-  await openNewDirectMessageDialog(page);
+  await openNewMessagePage(page);
   await page.getByTestId("new-dm-search").fill("charlie");
   await page
     .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
@@ -490,18 +1111,79 @@ test("keeps direct message row add buttons hidden while opening", async ({
   await expect(
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeVisible();
 
-  const rowAddButtons = page.locator("[data-testid^='new-dm-add-']");
-  await expect(rowAddButtons.first()).toBeAttached();
+  await page.getByTestId("message-input").fill("Open this conversation");
+  await page.getByTestId("send-message").click();
 
-  await page.getByTestId("new-dm-submit").click();
-
-  await expect(page.getByTestId("new-dm-submit")).toContainText("Opening...");
-  await expect(
-    page.locator("button[data-testid^='new-dm-add-']:visible"),
-  ).toHaveCount(0);
+  await expect(page.getByTestId("new-dm-opening")).toContainText("Opening");
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeHidden();
 
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+});
+
+test("does not reopen a direct message after leaving the composer", async ({
+  page,
+}) => {
+  await installMockBridge(page, { openDmDelayMs: 1_000 });
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+  const staleMessage = "Do not send after leaving";
+  await page.getByTestId("message-input").fill(staleMessage);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("new-dm-opening")).toContainText("Opening");
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("dm-list")).toContainText("charlie");
+  // The DM appearing proves the delayed open completed. Give the abandoned
+  // continuation time to run before asserting that it did not publish.
+  await page.waitForTimeout(1_250);
+  expect(await hasOutgoingEventWithContent(page, staleMessage)).toBe(false);
+  await expect(page).toHaveURL(
+    new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`),
+  );
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+});
+
+test("does not reopen a sent direct message after leaving during cache reseed", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+  const staleMessage = "Stay on the channel after cache reseed";
+  await page.getByTestId("message-input").fill(staleMessage);
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E__?: { mock?: { channelsReadDelayMs?: number } };
+    };
+    testWindow.__BUZZ_E2E__ ??= {};
+    testWindow.__BUZZ_E2E__.mock ??= {};
+    testWindow.__BUZZ_E2E__.mock.channelsReadDelayMs = 1_000;
+  });
+
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(async () => hasOutgoingEventWithContent(page, staleMessage))
+    .toBe(true);
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForTimeout(1_250);
+  await expect(page).toHaveURL(
+    new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`),
+  );
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
 test("shows capped participant stack in group direct message header", async ({
@@ -509,8 +1191,8 @@ test("shows capped participant stack in group direct message header", async ({
 }) => {
   await page.goto("/");
 
-  await openNewDirectMessageDialog(page);
-  await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
+  await openNewMessagePage(page);
+  await expect(page.getByTestId("new-message-page")).toBeVisible();
 
   for (const identity of [
     TEST_IDENTITIES.alice,
@@ -522,7 +1204,8 @@ test("shows capped participant stack in group direct message header", async ({
     await page.getByTestId(`new-dm-result-${identity.pubkey}`).click();
   }
 
-  await page.getByTestId("new-dm-submit").click();
+  await page.getByTestId("message-input").fill("Hello group");
+  await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("channel-dm-count-Group DM (5)")).toHaveText(
     "4",
@@ -1706,9 +2389,11 @@ test("manage channel keeps canvas near the top of the sheet", async ({
   expect(canvasBox?.y).toBeLessThan(nameBox?.y);
 });
 
-test("home inbox channel label opens management without leaving home", async ({
-  page,
-}) => {
+async function seedHomeInboxMention(
+  page: import("@playwright/test").Page,
+  itemId: string,
+  tags?: string[][],
+) {
   await page.goto("/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await page.waitForFunction(
@@ -1718,7 +2403,14 @@ test("home inbox channel label opens management without leaving home", async ({
   );
 
   await page.evaluate(
-    ({ channelId, createdAt, currentPubkey, senderPubkey }) => {
+    ({
+      channelId,
+      createdAt,
+      currentPubkey,
+      itemId: id,
+      senderPubkey,
+      tags: seededTags,
+    }) => {
       const pushFeedItem = (window as MockFeedWindow)
         .__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
       if (!pushFeedItem) {
@@ -1726,14 +2418,14 @@ test("home inbox channel label opens management without leaving home", async ({
       }
 
       pushFeedItem({
-        id: "mock-feed-home-channel-panel",
+        id,
         kind: 9,
         pubkey: senderPubkey,
         content: "Please review the home panel routing.",
         created_at: createdAt,
         channel_id: channelId,
         channel_name: "general",
-        tags: [
+        tags: seededTags ?? [
           ["e", channelId],
           ["p", currentPubkey],
         ],
@@ -1744,16 +2436,66 @@ test("home inbox channel label opens management without leaving home", async ({
       channelId: GENERAL_CHANNEL_ID,
       createdAt: Math.floor(Date.now() / 1000),
       currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+      itemId,
       senderPubkey: TEST_IDENTITIES.alice.pubkey,
+      tags,
     },
   );
 
-  await page
-    .getByTestId("home-inbox-item-mock-feed-home-channel-panel")
-    .click();
+  await page.getByTestId(`home-inbox-item-${itemId}`).click();
+}
+
+test("home inbox channel label navigates to the channel message", async ({
+  page,
+}) => {
+  await seedHomeInboxMention(page, "mock-feed-home-channel-navigate");
+
   await page
     .getByTestId("home-inbox-detail")
     .getByRole("button", { exact: true, name: "general" })
+    .click();
+
+  await expect(page).toHaveURL(
+    new RegExp(`#/channels/${GENERAL_CHANNEL_ID}\\?`),
+  );
+  await expect(page).toHaveURL(/messageId=mock-feed-home-channel-navigate/);
+  await expect(page).not.toHaveURL(/threadRootId=/);
+  await expect(page.getByTestId("message-timeline")).toBeVisible();
+  await expect(page.getByTestId("home-inbox-list")).toHaveCount(0);
+});
+
+test("home inbox thread reply mention carries threadRootId to the channel", async ({
+  page,
+}) => {
+  const rootEventId = "mock-feed-home-thread-root";
+  await seedHomeInboxMention(page, "mock-feed-home-thread-navigate", [
+    ["e", rootEventId, "", "root"],
+    ["e", "mock-feed-home-thread-parent", "", "reply"],
+    ["p", TEST_IDENTITIES.tyler.pubkey],
+  ]);
+
+  await page
+    .getByTestId("home-inbox-detail")
+    .getByRole("button", { exact: true, name: "general" })
+    .click();
+
+  await expect(page).toHaveURL(
+    new RegExp(`#/channels/${GENERAL_CHANNEL_ID}\\?`),
+  );
+  await expect(page).toHaveURL(/messageId=mock-feed-home-thread-navigate/);
+  await expect(page).toHaveURL(new RegExp(`threadRootId=${rootEventId}`));
+  await expect(page.getByTestId("message-timeline")).toBeVisible();
+  await expect(page.getByTestId("home-inbox-list")).toHaveCount(0);
+});
+
+test("home inbox manage affordance opens management without leaving home", async ({
+  page,
+}) => {
+  await seedHomeInboxMention(page, "mock-feed-home-channel-panel");
+
+  await page
+    .getByTestId("home-inbox-detail")
+    .getByTestId("channel-management-trigger")
     .click();
 
   await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
@@ -1877,6 +2619,37 @@ test("members sidebar pages add-member search beyond the first 50 people", async
   );
 });
 
+test("shows loading skeletons without stale recipient results", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [],
+    relayAgents: [],
+    userSearchDelayMs: 1_000,
+  });
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  const search = page.getByTestId("new-dm-search");
+  await search.fill("Alex");
+
+  await expect(page.getByTestId("new-dm-loading")).toBeVisible();
+  await expect(
+    page.locator("[data-testid^='new-dm-result-']:visible"),
+  ).toHaveCount(0);
+  await expect(search).not.toHaveAttribute("aria-activedescendant");
+  await search.press("Enter");
+  await expect(
+    page.locator("button[data-testid^='new-dm-selected-']"),
+  ).toHaveCount(0);
+
+  await expect(page.getByTestId("new-dm-loading")).toBeHidden();
+  await expect(page.locator("[data-testid^='new-dm-result-']")).toHaveCount(0);
+  await expect(page.getByTestId("new-dm-empty")).toContainText(
+    "No matching users.",
+  );
+});
+
 test("new DM picker pages people search beyond the first 50 results", async ({
   page,
 }) => {
@@ -1887,8 +2660,8 @@ test("new DM picker pages people search beyond the first 50 results", async ({
   await installMockBridge(page, { searchProfiles });
 
   await page.goto("/");
-  await openNewDirectMessageDialog(page);
-  await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
+  await openNewMessagePage(page);
+  await expect(page.getByTestId("new-message-page")).toBeVisible();
   await page.getByTestId("new-dm-search").fill("Alex");
 
   const results = page.locator("[data-testid^='new-dm-result-']");

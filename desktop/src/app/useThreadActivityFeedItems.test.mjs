@@ -42,11 +42,11 @@ test("thread activity feed projection filters muted roots", () => {
   assert.equal(items[0]?.channelType, "stream");
 });
 
-test("channel-presence fence: items from channels absent in workspace are filtered out", () => {
-  // workspace A has channel-1; workspace B (relayed) has only channel-2.
+test("channel-presence fence: items from channels absent in community are filtered out", () => {
+  // community A has channel-1; community B (relayed) has only channel-2.
   // Simulate A's stored items landing in B's projection call — they should
   // all be filtered out because channel-1 is not in B's channel set.
-  const workspaceBChannels = [
+  const communityBChannels = [
     { id: OTHER_CHANNEL_ID, name: "other-channel", channelType: "stream" },
   ];
 
@@ -59,10 +59,10 @@ test("channel-presence fence: items from channels absent in workspace are filter
       }),
     ],
     new Set(),
-    workspaceBChannels,
+    communityBChannels,
   );
 
-  // Only the item whose channelId exists in the current workspace passes.
+  // Only the item whose channelId exists in the current community passes.
   assert.deepEqual(
     items.map((item) => item.id),
     ["reply-from-b"],

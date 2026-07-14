@@ -92,9 +92,10 @@ COPY --from=builder    /build/target/release/buzz-admin /usr/local/bin/buzz-admi
 COPY --from=builder    /build/target/release/buzz-pair-relay /usr/local/bin/buzz-pair-relay
 COPY --from=web-builder /build/web/dist                 /srv/buzz/web
 
-ENV BUZZ_WEB_DIR=/srv/buzz/web
+# The web UI is bundled but disabled by default. Set
+# BUZZ_WEB_DIR=/srv/buzz/web to opt in.
 
-# 3000: app (WS + REST + web UI)  ·  8080: /_liveness, /_readiness  ·  9102: /metrics
+# 3000: app (WS + REST)  ·  8080: /_liveness, /_readiness  ·  9102: /metrics
 EXPOSE 3000 8080 9102
 
 USER buzz:buzz

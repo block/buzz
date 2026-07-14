@@ -55,8 +55,8 @@ import {
   writeStoredViewMode,
 } from "@/features/projects/lib/projectsViewHelpers";
 import { useOpenProjectTerminal } from "@/features/projects/ui/useOpenProjectTerminal";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
-import { WorkspaceEmojiIcon } from "@/features/workspaces/ui/WorkspaceSwitcher";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { CommunityEmojiIcon } from "@/features/communities/ui/CommunitySwitcher";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
@@ -73,7 +73,7 @@ const MANY_PROJECTS_THRESHOLD = 12;
 
 export function ProjectsView() {
   const { goProject } = useAppNavigation();
-  const { activeWorkspace } = useWorkspaces();
+  const { activeCommunity } = useCommunities();
   const mainInsetRef = useMainInsetRef();
   const projectsHeaderChromeRef = useMeasuredCssVariable({
     targetRef: mainInsetRef,
@@ -84,7 +84,7 @@ export function ProjectsView() {
   const projects = projectsQuery.data ?? [];
   const activitySummariesQuery = useProjectActivitySummariesQuery(projects);
   const localRepositoriesQuery = useProjectLocalRepositoriesQuery(
-    activeWorkspace?.reposDir,
+    activeCommunity?.reposDir,
   );
   const projectPullRequestsQuery = useProjectsPullRequestsQuery(projects);
   const [filter, setFilter] = React.useState<ProjectsFilter>(() =>
@@ -101,7 +101,7 @@ export function ProjectsView() {
   );
   const repoSnapshotsQuery = useProjectsRepoSnapshotsQuery(
     snapshotProjects,
-    activeWorkspace?.reposDir,
+    activeCommunity?.reposDir,
   );
   const [searchOpen, setSearchOpen] = React.useState(false);
   const [createProjectOpen, setCreateProjectOpen] = React.useState(false);
@@ -296,7 +296,7 @@ export function ProjectsView() {
     [goProject],
   );
 
-  const openTerminal = useOpenProjectTerminal(activeWorkspace?.reposDir);
+  const openTerminal = useOpenProjectTerminal(activeCommunity?.reposDir);
   const handleOpenTerminal = React.useCallback(
     (project: Project) =>
       openTerminal(project, {
@@ -473,10 +473,10 @@ export function ProjectsView() {
 
   const projectsHeader = (
     <div className="pointer-events-auto flex min-w-0 items-center gap-3 px-4 pb-1 pt-4">
-      <WorkspaceEmojiIcon className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/40 text-3xl" />
+      <CommunityEmojiIcon className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/40 text-3xl" />
       <div className="min-w-0 flex-1 space-y-0.5">
         <h2 className="text-xl font-semibold leading-6 tracking-tight text-foreground">
-          {activeWorkspace?.name || "Relay"} Projects
+          {activeCommunity?.name || "Relay"} Projects
         </h2>
         <p className="line-clamp-2 max-w-2xl text-base font-normal text-muted-foreground sm:line-clamp-none">
           Browse shared repositories, pull requests, and local project checkouts
@@ -547,7 +547,7 @@ export function ProjectsView() {
           <ProjectsAgentPromptPage
             onClose={() => setSearchOpen(false)}
             projects={projects}
-            workspaceId={activeWorkspace?.id ?? null}
+            workspaceId={activeCommunity?.id ?? null}
           />
         </>
       ) : (

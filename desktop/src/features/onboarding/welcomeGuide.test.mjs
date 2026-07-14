@@ -93,14 +93,14 @@ test("pickWelcomeGuideAgent ignores non-Kit agents with the legacy prompt", () =
   assert.equal(pickWelcomeGuideAgent([nonKit, fizz]), fizz);
 });
 
-test("pickWelcomeGuideAgentForRelay ignores Fizz agents from other workspaces", () => {
-  const otherWorkspaceFizz = makeAgent({
+test("pickWelcomeGuideAgentForRelay ignores Fizz agents from other communities", () => {
+  const otherCommunityFizz = makeAgent({
     pubkey: PUB_A,
     personaId: WELCOME_GUIDE_PERSONA_ID,
     relayUrl: RELAY_A,
     status: "running",
   });
-  const currentWorkspaceFizz = makeAgent({
+  const currentCommunityFizz = makeAgent({
     pubkey: PUB_B,
     personaId: WELCOME_GUIDE_PERSONA_ID,
     relayUrl: RELAY_B,
@@ -109,22 +109,22 @@ test("pickWelcomeGuideAgentForRelay ignores Fizz agents from other workspaces", 
 
   assert.equal(
     pickWelcomeGuideAgentForRelay(
-      [otherWorkspaceFizz, currentWorkspaceFizz],
+      [otherCommunityFizz, currentCommunityFizz],
       RELAY_B,
     ),
-    currentWorkspaceFizz,
+    currentCommunityFizz,
   );
 });
 
-test("pickWelcomeGuideAgentForRelay returns null when Fizz only exists in another workspace", () => {
-  const otherWorkspaceFizz = makeAgent({
+test("pickWelcomeGuideAgentForRelay returns null when Fizz only exists in another community", () => {
+  const otherCommunityFizz = makeAgent({
     pubkey: PUB_A,
     personaId: WELCOME_GUIDE_PERSONA_ID,
     relayUrl: RELAY_A,
   });
 
   assert.equal(
-    pickWelcomeGuideAgentForRelay([otherWorkspaceFizz], RELAY_B),
+    pickWelcomeGuideAgentForRelay([otherCommunityFizz], RELAY_B),
     null,
   );
 });

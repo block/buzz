@@ -343,13 +343,22 @@ pub enum SteerAck {
     PromptCompletedNeutral,
 }
 
+/// Whether a turn was cut by the idle clock or the hard wall-clock cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutKind {
+    /// No ACP wire activity for `idle_timeout` seconds.
+    Idle,
+    /// Turn ran for `max_turn_duration` seconds of wall-clock time.
+    Hard,
+}
+
 /// Outcome of a prompt task.
 #[allow(dead_code)]
 pub enum PromptOutcome {
     Ok(StopReason),
     Error(AcpError),
     AgentExited,
-    Timeout,
+    Timeout(TimeoutKind),
     /// Intentional cancel via `!cancel` command or interrupt mode.
     /// Agent is healthy — no respawn, no retry penalty.
     Cancelled,
@@ -1448,7 +1457,7 @@ pub async fn run_prompt_task(
                         &result_tx,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                     return;
@@ -1464,7 +1473,7 @@ pub async fn run_prompt_task(
                         &result_tx,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Hard),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                     return;
@@ -1698,8 +1707,8 @@ pub async fn run_prompt_task(
                                 );
                                 return;
                             }
-                            Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout) => {
-                                // Cancel drain timed out — agent state uncertain.
+                            Err(AcpError::IdleTimeout(_)) => {
+                                // Cancel drain idle timed out — agent state uncertain.
                                 agent.state.invalidate(&source);
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
@@ -1718,7 +1727,32 @@ pub async fn run_prompt_task(
                                     &result_tx,
                                     agent,
                                     source,
-                                    PromptOutcome::Timeout,
+                                    PromptOutcome::Timeout(TimeoutKind::Idle),
+                                    retry_batch,
+                                );
+                                return;
+                            }
+                            Err(AcpError::HardTimeout) => {
+                                // Cancel drain hard timed out — agent state uncertain.
+                                agent.state.invalidate(&source);
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+
+                                let usage = agent.acp.take_turn_usage();
+                                publish_agent_turn_metric(
+                                    &ctx,
+                                    usage,
+                                    observer_channel_id,
+                                    &session_id,
+                                    &turn_id,
+                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                )
+                                .await;
+                                send_prompt_result(
+                                    &result_tx,
+                                    agent,
+                                    source,
+                                    PromptOutcome::Timeout(TimeoutKind::Hard),
                                     retry_batch,
                                 );
                                 return;
@@ -1912,7 +1946,7 @@ pub async fn run_prompt_task(
                         &result_tx,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                 }
@@ -1961,7 +1995,7 @@ pub async fn run_prompt_task(
                         &result_tx,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                 }
@@ -1988,7 +2022,7 @@ pub async fn run_prompt_task(
                 &result_tx,
                 agent,
                 source,
-                PromptOutcome::Timeout,
+                PromptOutcome::Timeout(TimeoutKind::Hard),
                 requeue_batch_if_queue(&ctx, batch),
             );
         }

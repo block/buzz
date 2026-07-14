@@ -9,6 +9,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../custom_emoji/custom_emoji.dart';

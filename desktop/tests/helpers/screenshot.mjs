@@ -85,17 +85,17 @@ const page = await browser.newPage({
   viewport: { width: vpWidth, height: vpHeight },
 });
 
-// Seed default workspace (mirrors seedDefaultWorkspace in bridge.ts)
+// Seed default community (mirrors seedDefaultCommunity in bridge.ts)
 await page.addInitScript(() => {
-  const workspaceId = "e2e-default-workspace";
-  const workspace = {
-    id: workspaceId,
+  const communityId = "e2e-default-community";
+  const community = {
+    id: communityId,
     name: "E2E Test",
     relayUrl: "ws://localhost:3000",
     addedAt: new Date().toISOString(),
   };
-  window.localStorage.setItem("buzz-workspaces", JSON.stringify([workspace]));
-  window.localStorage.setItem("buzz-active-workspace-id", workspaceId);
+  window.localStorage.setItem("buzz-communities", JSON.stringify([community]));
+  window.localStorage.setItem("buzz-active-community-id", communityId);
 });
 
 // Seed onboarding completion for all known identities

@@ -272,6 +272,7 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `BUZZ_AUTO_MIGRATE`             | `false`                     | Opt in with `true`/`1`/`yes`/`on` to run embedded SQLx migrations on relay startup |
 | `RELAY_OWNER_PUBKEY`              | unset                       | Bootstrapped as `owner` in `relay_members` at first start |
 | `BUZZ_ALLOW_NIP_OA_AUTH`        | `false`                     | Enable NIP-OA owner attestation for membership |
+| `BUZZ_WEB_DIR`                  | unset                       | Set to the bundled `/srv/buzz/web` in the container to opt in to the browser web UI |
 
 CLI-side, only two matter for testing:
 

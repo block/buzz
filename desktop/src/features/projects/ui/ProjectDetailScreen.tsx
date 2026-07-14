@@ -54,7 +54,7 @@ import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useProjectCommitDiffQuery } from "@/features/projects/useProjectCommitDiff";
 import { useGitIdentityQuery } from "@/features/projects/useGitIdentity";
 import type { ViewerGitIdentity } from "@/features/projects/lib/projectContributorMatching";
@@ -112,7 +112,7 @@ const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const { commitHash, projectId, pullRequestId, issueId } = props;
   const { goChannel, goProjects } = useAppNavigation();
-  const { activeWorkspace } = useWorkspaces();
+  const { activeCommunity } = useCommunities();
   const mainInsetRef = useMainInsetRef();
   const projectDetailHeaderChromeRef = useMeasuredCssVariable({
     targetRef: mainInsetRef,
@@ -216,7 +216,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   );
   const localRepoDiffQuery = useProjectLocalRepoDiffQuery(
     project,
-    activeWorkspace?.reposDir,
+    activeCommunity?.reposDir,
     activeBranch,
     activeRepoPullRequest,
     repoSource === "local" && Boolean(activeRepoPullRequest),
@@ -225,26 +225,26 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     project,
     selectedCommitHash,
     repoSource,
-    activeWorkspace?.reposDir,
+    activeCommunity?.reposDir,
   );
   const localRepoSnapshotQuery = useProjectLocalRepoSnapshotQuery(
     project,
-    activeWorkspace?.reposDir,
+    activeCommunity?.reposDir,
     activeBranch,
   );
   const repoSyncStatusQuery = useProjectRepoSyncStatusQuery(
     project,
-    activeWorkspace?.reposDir,
+    activeCommunity?.reposDir,
     activeBranch,
   );
   const pushLocalRepoMutation = usePushProjectLocalRepositoryMutation(
     project,
-    activeWorkspace?.reposDir,
+    activeCommunity?.reposDir,
     activeBranch,
   );
   const pullLocalRepoMutation = usePullProjectLocalRepositoryMutation(
     project,
-    activeWorkspace?.reposDir,
+    activeCommunity?.reposDir,
     activeBranch,
   );
   const hasLocalCheckout = Boolean(
@@ -467,7 +467,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repoSyncStatusQuery,
   ]);
 
-  const openTerminal = useOpenProjectTerminal(activeWorkspace?.reposDir);
+  const openTerminal = useOpenProjectTerminal(activeCommunity?.reposDir);
   const handleOpenTerminal = React.useCallback(() => {
     if (!project) return Promise.resolve();
     return openTerminal(project, {

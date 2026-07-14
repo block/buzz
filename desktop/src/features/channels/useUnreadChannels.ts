@@ -148,7 +148,7 @@ export function useUnreadChannels(
   const activeChannelId = activeChannel?.id ?? null;
   const normalizedPubkey = pubkey?.toLowerCase() ?? null;
   // Scoped relay key for activity storage; empty string when relay not yet known
-  // so rows from an unknown relay never load into the wrong workspace.
+  // so rows from an unknown relay never load into the wrong community.
   const normalizedRelayUrl = relayUrlOption
     ? normalizeRelayUrl(relayUrlOption)
     : "";
@@ -192,7 +192,7 @@ export function useUnreadChannels(
   // stores the channel's NIP-RS read marker (unix seconds) at force-time, or
   // null if no marker existed yet. Persisted to localStorage
   // (buzz-forced-unread.v1) so it survives reload and is visible to the rail
-  // observer for inactive workspaces.
+  // observer for inactive communities.
   const forcedUnreadRef = React.useRef<ForcedUnreadMap>(
     pubkey ? forcedUnreadStore.read(pubkey) : {},
   );

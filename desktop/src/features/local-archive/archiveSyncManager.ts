@@ -72,7 +72,7 @@ function scopeKey(scopeType: ScopeType, scopeValue: string): string {
  * config and forwards matched events to `archive_events` in debounced batches.
  *
  * Lifecycle: created once at app-shell mount (see `useArchiveSync`), destroyed
- * on workspace switch. Resubscribes automatically when subscriptions change
+ * on community switch. Resubscribes automatically when subscriptions change
  * via the module-level notifier in `tauriArchive.ts`.
  *
  * Accepts optional `deps` for testing — production callers pass nothing.
@@ -304,7 +304,7 @@ import * as React from "react";
 
 /**
  * Starts the ArchiveSyncManager at app-shell mount and tears it down when the
- * component unmounts (workspace switch). No return value needed — the manager
+ * component unmounts (community switch). No return value needed — the manager
  * runs entirely in the background.
  */
 export function useArchiveSync(): void {

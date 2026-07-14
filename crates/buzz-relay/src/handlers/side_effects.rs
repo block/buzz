@@ -1984,6 +1984,10 @@ async fn handle_a_tag_deletion(
     let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
 
     match kind_num {
+        // kind:30350 revocation is exclusively a higher-generation inactive replacement.
+        super::push_lease::KIND_PUSH_LEASE => {
+            tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
+        }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
             // Try UUID first (workflow_id); fall back to name-based lookup.
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
@@ -2107,6 +2111,13 @@ async fn handle_standard_deletion_event(
             Some(target) => target,
             None => continue,
         };
+        if u32::from(target_event.event.kind.as_u16()) == super::push_lease::KIND_PUSH_LEASE {
+            tracing::debug!(
+                target_id = %hex::encode(&target_id),
+                "NIP-09 deletion ignored for push lease"
+            );
+            continue;
+        }
 
         let meta = state
             .db
@@ -2743,39 +2754,29 @@ async fn emit_initial_ref_state(
 ///
 /// Queries all current relay members and emits a relay-signed, NIP-70-protected
 /// addressable event listing every member pubkey. Replaces any previous list.
+///
+/// The member query, event construction, and replacement all happen inside
+/// the same per-community advisory lock held by
+/// `publish_nip43_membership_locked`. This prevents a stale snapshot from
+/// overwriting a newer one when two publications race: the lock serializes
+/// the entire read-build-write cycle, not just the write.
 pub async fn publish_nip43_membership_list(
     tenant: &TenantContext,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
-    let members = state.db.list_relay_members(tenant.community()).await?;
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+    let community = tenant.community();
 
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
-
-    // NIP-70 protected-event marker — prevents re-broadcasting by third parties.
-    tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
-
-    for member in &members {
-        tags.push(
-            Tag::parse(["member", &member.pubkey, &member.role])
-                .map_err(|e| anyhow::anyhow!("failed to build member tag: {e}"))?,
-        );
-    }
-
-    let event = EventBuilder::new(Kind::Custom(KIND_NIP43_MEMBERSHIP_LIST as u16), "")
-        .tags(tags)
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:13534: {e}"))?;
-
-    // NOTE: kind 13534 is technically a regular event (not in the NIP-16 replaceable
-    // range), but we intentionally use replace_addressable_event to get replacement
-    // semantics — only the latest membership snapshot matters. This function keys on
-    // (kind, pubkey, channel_id) and atomically replaces older events, which is exactly
-    // what Pyramid (the reference NIP-43 implementation) does with store.ReplaceEvent().
-    let (stored, was_inserted) = state
+    // The DB method acquires the per-community snapshot lock BEFORE reading
+    // members, so that the entire read-build-write cycle is serialized. A
+    // concurrent publication that reads newer state will block until our
+    // replacement commits, then read the updated membership. This prevents a
+    // stale snapshot from winning by arrival order.
+    let (stored, was_inserted, member_count) = state
         .db
-        .replace_addressable_event(tenant.community(), &event, None)
+        .publish_nip43_membership_locked(community, &state.relay_keypair)
         .await?;
+
     if was_inserted {
         dispatch_persistent_event(
             tenant,
@@ -2788,10 +2789,7 @@ pub async fn publish_nip43_membership_list(
         .await;
     }
 
-    info!(
-        member_count = members.len(),
-        "NIP-43 membership list published"
-    );
+    info!(member_count, "NIP-43 membership list published");
     Ok(())
 }
 

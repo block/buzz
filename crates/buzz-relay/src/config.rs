@@ -1,6 +1,7 @@
 //! Relay configuration from environment variables.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use thiserror::Error;
 use tracing::warn;
@@ -175,6 +176,14 @@ pub struct Config {
     /// Used to authenticate internal policy endpoint requests.
     pub git_hook_hmac_secret: String,
 
+    /// Descriptor key identifier accepted in kind:30350 `exec` tags.
+    pub push_executor_key_id: String,
+    /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
+    /// Push lease support is disabled when unset.
+    pub push_gateway_delivery_url: Option<url::Url>,
+    /// Hard timeout for one gateway delivery request.
+    pub push_gateway_timeout: Duration,
+
     /// Optional path to the web UI `dist/` directory.
     /// When set, the relay serves the SPA from this directory for browser requests.
     /// When unset, no static file serving happens (relay behaves as before).
@@ -205,6 +214,28 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
         ));
     }
     Ok(raw.trim_end_matches('/').to_string())
+}
+
+fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
+    let url = url::Url::parse(raw.trim()).map_err(|e| {
+        ConfigError::InvalidValue(format!(
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL is not a valid URL: {e}"
+        ))
+    })?;
+    if url.scheme() != "https"
+        || url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/v1/deliveries/apns"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidValue(
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTPS /v1/deliveries/apns URL without credentials, query, or fragment"
+                .to_string(),
+        ));
+    }
+    Ok(url)
 }
 
 fn ensure_git_repo_path(
@@ -497,6 +528,33 @@ impl Config {
                 let secret: [u8; 32] = rand::random();
                 hex::encode(secret)
             });
+        let push_executor_key_id =
+            std::env::var("BUZZ_PUSH_EXECUTOR_KEY_ID").unwrap_or_else(|_| "relay-v1".to_string());
+        if push_executor_key_id.is_empty() || push_executor_key_id.len() > 64 {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_PUSH_EXECUTOR_KEY_ID must contain 1..=64 bytes".to_string(),
+            ));
+        }
+        let push_gateway_delivery_url = std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL")
+            .ok()
+            .filter(|raw| !raw.trim().is_empty())
+            .map(|raw| parse_push_gateway_delivery_url(&raw))
+            .transpose()?;
+        let push_gateway_timeout_millis = match std::env::var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS") {
+            Ok(raw) => raw
+                .parse::<u64>()
+                .ok()
+                .filter(|millis| (100..=10_000).contains(millis))
+                .ok_or_else(|| {
+                    ConfigError::InvalidValue(
+                        "BUZZ_PUSH_GATEWAY_TIMEOUT_MS must be an integer in 100..=10000"
+                            .to_string(),
+                    )
+                })?,
+            Err(_) => 2_000,
+        };
+        let push_gateway_timeout = Duration::from_millis(push_gateway_timeout_millis);
+
         // Web UI static file serving
         let web_dir = std::env::var("BUZZ_WEB_DIR")
             .ok()
@@ -560,6 +618,9 @@ impl Config {
             git_max_repos_per_pubkey,
             git_max_concurrent_ops,
             git_hook_hmac_secret,
+            push_executor_key_id,
+            push_gateway_delivery_url,
+            push_gateway_timeout,
             web_dir,
         })
     }
@@ -675,6 +736,48 @@ mod tests {
         assert!(matches!(
             result,
             Err(ConfigError::InvalidValue(ref msg)) if msg.contains("must be an http(s) origin")
+        ));
+    }
+
+    #[test]
+    fn push_gateway_url_is_exact_and_fail_closed() {
+        assert!(parse_push_gateway_delivery_url("https://push.example/v1/deliveries/apns").is_ok());
+        for invalid in [
+            "http://push.example/v1/deliveries/apns",
+            "https://push.example/v1/deliveries/apns/",
+            "https://push.example/v1/deliveries/apns?token=x",
+            "https://user@push.example/v1/deliveries/apns",
+        ] {
+            assert!(
+                parse_push_gateway_delivery_url(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_push_gateway_timeout_is_not_silently_defaulted() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS", "99");
+        let result = Config::from_env();
+        std::env::remove_var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS");
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_PUSH_GATEWAY_TIMEOUT_MS")
+        ));
+    }
+
+    #[test]
+    fn invalid_push_executor_key_id_is_rejected() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_PUSH_EXECUTOR_KEY_ID", "");
+        let result = Config::from_env();
+        std::env::remove_var("BUZZ_PUSH_EXECUTOR_KEY_ID");
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_PUSH_EXECUTOR_KEY_ID")
         ));
     }
 

@@ -338,7 +338,7 @@ export function useChannelWorkingAgentPubkeys(
   );
 }
 
-/** Workspace-switch reset (see resetWorkspaceState in useWorkspaceInit). */
+/** Community-switch reset (see resetCommunityState in useCommunityInit). */
 export function resetAgentWorkingSignal() {
   typingByChannel.clear();
   invalidateCaches();
