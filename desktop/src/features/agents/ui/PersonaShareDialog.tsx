@@ -411,7 +411,7 @@ export function PersonaShareDialog({
                   selectedUsers={selectedRecipients}
                 />
               </motion.div>
-              <AnimatePresence initial={false}>
+              <AnimatePresence initial={false} mode="popLayout">
                 {hasSelectedRecipients ? (
                   <motion.div
                     animate={{ opacity: 1 }}

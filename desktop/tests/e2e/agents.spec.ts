@@ -722,6 +722,10 @@ test("custom personas share with people and keep export separate", async ({
   await expect(shareDialog).toBeVisible();
 
   const recipientSearch = page.getByTestId("persona-share-recipient-search");
+  const recipientField = page.getByTestId("persona-share-recipient-field");
+  await waitForAnimations(page);
+  const emptyRecipientFieldWidth =
+    (await recipientField.boundingBox())?.width ?? 0;
   await recipientSearch.click();
   const recipientList = page.getByTestId("persona-share-recipient-results");
   await expect(recipientList).toBeVisible();
@@ -749,11 +753,10 @@ test("custom personas share with people and keep export separate", async ({
       `persona-share-recipient-option-${TEST_IDENTITIES.charlie.pubkey}`,
     )
     .click();
-  await expect(
-    page.getByTestId(
-      `persona-share-recipient-chip-${TEST_IDENTITIES.charlie.pubkey}`,
-    ),
-  ).toBeVisible();
+  const charlieChip = page.getByTestId(
+    `persona-share-recipient-chip-${TEST_IDENTITIES.charlie.pubkey}`,
+  );
+  await expect(charlieChip).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Verify charlie public key" }),
   ).toHaveCount(0);
@@ -803,6 +806,54 @@ test("custom personas share with people and keep export separate", async ({
   expect(Math.abs(poofOrigin.y - removePointer.y)).toBeLessThanOrEqual(0.5);
   await page.mouse.up();
   await expect(bobChip).toHaveCount(0);
+
+  await waitForAnimations(page);
+  const selectedRecipientFieldWidth =
+    (await recipientField.boundingBox())?.width ?? 0;
+  const charlieChipBox = await charlieChip.boundingBox();
+  expect(charlieChipBox).not.toBeNull();
+  if (!charlieChipBox) return;
+  await page.mouse.move(
+    charlieChipBox.x + charlieChipBox.width / 2,
+    charlieChipBox.y + charlieChipBox.height / 2,
+  );
+  await page.mouse.down();
+  const lastChipRemovalSamples = await page.evaluate(async () => {
+    const samples: Array<{ elapsed: number; fieldWidth: number }> = [];
+    const start = performance.now();
+
+    await new Promise<void>((resolve) => {
+      const sample = (now: number) => {
+        const field = document.querySelector<HTMLElement>(
+          '[data-testid="persona-share-recipient-field"]',
+        );
+        samples.push({
+          elapsed: now - start,
+          fieldWidth: field?.getBoundingClientRect().width ?? 0,
+        });
+        if (now - start >= 240) {
+          resolve();
+          return;
+        }
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+
+    return samples;
+  });
+  await page.mouse.up();
+  await expect(charlieChip).toHaveCount(0);
+  const firstExpandedSample = lastChipRemovalSamples.find(
+    ({ fieldWidth }) => fieldWidth > selectedRecipientFieldWidth + 1,
+  );
+  expect(firstExpandedSample?.elapsed).toBeLessThan(100);
+  expect(
+    Math.abs(
+      (lastChipRemovalSamples.at(-1)?.fieldWidth ?? 0) -
+        emptyRecipientFieldWidth,
+    ),
+  ).toBeLessThanOrEqual(1);
 
   await recipientSearch.fill("bob");
   await page
