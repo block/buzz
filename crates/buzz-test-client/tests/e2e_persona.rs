@@ -63,18 +63,17 @@ async fn test_persona_publish_and_query() {
 
     // Publish persona event
     let event = persona_event(&keys, &d_tag, &content);
+    let event_id = event.id;
     let ok = client
         .send_event(event.clone())
         .await
         .expect("send persona");
     assert!(ok.accepted, "relay rejected persona event: {}", ok.message);
 
-    // Query it back using NIP-33 filter (kind + author + d-tag)
+    // Query the exact event this test published. Replacement-address filters
+    // are exercised below and may legitimately replay a racing duplicate.
     let sid = sub_id("query");
-    let filter = Filter::new()
-        .kind(Kind::Custom(PERSONA_KIND))
-        .author(keys.public_key())
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [d_tag.as_str()]);
+    let filter = Filter::new().id(event_id);
 
     client
         .subscribe(&sid, vec![filter])
@@ -86,8 +85,10 @@ async fn test_persona_publish_and_query() {
         .await
         .expect("collect events");
 
-    assert_eq!(events.len(), 1, "expected exactly one persona event");
-    let ev = &events[0];
+    let ev = events
+        .iter()
+        .find(|candidate| candidate.id == event_id)
+        .expect("published persona event was not returned");
     assert_eq!(ev.content, content);
     assert_eq!(ev.pubkey, keys.public_key());
     assert_eq!(ev.kind, Kind::Custom(PERSONA_KIND));
