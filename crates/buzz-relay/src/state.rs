@@ -317,18 +317,6 @@ impl ConnectionManager {
         closed
     }
 
-    /// Disconnect every live socket bound to one community.
-    pub fn disconnect_community(&self, community: CommunityId) -> usize {
-        let mut closed = 0;
-        for entry in self.connections.iter() {
-            if entry.community_id == community {
-                entry.cancel.cancel();
-                closed += 1;
-            }
-        }
-        closed
-    }
-
     /// Return the server-resolved community that the connection's host bound to.
     pub fn community_for_conn(&self, conn_id: Uuid) -> Option<CommunityId> {
         self.connections
