@@ -549,7 +549,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 16);
+        assert_eq!(migrations.len(), 17);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -765,18 +765,24 @@ mod tests {
             .as_str()
             .contains("_operator_global_tables"));
 
-        // Product feedback is a deployment-private sidecar; community_id is
-        // provenance, not an operator-review authorization boundary.
         assert_eq!(migrations[15].version, 16);
         assert!(migrations[15]
             .sql
             .as_str()
+            .contains("ADD COLUMN archived_at"));
+
+        // Product feedback is a deployment-private sidecar; community_id is
+        // provenance, not an operator-review authorization boundary.
+        assert_eq!(migrations[16].version, 17);
+        assert!(migrations[16]
+            .sql
+            .as_str()
             .contains("CREATE TABLE product_feedback"));
-        assert!(migrations[15]
+        assert!(migrations[16]
             .sql
             .as_str()
             .contains("community_id UUID NOT NULL"));
-        assert!(migrations[15]
+        assert!(migrations[16]
             .sql
             .as_str()
             .contains("('product_feedback', 'deployment product inbox"));
