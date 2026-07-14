@@ -126,6 +126,8 @@ function isProviderBackedAgent(agent: ManagedAgent) {
 
 const DM_THREAD_AGENT_MENTION_ERROR =
   "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
+const DM_THREAD_MEMBERS_LOADING_ERROR =
+  "Checking conversation members. Try again in a moment.";
 
 export function useMentionSendFlow({
   channelId,
@@ -522,30 +524,35 @@ export function useMentionSendFlow({
     [channelType, mentions.hasResolvedMembers, mentions.memberPubkeys],
   );
 
-  const hasUnavailableDmThreadAgentMention = React.useCallback(
+  const getDmThreadAgentMentionError = React.useCallback(
     (
       trimmed: string,
       capturedThreadContext: SendMessageWithMentionFlowInput["capturedThreadContext"],
     ) => {
       if (channelType !== "dm" || capturedThreadContext == null) {
-        return false;
+        return null;
       }
 
       if (mentions.extractMentionPersonas(trimmed).length > 0) {
-        return true;
+        return DM_THREAD_AGENT_MENTION_ERROR;
+      }
+
+      const agentPubkeys = mentions
+        .extractMentionPubkeys(trimmed)
+        .filter(mentions.isAgentPubkey);
+      if (agentPubkeys.length === 0) {
+        return null;
       }
 
       if (!mentions.hasResolvedMembers) {
-        return false;
+        return DM_THREAD_MEMBERS_LOADING_ERROR;
       }
 
-      return mentions
-        .extractMentionPubkeys(trimmed)
-        .some(
-          (pubkey) =>
-            mentions.isAgentPubkey(pubkey) &&
-            !mentions.memberPubkeys.has(normalizePubkey(pubkey)),
-        );
+      return agentPubkeys.some(
+        (pubkey) => !mentions.memberPubkeys.has(normalizePubkey(pubkey)),
+      )
+        ? DM_THREAD_AGENT_MENTION_ERROR
+        : null;
     },
     [
       channelType,
@@ -573,11 +580,13 @@ export function useMentionSendFlow({
       isMentionSendPendingRef.current = true;
       setIsMentionSendPending(true);
       try {
-        if (
-          hasUnavailableDmThreadAgentMention(trimmed, capturedThreadContext)
-        ) {
-          setNonMemberPromptError(DM_THREAD_AGENT_MENTION_ERROR);
-          toast.error(DM_THREAD_AGENT_MENTION_ERROR);
+        const dmThreadAgentMentionError = getDmThreadAgentMentionError(
+          trimmed,
+          capturedThreadContext,
+        );
+        if (dmThreadAgentMentionError) {
+          setNonMemberPromptError(dmThreadAgentMentionError);
+          toast.error(dmThreadAgentMentionError);
           return;
         }
 
@@ -678,7 +687,7 @@ export function useMentionSendFlow({
       customEmoji,
       getManagedAgentsByPubkey,
       getNonMemberMentionPubkeys,
-      hasUnavailableDmThreadAgentMention,
+      getDmThreadAgentMentionError,
       mentions.extractMentionPubkeys,
       mentions.isManagedAgentPubkey,
       onPrepareSendChannel,

@@ -29,6 +29,8 @@ const PROFILE_ONLY_AGENT_PUBKEY =
 const SYSTEM_MESSAGE_KIND = 40099;
 const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
   "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
+const DM_THREAD_MEMBERS_LOADING_ERROR_TEXT =
+  "Checking conversation members. Try again in a moment.";
 
 /** Locator scoped to the mention autocomplete dropdown inside the composer. */
 function autocomplete(page: import("@playwright/test").Page) {
@@ -341,7 +343,7 @@ test("blocks non-participant persona mentions in DM threads", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
 });
 
-test("allows participant agent mentions while DM members are loading", async ({
+test("defers agent mentions until DM members finish loading", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -350,7 +352,7 @@ test("allows participant agent mentions while DM members are loading", async ({
       {
         pubkey: TEST_IDENTITIES.alice.pubkey,
         name: "alice",
-        status: "running",
+        status: "stopped",
       },
     ],
   });
@@ -379,11 +381,28 @@ test("allows participant agent mentions while DM members are loading", async ({
   ).toBeVisible();
   await input.press("Enter");
   await page.keyboard.type(" before members resolve");
+  const baselineCommands = await readCommandLog(page);
+  await threadPanel.getByTestId("send-message").click();
+
+  await expect(
+    page.getByText(DM_THREAD_MEMBERS_LOADING_ERROR_TEXT).first(),
+  ).toBeVisible();
+  await page.mouse.move(0, 0);
+  expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
+    commandCount(baselineCommands, "add_channel_members"),
+  );
+  await expect(input).toContainText("before members resolve");
+
+  await page.waitForTimeout(5_100);
   await threadPanel.getByTestId("send-message").click();
 
   await expect(page.getByText(DM_THREAD_AGENT_MENTION_ERROR_TEXT)).toHaveCount(
     0,
   );
+  expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
+    commandCount(baselineCommands, "add_channel_members"),
+  );
+  await expect(input).toBeEmpty();
   await expect(threadPanel).toContainText("before members resolve");
 });
 
