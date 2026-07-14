@@ -40,7 +40,7 @@ export function WelcomeAgentCreateDialog({
 
         <div className="space-y-2">
           <button
-            className="flex w-full items-start gap-3 rounded-lg border border-primary bg-primary/5 p-4 text-left transition-colors hover:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex w-full items-start gap-3 rounded-lg border border-primary bg-transparent p-4 text-left transition-colors hover:bg-primary/5 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
             data-testid="welcome-create-agent-in-chat"
             disabled={isSending}
             onClick={onCreateInChat}
