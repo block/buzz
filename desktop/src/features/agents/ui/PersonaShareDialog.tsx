@@ -1,5 +1,6 @@
 import * as React from "react";
 import { ChevronRight, Download, Link2, Loader2, X } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
 import { useEncodeAgentSnapshotForSendMutation } from "@/features/agents/hooks";
@@ -53,6 +54,11 @@ const SHARE_LEVELS: { value: SnapshotMemoryLevel; label: string }[] = [
   { value: "core", label: "Agent + core memory" },
   { value: "everything", label: "Agent + all memories" },
 ];
+
+const RECIPIENT_ACTION_TRANSITION = {
+  duration: 0.18,
+  ease: [0.23, 1, 0.32, 1],
+} as const;
 
 type PendingMemoryShare = {
   action: "copy" | "send";
@@ -185,6 +191,7 @@ export function PersonaShareDialog({
   const openDmMutation = useOpenDmMutation();
   const snapshotSendController = useSnapshotSendController(open);
   const profileQuery = useProfileQuery(open);
+  const shouldReduceMotion = useReducedMotion();
   const [selectedRecipients, setSelectedRecipients] = React.useState<
     UserSearchResult[]
   >([]);
@@ -201,6 +208,10 @@ export function PersonaShareDialog({
   );
   const isActionPending = isPending || isCopying || isSending;
   const hasLinkedAgent = linkedAgentPubkey !== null;
+  const hasSelectedRecipients = selectedRecipients.length > 0;
+  const recipientActionTransition = shouldReduceMotion
+    ? { duration: 0 }
+    : RECIPIENT_ACTION_TRANSITION;
   const ownerDisplayName =
     profileQuery.data?.displayName?.trim() || "Your account";
   const excludedRecipientPubkeys = React.useMemo(
@@ -354,41 +365,62 @@ export function PersonaShareDialog({
 
           <div className="space-y-4 pt-4">
             <div className="flex items-start gap-2">
-              <PersonaShareRecipients
-                disabled={
-                  isActionPending || !snapshotSendController.isDmSafetyReady
-                }
-                excludedPubkeys={excludedRecipientPubkeys}
-                onSelectionChange={setSelectedRecipients}
-                open={open}
-                renderEndControl={(handleAccessOpenChange) => (
-                  <ShareLevelControl
-                    ariaLabel="Recipient access"
-                    className="h-7"
-                    disabled={isActionPending}
-                    hasLinkedAgent={hasLinkedAgent}
-                    onChange={setRecipientShareLevel}
-                    onOpenChange={handleAccessOpenChange}
-                    staticClassName="h-7 w-auto"
-                    testId="persona-share-recipient-access"
-                    value={recipientShareLevel}
-                  />
-                )}
-                selectedUsers={selectedRecipients}
-              />
-              <Button
-                className="h-10 shrink-0"
-                data-testid="persona-share-send"
-                disabled={
-                  isActionPending ||
-                  !snapshotSendController.isDmSafetyReady ||
-                  selectedRecipients.length === 0
-                }
-                onClick={() => requestMemoryShare("send", recipientShareLevel)}
-                type="button"
+              <motion.div
+                className="min-w-0 flex-1"
+                layout
+                transition={recipientActionTransition}
               >
-                {isSending ? "Sending…" : "Send"}
-              </Button>
+                <PersonaShareRecipients
+                  disabled={
+                    isActionPending || !snapshotSendController.isDmSafetyReady
+                  }
+                  excludedPubkeys={excludedRecipientPubkeys}
+                  onSelectionChange={setSelectedRecipients}
+                  open={open}
+                  renderEndControl={(handleAccessOpenChange) => (
+                    <ShareLevelControl
+                      ariaLabel="Recipient access"
+                      className="h-7"
+                      disabled={isActionPending}
+                      hasLinkedAgent={hasLinkedAgent}
+                      onChange={setRecipientShareLevel}
+                      onOpenChange={handleAccessOpenChange}
+                      staticClassName="h-7 w-auto"
+                      testId="persona-share-recipient-access"
+                      value={recipientShareLevel}
+                    />
+                  )}
+                  selectedUsers={selectedRecipients}
+                />
+              </motion.div>
+              <AnimatePresence initial={false}>
+                {hasSelectedRecipients ? (
+                  <motion.div
+                    animate={{ opacity: 1 }}
+                    className="shrink-0"
+                    data-testid="persona-share-send-motion"
+                    exit={{ opacity: 0 }}
+                    initial={shouldReduceMotion ? false : { opacity: 0 }}
+                    layout
+                    transition={recipientActionTransition}
+                  >
+                    <Button
+                      className="h-10"
+                      data-testid="persona-share-send"
+                      disabled={
+                        isActionPending ||
+                        !snapshotSendController.isDmSafetyReady
+                      }
+                      onClick={() =>
+                        requestMemoryShare("send", recipientShareLevel)
+                      }
+                      type="button"
+                    >
+                      {isSending ? "Sending…" : "Send"}
+                    </Button>
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
             </div>
 
             <section
@@ -457,7 +489,6 @@ export function PersonaShareDialog({
                 onClick={() => requestMemoryShare("copy", linkShareLevel)}
                 size="sm"
                 type="button"
-                variant="secondary"
               >
                 {isCopying ? (
                   <Loader2 className="h-4 w-4 animate-spin" />

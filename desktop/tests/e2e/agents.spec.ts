@@ -504,8 +504,9 @@ test("custom personas share with people and keep export separate", async ({
   const accessOwner = page.getByTestId("persona-share-access-owner");
   const accessSection = page.getByTestId("persona-share-access");
   const copyLinkFooter = page.getByTestId("persona-share-copy-link-footer");
+  await expect(page.getByTestId("persona-share-send")).toHaveCount(0);
   await expect(page.getByTestId("persona-share-copy-link")).toHaveClass(
-    /bg-secondary/,
+    /bg-primary/,
   );
   await expect(accessLink).toContainText("Anyone with a link");
   await expect(page.getByTestId("persona-share-link-access")).toHaveText(
@@ -521,9 +522,6 @@ test("custom personas share with people and keep export separate", async ({
   const accessLinkBox = await accessLink.boundingBox();
   const accessOwnerBox = await accessOwner.boundingBox();
   expect(accessLinkBox?.y).toBeLessThan(accessOwnerBox?.y ?? 0);
-  await expect(
-    page.getByTestId("persona-share-send").locator("svg"),
-  ).toHaveCount(0);
   await expect(
     accessSection.getByTestId("persona-share-copy-link-footer"),
   ).toHaveCount(0);
@@ -702,6 +700,7 @@ test("custom personas share with people and keep export separate", async ({
       .getByTestId("persona-share-recipient-field")
       .getByTestId("persona-share-recipient-access"),
   ).toHaveText("Agent");
+  await expect(page.getByTestId("persona-share-send")).toBeVisible();
 
   await recipientSearch.fill("bob");
   await page
@@ -785,6 +784,9 @@ test("share access controls include the selected memories", async ({
 
   const shareDialog = page.getByTestId("persona-share-dialog");
   const linkAccess = shareDialog.getByLabel("Link access");
+  const recipientField = page.getByTestId("persona-share-recipient-field");
+  const emptyRecipientFieldBox = await recipientField.boundingBox();
+  await expect(shareDialog.getByTestId("persona-share-send")).toHaveCount(0);
   await expect(linkAccess).toHaveText("Agent");
   expect((await linkAccess.boundingBox())?.width).toBeLessThan(96);
   expect(await linkAccess.evaluate((element) => element.tagName)).toBe(
@@ -800,16 +802,12 @@ test("share access controls include the selected memories", async ({
   const ownerLabelBox = await shareDialog
     .getByText("Owner", { exact: true })
     .boundingBox();
-  const sendButtonBox = await shareDialog
-    .getByTestId("persona-share-send")
-    .boundingBox();
   const copyLinkButtonBox = await shareDialog
     .getByTestId("persona-share-copy-link")
     .boundingBox();
   const alignedRightEdges = [
     (linkAccessChevronBox?.x ?? 0) + (linkAccessChevronBox?.width ?? 0),
     (ownerLabelBox?.x ?? 0) + (ownerLabelBox?.width ?? 0),
-    (sendButtonBox?.x ?? 0) + (sendButtonBox?.width ?? 0),
     (copyLinkButtonBox?.x ?? 0) + (copyLinkButtonBox?.width ?? 0),
   ];
   expect(
@@ -863,7 +861,6 @@ test("share access controls include the selected memories", async ({
       `persona-share-recipient-option-${TEST_IDENTITIES.charlie.pubkey}`,
     )
     .click();
-  const recipientField = page.getByTestId("persona-share-recipient-field");
   const recipientInputRegion = recipientField.getByTestId(
     "persona-share-recipient-input-region",
   );
@@ -872,7 +869,21 @@ test("share access controls include the selected memories", async ({
   expect((await recipientAccess.boundingBox())?.width).toBeLessThan(96);
   await expect(recipientField).toHaveCSS("column-gap", "12px");
   await expect(recipientInputRegion).toHaveCSS("flex-wrap", "wrap");
-  const recipientFieldBox = await recipientField.boundingBox();
+  const sendButton = shareDialog.getByTestId("persona-share-send");
+  await expect(sendButton).toBeVisible();
+  await waitForAnimations(page);
+  const resizedRecipientFieldBox = await recipientField.boundingBox();
+  expect(resizedRecipientFieldBox?.width).toBeLessThan(
+    emptyRecipientFieldBox?.width ?? 0,
+  );
+  const sendButtonBox = await sendButton.boundingBox();
+  expect(
+    Math.abs(
+      (sendButtonBox?.x ?? 0) +
+        (sendButtonBox?.width ?? 0) -
+        ((copyLinkButtonBox?.x ?? 0) + (copyLinkButtonBox?.width ?? 0)),
+    ),
+  ).toBeLessThanOrEqual(1);
   const recipientInputRegionBox = await recipientInputRegion.boundingBox();
   const recipientAccessBox = await recipientAccess.boundingBox();
   expect(
@@ -884,8 +895,8 @@ test("share access controls include the selected memories", async ({
     (recipientAccessBox?.x ?? 0) + (recipientAccessBox?.width ?? 0);
   expect(
     Math.abs(
-      (recipientFieldBox?.x ?? 0) +
-        (recipientFieldBox?.width ?? 0) -
+      (resizedRecipientFieldBox?.x ?? 0) +
+        (resizedRecipientFieldBox?.width ?? 0) -
         8 -
         recipientAccessRightEdge,
     ),
