@@ -68,6 +68,7 @@ type MockManagedAgentSeed = {
   backend?: RawManagedAgent["backend"];
   lastError?: string | null;
   lastErrorCode?: number | null;
+  needsRestart?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
 };
@@ -537,6 +538,7 @@ type RawManagedAgent = {
   last_exit_code: number | null;
   last_error: string | null;
   last_error_code: number | null;
+  needs_restart?: boolean;
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
@@ -1197,6 +1199,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     last_exit_code: agent.last_exit_code,
     last_error: agent.last_error,
     last_error_code: agent.last_error_code,
+    needs_restart: agent.needs_restart ?? false,
     log_path: agent.log_path,
     start_on_app_launch: agent.start_on_app_launch,
     auto_restart_on_config_change: agent.auto_restart_on_config_change ?? true,
@@ -1728,6 +1731,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     last_exit_code: null,
     last_error: seed.lastError ?? null,
     last_error_code: seed.lastErrorCode ?? null,
+    needs_restart: seed.needsRestart ?? false,
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
     auto_restart_on_config_change: true,

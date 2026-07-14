@@ -54,6 +54,7 @@ type MockManagedAgentSeed = {
     | { type: "provider"; id: string; config: Record<string, unknown> };
   lastError?: string | null;
   lastErrorCode?: number | null;
+  needsRestart?: boolean;
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
 };
