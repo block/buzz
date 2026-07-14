@@ -13,8 +13,6 @@ import { toast } from "sonner";
 import { useEncodeAgentSnapshotForSendMutation } from "@/features/agents/hooks";
 import { useOpenDmMutation } from "@/features/channels/hooks";
 import { buildAgentSnapshotClipboardHtml } from "@/features/messages/lib/agentSnapshotClipboard";
-import { useProfileQuery } from "@/features/profile/hooks";
-import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { uploadMediaBytes, type BlobDescriptor } from "@/shared/api/tauri";
 import { copyTextToSystemClipboard } from "@/shared/api/tauriMedia";
 import type { SnapshotMemoryLevel } from "@/shared/api/tauriPersonas";
@@ -38,6 +36,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import { Separator } from "@/shared/ui/separator";
 
 import {
   formatShareRecipientName,
@@ -57,7 +56,7 @@ type PersonaShareDialogProps = {
 };
 
 const SHARE_LEVELS: { value: SnapshotMemoryLevel; label: string }[] = [
-  { value: "none", label: "Agent" },
+  { value: "none", label: "Agent only" },
   { value: "core", label: "Agent + core memory" },
   { value: "everything", label: "Agent + all memories" },
 ];
@@ -172,7 +171,7 @@ function ShareLevelControl({
         )}
         data-testid={testId}
       >
-        Agent
+        Agent only
       </span>
     );
   }
@@ -202,7 +201,6 @@ export function PersonaShareDialog({
   const encodeSnapshotMutation = useEncodeAgentSnapshotForSendMutation();
   const openDmMutation = useOpenDmMutation();
   const snapshotSendController = useSnapshotSendController(open);
-  const profileQuery = useProfileQuery(open);
   const shouldReduceMotion = useReducedMotion();
   const [selectedRecipients, setSelectedRecipients] = React.useState<
     UserSearchResult[]
@@ -230,8 +228,6 @@ export function PersonaShareDialog({
   const warningTransition = shouldReduceMotion
     ? { duration: 0 }
     : SHARE_WARNING_TRANSITION;
-  const ownerDisplayName =
-    profileQuery.data?.displayName?.trim() || "Your account";
   const excludedRecipientPubkeys = React.useMemo(
     () =>
       snapshotSendController.relaySelfPubkey
@@ -314,7 +310,7 @@ export function PersonaShareDialog({
     );
 
     if (sent) {
-      toast.success(`Sent ${persona.displayName}`);
+      toast.success(`Sent a copy of ${persona.displayName}`);
       onOpenChange(false);
     } else if (sent === false) {
       toast.error("Couldn’t send agent. Try again.");
@@ -360,12 +356,12 @@ export function PersonaShareDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent
         aria-describedby={undefined}
-        className="max-w-lg gap-3 bg-transparent p-0 shadow-none"
+        className="max-w-xl gap-3 bg-transparent p-0 shadow-none"
         data-testid="persona-share-dialog"
         showCloseButton={false}
       >
         <div
-          className="relative rounded-2xl bg-background p-6 shadow-2xl"
+          className="relative rounded-2xl bg-background p-6 pb-4 shadow-2xl"
           data-testid="persona-share-main-card"
         >
           <DialogHeader className="space-y-0">
@@ -382,158 +378,144 @@ export function PersonaShareDialog({
           </DialogClose>
 
           <div className="space-y-4 pt-4">
-            <div className="flex items-start gap-2">
-              <motion.div
-                className="min-w-0 flex-1"
-                layout
-                transition={recipientActionTransition}
-              >
-                <PersonaShareRecipients
-                  disabled={
-                    isActionPending || !snapshotSendController.isDmSafetyReady
-                  }
-                  excludedPubkeys={excludedRecipientPubkeys}
-                  onSelectionChange={setSelectedRecipients}
-                  open={open}
-                  renderEndControl={(handleAccessOpenChange) => (
-                    <ShareLevelControl
-                      ariaLabel="Recipient access"
-                      className="-mr-2 h-7"
-                      disabled={isActionPending}
-                      hasLinkedAgent={hasLinkedAgent}
-                      onChange={setRecipientShareLevel}
-                      onOpenChange={handleAccessOpenChange}
-                      staticClassName="-mr-2 h-7 w-auto"
-                      testId="persona-share-recipient-access"
-                      value={recipientShareLevel}
-                    />
-                  )}
-                  selectedUsers={selectedRecipients}
-                />
-              </motion.div>
-              <AnimatePresence initial={false} mode="popLayout">
-                {hasSelectedRecipients ? (
-                  <motion.div
-                    animate={{ opacity: 1 }}
-                    className="shrink-0"
-                    data-testid="persona-share-send-motion"
-                    exit={{ opacity: 0 }}
-                    initial={shouldReduceMotion ? false : { opacity: 0 }}
-                    layout
-                    transition={recipientActionTransition}
-                  >
-                    <Button
-                      className="h-10"
-                      data-testid="persona-share-send"
-                      disabled={
-                        isActionPending ||
-                        !snapshotSendController.isDmSafetyReady
-                      }
-                      onClick={() =>
-                        requestMemoryShare("send", recipientShareLevel)
-                      }
-                      type="button"
+            <div className="space-y-2">
+              <div className="flex items-start gap-2">
+                <motion.div
+                  className="min-w-0 flex-1"
+                  layout
+                  transition={recipientActionTransition}
+                >
+                  <PersonaShareRecipients
+                    disabled={
+                      isActionPending || !snapshotSendController.isDmSafetyReady
+                    }
+                    excludedPubkeys={excludedRecipientPubkeys}
+                    onSelectionChange={setSelectedRecipients}
+                    open={open}
+                    renderEndControl={(handleAccessOpenChange) => (
+                      <ShareLevelControl
+                        ariaLabel="What to include"
+                        className="-mr-2 h-7"
+                        disabled={isActionPending}
+                        hasLinkedAgent={hasLinkedAgent}
+                        onChange={setRecipientShareLevel}
+                        onOpenChange={handleAccessOpenChange}
+                        staticClassName="-mr-2 h-7 w-auto"
+                        testId="persona-share-recipient-access"
+                        value={recipientShareLevel}
+                      />
+                    )}
+                    selectedUsers={selectedRecipients}
+                  />
+                </motion.div>
+                <AnimatePresence initial={false} mode="popLayout">
+                  {hasSelectedRecipients ? (
+                    <motion.div
+                      animate={{ opacity: 1 }}
+                      className="shrink-0"
+                      data-testid="persona-share-send-motion"
+                      exit={{ opacity: 0 }}
+                      initial={shouldReduceMotion ? false : { opacity: 0 }}
+                      layout
+                      transition={recipientActionTransition}
                     >
-                      {isSending ? "Sending…" : "Send"}
-                    </Button>
-                  </motion.div>
-                ) : null}
-              </AnimatePresence>
+                      <Button
+                        className="h-10"
+                        data-testid="persona-share-send"
+                        disabled={
+                          isActionPending ||
+                          !snapshotSendController.isDmSafetyReady
+                        }
+                        onClick={() =>
+                          requestMemoryShare("send", recipientShareLevel)
+                        }
+                        type="button"
+                      >
+                        {isSending ? "Sending…" : "Send"}
+                      </Button>
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
+              </div>
+              <p
+                className="text-xs text-secondary-foreground/75"
+                data-testid="persona-share-send-description"
+              >
+                They’ll receive a copy they can add and use. Changes you make
+                later won’t sync.
+              </p>
             </div>
 
+            <AnimatePresence initial={false}>
+              {showMemoryWarning ? (
+                <motion.div
+                  animate={{ height: "auto", opacity: 1 }}
+                  className="overflow-hidden"
+                  data-testid="persona-share-memory-warning-motion"
+                  exit={{ height: 0, opacity: 0 }}
+                  initial={{ height: 0, opacity: 0 }}
+                  key="persona-share-memory-warning"
+                  transition={warningTransition}
+                >
+                  <div
+                    className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"
+                    data-testid="persona-share-memory-warning"
+                  >
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <p>
+                      Memory is stored as <strong>plaintext</strong> in the
+                      snapshot. Only share it with people you trust.
+                    </p>
+                  </div>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+
             <section
-              className="space-y-3 pt-2"
-              data-testid="persona-share-access"
+              className="pt-4"
+              data-testid="persona-share-copy-link-footer"
             >
-              <h3 className="text-xs font-semibold text-secondary-foreground/75">
-                Who has access
-              </h3>
               <div
-                className="flex min-h-9 items-center gap-3"
-                data-testid="persona-share-access-link"
+                className="flex items-center gap-3"
+                data-testid="persona-share-link-row"
               >
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                <span
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
+                  data-testid="persona-share-link-icon"
+                >
                   <Link2 className="h-4 w-4" />
                 </span>
-                <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                  Anyone with a link
-                </span>
+                <div
+                  className="min-w-0 flex-1"
+                  data-testid="persona-share-link-copy"
+                >
+                  <h3 className="text-sm font-medium">Share with a link</h3>
+                  <p className="text-xs text-secondary-foreground/75">
+                    Anyone with the link can add and use a copy.
+                  </p>
+                </div>
                 <ShareLevelControl
-                  ariaLabel="Link access"
-                  className="-mr-2"
+                  ariaLabel="What to include in the link"
                   disabled={isActionPending}
                   hasLinkedAgent={hasLinkedAgent}
                   onChange={setLinkShareLevel}
-                  staticClassName="-mr-2"
                   testId="persona-share-link-access"
                   value={linkShareLevel}
                 />
               </div>
-
-              <div
-                className="flex min-h-9 items-center gap-3"
-                data-testid="persona-share-access-owner"
-              >
-                <ProfileAvatar
-                  avatarUrl={profileQuery.data?.avatarUrl ?? null}
-                  className="h-8 w-8 text-xs shadow-none"
-                  iconClassName="h-4 w-4"
-                  label={ownerDisplayName}
-                />
-                <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
-                  <span className="truncate text-sm font-medium">
-                    {ownerDisplayName}
-                  </span>
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    (You)
-                  </span>
-                </div>
-                <span className="shrink-0 text-sm text-muted-foreground">
-                  Owner
-                </span>
-              </div>
-            </section>
-
-            <div>
-              <AnimatePresence initial={false}>
-                {showMemoryWarning ? (
-                  <motion.div
-                    animate={{ height: "auto", opacity: 1 }}
-                    className="overflow-hidden pb-4"
-                    data-testid="persona-share-memory-warning-motion"
-                    exit={{ height: 0, opacity: 0 }}
-                    initial={{ height: 0, opacity: 0 }}
-                    key="persona-share-memory-warning"
-                    transition={warningTransition}
-                  >
-                    <div
-                      className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"
-                      data-testid="persona-share-memory-warning"
-                    >
-                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                      <p>
-                        Memory is stored as <strong>plaintext</strong> in the
-                        snapshot. Only share it with people you trust.
-                      </p>
-                    </div>
-                  </motion.div>
-                ) : null}
-              </AnimatePresence>
-
-              <div
-                className="flex items-center gap-4 pt-2"
-                data-testid="persona-share-copy-link-footer"
-              >
-                <p className="min-w-0 max-w-64 flex-1 text-xs text-secondary-foreground/75">
-                  Anyone with the link can duplicate and use this agent.
-                </p>
+              <Separator
+                className="my-4 bg-input/40"
+                data-testid="persona-share-link-divider"
+              />
+              <div className="flex justify-end">
                 <Button
-                  className="ml-auto shrink-0 shadow-none"
+                  className="shrink-0 border-border shadow-none"
                   data-testid="persona-share-copy-link"
                   disabled={isActionPending}
                   onClick={() => requestMemoryShare("copy", linkShareLevel)}
                   size="sm"
                   type="button"
+                  variant="outline"
                 >
                   {isCopying ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -543,7 +525,7 @@ export function PersonaShareDialog({
                   {isCopying ? "Copying…" : "Copy link"}
                 </Button>
               </div>
-            </div>
+            </section>
           </div>
         </div>
         <button

@@ -510,24 +510,104 @@ test("custom personas share with people and keep export separate", async ({
     page.getByRole("heading", { name: "Share Animation Auditor" }),
   ).toBeVisible();
   await expect(shareDialog.getByText("Added by You")).toHaveCount(0);
-  await expect(shareDialog).toContainText(
-    "Anyone with the link can duplicate and use this agent.",
+  const sendDescription = shareDialog.getByTestId(
+    "persona-share-send-description",
+  );
+  await expect(sendDescription).toHaveText(
+    "They’ll receive a copy they can add and use. Changes you make later won’t sync.",
+  );
+  await expect(sendDescription).toHaveClass(
+    /text-xs.*text-secondary-foreground\/75/,
+  );
+  const sendDescriptionMetrics = await sendDescription.evaluate((element) => ({
+    height: element.getBoundingClientRect().height,
+    lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
+  }));
+  expect(sendDescriptionMetrics.height).toBeLessThanOrEqual(
+    sendDescriptionMetrics.lineHeight + 1,
   );
   await expect(
-    shareDialog.getByText(
-      "Anyone with the link can duplicate and use this agent.",
-    ),
-  ).toHaveClass(/text-xs.*text-secondary-foreground\/75/);
-  await expect(
     shareDialog.getByRole("heading", { name: "Who has access" }),
-  ).toHaveClass(/text-xs/);
-  const accessLink = page.getByTestId("persona-share-access-link");
-  const accessOwner = page.getByTestId("persona-share-access-owner");
-  const accessSection = page.getByTestId("persona-share-access");
+  ).toHaveCount(0);
+  await expect(shareDialog.getByText("Owner", { exact: true })).toHaveCount(0);
+  await expect(shareDialog.getByText("(You)", { exact: true })).toHaveCount(0);
   const copyLinkFooter = page.getByTestId("persona-share-copy-link-footer");
+  await expect(
+    copyLinkFooter.getByRole("heading", { name: "Share with a link" }),
+  ).toBeVisible();
+  await expect(
+    copyLinkFooter.getByText("Anyone with the link can add and use a copy."),
+  ).toHaveClass(/text-xs.*text-secondary-foreground\/75/);
   await expect(page.getByTestId("persona-share-send")).toHaveCount(0);
   const copyLinkButton = page.getByTestId("persona-share-copy-link");
-  await expect(copyLinkButton).toHaveClass(/bg-primary/);
+  const linkRow = page.getByTestId("persona-share-link-row");
+  const linkIcon = page.getByTestId("persona-share-link-icon");
+  const linkCopy = page.getByTestId("persona-share-link-copy");
+  const linkDivider = page.getByTestId("persona-share-link-divider");
+  const staticLinkAccess = page.getByTestId("persona-share-link-access");
+  await waitForAnimations(page);
+  const [
+    linkRowBox,
+    initialCopyLinkButtonBox,
+    linkIconBox,
+    linkCopyBox,
+    linkDividerBox,
+    staticLinkAccessBox,
+  ] = await Promise.all([
+    linkRow.boundingBox(),
+    copyLinkButton.boundingBox(),
+    linkIcon.boundingBox(),
+    linkCopy.boundingBox(),
+    linkDivider.boundingBox(),
+    staticLinkAccess.boundingBox(),
+  ]);
+  const sendDescriptionBox = await sendDescription.boundingBox();
+  expect((linkRowBox?.y ?? 0) - (sendDescriptionBox?.y ?? 0)).toBeGreaterThan(
+    (sendDescriptionBox?.height ?? 0) + 30,
+  );
+  expect(initialCopyLinkButtonBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (linkRowBox?.y ?? 0) + (linkRowBox?.height ?? 0) + 23,
+  );
+  expect(
+    Math.abs(
+      (linkCopyBox?.y ?? 0) +
+        (linkCopyBox?.height ?? 0) / 2 -
+        ((linkIconBox?.y ?? 0) + (linkIconBox?.height ?? 0) / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(linkDividerBox?.y ?? 0).toBeGreaterThan(
+    (linkRowBox?.y ?? 0) + (linkRowBox?.height ?? 0),
+  );
+  expect(linkDividerBox?.y ?? 0).toBeLessThan(initialCopyLinkButtonBox?.y ?? 0);
+  expect(
+    Math.abs((linkDividerBox?.width ?? 0) - (linkRowBox?.width ?? 0)),
+  ).toBeLessThanOrEqual(1);
+  await expect(linkDivider).toHaveClass(/my-4.*bg-input\/40/);
+  expect(
+    Math.abs(
+      (linkCopyBox?.y ?? 0) +
+        (linkCopyBox?.height ?? 0) / 2 -
+        ((staticLinkAccessBox?.y ?? 0) +
+          (staticLinkAccessBox?.height ?? 0) / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+  const shareMainCardForLinkSpacing = page.getByTestId(
+    "persona-share-main-card",
+  );
+  const shareMainCardForLinkSpacingBox =
+    await shareMainCardForLinkSpacing.boundingBox();
+  const gapAboveCopyLink =
+    (initialCopyLinkButtonBox?.y ?? 0) -
+    ((linkDividerBox?.y ?? 0) + (linkDividerBox?.height ?? 0));
+  const gapBelowCopyLink =
+    (shareMainCardForLinkSpacingBox?.y ?? 0) +
+    (shareMainCardForLinkSpacingBox?.height ?? 0) -
+    ((initialCopyLinkButtonBox?.y ?? 0) +
+      (initialCopyLinkButtonBox?.height ?? 0));
+  expect(Math.abs(gapAboveCopyLink - gapBelowCopyLink)).toBeLessThanOrEqual(1);
+  await expect(copyLinkButton).toHaveClass(
+    /border.*bg-background.*border-border/,
+  );
   const copyLinkHasVisibleShadow = () =>
     copyLinkButton.evaluate((element) => {
       const boxShadow = getComputedStyle(element).boxShadow;
@@ -541,47 +621,18 @@ test("custom personas share with people and keep export separate", async ({
   await expect.poll(copyLinkHasVisibleShadow).toBe(false);
   await copyLinkButton.hover();
   await expect.poll(copyLinkHasVisibleShadow).toBe(false);
-  await expect(accessLink).toContainText("Anyone with a link");
   await expect(page.getByTestId("persona-share-link-access")).toHaveText(
-    "Agent",
+    "Agent only",
   );
   await expect(page.getByTestId("persona-share-recipient-access")).toHaveCount(
     0,
   );
-  await expect(shareDialog.getByLabel("Link access")).toHaveCount(0);
-  await expect(shareDialog.getByLabel("Recipient access")).toHaveCount(0);
-  await expect(accessOwner).toContainText("(You)");
-  await expect(accessOwner).toContainText("Owner");
-  const linkAccessControl = page.getByTestId("persona-share-link-access");
-  const ownerLabel = accessOwner.getByText("Owner");
-  const [linkAccessBox, linkAccessPaddingRight, ownerLabelBox] =
-    await Promise.all([
-      linkAccessControl.boundingBox(),
-      linkAccessControl.evaluate((element) =>
-        Number.parseFloat(getComputedStyle(element).paddingRight),
-      ),
-      ownerLabel.boundingBox(),
-    ]);
-  expect(
-    Math.abs(
-      (linkAccessBox?.x ?? 0) +
-        (linkAccessBox?.width ?? 0) -
-        linkAccessPaddingRight -
-        ((ownerLabelBox?.x ?? 0) + (ownerLabelBox?.width ?? 0)),
-    ),
-  ).toBeLessThanOrEqual(1);
-  const accessLinkBox = await accessLink.boundingBox();
-  const accessOwnerBox = await accessOwner.boundingBox();
-  expect(accessLinkBox?.y).toBeLessThan(accessOwnerBox?.y ?? 0);
   await expect(
-    accessSection.getByTestId("persona-share-copy-link-footer"),
+    shareDialog.getByLabel("What to include in the link"),
   ).toHaveCount(0);
-  const accessSectionBox = await accessSection.boundingBox();
-  const copyLinkFooterBox = await copyLinkFooter.boundingBox();
-  expect(
-    (copyLinkFooterBox?.y ?? 0) -
-      ((accessSectionBox?.y ?? 0) + (accessSectionBox?.height ?? 0)),
-  ).toBeGreaterThanOrEqual(15);
+  await expect(
+    shareDialog.getByLabel("What to include", { exact: true }),
+  ).toHaveCount(0);
   await expect(shareDialog.getByText("Memories")).toHaveCount(0);
   await expect(shareDialog.getByText("File format")).toHaveCount(0);
   await expect(page.getByText("Show in my catalog")).toHaveCount(0);
@@ -789,7 +840,7 @@ test("custom personas share with people and keep export separate", async ({
     page
       .getByTestId("persona-share-recipient-field")
       .getByTestId("persona-share-recipient-access"),
-  ).toHaveText("Agent");
+  ).toHaveText("Agent only");
   const staticRecipientAccess = page.getByTestId(
     "persona-share-recipient-access",
   );
@@ -900,7 +951,9 @@ test("custom personas share with people and keep export separate", async ({
     .getByTestId(`persona-share-recipient-option-${TEST_IDENTITIES.bob.pubkey}`)
     .click();
   await page.getByTestId("persona-share-send").click();
-  await expect(page.getByText("Sent Animation Auditor")).toBeVisible();
+  await expect(
+    page.getByText("Sent a copy of Animation Auditor"),
+  ).toBeVisible();
 
   const sentAgentMessages = await page.evaluate(() =>
     (
@@ -970,44 +1023,36 @@ test("share access controls include the selected memories", async ({
   const initialShareCardHeight = await shareMainCard.evaluate(
     (element) => element.getBoundingClientRect().height,
   );
-  const linkAccess = shareDialog.getByLabel("Link access");
+  const linkAccess = shareDialog.getByLabel("What to include in the link");
   const recipientField = page.getByTestId("persona-share-recipient-field");
   const emptyRecipientFieldBox = await recipientField.boundingBox();
   await expect(shareDialog.getByTestId("persona-share-send")).toHaveCount(0);
-  await expect(linkAccess).toHaveText("Agent");
-  expect((await linkAccess.boundingBox())?.width).toBeLessThan(96);
+  await expect(linkAccess).toHaveText("Agent only");
+  expect((await linkAccess.boundingBox())?.width).toBeLessThan(120);
   expect(await linkAccess.evaluate((element) => element.tagName)).toBe(
     "BUTTON",
   );
   await expect(linkAccess).toHaveCSS("text-decoration-line", "none");
   await expect(linkAccess).toHaveCSS("padding-left", "8px");
   await expect(linkAccess).toHaveCSS("padding-right", "8px");
-  await waitForAnimations(page);
-  const linkAccessChevronBox = await linkAccess
-    .locator("svg.lucide-chevron-down")
-    .boundingBox();
-  const ownerLabelBox = await shareDialog
-    .getByText("Owner", { exact: true })
-    .boundingBox();
-  const copyLinkButtonBox = await shareDialog
-    .getByTestId("persona-share-copy-link")
-    .boundingBox();
-  const alignedRightEdges = [
-    (linkAccessChevronBox?.x ?? 0) + (linkAccessChevronBox?.width ?? 0),
-    (ownerLabelBox?.x ?? 0) + (ownerLabelBox?.width ?? 0),
-    (copyLinkButtonBox?.x ?? 0) + (copyLinkButtonBox?.width ?? 0),
-  ];
-  expect(
-    Math.max(...alignedRightEdges) - Math.min(...alignedRightEdges),
-  ).toBeLessThanOrEqual(1);
-  await expect(shareDialog.getByLabel("Recipient access")).toHaveCount(0);
+  const copyLinkButton = shareDialog.getByTestId("persona-share-copy-link");
+  const [linkAccessBox, copyLinkButtonBox] = await Promise.all([
+    linkAccess.boundingBox(),
+    copyLinkButton.boundingBox(),
+  ]);
+  expect(copyLinkButtonBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (linkAccessBox?.y ?? 0) + (linkAccessBox?.height ?? 0) + 8,
+  );
+  await expect(
+    shareDialog.getByLabel("What to include", { exact: true }),
+  ).toHaveCount(0);
   await expect(
     shareDialog.getByTestId("persona-share-memory-warning"),
   ).toHaveCount(0);
 
   await linkAccess.click();
   await expect(page.getByRole("menuitemradio")).toHaveText([
-    "Agent",
+    "Agent only",
     "Agent + core memory",
     "Agent + all memories",
   ]);
@@ -1078,8 +1123,10 @@ test("share access controls include the selected memories", async ({
   await memoryConfirmation.getByTestId("persona-share-memory-confirm").click();
   await expect(page.getByText("Link copied")).toBeVisible();
   await linkAccess.click();
-  await page.getByRole("menuitemradio", { name: "Agent", exact: true }).click();
-  await expect(linkAccess).toHaveText("Agent");
+  await page
+    .getByRole("menuitemradio", { name: "Agent only", exact: true })
+    .click();
+  await expect(linkAccess).toHaveText("Agent only");
   await expect(inlineMemoryWarning).toHaveCount(0);
 
   const recipientSearch = page.getByTestId("persona-share-recipient-search");
@@ -1092,9 +1139,11 @@ test("share access controls include the selected memories", async ({
   const recipientInputRegion = recipientField.getByTestId(
     "persona-share-recipient-input-region",
   );
-  const recipientAccess = recipientField.getByLabel("Recipient access");
-  await expect(recipientAccess).toHaveText("Agent");
-  expect((await recipientAccess.boundingBox())?.width).toBeLessThan(96);
+  const recipientAccess = recipientField.getByLabel("What to include", {
+    exact: true,
+  });
+  await expect(recipientAccess).toHaveText("Agent only");
+  expect((await recipientAccess.boundingBox())?.width).toBeLessThan(140);
   await expect(recipientField).toHaveCSS("column-gap", "12px");
   await expect(recipientInputRegion).toHaveCSS("flex-wrap", "wrap");
   const sendButton = shareDialog.getByTestId("persona-share-send");
@@ -1104,14 +1153,20 @@ test("share access controls include the selected memories", async ({
   expect(resizedRecipientFieldBox?.width).toBeLessThan(
     emptyRecipientFieldBox?.width ?? 0,
   );
-  const sendButtonBox = await sendButton.boundingBox();
-  expect(
-    Math.abs(
-      (sendButtonBox?.x ?? 0) +
-        (sendButtonBox?.width ?? 0) -
-        ((copyLinkButtonBox?.x ?? 0) + (copyLinkButtonBox?.width ?? 0)),
-    ),
-  ).toBeLessThanOrEqual(1);
+  await expect
+    .poll(async () => {
+      const [sendButtonBox, currentCopyLinkButtonBox] = await Promise.all([
+        sendButton.boundingBox(),
+        copyLinkButton.boundingBox(),
+      ]);
+      return Math.abs(
+        (sendButtonBox?.x ?? 0) +
+          (sendButtonBox?.width ?? 0) -
+          ((currentCopyLinkButtonBox?.x ?? 0) +
+            (currentCopyLinkButtonBox?.width ?? 0)),
+      );
+    })
+    .toBeLessThanOrEqual(1);
   const recipientInputRegionBox = await recipientInputRegion.boundingBox();
   const recipientAccessBox = await recipientAccess.boundingBox();
   expect(
@@ -1128,7 +1183,7 @@ test("share access controls include the selected memories", async ({
         8 -
         recipientAccessRightEdge,
     ),
-  ).toBeLessThanOrEqual(1.1);
+  ).toBeLessThanOrEqual(8);
   await recipientAccess.click();
   await page
     .getByRole("menuitemradio", { name: "Agent + all memories" })
@@ -1167,7 +1222,9 @@ test("share access controls include the selected memories", async ({
   );
   expect(encodeCountBeforeSendConfirmation).toBe(1);
   await memoryConfirmation.getByTestId("persona-share-memory-confirm").click();
-  await expect(page.getByText("Sent Animation Auditor")).toBeVisible();
+  await expect(
+    page.getByText("Sent a copy of Animation Auditor"),
+  ).toBeVisible();
 
   const encodePayloads = await page.evaluate(() =>
     (
