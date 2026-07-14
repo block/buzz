@@ -1,6 +1,13 @@
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
-import { Activity, Archive, ChevronRight, Info, Wrench } from "lucide-react";
+import {
+  Activity,
+  Archive,
+  ChevronRight,
+  Info,
+  RefreshCw,
+  Wrench,
+} from "lucide-react";
 
 import type { ActiveTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
@@ -728,6 +735,7 @@ export function ProfileRuntimeTabContent({
   agentInstruction,
   diagnosticsFields,
   diagnosticsSummary,
+  needsRestart = false,
   onOpenDiagnostics,
   onOpenInstructions,
   runtimeConfigurationFields,
@@ -738,6 +746,8 @@ export function ProfileRuntimeTabContent({
   agentInstruction: string | null;
   diagnosticsFields: ProfileField[];
   diagnosticsSummary: React.ReactNode;
+  /** True when the running agent's config has drifted from what it was spawned with. */
+  needsRestart?: boolean;
   onOpenDiagnostics: () => void;
   onOpenInstructions: () => void;
   runtimeConfigurationFields: ProfileField[];
@@ -766,6 +776,24 @@ export function ProfileRuntimeTabContent({
 
   return (
     <div className="space-y-2">
+      {needsRestart ? (
+        <div
+          className="flex items-start gap-3 rounded-2xl bg-amber-500/10 px-4 py-3"
+          data-testid="needs-restart-banner"
+        >
+          <RefreshCw className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <div className="min-w-0 text-sm">
+            <p className="font-medium text-amber-600 dark:text-amber-400">
+              Restart required
+            </p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Configuration changed since this agent started. It will restart
+              automatically after ~3 minutes idle, or restart manually for
+              immediate effect.
+            </p>
+          </div>
+        </div>
+      ) : null}
       {showInstructionBlock ? (
         <div className="overflow-hidden rounded-2xl bg-muted/20">
           <AgentInstructionRow

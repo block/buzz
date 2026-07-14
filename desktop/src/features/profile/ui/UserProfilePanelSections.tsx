@@ -400,6 +400,7 @@ export function ProfileSummaryView({
                 agentInstruction={agentInstruction}
                 diagnosticsFields={diagnosticsFields}
                 diagnosticsSummary={diagnosticsTrailing}
+                needsRestart={managedAgent?.needsRestart ?? false}
                 onOpenDiagnostics={onOpenDiagnostics}
                 onOpenInstructions={onOpenInstructions}
                 runtimeConfigurationFields={runtimeConfigurationFields}

@@ -1,5 +1,11 @@
 import * as React from "react";
-import { ChevronDown, ChevronRight, Ellipsis, OctagonX } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Ellipsis,
+  OctagonX,
+  RefreshCw,
+} from "lucide-react";
 
 import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
@@ -9,6 +15,7 @@ import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
+import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -344,6 +351,14 @@ function AgentPersonaCard({
         }
         onOpenPersonaProfile(persona);
       }}
+      statusBadge={
+        agent?.needsRestart ? (
+          <Badge className="gap-1" variant="warning">
+            <RefreshCw className="h-3 w-3" />
+            Restart required
+          </Badge>
+        ) : null
+      }
     />
   );
 }
@@ -400,6 +415,14 @@ function StandaloneAgentCard({
           opensRuntimeTab ? { tab: "runtime" } : undefined,
         );
       }}
+      statusBadge={
+        agent.needsRestart ? (
+          <Badge className="gap-1" variant="warning">
+            <RefreshCw className="h-3 w-3" />
+            Restart required
+          </Badge>
+        ) : null
+      }
     />
   );
 }
