@@ -27,6 +27,7 @@ import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
+import { withMentionReferenceTags } from "@/shared/lib/mentionReferenceTags";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 
 type PendingNonMemberMentionSend = {
@@ -109,21 +110,6 @@ type UseMentionSendFlowOptions = {
   }) => void;
   resolvePostSendContent?: (effectiveExplicitAgentPubkeys: string[]) => string;
 };
-
-function mergeOutgoingTagsWithReferenceMentions(
-  outgoingTags: string[][] | undefined,
-  pubkeys: Iterable<string>,
-) {
-  const normalizedPubkeys = uniqueNormalizedPubkeys(pubkeys);
-  if (normalizedPubkeys.length === 0) {
-    return outgoingTags;
-  }
-
-  return [
-    ...(outgoingTags ?? []),
-    ...normalizedPubkeys.map((pubkey) => [MENTION_REFERENCE_TAG, pubkey]),
-  ];
-}
 
 function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -514,11 +500,16 @@ export function useMentionSendFlow({
           );
         }
 
+        const finalOutgoingTags = withMentionReferenceTags(
+          outgoingTags ?? [],
+          mentionPubkeys,
+        );
+
         try {
           await onSendRef.current(
             draft.finalContent,
             mentionPubkeys,
-            outgoingTags,
+            finalOutgoingTags,
             sendChannelId,
             draft.capturedThreadContext,
           );
@@ -799,8 +790,8 @@ export function useMentionSendFlow({
     const mentionPubkeys = pendingNonMemberSend.mentionPubkeys.filter(
       (pubkey) => !nonMemberPubkeys.has(normalizePubkey(pubkey)),
     );
-    const outgoingTags = mergeOutgoingTagsWithReferenceMentions(
-      pendingNonMemberSend.outgoingTags,
+    const outgoingTags = withMentionReferenceTags(
+      pendingNonMemberSend.outgoingTags ?? [],
       nonMemberPubkeys,
     );
     void completeSend(pendingNonMemberSend, mentionPubkeys, outgoingTags);

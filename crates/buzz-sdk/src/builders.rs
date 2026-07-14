@@ -184,16 +184,19 @@ fn thread_tags(thread_ref: &ThreadRef, tags: &mut Vec<Tag>) -> Result<(), SdkErr
     Ok(())
 }
 
-/// Deduplicate and cap mentions, emitting p-tags.
+/// Deduplicate and cap mentions, emitting delivery `p` tags and explicit
+/// Buzz `mention` reference tags. The relay uses the latter to distinguish
+/// actual @mentions from structural reply-author `p` tags.
 fn mention_tags(mentions: &[&str], tags: &mut Vec<Tag>) -> Result<(), SdkError> {
     if mentions.len() > crate::mentions::MENTION_CAP {
         return Err(SdkError::TooManyMentions);
     }
     let mut seen = std::collections::HashSet::new();
     for &hex in mentions {
-        let lower = hex.to_ascii_lowercase();
+        let lower = check_pubkey_hex(hex, "mention")?;
         if seen.insert(lower.clone()) {
             tags.push(tag(&["p", &lower])?);
+            tags.push(tag(&["mention", &lower])?);
         }
     }
     Ok(())
@@ -213,7 +216,7 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
 /// - `channel_id`: target channel UUID
 /// - `content`: message text (max 64 KiB)
 /// - `thread_ref`: optional NIP-10 reply context
-/// - `mentions`: pubkey hex strings to p-tag (deduped, max 50)
+/// - `mentions`: pubkey hex strings to p-tag and `mention`-tag (deduped, max 50)
 /// - `broadcast`: if true, adds `["broadcast", "1"]` tag
 /// - `media_tags`: raw imeta tag vectors
 pub fn build_message(
@@ -1977,12 +1980,14 @@ mod tests {
     }
 
     #[test]
-    fn message_mentions_deduped() {
+    fn message_mentions_emit_delivery_and_reference_tags_deduped() {
         let cid = uuid();
         let hex = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
         let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, &[]).unwrap());
         let p_tags = tag_values(&ev, "p");
-        assert_eq!(p_tags.len(), 1);
+        let mention_tags = tag_values(&ev, "mention");
+        assert_eq!(p_tags, vec![hex]);
+        assert_eq!(mention_tags, vec![hex]);
     }
 
     #[test]
