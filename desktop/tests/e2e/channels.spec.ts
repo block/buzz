@@ -930,6 +930,73 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   ).toHaveAttribute("data-channel-id", retryChannelId ?? "");
 });
 
+test("drops an expanded DM after agent startup fails", async ({ page }) => {
+  const retryMessage = "Retry after agent startup failed";
+  const startError = "Mock agent startup failed.";
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+    startManagedAgentErrors: [startError],
+  });
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" before startup fails");
+  await page.getByTestId("send-message").click();
+
+  await expect(
+    page.getByText(startError, { exact: false }).first(),
+  ).toBeVisible();
+  await expect(input).toContainText("Fizz");
+
+  const commandsAfterFailure = await readCommandPayloadLog(page);
+  const openDmCallsAfterFailure = commandsAfterFailure.filter(
+    (entry) => entry.command === "open_dm",
+  );
+  expect(openDmCallsAfterFailure).toHaveLength(2);
+  expect(
+    (openDmCallsAfterFailure.at(-1)?.payload as { pubkeys?: string[] })
+      ?.pubkeys,
+  ).toEqual(expect.arrayContaining([TEST_IDENTITIES.charlie.pubkey]));
+  expect(
+    (openDmCallsAfterFailure.at(-1)?.payload as { pubkeys?: string[] })
+      ?.pubkeys,
+  ).toHaveLength(2);
+
+  await input.fill(retryMessage);
+  const retryBaseline = commandsAfterFailure.length;
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    retryMessage,
+  );
+
+  const retryCommands = (await readCommandPayloadLog(page)).slice(
+    retryBaseline,
+  );
+  const retryOpenDm = retryCommands.find(
+    (entry) => entry.command === "open_dm",
+  );
+  expect(
+    (retryOpenDm?.payload as { pubkeys?: string[] } | undefined)?.pubkeys,
+  ).toEqual([TEST_IDENTITIES.charlie.pubkey]);
+  await expect(page.getByTestId("chat-title")).not.toContainText("Fizz");
+});
+
 test("closes direct message results while opening", async ({ page }) => {
   await page.goto("/");
   await page.evaluate(() => {

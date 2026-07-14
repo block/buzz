@@ -184,11 +184,17 @@ export function NewMessageScreen() {
         ),
       ].filter(Boolean);
       const preparedDirectMessage = preparedDirectMessageRef.current;
+      const currentNormalizedPubkey = currentPubkey
+        ? normalizePubkey(currentPubkey)
+        : null;
       const preparedParticipantPubkeys = new Set(
-        preparedDirectMessage?.participantPubkeys.map(normalizePubkey) ?? [],
+        (preparedDirectMessage?.participantPubkeys ?? [])
+          .map(normalizePubkey)
+          .filter((pubkey) => pubkey !== currentNormalizedPubkey),
       );
       if (
         preparedDirectMessage &&
+        preparedParticipantPubkeys.size === requestedPubkeys.length &&
         requestedPubkeys.every((pubkey) =>
           preparedParticipantPubkeys.has(pubkey),
         )
@@ -222,6 +228,7 @@ export function NewMessageScreen() {
       }
     },
     [
+      currentPubkey,
       openDmMutation.isPending,
       openDmMutation.mutateAsync,
       selectedUsers,
@@ -244,8 +251,13 @@ export function NewMessageScreen() {
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
+      targetChannelId?: string | null,
     ) => {
-      const directMessage = await openDirectMessage();
+      const preparedDirectMessage = preparedDirectMessageRef.current;
+      const directMessage =
+        targetChannelId && preparedDirectMessage?.id === targetChannelId
+          ? preparedDirectMessage
+          : await openDirectMessage();
       if (!directMessage) {
         throw new Error(
           submitErrorMessage ?? "Choose at least one recipient first.",

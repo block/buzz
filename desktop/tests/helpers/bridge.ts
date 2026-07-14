@@ -164,6 +164,8 @@ type MockBridgeOptions = {
   sendMessageDelayMs?: number;
   /** Reject successive kind-9 sends with these messages, then resume. */
   sendMessageErrors?: string[];
+  /** Reject successive managed-agent starts, then resume. */
+  startManagedAgentErrors?: string[];
   /** Delay (ms) after snapshotting a thread-replies page so E2E tests can
    * deliver live reply/aux events while an older response is in flight. */
   threadRepliesDelayMs?: number;
