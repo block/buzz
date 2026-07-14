@@ -12,6 +12,9 @@ use uuid::Uuid;
 
 use crate::error::Result;
 
+/// Maximum claims for a malformed matcher job before it is discarded.
+pub const MAX_MATCH_ATTEMPTS: i32 = 8;
+
 /// Common signed-event ordering fields for a lease replacement.
 #[derive(Debug, Clone, Copy)]
 pub struct LeaseVersion<'a> {
@@ -108,7 +111,7 @@ pub struct ClaimedWake {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RevalidateWakeOutcome {
     /// The claim and current lease still authorize delivery.
-    Deliver(ClaimedWake),
+    Deliver(Box<ClaimedWake>),
     /// The claim was lost or the lease rotated, revoked, expired, or disabled.
     Suppressed,
 }
@@ -122,6 +125,8 @@ pub struct ClaimedMatch {
     pub event: buzz_core::StoredEvent,
     /// Fencing token required to complete or retry this claim.
     pub claim_id: Uuid,
+    /// Attempt number, starting at one for the first claim.
+    pub attempt: i32,
 }
 
 /// Current active lease candidate for matcher evaluation.
@@ -575,14 +580,44 @@ pub async fn claim_due_match(
     pool: &PgPool,
     lease_until: DateTime<Utc>,
 ) -> Result<Option<ClaimedMatch>> {
+    claim_due_match_with_loader(pool, lease_until, |pool, community, event_id| async move {
+        Ok(
+            crate::event::get_events_by_ids(&pool, community, &[&event_id])
+                .await?
+                .into_iter()
+                .next(),
+        )
+    })
+    .await
+}
+
+async fn claim_due_match_with_loader<F, Fut>(
+    pool: &PgPool,
+    lease_until: DateTime<Utc>,
+    load: F,
+) -> Result<Option<ClaimedMatch>>
+where
+    F: FnOnce(PgPool, CommunityId, Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<buzz_core::StoredEvent>>>,
+{
     let claim_id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
+    // Reap poison jobs before claiming so a worker crash on the final attempt
+    // cannot leave an unclaimable row pinning outbox retention forever.
+    sqlx::query(
+        "DELETE FROM push_match_queue WHERE attempts >= $1 \
+         AND (state='pending' OR (state='matching' AND lease_until < now()))",
+    )
+    .bind(MAX_MATCH_ATTEMPTS)
+    .execute(&mut *tx)
+    .await?;
     let row = sqlx::query(
         r#"
         WITH candidate AS (
             SELECT community_id, event_id
             FROM push_match_queue
-            WHERE next_attempt_at <= now()
+            WHERE attempts < $3
+              AND next_attempt_at <= now()
               AND (state = 'pending' OR (state = 'matching' AND lease_until < now()))
             ORDER BY next_attempt_at, created_at
             FOR UPDATE SKIP LOCKED
@@ -592,11 +627,12 @@ pub async fn claim_due_match(
         SET state='matching', claim_id=$1, lease_until=$2, attempts=attempts+1
         FROM candidate c
         WHERE q.community_id=c.community_id AND q.event_id=c.event_id
-        RETURNING q.community_id, q.event_id
+        RETURNING q.community_id, q.event_id, q.attempts
         "#,
     )
     .bind(claim_id)
     .bind(lease_until)
+    .bind(MAX_MATCH_ATTEMPTS)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
@@ -605,11 +641,9 @@ pub async fn claim_due_match(
     };
     let community = CommunityId::from_uuid(row.try_get("community_id")?);
     let event_id: Vec<u8> = row.try_get("event_id")?;
+    let attempt: i32 = row.try_get("attempts")?;
     tx.commit().await?;
-    let event = crate::event::get_events_by_ids(pool, community, &[&event_id])
-        .await?
-        .into_iter()
-        .next();
+    let event = load(pool.clone(), community, event_id.clone()).await?;
     let Some(event) = event else {
         // Source absence and soft deletion are deliberate privacy-preserving
         // terminal outcomes. Query errors above propagate instead, leaving the
@@ -629,6 +663,7 @@ pub async fn claim_due_match(
         community,
         event,
         claim_id,
+        attempt,
     }))
 }
 
@@ -783,7 +818,7 @@ pub async fn revalidate_wake_for_send(
     row.map(row_to_claimed_wake)
         .transpose()?
         .map_or(Ok(RevalidateWakeOutcome::Suppressed), |wake| {
-            Ok(RevalidateWakeOutcome::Deliver(wake))
+            Ok(RevalidateWakeOutcome::Deliver(Box::new(wake)))
         })
 }
 
@@ -875,6 +910,10 @@ pub async fn disable_endpoint_generation(
 }
 
 /// Delete terminal/expired outbox rows older than a retention cutoff.
+///
+/// NIP-RS hard purge only targets kind 30078, which is not push-eligible and
+/// therefore cannot have a matcher row; any other absent source is handled by
+/// the matcher's fenced load-miss deletion.
 pub async fn prune_wake_outbox(
     pool: &PgPool,
     community: CommunityId,
@@ -1477,6 +1516,45 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn matcher_load_error_preserves_claimed_job_for_recovery() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "retry me")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign event");
+        crate::event::insert_event(&pool, community, &event, None)
+            .await
+            .expect("insert event");
+
+        let error = claim_due_match_with_loader(
+            &pool,
+            Utc::now() - chrono::Duration::seconds(1),
+            |_pool, _community, _event_id| async {
+                Err(crate::DbError::InvalidData("injected load failure".into()))
+            },
+        )
+        .await
+        .expect_err("load error must propagate");
+        assert!(error.to_string().contains("injected load failure"));
+        let row: (String, i32) = sqlx::query_as(
+            "SELECT state, attempts FROM push_match_queue WHERE community_id=$1 AND event_id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("load failure must preserve matcher row");
+        assert_eq!(row, ("matching".to_string(), 1));
+        assert!(
+            claim_due_match(&pool, Utc::now() + chrono::Duration::minutes(1))
+                .await
+                .expect("expired claim remains recoverable")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn matcher_claim_is_exclusive_across_workers() {
         let pool = setup_pool().await;
         let community = make_community(&pool).await;
@@ -1503,5 +1581,118 @@ mod tests {
             claimed += usize::from(task.await.expect("join").is_some());
         }
         assert_eq!(claimed, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delivered_wake_is_retained_while_rematch_is_queued() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let author = [22; 32];
+        let event_id = [23; 32];
+        activate(&pool, community, &author, "install", &[24; 32], 1).await;
+        let wake_id = enqueue_one(&pool, community, &author, &event_id, 1).await;
+        sqlx::query(
+            "UPDATE push_wake_outbox SET state='delivered', created_at=now()-interval '2 days' \
+             WHERE community_id=$1 AND id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(wake_id)
+        .execute(&pool)
+        .await
+        .expect("mark old wake delivered");
+
+        let cutoff = Utc::now() - chrono::Duration::days(1);
+        assert_eq!(
+            prune_wake_outbox(&pool, community, cutoff).await.unwrap(),
+            0
+        );
+        sqlx::query("DELETE FROM push_match_queue WHERE community_id=$1 AND event_id=$2")
+            .bind(community.as_uuid())
+            .bind(event_id)
+            .execute(&pool)
+            .await
+            .expect("complete rematch");
+        assert_eq!(
+            prune_wake_outbox(&pool, community, cutoff).await.unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn exhausted_match_job_is_reaped_and_cannot_pin_retention() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "poison")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign event");
+        crate::event::insert_event(&pool, community, &event, None)
+            .await
+            .expect("insert event");
+        let author = [25; 32];
+        activate(&pool, community, &author, "install", &[26; 32], 1).await;
+        let wake_id = match enqueue_wake(
+            &pool,
+            community,
+            &author,
+            "install",
+            NewWake {
+                lease_generation: 1,
+                event_id: event.id.as_bytes(),
+                class: "default",
+                expires_at: i64::MAX / 2,
+            },
+        )
+        .await
+        .expect("enqueue wake")
+        {
+            EnqueueWakeOutcome::Enqueued(id) => id,
+            other => panic!("expected fresh wake, got {other:?}"),
+        };
+        sqlx::query(
+            "UPDATE push_wake_outbox SET state='delivered', created_at=now()-interval '2 days' \
+             WHERE community_id=$1 AND id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(wake_id)
+        .execute(&pool)
+        .await
+        .expect("mark old wake delivered");
+        let cutoff = Utc::now() - chrono::Duration::days(1);
+        assert_eq!(
+            prune_wake_outbox(&pool, community, cutoff).await.unwrap(),
+            0
+        );
+        sqlx::query(
+            "UPDATE push_match_queue SET attempts=$3, state='matching', lease_until=now()-interval '1 second' \
+             WHERE community_id=$1 AND event_id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(MAX_MATCH_ATTEMPTS)
+        .execute(&pool)
+        .await
+        .expect("exhaust matcher job");
+        assert!(
+            claim_due_match(&pool, Utc::now() + chrono::Duration::minutes(1))
+                .await
+                .expect("reap exhausted matcher")
+                .is_none()
+        );
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM push_match_queue WHERE community_id=$1 AND event_id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
+        assert_eq!(
+            prune_wake_outbox(&pool, community, cutoff).await.unwrap(),
+            1,
+            "reaped poison job must release delivered-wake retention"
+        );
     }
 }

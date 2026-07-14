@@ -695,6 +695,21 @@ mod tests {
     }
 
     #[test]
+    fn migration_trigger_allowlist_matches_advertised_push_kinds() {
+        let kinds = PUSH_KINDS
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let predicate = format!("NEW.kind IN ({kinds})");
+        let migration = include_str!("../../../../migrations/0017_push_match_queue.sql");
+        assert!(
+            migration.contains(&predicate),
+            "migration trigger must use PUSH_KINDS exactly: {predicate}"
+        );
+    }
+
+    #[test]
     fn active_filter_requires_narrowing_and_self_p_tag() {
         let body = parse_plaintext(r##"{"v":1,"origin":"o","generation":1,"active":true,"app_profile":"p","transport":"apns","endpoint":"token","subscriptions":[{"filter":{"kinds":[9]},"class":"default"}]}"##, 4096).unwrap();
         assert_eq!(
