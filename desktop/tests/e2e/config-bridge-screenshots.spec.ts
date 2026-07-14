@@ -14,6 +14,8 @@ const MULTI_ORIGIN_PUBKEY =
   "abc1230000000000000000000000000000000000000000000000000000000def";
 const BUZZ_AGENT_PUBKEY =
   "b0220000000000000000000000000000000000000000000000000000000000a9";
+const BUZZ_AGENT_POPULATED_PUBKEY =
+  "b0220000000000000000000000000000000000000000000000000000000000b1";
 
 const MANAGED_AGENTS = [
   {
@@ -275,6 +277,30 @@ test.describe("config bridge screenshots", () => {
 
     await expect(
       panel.getByText("No custom servers configured", { exact: true }),
+    ).toBeVisible();
+    await expect(panel.getByText("MCP Servers", { exact: true })).toHaveCount(
+      1,
+    );
+  });
+
+  test("06b — buzz-agent populated MCP servers", async ({ page }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: BUZZ_AGENT_POPULATED_PUBKEY,
+          name: "Buzz Populated",
+          status: "running" as const,
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    const panel = await openAgentProfileFromChannel(page, "Buzz Populated");
+
+    // The populated WYSIWYG surface includes a "filesystem" server row.
+    await expect(panel.getByText("filesystem", { exact: true })).toBeVisible();
+    await expect(
+      panel.getByText("npx -y @modelcontextprotocol/server-filesystem /tmp"),
     ).toBeVisible();
     await expect(panel.getByText("MCP Servers", { exact: true })).toHaveCount(
       1,

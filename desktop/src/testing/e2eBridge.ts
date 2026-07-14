@@ -1713,14 +1713,29 @@ function buildMockConfigSurface(pubkey: string): {
     },
   };
 
-  const buzzAgentSurface = {
+  const buzzAgentBase = {
     ...gooseSurface,
     runtimeId: "buzz-agent",
     runtimeLabel: "Buzz Agent",
     advanced: [],
     extensions: [],
-    // Effective merged (global < definition < agent, enabled-only) servers —
-    // "what runs." Exercises the WYSIWYG read-only display by default.
+    sources: {
+      ...gooseSurface.sources,
+      configFilePath: null,
+      mcpConfigFilePath: null,
+    },
+  };
+
+  // Empty WYSIWYG surface — "No custom servers configured" path.
+  const buzzAgentEmptySurface = {
+    ...buzzAgentBase,
+    buzzAgentMcpServers: [] satisfies McpServerConfig[],
+  };
+
+  // Populated WYSIWYG surface — exercises the read-only BuzzAgentMcpServerRow
+  // rendering with an effective-merged server list.
+  const buzzAgentPopulatedSurface = {
+    ...buzzAgentBase,
     buzzAgentMcpServers: [
       {
         name: "filesystem",
@@ -1730,11 +1745,6 @@ function buildMockConfigSurface(pubkey: string): {
         enabled: true,
       },
     ] satisfies McpServerConfig[],
-    sources: {
-      ...gooseSurface.sources,
-      configFilePath: null,
-      mcpConfigFilePath: null,
-    },
   };
 
   // Map well-known test pubkeys to specific fixtures.
@@ -1743,6 +1753,8 @@ function buildMockConfigSurface(pubkey: string): {
     "abc1230000000000000000000000000000000000000000000000000000000def";
   const PUBKEY_BUZZ_AGENT =
     "b0220000000000000000000000000000000000000000000000000000000000a9";
+  const PUBKEY_BUZZ_AGENT_POPULATED =
+    "b0220000000000000000000000000000000000000000000000000000000000b1";
 
   switch (pubkey) {
     case ALICE_PUBKEY:
@@ -1756,7 +1768,9 @@ function buildMockConfigSurface(pubkey: string): {
     case PUBKEY_MULTI_ORIGIN:
       return multiOriginSurface;
     case PUBKEY_BUZZ_AGENT:
-      return buzzAgentSurface;
+      return buzzAgentEmptySurface;
+    case PUBKEY_BUZZ_AGENT_POPULATED:
+      return buzzAgentPopulatedSurface;
     default:
       return gooseSurface;
   }
@@ -9307,16 +9321,16 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       }
       case "get_global_agent_config": {
-        // Return the mock global agent config if provided; otherwise return
-        // an empty config (no global provider, model, env vars, or MCP servers).
-        return (
-          config?.mock?.globalAgentConfig ?? {
-            env_vars: {},
-            mcp_servers: [],
-            provider: null,
-            model: null,
-          }
-        );
+        // Return the mock global agent config, defaulting each field
+        // individually so a partial seed (e.g. {env_vars, provider, model}
+        // without mcp_servers) still produces a valid shape.
+        return {
+          env_vars: {},
+          mcp_servers: [],
+          provider: null,
+          model: null,
+          ...config?.mock?.globalAgentConfig,
+        };
       }
       case "set_global_agent_config": {
         // Echo back the submitted config as the saved value (mirrors the

@@ -39,7 +39,39 @@ export const MCP_RESERVED_SERVER_NAME = "buzz-dev-mcp";
 /** Effective/per-layer enabled-server cap. Mirrors `MAX_USER_MCP_SERVERS`. */
 export const MAX_USER_MCP_SERVERS = 15;
 
+/** Per-value byte cap. Mirrors `MAX_ENV_VALUE_BYTES` in `env_vars.rs`. */
+export const MAX_ENV_VALUE_BYTES = 32 * 1024;
+
+/**
+ * Reserved env keys (case-insensitive). Mirrors `RESERVED_ENV_KEYS` in
+ * `env_vars.rs`. Keys that override agent identity, code-execution surface,
+ * security gates, or structured transport must never be user-settable.
+ */
+export const RESERVED_ENV_KEYS: readonly string[] = [
+  "BUZZ_PRIVATE_KEY",
+  "NOSTR_PRIVATE_KEY",
+  "BUZZ_AUTH_TAG",
+  "BUZZ_API_TOKEN",
+  "BUZZ_ACP_PRIVATE_KEY",
+  "BUZZ_ACP_API_TOKEN",
+  "BUZZ_RELAY_URL",
+  "BUZZ_ACP_AGENT_COMMAND",
+  "BUZZ_ACP_AGENT_ARGS",
+  "BUZZ_ACP_MCP_COMMAND",
+  "BUZZ_ACP_MCP_SERVERS",
+  "BUZZ_ACP_RESPOND_TO",
+  "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+  "BUZZ_ACP_AGENT_OWNER",
+  "BUZZ_ACP_SETUP_PAYLOAD",
+];
+
+const RESERVED_ENV_KEYS_UPPER = new Set(
+  RESERVED_ENV_KEYS.map((k) => k.toUpperCase()),
+);
+
 const NAME_CHARS_RE = /^[A-Za-z0-9_-]*$/;
+/** POSIX env key: `[A-Za-z_][A-Za-z0-9_]*`. Mirrors `is_well_formed_env_key`. */
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * Client-side mirror of the Rust `validate_mcp_servers` name grammar, for
@@ -76,6 +108,32 @@ export function validateMcpServerRow(
   if (otherNames.has(row.name)) return "Server names must be unique.";
   if (row.enabled && row.command.trim().length === 0) {
     return "Command is required for an enabled server.";
+  }
+  return null;
+}
+
+/**
+ * Validate a single per-server env var entry. Mirrors the Rust
+ * `validate_user_env_keys` boundary (`env_vars.rs`): POSIX key format,
+ * reserved-key check (case-insensitive), NUL-free values, and per-value
+ * byte cap. Returns `null` when valid. Exported for unit tests.
+ */
+export function validateMcpServerEnvEntry(entry: {
+  name: string;
+  value: string;
+}): string | null {
+  if (entry.name.length === 0) return null; // blank rows are skipped by toServers
+  if (!ENV_KEY_RE.test(entry.name)) {
+    return "Key must match [A-Za-z_][A-Za-z0-9_]*.";
+  }
+  if (RESERVED_ENV_KEYS_UPPER.has(entry.name.toUpperCase())) {
+    return `"${entry.name}" is reserved by Buzz.`;
+  }
+  if (entry.value.includes("\0")) {
+    return "Value cannot contain NUL bytes.";
+  }
+  if (new TextEncoder().encode(entry.value).length > MAX_ENV_VALUE_BYTES) {
+    return `Value exceeds the ${MAX_ENV_VALUE_BYTES}-byte limit.`;
   }
   return null;
 }
@@ -177,8 +235,8 @@ export function serversEqual(a: McpServersValue, b: McpServersValue): boolean {
  * effective-server cap: it is a DISPLAY merge for the editor's read-only
  * "inherited" rows, not the runtime WYSIWYG surface (that's
  * `RuntimeConfigSurface.buzzAgentMcpServers`, computed server-side). Sorted
- * by name for the same deterministic order the backend's `BTreeMap`-backed
- * merge produces. Exported for unit tests and dialog callers.
+ * by ASCII byte order (`<` / `>`) to match Rust's `BTreeMap<String, _>`
+ * ordering. Exported for unit tests and dialog callers.
  */
 export function mergeMcpServersByName(
   ...layers: readonly McpServersValue[]
@@ -190,8 +248,26 @@ export function mergeMcpServersByName(
     }
   }
   return Array.from(merged.values()).sort((a, b) =>
-    a.name.localeCompare(b.name),
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
   );
+}
+
+/**
+ * Compute the effective enabled count across local and inherited layers.
+ * Local enabled rows plus inherited enabled rows NOT overridden/masked by
+ * a local row with the same name. Mirrors the Rust effective-merge cap
+ * check (`mcp_servers.rs:225-229`). Exported for unit tests.
+ */
+export function effectiveEnabledCount(
+  local: McpServersValue,
+  inherited: McpServersValue,
+): number {
+  const localNames = new Set(local.map((s) => s.name));
+  const localEnabled = local.filter((s) => s.enabled).length;
+  const inheritedEnabled = inherited.filter(
+    (s) => s.enabled && !localNames.has(s.name),
+  ).length;
+  return localEnabled + inheritedEnabled;
 }
 
 /** True when a row has any content beyond a bare name — used to decide
@@ -245,18 +321,24 @@ export function McpServersEditor({
   helperText,
   disabled = false,
 }: McpServersEditorProps) {
-  const [rows, setRows] = React.useState<ServerRow[]>(() => toRows(value));
-  const lastEmitted = React.useRef<McpServersValue>(value);
+  // Defense-in-depth: coerce at the exported boundary so a caller passing
+  // `undefined` (e.g. a partial test bridge seed) degrades to empty rather
+  // than crashing inside `toRows`. Production never produces `undefined`
+  // (Rust `#[serde(default)]` + `EMPTY_CONFIG`), but a single coercion
+  // here is cheaper than scattering `?? []` across every mount site.
+  const safeValue = value ?? [];
+  const [rows, setRows] = React.useState<ServerRow[]>(() => toRows(safeValue));
+  const lastEmitted = React.useRef<McpServersValue>(safeValue);
 
   // Resync from `value` when the parent supplies a value we did not just
   // emit (e.g. dialog reopened against a different persona/agent). Mirrors
   // EnvVarsEditor's `recordsEqual` resync guard.
   React.useEffect(() => {
-    if (!serversEqual(lastEmitted.current, value)) {
-      lastEmitted.current = value;
-      setRows(toRows(value));
+    if (!serversEqual(lastEmitted.current, safeValue)) {
+      lastEmitted.current = safeValue;
+      setRows(toRows(safeValue));
     }
-  }, [value]);
+  }, [safeValue]);
 
   function emit(nextRows: ServerRow[]) {
     setRows(nextRows);
@@ -337,11 +419,16 @@ export function McpServersEditor({
     updateRow(rowId, { env: row.env.filter((e) => e.id !== envId) });
   }
 
-  const enabledCount = rows.filter((r) => r.enabled).length;
-  const atCap = enabledCount >= MAX_USER_MCP_SERVERS;
+  const localNames = new Set(rows.map((r) => r.name));
   const visibleInherited = inheritedServers.filter(
-    (server) => !rows.some((row) => row.name === server.name),
+    (server) => !localNames.has(server.name),
   );
+  const localEnabledCount = rows.filter((r) => r.enabled).length;
+  const inheritedEnabledCount = visibleInherited.filter(
+    (s) => s.enabled,
+  ).length;
+  const atCap =
+    localEnabledCount + inheritedEnabledCount >= MAX_USER_MCP_SERVERS;
 
   return (
     <div className="space-y-2" data-testid="mcp-servers-editor">
@@ -433,7 +520,7 @@ export function McpServersEditor({
                   aria-label={row.enabled ? "Disable server" : "Enable server"}
                   checked={row.enabled}
                   data-testid="mcp-servers-enabled"
-                  disabled={disabled}
+                  disabled={disabled || (!row.enabled && atCap)}
                   onCheckedChange={(checked) =>
                     updateRow(row.id, { enabled: checked })
                   }
@@ -530,67 +617,84 @@ export function McpServersEditor({
                 <p className="text-xs font-medium text-muted-foreground">
                   Environment
                 </p>
-                {row.env.map((entry) => (
-                  <div className="flex items-center gap-2" key={entry.id}>
-                    <div
-                      className={cn(
-                        "flex min-h-9 flex-1 items-center px-3",
-                        PERSONA_FIELD_SHELL_CLASS,
-                      )}
-                    >
-                      <Input
-                        aria-label="Env var name"
-                        className={cn(
-                          "h-7 px-0 py-0 font-mono text-xs leading-6",
-                          PERSONA_FIELD_CONTROL_CLASS,
-                        )}
-                        data-testid="mcp-servers-env-name"
-                        disabled={disabled}
-                        onChange={(event) =>
-                          updateEnvRow(row.id, entry.id, {
-                            name: event.target.value,
-                          })
-                        }
-                        placeholder="VARIABLE_NAME"
-                        value={entry.name}
-                      />
+                {row.env.map((entry) => {
+                  const envError = validateMcpServerEnvEntry(entry);
+                  return (
+                    <div key={entry.id}>
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={cn(
+                            "flex min-h-9 flex-1 items-center px-3",
+                            PERSONA_FIELD_SHELL_CLASS,
+                          )}
+                        >
+                          <Input
+                            aria-label="Env var name"
+                            className={cn(
+                              "h-7 px-0 py-0 font-mono text-xs leading-6",
+                              PERSONA_FIELD_CONTROL_CLASS,
+                            )}
+                            data-testid="mcp-servers-env-name"
+                            disabled={disabled}
+                            onChange={(event) =>
+                              updateEnvRow(row.id, entry.id, {
+                                name: event.target.value,
+                              })
+                            }
+                            placeholder="VARIABLE_NAME"
+                            value={entry.name}
+                          />
+                        </div>
+                        <div
+                          className={cn(
+                            "flex min-h-9 flex-[2] items-center px-3",
+                            PERSONA_FIELD_SHELL_CLASS,
+                          )}
+                        >
+                          <Input
+                            aria-label="Env var value"
+                            className={cn(
+                              "h-7 px-0 py-0 font-mono text-xs leading-6",
+                              PERSONA_FIELD_CONTROL_CLASS,
+                            )}
+                            data-testid="mcp-servers-env-value"
+                            disabled={disabled}
+                            onChange={(event) =>
+                              updateEnvRow(row.id, entry.id, {
+                                value: event.target.value,
+                              })
+                            }
+                            placeholder="value"
+                            value={entry.value}
+                          />
+                        </div>
+                        <Button
+                          aria-label="Remove env var"
+                          data-testid="mcp-servers-env-remove"
+                          disabled={disabled}
+                          onClick={() => removeEnvRow(row.id, entry.id)}
+                          size="icon"
+                          type="button"
+                          variant="ghost"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                      {envError ? (
+                        <p
+                          className="ml-1 mt-0.5 flex items-center gap-1 text-xs text-destructive"
+                          data-testid="mcp-servers-env-error"
+                        >
+                          <AlertCircle
+                            className="h-3 w-3 shrink-0"
+                            aria-hidden
+                          />
+                          {envError}
+                        </p>
+                      ) : null}
                     </div>
-                    <div
-                      className={cn(
-                        "flex min-h-9 flex-[2] items-center px-3",
-                        PERSONA_FIELD_SHELL_CLASS,
-                      )}
-                    >
-                      <Input
-                        aria-label="Env var value"
-                        className={cn(
-                          "h-7 px-0 py-0 font-mono text-xs leading-6",
-                          PERSONA_FIELD_CONTROL_CLASS,
-                        )}
-                        data-testid="mcp-servers-env-value"
-                        disabled={disabled}
-                        onChange={(event) =>
-                          updateEnvRow(row.id, entry.id, {
-                            value: event.target.value,
-                          })
-                        }
-                        placeholder="value"
-                        value={entry.value}
-                      />
-                    </div>
-                    <Button
-                      aria-label="Remove env var"
-                      data-testid="mcp-servers-env-remove"
-                      disabled={disabled}
-                      onClick={() => removeEnvRow(row.id, entry.id)}
-                      size="icon"
-                      type="button"
-                      variant="ghost"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                ))}
+                  );
+                })}
                 <Button
                   data-testid="mcp-servers-env-add"
                   disabled={disabled}
@@ -621,7 +725,7 @@ export function McpServersEditor({
           </Button>
           {atCap ? (
             <p className="ml-1 text-xs text-muted-foreground">
-              {MAX_USER_MCP_SERVERS}-server limit reached for this layer.
+              {MAX_USER_MCP_SERVERS}-server limit reached (including inherited).
             </p>
           ) : null}
         </div>

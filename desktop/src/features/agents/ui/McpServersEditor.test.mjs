@@ -23,12 +23,17 @@ import assert from "node:assert/strict";
 import {
   validateMcpServerName,
   validateMcpServerRow,
+  validateMcpServerEnvEntry,
   toRows,
   toServers,
   serversEqual,
   mergeMcpServersByName,
+  effectiveEnabledCount,
+  MAX_USER_MCP_SERVERS,
+  MAX_ENV_VALUE_BYTES,
   MCP_SERVER_NAME_MAX_LEN,
   MCP_RESERVED_SERVER_NAME,
+  RESERVED_ENV_KEYS,
 } from "./McpServersEditor.tsx";
 
 // ── Invariant 1: name grammar mirrors validate_mcp_servers ─────────────────
@@ -300,4 +305,162 @@ test("mergeMcpServersByName_distinct_names_from_all_layers_are_kept", () => {
 
 test("mergeMcpServersByName_empty_layers_produce_empty_result", () => {
   assert.deepEqual(mergeMcpServersByName([], [], []), []);
+});
+
+test("mergeMcpServersByName_sorts_by_ascii_byte_order_not_locale", () => {
+  // Rust BTreeMap<String, _> orders by byte value: '_' (0x5F) > 'Z' (0x5A)
+  // > 'A' (0x41), and uppercase < lowercase. localeCompare would put
+  // these in a different order (e.g. case-insensitive or locale-dependent).
+  const servers = [
+    { name: "beta", command: "", args: [], env: [], enabled: true },
+    { name: "Alpha", command: "", args: [], env: [], enabled: true },
+    { name: "_underscore", command: "", args: [], env: [], enabled: true },
+    { name: "alpha", command: "", args: [], env: [], enabled: true },
+  ];
+  const merged = mergeMcpServersByName(servers);
+  // ASCII: 'A'(65) < '_'(95) < 'a'(97) < 'b'(98)
+  assert.deepEqual(
+    merged.map((s) => s.name),
+    ["Alpha", "_underscore", "alpha", "beta"],
+  );
+});
+
+// ── Invariant 5: effectiveEnabledCount — cap across layers ──────────────
+
+function makeServer(name, enabled = true) {
+  return { name, command: "npx", args: [], env: [], enabled };
+}
+
+test("effectiveEnabledCount_local_only", () => {
+  const local = [makeServer("a"), makeServer("b", false)];
+  assert.equal(effectiveEnabledCount(local, []), 1);
+});
+
+test("effectiveEnabledCount_inherited_not_overridden", () => {
+  const local = [makeServer("a")];
+  const inherited = [makeServer("b"), makeServer("c")];
+  assert.equal(effectiveEnabledCount(local, inherited), 3);
+});
+
+test("effectiveEnabledCount_inherited_overridden_by_local_not_counted", () => {
+  // Local row overrides inherited — only the local row's enabled state
+  // counts, not the inherited one.
+  const local = [makeServer("a", false)];
+  const inherited = [makeServer("a"), makeServer("b")];
+  // "a" overridden (local disabled → 0), "b" inherited enabled → 1
+  assert.equal(effectiveEnabledCount(local, inherited), 1);
+});
+
+test("effectiveEnabledCount_disabled_inherited_not_counted", () => {
+  const local = [];
+  const inherited = [makeServer("a", false), makeServer("b")];
+  assert.equal(effectiveEnabledCount(local, inherited), 1);
+});
+
+test("effectiveEnabledCount_15_inherited_plus_1_local_hits_cap", () => {
+  const inherited = Array.from({ length: MAX_USER_MCP_SERVERS }, (_, i) =>
+    makeServer(`inh-${i}`),
+  );
+  const local = [makeServer("local-1")];
+  assert.equal(
+    effectiveEnabledCount(local, inherited),
+    MAX_USER_MCP_SERVERS + 1,
+  );
+});
+
+test("effectiveEnabledCount_toggling_disabled_to_16th_hits_cap", () => {
+  // Simulates toggling a disabled local row to enabled when 14 inherited +
+  // 1 other local are already enabled = 15. The 16th would exceed the cap.
+  const inherited = Array.from({ length: 14 }, (_, i) =>
+    makeServer(`inh-${i}`),
+  );
+  const local = [makeServer("local-1"), makeServer("local-2", false)];
+  // Before toggle: 1 local enabled + 14 inherited = 15 (at cap)
+  assert.equal(effectiveEnabledCount(local, inherited), MAX_USER_MCP_SERVERS);
+  // After toggle: 2 local enabled + 14 inherited = 16 (exceeds cap)
+  const toggled = local.map((s) =>
+    s.name === "local-2" ? { ...s, enabled: true } : s,
+  );
+  assert.equal(
+    effectiveEnabledCount(toggled, inherited),
+    MAX_USER_MCP_SERVERS + 1,
+  );
+});
+
+// ── Invariant 6: validateMcpServerEnvEntry — per-server env boundary ────
+
+test("validateMcpServerEnvEntry_valid_entry_returns_null", () => {
+  assert.equal(
+    validateMcpServerEnvEntry({ name: "MY_TOKEN", value: "abc" }),
+    null,
+  );
+});
+
+test("validateMcpServerEnvEntry_empty_name_returns_null_skipped", () => {
+  // Blank rows are skipped by toServers, so no error shown.
+  assert.equal(
+    validateMcpServerEnvEntry({ name: "", value: "anything" }),
+    null,
+  );
+});
+
+test("validateMcpServerEnvEntry_malformed_key_rejected", () => {
+  const err = validateMcpServerEnvEntry({ name: "1BAD", value: "" });
+  assert.match(err, /must match/);
+});
+
+test("validateMcpServerEnvEntry_key_with_equals_rejected", () => {
+  const err = validateMcpServerEnvEntry({ name: "KEY=val", value: "" });
+  assert.match(err, /must match/);
+});
+
+test("validateMcpServerEnvEntry_key_with_spaces_rejected", () => {
+  const err = validateMcpServerEnvEntry({ name: "MY KEY", value: "" });
+  assert.match(err, /must match/);
+});
+
+test("validateMcpServerEnvEntry_reserved_key_rejected", () => {
+  const err = validateMcpServerEnvEntry({
+    name: "BUZZ_ACP_MCP_SERVERS",
+    value: "",
+  });
+  assert.match(err, /reserved/);
+});
+
+test("validateMcpServerEnvEntry_reserved_key_case_insensitive", () => {
+  const err = validateMcpServerEnvEntry({
+    name: "buzz_private_key",
+    value: "",
+  });
+  assert.match(err, /reserved/);
+});
+
+test("validateMcpServerEnvEntry_nul_in_value_rejected", () => {
+  const err = validateMcpServerEnvEntry({ name: "TOKEN", value: "abc\0def" });
+  assert.match(err, /NUL/);
+});
+
+test("validateMcpServerEnvEntry_oversized_value_rejected", () => {
+  const err = validateMcpServerEnvEntry({
+    name: "TOKEN",
+    value: "x".repeat(MAX_ENV_VALUE_BYTES + 1),
+  });
+  assert.match(err, /exceeds/);
+});
+
+test("validateMcpServerEnvEntry_at_limit_value_accepted", () => {
+  assert.equal(
+    validateMcpServerEnvEntry({
+      name: "TOKEN",
+      value: "x".repeat(MAX_ENV_VALUE_BYTES),
+    }),
+    null,
+  );
+});
+
+test("validateMcpServerEnvEntry_all_reserved_keys_are_rejected", () => {
+  for (const key of RESERVED_ENV_KEYS) {
+    const err = validateMcpServerEnvEntry({ name: key, value: "" });
+    assert.ok(err, `Expected "${key}" to be rejected as reserved`);
+  }
 });
