@@ -116,6 +116,42 @@ const BLOCK_SPOILER_DELIMITER_RE = /^\s*\|\|\s*$/;
  * file attachments from the body in edit mode.
  */
 const FILE_LINE_RE = /^\[(?:\\.|[^\]\\])*\]\(([^)\s]+)\)\s*$/;
+const LABELED_FILE_LINE_RE = /^\[((?:\\.|[^\]\\])*)\]\(([^)\s]+)\)\s*$/;
+
+function unescapeMarkdownLinkLabel(label: string): string {
+  return label.replace(/\\([\\[\]])/g, "$1");
+}
+
+/**
+ * Restore composer-only attachment labels from the durable markdown link in
+ * an existing message body. NIP-92 imeta tags preserve the attachment file
+ * metadata but not the visible link label, so edit mode must join the two
+ * representations before seeding pending attachments.
+ */
+export function restoreImetaMediaDisplayLabels(
+  body: string,
+  imetaMedia: ReadonlyArray<ImetaMedia>,
+): ImetaMedia[] {
+  if (imetaMedia.length === 0) return [];
+
+  const urls = new Set(imetaMedia.map((media) => media.url));
+  const labelsByUrl = new Map<string, string>();
+  const lines = body.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    const match = line.match(LABELED_FILE_LINE_RE);
+    const url = match?.[2];
+    if (!url || !urls.has(url) || labelsByUrl.has(url)) continue;
+
+    const label = unescapeMarkdownLinkLabel(match[1]).trim();
+    if (label) labelsByUrl.set(url, label);
+  }
+
+  return imetaMedia.map((media) => {
+    const displayLabel = labelsByUrl.get(media.url);
+    return displayLabel ? { ...media, displayLabel } : media;
+  });
+}
 
 function findTrailingBlockSpoilerMediaStart(
   lines: string[],

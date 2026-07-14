@@ -11,7 +11,10 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
 import { useEncodeAgentSnapshotForSendMutation } from "@/features/agents/hooks";
-import { useOpenDmMutation } from "@/features/channels/hooks";
+import {
+  useOpenDmMutation,
+  useUpsertCachedChannel,
+} from "@/features/channels/hooks";
 import { buildAgentSnapshotClipboardHtml } from "@/features/messages/lib/agentSnapshotClipboard";
 import { uploadMediaBytes, type BlobDescriptor } from "@/shared/api/tauri";
 import { copyTextToSystemClipboard } from "@/shared/api/tauriMedia";
@@ -200,6 +203,7 @@ export function PersonaShareDialog({
 }: PersonaShareDialogProps) {
   const encodeSnapshotMutation = useEncodeAgentSnapshotForSendMutation();
   const openDmMutation = useOpenDmMutation();
+  const upsertCachedChannel = useUpsertCachedChannel();
   const snapshotSendController = useSnapshotSendController(open);
   const shouldReduceMotion = useReducedMotion();
   const [selectedRecipients, setSelectedRecipients] = React.useState<
@@ -304,6 +308,7 @@ export function PersonaShareDialog({
         const directMessage = await openDmMutation.mutateAsync({
           pubkeys: selectedRecipients.map((recipient) => recipient.pubkey),
         });
+        await upsertCachedChannel(directMessage);
         return directMessage.id;
       },
       persona.displayName,
@@ -352,8 +357,13 @@ export function PersonaShareDialog({
     }
   }
 
+  function handleDialogOpenChange(nextOpen: boolean) {
+    if (!nextOpen && isActionPending) return;
+    onOpenChange(nextOpen);
+  }
+
   return (
-    <Dialog onOpenChange={onOpenChange} open={open}>
+    <Dialog onOpenChange={handleDialogOpenChange} open={open}>
       <DialogContent
         aria-describedby={undefined}
         className="max-w-xl gap-3 bg-transparent p-0 shadow-none"

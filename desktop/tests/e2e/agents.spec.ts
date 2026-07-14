@@ -1371,7 +1371,7 @@ test("people sharing guards the full action against duplicate sends", async ({
     button.click();
   });
 
-  await expect(page.getByText("Sent Safety Auditor")).toBeVisible({
+  await expect(page.getByText("Sent a copy of Safety Auditor")).toBeVisible({
     timeout: 5_000,
   });
   await expect(page.getByText("Couldn’t send agent. Try again.")).toHaveCount(
@@ -1388,6 +1388,20 @@ test("people sharing guards the full action against duplicate sends", async ({
       1,
     );
   }
+});
+
+test("people sharing stays mounted while a send is pending", async ({
+  page,
+}) => {
+  await openSafetyShareDialog(page, { encodeDelayMs: 800 });
+  await selectCharlieRecipient(page);
+  await page.getByTestId("persona-share-send").click();
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("persona-share-dialog")).toBeVisible();
+  await expect(page.getByText("Sent a copy of Safety Auditor")).toBeVisible({
+    timeout: 5_000,
+  });
 });
 
 test("export from share aligns selections and animates memory details", async ({

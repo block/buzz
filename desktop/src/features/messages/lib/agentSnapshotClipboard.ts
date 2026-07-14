@@ -25,6 +25,10 @@ function escapeHtml(value: string): string {
 }
 
 function isSafeSnapshotUrl(value: string): boolean {
+  // The raw value is later emitted inside Markdown's `(url)` syntax. Keep
+  // delimiters and whitespace out even when URL parsing would normalize them.
+  if (/[\s()]/u.test(value)) return false;
+
   try {
     const url = new URL(value);
     return url.protocol === "https:" || url.protocol === "http:";

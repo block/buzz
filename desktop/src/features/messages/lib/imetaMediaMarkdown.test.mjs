@@ -13,6 +13,7 @@ import {
   formatImetaMediaLine,
   imetaMediaFromTags,
   mergeOutgoingTags,
+  restoreImetaMediaDisplayLabels,
   splitOutgoingTags,
   stripImetaMediaLines,
 } from "./imetaMediaMarkdown.ts";
@@ -233,6 +234,59 @@ test("strip: removes an escaped-bracket generic file line on edit", () => {
     { url, type: "application/pdf" },
   ]);
   assert.equal(stripped, "note");
+});
+
+test("edit labels: restores an agent name from its durable attachment link", () => {
+  const url = "https://b/animation-auditor.png";
+  const body = "note\n[Animation Auditor](https://b/animation-auditor.png)";
+
+  assert.deepEqual(
+    restoreImetaMediaDisplayLabels(body, [
+      {
+        filename: "animation-auditor.agent.png",
+        type: "image/png",
+        url,
+      },
+    ]),
+    [
+      {
+        displayLabel: "Animation Auditor",
+        filename: "animation-auditor.agent.png",
+        type: "image/png",
+        url,
+      },
+    ],
+  );
+});
+
+test("edit labels: unescapes attachment labels without changing unmatched media", () => {
+  const labeledUrl = "https://b/labeled";
+  const unmatched = { type: "application/pdf", url: "https://b/unmatched" };
+  const body = String.raw`note
+[A\]gent \\ Auditor](${labeledUrl})`;
+
+  const restored = restoreImetaMediaDisplayLabels(body, [
+    { type: "application/zip", url: labeledUrl },
+    unmatched,
+  ]);
+
+  assert.equal(restored[0].displayLabel, String.raw`A]gent \ Auditor`);
+  assert.equal(restored[1], unmatched);
+});
+
+test("edit labels: prefers the trailing attachment label over an earlier link", () => {
+  const url = "https://b/agent";
+  const body = [
+    `[Earlier link](${url})`,
+    "message",
+    `[Current agent name](${url})`,
+  ].join("\n");
+
+  const [restored] = restoreImetaMediaDisplayLabels(body, [
+    { type: "image/png", url },
+  ]);
+
+  assert.equal(restored.displayLabel, "Current agent name");
 });
 
 test("findSpoileredImetaMediaUrls: extracts only spoilered matching media urls", () => {

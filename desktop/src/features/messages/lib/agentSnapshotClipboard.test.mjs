@@ -61,6 +61,9 @@ test("invalid copied snapshot metadata falls through to normal paste", () => {
     buildHtml({ size: 11 * 1024 * 1024 }),
     buildHtml({ type: "text/html" }),
     buildHtml({ url: "javascript:alert(1)" }),
+    buildHtml({ url: `${URL})[hidden](https://attacker.example` }),
+    buildHtml({ url: `${URL}\n[hidden](https://attacker.example)` }),
+    buildHtml({ url: `${URL} trailing` }),
   ];
 
   for (const html of invalid) {

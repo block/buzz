@@ -16,6 +16,7 @@ import {
   findSpoileredImetaMediaUrls,
   type ImetaMedia,
   mergeOutgoingTags,
+  restoreImetaMediaDisplayLabels,
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
 
@@ -369,21 +370,19 @@ function MessageComposerImpl({
       // Strip the trailing `![image|video](url)` lines that correspond to
       // imeta attachments — the user manages those via the attachments row,
       // not via raw markdown in the editor.
-      const editableBody = stripImetaMediaLines(
+      const editableImeta = restoreImetaMediaDisplayLabels(
         editTarget.body,
         editTarget.imetaMedia ?? [],
       );
+      const editableBody = stripImetaMediaLines(editTarget.body, editableImeta);
       setComposerContent(editableBody);
       richText.setContent(editableBody);
       // Seed the composer's pending-imeta state with the original event's
       // attachments so they show up in `ComposerAttachments` and the user
       // can remove existing ones / add new ones before saving.
-      media.setPendingImeta(editTarget.imetaMedia ?? []);
+      media.setPendingImeta(editableImeta);
       setSpoileredAttachmentUrls(
-        findSpoileredImetaMediaUrls(
-          editTarget.body,
-          editTarget.imetaMedia ?? [],
-        ),
+        findSpoileredImetaMediaUrls(editTarget.body, editableImeta),
       );
       // Defer focus to the next frame so it runs after any focus-
       // restoration the trigger UI (e.g. the message-row context menu)
