@@ -909,7 +909,7 @@ test("does not reroute an expanded DM after the channel pane unmounts", async ({
 }) => {
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
-    sendMessageDelayMs: 1_000,
+    openDmDelayMs: 1_000,
   });
   await page.goto("/");
   await page.getByTestId("channel-alice-tyler").click();
@@ -932,6 +932,9 @@ test("does not reroute an expanded DM after the channel pane unmounts", async ({
   await expect(page.getByTestId("settings-view")).toBeVisible();
   await page.waitForTimeout(1_250);
   await expect(page.getByTestId("settings-view")).toBeVisible();
+  await expect
+    .poll(async () => readOutgoingChannelId(page, "while I open settings"))
+    .toBeNull();
 });
 
 test("drops an expanded DM after the first message fails", async ({ page }) => {

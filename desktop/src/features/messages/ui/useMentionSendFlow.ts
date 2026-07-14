@@ -156,11 +156,18 @@ export function useMentionSendFlow({
     React.useState(false);
   const isMentionSendPendingRef = React.useRef(false);
   const isCompleteSendPendingRef = React.useRef(false);
+  const isMountedRef = React.useRef(false);
   const previousChannelIdRef = React.useRef(channelId);
   // Tracks the live channel so completeSend can ask "is the user still here?"
   // without being frozen to the compose-time closure.
   const channelIdRef = React.useRef(channelId);
   channelIdRef.current = channelId;
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const addMembersMutation = useAddChannelMembersMutation(channelId);
   const attachAgentMutation = useAttachManagedAgentToChannelMutation(channelId);
@@ -412,6 +419,9 @@ export function useMentionSendFlow({
           (draft.readyAgentPubkeys ?? []).map(normalizePubkey),
         );
         const managedAgentsByPubkey = await getManagedAgentsByPubkey();
+        if (!isMountedRef.current) {
+          return;
+        }
         for (const agent of draft.preparedManagedAgents ?? []) {
           managedAgentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
         }
@@ -434,6 +444,9 @@ export function useMentionSendFlow({
           if (!sendChannelId) {
             return;
           }
+          if (!isMountedRef.current) {
+            return;
+          }
         }
 
         const agentReadiness = await ensureManagedAgentMentionsReady(
@@ -444,6 +457,9 @@ export function useMentionSendFlow({
           onPrepareSendChannel ? preparedAgentPubkeys : [],
           [...managedAgentsByPubkey.values()],
         );
+        if (!isMountedRef.current) {
+          return;
+        }
         if (agentReadiness.errors.length > 0) {
           const message =
             agentReadiness.errors.length === 1
@@ -495,7 +511,9 @@ export function useMentionSendFlow({
         }
       } finally {
         isCompleteSendPendingRef.current = false;
-        setIsCompleteSendPending(false);
+        if (isMountedRef.current) {
+          setIsCompleteSendPending(false);
+        }
       }
     },
     [
