@@ -326,6 +326,9 @@ export function useMentions(
 
     for (const member of members ?? []) {
       const pubkey = normalizePubkey(member.pubkey);
+      const linkedPersonaId = activePersonaById.has(pubkey)
+        ? pubkey
+        : undefined;
       const agentName =
         managedAgentNamesByPubkey.get(pubkey) ??
         relayAgentNamesByPubkey.get(pubkey) ??
@@ -342,7 +345,8 @@ export function useMentions(
           null,
         avatarUrl: profile?.avatarUrl ?? null,
         isMember: true,
-        personaId: managedAgentPersonaIdsByPubkey.get(pubkey),
+        personaId:
+          managedAgentPersonaIdsByPubkey.get(pubkey) ?? linkedPersonaId,
         isAgent:
           member.isAgent === true ||
           profile?.isAgent === true ||
@@ -360,11 +364,15 @@ export function useMentions(
     }
 
     for (const agent of relayAgentsQuery.data ?? []) {
+      const pubkey = normalizePubkey(agent.pubkey);
       addCandidate({
         kind: "identity",
-        pubkey: agent.pubkey,
+        pubkey,
         displayName: agent.name,
         isMember: false,
+        personaId:
+          managedAgentPersonaIdsByPubkey.get(pubkey) ??
+          (activePersonaById.has(pubkey) ? pubkey : undefined),
         ownerPubkey: null,
         isAgent: true,
       });
@@ -387,27 +395,25 @@ export function useMentions(
 
     if (canSearchGlobalUsers) {
       for (const user of userSearchResults) {
+        const pubkey = normalizePubkey(user.pubkey);
         addCandidate({
           kind: "identity",
-          pubkey: user.pubkey,
+          pubkey,
           displayName: formatSearchUserDisplayName(user),
           avatarUrl: user.avatarUrl ?? null,
-          personaId: managedAgentPersonaIdsByPubkey.get(
-            normalizePubkey(user.pubkey),
-          ),
+          personaId:
+            managedAgentPersonaIdsByPubkey.get(pubkey) ??
+            (activePersonaById.has(pubkey) ? pubkey : undefined),
           isMember: false,
           isAgent:
             user.isAgent ||
-            managedAgentNamesByPubkey.has(normalizePubkey(user.pubkey)) ||
-            relayAgentNamesByPubkey.has(normalizePubkey(user.pubkey)),
-          personaName:
-            personaNameByPubkey.get(normalizePubkey(user.pubkey)) ?? null,
+            managedAgentNamesByPubkey.has(pubkey) ||
+            relayAgentNamesByPubkey.has(pubkey),
+          personaName: personaNameByPubkey.get(pubkey) ?? null,
           secondaryLabel: formatSearchUserSecondaryLabel(user),
           ownerPubkey: user.ownerPubkey ?? null,
           isGlobalSearchResult: true,
-          isManagedAgent: managedAgentNamesByPubkey.has(
-            normalizePubkey(user.pubkey),
-          ),
+          isManagedAgent: managedAgentNamesByPubkey.has(pubkey),
         });
       }
     }
@@ -436,6 +442,7 @@ export function useMentions(
       },
     );
   }, [
+    activePersonaById,
     activePersonas,
     userSearchResults,
     canSearchGlobalUsers,
