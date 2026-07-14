@@ -276,6 +276,9 @@ export function NewMessageScreen() {
       }
 
       await upsertCachedChannel(directMessage);
+      if (!isMountedRef.current) {
+        return;
+      }
       await goChannel(directMessage.id, { replace: true });
     },
     [

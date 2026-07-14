@@ -127,6 +127,7 @@ type E2eConfig = {
     addChannelMembersDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
+    channelsReadDelayMs?: number;
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
     feedReadError?: string;
@@ -4744,6 +4745,13 @@ async function submitSignedEvent(
 }
 
 async function handleGetChannels(config: E2eConfig | undefined) {
+  const channelsReadDelayMs = config?.mock?.channelsReadDelayMs ?? 0;
+  if (channelsReadDelayMs > 0) {
+    await new Promise((resolve) =>
+      window.setTimeout(resolve, channelsReadDelayMs),
+    );
+  }
+
   const channelsReadError = config?.mock?.channelsReadError;
   if (channelsReadError) {
     throw new Error(channelsReadError);

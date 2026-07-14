@@ -945,6 +945,41 @@ test("does not reopen a direct message after leaving the composer", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
+test("does not reopen a sent direct message after leaving during cache reseed", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+  const staleMessage = "Stay on the channel after cache reseed";
+  await page.getByTestId("message-input").fill(staleMessage);
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E__?: { mock?: { channelsReadDelayMs?: number } };
+    };
+    testWindow.__BUZZ_E2E__ ??= {};
+    testWindow.__BUZZ_E2E__.mock ??= {};
+    testWindow.__BUZZ_E2E__.mock.channelsReadDelayMs = 1_000;
+  });
+
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(async () => hasOutgoingEventWithContent(page, staleMessage))
+    .toBe(true);
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForTimeout(1_250);
+  await expect(page).toHaveURL(
+    new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`),
+  );
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+});
+
 test("shows capped participant stack in group direct message header", async ({
   page,
 }) => {
