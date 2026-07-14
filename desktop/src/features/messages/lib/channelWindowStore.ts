@@ -57,7 +57,7 @@ function cursorsEqual(
 }
 
 /** Relay order: newest timestamp first, then ascending id within a second. */
-function compareRelayOrder(left: RelayEvent, right: RelayEvent) {
+export function compareRelayOrder(left: RelayEvent, right: RelayEvent) {
   return left.created_at !== right.created_at
     ? right.created_at - left.created_at
     : left.id < right.id

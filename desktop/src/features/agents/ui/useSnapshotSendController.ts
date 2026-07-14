@@ -212,10 +212,6 @@ export async function runSendPipeline(deps: {
   };
   checkEligibilityFn: () => string | null;
   channelId: string;
-  /** Optional avatar URL emitted as the NIP-92 `thumb` field on the snapshot
-   *  attachment. Decorative — lets the recipient card show the agent's avatar
-   *  without trusting sender-supplied identity. */
-  thumbUrl?: string;
 }): Promise<boolean> {
   const {
     encodeFn,
@@ -225,7 +221,6 @@ export async function runSendPipeline(deps: {
     buildMessageFn,
     checkEligibilityFn,
     channelId,
-    thumbUrl,
   } = deps;
 
   // ── Eligibility checkpoint 1: before encode ───────────────────────────────
@@ -284,13 +279,13 @@ export async function runSendPipeline(deps: {
   }
 
   // Preserve the original filename so `buildImetaTags` emits a `filename`
-  // field and the recipient's FileCard renders the correct label.
-  // Also carry the agent's avatar URL as the NIP-92 `thumb` field when
-  // the caller supplied one — decorative hint for the recipient card.
+  // field and the recipient's FileCard renders the correct label. Snapshot
+  // sends never emit `thumb`: NIP-92 requires it to be this upload's local
+  // thumbnail sidecar, which an agent avatar is not.
+  const { thumb: _thumb, ...descriptorWithoutThumb } = descriptor;
   const descriptorWithFilename: BlobDescriptor = {
-    ...descriptor,
+    ...descriptorWithoutThumb,
     filename: fileName,
-    ...(thumbUrl ? { thumb: thumbUrl } : {}),
   };
 
   // ── Build message content + NIP-92 imeta tags ─────────────────────────────
@@ -361,14 +356,10 @@ export type UseSnapshotSendControllerResult = {
    * false and sets error state if blocked, ineligible, or if any step fails.
    * Never throws.
    *
-   * @param thumbUrl Optional avatar URL emitted as the NIP-92 `thumb` imeta
-   *   field on the snapshot attachment — decorative, lets the recipient card
-   *   show the agent's avatar without any identity assertion.
    */
   beginSend: (
     encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
     channelId: string,
-    thumbUrl?: string,
   ) => Promise<boolean>;
   /** Set state to error with a message (for pre-send gate failures). */
   setErrorState: (message: string) => void;
@@ -461,12 +452,10 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
   async function beginSend(
     encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
     channelId: string,
-    thumbUrl?: string,
   ): Promise<boolean> {
     return runGuardedSend(guardRef.current, {
       encodeFn,
       channelId,
-      thumbUrl,
       // Eligibility is checked by reading directly from the React Query cache
       // and the timeout external store — not from rendered React state.
       checkEligibilityFn: () => checkSendEligibility(queryClient, channelId),

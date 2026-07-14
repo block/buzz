@@ -281,6 +281,33 @@ class ChannelActions {
     return _refreshChannelsAndRead(channelId);
   }
 
+  Future<void> addMembers({
+    required String channelId,
+    required List<String> pubkeys,
+    String role = 'member',
+  }) async {
+    final normalizedRole = role.trim();
+    if (normalizedRole.isEmpty) {
+      throw ArgumentError.value(role, 'role', 'must not be empty');
+    }
+    final normalizedPubkeys = {
+      for (final pubkey in pubkeys)
+        if (pubkey.trim().isNotEmpty) pubkey.trim().toLowerCase(),
+    };
+    for (final pubkey in normalizedPubkeys) {
+      await _signedEventRelay.submit(
+        kind: 9000,
+        content: '',
+        tags: [
+          ['h', channelId],
+          ['p', pubkey],
+          ['role', normalizedRole],
+        ],
+      );
+    }
+    _ref.invalidate(channelMembersProvider(channelId));
+  }
+
   Future<void> joinChannel(String channelId) async {
     await _signedEventRelay.submit(
       kind: 9021,

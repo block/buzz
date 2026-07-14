@@ -230,6 +230,31 @@
         "labels": { "type": "object" }
       }
     },
+    "pairingRelay": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "url": {
+          "type": "string",
+          "pattern": "^(wss?://.+)?$",
+          "description": "Public WebSocket URL advertised to clients for NIP-AB device pairing."
+        },
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "annotations": { "type": "object" }
+          }
+        },
+        "podAnnotations": { "type": "object" },
+        "podLabels": { "type": "object" },
+        "resources": { "type": "object" }
+      }
+    },
     "extraManifests": {
       "type": "array"
     }

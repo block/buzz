@@ -66,9 +66,17 @@ export type InboxReply = {
   depth?: number;
   fullTimestampLabel: string;
   id: string;
+  /** Raw event kind — input to the config-nudge trust gate. */
+  kind?: number;
   parentId?: string | null;
   reactions?: TimelineReaction[];
   rootId?: string | null;
+  /**
+   * Raw event signer, NOT the tag-attributed display author
+   * (`authorPubkey`). The config-nudge trust gate authenticates against
+   * this field so `actor`/`p`-tag spoofing can't enable the card.
+   */
+  signerPubkey?: string;
   tags?: string[][];
   timeLabel?: string;
 };

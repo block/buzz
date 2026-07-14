@@ -11,8 +11,7 @@ import 'mention_ranking.dart';
 
 /// Relay agent directory from kind:10100 agent-profile events.
 ///
-/// Watches the session so it re-fetches once connected (a fetch fired
-/// before the WS is up resolves empty on timeout).
+/// Watches the session and only fetches after the WebSocket connects.
 final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
   ref,
 ) async {

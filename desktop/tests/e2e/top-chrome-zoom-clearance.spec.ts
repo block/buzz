@@ -1,6 +1,24 @@
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
 
 import { installMockBridge } from "../helpers/bridge";
+
+type TauriConfig = {
+  app: {
+    windows: Array<{
+      trafficLightPosition?: { x: number; y: number };
+    }>;
+  };
+};
+
+const tauriConfig = JSON.parse(
+  readFileSync(
+    new URL("../../src-tauri/tauri.conf.json", import.meta.url),
+    "utf8",
+  ),
+) as TauriConfig;
+const EXPECTED_TRAFFIC_LIGHT_POSITION = { x: 16, y: 24 };
+const EXPECTED_NAV_CENTER_Y = 23;
 
 // The macOS traffic lights are native chrome: with `trafficLightPosition`
 // x:16 they occupy roughly x 16–68 regardless of the app's Cmd +/- text
@@ -90,6 +108,22 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     await spoofMacPlatform(page);
     await installMockBridge(page);
     await page.goto("/");
+
+    // Lock the native and webview placements together: removing this explicit
+    // Tauri inset or shifting the nav row regresses the macOS chrome alignment.
+    expect(tauriConfig.app.windows[0]?.trafficLightPosition).toEqual(
+      EXPECTED_TRAFFIC_LIGHT_POSITION,
+    );
+    const toggleBox = await page
+      .getByRole("button", { name: "Toggle Sidebar", exact: true })
+      .boundingBox();
+    expect(toggleBox).not.toBeNull();
+    // Tauri interprets y:24 as a native titlebar inset, not the literal
+    // traffic-light center. The established 40px row + 3px webview offset
+    // centers the adjacent controls at y:23.
+    expect((toggleBox?.y ?? 0) + (toggleBox?.height ?? 0) / 2).toBe(
+      EXPECTED_NAV_CENTER_Y,
+    );
 
     expect(await firstNavButtonX(page)).toBeGreaterThanOrEqual(
       TRAFFIC_LIGHT_RIGHT_EDGE,

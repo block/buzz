@@ -2,10 +2,7 @@ import * as React from "react";
 import { AlertCircle, Check, Search, Send } from "lucide-react";
 
 import type { AgentPersona } from "@/shared/api/types";
-import type {
-  SnapshotFormat,
-  SnapshotMemoryLevel,
-} from "@/shared/api/tauriPersonas";
+import type { SnapshotMemoryLevel } from "@/shared/api/tauriPersonas";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -17,6 +14,7 @@ import {
 import { Separator } from "@/shared/ui/separator";
 import { useEncodeAgentSnapshotForSendMutation } from "@/features/agents/hooks";
 import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
+import { resolveSnapshotAvatarPng } from "./snapshotAvatarPng";
 import {
   useSnapshotSendController,
   type SendPhase,
@@ -30,7 +28,6 @@ type AgentSnapshotSendDialogProps = {
   persona: AgentPersona;
   linkedAgentPubkey: string | null;
   memoryLevel: SnapshotMemoryLevel;
-  format: SnapshotFormat;
   onOpenChange: (open: boolean) => void;
   /** Called when the snapshot was successfully sent. */
   onSent: () => void;
@@ -53,7 +50,6 @@ export function AgentSnapshotSendDialog({
   persona,
   linkedAgentPubkey,
   memoryLevel,
-  format,
   onOpenChange,
   onSent,
 }: AgentSnapshotSendDialogProps) {
@@ -163,17 +159,17 @@ export function AgentSnapshotSendDialog({
     // This closes the race between this pre-flight check and the moment encode
     // or upload actually starts.
     await controller.beginSend(
-      () =>
+      async () =>
         encodeMutation.mutateAsync({
           id: persona.id,
           memoryLevel,
-          format,
+          // PNG is the avatar card image and retains the snapshot contents.
+          // JSON has no relay-valid thumbnail.
+          format: "png",
           memorySourcePubkey: linkedAgentPubkey,
+          avatarPngDataUrl: await resolveSnapshotAvatarPng(persona.avatarUrl),
         }),
       destination.id,
-      // Pass the agent's avatar URL as the NIP-92 thumb hint so the recipient
-      // card can show the avatar instead of the generic Bot icon.
-      persona.avatarUrl ?? undefined,
     );
     // Phase transitions (done/error) are driven by beginSend via setState
     // inside the controller; the mirror effect above keeps `step` in sync.

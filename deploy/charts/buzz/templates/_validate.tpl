@@ -46,6 +46,11 @@ surface at template time regardless of which manifest helm renders first.
   {{- end -}}
 {{- end -}}
 
+{{/* Pairing relay deployment must have an advertised public URL. */}}
+{{- if and .Values.pairingRelay.enabled (not .Values.pairingRelay.url) -}}
+  {{- fail "pairingRelay.url is required when pairingRelay.enabled=true" -}}
+{{- end -}}
+
 {{/* ingress + httproute mutually exclusive */}}
 {{- if and .Values.ingress.enabled .Values.httproute.enabled -}}
   {{- fail "ingress.enabled and httproute.enabled cannot both be true — choose one." -}}

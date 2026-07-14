@@ -30,7 +30,7 @@ export function OrgSidebar({ repos }: { repos: Repo[] }) {
       {/* People section */}
       {uniquePubkeys.length > 0 && (
         <div>
-          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-sidebar-foreground">
+          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-black dark:text-white">
             <Users className="h-4 w-4" />
             People
           </h3>
@@ -40,7 +40,7 @@ export function OrgSidebar({ repos }: { repos: Repo[] }) {
             ))}
           </div>
           {overflowCount > 0 && (
-            <span className="mt-2 block text-xs text-muted-foreground">
+            <span className="mt-2 block text-xs text-black/50 dark:text-white/50">
               {uniquePubkeys.length} people
             </span>
           )}

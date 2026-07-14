@@ -159,31 +159,30 @@ test("preserves user scroll while older channel history loads", async ({
       return Number.isFinite(min) ? min : null;
     });
 
-  // PHASE 1 -- walk into mid-history with NO history delay. Each fetchOlder
-  // resolves instantly, the prepend lands, the oldest-rendered index advances,
-  // and the next wheel re-enters a fresh top sentinel. This sustained climb is
-  // how a deep seed reaches the sentinel under real wheel (the `count:2100`
-  // sibling relies on the same mechanic). We stop in mid-history -- not at the
-  // top -- so a genuine older page still sits behind the `until` cursor for
-  // phase 2 to fetch, and so the anchor we hold has older content arriving
-  // ABOVE it (the actual scroll-preservation scenario, not the at-top edge).
-  await timeline.hover();
-  let deepest = Number.POSITIVE_INFINITY;
-  let stallStreak = 0;
-  for (let attempt = 0; attempt < 120 && deepest > 250; attempt += 1) {
-    await page.mouse.wheel(0, -4000);
-    await page.waitForTimeout(70);
-    const current = await oldestRenderedIndex();
-    if (current !== null && current < deepest) {
-      deepest = current;
-      stallStreak = 0;
-    } else {
-      stallStreak += 1;
-      if (stallStreak > 20) break;
-    }
+  // PHASE 1 -- walk into mid-history with NO history delay. Force the timeline
+  // to its top and wait for an older rendered index after each fetch. A wheel
+  // issued while prepend restoration owns the sentinel can be swallowed, which
+  // made a fixed gesture loop fail before exercising the anchor invariant.
+  // Stop in mid-history so phase 2 still has a genuine older page to fetch above
+  // the reading anchor.
+  const scrollToTop = async () =>
+    timeline.evaluate((element) => {
+      const container = element as HTMLDivElement;
+      container.scrollTop = 0;
+      container.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+
+  let deepest = (await oldestRenderedIndex()) ?? Number.POSITIVE_INFINITY;
+  for (let pageIndex = 0; pageIndex < 10 && deepest >= 400; pageIndex += 1) {
+    const previousDeepest = deepest;
+    await scrollToTop();
+    await expect
+      .poll(async () => (await oldestRenderedIndex()) ?? previousDeepest, {
+        timeout: 5_000,
+      })
+      .toBeLessThan(previousDeepest);
+    deepest = (await oldestRenderedIndex()) ?? previousDeepest;
   }
-  // Confirm phase 1 actually paginated into mid-history -- if it never climbed
-  // off the newest window the rest of the test is meaningless.
   expect(deepest).toBeLessThan(400);
 
   // PHASE 2 -- now delay the next history page so it stays in flight long
@@ -220,10 +219,12 @@ test("preserves user scroll while older channel history loads", async ({
   await page.mouse.wheel(0, 1_500);
   await page.waitForTimeout(100);
 
-  // One wheel tick to fire the delayed older-history page.
+  // Re-enter the top sentinel and wait for the delayed request to start. Drive
+  // the actual scroll container because wheel input can arrive while prepend
+  // restoration still owns the sentinel and be discarded.
   for (let attempt = 0; attempt < 50; attempt += 1) {
     if ((await inflightCount()) > 0) break;
-    await page.mouse.wheel(0, -4000);
+    await scrollToTop();
     await page.waitForTimeout(50);
   }
   expect(await inflightCount()).toBeGreaterThan(0);

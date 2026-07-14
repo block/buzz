@@ -35,6 +35,8 @@ function requirementKey(
       return `cli_login:${req.probe_args.join(",")}:${index}`;
     case "cli_config_invalid":
       return `cli_config_invalid:${req.probe_args.join(",")}:${index}`;
+    case "git_bash":
+      return `git_bash:${index}`;
   }
 }
 
@@ -45,8 +47,20 @@ function requirementKey(
  * (every row is `availability === "available"`) are purely informational and
  * do not route anywhere.
  */
+function hasGitBashRequirement(
+  reqs: ConfigNudgePayload["requirements"],
+): boolean {
+  return reqs.some((r) => r.surface === "git_bash");
+}
+
 function isAllCliLogin(reqs: ConfigNudgePayload["requirements"]): boolean {
   return reqs.length > 0 && reqs.every((r) => r.surface === "cli_login");
+}
+
+export function shouldOpenDoctor(
+  reqs: ConfigNudgePayload["requirements"],
+): boolean {
+  return isAllCliLogin(reqs) || hasGitBashRequirement(reqs);
 }
 
 /**
@@ -149,23 +163,17 @@ export function focusTargetForRequirement(
  * the system.
  *
  * Routing:
- * (A) When ALL requirements are `cli_login` in an install state
- *     (`not_installed` / `cli_missing` / `adapter_missing`): the card trigger
- *     opens Settings → Doctor. A card-level "Open Doctor →" label in
- *     `AttachmentActions` confirms the action at rest.
- * (A-auth) When ALL requirements are `cli_login` with `availability ===
- *     "available"` (tooling installed, just needs login): Doctor has no auth
- *     functionality and would be a misleading dead-end. The card is purely
- *     informational — no trigger, no CTA, no pointer/hover affordance. The
- *     inline copy (`setup_copy`) already tells the user the exact command.
- * (B) Otherwise (mixed card), the card trigger opens Edit Agent as the
- *     card-level fallback. Each row carries its own inline CTA sharing one
- *     right edge so the actions are clearly paired with their requirement:
- *     - `cli_login` rows in an install state → "Open Doctor →" (Doctor).
- *     - `cli_login` rows with `availability === "available"` → no per-row CTA.
- *     - `env_key` / `normalized_field` rows → "Edit Agent →" (Edit Agent).
- *     The `AttachmentActions` column is omitted on mixed cards — per-row CTAs
- *     replace it.
+ * (A) Any card with a `git_bash` requirement, or one whose requirements are all
+ *     install-state `cli_login`, opens Settings → Doctor. A card-level
+ *     "Open Doctor →" label in `AttachmentActions` confirms the action at rest.
+ * (A-auth) A card whose requirements are all available `cli_login` surfaces is
+ *     purely informational: Doctor cannot authenticate a CLI, and `setup_copy`
+ *     already gives the needed command.
+ * (B) Other mixed cards open Edit Agent as the card-level fallback. Their rows
+ *     carry inline CTAs for the matching destination: install-state `cli_login`
+ *     opens Doctor; `env_key` and `normalized_field` open Edit Agent. A
+ *     `git_bash` row is covered by the card-level Doctor route, so it does not
+ *     render a redundant row action.
  */
 export function ConfigNudgeCard({
   className,
@@ -178,6 +186,7 @@ export function ConfigNudgeCard({
   const { onOpenSettings } = useAppShell();
 
   const allCliLogin = isAllCliLogin(nudge.requirements);
+  const opensDoctor = shouldOpenDoctor(nudge.requirements);
   const authOnly = isAuthOnly(nudge.requirements);
   const allConfigInvalid = isAllConfigInvalid(nudge.requirements);
   // Any card that is purely informational (auth-only or all-config-invalid)
@@ -199,10 +208,9 @@ export function ConfigNudgeCard({
   };
 
   const handleOpen = () => {
-    if (allCliLogin) {
-      // (A) Non-authOnly install-state all-cli_login card — route to Doctor.
-      // AuthOnly cards never mount this trigger, so this branch only runs for
-      // install-state cards where Doctor is the correct destination.
+    if (shouldOpenDoctor(nudge.requirements)) {
+      // Git Bash and install-state CLI requirements both resolve in Doctor.
+      // Informational-only cards never mount this trigger.
       openDoctor();
     } else {
       // (B) Mixed card — card-level fallback: focus the first editable field.
@@ -258,10 +266,9 @@ export function ConfigNudgeCard({
           ))}
         </div>
       </AttachmentContent>
-      {/* (A) Install-state all-cli_login card only — single card-level CTA
-          confirming the action at rest. Informational-only cards have no CTA;
-          mixed cards render per-row CTAs instead. */}
-      {allCliLogin && !informationalOnly && (
+      {/* (A) Doctor-routed cards have one card-level CTA. Informational-only
+          cards have none; other mixed cards render their own row CTAs. */}
+      {opensDoctor && !informationalOnly && (
         <AttachmentActions className="items-end self-end">
           <span className="text-xs text-muted-foreground">Open Doctor →</span>
         </AttachmentActions>
@@ -270,7 +277,7 @@ export function ConfigNudgeCard({
       {!informationalOnly && (
         <AttachmentTrigger
           aria-label={
-            allCliLogin
+            opensDoctor
               ? `Open Doctor settings for ${nudge.agent_name}`
               : `Open Edit Agent for ${nudge.agent_name}`
           }
@@ -362,6 +369,14 @@ function RequirementRow({
               Open Doctor →
             </button>
           )}
+        </div>
+      );
+    case "git_bash":
+      return (
+        <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
+          <span className="flex-1 [overflow-wrap:anywhere]">
+            Git for Windows is required for buzz-agent shell tools
+          </span>
         </div>
       );
     case "cli_config_invalid": {

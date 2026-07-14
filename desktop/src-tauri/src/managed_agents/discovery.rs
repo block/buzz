@@ -983,38 +983,39 @@ pub(crate) fn classify_runtime(
 /// [`std::process::Child::try_wait`] (the repo's standard deadline pattern) and
 /// killed if it does not exit in time.
 ///
-/// Stdout is redirected to a temporary file rather than a pipe. A pipe's
-/// `read_to_end` blocks until all file descriptors holding the write-end are
-/// closed — including those inherited by forked descendants. A regular file does
-/// not have this property: `read` returns EOF at the current write position
-/// regardless of how many processes still have the file open. This makes the
-/// post-exit read guaranteed to complete without blocking, and works identically
-/// on Windows and Unix.
+/// Stdout is redirected to a temporary file rather than a pipe, so forked
+/// descendants cannot hold EOF open. Reads from a regular file return EOF at its
+/// current write position regardless of inherited file descriptors, cross-platform.
 pub(crate) fn probe_codex_acp_major_version(binary_path: &Path) -> Option<u64> {
+    probe_codex_acp_major_version_with_path(
+        binary_path,
+        crate::managed_agents::readiness::cli_probe::augmented_path().as_deref(),
+    )
+}
+pub(crate) fn probe_codex_acp_major_version_with_path(
+    binary_path: &Path,
+    augmented_path: Option<&str>,
+) -> Option<u64> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     use std::time::{Duration, Instant};
-
-    /// Hard ceiling on how long the version probe may block discovery.
     const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-    // Redirect stdout to a temporary file instead of a pipe.  When the child
-    // exits its write-end is closed; any forked descendant that inherited the
-    // file descriptor can keep writing, but `read` on a regular file returns
-    // EOF at the current file size — not blocking on a "writer present" check.
-    // This is the only cross-platform way to bound the post-exit stdout read
-    // without O_NONBLOCK (which is Unix-only) or a reader thread.
+    // A regular file returns EOF at its current size even when a descendant
+    // inherits its descriptor, bounding the post-exit read cross-platform.
     let mut tmp = tempfile::tempfile().ok()?;
 
-    let mut child = Command::new(binary_path)
-        .arg("--version")
+    let mut command = Command::new(binary_path);
+    command.arg("--version");
+    if let Some(path) = augmented_path {
+        command.env("PATH", path);
+    }
+    let mut child = command
         .stdout(tmp.try_clone().ok()?)
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
 
-    // Poll try_wait with a deadline — the repo's standard bounded-subprocess
-    // pattern (see backend.rs).  This returns as soon as the process exits
-    // rather than blocking on stdout EOF.
+    // Poll until the deadline rather than blocking on stdout EOF.
     let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
     let exit_status = loop {
         match child.try_wait() {
@@ -1039,9 +1040,7 @@ pub(crate) fn probe_codex_acp_major_version(binary_path: &Path) -> Option<u64> {
         return None;
     }
 
-    // Seek to the start and read at most 4 KiB.  A regular file returns EOF
-    // at the current write position even if a descendant still has the fd
-    // open, so this read is guaranteed to complete without blocking.
+    // Read at most 4 KiB from the regular file without blocking.
     tmp.seek(SeekFrom::Start(0)).ok()?;
     let mut buf = Vec::with_capacity(128);
     let _ = (&mut tmp as &mut dyn std::io::Read)

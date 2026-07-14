@@ -49,7 +49,6 @@ export type TimelineVirtualizerApi = {
 };
 
 type TimelineMessageListProps = {
-  agentPubkeys?: ReadonlySet<string>;
   channelId?: string | null;
   channelName?: string;
   channelType?: ChannelType | null;
@@ -118,7 +117,6 @@ type TimelineMessageListProps = {
 };
 
 export const TimelineMessageList = React.memo(function TimelineMessageList({
-  agentPubkeys,
   channelId,
   channelName,
   channelType,
@@ -250,7 +248,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         case "message":
           return (
             <MessageRowItem
-              agentPubkeys={agentPubkeys}
               channelId={channelId}
               currentPubkey={currentPubkey}
               entry={item.entry}
@@ -283,7 +280,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       }
     },
     [
-      agentPubkeys,
       channelId,
       currentPubkey,
       followThreadById,
@@ -760,7 +756,6 @@ function SystemRow({
 
 type MessageRowItemProps = Pick<
   TimelineMessageListProps,
-  | "agentPubkeys"
   | "channelId"
   | "currentPubkey"
   | "followThreadById"
@@ -790,7 +785,6 @@ type MessageRowItemProps = Pick<
 };
 
 function MessageRowItem({
-  agentPubkeys,
   channelId,
   currentPubkey,
   entry,
@@ -837,7 +831,6 @@ function MessageRowItem({
         )}
       >
         <MessageRow
-          agentPubkeys={agentPubkeys}
           channelId={channelId}
           highlighted={false}
           hoverBackground={false}
@@ -894,7 +887,6 @@ function MessageRowItem({
       )}
     >
       <MessageRow
-        agentPubkeys={agentPubkeys}
         channelId={channelId}
         highlighted={message.id === highlightedMessageId || isSearchActive}
         huddleMemberPubkeys={huddleMemberPubkeys}

@@ -242,6 +242,95 @@ void main() {
     },
   );
 
+  test(
+    'keeps cached channels and live subscriptions during reconnect',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final initial = await container.read(channelsProvider.future);
+      expect(initial.single.name, 'general');
+      expect(session.subscribeFilters, hasLength(1));
+
+      session.setStatus(SessionStatus.reconnecting);
+      final reconnecting = await container.read(channelsProvider.future);
+
+      expect(reconnecting.single.name, 'general');
+      expect(session.subscribeFilters, hasLength(1));
+      expect(session.unsubscribeCount, 0);
+    },
+  );
+
+  test(
+    'refreshes cached channels after a disconnected workspace switch',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      expect(
+        (await container.read(channelsProvider.future)).single.name,
+        'general',
+      );
+
+      session.setStatus(SessionStatus.disconnected);
+      session.memberships = [_membership(_channelB, myPk)];
+      session.metadata = [_meta(id: _channelB, name: 'random')];
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://new-workspace.example');
+      await Future<void>.delayed(Duration.zero);
+      expect(container.read(channelsProvider).value?.single.name, 'general');
+
+      session.setStatus(SessionStatus.connected);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(container.read(channelsProvider).value?.single.name, 'random');
+    },
+  );
+
+  test('recovers an initial fetch failure after reconnecting', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      membershipFailures: 1,
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    await expectLater(container.read(channelsProvider.future), throwsException);
+
+    session.setStatus(SessionStatus.reconnecting);
+    session.setStatus(SessionStatus.connected);
+    await Future<void>.delayed(Duration.zero);
+
+    final recovered = await container.read(channelsProvider.future);
+    expect(recovered.single.name, 'general');
+  });
+
+  test(
+    'preserves a successfully loaded empty list while disconnected',
+    () async {
+      final session = _FakeRelaySession(memberships: [], metadata: []);
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      expect(await container.read(channelsProvider.future), isEmpty);
+      final fetchCount = session.historyFilters.length;
+
+      session.setStatus(SessionStatus.reconnecting);
+      expect(await container.read(channelsProvider.future), isEmpty);
+      expect(session.historyFilters, hasLength(fetchCount));
+    },
+  );
+
   test('initial fetch issues membership + metadata queries', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
@@ -325,6 +414,7 @@ NostrEvent _meta({
 
 ProviderContainer _buildContainer({required _FakeRelaySession session}) {
   return ProviderContainer(
+    retry: (_, _) => null,
     overrides: [
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
@@ -340,15 +430,18 @@ class _FakeRelaySession extends RelaySessionNotifier {
     required this.memberships,
     required this.metadata,
     this.hiddenDmEvents = const [],
+    this.membershipFailures = 0,
   });
 
-  final List<NostrEvent> memberships;
-  final List<NostrEvent> metadata;
+  List<NostrEvent> memberships;
+  List<NostrEvent> metadata;
   final List<NostrEvent> hiddenDmEvents;
+  int membershipFailures;
 
   final List<NostrFilter> historyFilters = [];
   final List<NostrFilter> subscribeFilters = [];
   final List<void Function(NostrEvent)> _listeners = [];
+  int unsubscribeCount = 0;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -359,7 +452,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     historyFilters.add(filter);
-    if (filter.kinds.contains(39002)) {
+    if (filter.kinds.contains(39002) && filter.tags['#p'] != null) {
+      if (membershipFailures > 0) {
+        membershipFailures--;
+        throw Exception('membership fetch failed');
+      }
       // Membership query — return all memberships we have for this pubkey.
       final myPk = filter.tags['#p']?.single;
       return memberships
@@ -389,9 +486,14 @@ class _FakeRelaySession extends RelaySessionNotifier {
     subscribeFilters.add(filter);
     _listeners.add(onEvent);
     return () {
+      unsubscribeCount++;
       subscribeFilters.remove(filter);
       _listeners.remove(onEvent);
     };
+  }
+
+  void setStatus(SessionStatus status) {
+    state = SessionState(status: status);
   }
 
   /// Emit a live event to all subscribers.

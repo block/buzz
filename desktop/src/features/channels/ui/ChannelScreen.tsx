@@ -22,6 +22,7 @@ import {
   usePersonasQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import {
   mergeMessages,
   useChannelMessagesQuery,
@@ -54,10 +55,6 @@ import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import {
-  mergeCurrentProfileIntoLookup,
-  profileLookupsEqual,
-} from "@/features/profile/lib/identity";
 import type { RelayEvent, RespondToMode, SearchHit } from "@/shared/api/types";
 import { useChannelFind } from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
@@ -70,11 +67,9 @@ import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import {
-  mergeAgentNamesIntoProfiles,
-  useChannelActivityTyping,
-} from "./useChannelActivityTyping";
+import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
+import { useMessageProfiles } from "./useMessageProfiles";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
@@ -349,47 +344,29 @@ export function ChannelScreen({
   // Observer ingestion (frame decryption + derived active-turn liveness) is
   // owner-global — mounted once in AppShell via useAgentObserverIngestion —
   // so this screen no longer mounts its own observer/turns bridges.
-  const messageProfilesRaw = React.useMemo(() => {
-    const base =
-      mergeCurrentProfileIntoLookup(
-        messageProfilesQuery.data?.profiles,
-        currentProfile,
-      ) ?? {};
-    return mergeAgentNamesIntoProfiles(
-      base,
-      managedAgents,
-      relayAgents,
-      currentPubkey,
-    );
-  }, [
+  const messageProfiles = useMessageProfiles({
+    channelMembers,
     currentProfile,
     currentPubkey,
     managedAgents,
-    messageProfilesQuery.data?.profiles,
+    profiles: messageProfilesQuery.data?.profiles,
     relayAgents,
-  ]);
-  // Stabilise the merged lookup's reference across renders when no profile
-  // value changed. `messageProfilesRaw` gets a fresh identity whenever the
-  // `users-batch` query re-keys — which typing churn triggers constantly — and
-  // that identity flows to MessageRow's `prev.profiles === next.profiles` memo
-  // check, so an unstable reference re-renders the whole timeline per keystroke.
-  const messageProfilesRef = React.useRef(messageProfilesRaw);
-  if (!profileLookupsEqual(messageProfilesRef.current, messageProfilesRaw)) {
-    messageProfilesRef.current = messageProfilesRaw;
-  }
-  const messageProfiles = messageProfilesRef.current;
-  // Derived from the stabilised lookup so this Set only churns when a profile
-  // value actually changed — MessageRow compares `agentPubkeys` by reference,
-  // and each row previously re-derived this same scan locally (removed).
+  });
+  // Agent set for ChannelPane's own consumers (DM huddle member resolution,
+  // the agents list): the workspace-scoped baseline shared by every surface,
+  // widened with channel-member roles and this screen's profile lookup.
+  // Message rows no longer take this — MessageRow derives agent-ness itself
+  // from useKnownAgentPubkeys + per-pubkey profile checks.
+  const workspaceAgentPubkeys = useKnownAgentPubkeys();
   const agentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set(knownAgentPubkeys);
+    const pubkeys = new Set([...workspaceAgentPubkeys, ...knownAgentPubkeys]);
     for (const [pubkey, profile] of Object.entries(messageProfiles)) {
       if (profile.isAgent) {
         pubkeys.add(normalizePubkey(pubkey));
       }
     }
     return pubkeys;
-  }, [knownAgentPubkeys, messageProfiles]);
+  }, [knownAgentPubkeys, messageProfiles, workspaceAgentPubkeys]);
   const personasQuery = usePersonasQuery();
   const { personaLookup, respondToLookup } = React.useMemo(() => {
     const agents = managedAgentsQuery.data ?? [];

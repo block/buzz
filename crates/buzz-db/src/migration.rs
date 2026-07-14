@@ -12,7 +12,78 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
 /// Run all pending Buzz database migrations.
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
+    reject_legacy_nip_rs_cardinality_ambiguity(pool).await?;
     MIGRATOR.run(pool).await?;
+    Ok(())
+}
+
+/// Migration 0007 is checksum-frozen and predates exact NIP-RS tag-cardinality
+/// enforcement. A populated database still on 0001-0006 must not let 0007
+/// irreversibly purge duplicate-tag history. Fail before sqlx starts its
+/// migration transaction so an operator can inspect and repair those rows.
+async fn reject_legacy_nip_rs_cardinality_ambiguity(pool: &PgPool) -> Result<()> {
+    let migrations_table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
+            .fetch_one(pool)
+            .await?;
+    if migrations_table.is_none() {
+        return Ok(());
+    }
+    let applied: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(pool)
+            .await?;
+    if applied.is_none_or(|version| version >= 7) {
+        return Ok(());
+    }
+
+    let ambiguous: bool = sqlx::query_scalar(
+        "SELECT EXISTS (\
+             SELECT 1 FROM events e \
+             WHERE e.kind = 30078 \
+               AND e.d_tag ~ '^read-state:[0-9a-f]{32}$' \
+               AND (\
+                   jsonb_typeof(e.tags) IS DISTINCT FROM 'array' \
+                   OR (\
+                       EXISTS (\
+                           SELECT 1 FROM jsonb_array_elements(\
+                               CASE WHEN jsonb_typeof(e.tags) = 'array' THEN e.tags ELSE '[]'::jsonb END\
+                           ) tag \
+                           WHERE tag = '[\"t\", \"read-state\"]'::jsonb\
+                       ) \
+                       AND (\
+                           (SELECT count(*) FROM jsonb_array_elements(\
+                               CASE WHEN jsonb_typeof(e.tags) = 'array' THEN e.tags ELSE '[]'::jsonb END\
+                            ) tag \
+                            WHERE jsonb_typeof(tag) = 'array' \
+                              AND tag->0 = '\"d\"'::jsonb) <> 1 \
+                           OR NOT EXISTS (\
+                               SELECT 1 FROM jsonb_array_elements(\
+                                   CASE WHEN jsonb_typeof(e.tags) = 'array' THEN e.tags ELSE '[]'::jsonb END\
+                               ) tag \
+                               WHERE jsonb_typeof(tag) = 'array' \
+                                 AND jsonb_array_length(tag) >= 2 \
+                                 AND jsonb_typeof(tag->1) = 'string' \
+                                 AND tag->>0 = 'd' \
+                                 AND tag->>1 = e.d_tag\
+                           ) \
+                           OR (SELECT count(*) FROM jsonb_array_elements(\
+                               CASE WHEN jsonb_typeof(e.tags) = 'array' THEN e.tags ELSE '[]'::jsonb END\
+                           ) tag WHERE tag = '[\"t\", \"read-state\"]'::jsonb) <> 1\
+                       )\
+                   )\
+               )\
+         )",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    if ambiguous {
+        return Err(crate::DbError::InvalidData(
+            "NIP-RS migration blocked: pre-0007 database contains kind-30078 rows with ambiguous d/t tag cardinality; repair or remove those nonconforming rows before retrying"
+                .into(),
+        ));
+    }
     Ok(())
 }
 
@@ -471,7 +542,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 6);
+        assert_eq!(migrations.len(), 11);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -555,6 +626,90 @@ mod tests {
             );
         }
         assert!(!migrations[0].sql.as_str().contains("moderation_reports"));
+
+        // NIP-RS retention is additive and boot-safe: seed replay watermarks
+        // before deleting payload history, without rewriting search storage.
+        assert_eq!(migrations[6].version, 7);
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("LOCK TABLE events IN SHARE ROW EXCLUSIVE MODE"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE parameterized_event_watermarks"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("INSERT INTO parameterized_event_watermarks"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("CREATE INDEX idx_event_mentions_community_event"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("NIP-RS retention blocked: deleted event outranks live head"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("DELETE FROM events old"));
+        assert!(!migrations[6]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE events DROP COLUMN search_tsv"));
+
+        // Fresh installs opt into the positive search allowlist without making
+        // populated databases rewrite their events heap during relay startup.
+        assert_eq!(migrations[7].version, 8);
+        assert!(migrations[7]
+            .sql
+            .as_str()
+            .contains("IF NOT EXISTS (SELECT 1 FROM events LIMIT 1)"));
+        assert!(migrations[7]
+            .sql
+            .as_str()
+            .contains("CASE WHEN kind IN (0, 9, 40002, 45001, 45003)"));
+        assert!(migrations[7].sql.as_str().contains("ELSE NULL::tsvector"));
+
+        // Mixed-version guards are additive because 0007/0008 may already be
+        // recorded by a running relay and their sqlx checksums are immutable.
+        assert_eq!(migrations[8].version, 9);
+        assert!(migrations[8]
+            .sql
+            .as_str()
+            .contains("CREATE TRIGGER trg_events_nip_rs_watermark"));
+        assert!(migrations[8]
+            .sql
+            .as_str()
+            .contains("stale NIP-RS event rejected by durable watermark"));
+        assert!(migrations[8]
+            .sql
+            .as_str()
+            .contains("CREATE TRIGGER trg_events_purge_soft_deleted_nip_rs"));
+        assert!(migrations[8]
+            .sql
+            .as_str()
+            .contains("CREATE TRIGGER trg_event_mentions_require_live_event"));
+
+        assert_eq!(migrations[9].version, 10);
+        assert!(migrations[9]
+            .sql
+            .as_str()
+            .contains("CREATE OR REPLACE FUNCTION guard_nip_rs_watermark"));
+        assert!(migrations[9].sql.as_str().contains("RETURN NULL"));
+
+        assert_eq!(migrations[10].version, 11);
+        assert!(migrations[10]
+            .sql
+            .as_str()
+            .contains("CREATE OR REPLACE FUNCTION guard_nip_rs_watermark"));
+        assert!(migrations[10]
+            .sql
+            .as_str()
+            .contains("CREATE OR REPLACE FUNCTION purge_soft_deleted_nip_rs"));
+        assert!(migrations[10].sql.as_str().contains("tag->>0 = 'd'"));
+        assert!(migrations[10].sql.as_str().contains(") = 1"));
     }
 
     #[test]
@@ -732,6 +887,76 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn pre_0007_ambiguous_nip_rs_data_blocks_without_mutation_and_allows_retry() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(6, &pool)
+            .await
+            .expect("apply migrations 1-6");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("pre-0007-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let event_id = vec![1_u8; 32];
+        let pubkey = vec![2_u8; 32];
+        let d_tag = format!("read-state:{}", "a".repeat(32));
+        let ambiguous_tags = serde_json::json!([["d", d_tag], ["d", "other"], ["t", "read-state"]]);
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, d_tag) \
+             VALUES ($1, $2, $3, NOW(), 30078, $4, 'ambiguous', $5, NOW(), $6)",
+        )
+        .bind(community_id)
+        .bind(&event_id)
+        .bind(&pubkey)
+        .bind(&ambiguous_tags)
+        .bind(vec![3_u8; 64])
+        .bind(&d_tag)
+        .execute(&pool)
+        .await
+        .expect("insert ambiguous NIP-RS row");
+
+        let before_versions = applied_versions(&pool).await;
+        let before_row: (serde_json::Value, String) =
+            sqlx::query_as("SELECT tags, content FROM events WHERE community_id=$1 AND id=$2")
+                .bind(community_id)
+                .bind(&event_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read ambiguous row before blocked migration");
+        let blocked = run_migrations(&pool).await;
+        assert!(blocked.is_err(), "ambiguous pre-0007 data must fail closed");
+        assert_eq!(applied_versions(&pool).await, before_versions);
+        let after_row: (serde_json::Value, String) =
+            sqlx::query_as("SELECT tags, content FROM events WHERE community_id=$1 AND id=$2")
+                .bind(community_id)
+                .bind(&event_id)
+                .fetch_one(&pool)
+                .await
+                .expect("blocked migration must preserve source row");
+        assert_eq!(after_row, before_row);
+
+        let repaired_tags = serde_json::json!([["d", d_tag], ["t", "read-state"]]);
+        sqlx::query("UPDATE events SET tags=$1 WHERE community_id=$2 AND id=$3")
+            .bind(repaired_tags)
+            .bind(community_id)
+            .bind(&event_id)
+            .execute(&pool)
+            .await
+            .expect("repair ambiguous row");
+        run_migrations(&pool)
+            .await
+            .expect("retry succeeds after operator repair");
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(11));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn run_migrations_applies_consolidated_initial_schema_on_fresh_database() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
@@ -769,5 +994,25 @@ mod tests {
             );
             assert!(exists, "migration should create {table}");
         }
+
+        let search_expression: String = sqlx::query_scalar(
+            "SELECT pg_get_expr(adbin, adrelid) \
+             FROM pg_attrdef \
+             WHERE adrelid = 'events'::regclass \
+               AND adnum = (SELECT attnum FROM pg_attribute \
+                            WHERE attrelid = 'events'::regclass \
+                              AND attname = 'search_tsv')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read fresh-install search expression");
+        assert!(
+            search_expression.contains("ARRAY[0, 9, 40002, 45001, 45003]"),
+            "fresh-install search allowlist has the wrong kinds: {search_expression}"
+        );
+        assert!(
+            search_expression.contains("ELSE NULL::tsvector"),
+            "fresh installs must default non-allowlisted kinds to NULL: {search_expression}"
+        );
     }
 }

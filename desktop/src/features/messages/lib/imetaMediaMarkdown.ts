@@ -235,17 +235,21 @@ export function findSpoileredImetaMediaUrls(
  * Images and video use `![image|video](url)` so the renderer draws them inline.
  * Generic files use a plain `[filename](url)` link — the renderer recognises the
  * href as a local media blob with a non-media MIME and upgrades it to a file
- * card. Mime-driven so the form is correct regardless of URL suffix.
+ * card. Agent snapshot PNGs deliberately use the file-link form despite their
+ * image MIME so the renderer can upgrade them to the import/download card.
  */
 export function formatImetaMediaLine(
   { url, type, filename }: ImetaMedia,
   options: { spoiler?: boolean } = {},
 ): string {
+  // A PNG snapshot is image/png on the wire, but it is an importable file, not
+  // inline media. Keep it on the anchor renderer's snapshot-card path.
+  const isAgentSnapshot = filename?.toLowerCase().endsWith(".agent.png");
   if (type.startsWith("video/")) {
     const line = `![video](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }
-  if (type.startsWith("image/")) {
+  if (type.startsWith("image/") && !isAgentSnapshot) {
     const line = `![image](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }

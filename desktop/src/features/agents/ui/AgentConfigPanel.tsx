@@ -17,6 +17,7 @@ import { useAgentConfigSurface } from "../hooks";
 import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Spinner } from "@/shared/ui/spinner";
+import { McpServersSection } from "./McpServersSection";
 import type {
   ConfigField,
   ConfigOrigin,
@@ -365,7 +366,8 @@ export function AgentConfigPanel({
     );
   }
 
-  const { normalized, advanced, sources, isPreSpawn } = data;
+  const { normalized, advanced, extensions, runtimeId, sources, isPreSpawn } =
+    data;
   const configFilePath = sources.configFilePath;
 
   const normalizedEntries = (
@@ -416,8 +418,17 @@ export function AgentConfigPanel({
         )}
       </div>
 
+      <McpServersSection
+        extensions={extensions}
+        runtimeId={runtimeId}
+        variant={advancedMode === "flat" ? "profile" : "compact"}
+      />
+
       {advanced.length > 0 && advancedMode === "flat" ? (
         <div className="divide-y divide-border/50 border-t border-border/50">
+          <p className="px-4 py-3 text-xs font-medium text-foreground">
+            Advanced
+          </p>
           {advanced.map((field) => (
             <AdvancedRow
               key={field.key}

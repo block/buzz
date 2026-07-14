@@ -609,7 +609,6 @@ export const ChannelPane = React.memo(function ChannelPane({
           ) : null}
           <MessageTimeline
             ref={messageTimelineRef}
-            agentPubkeys={agentPubkeys}
             channelId={activeChannel?.id}
             channelIntro={channelIntro}
             directMessageIntro={directMessageIntro}
@@ -795,7 +794,6 @@ export const ChannelPane = React.memo(function ChannelPane({
         (() => {
           const panel = (
             <MessageThreadPanel
-              agentPubkeys={agentPubkeys}
               channel={activeChannel}
               channelId={activeChannel?.id ?? null}
               channelName={activeChannel?.name ?? "channel"}

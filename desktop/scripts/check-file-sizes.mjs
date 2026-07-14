@@ -160,7 +160,10 @@ const overrides = new Map([
   // +1: pub(crate) mod cli_probe declaration for doctor auth probe access.
   // +3: auth_probe_args: None + login_hint: None added to make_cli_runtime and
   // make_codex_runtime stubs (new KnownAcpRuntime fields).
-  ["src-tauri/src/managed_agents/readiness.rs", 1754],
+  // Git Bash readiness is intentionally colocated with buzz-agent's other
+  // setup-mode requirements. The Windows-only requirement and serialization
+  // test add eight lines; split remains queued with the existing file debt.
+  ["src-tauri/src/managed_agents/readiness.rs", 1762],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -191,14 +194,19 @@ const overrides = new Map([
   // added to RawAcpRuntimeCatalogEntry + fromRawAcpRuntimeCatalogEntry mapper (+8).
   // codex-install-auto-restart: restarted_count + failed_restart_count added to
   // RawInstallRuntimeResult + fromRawInstallRuntimeResult mapper (+2).
-  ["src/shared/api/tauri.ts", 1282],
+  // Git Bash Doctor discovery adds the raw Tauri response and its camelCase
+  // mapper. This is the existing API boundary; split remains queued.
+  ["src/shared/api/tauri.ts", 1304],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
   // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
   // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/
   // loginHint fields on AcpRuntimeCatalogEntry (+14 lines). Load-bearing new feature.
   // agent-lifecycle-fixes: GlobalAgentConfigSaveResult type grows with
   // failed_restart_count (+2 lines). Queued to split with the rest of this list.
-  ["src/shared/api/types.ts", 1030],
+  // mcp-readonly-view rebase: PR2 MCP config surface FE-type fields force +1 over the grandfathered ceiling.
+  // Git Bash prerequisite payload adds four fields to the shared Tauri API
+  // contract. This is the canonical type location; split remains queued.
+  ["src/shared/api/types.ts", 1038],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -325,7 +333,11 @@ const overrides = new Map([
   // (reply-inclusive; would clear unread state early). The file was already
   // at the 1000 ceiling; comment-only overage, not code growth. Queued to
   // split with the rest of this list.
-  ["src/features/channels/ui/ChannelScreen.tsx", 1002],
+  // member-agent-flags: messageProfiles merge + ref stabilisation split out to
+  // useMessageProfiles.ts, ratcheting 1002 -> 972 (under the 1000 default;
+  // entry kept as a ratchet). +7 rebase onto main (#1698 timeline-window
+  // growth), 972 -> 979.
+  ["src/features/channels/ui/ChannelScreen.tsx", 979],
   // forced-unread persistence: markChannelUnread now writes through to
   // forcedUnreadStore (localStorage) so the sidebar badge survives reload and
   // the rail observer can read it. Three clear points added (markChannelRead,
@@ -380,7 +392,10 @@ const overrides = new Map([
   // cache tests replaced with 6 pure availability_drift predicate tests;
   // dead-pid non-happy-path added. All load-bearing correctness fixes.
   // (+17 lines net vs previous 1330 limit; rustfmt expanded some call sites)
-  ["src-tauri/src/commands/agent_discovery.rs", 1347],
+  // Git Bash Doctor discovery exposes a narrow async Tauri command at the
+  // existing discovery boundary. The ten-line addition preserves the platform
+  // neutral frontend contract; split remains queued.
+  ["src-tauri/src/commands/agent_discovery.rs", 1357],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.4.2
+
+- fix(desktop): unify observer feed scroll onto useAnchoredScroll ([#1825](https://github.com/block/buzz/pull/1825)) ([`d75c2e913`](https://github.com/block/buzz/commit/d75c2e913eef763e8ea2e748c58353c3a22d544d))
+- fix(desktop): sync sidebar update card copy with global installing state ([#1827](https://github.com/block/buzz/pull/1827)) ([`b63a2e423`](https://github.com/block/buzz/commit/b63a2e4231d27f61eae952d2febab36489e773a5))
+- fix(desktop): parse codex ACP plan entries[] into checklist ([#1824](https://github.com/block/buzz/pull/1824)) ([`34dcd13d5`](https://github.com/block/buzz/commit/34dcd13d559b6c606312fca1bbc2c52310b35603))
+- fix(desktop): resolve Git Bash for Windows shell tool via PATH/git/registry fallback ([#1821](https://github.com/block/buzz/pull/1821)) ([`020ac7f40`](https://github.com/block/buzz/commit/020ac7f405c24f72e390b605571fb65e2481612c))
+- feat(desktop): show read-only MCP server config ([#1780](https://github.com/block/buzz/pull/1780)) ([`51ee1c473`](https://github.com/block/buzz/commit/51ee1c473dae018499e42106086c359c19108137))
+- fix(desktop): require user action before applying updates ([#1820](https://github.com/block/buzz/pull/1820)) ([`deed64a14`](https://github.com/block/buzz/commit/deed64a14f1ec39a1242bed46711e44d77a3086e))
+- fix(desktop): preserve selected inbox rows through reflow ([#1817](https://github.com/block/buzz/pull/1817)) ([`c06ddcf14`](https://github.com/block/buzz/commit/c06ddcf14b81834a59a4eedf020ccbe8ca72dfd7))
+- fix(snapshot): send Buzz shares as PNG avatar cards ([#1811](https://github.com/block/buzz/pull/1811)) ([`a6cfd6551`](https://github.com/block/buzz/commit/a6cfd65511ee06f9073f2d5405e2242a9e2ff4ef))
+- test(desktop): consolidate and stabilize scroll coverage ([#1815](https://github.com/block/buzz/pull/1815)) ([`d41b4c390`](https://github.com/block/buzz/commit/d41b4c390522d63a0a4e1b3e8a93fe9c84289b2a))
+- fix(buzz-agent): support max effort for gpt-5.6 family ([#1806](https://github.com/block/buzz/pull/1806)) ([`e34e0974a`](https://github.com/block/buzz/commit/e34e0974a149a2b776e779e5798cc4252cc5030c))
+- fix(desktop): widen probe test timing margins for parallel pre-push ([#1812](https://github.com/block/buzz/pull/1812)) ([`fac79215a`](https://github.com/block/buzz/commit/fac79215a4cdc8289cc94282641e69d822d419d6))
+- fix(desktop): keep pairing tests after production items ([#1807](https://github.com/block/buzz/pull/1807)) ([`68909629f`](https://github.com/block/buzz/commit/68909629f96a95797a627b19e76e03bcbd6983de))
+- chore(deps): update rust crate nostr to v0.44.4 ([#1789](https://github.com/block/buzz/pull/1789)) ([`f1f5002a9`](https://github.com/block/buzz/commit/f1f5002a970bb651173ef49027e9609b903e3fa3))
+- Add optional standalone pairing relay to Helm chart ([#1799](https://github.com/block/buzz/pull/1799)) ([`9b47c8548`](https://github.com/block/buzz/commit/9b47c8548fd061fbb806ea8b9ddee831c19cf80e))
+- chore(ci): lint desktop Tauri crate in CI ([#1801](https://github.com/block/buzz/pull/1801)) ([`bea507d8a`](https://github.com/block/buzz/commit/bea507d8aa611d8d0be893bac1339dad50162d7b))
+- fix(desktop): preserve live events and window order across channel refreshes ([#1802](https://github.com/block/buzz/pull/1802)) ([`e09e94ab8`](https://github.com/block/buzz/commit/e09e94ab88543ea0e0c6411092852c1c98187feb))
+- fix(desktop): restore macOS navigation chrome alignment ([#1797](https://github.com/block/buzz/pull/1797)) ([`109800fe5`](https://github.com/block/buzz/commit/109800fe5a67c560e3ffb750e7df28177c03f509))
+- fix(desktop): omit invalid snapshot imeta thumbnails ([#1800](https://github.com/block/buzz/pull/1800)) ([`b32f2c08f`](https://github.com/block/buzz/commit/b32f2c08f7cdbad1bcc3b6a73711c2e7a21c71bd))
+- fix(desktop): centralize known-agent trust set in useKnownAgentPubkeys ([#1703](https://github.com/block/buzz/pull/1703)) ([`095f3c728`](https://github.com/block/buzz/commit/095f3c7280153394bf2a8215b1355ef734af9ee6))
+- chore(deps): update all non-major dependencies ([#1778](https://github.com/block/buzz/pull/1778)) ([`221aceb1c`](https://github.com/block/buzz/commit/221aceb1c2f794db0bf2050d1cc66fe8d2db9cec))
+- fix(desktop): pass augmented PATH to codex-acp version probe ([#1794](https://github.com/block/buzz/pull/1794)) ([`10ae66893`](https://github.com/block/buzz/commit/10ae66893c8b454255298d0eab40bfd47a46041c))
+- feat(desktop): add team snapshot sharing commands ([#1790](https://github.com/block/buzz/pull/1790)) ([`150514f66`](https://github.com/block/buzz/commit/150514f665c5aeebb83f9c42c17e793d88ee6b9f))
+- feat(managed_agents): add buzz-team-snapshot v1 codec ([#1784](https://github.com/block/buzz/pull/1784)) ([`aceb5e045`](https://github.com/block/buzz/commit/aceb5e0456c19761f1210585be520fa291ef903c))
+
+
 ## v0.4.1
 
 - feat(desktop): auto-restart setup-mode agents after adapter install, badge drift fallback ([#1786](https://github.com/block/buzz/pull/1786)) ([`11a286b9a`](https://github.com/block/buzz/commit/11a286b9a4284f4f80943d1321f86fa41c472dcf))

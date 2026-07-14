@@ -33,10 +33,9 @@ export type ResolvedSnapshotCard = {
   /** Discriminant for the snapshot kind — currently only "agent". */
   snapshotKind: "agent";
   /**
-   * Optional thumbnail URL for the card icon. For `.agent.json` attachments
-   * this comes from the imeta `thumb` field set by the sender. For
-   * `.agent.png` attachments it falls back to the attachment URL itself
-   * (the PNG is the avatar card image).
+   * Optional thumbnail URL for the card icon. PNG snapshots use the
+   * attachment URL because the PNG body is the avatar card image. JSON
+   * snapshots have no thumbnail and use the generic icon.
    */
   thumb?: string;
 };
@@ -86,14 +85,9 @@ export function resolveSnapshotCard(
     size: entry.size,
     sha256,
     snapshotKind: "agent",
-    // For PNG snapshots, use the attachment URL as the thumb source (it IS
-    // the avatar card image). For JSON, use the explicit imeta `thumb` field
-    // if the sender included one.
-    thumb: isPng
-      ? rewriteRelayUrl(href)
-      : entry.thumb
-        ? rewriteRelayUrl(entry.thumb)
-        : undefined,
+    // PNG snapshots use the attachment URL as the thumb source because it is
+    // the avatar card image. JSON snapshots use the generic icon.
+    thumb: isPng ? rewriteRelayUrl(href) : undefined,
   };
 }
 

@@ -322,7 +322,7 @@ async fn restart_setup_mode_agents_after_install(
                     &global,
                 );
                 let now_ready = matches!(agent_readiness(&effective), AgentReadiness::Ready);
-                let pid_alive = pid.is_some_and(|p| crate::managed_agents::process_is_running(p));
+                let pid_alive = pid.is_some_and(crate::managed_agents::process_is_running);
                 should_restart_after_install(
                     is_local,
                     pid_alive,
@@ -1343,4 +1343,14 @@ mod tests {
             "non-codex agent (None stamp) must never trigger drift badge"
         );
     }
+}
+
+/// Returns the Windows-only Git Bash prerequisite used by buzz-agent's shell MCP.
+/// `None` on other platforms keeps the shared Doctor surfaces platform-neutral.
+#[tauri::command]
+pub async fn discover_git_bash_prerequisite(
+) -> Result<Option<crate::managed_agents::GitBashPrerequisite>, String> {
+    tokio::task::spawn_blocking(crate::managed_agents::discover_git_bash)
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
