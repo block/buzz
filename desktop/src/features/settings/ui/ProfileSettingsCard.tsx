@@ -1011,7 +1011,7 @@ export function ProfileSettingsCard({
                 disabled={isSignOutPending}
                 onClick={() => {
                   setIsSignOutPending(true);
-                  // signOut() restarts the process and never resolves on success.
+                  // Keep the pending state if signOut() resolves before restart.
                   signOut().catch((err: unknown) => {
                     setIsSignOutPending(false);
                     setIsSignOutOpen(false);

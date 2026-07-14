@@ -43,8 +43,8 @@ export async function persistCurrentIdentity(): Promise<Identity> {
  * Wipe all local Buzz state (keychain, App Support, WebKit, nest, OAuth cache,
  * CLI symlinks) and relaunch into first-run onboarding.
  *
- * This call never resolves on success — the process restarts. Callers should
- * handle the error case (e.g. display a toast) but not await a resolution.
+ * The app restarts after this call completes. Callers should keep the pending
+ * state until the process exits and only handle errors (e.g. display a toast).
  */
 export async function signOut(): Promise<void> {
   await invokeTauri("sign_out");
