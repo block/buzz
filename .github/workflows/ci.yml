@@ -248,6 +248,7 @@ jobs:
             desktop/playwright-report.json
             desktop/test-results
           if-no-files-found: ignore
+          retention-days: 7
 
   desktop:
     name: Desktop
@@ -463,6 +464,7 @@ jobs:
             desktop/test-results
             /tmp/buzz-relay.log
           if-no-files-found: ignore
+          retention-days: 7
       - name: Save pnpm store cache
         if: github.event_name == 'push'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
