@@ -791,8 +791,8 @@ export function ProfileRuntimeTabContent({
             </p>
             <p className="mt-0.5 text-xs text-muted-foreground">
               {autoRestartEnabled
-                ? "Configuration changed since this agent started. Buzz can restart it automatically after ~3 minutes idle, or restart manually to apply now."
-                : "Configuration changed since this agent started. Automatic restart is off for this agent \u2014 restart manually to apply the changes."}
+                ? "Configuration changed since this agent started. Buzz can restart it automatically after ~3 minutes idle, or stop and respawn it to apply now."
+                : "Configuration changed since this agent started. Automatic restart is off for this agent \u2014 stop and respawn it to apply the changes."}
             </p>
           </div>
         </div>
