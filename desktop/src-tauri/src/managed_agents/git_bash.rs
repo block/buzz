@@ -23,11 +23,21 @@ const INSTALL_URL: &str = "https://git-scm.com/download/win";
 const INSTALL_HINT: &str =
     "Install Git for Windows and select \"Git from the command line and also from 3rd-party software\" for its PATH option.";
 
-pub(crate) fn discover_git_bash() -> Option<GitBashPrerequisite> {
+/// Install hint for error messages when `install_shell_command` can't find a shell on Windows.
+#[cfg(windows)]
+pub(crate) const GIT_BASH_INSTALL_HINT: &str = INSTALL_HINT;
+
+/// Resolve the Git Bash executable path using the same resolver chain as Doctor.
+///
+/// Returns `Some(path)` on Windows when a usable bash is found, `None` otherwise
+/// (including all non-Windows platforms). Honors `BUZZ_SHELL` (any executable) —
+/// correct for the Doctor readiness gate where any shell suffices.
+#[allow(dead_code)] // used only on Windows; called by discover_git_bash()
+pub(crate) fn resolve_git_bash_path() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     {
         let env = GitBashEnv::from_process();
-        let path = resolve_git_bash(
+        return resolve_git_bash(
             &env.path,
             env.shell_override,
             env.git_bash_override,
@@ -36,6 +46,43 @@ pub(crate) fn discover_git_bash() -> Option<GitBashPrerequisite> {
             env.program_files_x86,
             env.local_app_data,
         );
+    }
+
+    #[cfg(not(windows))]
+    None
+}
+
+/// Resolve a bash-compatible shell for install commands and login-shell discovery.
+///
+/// Unlike `resolve_git_bash_path`, this skips `BUZZ_SHELL` entirely — that override
+/// intentionally accepts any executable (`cmd`, `pwsh`) for the MCP child, but install
+/// commands and `login_shell_candidates` use bash-only `-l -c` syntax. Skipping the
+/// override means the chain falls through to: `GIT_BASH` → PATH scan → derive-from-git
+/// → well-known locations → registry.
+#[allow(dead_code)] // used only on Windows, from install_shell_command + login_shell_candidates
+pub(crate) fn resolve_bash_path() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let env = GitBashEnv::from_process();
+        return resolve_git_bash(
+            &env.path,
+            None, // skip BUZZ_SHELL — install/login-shell callers require bash
+            env.git_bash_override,
+            env.system_root,
+            env.program_files,
+            env.program_files_x86,
+            env.local_app_data,
+        );
+    }
+
+    #[cfg(not(windows))]
+    None
+}
+
+pub(crate) fn discover_git_bash() -> Option<GitBashPrerequisite> {
+    #[cfg(windows)]
+    {
+        let path = resolve_git_bash_path();
         return Some(GitBashPrerequisite {
             available: path.is_some(),
             path: path.map(|path| path.display().to_string()),
@@ -115,7 +162,7 @@ impl GitBashEnv {
 }
 
 #[cfg(windows)]
-fn resolve_git_bash(
+pub(crate) fn resolve_git_bash(
     path_env: &str,
     shell_override: Option<PathBuf>,
     git_bash_override: Option<PathBuf>,
@@ -124,7 +171,32 @@ fn resolve_git_bash(
     program_files_x86: Option<PathBuf>,
     local_app_data: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    shell_override
+    resolve_git_bash_inner(
+        path_env,
+        shell_override,
+        git_bash_override,
+        system_root,
+        program_files,
+        program_files_x86,
+        local_app_data,
+        true,
+    )
+}
+
+/// Inner resolver with an explicit `check_registry` toggle so tests can
+/// disable the ambient `HKLM/HKCU\SOFTWARE\GitForWindows` lookup.
+#[cfg(windows)]
+fn resolve_git_bash_inner(
+    path_env: &str,
+    shell_override: Option<PathBuf>,
+    git_bash_override: Option<PathBuf>,
+    system_root: Option<PathBuf>,
+    program_files: Option<PathBuf>,
+    program_files_x86: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    check_registry: bool,
+) -> Option<PathBuf> {
+    let result = shell_override
         .and_then(|path| resolve_shell_override(&path, path_env))
         .or_else(|| git_bash_override.filter(|path| path.is_file()))
         .or_else(|| scan_path_for_bash(path_env, system_root.as_deref()))
@@ -134,8 +206,39 @@ fn resolve_git_bash(
         })
         .or_else(|| {
             git_bash_from_standard_paths([program_files, program_files_x86, local_app_data])
-        })
-        .or_else(git_bash_from_registry)
+        });
+    if result.is_some() {
+        return result;
+    }
+    if check_registry {
+        return git_bash_from_registry();
+    }
+    None
+}
+
+/// Like `resolve_git_bash` but skips the ambient Windows registry lookup, so
+/// tests can assert "no resolution" deterministically regardless of the CI
+/// runner's installed software.
+#[cfg(all(windows, test))]
+pub(crate) fn resolve_git_bash_no_registry(
+    path_env: &str,
+    shell_override: Option<PathBuf>,
+    git_bash_override: Option<PathBuf>,
+    system_root: Option<PathBuf>,
+    program_files: Option<PathBuf>,
+    program_files_x86: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+) -> Option<PathBuf> {
+    resolve_git_bash_inner(
+        path_env,
+        shell_override,
+        git_bash_override,
+        system_root,
+        program_files,
+        program_files_x86,
+        local_app_data,
+        false,
+    )
 }
 
 /// Resolve `BUZZ_SHELL` with the same rooted/bare-name semantics as the MCP
@@ -412,6 +515,65 @@ mod tests {
                 None,
             ),
             Some(shell)
+        );
+    }
+
+    // ── Regression: install/login-shell must skip non-bash BUZZ_SHELL ─────────
+
+    /// When BUZZ_SHELL=pwsh.exe, `resolve_git_bash` with `shell_override=None`
+    /// (the `resolve_bash_path` code path) skips it and falls through to the
+    /// bash.exe on PATH. The readiness gate (`shell_override=Some`) still
+    /// returns pwsh — both contracts hold simultaneously.
+    #[test]
+    fn test_install_path_skips_buzz_shell_pwsh() {
+        let temp = tempdir().expect("tempdir");
+        let pwsh = temp.path().join("pwsh.exe");
+        let bash = temp.path().join("bash.exe");
+        std::fs::write(&pwsh, []).expect("pwsh");
+        std::fs::write(&bash, []).expect("bash");
+
+        let path = std::env::join_paths([temp.path()]).expect("PATH");
+        let path_str = path.to_str().expect("utf8");
+
+        // Readiness gate: BUZZ_SHELL=pwsh accepted (Doctor green).
+        assert_eq!(
+            resolve_git_bash(path_str, Some(pwsh.clone()), None, None, None, None, None),
+            Some(pwsh),
+            "readiness gate must accept BUZZ_SHELL=pwsh"
+        );
+
+        // Install path: shell_override=None skips pwsh, finds bash on PATH.
+        assert_eq!(
+            resolve_git_bash(path_str, None, None, None, None, None, None),
+            Some(bash),
+            "install path must skip BUZZ_SHELL and find bash on PATH"
+        );
+    }
+
+    /// Same as above but with BUZZ_SHELL=cmd.exe.
+    #[test]
+    fn test_install_path_skips_buzz_shell_cmd() {
+        let temp = tempdir().expect("tempdir");
+        let cmd = temp.path().join("cmd.exe");
+        let bash = temp.path().join("bash.exe");
+        std::fs::write(&cmd, []).expect("cmd");
+        std::fs::write(&bash, []).expect("bash");
+
+        let path = std::env::join_paths([temp.path()]).expect("PATH");
+        let path_str = path.to_str().expect("utf8");
+
+        // Readiness gate: BUZZ_SHELL=cmd accepted.
+        assert_eq!(
+            resolve_git_bash(path_str, Some(cmd.clone()), None, None, None, None, None),
+            Some(cmd),
+            "readiness gate must accept BUZZ_SHELL=cmd"
+        );
+
+        // Install path: shell_override=None skips cmd, finds bash on PATH.
+        assert_eq!(
+            resolve_git_bash(path_str, None, None, None, None, None, None),
+            Some(bash),
+            "install path must skip BUZZ_SHELL and find bash on PATH"
         );
     }
 }

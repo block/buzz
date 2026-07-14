@@ -8,9 +8,9 @@ import {
   getActiveTurnsByChannel,
   resetActiveAgentTurnsStore,
   subscribeActiveAgentTurns,
-  saveActiveAgentTurnsForWorkspace,
-  restoreActiveAgentTurnsForWorkspace,
-  clearSavedWorkspaceSnapshot,
+  saveActiveAgentTurnsForCommunity,
+  restoreActiveAgentTurnsForCommunity,
+  clearSavedCommunitySnapshot,
 } from "./activeAgentTurnsStore.ts";
 import {
   injectObserverEventsForE2E,
@@ -1332,13 +1332,13 @@ describe("formatElapsed", () => {
   });
 });
 
-describe("workspace-switch save / restore", () => {
+describe("community-switch save / restore", () => {
   beforeEach(() => {
     resetActiveAgentTurnsStore();
   });
 
   it("restores original startedAt timestamps across a round-trip", () => {
-    // Simulate a turn active in workspace A with a known start timestamp.
+    // Simulate a turn active in community A with a known start timestamp.
     syncAgentTurnsFromEvents(AGENT, [
       makeEvent({
         seq: 1,
@@ -1350,7 +1350,7 @@ describe("workspace-switch save / restore", () => {
     const anchorBefore = getActiveTurnsForAgent(AGENT)[0].anchorAt;
 
     // Switch away (save A, reset, apply B).
-    saveActiveAgentTurnsForWorkspace("ws-a");
+    saveActiveAgentTurnsForCommunity("ws-a");
     resetActiveAgentTurnsStore();
     assert.equal(
       getActiveTurnsForAgent(AGENT).length,
@@ -1359,7 +1359,7 @@ describe("workspace-switch save / restore", () => {
     );
 
     // Switch back (restore A).
-    restoreActiveAgentTurnsForWorkspace("ws-a");
+    restoreActiveAgentTurnsForCommunity("ws-a");
     const turns = getActiveTurnsForAgent(AGENT);
     assert.equal(turns.length, 1, "restored turn must reappear");
     assert.equal(turns[0].channelId, "c1");
@@ -1370,7 +1370,7 @@ describe("workspace-switch save / restore", () => {
     );
   });
 
-  it("no-op restore when no snapshot exists for the workspace", () => {
+  it("no-op restore when no snapshot exists for the community", () => {
     // Populate the store so we can verify nothing changes.
     syncAgentTurnsFromEvents(AGENT, [
       makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
@@ -1379,7 +1379,7 @@ describe("workspace-switch save / restore", () => {
     const unsub = subscribeActiveAgentTurns(() => {
       notified++;
     });
-    restoreActiveAgentTurnsForWorkspace("ws-unknown");
+    restoreActiveAgentTurnsForCommunity("ws-unknown");
     unsub();
     assert.equal(notified, 0, "no-op restore must not notify listeners");
     // Store should be unchanged — still has the turn we set up above.
@@ -1391,15 +1391,15 @@ describe("workspace-switch save / restore", () => {
     syncAgentTurnsFromEvents(AGENT, [
       makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
     ]);
-    saveActiveAgentTurnsForWorkspace("ws-a");
+    saveActiveAgentTurnsForCommunity("ws-a");
 
     // Second pass: the turns ended while we were away, so the store is empty
     // when we try to save again.
     resetActiveAgentTurnsStore();
-    saveActiveAgentTurnsForWorkspace("ws-a"); // empty store → delete snapshot
+    saveActiveAgentTurnsForCommunity("ws-a"); // empty store → delete snapshot
 
     // Restore must be a no-op now.
-    restoreActiveAgentTurnsForWorkspace("ws-a");
+    restoreActiveAgentTurnsForCommunity("ws-a");
     assert.equal(
       getActiveTurnsForAgent(AGENT).length,
       0,
@@ -1411,15 +1411,15 @@ describe("workspace-switch save / restore", () => {
     syncAgentTurnsFromEvents(AGENT, [
       makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
     ]);
-    saveActiveAgentTurnsForWorkspace("ws-a");
+    saveActiveAgentTurnsForCommunity("ws-a");
     resetActiveAgentTurnsStore();
 
-    restoreActiveAgentTurnsForWorkspace("ws-a");
+    restoreActiveAgentTurnsForCommunity("ws-a");
     assert.equal(getActiveTurnsForAgent(AGENT).length, 1, "first restore ok");
 
     // Second restore — snapshot was consumed.
     resetActiveAgentTurnsStore();
-    restoreActiveAgentTurnsForWorkspace("ws-a");
+    restoreActiveAgentTurnsForCommunity("ws-a");
     assert.equal(
       getActiveTurnsForAgent(AGENT).length,
       0,
@@ -1436,9 +1436,9 @@ describe("workspace-switch save / restore", () => {
         timestamp: "2024-01-01T00:00:00Z",
       }),
     ]);
-    saveActiveAgentTurnsForWorkspace("ws-a");
+    saveActiveAgentTurnsForCommunity("ws-a");
     resetActiveAgentTurnsStore();
-    restoreActiveAgentTurnsForWorkspace("ws-a");
+    restoreActiveAgentTurnsForCommunity("ws-a");
 
     // Replaying an event at or below the watermark must be a no-op.
     let notified = 0;
@@ -1479,9 +1479,9 @@ describe("workspace-switch save / restore", () => {
         timestamp: "2024-01-01T00:00:10Z",
       }),
     ]);
-    saveActiveAgentTurnsForWorkspace("ws-a");
+    saveActiveAgentTurnsForCommunity("ws-a");
     resetActiveAgentTurnsStore();
-    restoreActiveAgentTurnsForWorkspace("ws-a");
+    restoreActiveAgentTurnsForCommunity("ws-a");
 
     // A liveness stamped before the completion must not resurrect t1.
     syncAgentTurnsFromEvents(AGENT, [
@@ -1504,36 +1504,36 @@ describe("workspace-switch save / restore", () => {
     syncAgentTurnsFromEvents(AGENT, [
       makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
     ]);
-    saveActiveAgentTurnsForWorkspace("ws-a");
+    saveActiveAgentTurnsForCommunity("ws-a");
     resetActiveAgentTurnsStore();
 
     let notified = 0;
     const unsub = subscribeActiveAgentTurns(() => {
       notified++;
     });
-    restoreActiveAgentTurnsForWorkspace("ws-a");
+    restoreActiveAgentTurnsForCommunity("ws-a");
     unsub();
 
     assert.ok(notified > 0, "restore must notify listeners");
   });
 
-  it("multiple workspaces maintain independent snapshots", () => {
-    // Workspace A: agent in c1.
+  it("multiple communities maintain independent snapshots", () => {
+    // Community A: agent in c1.
     syncAgentTurnsFromEvents(AGENT, [
       makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
     ]);
-    saveActiveAgentTurnsForWorkspace("ws-a");
+    saveActiveAgentTurnsForCommunity("ws-a");
 
-    // Workspace B: different agent/channel.
+    // Community B: different agent/channel.
     resetActiveAgentTurnsStore();
     syncAgentTurnsFromEvents(AGENT_2, [
       makeEvent({ seq: 1, turnId: "t2", channelId: "c2" }),
     ]);
-    saveActiveAgentTurnsForWorkspace("ws-b");
+    saveActiveAgentTurnsForCommunity("ws-b");
 
     // Switch to A — only A's turns must appear.
     resetActiveAgentTurnsStore();
-    restoreActiveAgentTurnsForWorkspace("ws-a");
+    restoreActiveAgentTurnsForCommunity("ws-a");
     const aChannels = new Set(
       getActiveTurnsForAgent(AGENT).map((s) => s.channelId),
     );
@@ -1546,28 +1546,28 @@ describe("workspace-switch save / restore", () => {
 
     // Switch to B — only B's turns.
     resetActiveAgentTurnsStore();
-    restoreActiveAgentTurnsForWorkspace("ws-b");
+    restoreActiveAgentTurnsForCommunity("ws-b");
     const bChannels = new Set(
       getActiveTurnsForAgent(AGENT_2).map((s) => s.channelId),
     );
     assert.ok(bChannels.has("c2"), "ws-b must restore c2");
   });
 
-  it("clearSavedWorkspaceSnapshot discards the snapshot so restore is a no-op", () => {
+  it("clearSavedCommunitySnapshot discards the snapshot so restore is a no-op", () => {
     syncAgentTurnsFromEvents(AGENT, [
       makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
     ]);
-    saveActiveAgentTurnsForWorkspace("ws-a");
+    saveActiveAgentTurnsForCommunity("ws-a");
 
-    // Simulate workspace deletion: GC the snapshot before switching back.
-    clearSavedWorkspaceSnapshot("ws-a");
+    // Simulate community deletion: GC the snapshot before switching back.
+    clearSavedCommunitySnapshot("ws-a");
 
     resetActiveAgentTurnsStore();
-    restoreActiveAgentTurnsForWorkspace("ws-a");
+    restoreActiveAgentTurnsForCommunity("ws-a");
     assert.equal(
       getActiveTurnsForAgent(AGENT).length,
       0,
-      "restore must be no-op after clearSavedWorkspaceSnapshot",
+      "restore must be no-op after clearSavedCommunitySnapshot",
     );
   });
 });

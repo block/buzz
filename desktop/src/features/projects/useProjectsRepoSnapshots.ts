@@ -78,7 +78,7 @@ async function fetchProjectsRepoSnapshots(
 
 /**
  * Fetches repo snapshots for a set of projects (throttled, failure-tolerant)
- * for workspace-wide aggregates like the overview language breakdown.
+ * for community-wide aggregates like the overview language breakdown.
  * Prefers local checkouts under `reposDir`; falls back to remote clones.
  * Callers should pre-filter and cap `projects` — up to one git clone per entry.
  */

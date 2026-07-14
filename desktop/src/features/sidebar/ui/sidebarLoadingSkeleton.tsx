@@ -95,11 +95,11 @@ function hasSidebarLoadingRows(shape: SidebarLoadingShape) {
 }
 
 function sidebarSkeletonCacheKey(
-  workspaceId: string | null | undefined,
+  communityId: string | null | undefined,
   pubkey: string | undefined,
 ) {
-  if (!workspaceId) return null;
-  return `${SIDEBAR_SKELETON_CACHE_PREFIX}:${workspaceId}:${pubkey ?? "anonymous"}`;
+  if (!communityId) return null;
+  return `${SIDEBAR_SKELETON_CACHE_PREFIX}:${communityId}:${pubkey ?? "anonymous"}`;
 }
 
 function readSidebarLoadingShape(
@@ -174,14 +174,14 @@ function createSidebarLoadingShape({
 }
 
 export function useSidebarLoadingShape({
-  activeWorkspaceId,
+  activeCommunityId,
   directMessages,
   dmChannelLabels,
   isLoading,
   currentPubkey,
   streamChannels,
 }: {
-  activeWorkspaceId: string | null | undefined;
+  activeCommunityId: string | null | undefined;
   directMessages: Channel[];
   dmChannelLabels: Record<string, string>;
   isLoading: boolean;
@@ -189,8 +189,8 @@ export function useSidebarLoadingShape({
   streamChannels: Channel[];
 }) {
   const cacheKey = React.useMemo(
-    () => sidebarSkeletonCacheKey(activeWorkspaceId, currentPubkey),
-    [activeWorkspaceId, currentPubkey],
+    () => sidebarSkeletonCacheKey(activeCommunityId, currentPubkey),
+    [activeCommunityId, currentPubkey],
   );
   const liveShape = React.useMemo(
     () =>

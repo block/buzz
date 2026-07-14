@@ -10,7 +10,7 @@ import {
   type ModerationReport as HookModerationReport,
   type ResolutionAction,
 } from "@/features/moderation/hooks";
-import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
+import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import {
   deleteMessage,

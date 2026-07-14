@@ -1,9 +1,9 @@
 /**
- * Workspace custom emoji (NIP-30, per-user sets).
+ * Community custom emoji (NIP-30, per-user sets).
  *
  * Each member publishes their OWN kind:30030 parameterized-replaceable event,
  * signed as themselves, keyed by `(pubkey, 30030, "buzz:custom-emoji")`. The
- * "workspace palette" shown in the picker/renderer is the client-side UNION of
+ * "community palette" shown in the picker/renderer is the client-side UNION of
  * every member's set, collapsed to one entry per shortcode (deterministic
  * winner) — a view computed on read, not stored state. Downstream identity is
  * shortcode-only (emoji-mart id, autocomplete key, reaction lookup, send tag),
@@ -30,7 +30,7 @@ export const CUSTOM_EMOJI_SET_D_TAG = "buzz:custom-emoji";
 
 /**
  * Resolve the image URL for a reaction whose content is a custom-emoji
- * `:shortcode:`, from the workspace set. Returns undefined for unicode
+ * `:shortcode:`, from the community set. Returns undefined for unicode
  * reactions or unknown shortcodes (the kind:7 then carries no emoji tag).
  */
 export function reactionEmojiUrl(
@@ -104,7 +104,7 @@ export function customEmojiFromEvent(event: RelayEvent | null): CustomEmoji[] {
 }
 
 /**
- * Union every member's kind:30030 set into the workspace palette, collapsed to
+ * Union every member's kind:30030 set into the community palette, collapsed to
  * one entry per shortcode. When members disagree on a shortcode's URL, the
  * most recently published set wins (`created_at` is signed event data, so this
  * is as deterministic and fetch-order-independent as any pure function of the
@@ -134,20 +134,20 @@ export function unionCustomEmoji(
 }
 
 /** Fetch every member's 30030 set (catch-up). */
-export async function fetchWorkspaceEmojiEvents(): Promise<RelayEvent[]> {
+export async function fetchCommunityEmojiEvents(): Promise<RelayEvent[]> {
   return relayClient.fetchEvents({
     kinds: [KIND_EMOJI_SET],
     "#d": [CUSTOM_EMOJI_SET_D_TAG],
-    // One 30030 per member; a workspace has far fewer than this. The relay
+    // One 30030 per member; a community has far fewer than this. The relay
     // already keeps only the latest per (pubkey, d_tag), so this is the member
     // count, not history depth.
     limit: 500,
   });
 }
 
-/** Fetch the workspace custom emoji palette (union). Empty when none. */
+/** Fetch the community custom emoji palette (union). Empty when none. */
 export async function listCustomEmoji(): Promise<CustomEmoji[]> {
-  const events = await fetchWorkspaceEmojiEvents();
+  const events = await fetchCommunityEmojiEvents();
   return unionCustomEmoji(events);
 }
 

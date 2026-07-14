@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import type * as React from "react";
 
-import { WorkspaceEmojiIcon } from "@/features/workspaces/ui/WorkspaceSwitcher";
+import { CommunityEmojiIcon } from "@/features/communities/ui/CommunitySwitcher";
 import type {
   Project,
   ProjectActivitySummary,
@@ -41,7 +41,7 @@ type ProjectsOverviewPanelProps = {
   profiles?: UserProfileLookup;
   projects: Project[];
   relayName: string;
-  /** Repo snapshots keyed by project ID, for workspace-wide aggregates. */
+  /** Repo snapshots keyed by project ID, for community-wide aggregates. */
   snapshots?: Record<string, ProjectRepoSnapshot>;
   snapshotsLoading?: boolean;
   summaries?: Record<string, ProjectActivitySummary>;
@@ -224,14 +224,14 @@ export function ProjectsOverviewPanel({
   return (
     <section className="-mx-4 mb-4 bg-card">
       <div className="flex min-w-0 items-start gap-3 p-4">
-        <WorkspaceEmojiIcon className="flex h-10 w-10 shrink-0 items-center justify-center border border-border/60 bg-muted/40 text-2xl" />
+        <CommunityEmojiIcon className="flex h-10 w-10 shrink-0 items-center justify-center border border-border/60 bg-muted/40 text-2xl" />
         <div className="-mt-1 min-w-0 flex-1">
           <h2 className="text-xl font-semibold leading-6 tracking-tight text-foreground">
             {relayName} Projects
           </h2>
           <p className="max-w-2xl text-sm font-normal text-muted-foreground">
             Browse shared repositories, pull requests, and local project
-            checkouts in this workspace.
+            checkouts in this community.
           </p>
         </div>
       </div>

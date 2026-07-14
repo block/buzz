@@ -7,7 +7,7 @@ import type {
 
 export const WELCOME_CHANNEL_NAME = "Welcome";
 export const WELCOME_CHANNEL_DESCRIPTION =
-  "A private channel for getting oriented in this workspace.";
+  "A private channel for getting oriented in this community.";
 export const WELCOME_CHANNEL_READY_EVENT =
   "buzz:onboarding-welcome-channel-ready";
 
@@ -162,25 +162,25 @@ export async function ensureWelcomeChannel(
 
 export function welcomeChannelEnsuredStorageKey(
   pubkey: string,
-  workspaceScope: string,
+  communityScope: string,
 ) {
   return `${WELCOME_CHANNEL_ENSURED_STORAGE_KEY}:${encodeURIComponent(
-    workspaceScope,
+    communityScope,
   )}:${pubkey}`;
 }
 
 export function hasEnsuredWelcomeChannel(
   pubkey: string | null | undefined,
-  workspaceScope: string | null | undefined,
+  communityScope: string | null | undefined,
 ) {
-  if (typeof window === "undefined" || !pubkey || !workspaceScope) {
+  if (typeof window === "undefined" || !pubkey || !communityScope) {
     return false;
   }
 
   try {
     return (
       window.localStorage.getItem(
-        welcomeChannelEnsuredStorageKey(pubkey, workspaceScope),
+        welcomeChannelEnsuredStorageKey(pubkey, communityScope),
       ) === "true"
     );
   } catch {
@@ -190,15 +190,15 @@ export function hasEnsuredWelcomeChannel(
 
 export function markWelcomeChannelEnsured(
   pubkey: string | null | undefined,
-  workspaceScope: string | null | undefined,
+  communityScope: string | null | undefined,
 ) {
-  if (typeof window === "undefined" || !pubkey || !workspaceScope) {
+  if (typeof window === "undefined" || !pubkey || !communityScope) {
     return;
   }
 
   try {
     window.localStorage.setItem(
-      welcomeChannelEnsuredStorageKey(pubkey, workspaceScope),
+      welcomeChannelEnsuredStorageKey(pubkey, communityScope),
       "true",
     );
   } catch {

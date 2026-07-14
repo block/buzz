@@ -9,6 +9,10 @@ use crate::util;
 
 pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
+    let _restore_transition = state
+        .managed_agent_restore_transition
+        .lock()
+        .map_err(|error| error.to_string())?;
     let _store_guard = state
         .managed_agents_store_lock
         .lock()

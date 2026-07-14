@@ -1,12 +1,13 @@
 name: Auto-tag on Release PR Merge
 
-# Four release lanes share this one workflow. Three use an explicit branch
-# prefix; the chart lane also auto-detects a Chart.yaml version bump so a chart
-# feature PR can publish its own new version when merged:
+# Five release lanes share this one workflow. Four use an explicit branch
+# prefix; the main chart lane also auto-detects a Chart.yaml version bump so
+# a chart feature PR can publish its own new version when merged:
 #
 #   version-bump/<v>   → tag v<v>        → dispatch release.yml (desktop app)
 #   relay-release/<v>  → tag relay-v<v>  → dispatch docker.yml (relay image)
-#   chart-release/<v>  → tag chart-v<v>  → dispatch helm-chart.yml (helm chart)
+#   chart-release/<v>  → tag chart-v<v>  → dispatch helm-chart.yml (main helm chart)
+#   push-chart-release/<v> → tag push-chart-v<v> → dispatch push-gateway-helm-chart.yml
 #   any internal PR that bumps deploy/charts/buzz/Chart.yaml `version`
 #                       → tag chart-v<v>  → dispatch helm-chart.yml (helm chart)
 #   mobile-release/<v> → tag mobile-v<v> → (manual sprout_ref for buzz-releases build — see below)
@@ -68,6 +69,10 @@ jobs:
               VERSION="${BRANCH#chart-release/}"
               TAG_PREFIX="chart-v"
               DISPATCH="helm-chart" ;;
+            push-chart-release/*)
+              VERSION="${BRANCH#push-chart-release/}"
+              TAG_PREFIX="push-chart-v"
+              DISPATCH="push-gateway-helm-chart" ;;
             mobile-release/*)
               VERSION="${BRANCH#mobile-release/}"
               TAG_PREFIX="mobile-v"
@@ -134,6 +139,7 @@ jobs:
             release) WORKFLOW="release.yml" ;;
             docker)  WORKFLOW="docker.yml" ;;
             helm-chart) WORKFLOW="helm-chart.yml" ;;
+            push-gateway-helm-chart) WORKFLOW="push-gateway-helm-chart.yml" ;;
             *)
               echo "::error::Unhandled dispatch target: '$DISPATCH'"
               exit 1 ;;

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: buzz-push-gateway
+description: Public capability-gated APNs last-hop gateway for Buzz
+version: 0.1.0
+appVersion: "0.1.0"
+type: application

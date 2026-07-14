@@ -163,7 +163,8 @@ const overrides = new Map([
   // Git Bash readiness is intentionally colocated with buzz-agent's other
   // setup-mode requirements. The Windows-only requirement and serialization
   // test add eight lines; split remains queued with the existing file debt.
-  ["src-tauri/src/managed_agents/readiness.rs", 1762],
+  // Windows Doctor install fix: cli_install_commands_windows field added to test stubs.
+  ["src-tauri/src/managed_agents/readiness.rs", 1764],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -262,11 +263,24 @@ const overrides = new Map([
   // + updated adapter_availability_cached() signature (Option return, cold=None)
   // prevents false restart badge on newly restarted agents. Correctness fix;
   // load-bearing — required by Thufir's IMPORTANT findings. (+15 lines)
-  ["src-tauri/src/managed_agents/discovery.rs", 1245],
+  // Windows Doctor install fix: cli_install_commands_windows field, impl block
+  // for cli_install_commands_for_os(), command_basenames() + .cmd/.bat resolution,
+  // Windows well-known dirs in common_binary_paths(), login_shell_candidates(),
+  // path_candidates_from_env_raw(). Load-bearing Windows platform support.
+  // +13: fetch_login_shell_path_inner Windows guard (POSIX PATH → None).
+  // resolve_git_bash made pub(crate) for Windows test access.
+  // +1: login_shell_candidates doc comment expanded for resolve_bash_path.
+  ["src-tauri/src/managed_agents/discovery.rs", 1366],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1029],
+  // Windows Doctor install fix: command_basenames, cli_install_commands_for_os,
+  // and login_shell_candidates tests. Load-bearing platform-awareness coverage.
+  // +132: pass 2 — five cfg(windows) behavioral tests: command_basenames .cmd/.bat
+  // candidates, cli_install_commands_for_os PowerShell selection, login_shell_path
+  // None regression, .cmd shim resolution, no-git-bash error hint.
+  // +32: deterministic .cmd resolver + no-registry + install_shell_from tests.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1270],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -411,7 +425,14 @@ const overrides = new Map([
   // Git Bash Doctor discovery exposes a narrow async Tauri command at the
   // existing discovery boundary. The ten-line addition preserves the platform
   // neutral frontend contract; split remains queued.
-  ["src-tauri/src/commands/agent_discovery.rs", 1357],
+  // Windows Doctor install fix: resolve_install_shell() + install_shell_command()
+  // returns Result (Windows Git Bash resolution, CREATE_NO_WINDOW, taskkill timeout
+  // kill), cli_install_commands_for_os() callsite, unit tests for shell selection
+  // and per-OS install command accessor. Load-bearing Windows platform support.
+  // +53: pass 2 — three cfg(windows) install shell tests (resolve succeeds with
+  // Git, error hint content, install_shell_command succeeds).
+  // +8: install_shell_from pure seam extracted for deterministic testing.
+  ["src-tauri/src/commands/agent_discovery.rs", 1523],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

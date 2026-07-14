@@ -241,7 +241,7 @@ export function EditAgentAdvancedFields({
             disabled={disabled}
             id="edit-agent-relay-url"
             onChange={(event) => onRelayUrlChange(event.target.value)}
-            placeholder="Leave blank to use the workspace relay"
+            placeholder="Leave blank to use the community relay"
             value={relayUrl}
           />
         </div>

@@ -2,7 +2,7 @@ import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { ArrowLeft } from "lucide-react";
 
-import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
+import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
 import { getFeature } from "@/shared/features/manifest";
 import {
   resolveEnabled,
@@ -58,8 +58,8 @@ const settingsNavGroups: Array<{
     ],
   },
   {
-    label: "Workspaces",
-    sections: ["channel-templates", "relay-members"],
+    label: "Communities",
+    sections: ["channel-templates", "community-members"],
   },
   {
     label: "App",
@@ -142,8 +142,8 @@ export function SettingsView({
           return false;
         }
       }
-      // Relay members requires admin/owner role
-      if (s.value === "relay-members") {
+      // Community members requires admin/owner role
+      if (s.value === "community-members") {
         return (
           membership != null &&
           (membership.role === "owner" || membership.role === "admin")

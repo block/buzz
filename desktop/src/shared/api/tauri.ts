@@ -1272,7 +1272,7 @@ export async function cancelPairing(): Promise<void> {
   await invokeTauri("cancel_pairing");
 }
 
-export async function applyWorkspace(
+export async function applyCommunity(
   relayUrl: string,
   nsec?: string,
   token?: string,

@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../channels/message_content.dart';
@@ -98,20 +99,16 @@ class ComposeNotePage extends HookConsumerWidget {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    CircleAvatar(
+                    AvatarImage(
+                      imageUrl: profile?.avatarUrl,
                       radius: 18,
                       backgroundColor: context.colors.primaryContainer,
-                      backgroundImage: profile?.avatarUrl != null
-                          ? NetworkImage(profile!.avatarUrl!)
-                          : null,
-                      child: profile?.avatarUrl == null
-                          ? Text(
-                              profile?.initial ?? '?',
-                              style: context.textTheme.labelMedium?.copyWith(
-                                color: context.colors.onPrimaryContainer,
-                              ),
-                            )
-                          : null,
+                      fallback: Text(
+                        profile?.initial ?? '?',
+                        style: context.textTheme.labelMedium?.copyWith(
+                          color: context.colors.onPrimaryContainer,
+                        ),
+                      ),
                     ),
                     const SizedBox(width: Grid.xxs),
                     Expanded(
@@ -183,20 +180,16 @@ class _ReplyContext extends ConsumerWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              CircleAvatar(
+              AvatarImage(
+                imageUrl: profile?.avatarUrl,
                 radius: 18,
                 backgroundColor: context.colors.primaryContainer,
-                backgroundImage: profile?.avatarUrl != null
-                    ? NetworkImage(profile!.avatarUrl!)
-                    : null,
-                child: profile?.avatarUrl == null
-                    ? Text(
-                        (profile?.initial ?? displayName[0]).toUpperCase(),
-                        style: context.textTheme.labelMedium?.copyWith(
-                          color: context.colors.onPrimaryContainer,
-                        ),
-                      )
-                    : null,
+                fallback: Text(
+                  (profile?.initial ?? displayName[0]).toUpperCase(),
+                  style: context.textTheme.labelMedium?.copyWith(
+                    color: context.colors.onPrimaryContainer,
+                  ),
+                ),
               ),
               const SizedBox(width: Grid.xs),
               Expanded(

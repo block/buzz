@@ -50,7 +50,7 @@ export class RelayConnectionStateEmitter {
     };
   }
 
-  /** Drop all listeners. Called on workspace teardown to match the legacy
+  /** Drop all listeners. Called on community teardown to match the legacy
    *  pattern used for the reconnect listener set. */
   clear(): void {
     this.listeners.clear();

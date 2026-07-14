@@ -582,6 +582,7 @@ mod tests {
             mcp_hooks: false,
             underlying_cli: None,
             cli_install_commands: &[],
+            cli_install_commands_windows: &[],
             adapter_install_commands: &[],
             install_instructions_url: "",
             cli_install_hint: "",

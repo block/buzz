@@ -266,7 +266,7 @@ void main() {
   );
 
   test(
-    'refreshes cached channels after a disconnected workspace switch',
+    'refreshes cached channels after a disconnected community switch',
     () async {
       final session = _FakeRelaySession(
         memberships: [_membership(_channelA, myPk)],
@@ -285,7 +285,7 @@ void main() {
       session.metadata = [_meta(id: _channelB, name: 'random')];
       container
           .read(relayConfigProvider.notifier)
-          .update(baseUrl: 'https://new-workspace.example');
+          .update(baseUrl: 'https://new-community.example');
       await Future<void>.delayed(Duration.zero);
       expect(container.read(channelsProvider).value?.single.name, 'general');
 
