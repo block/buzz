@@ -89,6 +89,7 @@ type ChannelManagementSheetProps = {
   channel: Channel | null;
   animateSplitEnter?: boolean;
   currentPubkey?: string;
+  managementRequest?: { edit: boolean; id: number };
   layout?: "overlay" | "split";
   onDeleted?: () => void;
   onOpenChange: (open: boolean) => void;
@@ -100,6 +101,7 @@ export function ChannelManagementSheet({
   animateSplitEnter = false,
   channel,
   currentPubkey,
+  managementRequest = { edit: false, id: 0 },
   layout = "overlay",
   onDeleted,
   onOpenChange,
@@ -201,10 +203,12 @@ export function ChannelManagementSheet({
   // Sync drafts from server only when the sheet opens or the channel changes -
   // not on every background refetch, which would clobber in-flight edits.
   const syncedForRef = React.useRef<string | null>(null);
+  const appliedEditRequestRef = React.useRef(0);
   React.useEffect(() => {
     if (!open) {
       // Reset on close so the next open re-syncs from server.
       syncedForRef.current = null;
+      appliedEditRequestRef.current = managementRequest.id;
       setIsDeleteDialogOpen(false);
       setIsEditDialogOpen(false);
       setActiveView("summary");
@@ -215,22 +219,25 @@ export function ChannelManagementSheet({
     }
 
     const key = detail.id;
-    if (syncedForRef.current === key) {
-      return;
+    if (syncedForRef.current !== key) {
+      syncedForRef.current = key;
+      setNameDraft(detail.name);
+      setDescriptionDraft(detail.description);
+      setTopicDraft(detail.topic ?? "");
+      setPurposeDraft(detail.purpose ?? "");
+      setIsPrivateDraft(detail.visibility === "private");
+      setIsEphemeralDraft(detail.ttlSeconds !== null);
+      setTtlDraft(
+        detail.ttlSeconds !== null ? formatTtlDuration(detail.ttlSeconds) : "",
+      );
+      setActiveView("summary");
     }
-    syncedForRef.current = key;
 
-    setNameDraft(detail.name);
-    setDescriptionDraft(detail.description);
-    setTopicDraft(detail.topic ?? "");
-    setPurposeDraft(detail.purpose ?? "");
-    setIsPrivateDraft(detail.visibility === "private");
-    setIsEphemeralDraft(detail.ttlSeconds !== null);
-    setTtlDraft(
-      detail.ttlSeconds !== null ? formatTtlDuration(detail.ttlSeconds) : "",
-    );
-    setActiveView("summary");
-  }, [detail, open]);
+    if (managementRequest.id !== appliedEditRequestRef.current) {
+      appliedEditRequestRef.current = managementRequest.id;
+      setIsEditDialogOpen(managementRequest.edit);
+    }
+  }, [detail, managementRequest.edit, managementRequest.id, open]);
 
   if (!channel) {
     return null;

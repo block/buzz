@@ -143,6 +143,7 @@ type E2eConfig = {
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     channelWindowDelayMs?: number;
     profileReadDelayMs?: number;
+    channelMembersDelayMs?: number;
     profileReadError?: string;
     profileUpdateError?: string;
     profileUpdateErrors?: string[];
@@ -5503,6 +5504,11 @@ async function handleGetChannelMembers(
   args: { channelId: string },
   config: E2eConfig | undefined,
 ): Promise<RawChannelMembersResponse> {
+  const delayMs = config?.mock?.channelMembersDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const channel = getMockChannel(args.channelId);

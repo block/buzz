@@ -41,7 +41,7 @@ import {
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
 import { ChannelMenuButton } from "@/features/sidebar/ui/SidebarSection";
-import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
+import { ChannelContextMenu } from "@/features/sidebar/ui/ChannelContextMenu";
 import { deferMenuAction } from "@/features/sidebar/ui/sidebarMenuHelpers";
 import {
   DraggableChannelRow,
@@ -415,24 +415,31 @@ export function ChannelGroupSection({
           // AlertDialog. A modal ContextMenu would leave `pointer-events: none`
           // stuck on <body> when it closes as the dialog mounts, freezing the
           // whole app. Non-modal avoids installing that body guard entirely.
-          <ContextMenu key={channel.id} modal={false}>
-            <ContextMenuTrigger asChild>
-              <SidebarMenuItem className="content-visibility-auto-row">
-                {draggable ? (
-                  <DraggableChannelRow channelId={channel.id}>
-                    <ChannelMenuButton
-                      channel={channel}
-                      activeWorking={activeWorkingByChannelId?.get(channel.id)}
-                      hasUnread={unreadChannelIds.has(channel.id)}
-                      unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
-                      isMuted={mutedChannelIds?.has(channel.id)}
-                      isActive={
-                        isActiveChannel && selectedChannelId === channel.id
-                      }
-                      onSelectChannel={onSelectChannel}
-                    />
-                  </DraggableChannelRow>
-                ) : (
+          <ChannelContextMenu
+            key={channel.id}
+            modal={false}
+            contentProps={{
+              channel,
+              hasUnread: unreadChannelIds.has(channel.id),
+              isMuted: mutedChannelIds?.has(channel.id),
+              isStarred: starredChannelIds?.has(channel.id),
+              sections,
+              assignments,
+              onMarkChannelRead,
+              onMarkChannelUnread,
+              onMuteChannel,
+              onUnmuteChannel,
+              onStarChannel,
+              onUnstarChannel,
+              onAssignChannel,
+              onUnassignChannel,
+              onCreateSectionForChannel,
+              onLeaveChannel,
+            }}
+          >
+            <SidebarMenuItem className="content-visibility-auto-row">
+              {draggable ? (
+                <DraggableChannelRow channelId={channel.id}>
                   <ChannelMenuButton
                     channel={channel}
                     activeWorking={activeWorkingByChannelId?.get(channel.id)}
@@ -444,30 +451,20 @@ export function ChannelGroupSection({
                     }
                     onSelectChannel={onSelectChannel}
                   />
-                )}
-              </SidebarMenuItem>
-            </ContextMenuTrigger>
-            <ContextMenuContent>
-              <ChannelContextMenuItems
-                channel={channel}
-                hasUnread={unreadChannelIds.has(channel.id)}
-                isMuted={mutedChannelIds?.has(channel.id)}
-                isStarred={starredChannelIds?.has(channel.id)}
-                sections={sections}
-                assignments={assignments}
-                onMarkChannelRead={onMarkChannelRead}
-                onMarkChannelUnread={onMarkChannelUnread}
-                onMuteChannel={onMuteChannel}
-                onUnmuteChannel={onUnmuteChannel}
-                onStarChannel={onStarChannel}
-                onUnstarChannel={onUnstarChannel}
-                onAssignChannel={onAssignChannel}
-                onUnassignChannel={onUnassignChannel}
-                onCreateSectionForChannel={onCreateSectionForChannel}
-                onLeaveChannel={onLeaveChannel}
-              />
-            </ContextMenuContent>
-          </ContextMenu>
+                </DraggableChannelRow>
+              ) : (
+                <ChannelMenuButton
+                  channel={channel}
+                  activeWorking={activeWorkingByChannelId?.get(channel.id)}
+                  hasUnread={unreadChannelIds.has(channel.id)}
+                  unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
+                  isMuted={mutedChannelIds?.has(channel.id)}
+                  isActive={isActiveChannel && selectedChannelId === channel.id}
+                  onSelectChannel={onSelectChannel}
+                />
+              )}
+            </SidebarMenuItem>
+          </ChannelContextMenu>
         ))}
       </SidebarMenu>
     ) : null;
@@ -705,52 +702,49 @@ export function CustomChannelSection({
                       // modal={false}: see note on the other channel ContextMenu
                       // above — avoids the pointer-events lockup when Leave
                       // channel's AlertDialog opens.
-                      <ContextMenu key={channel.id} modal={false}>
-                        <ContextMenuTrigger asChild>
-                          <SidebarMenuItem>
-                            <DraggableChannelRow channelId={channel.id}>
-                              <ChannelMenuButton
-                                channel={channel}
-                                activeWorking={activeWorkingByChannelId?.get(
-                                  channel.id,
-                                )}
-                                hasUnread={unreadChannelIds.has(channel.id)}
-                                unreadCount={
-                                  unreadChannelCounts.get(channel.id) ?? 0
-                                }
-                                isMuted={mutedChannelIds?.has(channel.id)}
-                                isActive={
-                                  isActiveChannel &&
-                                  selectedChannelId === channel.id
-                                }
-                                onSelectChannel={onSelectChannel}
-                              />
-                            </DraggableChannelRow>
-                          </SidebarMenuItem>
-                        </ContextMenuTrigger>
-                        <ContextMenuContent>
-                          <ChannelContextMenuItems
-                            channel={channel}
-                            hasUnread={unreadChannelIds.has(channel.id)}
-                            isMuted={mutedChannelIds?.has(channel.id)}
-                            isStarred={starredChannelIds?.has(channel.id)}
-                            sections={sections}
-                            assignments={assignments}
-                            onMarkChannelRead={onMarkChannelRead}
-                            onMarkChannelUnread={onMarkChannelUnread}
-                            onMuteChannel={onMuteChannel}
-                            onUnmuteChannel={onUnmuteChannel}
-                            onStarChannel={onStarChannel}
-                            onUnstarChannel={onUnstarChannel}
-                            onAssignChannel={onAssignChannel}
-                            onUnassignChannel={onUnassignChannel}
-                            onCreateSectionForChannel={
-                              onCreateSectionForChannel
-                            }
-                            onLeaveChannel={onLeaveChannel}
-                          />
-                        </ContextMenuContent>
-                      </ContextMenu>
+                      <ChannelContextMenu
+                        key={channel.id}
+                        modal={false}
+                        contentProps={{
+                          channel,
+                          hasUnread: unreadChannelIds.has(channel.id),
+                          isMuted: mutedChannelIds?.has(channel.id),
+                          isStarred: starredChannelIds?.has(channel.id),
+                          sections,
+                          assignments,
+                          onMarkChannelRead,
+                          onMarkChannelUnread,
+                          onMuteChannel,
+                          onUnmuteChannel,
+                          onStarChannel,
+                          onUnstarChannel,
+                          onAssignChannel,
+                          onUnassignChannel,
+                          onCreateSectionForChannel,
+                          onLeaveChannel,
+                        }}
+                      >
+                        <SidebarMenuItem>
+                          <DraggableChannelRow channelId={channel.id}>
+                            <ChannelMenuButton
+                              channel={channel}
+                              activeWorking={activeWorkingByChannelId?.get(
+                                channel.id,
+                              )}
+                              hasUnread={unreadChannelIds.has(channel.id)}
+                              unreadCount={
+                                unreadChannelCounts.get(channel.id) ?? 0
+                              }
+                              isMuted={mutedChannelIds?.has(channel.id)}
+                              isActive={
+                                isActiveChannel &&
+                                selectedChannelId === channel.id
+                              }
+                              onSelectChannel={onSelectChannel}
+                            />
+                          </DraggableChannelRow>
+                        </SidebarMenuItem>
+                      </ChannelContextMenu>
                     ))}
                   </SidebarMenu>
                 ) : null}

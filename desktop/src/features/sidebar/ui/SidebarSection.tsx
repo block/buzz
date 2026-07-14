@@ -9,13 +9,7 @@ import {
   X,
 } from "lucide-react";
 
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuTrigger,
-} from "@/shared/ui/context-menu";
-
-import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
+import { ChannelContextMenu } from "@/features/sidebar/ui/ChannelContextMenu";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
@@ -488,20 +482,20 @@ export function SidebarSection({
                 // The shared menu always renders copy actions, so every row
                 // gets a context menu regardless of read/mute availability.
                 return (
-                  <ContextMenu key={channel.id}>
-                    <ContextMenuTrigger asChild>{menuItem}</ContextMenuTrigger>
-                    <ContextMenuContent>
-                      <ChannelContextMenuItems
-                        channel={channel}
-                        hasUnread={unreadChannelIds.has(channel.id)}
-                        isMuted={mutedChannelIds?.has(channel.id)}
-                        onMarkChannelRead={onMarkChannelRead}
-                        onMarkChannelUnread={onMarkChannelUnread}
-                        onMuteChannel={onMuteChannel}
-                        onUnmuteChannel={onUnmuteChannel}
-                      />
-                    </ContextMenuContent>
-                  </ContextMenu>
+                  <ChannelContextMenu
+                    key={channel.id}
+                    contentProps={{
+                      channel,
+                      hasUnread: unreadChannelIds.has(channel.id),
+                      isMuted: mutedChannelIds?.has(channel.id),
+                      onMarkChannelRead,
+                      onMarkChannelUnread,
+                      onMuteChannel,
+                      onUnmuteChannel,
+                    }}
+                  >
+                    {menuItem}
+                  </ChannelContextMenu>
                 );
               })}
             </SidebarMenu>

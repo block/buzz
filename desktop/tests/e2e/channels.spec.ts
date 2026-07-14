@@ -11,6 +11,7 @@ import {
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
+const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
 // Relay-only agent owned by the mock viewer (see e2eBridge.ts
 // OWNED_RELAY_AGENT_PUBKEY). Classified as a bot via mockRelayAgents and
@@ -2331,6 +2332,103 @@ test("open channel management supports join and leave", async ({ page }) => {
       .getByTestId("browse-channel-design")
       .getByRole("button", { name: "Join" }),
   ).toBeVisible();
+});
+
+test("channel context menu edits a stream", async ({ page }) => {
+  await installMockBridge(page, { channelMembersDelayMs: 2_000 });
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click({ button: "right" });
+  const pendingEditItem = page.getByRole("menuitem", { name: "Edit channel" });
+  await expect(pendingEditItem).toBeVisible();
+  await expect(pendingEditItem).toBeDisabled();
+  await expect(pendingEditItem).toBeEnabled();
+  await page.keyboard.press("Escape");
+  await expect(pendingEditItem).toHaveCount(0);
+
+  await page.getByTestId("channel-general").click({ button: "right" });
+  const editItem = page.getByRole("menuitem", { name: "Edit channel" });
+  await expect(editItem).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Archive channel" }),
+  ).toBeVisible();
+
+  await editItem.click();
+  const editDialog = page.getByRole("dialog", { name: "Edit channel" });
+  await expect(editDialog).toBeVisible();
+  await expect(editDialog.getByTestId("channel-management-name")).toHaveValue(
+    "general",
+  );
+
+  await editDialog.getByTestId("channel-management-name").fill("general-chat");
+  await editDialog.getByTestId("channel-management-save-changes").click();
+  await expect(editDialog).not.toBeVisible();
+  await expect(page.getByTestId("stream-list")).toContainText("general-chat");
+
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByTestId("channel-management-trigger").click();
+  await expect(editDialog).toHaveCount(0);
+});
+
+test("channel context menu hides management actions from members and DMs", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await page.getByTestId("channel-management-trigger").click();
+  await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
+  await expect
+    .poll(async () => {
+      const commandLog = await readCommandPayloadLog(page);
+      return commandLog.some(
+        ({ command, payload }) =>
+          command === "get_channel_members" &&
+          (payload as { channelId?: string }).channelId === RANDOM_CHANNEL_ID,
+      );
+    })
+    .toBe(true);
+  await expect(page.getByTestId("channel-management-edit")).toHaveCount(0);
+  await page.getByTestId("auxiliary-panel-close").click();
+
+  await page.getByTestId("channel-random").click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Copy" })).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Edit channel" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("menuitem", { name: "Archive channel" }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  const firstDm = page
+    .getByTestId("dm-list")
+    .locator('[data-testid^="channel-"]')
+    .first();
+  await firstDm.click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Copy" })).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Edit channel" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("menuitem", { name: "Archive channel" }),
+  ).toHaveCount(0);
+});
+
+test("channel context menu archives a stream", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click({ button: "right" });
+  const archiveItem = page.getByRole("menuitem", { name: "Archive channel" });
+  await expect(archiveItem).toBeVisible();
+  await archiveItem.click();
+
+  await expect(page.getByTestId("channel-general")).toHaveCount(0);
+  await openChannelBrowser(page);
+  await expect(page.getByTestId("browse-channel-general")).toContainText(
+    "archived",
+  );
 });
 
 test("manage channel can archive and unarchive a stream", async ({ page }) => {

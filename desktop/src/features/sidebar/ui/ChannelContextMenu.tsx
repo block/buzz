@@ -1,4 +1,7 @@
+import * as React from "react";
+
 import {
+  Archive,
   Bell,
   BellOff,
   Check,
@@ -6,11 +9,22 @@ import {
   CircleDot,
   Copy,
   LogOut,
+  Pencil,
   Plus,
   Star,
   StarOff,
 } from "lucide-react";
+import { toast } from "sonner";
 
+import { useAppShell } from "@/app/AppShellContext";
+import {
+  useArchiveChannelMutation,
+  useChannelMembersQuery,
+} from "@/features/channels/hooks";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
 import {
   ContextMenuIconSlot,
@@ -20,12 +34,34 @@ import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { Channel } from "@/shared/api/types";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import {
+  ContextMenu,
+  ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuTrigger,
   ContextMenuSub,
   ContextMenuSubContent,
   ContextMenuSubTrigger,
 } from "@/shared/ui/context-menu";
+
+export function ChannelContextMenu({
+  children,
+  contentProps,
+  modal,
+}: {
+  children: React.ReactNode;
+  contentProps: React.ComponentProps<typeof ChannelContextMenuItems>;
+  modal?: boolean;
+}) {
+  return (
+    <ContextMenu modal={modal}>
+      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuContent>
+        <ChannelContextMenuItems {...contentProps} />
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
 
 function MoveToSectionSubmenu({
   channelId,
@@ -166,6 +202,52 @@ export function ChannelContextMenuItems({
   onCreateSectionForChannel?: (channelId: string) => void;
   onLeaveChannel?: (channel: Channel) => void;
 }) {
+  const { openChannelManagement } = useAppShell();
+  const currentPubkey = useIdentityQuery().data?.pubkey;
+  const archiveChannelMutation = useArchiveChannelMutation(channel.id);
+  const membersQuery = useChannelMembersQuery(
+    channel.id,
+    channel.channelType !== "dm",
+  );
+  const ownerPubkeys =
+    membersQuery.data
+      ?.filter(
+        (member) => member.role === "owner" && member.pubkey !== currentPubkey,
+      )
+      .map((member) => member.pubkey) ?? [];
+  const ownerProfilesQuery = useUsersBatchQuery(ownerPubkeys, {
+    enabled: ownerPubkeys.length > 0,
+  });
+  const selfMember = membersQuery.data?.find(
+    (member) => member.pubkey === currentPubkey,
+  );
+  const canManageOwnedAgentChannel = ownerPubkeys.some((pubkey) =>
+    ownsAuthorAgent(
+      ownerProfilesQuery.data?.profiles[normalizePubkey(pubkey)],
+      currentPubkey,
+    ),
+  );
+  const canManageChannel =
+    selfMember?.role === "owner" ||
+    selfMember?.role === "admin" ||
+    canManageOwnedAgentChannel;
+  const hasResolvedMembers =
+    membersQuery.data !== undefined || membersQuery.isError;
+  const hasResolvedOwnerProfiles =
+    ownerPubkeys.length === 0 ||
+    ownerProfilesQuery.data !== undefined ||
+    ownerProfilesQuery.isError;
+  const isManagementCandidate =
+    channel.channelType !== "dm" && channel.archivedAt === null;
+  // Context-menu content mounts per open session. Once these rows are reserved,
+  // keep them until close so permission resolution cannot move another action
+  // beneath the pointer; eligible rows transition from disabled to enabled.
+  const [showManagementActions] = React.useState(
+    () =>
+      isManagementCandidate &&
+      (!hasResolvedMembers || !hasResolvedOwnerProfiles || canManageChannel),
+  );
+  const disableManagementActions = !canManageChannel;
   const showStar = Boolean(onStarChannel && onUnstarChannel);
   const showReadToggle = hasUnread
     ? Boolean(onMarkChannelRead)
@@ -191,6 +273,44 @@ export function ChannelContextMenuItems({
           onUnassignChannel={onUnassignChannel ?? (() => {})}
           onCreateSectionForChannel={onCreateSectionForChannel ?? (() => {})}
         />
+      ) : null}
+      {showManagementActions ? (
+        <>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            disabled={disableManagementActions}
+            onSelect={() =>
+              deferMenuAction(() =>
+                openChannelManagement(channel.id, { edit: true }),
+              )
+            }
+          >
+            <ContextMenuIconSlot>
+              <Pencil className="h-4 w-4" />
+            </ContextMenuIconSlot>
+            <span>Edit channel</span>
+          </ContextMenuItem>
+          <ContextMenuItem
+            className="text-destructive focus:text-destructive"
+            disabled={disableManagementActions}
+            onSelect={() =>
+              deferMenuAction(() => {
+                void archiveChannelMutation.mutateAsync().catch((error) => {
+                  toast.error(
+                    error instanceof Error
+                      ? error.message
+                      : "Failed to archive channel.",
+                  );
+                });
+              })
+            }
+          >
+            <ContextMenuIconSlot>
+              <Archive className="h-4 w-4" />
+            </ContextMenuIconSlot>
+            <span>Archive channel</span>
+          </ContextMenuItem>
+        </>
       ) : null}
       {showReadToggle ? <ContextMenuSeparator /> : null}
       {hasUnread && onMarkChannelRead ? (
