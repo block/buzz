@@ -23,7 +23,6 @@ import {
 type AgentDialogCreateProps = {
   mode: "definition";
   initialValues?: CreatePersonaInput | null;
-  startAfterCreateDefault?: boolean;
   onOpenChange: (open: boolean) => void;
   definitionError: Error | null;
   isDefinitionPending: boolean;
@@ -105,7 +104,6 @@ export function AgentDialog(props: AgentDialogProps) {
 
 function AgentCreateDialogRouter({
   initialValues: providedInitialValues,
-  startAfterCreateDefault = true,
   onOpenChange,
   definitionError,
   isDefinitionPending,

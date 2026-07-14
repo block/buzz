@@ -22,7 +22,6 @@ export function AgentManagementDialogs() {
           onSubmitDefinition={management.submitCreate}
           runtimes={management.runtimes}
           runtimesLoading={management.runtimesLoading}
-          startAfterCreateDefault
         />
       ) : null}
       {management.createdAgent ? (
