@@ -604,7 +604,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
             ref={projectDetailHeaderChromeRef}
           >
             <div
-              className="pointer-events-auto flex min-h-[3.25rem] items-center justify-between gap-3 px-4 py-2"
+              className="pointer-events-auto flex min-h-[2.75rem] items-center justify-between gap-3 px-4 py-1.5"
               data-tauri-drag-region
             >
               <nav
@@ -675,7 +675,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
               </nav>
               {project.projectChannelId ? (
                 <Button
-                  className="h-9 shrink-0 gap-1.5"
+                  className="h-8 shrink-0 gap-1.5"
                   onClick={() => {
                     if (project.projectChannelId) {
                       void goChannel(project.projectChannelId);

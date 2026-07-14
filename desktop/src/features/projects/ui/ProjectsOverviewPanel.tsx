@@ -1,7 +1,6 @@
 import { CircleDot, FolderGit2, GitPullRequest, Radio } from "lucide-react";
 import type * as React from "react";
 
-import { WorkspaceEmojiIcon } from "@/features/workspaces/ui/WorkspaceSwitcher";
 import type {
   Project,
   ProjectActivitySummary,
@@ -23,7 +22,6 @@ type ProjectsOverviewPanelProps = {
   metadata: React.ReactNode;
   onSelectSection: (section: ProjectsOverviewSection) => void;
   projects: Project[];
-  relayName: string;
   summaries?: Record<string, ProjectActivitySummary>;
 };
 
@@ -94,7 +92,6 @@ export function ProjectsOverviewPanel({
   metadata,
   onSelectSection,
   projects,
-  relayName,
   summaries,
 }: ProjectsOverviewPanelProps) {
   const stats = overviewStats(projects, summaries);
@@ -103,20 +100,7 @@ export function ProjectsOverviewPanel({
   return (
     <section className="-mx-4 mb-4 bg-card">
       <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem] 2xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <div className="order-1 flex min-w-0 items-center gap-3 p-4 xl:order-none">
-          <WorkspaceEmojiIcon className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/40 text-3xl" />
-          <div className="min-w-0 flex-1 space-y-1">
-            <h2 className="text-xl font-semibold leading-6 tracking-tight text-foreground">
-              {relayName} Projects
-            </h2>
-            <p className="line-clamp-2 max-w-2xl text-sm font-normal text-muted-foreground sm:line-clamp-none">
-              Browse shared repositories, pull requests, and local project
-              checkouts in this workspace.
-            </p>
-          </div>
-        </div>
-        <div className="hidden xl:block" />
-        <div className="order-2 grid grid-cols-2 gap-2 p-4 sm:gap-3 xl:order-none xl:col-start-1 xl:row-start-2 xl:grid-cols-4">
+        <div className="order-1 grid grid-cols-2 gap-2 p-4 pt-0 sm:gap-3 xl:order-none xl:col-start-1 xl:row-start-1 xl:grid-cols-4">
           <StatPill
             count={projects.length}
             icon={FolderGit2}
@@ -142,9 +126,9 @@ export function ProjectsOverviewPanel({
             onClick={() => onSelectSection("issues")}
           />
         </div>
-        <div className="order-3 min-w-0 overflow-hidden xl:order-none xl:col-start-1 xl:row-start-3">
+        <div className="order-2 min-w-0 overflow-hidden xl:order-none xl:col-start-1 xl:row-start-2">
           <div className="flex items-center justify-between gap-3 px-4 pt-3">
-            <h3 className="text-sm font-semibold text-foreground">
+            <h3 className="text-base font-semibold text-foreground">
               Contribution Activity
             </h3>
             <ProjectsContributionLegend />
@@ -156,10 +140,8 @@ export function ProjectsOverviewPanel({
             />
           </div>
         </div>
-        <aside className="order-5 min-w-0 border-t border-border/40 px-4 py-4 xl:order-none xl:col-start-2 xl:row-span-2 xl:row-start-2 xl:border-t-0">
-          {metadata}
-        </aside>
-        <div className="order-4 min-w-0 p-4 pt-2 xl:order-none xl:col-start-1 xl:row-start-4">
+        {metadata}
+        <div className="order-3 min-w-0 p-4 pt-2 xl:order-none xl:col-start-1 xl:row-start-3">
           {children}
         </div>
       </div>

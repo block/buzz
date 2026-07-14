@@ -15,6 +15,11 @@ type ProjectsToolbarProps = {
   onFilterChange: (filter: ProjectsFilter) => void;
   searchOpen: boolean;
   onSearchOpenChange: (open: boolean) => void;
+  /**
+   * When true the leading search button is pulled into the activity-timeline
+   * gutter so it lines up with the timeline node icons below it.
+   */
+  timeline?: boolean;
 };
 
 export function ProjectsViewModeToggle({
@@ -58,6 +63,7 @@ export function ProjectsToolbar({
   onFilterChange,
   searchOpen,
   onSearchOpenChange,
+  timeline = false,
 }: ProjectsToolbarProps) {
   const filterOptions: Array<{
     compactLabel?: string;
@@ -74,13 +80,14 @@ export function ProjectsToolbar({
     { label: "Issues", value: "issues" },
     { label: "Mine", value: "mine" },
     { label: "Local", value: "local" },
-    { label: "Agents", value: "agents" },
-    { label: "Users", value: "users" },
   ];
 
   return (
     <div
-      className="pointer-events-auto flex min-h-[3.25rem] min-w-0 items-center px-4 py-2"
+      className={cn(
+        "pointer-events-auto flex min-h-[3.25rem] min-w-0 items-center py-2",
+        timeline ? "pl-2 pr-4" : "px-4",
+      )}
       data-tauri-drag-region
     >
       <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
@@ -89,7 +96,9 @@ export function ProjectsToolbar({
           aria-label="Ask an agent about your projects"
           className={cn(
             "h-8 w-8 shrink-0 rounded-full px-0",
-            searchOpen && SELECTED_MENU_ITEM_CLASSES,
+            searchOpen
+              ? SELECTED_MENU_ITEM_CLASSES
+              : "border border-border/60 bg-transparent",
           )}
           onClick={() => onSearchOpenChange(!searchOpen)}
           size="sm"
@@ -98,14 +107,14 @@ export function ProjectsToolbar({
         >
           <Search className="h-4 w-4" />
         </Button>
-        <fieldset className="flex min-w-0 flex-1 flex-nowrap items-center gap-0.5 overflow-x-auto scrollbar-none [&::-webkit-scrollbar]:hidden">
+        <fieldset className="flex min-w-0 flex-1 flex-nowrap items-center gap-1 overflow-x-auto scrollbar-none [&::-webkit-scrollbar]:hidden">
           <legend className="sr-only">Project owner filter</legend>
           {filterOptions.map((option) => (
             <Button
               aria-label={option.label}
               aria-pressed={filter === option.value}
               className={cn(
-                "h-8 shrink-0 gap-1.5 rounded-full px-2.5 text-xs xl:px-3 xl:text-sm",
+                "h-7 shrink-0 gap-1.5 rounded-full px-2 text-xs xl:px-2.5 xl:text-sm",
                 !searchOpen &&
                   filter === option.value &&
                   SELECTED_MENU_ITEM_CLASSES,

@@ -70,52 +70,57 @@ export function ProjectsOverviewRail({
   const languages = overviewLanguages(snapshots);
 
   return (
-    <div className="grid h-full grid-cols-1 gap-4 sm:grid-cols-2 xl:flex xl:flex-col xl:gap-[1.125rem]">
-      <OverviewRailSection title="People">
-        {people.length > 0 ? (
-          <div className="flex flex-wrap gap-1.5">
-            {people.slice(0, 18).map((pubkey) => {
-              const profile = profiles?.[normalizePubkey(pubkey)];
-              const label = resolveUserLabel({ profiles, pubkey });
-              return (
-                <Tooltip key={pubkey}>
-                  <TooltipTrigger asChild>
-                    <span className="inline-flex">
-                      <UserAvatar
-                        accent={profile?.isAgent === true}
-                        avatarUrl={profile?.avatarUrl ?? null}
-                        displayName={label}
-                        size="sm"
-                      />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>{label}</TooltipContent>
-                </Tooltip>
-              );
-            })}
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">No people yet.</p>
-        )}
-      </OverviewRailSection>
+    <>
+      <div className="order-4 min-w-0 border-t border-border/40 px-4 py-4 xl:order-none xl:col-start-2 xl:row-start-1 xl:border-t-0 xl:pt-0">
+        <OverviewRailSection title="People" titleClassName="text-base">
+          {people.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {people.slice(0, 18).map((pubkey) => {
+                const profile = profiles?.[normalizePubkey(pubkey)];
+                const label = resolveUserLabel({ profiles, pubkey });
+                return (
+                  <Tooltip key={pubkey}>
+                    <TooltipTrigger asChild>
+                      <span className="inline-flex">
+                        <UserAvatar
+                          accent={profile?.isAgent === true}
+                          avatarUrl={profile?.avatarUrl ?? null}
+                          displayName={label}
+                          size="sm"
+                        />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>{label}</TooltipContent>
+                  </Tooltip>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No people yet.</p>
+          )}
+        </OverviewRailSection>
+      </div>
 
-      <OverviewRailSection title="Top Languages">
-        {languages.length > 0 ? (
-          <LanguageChips languages={languages} />
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            {snapshotsLoading
-              ? "Scanning repositories..."
-              : "No language data is available yet."}
-          </p>
-        )}
-      </OverviewRailSection>
+      <div className="order-5 min-w-0 space-y-7 border-t border-border/40 px-4 pb-4 pt-3 xl:order-none xl:col-start-2 xl:row-span-2 xl:row-start-2 xl:border-t-0">
+        <OverviewRailSection title="Top Languages" titleClassName="text-base">
+          {languages.length > 0 ? (
+            <LanguageChips languages={languages} />
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {snapshotsLoading
+                ? "Scanning repositories..."
+                : "No language data is available yet."}
+            </p>
+          )}
+        </OverviewRailSection>
 
-      <div className="sm:col-span-2 xl:col-span-1">
-        <OverviewRailSection title="Active Repositories">
+        <OverviewRailSection
+          title="Active Repositories"
+          titleClassName="text-base"
+        >
           {children}
         </OverviewRailSection>
       </div>
-    </div>
+    </>
   );
 }

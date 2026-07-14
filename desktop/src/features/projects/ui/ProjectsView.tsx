@@ -53,6 +53,7 @@ import {
 } from "@/features/projects/lib/projectsViewHelpers";
 import { useOpenProjectTerminal } from "@/features/projects/ui/useOpenProjectTerminal";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
+import { WorkspaceEmojiIcon } from "@/features/workspaces/ui/WorkspaceSwitcher";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
@@ -465,37 +466,65 @@ export function ProjectsView() {
     />
   );
 
-  const projectsToolbar = (
+  const projectsHeader = (
+    <div className="pointer-events-auto flex min-w-0 items-center gap-3 px-4 pb-1 pt-4">
+      <WorkspaceEmojiIcon className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/40 text-3xl" />
+      <div className="min-w-0 flex-1 space-y-0.5">
+        <h2 className="text-xl font-semibold leading-6 tracking-tight text-foreground">
+          {activeWorkspace?.name || "Relay"} Projects
+        </h2>
+        <p className="line-clamp-2 max-w-2xl text-base font-normal text-muted-foreground sm:line-clamp-none">
+          Browse shared repositories, pull requests, and local project checkouts
+          in this workspace.
+        </p>
+      </div>
+    </div>
+  );
+
+  const renderProjectsToolbar = (timeline: boolean) => (
     <ProjectsToolbar
       filter={filter}
       onFilterChange={handleFilterChange}
       onSearchOpenChange={setSearchOpen}
       searchOpen={searchOpen}
+      timeline={timeline}
     />
   );
 
   return (
-    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <div
-        className={cn(
-          "pointer-events-none relative z-30 overflow-hidden rounded-tl-xl bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
-          channelChrome.negativeMargin,
-          topChromeInset.divider,
-        )}
-        ref={projectsHeaderChromeRef}
-      >
-        {projectsToolbar}
-      </div>
-
+    <div
+      className={cn(
+        "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tl-xl",
+        topChromeInset.divider,
+      )}
+    >
       {searchOpen ? (
-        <ProjectsAgentPromptPage
-          onClose={() => setSearchOpen(false)}
-          projects={projects}
-          workspaceId={activeWorkspace?.id ?? null}
-        />
+        <>
+          <div
+            className={cn(
+              "pointer-events-none relative z-30 overflow-hidden bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
+              channelChrome.negativeMargin,
+            )}
+            ref={projectsHeaderChromeRef}
+          >
+            {projectsHeader}
+            {renderProjectsToolbar(false)}
+          </div>
+          <ProjectsAgentPromptPage
+            onClose={() => setSearchOpen(false)}
+            projects={projects}
+            workspaceId={activeWorkspace?.id ?? null}
+          />
+        </>
       ) : (
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto px-4 pb-4">
-          <div className="w-full min-w-0 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1rem)]">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto">
+          {projectsHeader}
+          {filter === "all" ? null : (
+            <div className="sticky top-0 z-30 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55">
+              {renderProjectsToolbar(false)}
+            </div>
+          )}
+          <div className="w-full min-w-0 px-4 pb-4 pt-4">
             {filter === "all" ? (
               <ProjectsOverviewPanel
                 localRepositoryCount={localProjectCount}
@@ -512,15 +541,16 @@ export function ProjectsView() {
                 }
                 onSelectSection={handleFilterChange}
                 projects={projects}
-                relayName={activeWorkspace?.name || "Relay"}
                 summaries={activitySummariesQuery.data}
               >
-                <section className="space-y-3">
-                  <h3 className="text-sm font-semibold text-foreground">
-                    Recent activity
-                  </h3>
-                  {activityFeed}
-                </section>
+                <div className="sticky top-0 z-30 -mx-4 mb-4 mt-2 bg-card/80 backdrop-blur-md supports-backdrop-filter:bg-card/70">
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none absolute -bottom-6 left-[23px] top-[2.625rem] z-0 w-px bg-border/45"
+                  />
+                  {renderProjectsToolbar(true)}
+                </div>
+                <section className="space-y-3">{activityFeed}</section>
               </ProjectsOverviewPanel>
             ) : (
               <section className="space-y-3">

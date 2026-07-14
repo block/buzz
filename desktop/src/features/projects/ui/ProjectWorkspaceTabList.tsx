@@ -4,17 +4,17 @@ import type { ProjectPullRequest } from "@/features/projects/hooks";
 import { TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
 const PROJECT_TAB_TRIGGER_CLASS =
-  "h-8 gap-1.5 rounded-full px-3 text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-sidebar-active data-[state=active]:text-sidebar-active-foreground data-[state=active]:shadow-xs data-[state=active]:hover:bg-sidebar-active data-[state=active]:hover:text-sidebar-active-foreground";
+  "h-7 gap-1.5 rounded-full px-2 text-xs text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-sidebar-active data-[state=active]:text-sidebar-active-foreground data-[state=active]:shadow-xs data-[state=active]:hover:bg-sidebar-active data-[state=active]:hover:text-sidebar-active-foreground xl:px-2.5 xl:text-sm";
 
 const PROJECT_TAB_SELECTED_CLASS =
   " bg-sidebar-active text-sidebar-active-foreground shadow-xs hover:bg-sidebar-active hover:text-sidebar-active-foreground";
 
 export function ProjectTabsList({ prsActive }: { prsActive?: boolean }) {
   return (
-    <TabsList className="h-9 w-fit justify-start gap-0.5 bg-transparent p-0">
+    <TabsList className="h-9 w-fit justify-start gap-1 bg-transparent p-0">
       <TabsTrigger
         aria-label="Overview"
-        className={PROJECT_TAB_TRIGGER_CLASS}
+        className={`${PROJECT_TAB_TRIGGER_CLASS} h-8 w-8 border border-border/60 px-0 data-[state=active]:border-transparent`}
         title="Overview"
         value="overview"
       >
