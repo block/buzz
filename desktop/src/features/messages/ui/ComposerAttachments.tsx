@@ -142,6 +142,7 @@ function ComposerAgentSnapshotCard({
         <AttachmentActions className="ml-4">
           <AttachmentAction
             aria-label={`Remove ${displayName}`}
+            className="border-0 bg-transparent text-muted-foreground/70 shadow-none hover:text-foreground hover:shadow-none focus-visible:bg-muted focus-visible:ring-0"
             data-testid="composer-agent-snapshot-remove"
             onClick={() => onRemove(attachment.url)}
             title="Remove"

@@ -640,6 +640,23 @@ test("custom personas share with people and keep export separate", async ({
   const composerAgentCard = page.getByTestId("composer-agent-snapshot-card");
   await expect(composerAgentCard).toBeVisible();
   await expect(composerAgentCard).toContainText("Animation Auditor");
+  const composerRemoveButton = page.getByTestId(
+    "composer-agent-snapshot-remove",
+  );
+  await expect(composerRemoveButton).toHaveCSS("border-top-width", "0px");
+  await composerRemoveButton.focus();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(composerRemoveButton).toBeFocused();
+  expect(
+    await composerRemoveButton.evaluate(
+      (button) => getComputedStyle(button).boxShadow,
+    ),
+  ).not.toContain("1px");
+  await expect(composerRemoveButton).not.toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
   await expect(page.getByTestId("send-message")).toBeEnabled();
   await page.getByTestId("send-message").click();
 
