@@ -1180,4 +1180,42 @@ mod tests {
         // Cleanup.
         let _ = store2.delete(key);
     }
+
+    #[ignore = "requires real OS keychain (run locally)"]
+    #[test]
+    fn delete_all_with_legacy_cleanup_removes_per_key_identity() {
+        let svc = "buzz-test-delete-all-legacy";
+        let key = "identity";
+        let value = "nsec1legacytest";
+
+        // Seed a legacy per-key entry (old format, pre-blob migration).
+        let entry = keyring_entry(svc, key).unwrap();
+        entry.set_password(value).unwrap();
+
+        // Also seed a blob with a different key to exercise the full path.
+        let store = SecretStore::keyring(svc);
+        store.store("agent:abc123", "nsec1agent").unwrap();
+
+        // Legacy per-key identity should be discoverable via probe.
+        let store2 = SecretStore::keyring(svc);
+        assert_eq!(store2.probe(key), KeyringProbe::Present);
+
+        // Wipe everything via the sign-out path.
+        store2.delete_all_with_legacy_cleanup().unwrap();
+
+        // Fresh store — neither the blob nor the per-key entry should remain.
+        let store3 = SecretStore::keyring(svc);
+        assert_eq!(
+            store3.probe(key),
+            KeyringProbe::ReachableButEmpty,
+            "per-key identity must not survive delete_all_with_legacy_cleanup"
+        );
+        assert_eq!(
+            store3.load(key).unwrap(),
+            None,
+            "load must not resurrect the legacy per-key identity"
+        );
+        // Agent key should also be gone.
+        assert_eq!(store3.load("agent:abc123").unwrap(), None);
+    }
 }

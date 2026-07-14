@@ -322,8 +322,9 @@ const overrides = new Map([
   // the interprocess advisory lock; +8 lines. Load-bearing; queued to split.
   // signout-wipe phase 2: delete_all_with_legacy_cleanup replaces delete_all;
   // reads blob keys + deletes per-key legacy entries to prevent resurrection.
-  // Net growth ~36 lines over prior cap. Load-bearing correctness fix.
-  ["src-tauri/src/secret_store.rs", 1190],
+  // + regression test for per-key resurrection via real OS keychain.
+  // Net growth ~36+32 lines over prior cap. Load-bearing correctness fix.
+  ["src-tauri/src/secret_store.rs", 1222],
   // sign-out wipe: Sign Out section (AlertDialog + controlled state) added
   // at the bottom of the Profile settings page. Load-bearing UX feature;
   // queued to split when ProfileSettingsCard is broken into sub-components.
