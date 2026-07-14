@@ -331,7 +331,9 @@ const overrides = new Map([
   // sign-out wipe: Sign Out section (AlertDialog + controlled state) added
   // at the bottom of the Profile settings page. Load-bearing UX feature;
   // queued to split when ProfileSettingsCard is broken into sub-components.
-  ["src/features/settings/ui/ProfileSettingsCard.tsx", 1005],
+  // +20 lines: scroll-position save/restore across avatar editor open/close
+  // to prevent layout shift from the Sign Out section causing a viewport jump.
+  ["src/features/settings/ui/ProfileSettingsCard.tsx", 1033],
   // keyring-dev-isolation: keyring_service() fn (7 lines) replaces the const
   // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
   ["src-tauri/src/app_state.rs", 1042],

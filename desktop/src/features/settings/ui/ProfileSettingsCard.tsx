@@ -264,9 +264,11 @@ export function ProfileSettingsCard({
   const [isSignOutPending, setIsSignOutPending] = React.useState(false);
   const displayNameInputRef = React.useRef<HTMLInputElement>(null);
   const aboutTextareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const sectionRef = React.useRef<HTMLElement>(null);
   const isEditingProfileMetadataRef = React.useRef(false);
   const avatarEditorOpenFrameRef = React.useRef<number | null>(null);
   const avatarEditorFinishTimeoutRef = React.useRef<number | null>(null);
+  const savedScrollTopRef = React.useRef<number | null>(null);
   isEditingProfileMetadataRef.current = isEditingProfileMetadata;
 
   React.useEffect(() => {
@@ -423,14 +425,31 @@ export function ProfileSettingsCard({
     window.clearTimeout(avatarEditorFinishTimeoutRef.current);
     avatarEditorFinishTimeoutRef.current = null;
   }, []);
+  const saveScrollPosition = React.useCallback(() => {
+    const el = sectionRef.current;
+    if (!el) return;
+    const scroller = el.closest<HTMLElement>("[class*='overflow-y']");
+    if (scroller) savedScrollTopRef.current = scroller.scrollTop;
+  }, []);
+  const restoreScrollPosition = React.useCallback(() => {
+    const saved = savedScrollTopRef.current;
+    if (saved == null) return;
+    savedScrollTopRef.current = null;
+    const el = sectionRef.current;
+    if (!el) return;
+    const scroller = el.closest<HTMLElement>("[class*='overflow-y']");
+    if (scroller) scroller.scrollTop = saved;
+  }, []);
   const closeAvatarEditor = React.useCallback(() => {
     clearAvatarEditorFinishTimeout();
     setIsAvatarEditorOpen(false);
     setIsAvatarEditorFinishing(false);
-  }, [clearAvatarEditorFinishTimeout]);
+    restoreScrollPosition();
+  }, [clearAvatarEditorFinishTimeout, restoreScrollPosition]);
   const completeAvatarEditorClose = React.useCallback(() => {
     setIsAvatarEditorOpen(false);
     clearAvatarEditorFinishTimeout();
+    restoreScrollPosition();
     avatarEditorFinishTimeoutRef.current = window.setTimeout(
       () => {
         avatarEditorFinishTimeoutRef.current = null;
@@ -438,7 +457,11 @@ export function ProfileSettingsCard({
       },
       shouldReduceMotion ? 0 : AVATAR_EDITOR_TRANSITION_MS,
     );
-  }, [clearAvatarEditorFinishTimeout, shouldReduceMotion]);
+  }, [
+    clearAvatarEditorFinishTimeout,
+    restoreScrollPosition,
+    shouldReduceMotion,
+  ]);
   const reopenAvatarEditorAfterClose = React.useCallback(() => {
     clearAvatarEditorFinishTimeout();
     setShouldRenderAvatarEditor(true);
@@ -447,6 +470,7 @@ export function ProfileSettingsCard({
   }, [clearAvatarEditorFinishTimeout]);
 
   const openAvatarEditor = React.useCallback(() => {
+    saveScrollPosition();
     setShouldRenderAvatarEditor(true);
     setIsAvatarEditorFinishing(false);
     clearAvatarEditorFinishTimeout();
@@ -459,7 +483,7 @@ export function ProfileSettingsCard({
       avatarEditorOpenFrameRef.current = null;
       setIsAvatarEditorOpen(true);
     });
-  }, [clearAvatarEditorFinishTimeout]);
+  }, [clearAvatarEditorFinishTimeout, saveScrollPosition]);
 
   const saveProfile = React.useCallback(async () => {
     if (!canSave) {
@@ -547,7 +571,11 @@ export function ProfileSettingsCard({
   }, []);
 
   return (
-    <section className="min-w-0" data-testid="settings-profile">
+    <section
+      className="min-w-0"
+      data-testid="settings-profile"
+      ref={sectionRef}
+    >
       <div>
         <SettingsSectionHeader
           title="Profile"
