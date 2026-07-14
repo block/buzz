@@ -65,8 +65,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::operator::list_owned_communities).post(api::operator::provision_community),
         )
         .route(
+            "/operator/communities/archive",
+            post(api::operator::archive_community),
+        )
+        .route(
             "/operator/communities/availability",
             get(api::operator::community_availability),
+        )
+        .route(
+            "/operator/communities/transfer",
+            post(api::operator::transfer_community),
         )
         // Relay invites: mint (owner/admin) + claim (membership-gate exempt)
         .route("/api/invites", post(api::invites::mint_invite))

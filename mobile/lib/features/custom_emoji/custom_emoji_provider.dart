@@ -3,7 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/relay/relay.dart';
 import 'custom_emoji.dart';
 
-/// Workspace custom-emoji palette (NIP-30, per-user kind:30030 sets unioned).
+/// Community custom-emoji palette (NIP-30, per-user kind:30030 sets unioned).
 ///
 /// On build, fetches every member's set and collapses to one entry per
 /// shortcode (see [unionCustomEmoji]). Re-fetches when the relay session
@@ -40,7 +40,7 @@ class CustomEmojiPaletteNotifier extends AsyncNotifier<List<CustomEmoji>> {
     }
   }
 
-  /// Force a re-fetch of the workspace palette.
+  /// Force a re-fetch of the community palette.
   Future<void> refresh() async {
     state = const AsyncValue.loading();
     state = await AsyncValue.guard(_fetch);

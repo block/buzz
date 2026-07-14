@@ -331,11 +331,11 @@ export function HomeView({
     enabled: feedProfilePubkeys.length > 0,
   });
   const feedProfiles = feedProfilesQuery.data?.profiles;
-  // Agent set for the inbox list/detail bot badges: the workspace-scoped
+  // Agent set for the inbox list/detail bot badges: the community-scoped
   // baseline widened with this surface's profile lookup.
-  const workspaceAgentPubkeys = useKnownAgentPubkeys();
+  const communityAgentPubkeys = useKnownAgentPubkeys();
   const inboxAgentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set(workspaceAgentPubkeys);
+    const pubkeys = new Set(communityAgentPubkeys);
 
     for (const [pubkey, profile] of Object.entries(feedProfiles ?? {})) {
       if (profile.isAgent) {
@@ -344,7 +344,7 @@ export function HomeView({
     }
 
     return pubkeys;
-  }, [feedProfiles, workspaceAgentPubkeys]);
+  }, [feedProfiles, communityAgentPubkeys]);
   const inboxItems = React.useMemo(
     () =>
       buildInboxItems({
@@ -788,10 +788,11 @@ export function HomeView({
                     setIsDeletingMessage(false);
                   });
               }}
-              onOpenChannel={(channelId) => {
+              onManageChannel={(channelId) => {
                 handleCloseProfilePanel();
                 setManagedChannelId(channelId);
               }}
+              onOpenContext={onOpenContext}
               onSendReply={async ({
                 content,
                 mediaTags,

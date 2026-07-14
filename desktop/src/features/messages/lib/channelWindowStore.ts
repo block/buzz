@@ -178,7 +178,7 @@ export function mergeLiveThreadSummary(
 
 /**
  * Merge a live top-level event without mutating authoritative page boundaries.
- * Events below the oldest loaded boundary wait for ordinary relay pagination.
+ * Events below an open oldest boundary wait for ordinary relay pagination.
  */
 export function mergeLiveChannelWindowEvent(
   current: ChannelWindowStore,
@@ -205,7 +205,13 @@ export function mergeLiveChannelWindowEvent(
   }
   const oldestPage = current.pages[current.pages.length - 1];
   const oldest = oldestPage?.rows[oldestPage.rows.length - 1]?.event;
-  if (oldest && compareRelayOrder(event, oldest) >= 0) return current;
+  if (
+    oldest &&
+    (event.created_at < oldest.created_at ||
+      (oldestPage.hasMore && compareRelayOrder(event, oldest) >= 0))
+  ) {
+    return current;
+  }
   return {
     ...current,
     liveOverlay: current.liveOverlay

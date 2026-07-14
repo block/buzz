@@ -44,6 +44,7 @@ import type {
   RawAcpRuntimeCatalogEntry,
   RawInstallRuntimeResult,
 } from "@/shared/api/tauri";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type TestIdentity = {
   privateKey: string;
@@ -68,6 +69,8 @@ type MockManagedAgentSeed = {
   backend?: RawManagedAgent["backend"];
   lastError?: string | null;
   lastErrorCode?: number | null;
+  needsRestart?: boolean;
+  autoRestartOnConfigChange?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
 };
@@ -124,17 +127,23 @@ type E2eConfig = {
     agentListDelayMs?: number;
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
     addChannelMembersDelayMs?: number;
+    channelMembersReadDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
+    channelsReadDelayMs?: number;
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
     feedReadError?: string;
     canvasReadError?: string;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
-     *  workspace-switch gate. 0/undefined = instant. */
-    applyWorkspaceDelayMs?: number;
+     *  community-switch gate. 0/undefined = instant. */
+    applyCommunityDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Reject successive kind-9 sends with these messages, then resume. */
+    sendMessageErrors?: string[];
+    /** Reject successive managed-agent starts, then resume. */
+    startManagedAgentErrors?: string[];
     /** Delay (ms) after snapshotting a thread-replies page so E2E tests can
      *  deliver live reply/aux events while an older response is in flight. */
     threadRepliesDelayMs?: number;
@@ -537,6 +546,7 @@ type RawManagedAgent = {
   last_exit_code: number | null;
   last_error: string | null;
   last_error_code: number | null;
+  needs_restart?: boolean;
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
@@ -663,7 +673,7 @@ function createMockRelayMembershipEvent(): RelayEvent {
 
 /**
  * Per-user custom emoji sets (kind:30030) the mock WS serves for
- * `listCustomEmoji` REQs. The workspace palette is the client-side UNION of
+ * `listCustomEmoji` REQs. The community palette is the client-side UNION of
  * every member's own set (d=`buzz:custom-emoji`). We serve TWO member-authored
  * sets from distinct pubkeys so the e2e exercises the union/collapse path, not
  * a single relay-owned set. `:buzz:` is the stable shortcode exercised by
@@ -1197,6 +1207,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     last_exit_code: agent.last_exit_code,
     last_error: agent.last_error,
     last_error_code: agent.last_error_code,
+    needs_restart: agent.needs_restart ?? false,
     log_path: agent.log_path,
     start_on_app_launch: agent.start_on_app_launch,
     auto_restart_on_config_change: agent.auto_restart_on_config_change ?? true,
@@ -1728,9 +1739,10 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     last_exit_code: null,
     last_error: seed.lastError ?? null,
     last_error_code: seed.lastErrorCode ?? null,
+    needs_restart: seed.needsRestart ?? false,
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
-    auto_restart_on_config_change: true,
+    auto_restart_on_config_change: seed.autoRestartOnConfigChange ?? true,
     backend: seed.backend ?? { type: "local" },
     backend_agent_id: null,
     respond_to: seed.respondTo ?? "owner-only",
@@ -2271,7 +2283,7 @@ const mockChannels: MockChannel[] = [
     visibility: "private",
     description: "Company announcements",
     topic: "Leadership updates",
-    purpose: "Read-only announcements for the workspace.",
+    purpose: "Read-only announcements for the community.",
     last_message_at: null,
     archived_at: null,
     created_by: ALICE_PUBKEY,
@@ -4441,7 +4453,7 @@ const MOCK_PROJECT_SEEDS = [
     dtag: "buzz",
     name: "buzz",
     description:
-      "Relay, desktop, and mobile clients for the Buzz workspace platform.",
+      "Relay, desktop, and mobile clients for the Buzz community platform.",
     owner: MOCK_IDENTITY_PUBKEY,
     contributors: [ALICE_PUBKEY, BOB_PUBKEY, CHARLIE_PUBKEY],
     activityLevel: 4,
@@ -4741,6 +4753,13 @@ async function submitSignedEvent(
 }
 
 async function handleGetChannels(config: E2eConfig | undefined) {
+  const channelsReadDelayMs = config?.mock?.channelsReadDelayMs ?? 0;
+  if (channelsReadDelayMs > 0) {
+    await new Promise((resolve) =>
+      window.setTimeout(resolve, channelsReadDelayMs),
+    );
+  }
+
   const channelsReadError = config?.mock?.channelsReadError;
   if (channelsReadError) {
     throw new Error(channelsReadError);
@@ -5503,6 +5522,11 @@ async function handleGetChannelMembers(
   args: { channelId: string },
   config: E2eConfig | undefined,
 ): Promise<RawChannelMembersResponse> {
+  const delayMs = config?.mock?.channelMembersReadDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const channel = getMockChannel(args.channelId);
@@ -5819,9 +5843,13 @@ async function handleAddChannelMembers(
     const channel = getMockChannel(args.channelId);
     const added: string[] = [];
     const errors: RawAddChannelMembersResponse["errors"] = [];
+    const existingPubkeys = new Set(
+      channel.members.map((member) => normalizePubkey(member.pubkey)),
+    );
 
     for (const pubkey of args.pubkeys) {
-      if (channel.members.some((member) => member.pubkey === pubkey)) {
+      const normalizedPubkey = normalizePubkey(pubkey);
+      if (existingPubkeys.has(normalizedPubkey)) {
         errors.push({
           pubkey,
           error: "Already a member.",
@@ -5829,7 +5857,43 @@ async function handleAddChannelMembers(
         continue;
       }
 
-      channel.members.push({
+      existingPubkeys.add(normalizedPubkey);
+      added.push(pubkey);
+    }
+
+    // DM participant sets are immutable. Adding a member creates or reuses a
+    // separate DM for the expanded set instead of mutating the source channel.
+    const targetChannel =
+      channel.channel_type === "dm" && added.length > 0
+        ? getMockChannel(
+            (
+              await handleOpenDm(
+                {
+                  pubkeys: [
+                    ...channel.members.map((member) => member.pubkey),
+                    ...added,
+                  ],
+                },
+                config,
+              )
+            ).id,
+          )
+        : channel;
+
+    for (const pubkey of added) {
+      const existingMember = targetChannel.members.find(
+        (member) => normalizePubkey(member.pubkey) === normalizePubkey(pubkey),
+      );
+      if (existingMember) {
+        existingMember.role = args.role ?? "member";
+        existingMember.is_agent =
+          args.role === "bot" ||
+          mockAgentPubkeys.has(pubkey) ||
+          mockManagedAgents.some((agent) => agent.pubkey === pubkey);
+        existingMember.display_name = mockDisplayNames.get(pubkey) ?? null;
+        continue;
+      }
+      targetChannel.members.push({
         pubkey,
         role: args.role ?? "member",
         is_agent:
@@ -5839,11 +5903,10 @@ async function handleAddChannelMembers(
         joined_at: new Date().toISOString(),
         display_name: mockDisplayNames.get(pubkey) ?? null,
       });
-      added.push(pubkey);
     }
 
-    syncMockChannel(channel);
-    touchMockChannel(channel);
+    syncMockChannel(targetChannel);
+    touchMockChannel(targetChannel);
     syncMockRelayAgentsFromManagedAgents();
     return {
       added,
@@ -6986,9 +7049,17 @@ function isRelayMeshManagedAgent(agent: MockManagedAgent): boolean {
   );
 }
 
-async function handleStartManagedAgent(args: {
-  pubkey: string;
-}): Promise<RawManagedAgent> {
+async function handleStartManagedAgent(
+  args: {
+    pubkey: string;
+  },
+  config?: E2eConfig,
+): Promise<RawManagedAgent> {
+  const startError = config?.mock?.startManagedAgentErrors?.shift();
+  if (startError) {
+    throw new Error(startError);
+  }
+
   const agent = getMockManagedAgent(args.pubkey);
   if (isRelayMeshManagedAgent(agent)) {
     // Model the backend start preflight (ensure_relay_mesh_for_record): a
@@ -7907,7 +7978,7 @@ function sendToMockSocket(args: {
     if (filter.kinds?.includes(KIND_EMOJI_SET)) {
       // Honor `authors` so `fetchOwnEmoji` (authors:[me]) sees only the
       // caller's set, while the union fetch (no authors) sees every member's —
-      // matching the real relay and the own-vs-workspace split in the UI.
+      // matching the real relay and the own-vs-community split in the UI.
       const authors = filter.authors?.map((a) => a.toLowerCase());
       for (const emojiEvent of createMockCustomEmojiSetEvents()) {
         if (authors && !authors.includes(emojiEvent.pubkey.toLowerCase())) {
@@ -8087,6 +8158,13 @@ function sendToMockSocket(args: {
         false,
         "Missing channel tag.",
       ]);
+      return;
+    }
+
+    const sendMessageError =
+      event.kind === 9 ? getConfig()?.mock?.sendMessageErrors?.shift() : null;
+    if (sendMessageError) {
+      sendWsText(socket.handler, ["OK", event.id, false, sendMessageError]);
       return;
     }
 
@@ -8554,7 +8632,7 @@ export function maybeInstallE2eTauriMocks() {
           (payload as { nsec?: string } | null)?.nsec ?? "",
         );
       case "apply_workspace": {
-        const applyDelayMs = activeConfig?.mock?.applyWorkspaceDelayMs ?? 0;
+        const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
           return new Promise((resolve) =>
             window.setTimeout(resolve, applyDelayMs),
@@ -8656,7 +8734,7 @@ export function maybeInstallE2eTauriMocks() {
               author_name: "Git Importer",
               author_email: "git-importer@example.com",
               timestamp: Math.floor(Date.now() / 1000) - 7_200,
-              subject: "Merge remote project history into local workspace",
+              subject: "Merge remote project history into local community",
             },
           ],
           contributors: [
@@ -8685,7 +8763,7 @@ export function maybeInstallE2eTauriMocks() {
               kind: "blob",
               size: 18420,
               preview_content:
-                'export function ProjectDetailScreen() {\n  return <WorkspaceTabs defaultValue="files" />;\n}\n',
+                'export function ProjectDetailScreen() {\n  return <CommunityTabs defaultValue="files" />;\n}\n',
             },
             {
               path: "desktop/src/features/projects/ui/ProjectsView.tsx",
@@ -8725,8 +8803,8 @@ export function maybeInstallE2eTauriMocks() {
                 "@@ -1,6 +1,8 @@",
                 ' import { Tabs } from "@/shared/ui/tabs";',
                 "",
-                "-function WorkspaceTabs() {",
-                "+function WorkspaceTabs({ selectedCommitHash }) {",
+                "-function CommunityTabs() {",
+                "+function CommunityTabs({ selectedCommitHash }) {",
                 '+  const [selectedTab, setSelectedTab] = useState("overview");',
                 "+",
                 "   return (",
@@ -8977,6 +9055,7 @@ export function maybeInstallE2eTauriMocks() {
       case "start_managed_agent":
         return handleStartManagedAgent(
           payload as Parameters<typeof handleStartManagedAgent>[0],
+          activeConfig,
         );
       case "stop_managed_agent":
         return handleStopManagedAgent(

@@ -143,7 +143,7 @@ test("profile popover does not show relay reconnect controls", async ({
   await expect(page.getByTestId("profile-popover-reconnect")).toHaveCount(0);
 
   // The sidebar owns the relay reconnect affordance; the profile popover stays
-  // focused on profile/settings/workspace actions even while the relay is down.
+  // focused on profile/settings/community actions even while the relay is down.
   await driveConnectionDegraded(page, "stalled");
   await expect(page.getByTestId("sidebar-relay-unreachable")).toBeVisible({
     timeout: 10_000,

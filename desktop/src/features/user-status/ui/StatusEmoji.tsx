@@ -7,7 +7,7 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
  * Render a user-status emoji from its stored string. A status emoji is a bare
  * string (unlike reactions, which carry a companion `emojiUrl`): a native glyph
  * like `💬`, or a custom-emoji `:shortcode:`. This resolves a known shortcode to
- * its workspace image and renders it as an `<img>`; anything else (native glyph,
+ * its community image and renders it as an `<img>`; anything else (native glyph,
  * or an unknown `:foo:`) renders as text.
  *
  * Every place that shows a status emoji renders this, so the shortcode→image

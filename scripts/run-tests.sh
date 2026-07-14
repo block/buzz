@@ -97,6 +97,9 @@ run_unit_tests() {
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.
   run_test_step "buzz-conformance tests" \
     cargo test -p buzz-conformance -- --nocapture
+
+  run_test_step "buzz-push-gateway tests" \
+    cargo test -p buzz-push-gateway -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

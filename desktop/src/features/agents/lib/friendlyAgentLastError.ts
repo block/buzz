@@ -37,7 +37,7 @@ export type FriendlyAgentLastError =
  * test asserts the user-facing string verbatim rather than a fuzzy pattern.
  */
 export const RELAY_MESH_DENIED_COPY =
-  "Relay mesh denied this agent — check your relay membership.";
+  "Community access denied this agent — check its community membership.";
 
 export const MODEL_NOT_FOUND_COPY =
   "The configured model is not available — open agent settings and select a different one from the dropdown.";

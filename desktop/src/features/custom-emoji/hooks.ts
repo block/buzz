@@ -13,7 +13,7 @@ import { relayClient } from "@/shared/api/relayClient";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 /**
- * React-query hooks for the workspace custom emoji palette (NIP-30, kind:30030).
+ * React-query hooks for the community custom emoji palette (NIP-30, kind:30030).
  *
  * The palette is the client-side UNION of every member's own kind:30030 set, so
  * the query key is stable — not keyed by channel or pubkey. Freshness comes from
@@ -40,7 +40,7 @@ export function useCustomEmojiQuery() {
 
 /**
  * The caller's OWN custom emoji set — the only thing the settings card may add
- * to or remove from. Distinct from the workspace union (`useCustomEmojiQuery`),
+ * to or remove from. Distinct from the community union (`useCustomEmojiQuery`),
  * which is read-only across members.
  */
 export function useOwnCustomEmojiQuery() {
@@ -56,7 +56,7 @@ export function useOwnCustomEmojiQuery() {
  * query whenever one arrives. Call once near the app root (alongside other
  * global live subscriptions). Safe to mount once; disposes on unmount.
  */
-export function useWorkspaceEmojiLiveUpdates(): void {
+export function useCommunityEmojiLiveUpdates(): void {
   const queryClient = useQueryClient();
 
   React.useEffect(() => {
@@ -80,7 +80,7 @@ export function useWorkspaceEmojiLiveUpdates(): void {
         }
       })
       .catch((error) => {
-        console.error("Failed to subscribe to workspace custom emoji", error);
+        console.error("Failed to subscribe to community custom emoji", error);
       });
 
     // Re-sync on reconnect: a member's 30030 published while we were

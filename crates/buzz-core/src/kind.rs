@@ -101,6 +101,13 @@ pub const KIND_AGENT_ENGRAM: u32 = 30174;
 /// author-only (see [`AUTHOR_ONLY_KINDS`]). See `docs/nips/NIP-ER.md`.
 pub const KIND_EVENT_REMINDER: u32 = 30300;
 
+/// NIP-PL: encrypted push lease (parameterized replaceable, author-only).
+///
+/// The source event contains endpoint-bearing NIP-44 ciphertext and is readable
+/// only by its authenticated author. Effective delivery state lives in the
+/// dedicated push lease tables.
+pub const KIND_PUSH_LEASE: u32 = 30350;
+
 /// Kinds whose stored events are readable only by their author.
 ///
 /// The relay must never reveal the existence, count, tags, content, schedule,
@@ -108,9 +115,9 @@ pub const KIND_EVENT_REMINDER: u32 = 30300;
 /// Shared across the ingest write path (NIP-ER `not_before` validation) and the
 /// read path (REQ/COUNT/subscription author-only filtering).
 ///
-/// Currently O(1) with a single entry. If this grows past ~4 kinds, convert to
-/// a compile-time bitset or sorted array with binary search for hot-path use.
-pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER];
+/// Currently a tiny linear set. If this grows past ~4 kinds, convert to a
+/// compile-time bitset or sorted array with binary search for hot-path use.
+pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER, KIND_PUSH_LEASE];
 
 /// Kinds that require a result-level read gate beyond the filter-layer
 /// `#p` check: even a reader who knows an event id MUST match the event's
@@ -182,6 +189,10 @@ pub const KIND_MANAGED_AGENT: u32 = 30177;
 /// queue, and never fanned out publicly. Reports are signals, not triggers:
 /// the relay never auto-actions on them (NIP-56).
 pub const KIND_REPORT: u32 = 1984;
+
+/// Buzz product feedback submission. Accepted at ingest, sidecarred to the
+/// deployment feedback table, and never stored or fanned out as an event.
+pub const KIND_PRODUCT_FEEDBACK: u32 = 42000;
 
 // NIP-29 group admin events
 /// NIP-29: Add a user to a group.
@@ -523,6 +534,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_TEAM,
     KIND_MANAGED_AGENT,
     KIND_REPORT,
+    KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,
     KIND_NIP29_EDIT_METADATA,

@@ -9,7 +9,7 @@
  *
  *  - **Terminal sessions never reconnect.** When the relay has explicitly
  *    rejected us (today: kind:22242 AUTH OK=false) the session is dead
- *    until the user re-engages (workspace switch or explicit preconnect).
+ *    until the user re-engages (community switch or explicit preconnect).
  *    This guards the reconnect-timer catch handler — and the retry wrappers
  *    in `publishEvent` / `sendRawWithReconnectRetry` — from racing the
  *    `disconnected` state back to `reconnecting`.

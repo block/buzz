@@ -14,6 +14,7 @@ import {
 type SidebarSelectedView =
   | "home"
   | "channel"
+  | "messages"
   | "agents"
   | "workflows"
   | "pulse"

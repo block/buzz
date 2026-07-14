@@ -281,12 +281,23 @@ pub async fn provision_community(
         let owner_hex = initial_owner.as_deref().ok_or_else(|| {
             "initial_owner_pubkey is required when create_only is true".to_string()
         })?;
-        let record = state
+        let record = match state
             .db
             .create_community_with_owner(&request.host, owner_hex)
             .await
             .map_err(|e| format!("failed to create community: {e}"))?
-            .ok_or_else(|| "community already exists".to_string())?;
+        {
+            buzz_db::CreateCommunityWithOwnerResult::Created(record) => record,
+            buzz_db::CreateCommunityWithOwnerResult::HostExists => {
+                return Err("community already exists".to_string());
+            }
+            buzz_db::CreateCommunityWithOwnerResult::LimitReached => {
+                return Err(
+                    "limit_reached: owner already owns the maximum number of communities"
+                        .to_string(),
+                );
+            }
+        };
 
         info!(
             operator = %operator_hex,

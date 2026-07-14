@@ -9,7 +9,7 @@ mod backend;
 pub(crate) mod config_bridge;
 mod discovery;
 mod env_vars;
-mod git_bash;
+pub(crate) mod git_bash;
 pub(crate) mod global_config;
 mod nest;
 mod persona_avatars;

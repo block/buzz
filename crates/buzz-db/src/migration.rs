@@ -332,6 +332,13 @@ mod tests {
             "communities",
             "rate_limit_violations",
             "_operator_global_tables",
+            "push_gateway_challenges",
+            "push_gateway_installations",
+            "push_gateway_delegations",
+            "push_gateway_endpoint_quotas",
+            "push_gateway_delivery_auth_replays",
+            "push_gateway_delivery_request_replays",
+            "product_feedback",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -542,7 +549,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 11);
+        assert_eq!(migrations.len(), 16);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -626,7 +633,6 @@ mod tests {
             );
         }
         assert!(!migrations[0].sql.as_str().contains("moderation_reports"));
-
         // NIP-RS retention is additive and boot-safe: seed replay watermarks
         // before deleting payload history, without rewriting search storage.
         assert_eq!(migrations[6].version, 7);
@@ -710,6 +716,71 @@ mod tests {
             .contains("CREATE OR REPLACE FUNCTION purge_soft_deleted_nip_rs"));
         assert!(migrations[10].sql.as_str().contains("tag->>0 = 'd'"));
         assert!(migrations[10].sql.as_str().contains(") = 1"));
+
+        // Push leases and their durable outbox are relay-owned and structurally
+        // community-scoped; the public gateway remains stateless.
+        assert_eq!(migrations[11].version, 12);
+        assert!(migrations[11]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE push_leases"));
+        assert!(migrations[11]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE push_wake_outbox"));
+        assert!(migrations[11]
+            .sql
+            .as_str()
+            .contains("PRIMARY KEY (community_id, author, installation_id)"));
+        assert!(!migrations[0].sql.as_str().contains("push_leases"));
+
+        assert_eq!(migrations[12].version, 13);
+        assert!(migrations[12]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN endpoint_enabled"));
+
+        // Kind 30350 is author-only encrypted data, so its ciphertext is never
+        // indexed for NIP-50 search. Preserve the 0001 checksum and extend the
+        // generated expression additively.
+        assert_eq!(migrations[13].version, 14);
+        assert!(migrations[13].sql.as_str().contains("30350"));
+        assert!(migrations[13].sql.as_str().contains("search_tsv"));
+        assert!(!migrations[0].sql.as_str().contains("30350"));
+
+        // Public push-gateway authority is intentionally deployment-global and
+        // durable: immediate revocation and hostile-relay admission cannot be
+        // honestly provided by a stateless gateway.
+        assert_eq!(migrations[14].version, 15);
+        assert!(migrations[14]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE push_gateway_installations"));
+        assert!(migrations[14]
+            .sql
+            .as_str()
+            .contains("push_gateway_delegations"));
+        assert!(migrations[14]
+            .sql
+            .as_str()
+            .contains("_operator_global_tables"));
+
+        // Product feedback is a deployment-private sidecar; community_id is
+        // provenance, not an operator-review authorization boundary.
+        assert_eq!(migrations[15].version, 16);
+        assert!(migrations[15]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE product_feedback"));
+        assert!(migrations[15]
+            .sql
+            .as_str()
+            .contains("community_id UUID NOT NULL"));
+        assert!(migrations[15]
+            .sql
+            .as_str()
+            .contains("('product_feedback', 'deployment product inbox"));
+        assert!(!migrations[0].sql.as_str().contains("product_feedback"));
     }
 
     #[test]
@@ -952,7 +1023,67 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(11));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(16));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn populated_upgrade_preserves_search_policy_except_for_push_leases() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(7, &pool)
+            .await
+            .expect("apply migrations 1-7");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("pre-0008-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+
+        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32)] {
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
+                 VALUES ($1, $2, $3, NOW(), $4, '[]'::jsonb, 'brownfield needle', $5, NOW())",
+            )
+            .bind(community_id)
+            .bind(vec![marker; 32])
+            .bind(vec![marker + 10; 32])
+            .bind(kind)
+            .bind(vec![marker + 20; 64])
+            .execute(&pool)
+            .await
+            .expect("insert brownfield event");
+        }
+
+        MIGRATOR
+            .run_to(11, &pool)
+            .await
+            .expect("apply main migrations through 11");
+        let before: Vec<(i32, bool)> = sqlx::query_as(
+            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
+             FROM events ORDER BY kind",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read pre-push search behavior");
+        assert_eq!(before, vec![(1, true), (30_350, true)]);
+
+        run_migrations(&pool)
+            .await
+            .expect("apply push migrations to populated database");
+        let after: Vec<(i32, Option<bool>)> = sqlx::query_as(
+            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
+             FROM events ORDER BY kind",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read post-push search behavior");
+        assert_eq!(after, vec![(1, Some(true)), (30_350, None)]);
     }
 
     #[tokio::test]

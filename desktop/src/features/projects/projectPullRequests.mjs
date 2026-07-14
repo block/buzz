@@ -61,6 +61,12 @@ function statusFromEvent(pullRequest, statusEvent) {
   return labels.includes("draft") ? "Draft" : "Open";
 }
 
+/** Keep consecutive lifecycle writes ordered even when they happen within the
+ * same whole-second Nostr timestamp. */
+export function nextProjectPullRequestStatusCreatedAt(pullRequest, now) {
+  return Math.max(now, (pullRequest.statusCreatedAt ?? 0) + 1);
+}
+
 function eventToPullRequestUpdate(event) {
   return {
     id: event.id,
@@ -172,6 +178,7 @@ export function eventToProjectPullRequest(
     approvals,
     status: statusFromEvent(pullRequest, latestStatus),
     statusEventId: latestStatus?.id ?? null,
+    statusCreatedAt: latestStatus?.created_at ?? null,
     branchName: getTag(pullRequest, "branch-name") ?? null,
     initialCommit,
     commit: latestCommit,

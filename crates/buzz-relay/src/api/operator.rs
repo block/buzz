@@ -11,8 +11,11 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
+
+use buzz_core::{CommunityId, TenantContext};
 
 use crate::handlers::community_provisioning::{
     normalize_candidate_host, validate_pubkey_hex, ProvisionCommunityRequest,
@@ -31,6 +34,22 @@ pub struct ListCommunitiesQuery {
 #[derive(Debug, Deserialize)]
 pub struct CommunityAvailabilityQuery {
     host: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferCommunityRequest {
+    community_id: String,
+    new_owner_pubkey: String,
+    expected_owner_pubkey: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TransferCommunityResponse {
+    community_id: String,
+    new_owner_pubkey: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_owner: Option<String>,
 }
 
 const OPERATOR_REPLAY_SCOPE: &str = "operator-management";
@@ -159,7 +178,9 @@ pub async fn provision_community(
         Err(msg) if msg.starts_with("actor not authorized") => {
             Err(api_error(StatusCode::FORBIDDEN, &msg))
         }
-        Err(msg) if msg == "community already exists" => Err(api_error(StatusCode::CONFLICT, &msg)),
+        Err(msg) if msg == "community already exists" || msg.starts_with("limit_reached:") => {
+            Err(api_error(StatusCode::CONFLICT, &msg))
+        }
         Err(msg)
             if msg.starts_with("failed to create community:")
                 || msg.starts_with("community provisioned but owner bootstrap failed:") =>
@@ -169,6 +190,75 @@ pub async fn provision_community(
         }
         Err(msg) => Err(api_error(StatusCode::BAD_REQUEST, &msg)),
     }
+}
+
+/// Owner assertion supplied by the trusted operator client.
+#[derive(Debug, Deserialize)]
+pub struct ArchiveCommunityRequest {
+    host: String,
+    owner_pubkey: String,
+}
+
+/// Idempotently archive a community owned by the asserted end-user identity.
+pub async fn archive_community(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    const PATH: &str = "/operator/communities/archive";
+    authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+    let request: ArchiveCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid archive-community JSON: {e}"),
+        )
+    })?;
+    let normalized_host = normalize_candidate_host(&request.host)
+        .map_err(|msg| api_error(StatusCode::BAD_REQUEST, &msg))?;
+    let deployment_host = buzz_core::tenant::relay_url_authority(&state.config.relay_url);
+    if normalized_host == deployment_host {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "the deployment community cannot be archived",
+        ));
+    }
+    let owner = validate_pubkey_hex(&request.owner_pubkey).ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid owner_pubkey: expected 64-char hex pubkey",
+        )
+    })?;
+    let record = state
+        .db
+        .archive_community_owned_by(&normalized_host, &owner, &deployment_host)
+        .await
+        .map_err(|e| internal_error(&format!("archive community: {e}")))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
+    let tenant = TenantContext::resolved(record.id, &record.host);
+    let closed = match state.disconnect_community_clusterwide(&tenant).await {
+        Ok(closed) => closed,
+        Err(error) => {
+            tracing::warn!(community = %record.id, host = %record.host, %error, "community archived but disconnect propagation is pending");
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "community_id": record.id.to_string(),
+                    "host": record.host,
+                    "archived_at": record.archived_at,
+                    "status": "archived",
+                    "propagation": "pending",
+                    "error": "connection propagation pending — retry this request",
+                })),
+            ));
+        }
+    };
+    tracing::info!(community = %record.id, host = %record.host, local_connections_closed = closed, "community archived");
+    Ok(Json(serde_json::json!({
+        "community_id": record.id.to_string(),
+        "host": record.host,
+        "archived_at": record.archived_at,
+        "status": "archived",
+    })))
 }
 
 /// List communities where a pubkey currently holds the `owner` role.
@@ -207,10 +297,135 @@ pub async fn list_owned_communities(
             "community_id": row.id.to_string(),
             "host": row.host,
             "created_at": row.created_at,
+            "archived_at": row.archived_at,
         })).collect::<Vec<_>>(),
     })))
 }
 
+/// Transfer ownership of a community to a new owner pubkey.
+///
+/// `POST /operator/communities/transfer`, NIP-98 signed by a pubkey in
+/// `RELAY_OPERATOR_PUBKEYS`, body:
+///
+/// ```json
+/// { "community_id": "<uuid>", "new_owner_pubkey": "<hex>" }
+/// ```
+///
+/// The previous owner is demoted to `member` (not `admin`). The transfer is
+/// instant and atomic at the database layer. Publication of the updated
+/// NIP-43 membership list is best-effort, matching the provision path.
+pub async fn transfer_community(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _pubkey = authorize_operator_request(
+        &state,
+        &headers,
+        "POST",
+        "/operator/communities/transfer",
+        None,
+        Some(&body),
+    )
+    .await?;
+
+    let request: TransferCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid transfer-community JSON: {e}"),
+        )
+    })?;
+
+    let community_uuid = Uuid::parse_str(&request.community_id).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid community_id: {e}"),
+        )
+    })?;
+
+    let new_owner_pubkey = validate_pubkey_hex(&request.new_owner_pubkey).ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid new_owner_pubkey: expected 64-char hex pubkey",
+        )
+    })?;
+
+    let expected_owner_pubkey =
+        validate_pubkey_hex(&request.expected_owner_pubkey).ok_or_else(|| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid expected_owner_pubkey: expected 64-char hex pubkey",
+            )
+        })?;
+
+    let community = CommunityId::from_uuid(community_uuid);
+
+    let result = state
+        .db
+        .transfer_ownership(community, &new_owner_pubkey, &expected_owner_pubkey)
+        .await
+        .map_err(|e| internal_error(&format!("transfer ownership: {e}")))?;
+
+    let (status, previous_owner) = match result {
+        buzz_db::relay_members::TransferResult::Transferred { previous_owner } => {
+            ("transferred", previous_owner)
+        }
+        buzz_db::relay_members::TransferResult::AlreadyOwner => ("already_owner", None),
+        buzz_db::relay_members::TransferResult::NoOwner => {
+            return Err(api_error(
+                StatusCode::NOT_FOUND,
+                "community has no owner to transfer from",
+            ));
+        }
+        buzz_db::relay_members::TransferResult::OwnerConflict => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "owner_conflict: the current owner no longer matches expected_owner_pubkey",
+            ));
+        }
+        buzz_db::relay_members::TransferResult::LimitReached => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "limit_reached: transferee already owns the maximum number of communities",
+            ));
+        }
+    };
+
+    // Best-effort NIP-43 membership snapshot publication — same pattern as
+    // provision_community. The DB mutation is already committed; a publication
+    // failure must not turn a success into an HTTP error.
+    if state.config.require_relay_membership {
+        if let Some(host) = state
+            .db
+            .lookup_community_host(community)
+            .await
+            .map_err(|e| internal_error(&format!("lookup community host: {e}")))?
+        {
+            let tenant = TenantContext::resolved(community, host);
+            if let Err(error) =
+                crate::handlers::side_effects::publish_nip43_membership_list(&tenant, &state).await
+            {
+                tracing::warn!(
+                    community = %community,
+                    error = %error,
+                    "ownership transferred but NIP-43 membership snapshot publication failed"
+                );
+            }
+        }
+    }
+
+    let response = TransferCommunityResponse {
+        community_id: request.community_id,
+        new_owner_pubkey,
+        status,
+        previous_owner,
+    };
+
+    Ok(Json(serde_json::to_value(response).map_err(|e| {
+        tracing::error!("failed to serialize transfer-community response: {e}");
+        internal_error("operator transfer response serialization failed")
+    })?))
+}
 /// Check whether a community host is available, returning the relay-canonical
 /// normalized authority used by create.
 pub async fn community_availability(
@@ -233,7 +448,7 @@ pub async fn community_availability(
         .map_err(|msg| api_error(StatusCode::BAD_REQUEST, &msg))?;
     let existing = state
         .db
-        .lookup_community_by_host(&normalized_host)
+        .lookup_community_by_host_for_management(&normalized_host)
         .await
         .map_err(|e| internal_error(&format!("check community availability: {e}")))?;
 
@@ -260,7 +475,7 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
+    use buzz_core::{kind::KIND_NIP43_MEMBERSHIP_LIST, CommunityId};
     use buzz_db::event::EventQuery;
 
     use crate::router::build_router;
@@ -369,6 +584,85 @@ mod tests {
             .await
             .expect("read response body");
         serde_json::from_slice(&bytes).expect("response JSON")
+    }
+
+    async fn signed_operator_request(
+        state: Arc<AppState>,
+        keys: &Keys,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+    ) -> axum::response::Response {
+        let url = format!("http://{INGRESS_HOST}{path}");
+        let auth = nip98_auth_header(keys, &url, method, body.as_deref().map(str::as_bytes));
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, INGRESS_HOST)
+            .header(header::AUTHORIZATION, auth);
+        if body.is_some() {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+        }
+        build_router(state)
+            .oneshot(
+                request
+                    .body(body.map_or_else(Body::empty, Body::from))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+    }
+
+    async fn provision_community(
+        state: Arc<AppState>,
+        operator: &Keys,
+        host: &str,
+        owner: &Keys,
+    ) -> axum::response::Response {
+        let body = serde_json::json!({
+            "host": host,
+            "initial_owner_pubkey": owner.public_key().to_hex(),
+            "create_only": true,
+        })
+        .to_string();
+        signed_operator_request(state, operator, "POST", "/operator/communities", Some(body)).await
+    }
+
+    fn is_member_tag(tag: &Tag, pubkey: &str, role: &str) -> bool {
+        let values = tag.as_slice();
+        values.first().is_some_and(|value| value == "member")
+            && values.get(1).is_some_and(|value| value == pubkey)
+            && values.get(2).is_some_and(|value| value == role)
+    }
+
+    async fn assert_snapshot_roles(
+        state: &AppState,
+        community: CommunityId,
+        expected: &[(&str, &str)],
+    ) {
+        let snapshot = state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![KIND_NIP43_MEMBERSHIP_LIST as i32]),
+                global_only: true,
+                limit: Some(1),
+                ..EventQuery::for_community(community)
+            })
+            .await
+            .expect("query membership snapshot")
+            .into_iter()
+            .next()
+            .expect("membership snapshot published");
+        for &(pubkey, role) in expected {
+            assert!(
+                snapshot
+                    .event
+                    .tags
+                    .iter()
+                    .any(|tag| is_member_tag(tag, pubkey, role)),
+                "missing {role} snapshot tag for {pubkey}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -506,6 +800,118 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn archive_publish_failure_is_retryable_and_preserves_timestamp() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        let owner_hex = owner.public_key().to_hex();
+        let create_body = serde_json::json!({
+            "host": host,
+            "initial_owner_pubkey": owner_hex,
+            "create_only": true,
+        })
+        .to_string();
+        let create_url = format!("http://{INGRESS_HOST}/operator/communities");
+        let create_auth =
+            nip98_auth_header(&operator, &create_url, "POST", Some(create_body.as_bytes()));
+        let create_response = build_router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/operator/communities")
+                    .header(header::HOST, INGRESS_HOST)
+                    .header(header::AUTHORIZATION, create_auth)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(create_body))
+                    .expect("create request"),
+            )
+            .await
+            .expect("create response");
+        assert_eq!(create_response.status(), StatusCode::OK);
+
+        let archive_body = serde_json::json!({
+            "host": host,
+            "owner_pubkey": owner.public_key().to_hex(),
+        })
+        .to_string();
+        let archive_url = format!("http://{INGRESS_HOST}/operator/communities/archive");
+        let archive_once = |state: Arc<AppState>| {
+            let auth = nip98_auth_header(
+                &operator,
+                &archive_url,
+                "POST",
+                Some(archive_body.as_bytes()),
+            );
+            let body = archive_body.clone();
+            async move {
+                build_router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/operator/communities/archive")
+                            .header(header::HOST, INGRESS_HOST)
+                            .header(header::AUTHORIZATION, auth)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(body))
+                            .expect("archive request"),
+                    )
+                    .await
+                    .expect("archive response")
+            }
+        };
+
+        let first = archive_once(Arc::clone(&state)).await;
+        assert_eq!(first.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let first_json = read_json(first).await;
+        assert_eq!(first_json["status"], "archived");
+        assert_eq!(first_json["propagation"], "pending");
+        let first_archived_at = first_json["archived_at"].clone();
+        assert!(!first_archived_at.is_null());
+        assert!(state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("active lookup")
+            .is_none());
+
+        assert_eq!(
+            state
+                .community_disconnect_publish_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        let second = archive_once(Arc::clone(&state)).await;
+        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let second_json = read_json(second).await;
+        assert_eq!(second_json["archived_at"], first_archived_at);
+        assert_eq!(
+            state
+                .community_disconnect_publish_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "idempotent archive retry must republish the disconnect"
+        );
+
+        let owned = state
+            .db
+            .list_communities_owned_by(&owner.public_key().to_hex())
+            .await
+            .expect("owned communities");
+        let row = owned
+            .iter()
+            .find(|row| row.host == host)
+            .expect("archived row");
+        assert_eq!(
+            serde_json::to_value(row.archived_at).expect("timestamp JSON"),
+            first_archived_at
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn happy_path_create_returns_created_and_bootstraps_owner() {
         let operator = Keys::generate();
         let owner = Keys::generate();
@@ -513,28 +919,7 @@ mod tests {
             return;
         };
         let host = format!("community-{}.example", Uuid::new_v4().simple());
-        let body = serde_json::json!({
-            "host": host,
-            "initial_owner_pubkey": owner.public_key().to_hex(),
-            "create_only": true,
-        })
-        .to_string();
-        let url = format!("http://{INGRESS_HOST}/operator/communities");
-        let auth = nip98_auth_header(&operator, &url, "POST", Some(body.as_bytes()));
-
-        let response = build_router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/operator/communities")
-                    .header(header::HOST, INGRESS_HOST)
-                    .header(header::AUTHORIZATION, auth)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
+        let response = provision_community(state.clone(), &operator, &host, &owner).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let json = read_json(response).await;
@@ -558,28 +943,182 @@ mod tests {
             .expect("owner member exists");
         assert_eq!(member.role, "owner");
 
-        let membership_events = state
+        assert_snapshot_roles(&state, community.id, &[(&owner_hex, "owner")]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn fresh_host_at_owner_limit_returns_limit_reached_conflict() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+
+        for _ in 0..buzz_db::relay_members::MAX_COMMUNITIES_PER_OWNER {
+            let host = format!("community-{}.example", Uuid::new_v4().simple());
+            assert_eq!(
+                provision_community(state.clone(), &operator, &host, &owner)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+        }
+
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        let response = provision_community(state.clone(), &operator, &host, &owner).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let json = read_json(response).await;
+        assert!(json["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("limit_reached:")));
+        assert!(state
             .db
-            .query_events(&EventQuery {
-                kinds: Some(vec![KIND_NIP43_MEMBERSHIP_LIST as i32]),
-                global_only: true,
-                limit: Some(1),
-                ..EventQuery::for_community(community.id)
-            })
+            .lookup_community_by_host(&host)
             .await
-            .expect("query membership snapshot");
-        let snapshot = membership_events
-            .first()
-            .expect("membership snapshot published during provisioning");
-        assert!(snapshot.event.tags.iter().any(|tag| {
-            tag.as_slice()
-                .first()
-                .is_some_and(|value| value == "member")
-                && tag
-                    .as_slice()
-                    .get(1)
-                    .is_some_and(|value| value == &owner_hex)
-                && tag.as_slice().get(2).is_some_and(|value| value == "owner")
-        }));
+            .expect("look up rejected fresh host")
+            .is_none());
+    }
+
+    /// Happy path: POST /operator/communities/transfer swaps ownership, demotes
+    /// the old owner to `member`, and publishes a NIP-43 snapshot reflecting the
+    /// new roles.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn happy_path_transfer_swaps_owner_and_demotes_old_to_member() {
+        let operator = Keys::generate();
+        let initial_owner = Keys::generate();
+        let new_owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        let create_response =
+            provision_community(state.clone(), &operator, &host, &initial_owner).await;
+        assert_eq!(create_response.status(), StatusCode::OK);
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup community")
+            .expect("community exists");
+        let community_id = community.id.to_string();
+        let initial_owner_hex = initial_owner.public_key().to_hex();
+        let new_owner_hex = new_owner.public_key().to_hex();
+
+        let transfer_body = serde_json::json!({
+            "community_id": community_id,
+            "new_owner_pubkey": new_owner_hex,
+            "expected_owner_pubkey": initial_owner_hex,
+        })
+        .to_string();
+        let response = signed_operator_request(
+            state.clone(),
+            &operator,
+            "POST",
+            "/operator/communities/transfer",
+            Some(transfer_body),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = read_json(response).await;
+        assert_eq!(
+            json.get("status").and_then(Value::as_str),
+            Some("transferred")
+        );
+        assert_eq!(
+            json.get("new_owner_pubkey").and_then(Value::as_str),
+            Some(new_owner_hex.as_str())
+        );
+        assert_eq!(
+            json.get("previous_owner").and_then(Value::as_str),
+            Some(initial_owner_hex.as_str())
+        );
+
+        // New owner is owner.
+        assert_eq!(
+            state
+                .db
+                .get_relay_member(community.id, &new_owner_hex)
+                .await
+                .expect("get new owner")
+                .expect("new owner exists")
+                .role,
+            "owner"
+        );
+        // Old owner is member (not admin).
+        assert_eq!(
+            state
+                .db
+                .get_relay_member(community.id, &initial_owner_hex)
+                .await
+                .expect("get old owner")
+                .expect("old owner exists")
+                .role,
+            "member"
+        );
+
+        assert_snapshot_roles(
+            &state,
+            community.id,
+            &[(&new_owner_hex, "owner"), (&initial_owner_hex, "member")],
+        )
+        .await;
+    }
+
+    /// Transfer with an invalid community_id returns 400.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn transfer_with_invalid_community_id_returns_400() {
+        let operator = Keys::generate();
+        let new_owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let body = serde_json::json!({
+            "community_id": "not-a-uuid",
+            "new_owner_pubkey": new_owner.public_key().to_hex(),
+            "expected_owner_pubkey": new_owner.public_key().to_hex(),
+        })
+        .to_string();
+        let response = signed_operator_request(
+            state,
+            &operator,
+            "POST",
+            "/operator/communities/transfer",
+            Some(body),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Transfer with an invalid new_owner_pubkey returns 400.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn transfer_with_invalid_pubkey_returns_400() {
+        let operator = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let body = serde_json::json!({
+            "community_id": Uuid::new_v4().to_string(),
+            "new_owner_pubkey": "not-a-pubkey",
+            "expected_owner_pubkey": "not-a-pubkey",
+        })
+        .to_string();
+        let response = signed_operator_request(
+            state,
+            &operator,
+            "POST",
+            "/operator/communities/transfer",
+            Some(body),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

@@ -10,7 +10,10 @@ import {
   KIND_TEXT_NOTE,
 } from "@/shared/constants/kinds";
 import type { Project } from "./hooks";
-import type { ProjectPullRequest } from "./projectPullRequests.mjs";
+import {
+  nextProjectPullRequestStatusCreatedAt,
+  type ProjectPullRequest,
+} from "./projectPullRequests.mjs";
 import {
   PR_APPROVAL_LABEL,
   PR_REVIEW_REQUEST_LABEL,
@@ -48,6 +51,10 @@ async function updateProjectPullRequestStatus({
   const event = await signRelayEvent({
     kind: PR_STATUS_KIND_BY_LIFECYCLE[status],
     content: "",
+    createdAt: nextProjectPullRequestStatusCreatedAt(
+      pullRequest,
+      Math.floor(Date.now() / 1_000),
+    ),
     tags: [
       ["e", pullRequest.id, "", "root"],
       ["a", project.repoAddress],

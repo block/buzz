@@ -77,10 +77,10 @@ async function checkMembershipDenied(): Promise<boolean> {
 
 type OnboardingFlowProps = {
   actions: OnboardingActions;
-  canBackToWorkspaceSetup: boolean;
+  canBackToCommunitySetup: boolean;
   identityLost?: boolean;
   initialProfile: OnboardingProfileSeed;
-  onBackToWorkspaceSetup: () => void;
+  onBackToCommunitySetup: () => void;
 };
 
 function isFallbackDisplayName(value?: string | null) {
@@ -147,10 +147,10 @@ function resolveProfileSaveRecovery(
 
 export function OnboardingFlow({
   actions,
-  canBackToWorkspaceSetup,
+  canBackToCommunitySetup,
   identityLost = false,
   initialProfile,
-  onBackToWorkspaceSetup,
+  onBackToCommunitySetup,
 }: OnboardingFlowProps) {
   const { complete, skipForNow } = actions;
   const queryClient = useQueryClient();
@@ -394,7 +394,7 @@ export function OnboardingFlow({
         }
       : profileStepState.saveRecovery,
   };
-  // Page sequences by path — step 1 is the workspace-picker that precedes
+  // Page sequences by path — step 1 is the community-picker that precedes
   // onboarding, so these pages start at step 2 (STEP_OFFSET below).
   // Fresh-key path: profile(2) → backup(3) → avatar(4) → theme(5) → setup(6)
   // Imported-key path: profile(2) → avatar(3) → theme(4) → setup(5)
@@ -418,7 +418,7 @@ export function OnboardingFlow({
     currentPage === "key-import" ? "profile" : currentPage;
   const pageIndex = activeSteps.indexOf(normalizedPage);
   const currentStep = pageIndex >= 0 ? pageIndex + STEP_OFFSET : STEP_OFFSET;
-  const totalOnboardingSteps = activeSteps.length + 1; // +1 for step 1 (workspace picker)
+  const totalOnboardingSteps = activeSteps.length + 1; // +1 for step 1 (community picker)
   const hideFixedProgressOnCompact =
     currentPage === "avatar" || currentPage === "theme";
 
@@ -468,14 +468,14 @@ export function OnboardingFlow({
     return (
       <MembershipDenied
         onChangeKey={
-          canBackToWorkspaceSetup
+          canBackToCommunitySetup
             ? () => {
                 setTransitionDirection("backward");
-                onBackToWorkspaceSetup();
+                onBackToCommunitySetup();
               }
             : undefined
         }
-        onImportKey={canBackToWorkspaceSetup ? undefined : importExistingKey}
+        onImportKey={canBackToCommunitySetup ? undefined : importExistingKey}
         onRetry={() => {
           void saveProfileAndContinue(membershipRetryPage);
         }}
@@ -532,10 +532,10 @@ export function OnboardingFlow({
           <ProfileStep
             actions={{
               advanceWithoutSaving: advanceFromProfileWithoutSaving,
-              back: canBackToWorkspaceSetup
+              back: canBackToCommunitySetup
                 ? () => {
                     setTransitionDirection("backward");
-                    onBackToWorkspaceSetup();
+                    onBackToCommunitySetup();
                   }
                 : undefined,
               clearAvatarDraft: resetAvatarDraft,

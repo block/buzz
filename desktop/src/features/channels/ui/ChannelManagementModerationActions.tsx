@@ -126,7 +126,7 @@ export function ChannelManagementModerationActions({
             <AlertDialogHeader>
               <AlertDialogTitle>Delete channel?</AlertDialogTitle>
               <AlertDialogDescription>
-                Delete {resolvedChannelName} from the workspace list. This
+                Delete {resolvedChannelName} from the community list. This
                 action cannot be undone.
               </AlertDialogDescription>
             </AlertDialogHeader>
