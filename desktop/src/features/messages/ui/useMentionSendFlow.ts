@@ -415,12 +415,18 @@ export function useMentionSendFlow({
         for (const agent of draft.preparedManagedAgents ?? []) {
           managedAgentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
         }
-        const managedMentionPubkeys = uniqueNormalizedPubkeys(
-          mentionPubkeys,
-        ).filter((pubkey) => managedAgentsByPubkey.has(pubkey));
+        const normalizedMentionPubkeys =
+          uniqueNormalizedPubkeys(mentionPubkeys);
+        const managedMentionPubkeys = normalizedMentionPubkeys.filter(
+          (pubkey) => managedAgentsByPubkey.has(pubkey),
+        );
+        const agentMentionPubkeys = uniqueNormalizedPubkeys([
+          ...managedMentionPubkeys,
+          ...normalizedMentionPubkeys.filter(mentions.isAgentPubkey),
+        ]);
         const preparedAgentPubkeys = uniqueNormalizedPubkeys([
           ...readyAgentPubkeys,
-          ...managedMentionPubkeys,
+          ...agentMentionPubkeys,
         ]);
         let sendChannelId = draft.capturedChannelId;
         if (preparedAgentPubkeys.length > 0 && onPrepareSendChannel) {
@@ -498,6 +504,7 @@ export function useMentionSendFlow({
       drafts,
       ensureManagedAgentMentionsReady,
       getManagedAgentsByPubkey,
+      mentions.isAgentPubkey,
       onPrepareSendChannel,
       onSendRef,
       richText.setContent,

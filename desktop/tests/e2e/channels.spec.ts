@@ -18,6 +18,8 @@ const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
 // view-activity gate (memberIsBot && viewerIsOwner) opens for it.
 const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
+const DM_RELAY_AGENT_PUBKEY =
+  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 type MockFeedWindow = Window & {
   __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
@@ -807,6 +809,66 @@ test("routes an agent mention from an existing DM to the expanded conversation",
   );
   expect(sendCommands.map((entry) => entry.command)).toEqual(
     expect.arrayContaining(["open_dm", "start_managed_agent"]),
+  );
+});
+
+test("routes a relay-agent mention from an existing DM to the expanded conversation", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: DM_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_IDENTITY_PUBKEY],
+      },
+    ],
+  });
+  await page.goto("/");
+
+  const sourceDm = page.getByTestId("channel-alice-tyler");
+  const sourceDmId = await sourceDm.getAttribute("data-channel-id");
+  expect(sourceDmId).toBeTruthy();
+  await sourceDm.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const messageTail = "with the relay agent";
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @qui");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "quinn" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(` ${messageTail}`);
+  const baselineCommands = await readCommandPayloadLog(page);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(async () => readOutgoingChannelId(page, messageTail))
+    .not.toBeNull();
+  const sentChannelId = await readOutgoingChannelId(page, messageTail);
+  expect(sentChannelId).not.toBe(sourceDmId);
+  await expect(
+    page.locator("[data-active='true'][data-channel-id]"),
+  ).toHaveAttribute("data-channel-id", sentChannelId ?? "");
+  await expect(page.getByTestId("chat-title")).toContainText("alice");
+  await expect(page.getByTestId("chat-title")).toContainText(
+    DM_RELAY_AGENT_PUBKEY.slice(0, 8),
+  );
+
+  const sendCommands = (await readCommandPayloadLog(page)).slice(
+    baselineCommands.length,
+  );
+  expect(sendCommands.map((entry) => entry.command)).toContain("open_dm");
+  expect(sendCommands.map((entry) => entry.command)).not.toContain(
+    "start_managed_agent",
+  );
+  expect(sendCommands.map((entry) => entry.command)).not.toContain(
+    "add_channel_members",
   );
 });
 
