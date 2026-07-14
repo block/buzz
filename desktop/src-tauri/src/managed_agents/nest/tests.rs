@@ -410,8 +410,8 @@ fn ensure_cli_symlink_does_not_clobber_regular_file_dev() {
     );
 }
 
-fn make_persona(id: &str, display_name: &str) -> PersonaRecord {
-    PersonaRecord {
+fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
+    AgentDefinition {
         id: id.to_string(),
         display_name: display_name.to_string(),
         avatar_url: None,
@@ -425,6 +425,9 @@ fn make_persona(id: &str, display_name: &str) -> PersonaRecord {
         source_team: None,
         source_team_persona_slug: None,
         env_vars: std::collections::BTreeMap::new(),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        parallelism: None,
         created_at: String::new(),
         updated_at: String::new(),
     }
@@ -452,8 +455,8 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         model: None,
         provider: None,
         persona_source_version: None,
-        mcp_toolsets: None,
         start_on_app_launch: false,
+        auto_restart_on_config_change: true,
         runtime_pid: None,
         backend: BackendKind::default(),
         backend_agent_id: None,
@@ -466,6 +469,7 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         last_stopped_at: None,
         last_exit_code: None,
         last_error: None,
+        last_error_code: None,
         respond_to: RespondTo::default(),
         respond_to_allowlist: vec![],
         env_vars: std::collections::BTreeMap::new(),
@@ -477,6 +481,9 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         is_active: true,
         source_team: None,
         source_team_persona_slug: None,
+        definition_respond_to: None,
+        definition_respond_to_allowlist: Vec::new(),
+        definition_parallelism: None,
         relay_mesh: None,
     }
 }
@@ -897,5 +904,41 @@ fn refresh_skill_overwrites_on_version_bump() {
     assert_eq!(
         content, BUZZ_CLI_SKILL_MD,
         "SKILL.md must be refreshed on version bump"
+    );
+}
+
+#[test]
+fn test_path_is_dev_nest_dev_path_returns_true() {
+    let path = std::path::Path::new("/Users/someone/.buzz-dev");
+    assert!(
+        path_is_dev_nest(path),
+        ".buzz-dev path must be identified as dev nest"
+    );
+}
+
+#[test]
+fn test_path_is_dev_nest_prod_path_returns_false() {
+    let path = std::path::Path::new("/Users/someone/.buzz");
+    assert!(
+        !path_is_dev_nest(path),
+        ".buzz path must not be identified as dev nest"
+    );
+}
+
+#[test]
+fn test_path_is_dev_nest_unrelated_path_returns_false() {
+    let path = std::path::Path::new("/Users/someone/.buzz-staging");
+    assert!(
+        !path_is_dev_nest(path),
+        "unrelated path must not be identified as dev nest"
+    );
+}
+
+#[test]
+fn test_path_is_dev_nest_root_returns_false() {
+    let path = std::path::Path::new("/");
+    assert!(
+        !path_is_dev_nest(path),
+        "root path must not be identified as dev nest"
     );
 }

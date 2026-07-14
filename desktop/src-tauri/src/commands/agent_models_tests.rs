@@ -219,6 +219,39 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
 // Parse/filter/pagination tests live in crates/buzz-agent/src/catalog.rs
 // (they moved there with the Option C refactor).
 
+// ---------------------------------------------------------------------------
+// Dead-knob guards: mcp_command and turn_timeout_seconds
+// ---------------------------------------------------------------------------
+
+#[test]
+fn update_request_mcp_command_parses_for_wire_compat() {
+    // UpdateManagedAgentRequest accepts mcpCommand for backward-compatibility
+    // with frontends that still send it: the deprecated field must keep
+    // parsing cleanly. Nothing consumes it — the patching loop in
+    // update_managed_agent has no mcp_command arm (the effective MCP command
+    // is always catalog-derived at spawn). That absent-arm invariant lives in
+    // the code, not in this test: it only guards the wire shape.
+    let req: crate::managed_agents::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abc", "mcpCommand": "user-override"}"#)
+            .expect("request with deprecated mcpCommand parses");
+    assert_eq!(req.mcp_command.as_deref(), Some("user-override"));
+}
+
+#[test]
+fn update_request_turn_timeout_parses_for_wire_compat() {
+    // UpdateManagedAgentRequest accepts turnTimeoutSeconds for
+    // backward-compatibility with frontends that still send it: the deprecated
+    // field must keep parsing cleanly. Nothing consumes it — the patching loop
+    // in update_managed_agent has no turn_timeout_seconds arm
+    // (BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness). That
+    // absent-arm invariant lives in the code, not in this test: it only
+    // guards the wire shape.
+    let req: crate::managed_agents::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abc", "turnTimeoutSeconds": 9999}"#)
+            .expect("request with deprecated turnTimeoutSeconds parses");
+    assert_eq!(req.turn_timeout_seconds, Some(9999));
+}
+
 #[test]
 fn is_databricks_provider_matches_both_variants() {
     assert!(is_databricks_provider(Some("databricks")));

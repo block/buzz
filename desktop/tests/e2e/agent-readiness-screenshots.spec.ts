@@ -4,46 +4,66 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/agent-readiness";
 
-// An existing buzz-agent managed agent for the Edit-dialog shot.
+// An existing goose-runtime managed agent for the Edit-dialog shot.
 // Tyler's pubkey maps to gooseSurface in the mock bridge (runtimeId: "goose"),
-// which supports LLM provider selection — the shared AgentProviderField /
-// AgentModelField components render for it just as they do for buzz-agent.
+// which supports LLM provider selection — the edit dialog's provider/model
+// pickers render for it just as they do for buzz-agent.
 const EDIT_AGENT_PUBKEY = TEST_IDENTITIES.tyler.pubkey;
 
 /**
- * Navigate to the agents view and open the Create Agent dialog via the
- * "Custom agent" option, then fill a placeholder name.
+ * Navigate to the agents view and open the unified agent-create dialog via
+ * the "New agent" menu item, then fill a placeholder name.
  */
 async function openCreateDialog(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByText("Custom agent").click();
-  await page.getByTestId("agent-name-input").fill("Test Agent");
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.locator("#persona-display-name").fill("Test Agent");
 }
 
 /**
- * Wait for the provider field to become visible (buzz-agent auto-selected)
- * then select the given provider value.
+ * Pick an option from a PersonaDropdownField (menu-based, not a native
+ * select): open the trigger, click the matching menuitemradio.
+ */
+async function selectDropdownOption(
+  page: import("@playwright/test").Page,
+  trigger: import("@playwright/test").Locator,
+  optionName: string | RegExp,
+) {
+  await expect(trigger).toBeVisible({ timeout: 10_000 });
+  await trigger.press("Enter");
+  await page
+    .getByRole("menuitemradio", { name: optionName })
+    .click({ timeout: 5_000 });
+}
+
+/**
+ * Wait for the LLM provider field to become visible (buzz-agent
+ * auto-selected) then select the given provider option.
  */
 async function selectProvider(
   page: import("@playwright/test").Page,
-  provider: string,
+  providerName: string,
 ) {
-  await expect(page.locator("#agent-provider")).toBeVisible({
-    timeout: 10_000,
-  });
-  await page.locator("#agent-provider").selectOption(provider);
+  await selectDropdownOption(
+    page,
+    page.locator("#persona-llm-provider"),
+    providerName,
+  );
 }
 
 /**
- * Choose "Custom model..." from the model dropdown and fill a custom model id.
+ * Choose "Custom model..." from the model combobox and fill a custom model id.
  */
 async function setCustomModel(
   page: import("@playwright/test").Page,
   modelId: string,
 ) {
-  await page.locator("#agent-model").selectOption("__custom_model__");
+  await page.locator("#persona-model").click();
+  await page
+    .getByRole("button", { name: "Custom model...", exact: true })
+    .click();
   await page.getByLabel("Custom model ID").fill(modelId);
 }
 
@@ -72,16 +92,17 @@ async function openEditDialog(
 
   // Wait for the Edit dialog's LLM provider field (goose runtime supports it).
   // The Edit dialog renders provider selection via PersonaDropdownField, whose
-  // trigger button carries this id (the Create dialog uses #agent-provider).
+  // trigger button carries this id.
   await expect(page.locator("#edit-agent-llm-provider")).toBeVisible({
     timeout: 10_000,
   });
 }
 
-// Settle any in-flight CSS / Web Animations before capture.
+// Settle any in-flight CSS / Web Animations before capture. allSettled, not
+// all: a dropdown-menu close cancels its animation, which rejects `finished`.
 async function settleAnimations(page: import("@playwright/test").Page) {
   await page.evaluate(() =>
-    Promise.all(document.getAnimations().map((a) => a.finished)),
+    Promise.allSettled(document.getAnimations().map((a) => a.finished)),
   );
 }
 
@@ -104,13 +125,13 @@ test.describe("agent readiness gate screenshots", () => {
     await openCreateDialog(page);
 
     // Wait for buzz-agent to auto-select and the provider field to render.
-    await expect(page.locator("#agent-provider")).toBeVisible({
+    await expect(page.locator("#persona-llm-provider")).toBeVisible({
       timeout: 10_000,
     });
 
-    // Provider empty → required marker shown; submit is now ENABLED.
-    // Wait up to 10 s for prereqsQuery to resolve (async even in mock env).
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+    // Provider empty + no global provider → save is BLOCKED per the
+    // provider-default rule. The submit button must be disabled.
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,
     });
     await settleAnimations(page);
@@ -121,16 +142,16 @@ test.describe("agent readiness gate screenshots", () => {
     });
   });
 
-  // Shot 02: buzz-agent + anthropic selected, model empty → required marker shown, save allowed.
+  // Shot 02: buzz-agent + anthropic selected, model empty → required marker
+  // shown. The unified dialog blocks submit until the explicit model is set
+  // (anthropic requires one) — stricter than the legacy dialog's save-allowed.
   test("02-create-buzzagent-empty-model-marker", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
-    await selectProvider(page, "anthropic");
+    await selectProvider(page, "Anthropic");
 
-    // Model still empty → required marker shown; submit is now ENABLED.
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
-      timeout: 10_000,
-    });
+    // Model still empty → required marker shown; submit blocked until set.
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled();
     await settleAnimations(page);
 
     const dialog = page.getByRole("dialog");
@@ -144,19 +165,26 @@ test.describe("agent readiness gate screenshots", () => {
   test("03-create-missing-credential-row", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
-    await selectProvider(page, "anthropic");
+    await selectProvider(page, "Anthropic");
     await setCustomModel(page, "claude-opus-4-5");
+
+    // The amber required rows render in the env-vars editor, which lives in
+    // the Advanced section of the unified dialog.
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
 
     // Required row should name ANTHROPIC_API_KEY; submit is now ENABLED.
     await expect(page.getByTestId("env-vars-required-key")).toHaveText(
       "ANTHROPIC_API_KEY",
     );
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 10_000,
     });
 
     // Scroll the required row into view so it is visible in the screenshot.
-    await page.getByTestId("env-vars-required-key").scrollIntoViewIfNeeded();
+    // Use evaluate to avoid detachment races with the motion.div container.
+    await page
+      .getByTestId("env-vars-required-key")
+      .evaluate((el) => el.scrollIntoView({ block: "nearest" }));
     await settleAnimations(page);
 
     const dialog = page.getByRole("dialog");
@@ -169,14 +197,16 @@ test.describe("agent readiness gate screenshots", () => {
   test("04-create-all-required-satisfied-enabled", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
-    await selectProvider(page, "anthropic");
+    await selectProvider(page, "Anthropic");
     await setCustomModel(page, "claude-opus-4-5");
+    // Fill the required ANTHROPIC_API_KEY amber row in the EnvVarsEditor.
+    // Advanced auto-expands when required keys are missing.
     await page
-      .getByTestId("env-vars-required-value")
+      .getByLabel("Value for ANTHROPIC_API_KEY")
       .fill("sk-test-api-key-for-e2e");
 
     // All required fields satisfied → submit enabled.
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 5_000,
     });
     await settleAnimations(page);
@@ -228,15 +258,19 @@ test.describe("agent readiness gate screenshots", () => {
 
     // Wait for buzz-agent to auto-select (provider field visible), then
     // switch to claude.
-    await expect(page.locator("#agent-provider")).toBeVisible({
+    await expect(page.locator("#persona-llm-provider")).toBeVisible({
       timeout: 10_000,
     });
-    await page.locator("#agent-runtime").selectOption("claude");
+    await selectDropdownOption(
+      page,
+      page.locator("#persona-runtime"),
+      "Claude Code",
+    );
 
     // Provider/model fields hidden for CLI-login runtimes.
-    await expect(page.locator("#agent-provider")).not.toBeVisible();
+    await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
     // Submit enabled without provider/model.
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 5_000,
     });
     await settleAnimations(page);
@@ -248,7 +282,7 @@ test.describe("agent readiness gate screenshots", () => {
   });
 
   // Shot 07: Edit dialog for an existing managed agent (goose runtime) showing
-  // the shared AgentProviderField / AgentModelField extraction.
+  // the provider/model pickers.
   test("07-edit-dialog-extracted-fields", async ({ page }) => {
     await installMockBridge(page, {
       managedAgents: [
@@ -270,24 +304,25 @@ test.describe("agent readiness gate screenshots", () => {
     });
   });
 
-  // Shot 08: goose runtime, provider empty → required marker shown, save allowed (same as buzz-agent).
+  // Shot 08: goose runtime, provider empty + no global → save BLOCKED (same rule as buzz-agent).
   test("08-create-goose-empty-provider-marker", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
 
     // Buzz-agent auto-selects first; wait for its provider field, then
     // switch to goose to confirm its required-marker behavior is identical.
-    await expect(page.locator("#agent-provider")).toBeVisible({
+    await expect(page.locator("#persona-llm-provider")).toBeVisible({
       timeout: 10_000,
     });
-    await page.locator("#agent-runtime").selectOption("goose");
+    await selectDropdownOption(page, page.locator("#persona-runtime"), "Goose");
 
     // Provider field still visible for goose (also a provider-selection runtime).
-    await expect(page.locator("#agent-provider")).toBeVisible({
+    await expect(page.locator("#persona-llm-provider")).toBeVisible({
       timeout: 5_000,
     });
-    // Required marker shown; submit is now ENABLED.
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+    // Provider empty + no global provider → save is BLOCKED per the
+    // provider-default rule. The submit button must be disabled.
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,
     });
     await settleAnimations(page);

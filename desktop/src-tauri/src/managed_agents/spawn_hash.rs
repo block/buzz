@@ -28,45 +28,58 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::{
     known_acp_runtime, normalize_agent_args,
-    persona_events::persona_snapshot_with_agent_config_fallback,
+    persona_events::apply_persona_snapshot,
     resolve_effective_agent_env,
-    types::{ManagedAgentRecord, PersonaRecord},
+    types::{AgentDefinition, ManagedAgentRecord},
+    GlobalAgentConfig,
 };
+
+/// The prompt a spawn would actually deliver: `Some("")` collapses to `None`
+/// because an empty BUZZ_ACP_SYSTEM_PROMPT is no prompt — EXCEPT for
+/// team-pack records, where buzz-acp falls back to the pack persona's prompt
+/// when the env var is absent, making set-but-empty a deliberate suppression.
+///
+/// The single source of truth for the spawn env write AND the config hash:
+/// both call this, so they cannot disagree (the hash's contract is "digest
+/// what a spawn would actually run"). B5 hash row 2 depends on the collapse:
+/// backfilled prompt-less records re-snapshot to `Some("")` from their
+/// manufactured definition and must not trip the restart badge.
+pub(crate) fn effective_spawn_prompt(record: &ManagedAgentRecord) -> Option<String> {
+    let has_pack_fallback =
+        record.persona_team_dir.is_some() && record.persona_name_in_team.is_some();
+    record
+        .system_prompt
+        .clone()
+        .filter(|p| has_pack_fallback || !p.is_empty())
+}
 
 /// Digest the effective spawn configuration of `record` under the current
 /// `personas`, resolving a blank record relay against `workspace_relay`.
 /// Pure — no `AppHandle`, no disk, no keyring.
 pub(crate) fn spawn_config_hash(
     record: &ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     workspace_relay: &str,
+    global: &GlobalAgentConfig,
 ) -> u64 {
-    // Prospective re-snapshot: mirror the mutation start/restore apply to the
-    // record right before spawning, so the hash covers what a restart would
-    // actually run. Idempotent, so the spawn-time stamp (post-snapshot record)
-    // and later recomputes (persisted record) agree when nothing changed.
+    // Prospective re-snapshot: apply the same `apply_persona_snapshot` the
+    // start/restore paths run right before spawning, so the hash covers what a
+    // restart would actually run. Idempotent, so the spawn-time stamp
+    // (post-snapshot record) and later recomputes (persisted record) agree
+    // when nothing changed. The persona env itself reaches the hash through
+    // `resolve_effective_agent_env` below; `persona_source_version` is set on
+    // the clone but is not a hash input.
     let mut record = record.clone();
     if let Some(persona_id) = record.persona_id.clone() {
         if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
-            let snapshot = persona_snapshot_with_agent_config_fallback(
-                persona,
-                &record.env_vars,
-                record.model.as_deref(),
-                record.provider.as_deref(),
-            );
-            if let Some(prompt) = snapshot.system_prompt {
-                record.system_prompt = Some(prompt);
-            }
-            record.model = snapshot.model;
-            record.provider = snapshot.provider;
-            record.env_vars = snapshot.env_vars;
+            apply_persona_snapshot(&mut record, persona);
         }
     }
     let record = &record;
 
     let effective_command = crate::managed_agents::record_agent_command(record, personas);
     let runtime_meta = known_acp_runtime(&effective_command);
-    let effective = resolve_effective_agent_env(record, personas, runtime_meta);
+    let effective = resolve_effective_agent_env(record, personas, runtime_meta, global);
 
     let mut hasher = DefaultHasher::new();
 
@@ -87,16 +100,32 @@ pub(crate) fn spawn_config_hash(
     // resolved: a blank record relay spawns on the workspace relay, so a
     // workspace relay change must trip the badge.
     crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay).hash(&mut hasher);
-    record.system_prompt.hash(&mut hasher);
+    // Prompt via the shared spawn-effective filter (see its doc for the
+    // Some("")/None collapse and the team-pack exception).
+    effective_spawn_prompt(record).hash(&mut hasher);
     record.model.hash(&mut hasher);
     record.provider.hash(&mut hasher);
     record.auth_tag.hash(&mut hasher);
     record.respond_to.as_str().hash(&mut hasher);
-    record.respond_to_allowlist.hash(&mut hasher);
+    // The allowlist is hashed as the env receives it: spawn sets
+    // BUZZ_ACP_RESPOND_TO_ALLOWLIST only in allowlist mode, and normalized
+    // (trim/lowercase/dedup via `validate_respond_to_allowlist`) — so edits
+    // that don't survive normalization, or edits while another mode is
+    // active, must not badge. A list spawn would reject hashes raw: the
+    // stamped hash comes from a successful spawn, so any invalid edit
+    // correctly compares unequal.
+    if record.respond_to == super::types::RespondTo::Allowlist {
+        super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)
+            .unwrap_or_else(|_| record.respond_to_allowlist.clone())
+            .hash(&mut hasher);
+    }
     record.idle_timeout_seconds.hash(&mut hasher);
-    record.max_turn_duration_seconds.hash(&mut hasher);
+    // Spawn writes BUZZ_ACP_MAX_TURN_DURATION with a default.
+    record
+        .max_turn_duration_seconds
+        .unwrap_or(super::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS)
+        .hash(&mut hasher);
     record.parallelism.hash(&mut hasher);
-    record.mcp_toolsets.hash(&mut hasher);
     record.persona_team_dir.hash(&mut hasher);
     record.persona_name_in_team.hash(&mut hasher);
 

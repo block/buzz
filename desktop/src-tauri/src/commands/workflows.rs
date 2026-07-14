@@ -66,6 +66,36 @@ pub async fn get_channel_workflows(
     Ok(events.iter().map(workflow_from_event).collect())
 }
 
+/// Fetch workflows across many channels in a single relay round-trip.
+///
+/// The Workflows overview screen previously issued one `get_channel_workflows`
+/// query per member channel (`Promise.all` fanout in `WorkflowsView`), i.e. N
+/// relay POSTs. A nostr `#h` filter matches ANY of its listed values, so one
+/// query with all channel ids returns the same set. Each `WorkflowWire` carries
+/// its own `channel_id` (from the event's `h` tag), so the frontend can still
+/// group results by channel. Neither this nor the per-channel command sets a
+/// `limit`, so batching does not change result completeness.
+#[tauri::command]
+pub async fn get_channels_workflows(
+    channel_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<WorkflowWire>, String> {
+    if channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [30620],
+            "#h": channel_ids,
+        })],
+    )
+    .await?;
+
+    Ok(events.iter().map(workflow_from_event).collect())
+}
+
 #[tauri::command]
 pub async fn get_workflow(
     workflow_id: String,

@@ -14,16 +14,15 @@ import {
 } from "@/features/channels/readState/readStateFormat";
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
 import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader";
-import {
-  ChannelPane,
-  ForumView,
-} from "@/features/channels/ui/ChannelScreenLazyViews";
+import { ChannelPane } from "@/features/channels/ui/ChannelScreenLazyViews";
+import { ForumChannelContent } from "@/features/channels/ui/ForumChannelContent";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
 import {
   useManagedAgentsQuery,
   usePersonasQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import {
   mergeMessages,
   useChannelMessagesQuery,
@@ -56,7 +55,6 @@ import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import type { RelayEvent, RespondToMode, SearchHit } from "@/shared/api/types";
 import { useChannelFind } from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
@@ -69,17 +67,14 @@ import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import {
-  mergeAgentNamesIntoProfiles,
-  useChannelActivityTyping,
-} from "./useChannelActivityTyping";
+import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
+import { useMessageProfiles } from "./useMessageProfiles";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelUnreadState } from "./useChannelUnreadState";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
-
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760,
   EMPTY_RELAY_EVENTS: RelayEvent[] = [];
 export function ChannelScreen({
@@ -189,7 +184,7 @@ export function ChannelScreen({
     effectiveOpenThreadHeadId,
   );
   useChannelSubscription(activeChannel);
-  const { fetchOlder, hasOlderMessages, isFetchingOlder } =
+  const { fetchOlder, hasOlderMessages, historyExhausted, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
   const latestActiveMessage = React.useMemo(() => {
     const messages = messagesQuery.data;
@@ -324,17 +319,6 @@ export function ChannelScreen({
   const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
     enabled: messageProfilePubkeys.length > 0,
   });
-  const agentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set(knownAgentPubkeys);
-    for (const [pubkey, profile] of Object.entries(
-      messageProfilesQuery.data?.profiles ?? {},
-    )) {
-      if (profile.isAgent) {
-        pubkeys.add(normalizePubkey(pubkey));
-      }
-    }
-    return pubkeys;
-  }, [knownAgentPubkeys, messageProfilesQuery.data]);
   const agentPubkeysPending =
     activeChannel?.channelType === "dm" &&
     (channelMembersQuery.isPending ||
@@ -360,25 +344,29 @@ export function ChannelScreen({
   // Observer ingestion (frame decryption + derived active-turn liveness) is
   // owner-global — mounted once in AppShell via useAgentObserverIngestion —
   // so this screen no longer mounts its own observer/turns bridges.
-  const messageProfiles = React.useMemo(() => {
-    const base =
-      mergeCurrentProfileIntoLookup(
-        messageProfilesQuery.data?.profiles,
-        currentProfile,
-      ) ?? {};
-    return mergeAgentNamesIntoProfiles(
-      base,
-      managedAgents,
-      relayAgents,
-      currentPubkey,
-    );
-  }, [
+  const messageProfiles = useMessageProfiles({
+    channelMembers,
     currentProfile,
     currentPubkey,
     managedAgents,
-    messageProfilesQuery.data?.profiles,
+    profiles: messageProfilesQuery.data?.profiles,
     relayAgents,
-  ]);
+  });
+  // Agent set for ChannelPane's own consumers (DM huddle member resolution,
+  // the agents list): the workspace-scoped baseline shared by every surface,
+  // widened with channel-member roles and this screen's profile lookup.
+  // Message rows no longer take this — MessageRow derives agent-ness itself
+  // from useKnownAgentPubkeys + per-pubkey profile checks.
+  const workspaceAgentPubkeys = useKnownAgentPubkeys();
+  const agentPubkeys = React.useMemo(() => {
+    const pubkeys = new Set([...workspaceAgentPubkeys, ...knownAgentPubkeys]);
+    for (const [pubkey, profile] of Object.entries(messageProfiles)) {
+      if (profile.isAgent) {
+        pubkeys.add(normalizePubkey(pubkey));
+      }
+    }
+    return pubkeys;
+  }, [knownAgentPubkeys, messageProfiles, workspaceAgentPubkeys]);
   const personasQuery = usePersonasQuery();
   const { personaLookup, respondToLookup } = React.useMemo(() => {
     const agents = managedAgentsQuery.data ?? [];
@@ -825,19 +813,27 @@ export function ChannelScreen({
         >
           {activeChannel ? (
             activeChannel.channelType === "forum" ? (
-              <>
-                {channelHeader}
-                <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>
-                  <ForumView
-                    channel={activeChannel}
-                    currentPubkey={currentPubkey}
-                    onClosePost={onCloseForumPost}
-                    onSelectPost={onSelectForumPost}
-                    selectedPostId={selectedForumPostId}
-                    targetReplyId={targetForumReplyId}
-                  />
-                </React.Suspense>
-              </>
+              <ForumChannelContent
+                canResetPanelWidth={canResetThreadPanelWidth}
+                channel={activeChannel}
+                currentPubkey={currentPubkey}
+                header={channelHeader}
+                onClosePost={onCloseForumPost}
+                onCloseProfilePanel={handleCloseProfilePanel}
+                onOpenDm={handleOpenDm}
+                onOpenProfilePanel={handleOpenProfilePanel}
+                onPanelResizeStart={handleThreadPanelResizeStart}
+                onProfilePanelTabChange={setProfilePanelTab}
+                onProfilePanelViewChange={setProfilePanelView}
+                onResetPanelWidth={handleThreadPanelWidthReset}
+                onSelectPost={onSelectForumPost}
+                panelWidthPx={threadPanelWidthPx}
+                profilePanelPubkey={profilePanelPubkey}
+                profilePanelTab={profilePanelTab}
+                profilePanelView={profilePanelView}
+                selectedPostId={selectedForumPostId}
+                targetReplyId={targetForumReplyId}
+              />
             ) : (
               <React.Suspense
                 fallback={<ViewLoadingFallback includeHeader kind="channel" />}
@@ -858,6 +854,7 @@ export function ChannelScreen({
                   fetchOlder={fetchOlder}
                   header={channelHeader}
                   hasOlderMessages={hasOlderMessages}
+                  historyExhausted={historyExhausted}
                   onAddAgent={handleOpenAddBot}
                   onCreateChannel={openCreateChannel}
                   onOpenMembers={handleOpenMembersSidebar}
@@ -949,6 +946,7 @@ export function ChannelScreen({
                   targetMessageId={mainTimelineTargetMessageId}
                   threadHeadMessage={displayedThreadHeadMessage}
                   threadMessages={displayedThreadMessages}
+                  threadMessagesPending={threadRepliesQuery.isPending}
                   threadPanelWidthPx={threadPanelWidthPx}
                   threadTypingPubkeys={threadTypingPubkeys}
                   threadReplyTargetMessage={displayedThreadReplyTargetMessage}

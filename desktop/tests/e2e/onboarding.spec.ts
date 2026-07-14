@@ -3,6 +3,11 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
+  seedActiveIdentity,
+  passThroughBackupStep,
+} from "../helpers/onboarding";
 
 type RelayConnectionState =
   | "connected"
@@ -58,7 +63,6 @@ async function setRelayConnectionState(
   }, state);
 }
 
-const E2E_IDENTITY_OVERRIDE_STORAGE_KEY = "buzz:e2e-identity-override.v1";
 const HOME_SEEN_STORAGE_KEY_PREFIX = "buzz-home-feed-seen.v1:";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const BLANK_TYLER_IDENTITY = {
@@ -79,24 +83,6 @@ const FIRST_RUN_ALICE = {
   ...TEST_IDENTITIES.alice,
   username: "",
 };
-
-type TestIdentity = {
-  privateKey: string;
-  pubkey: string;
-  username: string;
-};
-
-async function seedActiveIdentity(page: Page, identity: TestIdentity) {
-  await page.addInitScript(
-    ({ identity: nextIdentity, storageKey }) => {
-      window.localStorage.setItem(storageKey, JSON.stringify(nextIdentity));
-    },
-    {
-      identity,
-      storageKey: E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
-    },
-  );
-}
 
 async function seedOnboardingCompletion(page: Page, pubkey: string) {
   await page.addInitScript(
@@ -160,10 +146,10 @@ async function expectWiderThanTall(locator: Locator) {
 
 async function expectIntroActionIconStackedAboveTitle(
   action: Locator,
-  testId: string,
+  title: string,
 ) {
-  const iconBox = await action.getByTestId(`${testId}-icon`).boundingBox();
-  const titleBox = await action.getByTestId(`${testId}-title`).boundingBox();
+  const iconBox = await action.locator("svg").first().boundingBox();
+  const titleBox = await action.getByText(title, { exact: true }).boundingBox();
   if (!iconBox || !titleBox) {
     throw new Error("Could not measure welcome intro action content");
   }
@@ -286,17 +272,13 @@ async function expectWelcomeView(page: Page) {
   );
   await expectIntroActionIconStackedAboveTitle(
     page.getByTestId("welcome-intro-action-create-channel"),
-    "welcome-intro-action-create-channel",
+    "Create a channel",
   );
   await expect(
-    page.getByTestId("welcome-intro-action-create-channel-title"),
-  ).toHaveText("Create a channel");
-  await expect(
-    page.getByTestId("welcome-intro-action-create-channel-title"),
+    page
+      .getByTestId("welcome-intro-action-create-channel")
+      .getByText("Create a channel", { exact: true }),
   ).toHaveCSS("white-space", "normal");
-  await expect(
-    page.getByTestId("welcome-intro-action-create-channel-description"),
-  ).toHaveCount(0);
   await expect(
     page.getByTestId("welcome-intro-action-create-agent"),
   ).toBeVisible();
@@ -305,14 +287,8 @@ async function expectWelcomeView(page: Page) {
   );
   await expectIntroActionIconStackedAboveTitle(
     page.getByTestId("welcome-intro-action-create-agent"),
-    "welcome-intro-action-create-agent",
+    "Create a custom agent",
   );
-  await expect(
-    page.getByTestId("welcome-intro-action-create-agent-title"),
-  ).toHaveText("Create a custom agent");
-  await expect(
-    page.getByTestId("welcome-intro-action-create-agent-description"),
-  ).toHaveCount(0);
   await expect(page.getByTestId("message-composer")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toContainText(
@@ -546,6 +522,7 @@ async function expectIncompleteOnboarding(page: Page) {
 
 async function continueToSetupPage(page: Page) {
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page
     .getByTestId("onboarding-avatar-url")
@@ -595,7 +572,7 @@ test("first-run default workspace handoff gives immediate stepper feedback", asy
 
   await expect(page.getByText("Welcome to Buzz")).toBeVisible();
   await page
-    .getByRole("button", { name: "Continue with Block Inc. workspace" })
+    .getByRole("button", { name: "Continue with default workspace" })
     .click();
 
   await page.waitForTimeout(80);
@@ -603,7 +580,7 @@ test("first-run default workspace handoff gives immediate stepper feedback", asy
     0,
   );
   await expect(
-    page.getByRole("button", { name: "Continue with Block Inc. workspace" }),
+    page.getByRole("button", { name: "Continue with default workspace" }),
   ).toBeVisible();
   await expect(page.getByRole("progressbar")).toHaveAttribute(
     "aria-valuenow",
@@ -671,7 +648,7 @@ test("welcome presents custom workspace setup as joining a workspace", async ({
   await page.goto("/");
 
   await expect(
-    page.getByRole("button", { name: "Continue with Block Inc. workspace" }),
+    page.getByRole("button", { name: "Continue with default workspace" }),
   ).toHaveCount(0);
   await page.getByRole("button", { name: "Join a workspace" }).click();
 
@@ -785,6 +762,7 @@ test("avatar step uses an add-image placeholder before an avatar is chosen", asy
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
 
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   const preview = page.getByTestId("onboarding-avatar-preview");
@@ -802,6 +780,7 @@ test("avatar step reveals preset backgrounds after the first emoji pick", async 
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
 
   await page.getByRole("tab", { name: "Emoji" }).click();
@@ -828,6 +807,7 @@ test("avatar step accepts an avatar URL before theme selection", async ({
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page
     .getByTestId("onboarding-avatar-url")
@@ -859,6 +839,7 @@ test("failed avatar saves can continue without saving the avatar", async ({
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page
     .getByTestId("onboarding-avatar-url")
@@ -891,6 +872,7 @@ test("theme step offers skip instead of going back", async ({ page }) => {
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page
     .getByTestId("onboarding-avatar-url")
@@ -972,6 +954,7 @@ test("avatar upload rejects a file whose server-detected MIME is not an image", 
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page.getByTestId("onboarding-avatar-input").setInputFiles({
     name: "looks-like.png",
@@ -1009,6 +992,7 @@ test("avatar upload accepts a file whose server-detected MIME is an image", asyn
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page.getByTestId("onboarding-avatar-input").setInputFiles({
     name: "avatar.png",
@@ -1068,38 +1052,52 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   await expect(loadingGate).toBeVisible();
   await expect(loadingGate).toContainText("Setting up your workspace...");
 
-  // The boot gate is deliberately static: a plain Buzz mark in the brand
-  // yellow (#D7D72E) over solid black. The mark must paint complete on the
-  // FIRST frame — a blank gate reads as "nothing is loading" — so nothing
-  // about it may depend on SMIL/scripted animation, and the background must
-  // be a flat color rather than the animated gradient wash.
+  // The boot gate is the theme-adaptive grainient with the flapping Buzz bee
+  // as its hero. The mark must paint complete on the FIRST frame — a blank
+  // gate reads as "nothing is loading" — so nothing about it may depend on
+  // SMIL/scripted animation (<animate> count stays 0); the wing flap is pure
+  // CSS on HTML-level wing layers so it keeps running on the compositor even
+  // while boot work hogs the main thread.
+  await expect(
+    loadingGate.getByTestId("setup-grainient-background"),
+  ).toBeVisible();
   const mark = loadingGate.locator(".buzz-mark");
   await expect(mark).toBeVisible();
   const gateTreatment = await loadingGate.evaluate((element) => {
-    const shellStyles = window.getComputedStyle(element);
-    const markSvg = element.querySelector(".buzz-mark");
-    const markStyles =
-      markSvg instanceof SVGElement ? window.getComputedStyle(markSvg) : null;
+    const markElement = element.querySelector(".buzz-mark");
+    const markSvgs = markElement
+      ? Array.from(markElement.querySelectorAll("svg"))
+      : [];
+    const wing = element.querySelector(".bee-wing");
+    const wingStyles =
+      wing instanceof SVGElement ? window.getComputedStyle(wing) : null;
+    const wash = element.querySelector(".buzz-setup-grainient__wash");
+    const washStyles =
+      wash instanceof HTMLElement ? window.getComputedStyle(wash) : null;
     return {
       animateElementCount: element.querySelectorAll("animate").length,
-      backgroundColor: shellStyles.backgroundColor,
-      backgroundImage: shellStyles.backgroundImage,
-      // The document itself must also be black (inline <style> in
-      // index.html) so the pre-React/pre-CSS first paint can't flash white
-      // before the gate mounts.
+      // The document itself must not flash white before the gate mounts
+      // (inline <style> in index.html; black fallback when no cached theme).
       documentBackgroundColor: window.getComputedStyle(document.documentElement)
         .backgroundColor,
-      markColor: markStyles?.color,
-      markUsesCurrentColor: markSvg?.getAttribute("fill") === "currentColor",
+      grainientAnimation: washStyles?.animationName,
+      grainientUsesRadialGradients:
+        washStyles?.backgroundImage.includes("radial-gradient"),
+      markSvgsUseCurrentColor:
+        markSvgs.length > 0 &&
+        markSvgs.every((svg) => svg.getAttribute("fill") === "currentColor"),
+      wingFlapAnimation: wingStyles?.animationName,
+      wingFlapRunning: wingStyles?.animationPlayState,
     };
   });
   expect(gateTreatment).toEqual({
     animateElementCount: 0,
-    backgroundColor: "rgb(0, 0, 0)",
-    backgroundImage: "none",
     documentBackgroundColor: "rgb(0, 0, 0)",
-    markColor: "rgb(215, 215, 46)", // #d7d72e
-    markUsesCurrentColor: true,
+    grainientAnimation: "buzz-grainient-orbit",
+    grainientUsesRadialGradients: true,
+    markSvgsUseCurrentColor: true,
+    wingFlapAnimation: "bee-wing-left-flap",
+    wingFlapRunning: "running",
   });
   await expect(loadingGate).not.toHaveClass(/buzz-onboarding-neutral-theme/);
   await expectShellHidden(page);

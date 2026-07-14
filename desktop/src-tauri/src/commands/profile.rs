@@ -168,6 +168,16 @@ pub async fn get_user_notes(
     Ok(nostr_convert::user_notes_from_events(&events))
 }
 
+fn build_user_search_filter(query: &str, limit: usize, page: u32) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": [0],
+        "search": query,
+        "search_mode": "prefix",
+        "limit": limit,
+        "page": page,
+    })
+}
+
 #[tauri::command]
 pub async fn search_users(
     query: String,
@@ -225,16 +235,14 @@ pub async fn search_users(
     // `content` blob, where a hit in `display_name` is not weighted any higher
     // than a substring hit in `about`. The caller can request later pages via the
     // cursor so the UI cap is only a page size, not a terminal directory ceiling.
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [0],
-            "search": trimmed,
-            "limit": max,
-            "page": page,
-        })],
-    )
-    .await?;
+    //
+    // `search_mode: "prefix"` matters: every caller of this command is a
+    // typeahead surface (member picker, @mention popup, DM recipient search,
+    // topbar people results), so a partially typed name must match. Without it
+    // the relay runs whole-word `websearch_to_tsquery` matching and "tyl"
+    // returns zero results for "Tyler". Same bridge-only extension the topbar
+    // message search uses (see `build_search_messages_filter`).
+    let events = query_relay(&state, &[build_user_search_filter(trimmed, max, page)]).await?;
 
     let mut response = nostr_convert::rank_user_search_results(&events, trimmed, max);
     if events.len() >= max {
@@ -320,5 +328,24 @@ fn empty_profile_info(pubkey: &str) -> ProfileInfo {
         nip05_handle: None,
         owner_pubkey: None,
         has_profile_event: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_search_filter_requests_prefix_mode_for_typeahead() {
+        // Every caller of `search_users` is a typeahead surface. Whole-word
+        // FTS matching returns zero results for a partially typed name
+        // ("tyl" for "Tyler"), which reads as "user doesn't exist" in the
+        // member picker and @mention popup. Pin the mode so it can't drift.
+        let filter = build_user_search_filter("tyl", 25, 1);
+
+        assert_eq!(filter["search"], serde_json::json!("tyl"));
+        assert_eq!(filter["search_mode"], serde_json::json!("prefix"));
+        assert_eq!(filter["limit"], serde_json::json!(25));
+        assert_eq!(filter["page"], serde_json::json!(1));
     }
 }

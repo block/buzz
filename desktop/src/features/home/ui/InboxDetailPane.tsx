@@ -18,7 +18,9 @@ import {
   hasSameMessageAuthor,
   isWithinGroupingWindow,
 } from "@/features/messages/lib/messageGrouping";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
+import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import type { Channel } from "@/shared/api/types";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
@@ -58,6 +60,21 @@ type InboxDetailPaneProps = {
   channel: Channel | null;
   contextChannelName?: string | null;
   currentPubkey?: string;
+  /**
+   * The event anchor: the specific event ID the user selected or navigated to
+   * via `?item=`. Used for message highlighting and as the stable identity for
+   * scroll/focus effects. Does NOT change when a live reply advances the
+   * representative `item.id`.
+   */
+  selectedEventId: string | null;
+  /**
+   * The default reply-parent event ID derived from the latched anchor's tags
+   * in HomeView (`parentId ?? anchor.id`). Populated once the anchor is found
+   * in feedItems and held until a new anchor is selected. Used as fallback
+   * when the anchor event has been displaced from the current `groupItems`
+   * (e.g. a very old anchor evicted by a newer representative).
+   */
+  latchedDefaultParentId?: string | null;
   onBack?: () => void;
   onDelete: () => void;
   onOpenChannel: (channelId: string) => void;
@@ -90,6 +107,8 @@ export function InboxDetailPane({
   channel,
   contextChannelName = null,
   currentPubkey,
+  selectedEventId,
+  latchedDefaultParentId = null,
   onBack,
   onDelete,
   onOpenChannel,
@@ -97,22 +116,59 @@ export function InboxDetailPane({
   onToggleReaction,
 }: InboxDetailPaneProps) {
   const detailPaneRef = React.useRef<HTMLElement | null>(null);
+  // Refs for the shared anchored-scroll hook's container and content roots.
+  const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const contentRef = React.useRef<HTMLDivElement | null>(null);
   const [replyTargetId, setReplyTargetId] = React.useState<string | null>(null);
   const [isFocusHighlightVisible, setIsFocusHighlightVisible] =
     React.useState(true);
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
-  const selectedItemId = item?.id ?? null;
+  // The stable conversation ID: does not change when the representative latest
+  // event advances. All lifecycle effects (reply target reset, focus highlight,
+  // scroll centering) key on this.
+  const conversationId = item?.conversationId ?? null;
   const selectedChannelId = item?.item.channelId ?? null;
-  const selectedMessageScrollKey = React.useMemo(() => {
-    if (!selectedItemId) {
-      return null;
-    }
+  // Build the plain, non-virtualized timeline the shared hook anchors against.
+  // Live arrivals rerun its layout compensation without changing the target.
 
-    const selectedMessageIndex = messages.findIndex(
-      (message) => message.isSelected,
-    );
-    return `${selectedItemId}:${selectedMessageIndex}:${messages.length}`;
-  }, [messages, selectedItemId]);
+  const selectedMessage = messages.find((message) => message.isSelected);
+  const pendingReplyMessages: InboxDisplayMessage[] = replies.map((reply) => ({
+    ...reply,
+    depth: reply.depth ?? (selectedMessage?.depth ?? 0) + 1,
+    isSelected: false,
+    mentionNames: [],
+  }));
+  const displayMessages: InboxDisplayMessage[] =
+    messages.length > 0
+      ? [...messages, ...pendingReplyMessages]
+      : item
+        ? [
+            {
+              authorLabel: item.senderLabel,
+              authorPubkey: item.item.pubkey,
+              avatarUrl: item.avatarUrl,
+              content: item.preview,
+              createdAt: item.item.createdAt,
+              depth: 0,
+              fullTimestampLabel: item.fullTimestampLabel,
+              id: item.id,
+              isSelected: true,
+              mentionNames: item.mentionNames,
+              mentionPubkeysByName: item.mentionPubkeysByName,
+              timeLabel: formatTime(item.item.createdAt),
+            },
+            ...pendingReplyMessages,
+          ]
+        : pendingReplyMessages;
+  const { onScroll } = useAnchoredScroll({
+    channelId: conversationId,
+    contentRef,
+    isLoading: isThreadContextLoading,
+    messages: displayMessages,
+    pinTargetCentered: true,
+    scrollContainerRef,
+    targetMessageId: selectedEventId,
+  });
 
   const focusComposer = React.useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -125,9 +181,9 @@ export function InboxDetailPane({
   }, []);
 
   React.useEffect(() => {
-    void selectedItemId;
+    void conversationId;
     setReplyTargetId(null);
-  }, [selectedItemId]);
+  }, [conversationId]);
 
   React.useEffect(() => {
     void selectedChannelId;
@@ -135,7 +191,7 @@ export function InboxDetailPane({
   }, [selectedChannelId]);
 
   React.useEffect(() => {
-    void selectedItemId;
+    void conversationId;
     setIsFocusHighlightVisible(true);
     const timeoutId = window.setTimeout(() => {
       setIsFocusHighlightVisible(false);
@@ -144,21 +200,79 @@ export function InboxDetailPane({
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [selectedItemId]);
+  }, [conversationId]);
 
+  // Capture the default composer reply parent from the selected-event anchor
+  // when the conversation first opens (or when the user explicitly navigates
+  // to a different event anchor). Reset only when conversationId/selectedEventId
+  // changes so that a live incoming message does not silently retarget the
+  // in-progress reply, preserving PR #1714 same-depth semantics.
+  //
+  // Design: no render-phase ref mutations. `item` and `latchedDefaultParentId`
+  // are explicit deps. A committed ref (`parentCapturedRef`) written only inside
+  // effects prevents live-update re-runs from overwriting a value that was
+  // already captured for the current (conversationId, selectedEventId) pair.
+  const [capturedDefaultParentId, setCapturedDefaultParentId] = React.useState<
+    string | null
+  >(null);
+  // Written only inside committed effects — never during render.
+  const parentCapturedRef = React.useRef(false);
+
+  // Reset when the user navigates to a different conversation or event anchor.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: parentCapturedRef is a ref (not a reactive value); conversationId and selectedEventId are the intentional reset triggers
   React.useEffect(() => {
-    if (!selectedMessageScrollKey) {
+    parentCapturedRef.current = false;
+    setCapturedDefaultParentId(null);
+  }, [conversationId, selectedEventId]);
+
+  // Capture the default parent once per (conversation, anchor) pair. The effect
+  // also fires when `item` or `latchedDefaultParentId` changes, but the
+  // `parentCapturedRef` guard prevents overwriting a value that was already
+  // resolved for the current anchor. The one exception: when the anchor is not
+  // in groupItems and `latchedDefaultParentId` was null on the first run, we
+  // defer capture until the latch arrives (parentCapturedRef stays false so
+  // the null→resolved transition of latchedDefaultParentId triggers re-capture).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: conversationId is derived from item but listed explicitly as a self-documenting reset signal; parentCapturedRef is a ref
+  React.useEffect(() => {
+    if (parentCapturedRef.current) {
       return;
     }
-
-    window.requestAnimationFrame(() => {
-      detailPaneRef.current
-        ?.querySelector<HTMLElement>(
-          '[data-testid="home-inbox-selected-message"]',
-        )
-        ?.scrollIntoView({ block: "center" });
-    });
-  }, [selectedMessageScrollKey]);
+    if (!item) {
+      setCapturedDefaultParentId(null);
+      return;
+    }
+    // Look for the anchored event inside groupItems first (it may be an older
+    // non-representative event), then fall back to the representative item.
+    const anchoredEvent =
+      selectedEventId != null
+        ? item.groupItems.find((gi) => gi.id === selectedEventId)
+        : null;
+    if (anchoredEvent) {
+      // Anchor found in groupItems — derive parent from its tags. Mark as
+      // captured so live feed advances don't retarget the reply.
+      const defaultParent =
+        getThreadReference(anchoredEvent.tags).parentId ?? anchoredEvent.id;
+      setCapturedDefaultParentId(defaultParent);
+      parentCapturedRef.current = true;
+      return;
+    }
+    // Anchor is not in groupItems (evicted from feed window). Use the latched
+    // default parent from HomeView, which was captured when the event was still
+    // present in feedItems. If the latch is not yet available (null), use the
+    // representative fallback but do NOT mark as captured — the null→resolved
+    // transition of latchedDefaultParentId will fire this effect again with the
+    // correct value.
+    if (latchedDefaultParentId != null) {
+      setCapturedDefaultParentId(latchedDefaultParentId);
+      parentCapturedRef.current = true;
+      return;
+    }
+    // Latch not yet available; install the representative fallback without
+    // marking as captured so the true latch value replaces it when it arrives.
+    const fallback =
+      getThreadReference(item.item.tags ?? []).parentId ?? item.id;
+    setCapturedDefaultParentId(fallback);
+  }, [conversationId, selectedEventId, item, latchedDefaultParentId]);
 
   if (!item) {
     return (
@@ -179,35 +293,13 @@ export function InboxDetailPane({
     );
   }
 
-  const selectedMessage = messages.find((message) => message.isSelected);
-  const pendingReplyMessages: InboxDisplayMessage[] = replies.map((reply) => ({
-    ...reply,
-    depth: reply.depth ?? (selectedMessage?.depth ?? 0) + 1,
-    isSelected: false,
-    mentionNames: [],
-  }));
-  const displayMessages: InboxDisplayMessage[] =
-    messages.length > 0
-      ? [...messages, ...pendingReplyMessages]
-      : [
-          {
-            authorLabel: item.senderLabel,
-            authorPubkey: item.item.pubkey,
-            avatarUrl: item.avatarUrl,
-            content: item.preview,
-            createdAt: item.item.createdAt,
-            depth: 0,
-            fullTimestampLabel: item.fullTimestampLabel,
-            id: item.id,
-            isSelected: true,
-            mentionNames: item.mentionNames,
-            timeLabel: formatTime(item.item.createdAt),
-          },
-          ...pendingReplyMessages,
-        ];
   const replyTarget =
     displayMessages.find((message) => message.id === replyTargetId) ?? null;
-  const composerParentEventId = replyTarget?.id ?? item.id;
+  // Explicit sub-message reply wins. Otherwise use the captured default parent
+  // (derived from the selected-event anchor at conversation entry), which does
+  // not change when a live incoming message advances the representative item.
+  const composerParentEventId =
+    replyTarget?.id ?? capturedDefaultParentId ?? item.id;
   const composerReplyTarget =
     replyTarget && replyTarget.id !== item.id
       ? {
@@ -324,9 +416,11 @@ export function InboxDetailPane({
 
         <div
           aria-busy={isThreadContextLoading}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32"
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 [overflow-anchor:none]"
+          onScroll={onScroll}
+          ref={scrollContainerRef}
         >
-          <div>
+          <div ref={contentRef}>
             {displayMessages.map((message, index) => {
               const isAfterSeparator = index === 1;
               const previousMessage = displayMessages[index - 1];
@@ -370,7 +464,7 @@ export function InboxDetailPane({
               channelType={composerChannelType}
               containerClassName="px-4 pb-4 sm:px-4"
               disabled={!canReply}
-              draftKey={`inbox-reply:${item.id}`}
+              draftKey={`thread:${item.conversationId}`}
               isSending={isSendingReply}
               onCancelReply={
                 composerReplyTarget ? () => setReplyTargetId(null) : undefined

@@ -6,13 +6,11 @@ import {
   useChannelMembersQuery,
   useChannelsQuery,
 } from "@/features/channels/hooks";
-import { useUpdateManagedAgentMutation } from "@/features/agents/hooks";
 import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
-import { CreateAgentRespondToField } from "@/features/agents/ui/RespondToField";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
 import { formatMemberName } from "@/features/channels/lib/memberUtils";
@@ -32,7 +30,6 @@ import type {
   Channel,
   ChannelMember,
   ManagedAgent,
-  RespondToMode,
   UserSearchResult,
 } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
@@ -40,7 +37,6 @@ import {
   Dialog,
   DialogClose,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
@@ -54,10 +50,14 @@ import {
   MODAL_SEARCH_SHELL_CLASS,
 } from "@/shared/ui/modalSearchStyles";
 import { MembersSidebarMemberCard } from "./MembersSidebarMemberCard";
+import { EditRespondToDialog } from "./EditRespondToDialog";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
+import { useMembersSidebarModeration } from "./useMembersSidebarModeration";
 const MEMBER_ADD_RESULT_LIMIT = 50;
+const MEMBER_SEARCH_MIN_QUERY_LENGTH = 2;
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
   "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
+
 function formatAddCandidateName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
@@ -236,7 +236,10 @@ export function MembersSidebar({
     channel?.channelType !== "dm";
   const userSearchQuery = useInfiniteUserSearchQuery(deferredSearchQuery, {
     allowEmpty: false,
-    enabled: open && canAddMembers && deferredSearchQuery.length > 0,
+    enabled:
+      open &&
+      canAddMembers &&
+      deferredSearchQuery.length >= MEMBER_SEARCH_MIN_QUERY_LENGTH,
     limit: MEMBER_ADD_RESULT_LIMIT,
   });
   const userSearchResults = useFlattenedUserSearchResults(userSearchQuery.data);
@@ -437,6 +440,17 @@ export function MembersSidebar({
 
   const canManageMembers =
     selfMember?.role === "owner" || selfMember?.role === "admin";
+
+  const {
+    canModerate,
+    isModerationPending,
+    moderationStateByPubkey,
+    onBan,
+    onUnban,
+    onTimeout,
+    onUntimeout,
+  } = useMembersSidebarModeration(open);
+
   const isArchived =
     channel?.archivedAt !== null && channel?.archivedAt !== undefined;
   const managedAgentByPubkey = React.useMemo(
@@ -497,18 +511,15 @@ export function MembersSidebar({
   useFeedbackToasts(actionNoticeMessage, actionErrorMessage);
 
   const { openProfilePanel } = useProfilePanel();
-  // UserProfilePanel only renders inside ChannelPane, which forums replace
-  // with ForumView — opening there would close the sheet and show nothing.
-  const isForumChannel = channel?.channelType === "forum";
   const handleOpenProfile = React.useMemo(
     () =>
-      openProfilePanel && !isForumChannel
+      openProfilePanel
         ? (pubkey: string) => {
             onOpenChange(false);
             openProfilePanel(pubkey);
           }
         : undefined,
-    [isForumChannel, onOpenChange, openProfilePanel],
+    [onOpenChange, openProfilePanel],
   );
 
   const [editRespondToAgent, setEditRespondToAgent] =
@@ -563,8 +574,13 @@ export function MembersSidebar({
       <div className="content-visibility-auto" key={member.pubkey}>
         <MembersSidebarMemberCard
           canChangeRole={canManageMembers && member.pubkey !== currentPubkey}
+          canModerate={canModerate && member.pubkey !== currentPubkey}
           canRemoveMember={canRemoveMember(member)}
-          isActionPending={isActionPending || changeRoleMutation.isPending}
+          isActionPending={
+            isActionPending ||
+            changeRoleMutation.isPending ||
+            isModerationPending
+          }
           isArchived={isArchived}
           managedAgent={
             memberIsBot
@@ -577,6 +593,10 @@ export function MembersSidebar({
             member.displayName ?? truncatePubkey(member.pubkey)
           }
           memberLabel={formatMemberName(member, currentPubkey)}
+          moderationState={moderationStateByPubkey.get(
+            normalizePubkey(member.pubkey),
+          )}
+          onBan={onBan}
           onChangeRole={(m, role) => {
             void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
           }}
@@ -586,6 +606,9 @@ export function MembersSidebar({
           }}
           onOpenProfile={handleOpenProfile}
           onRemoveMember={handleRemoveMember}
+          onTimeout={onTimeout}
+          onUnban={onUnban}
+          onUntimeout={onUntimeout}
           onViewActivity={
             onViewActivity
               ? (pubkey: string) => {
@@ -895,88 +918,5 @@ function AddMemberSearchResultRow({
         Add
       </Button>
     </div>
-  );
-}
-
-function EditRespondToDialog({
-  agent,
-  currentPubkey,
-  onOpenChange,
-  open,
-}: {
-  agent: ManagedAgent | null;
-  currentPubkey?: string;
-  onOpenChange: (open: boolean) => void;
-  open: boolean;
-}) {
-  const updateMutation = useUpdateManagedAgentMutation();
-  const [respondTo, setRespondTo] = React.useState<RespondToMode>("owner-only");
-  const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
-    [],
-  );
-
-  React.useEffect(() => {
-    if (agent) {
-      setRespondTo(agent.respondTo);
-      setRespondToAllowlist([...agent.respondToAllowlist]);
-    }
-  }, [agent]);
-
-  const respondToValid =
-    respondTo !== "allowlist" || respondToAllowlist.length > 0;
-
-  async function handleSave() {
-    if (!agent) return;
-    await updateMutation.mutateAsync({
-      pubkey: agent.pubkey,
-      respondTo,
-      respondToAllowlist:
-        respondTo === "allowlist" ? respondToAllowlist : undefined,
-    });
-    onOpenChange(false);
-  }
-
-  return (
-    <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>Edit respond-to</DialogTitle>
-          <DialogDescription>
-            Choose who {agent?.name ?? "this agent"} responds to.
-          </DialogDescription>
-        </DialogHeader>
-        <CreateAgentRespondToField
-          allowlist={respondToAllowlist}
-          disabled={updateMutation.isPending}
-          mode={respondTo}
-          onAllowlistChange={setRespondToAllowlist}
-          onModeChange={setRespondTo}
-          ownerPubkey={currentPubkey}
-        />
-        {updateMutation.error instanceof Error ? (
-          <p className="text-sm text-destructive">
-            {updateMutation.error.message}
-          </p>
-        ) : null}
-        <div className="flex justify-end gap-2">
-          <Button
-            onClick={() => onOpenChange(false)}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            Cancel
-          </Button>
-          <Button
-            disabled={!respondToValid || updateMutation.isPending}
-            onClick={() => void handleSave()}
-            size="sm"
-            type="button"
-          >
-            {updateMutation.isPending ? "Saving..." : "Save"}
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }

@@ -1,10 +1,15 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   collectMessageIdsForAuxBackfill,
   fetchStructuralAuxForMessages,
 } from "@/features/messages/lib/auxBackfill";
-import { threadRepliesKey } from "@/features/messages/lib/messageQueryKeys";
+import {
+  threadRepliesKey,
+  sortMessages,
+} from "@/features/messages/lib/messageQueryKeys";
+import { relayClient } from "@/shared/api/relayClient";
+import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
 import { getThreadReplies } from "@/shared/api/tauri";
 import type { Channel, RelayEvent, ThreadCursor } from "@/shared/api/types";
 
@@ -18,24 +23,51 @@ const MAX_THREAD_PAGES = 500;
  * original text. Best-effort: an aux failure logs and returns the replies
  * unadorned rather than failing the whole thread load.
  */
-async function withStructuralAux(
+async function fetchThreadAuxBestEffort(
+  label: string,
   channelId: string,
-  replies: RelayEvent[],
+  fetchAux: () => Promise<RelayEvent[]>,
 ): Promise<RelayEvent[]> {
   try {
-    const auxEvents = await fetchStructuralAuxForMessages(
-      channelId,
-      collectMessageIdsForAuxBackfill(replies),
-    );
-    return auxEvents.length > 0 ? [...replies, ...auxEvents] : replies;
+    return await fetchAux();
   } catch (error) {
     console.error(
-      "Failed to backfill thread reply edits for channel",
+      `Failed to backfill thread reply ${label} for channel`,
       channelId,
       error,
     );
-    return replies;
+    return [];
   }
+}
+
+export function collectThreadAuxMessageIds(
+  threadRootId: string,
+  replies: RelayEvent[],
+): string[] {
+  return [
+    ...new Set([threadRootId, ...collectMessageIdsForAuxBackfill(replies)]),
+  ];
+}
+
+async function withThreadAux(
+  channelId: string,
+  threadRootId: string,
+  replies: RelayEvent[],
+): Promise<RelayEvent[]> {
+  const messageIds = collectThreadAuxMessageIds(threadRootId, replies);
+  const [structuralAux, reactions] = await Promise.all([
+    fetchThreadAuxBestEffort("structural aux", channelId, () =>
+      fetchStructuralAuxForMessages(channelId, messageIds),
+    ),
+    fetchThreadAuxBestEffort("reactions", channelId, () =>
+      relayClient.fetchAuxEventsByReference(
+        channelId,
+        messageIds,
+        buildChannelReactionAuxFilter,
+      ),
+    ),
+  ]);
+  return sortMessages([...replies, ...structuralAux, ...reactions]);
 }
 
 /** Fetch a thread subtree into a cache independent from channel window pages. */
@@ -45,14 +77,19 @@ export function useThreadReplies(
 ) {
   const channelId = activeChannel?.id ?? "none";
   const rootId = openThreadRootId ?? "none";
+  const queryClient = useQueryClient();
+  const queryKey = threadRepliesKey(channelId, rootId);
   return useQuery({
-    queryKey: threadRepliesKey(channelId, rootId),
+    queryKey,
     enabled:
       activeChannel !== null &&
       activeChannel.channelType !== "forum" &&
       openThreadRootId !== null,
     queryFn: async (): Promise<RelayEvent[]> => {
       if (!activeChannel || !openThreadRootId) return [];
+      const cacheAtStart =
+        queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      const idsAtStart = new Set(cacheAtStart.map((event) => event.id));
       const replies: RelayEvent[] = [];
       let cursor: ThreadCursor | null = null;
       for (let page = 0; page < MAX_THREAD_PAGES; page += 1) {
@@ -62,8 +99,19 @@ export function useThreadReplies(
           { limit: THREAD_PAGE_LIMIT, cursor },
         );
         replies.push(...response.events);
-        if (!response.nextCursor)
-          return withStructuralAux(activeChannel.id, replies);
+        if (!response.nextCursor) {
+          const fetched = await withThreadAux(
+            activeChannel.id,
+            openThreadRootId,
+            replies,
+          );
+          const current =
+            queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+          const receivedInFlight = current.filter(
+            (event) => !idsAtStart.has(event.id),
+          );
+          return sortMessages([...fetched, ...receivedInFlight]);
+        }
         cursor = response.nextCursor;
       }
       throw new Error(

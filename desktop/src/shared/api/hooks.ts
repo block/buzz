@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { getIdentity } from "@/shared/api/tauri";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 
 export function useIdentityQuery() {
   return useQuery({

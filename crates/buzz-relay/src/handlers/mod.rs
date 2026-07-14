@@ -4,6 +4,8 @@ pub mod auth;
 pub mod close;
 /// Command executor — transactional processing for command kinds.
 pub mod command_executor;
+/// Relay-operator community provisioning HTTP support.
+pub mod community_provisioning;
 /// NIP-45 COUNT handler.
 pub mod count;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
@@ -16,8 +18,18 @@ pub mod imeta;
 pub mod ingest;
 /// Mesh hole-punch signaling: validate membership + emit paired call-me-now.
 pub mod mesh_signaling;
+/// Community moderation authorization seam (capability helper).
+pub mod moderation_authz;
+/// Community moderation command handler (kinds 9040–9044).
+pub mod moderation_commands;
+/// Relay-signed moderation notice DMs.
+pub mod moderation_notices;
+#[allow(dead_code, missing_docs)]
+pub mod push_lease;
 /// NIP-43 relay membership admin command handler (kinds 9030–9032).
 pub mod relay_admin;
+/// NIP-56 report (kind:1984) validation + moderation queue persistence.
+pub mod report;
 /// REQ handler — subscribe, deliver historical events, then EOSE.
 pub mod req;
 /// NIP-29 and NIP-25 side-effect handlers.

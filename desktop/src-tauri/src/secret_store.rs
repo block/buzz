@@ -575,6 +575,45 @@ impl SecretStore {
         }
     }
 
+    /// Read the secret for `key` without any legacy-migration side effects.
+    ///
+    /// Read the entire blob without any legacy-migration side effects.
+    ///
+    /// Returns the full key→value map when a blob exists, `Ok(None)` when no
+    /// blob has been written yet, and `Err` only when the backend is
+    /// unavailable. Never calls `migrate_legacy_key`.
+    pub fn load_all_readonly(&self) -> Result<Option<HashMap<String, String>>, String> {
+        #[cfg(feature = "system-keyring")]
+        {
+            self.load_blob()
+        }
+        #[cfg(not(feature = "system-keyring"))]
+        {
+            Err("system-keyring feature disabled".to_string())
+        }
+    }
+
+    /// Insert all entries from `entries` into the blob in a single mutation.
+    ///
+    /// Entries that already exist in the blob are overwritten; entries not
+    /// present in `entries` are left unchanged. If the resulting blob is
+    /// identical to what is already stored, no keychain write occurs.
+    pub fn store_all(&self, entries: &HashMap<String, String>) -> Result<(), String> {
+        #[cfg(feature = "system-keyring")]
+        {
+            self.mutate_blob(|map| {
+                for (k, v) in entries {
+                    map.insert(k.clone(), v.clone());
+                }
+            })
+        }
+        #[cfg(not(feature = "system-keyring"))]
+        {
+            let _ = entries;
+            Err("system-keyring feature disabled".to_string())
+        }
+    }
+
     /// On first launch after upgrading from the per-key DPK format, read the
     /// old DPK entry for `key`, write it into a new blob, and delete the old
     /// item. Returns `Ok(None)` when no old entry exists.
@@ -652,6 +691,36 @@ impl SecretStore {
             }
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(format!("keyring get: {e}")),
+        }
+    }
+
+    /// Verify that `key` holds `expected` by reading directly from the OS
+    /// backend, bypassing the in-process cache. This is the key innovation for
+    /// read-back verification: it proves the OS keyring round-trip, not just
+    /// that the in-process cache was updated.
+    ///
+    /// Returns `Ok(true)` when the stored value matches `expected`, `Ok(false)`
+    /// when the entry is absent or holds a different value, and `Err` when the
+    /// backend is unavailable.
+    pub fn verify_stored_raw(&self, key: &str, expected: &str) -> Result<bool, String> {
+        #[cfg(feature = "system-keyring")]
+        {
+            let raw = self.read_blob_raw()?;
+            match raw {
+                None => Ok(false),
+                Some(bytes) => {
+                    let json = String::from_utf8(bytes).map_err(|e| format!("blob utf8: {e}"))?;
+                    let map =
+                        serde_json::from_str::<std::collections::HashMap<String, String>>(&json)
+                            .map_err(|e| format!("blob json: {e}"))?;
+                    Ok(map.get(key).is_some_and(|v| v == expected))
+                }
+            }
+        }
+        #[cfg(not(feature = "system-keyring"))]
+        {
+            let _ = (key, expected);
+            Err("system-keyring feature disabled".to_string())
         }
     }
 

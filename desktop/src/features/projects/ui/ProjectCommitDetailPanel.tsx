@@ -1,13 +1,15 @@
-import { Check, Copy, GitCommitHorizontal } from "lucide-react";
-import * as React from "react";
+import { GitCommitHorizontal } from "lucide-react";
 
-import { profileForCommitAuthor } from "@/features/projects/lib/projectContributorMatching";
+import {
+  profileForCommit,
+  type ViewerGitIdentity,
+} from "@/features/projects/lib/projectContributorMatching";
 import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import type { ProjectRepoCommit, ProjectRepoDiff } from "@/shared/api/types";
-import { Button } from "@/shared/ui/button";
+import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 import { ProjectDiffFilesPanel } from "./ProjectPullRequestFilesChangedPanel";
 
@@ -18,32 +20,6 @@ function commitDateLabel(timestamp: number) {
   });
 }
 
-function CopyHashButton({ hash }: { hash: string }) {
-  const [copied, setCopied] = React.useState(false);
-  const handleCopy = React.useCallback(() => {
-    void navigator.clipboard.writeText(hash).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2_000);
-    });
-  }, [hash]);
-
-  return (
-    <Button
-      aria-label="Copy commit hash"
-      className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
-      onClick={handleCopy}
-      size="icon-xs"
-      variant="ghost"
-    >
-      {copied ? (
-        <Check className="h-3.5 w-3.5 text-green-500" />
-      ) : (
-        <Copy className="h-3.5 w-3.5" />
-      )}
-    </Button>
-  );
-}
-
 /**
  * Detail view for a single commit: header with author identity and hash,
  * followed by the commit-vs-parent diff rendered with the shared changed
@@ -51,21 +27,26 @@ function CopyHashButton({ hash }: { hash: string }) {
  */
 export function ProjectCommitDetailPanel({
   commit,
+  commitAuthorPubkeys,
   commitHash,
   diff,
   diffError,
   diffLoading,
   profiles,
+  viewerGitIdentity,
 }: {
   commit: ProjectRepoCommit | null;
+  /** Signed commit→pubkey mapping derived from pull request events. */
+  commitAuthorPubkeys?: Map<string, string>;
   commitHash: string;
   diff: ProjectRepoDiff | null | undefined;
   diffError: unknown;
   diffLoading: boolean;
   profiles?: UserProfileLookup;
+  viewerGitIdentity?: ViewerGitIdentity | null;
 }) {
   const matchedProfile = commit
-    ? profileForCommitAuthor(commit, profiles)
+    ? profileForCommit(commit, profiles, commitAuthorPubkeys, viewerGitIdentity)
     : null;
   const authorLabel = matchedProfile
     ? resolveUserLabel({ pubkey: matchedProfile.pubkey, profiles })
@@ -74,7 +55,7 @@ export function ProjectCommitDetailPanel({
 
   return (
     <div className="space-y-3">
-      <header className="space-y-2 rounded-xl border border-border/50 bg-card/60 p-4">
+      <header className="space-y-2 border border-border/60 bg-card p-4">
         <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
           <GitCommitHorizontal className="h-3.5 w-3.5" />
           Commit from {authorLabel}
@@ -96,7 +77,10 @@ export function ProjectCommitDetailPanel({
             <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
               <span className="flex items-center gap-0.5 font-mono">
                 {shortHash}
-                <CopyHashButton hash={commit?.hash ?? commitHash} />
+                <CopyCommitHashButton
+                  className="h-6 w-6"
+                  hash={commit?.hash ?? commitHash}
+                />
               </span>
               {commit ? (
                 <>

@@ -1,6 +1,7 @@
 import * as React from "react";
 import { FileDiff, Maximize2 } from "lucide-react";
 
+import { getDiffTitleBadge } from "@/features/messages/lib/parseDiff";
 import { isSafeUrl } from "@/shared/lib/url";
 import { Button } from "@/shared/ui/button";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
@@ -39,6 +40,11 @@ export default function DiffMessage({
 
   const safeRepoUrl = isSafeUrl(repoUrl) ? repoUrl : undefined;
 
+  const titleBadge = React.useMemo(
+    () => getDiffTitleBadge(content, filePath),
+    [content, filePath],
+  );
+
   const commitUrl =
     safeRepoUrl && commitSha ? `${safeRepoUrl}/commit/${commitSha}` : undefined;
 
@@ -51,54 +57,61 @@ export default function DiffMessage({
     >
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border/50 bg-muted/40">
         <FileDiff className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <span className="flex-1 truncate font-mono text-xs text-foreground/80">
+        <span className="min-w-0 truncate font-mono text-xs text-foreground/80">
           {filePath ?? "diff"}
         </span>
-        {shortSha && (
-          <span className="text-xs text-muted-foreground font-mono">
-            {commitUrl ? (
+        {titleBadge && (
+          <span className="shrink-0 rounded-md border border-border/60 px-1.5 py-0.5 text-2xs uppercase tracking-[0.14em] text-muted-foreground">
+            {titleBadge}
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-2">
+          {shortSha && (
+            <span className="text-xs text-muted-foreground font-mono">
+              {commitUrl ? (
+                <a
+                  className="hover:underline"
+                  href={commitUrl}
+                  rel="noreferrer noopener"
+                  target="_blank"
+                >
+                  {shortSha}
+                </a>
+              ) : (
+                shortSha
+              )}
+            </span>
+          )}
+          {safeRepoUrl && !commitUrl && (
+            <span className="text-xs text-muted-foreground">
               <a
                 className="hover:underline"
-                href={commitUrl}
+                href={safeRepoUrl}
                 rel="noreferrer noopener"
                 target="_blank"
               >
-                {shortSha}
+                {getHostname(safeRepoUrl)}
               </a>
-            ) : (
-              shortSha
-            )}
-          </span>
-        )}
-        {safeRepoUrl && !commitUrl && (
-          <span className="text-xs text-muted-foreground">
-            <a
-              className="hover:underline"
-              href={safeRepoUrl}
-              rel="noreferrer noopener"
-              target="_blank"
-            >
-              {getHostname(safeRepoUrl)}
-            </a>
-          </span>
-        )}
-        {onExpand && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label="Expand diff"
-                className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
-                onClick={onExpand}
-                size="sm"
-                type="button"
-                variant="ghost"
-              >
-                <Maximize2 className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Expand diff</TooltipContent>
-          </Tooltip>
-        )}
+            </span>
+          )}
+          {onExpand && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label="Expand diff"
+                  className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
+                  onClick={onExpand}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  <Maximize2 className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Expand diff</TooltipContent>
+            </Tooltip>
+          )}
+        </div>
       </div>
 
       {description && (

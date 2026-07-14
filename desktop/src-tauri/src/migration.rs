@@ -145,14 +145,37 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
 
     migrate_legacy_app_data_dir(app);
     sync_shared_agent_data(app);
+    // Dev-build-only: copy any agent keys that exist in the production
+    // keyring ("buzz-desktop") into the dev service ("buzz-desktop-dev")
+    // so existing agents don't lose their keys after the service-name split.
+    // Must run after sync_shared_agent_data (JSON symlinked) and before
+    // any load_managed_agents call (which runs hydrate_keys against the
+    // dev service and would log "has no key" for un-migrated entries).
+    #[cfg(debug_assertions)]
+    if is_dev {
+        crate::managed_agents::migrate_agent_keys_to_dev_service(app);
+    }
     migrate_packs_to_teams(app);
     reconcile_persona_team_dirs(app);
     migrate_persona_provider_to_runtime(app);
     reconcile_legacy_command_names(app);
+    // Fold personas.json into the unified store HERE: after the JSON-level
+    // personas.json migrations above (which must see the legacy file), and
+    // before every consumer of the load/save_personas shims below —
+    // sync_team_personas would otherwise operate on an empty definition set.
+    // Post-fold readers of the runtime map (`load_persona_runtimes`) fall
+    // back to the unified store's definitions.
+    fold_personas_into_agent_store(app);
+    // B5: manufacture definitions for standalone agents AFTER the fold (so
+    // pre-existing definition slugs are present for collision checks) and
+    // before event sync republishes — the backfilled link is what flips the
+    // 30177 projection to its slim shape.
+    backfill_standalone_agents(app);
     if let Err(e) = crate::managed_agents::sync_team_personas(app) {
         eprintln!("buzz-desktop: sync-team-personas: {e}");
     }
     reconcile_provider_mcp_commands(app);
+    reconcile_databricks_v1_to_v2(app);
     materialize_agent_runtimes(app);
 }
 
@@ -1015,31 +1038,6 @@ fn reconcile_mcp_commands_in_file(path: &Path) {
     });
 }
 
-/// Build a `persona_id → runtime` map from the personas.json sibling of the
-/// given managed-agents.json path. Returns an empty map when personas can't be
-/// read or parsed — callers then fall back to the record's own snapshot.
-fn load_persona_runtimes(agents_path: &Path) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    let Some(personas_path) = agents_path.parent().map(|dir| dir.join("personas.json")) else {
-        return map;
-    };
-    let Ok(content) = std::fs::read_to_string(&personas_path) else {
-        return map;
-    };
-    let Ok(records) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
-        return map;
-    };
-    for record in records {
-        if let (Some(id), Some(runtime)) = (
-            record.get("id").and_then(|v| v.as_str()),
-            record.get("runtime").and_then(|v| v.as_str()),
-        ) {
-            map.insert(id.to_string(), runtime.to_string());
-        }
-    }
-    map
-}
-
 fn replace_command_field(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     field: &str,
@@ -1247,6 +1245,114 @@ pub fn reconcile_provider_mcp_commands(app: &tauri::AppHandle) {
     }
 }
 
+fn reconcile_databricks_v1_to_v2_in_file(path: &Path, rewrite_v1_provider: bool) {
+    use crate::managed_agents::is_derived_provider_model_key;
+    patch_json_records(path, |obj| {
+        let mut changed = false;
+
+        // Only rewrite the structured provider field when the baked build env
+        // marks this as a Block build (BUZZ_AGENT_PROVIDER == "databricks_v2").
+        // OSS users may intentionally select V1 (Model Serving), so we must not
+        // silently migrate their provider to V2 (AI Gateway).
+        if rewrite_v1_provider && obj.get("provider").and_then(|v| v.as_str()) == Some("databricks")
+        {
+            let name = obj
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string();
+            eprintln!(
+                "buzz-desktop: databricks-v1-to-v2: {name:?}: provider \"databricks\" → \"databricks_v2\"",
+            );
+            obj.insert(
+                "provider".to_string(),
+                serde_json::Value::String("databricks_v2".to_string()),
+            );
+            // Also clear the model field — a V1 model name (e.g. "dbrx-instruct")
+            // on a V2 provider would shadow the baked DATABRICKS_MODEL at spawn time
+            // (BUZZ_AGENT_MODEL from runtime_metadata_env_vars takes priority in
+            // buzz-agent config.rs). Clearing it lets the baked V2 default win.
+            if obj.remove("model").is_some() {
+                eprintln!(
+                    "buzz-desktop: databricks-v1-to-v2: {name:?}: cleared stale V1 model field",
+                );
+            }
+            changed = true;
+        }
+
+        // Strip derived provider/model keys from env_vars on ALL records,
+        // regardless of rewrite_v1_provider. These keys are re-derived from
+        // structured fields at spawn time; stale copies in env_vars silently
+        // override the structured fields (last-write-wins in Command::env) and
+        // can cause V1 routing even when the provider dropdown shows V2.
+        //
+        // The check is case-insensitive (matching the established helper)
+        // to cover any case-variant that may have been written historically.
+        if let Some(serde_json::Value::Object(env_vars)) = obj.get_mut("env_vars") {
+            let stale_keys: Vec<String> = env_vars
+                .keys()
+                .filter(|k| is_derived_provider_model_key(k))
+                .cloned()
+                .collect();
+            for key in stale_keys {
+                env_vars.remove(key.as_str());
+                eprintln!("buzz-desktop: databricks-v1-to-v2: removed stale env_vars[\"{key}\"]",);
+                changed = true;
+            }
+        }
+
+        changed
+    });
+}
+
+/// Strip stale derived provider/model keys from `env_vars` in all
+/// managed-agent records, and — on Block builds — also migrate any persisted
+/// `provider: "databricks"` to `"databricks_v2"`.
+///
+/// **Block builds** (where `baked_build_env()` contains
+/// `BUZZ_AGENT_PROVIDER=databricks_v2`): the structured `provider` field is
+/// rewritten V1→V2 because the baked release targets V2 exclusively. Records
+/// that were saved before this migration would otherwise silently override the
+/// baked value at spawn time (last-write-wins in `Command::env`).
+///
+/// **OSS builds** (baked env empty): the `provider` field is left alone —
+/// V1 (`databricks`) is a valid Model Serving choice for OSS users.
+///
+/// In both cases, stale `BUZZ_AGENT_PROVIDER` / `BUZZ_AGENT_MODEL` /
+/// `GOOSE_PROVIDER` / `GOOSE_MODEL` are stripped from `env_vars`. These keys
+/// are always re-derived from structured fields at spawn time; persisted copies
+/// silence UI edits and cause stale routing.
+///
+/// Covers both the current app data dir and the canonical dev data dir
+/// (for worktree instances) — same dual-dir pattern as
+/// `reconcile_legacy_command_names` and `reconcile_provider_mcp_commands`.
+pub fn reconcile_databricks_v1_to_v2(app: &tauri::AppHandle) {
+    use crate::managed_agents::baked_build_env;
+    // On Block builds, the baked env contains BUZZ_AGENT_PROVIDER=databricks_v2.
+    // Use that as a reliable signal that this is a Block build and the V1
+    // provider should be migrated. OSS builds have an empty baked env, so
+    // rewrite_v1_provider is false and the structured provider is preserved.
+    let rewrite_v1_provider = baked_build_env()
+        .get("BUZZ_AGENT_PROVIDER")
+        .map(|v| v == "databricks_v2")
+        .unwrap_or(false);
+    let Ok(current_dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let mut dirs = vec![current_dir.clone()];
+    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
+        if canonical.exists() && canonical != current_dir {
+            dirs.push(canonical);
+        }
+    }
+    for dir in dirs {
+        let path = dir.join("agents/managed-agents.json");
+        if path.exists() {
+            reconcile_databricks_v1_to_v2_in_file(&path, rewrite_v1_provider);
+        }
+    }
+}
+
 fn rename_provider_to_runtime_in_personas(path: &Path) {
     patch_json_records(path, |obj| {
         if obj.contains_key("runtime") {
@@ -1274,6 +1380,11 @@ pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
 
 mod materialize;
 pub use materialize::materialize_agent_runtimes;
+mod fold;
+pub use fold::fold_personas_into_agent_store;
+use fold::load_persona_runtimes;
+mod backfill;
+pub use backfill::backfill_standalone_agents;
 
 #[cfg(test)]
 #[path = "migration_test_support.rs"]
@@ -1286,6 +1397,10 @@ mod tests;
 #[cfg(test)]
 #[path = "migration_command_tests.rs"]
 mod command_tests;
+
+#[cfg(test)]
+#[path = "migration_databricks_tests.rs"]
+mod databricks_tests;
 
 #[cfg(test)]
 #[path = "migration_team_dir_tests.rs"]

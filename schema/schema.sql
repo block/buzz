@@ -206,9 +206,9 @@ CREATE TABLE events (
     -- Privacy: encrypted/private routing wrappers and p-gated membership notices
     -- must never be discoverable through NIP-50 full-text search. NULL tsvector
     -- never matches `@@`.
-    -- Keep in sync with migrations (final state: 0001 + 0005_agent_turn_metric_fts).
+    -- Keep in sync with migrations (final state: 0001 + 0005 + 0009).
     search_tsv  TSVECTOR GENERATED ALWAYS AS (
-        CASE WHEN kind IN (1059, 30300, 30622, 44100, 44101, 44200) THEN NULL::tsvector
+        CASE WHEN kind IN (1059, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
              ELSE to_tsvector('simple', content)
         END
     ) STORED,
@@ -606,6 +606,128 @@ CREATE TABLE audit_log (
 
 CREATE UNIQUE INDEX idx_audit_log_hash ON audit_log (community_id, hash);
 
+-- ── NIP-56 reports (kind:1984 ingest) ─────────────────────────────────────────
+-- One row per accepted report event. Reports are signals, never triggers:
+-- nothing auto-actions on them (NIP-56). Reporter identity is visible to
+-- moderators in the queue but never revealed to the reported author.
+
+CREATE TABLE moderation_reports (
+    community_id        UUID NOT NULL REFERENCES communities(id),
+    id                  UUID NOT NULL DEFAULT gen_random_uuid(),
+    -- The signed kind:1984 event id (stored for audit/idempotency).
+    report_event_id     BYTEA NOT NULL CHECK (length(report_event_id) = 32),
+    reporter_pubkey     BYTEA NOT NULL CHECK (length(reporter_pubkey) = 32),
+    -- What was reported. Exactly one target class per row (CHECK-enforced below).
+    target_kind         TEXT NOT NULL CHECK (target_kind IN ('event', 'pubkey', 'blob')),
+    target_event_id     BYTEA CHECK (target_event_id IS NULL OR length(target_event_id) = 32),
+    target_pubkey       BYTEA CHECK (target_pubkey IS NULL OR length(target_pubkey) = 32),
+    target_blob_sha256  BYTEA CHECK (target_blob_sha256 IS NULL OR length(target_blob_sha256) = 32),
+    -- Channel inferred from an in-tenant target event row, when resolvable.
+    channel_id          UUID,
+    -- NIP-56 report type: illegal|nudity|malware|spam|impersonation|profanity|other.
+    report_type         TEXT NOT NULL,
+    -- Reporter's optional free-text context (mod-queue-only; never public).
+    note                TEXT,
+    status              TEXT NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('open', 'resolved', 'dismissed', 'escalated')),
+    resolved_by         BYTEA,
+    resolved_at         TIMESTAMPTZ,
+    -- moderation_actions row that resolved this report, if any.
+    action_id           UUID,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, id),
+    -- Exactly one target class per row: target_kind is authoritative and the
+    -- matching column (only) is populated. Queue/action code never guesses.
+    CHECK (
+        (target_kind = 'event'  AND target_event_id IS NOT NULL AND target_pubkey IS NULL     AND target_blob_sha256 IS NULL) OR
+        (target_kind = 'pubkey' AND target_event_id IS NULL     AND target_pubkey IS NOT NULL AND target_blob_sha256 IS NULL) OR
+        (target_kind = 'blob'   AND target_event_id IS NULL     AND target_pubkey IS NULL     AND target_blob_sha256 IS NOT NULL)
+    ),
+    -- Same-community channel provenance (channels are soft-deleted, never
+    -- hard-deleted, so this FK cannot dangle).
+    FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
+);
+
+-- Queue reads: open reports, newest first, per community.
+CREATE INDEX idx_moderation_reports_status
+    ON moderation_reports (community_id, status, created_at DESC);
+-- Group-by-target for triage aggregation.
+CREATE INDEX idx_moderation_reports_target_event
+    ON moderation_reports (community_id, target_event_id)
+    WHERE target_event_id IS NOT NULL;
+CREATE INDEX idx_moderation_reports_target_pubkey
+    ON moderation_reports (community_id, target_pubkey)
+    WHERE target_pubkey IS NOT NULL;
+-- Idempotency: one row per report event per community.
+CREATE UNIQUE INDEX idx_moderation_reports_event
+    ON moderation_reports (community_id, report_event_id);
+
+-- ── Bans + timeouts (one restriction row per member) ──────────────────────────
+-- Ban = connection block, enforced at the NIP-42 auth seam
+-- ("blocked: you are banned from this community") + join/ingest surfaces.
+-- Timeout = write-block only ("restricted: you are timed out until <ts>").
+-- A row may be ban-only, timeout-only, or both over its lifetime.
+
+CREATE TABLE community_bans (
+    community_id    UUID NOT NULL REFERENCES communities(id),
+    pubkey          BYTEA NOT NULL CHECK (length(pubkey) = 32),
+    banned          BOOLEAN NOT NULL DEFAULT false,
+    -- NULL + banned=true ⇒ permanent.
+    ban_expires_at  TIMESTAMPTZ,
+    ban_reason      TEXT,
+    -- Write-block until this timestamp; NULL or past ⇒ not timed out.
+    muted_until     TIMESTAMPTZ,
+    mute_reason     TEXT,
+    -- Moderator who last modified this row.
+    actor_pubkey    BYTEA NOT NULL CHECK (length(actor_pubkey) = 32),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, pubkey)
+);
+
+-- ── Moderation audit ──────────────────────────────────────────────────────────
+-- One row per accepted moderation action. Full detail (reporter identities,
+-- private reasons, matched NIP-OA principal) stays mod/audit-only; the public
+-- tombstone carries only action_id + reason_code + sanitized public_reason.
+
+CREATE TABLE moderation_actions (
+    community_id    UUID NOT NULL REFERENCES communities(id),
+    id              UUID NOT NULL DEFAULT gen_random_uuid(),
+    actor_pubkey    BYTEA NOT NULL CHECK (length(actor_pubkey) = 32),
+    action          TEXT NOT NULL CHECK (action IN (
+                        'delete_message', 'kick', 'ban', 'unban',
+                        'timeout', 'untimeout', 'dismiss_report', 'escalate',
+                        'resolve:delete', 'resolve:kick', 'resolve:ban',
+                        'resolve:timeout')),
+    target_pubkey   BYTEA CHECK (target_pubkey IS NULL OR length(target_pubkey) = 32),
+    target_event_id BYTEA CHECK (target_event_id IS NULL OR length(target_event_id) = 32),
+    channel_id      UUID,
+    -- Machine-readable rule/reason code (e.g. "spam", "community_rule_3").
+    reason_code     TEXT,
+    -- Sanitized, safe for the public tombstone.
+    public_reason   TEXT,
+    -- Mod-only context; never leaves the audit surface.
+    private_reason  TEXT,
+    -- NIP-OA: which principal matched a ban ('self' | 'owner'); audit-only,
+    -- the client never learns which.
+    matched_principal TEXT CHECK (matched_principal IS NULL OR matched_principal IN ('self', 'owner')),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, id),
+    FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
+);
+
+CREATE INDEX idx_moderation_actions_created
+    ON moderation_actions (community_id, created_at DESC);
+CREATE INDEX idx_moderation_actions_target_pubkey
+    ON moderation_actions (community_id, target_pubkey)
+    WHERE target_pubkey IS NOT NULL;
+
+-- Same-community resolution provenance: a report can only be resolved by an
+-- action row in its own community. Added after moderation_actions exists.
+ALTER TABLE moderation_reports
+    ADD FOREIGN KEY (community_id, action_id)
+    REFERENCES moderation_actions (community_id, id);
+
 -- ── Lint allowlist registry ───────────────────────────────────────────────────
 -- The explicit registry of tables that are deliberately operator-global (NOT
 -- tenant-scoped). The migration-lint harness reads this: any table NOT listed
@@ -622,3 +744,130 @@ INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('communities',           'the tenant registry itself; id IS the community key'),
     ('rate_limit_violations', 'deployment abuse/health; never tenant-observable; community_id is an attribution label only'),
     ('_operator_global_tables', 'the registry table itself');
+-- NIP-PL effective lease state and durable wake outbox. Every key is led by
+-- community_id: client-provided origin is confirmation only, never routing.
+CREATE TABLE push_leases (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    author BYTEA NOT NULL CHECK (length(author) = 32),
+    installation_id TEXT NOT NULL CHECK (octet_length(installation_id) BETWEEN 1 AND 64),
+    source_event_id BYTEA NOT NULL CHECK (length(source_event_id) = 32),
+    source_created_at BIGINT NOT NULL,
+    generation BIGINT NOT NULL CHECK (generation > 0),
+    active BOOLEAN NOT NULL,
+    endpoint_enabled BOOLEAN NOT NULL DEFAULT true,
+    app_profile TEXT,
+    endpoint_hash BYTEA CHECK (endpoint_hash IS NULL OR length(endpoint_hash) = 32),
+    endpoint_grant TEXT,
+    max_class TEXT CHECK (max_class IS NULL OR max_class IN ('silent','default','time_sensitive','urgent')),
+    subscriptions JSONB,
+    expires_at BIGINT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, author, installation_id),
+    UNIQUE (community_id, source_event_id),
+    CHECK ((active AND app_profile IS NOT NULL AND endpoint_hash IS NOT NULL AND endpoint_grant IS NOT NULL AND max_class IS NOT NULL AND subscriptions IS NOT NULL)
+        OR (NOT active AND app_profile IS NULL AND endpoint_hash IS NULL AND endpoint_grant IS NULL AND max_class IS NULL AND subscriptions IS NULL))
+);
+CREATE UNIQUE INDEX push_leases_endpoint_unique
+    ON push_leases (community_id, author, app_profile, endpoint_hash)
+    WHERE active;
+CREATE INDEX push_leases_expiry ON push_leases (community_id, expires_at) WHERE active;
+
+CREATE TABLE push_wake_outbox (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
+    author BYTEA NOT NULL CHECK (length(author) = 32),
+    installation_id TEXT NOT NULL,
+    lease_generation BIGINT NOT NULL CHECK (lease_generation > 0),
+    endpoint_hash BYTEA NOT NULL CHECK (length(endpoint_hash) = 32),
+    event_id BYTEA NOT NULL CHECK (length(event_id) = 32),
+    class TEXT NOT NULL CHECK (class IN ('silent','default','time_sensitive','urgent')),
+    expires_at BIGINT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','sending','delivered','failed')),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_until TIMESTAMPTZ,
+    claim_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, id),
+    FOREIGN KEY (community_id, author, installation_id)
+        REFERENCES push_leases (community_id, author, installation_id),
+    UNIQUE (community_id, endpoint_hash, event_id)
+);
+CREATE INDEX push_wake_outbox_due
+    ON push_wake_outbox (community_id, next_attempt_at) WHERE state = 'pending';
+CREATE INDEX push_wake_outbox_recovery
+    ON push_wake_outbox (community_id, lease_until) WHERE state = 'sending';
+-- Durable, deployment-global authority for the public NIP-PL push gateway.
+-- This state is intentionally outside relay community tenancy: installations
+-- delegate to relay signing keys and may authorize multiple relay deployments.
+CREATE TABLE push_gateway_challenges (
+    id UUID PRIMARY KEY,
+    challenge_hash BYTEA NOT NULL CHECK (length(challenge_hash) = 32),
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX push_gateway_challenges_expiry ON push_gateway_challenges (expires_at);
+
+CREATE TABLE push_gateway_installations (
+    id UUID PRIMARY KEY,
+    app_attest_key_id BYTEA NOT NULL UNIQUE CHECK (octet_length(app_attest_key_id) BETWEEN 1 AND 128),
+    app_attest_public_key BYTEA NOT NULL CHECK (octet_length(app_attest_public_key) BETWEEN 33 AND 256),
+    assertion_counter BIGINT NOT NULL CHECK (assertion_counter BETWEEN 0 AND 4294967295),
+    app_profile TEXT NOT NULL CHECK (app_profile IN ('buzz-ios-production','buzz-ios-sandbox')),
+    token_ciphertext BYTEA NOT NULL CHECK (octet_length(token_ciphertext) BETWEEN 1 AND 2048),
+    token_fingerprint BYTEA NOT NULL CHECK (length(token_fingerprint) = 32),
+    endpoint_epoch BIGINT NOT NULL CHECK (endpoint_epoch > 0),
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (app_profile, token_fingerprint)
+);
+CREATE INDEX push_gateway_installations_expiry ON push_gateway_installations (expires_at) WHERE revoked_at IS NULL;
+
+CREATE TABLE push_gateway_delegations (
+    id UUID PRIMARY KEY,
+    installation_id UUID NOT NULL REFERENCES push_gateway_installations(id),
+    relay_pubkey BYTEA NOT NULL CHECK (length(relay_pubkey) = 32),
+    endpoint_epoch BIGINT NOT NULL CHECK (endpoint_epoch > 0),
+    generation BIGINT NOT NULL CHECK (generation > 0),
+    not_before TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (installation_id, relay_pubkey),
+    CHECK (not_before < expires_at)
+);
+CREATE INDEX push_gateway_delegations_expiry ON push_gateway_delegations (expires_at) WHERE revoked_at IS NULL;
+
+CREATE TABLE push_gateway_endpoint_quotas (
+    token_fingerprint BYTEA PRIMARY KEY CHECK (length(token_fingerprint) = 32),
+    window_started_at TIMESTAMPTZ NOT NULL,
+    admitted BIGINT NOT NULL CHECK (admitted >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX push_gateway_endpoint_quotas_updated ON push_gateway_endpoint_quotas (updated_at);
+
+CREATE TABLE push_gateway_delivery_auth_replays (
+    relay_pubkey BYTEA NOT NULL CHECK (length(relay_pubkey) = 32),
+    auth_event_id BYTEA NOT NULL CHECK (length(auth_event_id) = 32),
+    expires_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (relay_pubkey, auth_event_id)
+);
+CREATE INDEX push_gateway_delivery_auth_replays_expiry ON push_gateway_delivery_auth_replays (expires_at);
+
+CREATE TABLE push_gateway_delivery_request_replays (
+    relay_pubkey BYTEA NOT NULL CHECK (length(relay_pubkey) = 32),
+    request_id UUID NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (relay_pubkey, request_id)
+);
+CREATE INDEX push_gateway_delivery_request_replays_expiry ON push_gateway_delivery_request_replays (expires_at);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('push_gateway_challenges', 'public gateway one-time challenges span relay communities'),
+    ('push_gateway_installations', 'public gateway installation authority spans relay communities'),
+    ('push_gateway_delegations', 'public gateway relay delegations span relay communities'),
+    ('push_gateway_endpoint_quotas', 'public gateway endpoint abuse ceilings span relay communities'),
+    ('push_gateway_delivery_auth_replays', 'public gateway signed-event replay admission spans relay communities'),
+    ('push_gateway_delivery_request_replays', 'public gateway stable request-id admission spans relay communities');

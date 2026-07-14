@@ -46,4 +46,4 @@ nix = { version = "0.31", default-features = false, features = ["signal", "proce
 # required because CreateJobObjectW takes a SECURITY_ATTRIBUTES parameter;
 # Win32_System_Threading supplies IO_COUNTERS inside the extended-limit struct.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading"] }

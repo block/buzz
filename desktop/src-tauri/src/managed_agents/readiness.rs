@@ -29,8 +29,9 @@
 //! 2. Runtime metadata env vars (`runtime_metadata_env_vars`) — provider /
 //!    model env keys derived from the record's `model`/`provider` fields and
 //!    the runtime's `model_env_var`/`provider_env_var`.
-//! 3. Merged user env (`merged_user_env`) — the record's `env_vars` after
-//!    reserved-key and malformed-key filtering.  Last-wins on collision.
+//! 3. Merged user env (`merged_user_env`) — live persona env under the
+//!    record's `env_vars` overrides, after reserved-key and malformed-key
+//!    filtering.  Last-wins on collision.
 //!
 //! The config-file tier (Goose `~/.config/goose/config.yaml`) is tracked
 //! separately because it is not part of the process env — the harness reads
@@ -38,16 +39,23 @@
 //! UI display only.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::managed_agents::{
     agent_env::baked_build_env,
     config_bridge::read_goose_file_config,
-    discovery::{known_acp_runtime, resolve_command, KnownAcpRuntime},
+    discovery::{
+        classify_runtime, codex_adapter_availability, find_command, known_acp_runtime,
+        resolve_command, KnownAcpRuntime,
+    },
     env_vars::merged_user_env,
-    types::{ManagedAgentRecord, PersonaRecord},
+    global_config::GlobalAgentConfig,
+    types::{AcpAvailabilityStatus, AgentDefinition, ManagedAgentRecord},
 };
+
+pub(crate) mod cli_probe;
 
 // ── EffectiveAgentEnv ─────────────────────────────────────────────────────────
 
@@ -73,17 +81,21 @@ pub(crate) struct EffectiveAgentEnv {
     pub effective_command: String,
 }
 
-/// Assemble the effective agent env from a record, personas, and optional
-/// known-runtime metadata — without an `AppHandle` so it is unit-testable.
+/// Assemble the effective agent env from a record, personas, optional
+/// known-runtime metadata, and the global agent config defaults — without an
+/// `AppHandle` so it is fully unit-testable.
 ///
 /// # Arguments
 /// * `record` — the managed agent record (model/provider/env_vars/…)
 /// * `personas` — all current persona records (for persona-backed resolution)
 /// * `runtime` — the `KnownAcpRuntime` for the effective command, if any
+/// * `global` — global agent config defaults (lowest user layer; pass
+///   `&GlobalAgentConfig::default()` in tests that don't need global config)
 pub(crate) fn resolve_effective_agent_env(
     record: &ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     runtime: Option<&KnownAcpRuntime>,
+    global: &GlobalAgentConfig,
 ) -> EffectiveAgentEnv {
     let effective_command = crate::managed_agents::record_agent_command(record, personas);
 
@@ -91,9 +103,13 @@ pub(crate) fn resolve_effective_agent_env(
     let mut env = baked_build_env();
 
     // Layer 2: runtime metadata env vars (model / provider keys derived from
-    // the record's structured fields).
-    let effective_model = record.model.as_deref();
-    let effective_provider = record.provider.as_deref();
+    // the record's structured fields, with global as fallback).
+    //
+    // Uses the shared resolver to guarantee readiness and spawn agree on the
+    // effective model/provider: agent → persona → global → None.
+    let (effective_model, effective_provider) =
+        super::global_config::resolve_effective_model_provider(record, personas, global);
+
     if let Some(rt) = runtime {
         for (key, value) in super::runtime::runtime_metadata_env_vars(
             rt.model_env_var,
@@ -106,9 +122,21 @@ pub(crate) fn resolve_effective_agent_env(
         }
     }
 
-    // Layer 3: merged user env (agent env_vars after reserved/malformed-key
-    // filtering; last-wins on collision).
-    let user_env = merged_user_env(&BTreeMap::new(), &record.env_vars);
+    // Layer 3a: global env vars — the lowest user-settable layer.
+    // Injected before persona/agent so per-agent values win on collision.
+    // `merged_user_env` with an empty "lower" map applies reserved/malformed-key
+    // filtering to the global map for free.
+    let global_env = merged_user_env(&BTreeMap::new(), &global.env_vars);
+    env.extend(global_env);
+
+    // Layer 3b: merged user env — live persona env under the record's own
+    // overrides (last-wins), after reserved/malformed-key filtering. Reading
+    // the persona live is what makes persona credential edits refresh on the
+    // next spawn instead of being frozen into the record.
+    let user_env = merged_user_env(
+        &super::env_vars::live_persona_env(personas, record.persona_id.as_deref()),
+        &record.env_vars,
+    );
     env.extend(user_env);
 
     EffectiveAgentEnv {
@@ -143,9 +171,30 @@ pub enum Requirement {
         /// Arguments for the login-status probe (e.g. `["claude", "auth", "status"]`).
         probe_args: Vec<String>,
         /// Human-readable instruction for completing the login
-        /// (e.g. `"run \`codex login --with-api-key\`"`).
+        /// (e.g. `"run \`codex login\`"`).
         setup_copy: String,
+        /// Granular install/auth state for this runtime — distinguishes
+        /// "not installed" from "logged out" from "adapter missing".
+        /// Carried to the FE so the nudge card can show the right message
+        /// and route to Doctor with accurate context.
+        availability: AcpAvailabilityStatus,
     },
+    /// The CLI is installed but its config file could not be parsed.
+    /// This is an informational surface only — there is no in-app destination
+    /// that can repair an external config file; the user must edit it manually.
+    CliConfigInvalid {
+        /// Arguments used in the probe (e.g. `["codex", "login", "status"]`);
+        /// `probe_args[0]` is the CLI name (e.g. `"codex"`).
+        probe_args: Vec<String>,
+        /// Human-readable hint shown when no structured copy is available.
+        setup_copy: String,
+        /// A one-line excerpt from the CLI's stderr (the parse-error line).
+        /// Shown verbatim in the nudge so the user can identify the problem.
+        diagnostic: String,
+    },
+    /// Git for Windows is missing, so buzz-agent cannot launch buzz-dev-mcp's
+    /// Bash-based shell tool. Doctor owns installation and re-checking.
+    GitBash,
 }
 
 // ── AgentReadiness ────────────────────────────────────────────────────────────
@@ -236,11 +285,9 @@ fn collect_missing_requirements(
         "claude" => cli_login_requirements(
             &["claude", "auth", "status"],
             "complete Claude Code authentication by running the Claude CLI",
+            rt,
         ),
-        "codex" => cli_login_requirements(
-            &["codex", "login", "status"],
-            "run `codex login --with-api-key`",
-        ),
+        "codex" => cli_login_requirements(&["codex", "login", "status"], "run `codex login`", rt),
         _ => vec![],
     }
 }
@@ -248,6 +295,11 @@ fn collect_missing_requirements(
 /// Requirements for buzz-agent (provider + model + provider-specific creds).
 fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
     let mut missing = Vec::new();
+
+    #[cfg(windows)]
+    if !crate::managed_agents::git_bash_available(&effective.env) {
+        missing.push(Requirement::GitBash);
+    }
 
     // Provider is required — maps to BUZZ_AGENT_PROVIDER in the effective env.
     // An empty string is treated as absent: a key set to "" is not a valid
@@ -265,12 +317,29 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
 
     // Model is required — maps to BUZZ_AGENT_MODEL in the effective env.
     // Same empty-string treatment as provider.
-    let model = effective
+    // Also accept provider-specific model fallback keys, matching buzz-agent's
+    // own config.rs `from_env()` resolution order (e.g. DATABRICKS_MODEL for
+    // databricks/databricks_v2, ANTHROPIC_MODEL for anthropic, etc.). The
+    // baked buzz-releases env sets DATABRICKS_MODEL but not BUZZ_AGENT_MODEL,
+    // so without this fallback agents baked from releases appear "not ready".
+    let provider_model_key = match provider {
+        Some("databricks") | Some("databricks_v2") | Some("databricks-v2") => {
+            Some("DATABRICKS_MODEL")
+        }
+        Some("anthropic") => Some("ANTHROPIC_MODEL"),
+        Some("openai") | Some("openai-compat") => Some("OPENAI_COMPAT_MODEL"),
+        _ => None,
+    };
+    let model_present = effective
         .env
         .get("BUZZ_AGENT_MODEL")
         .filter(|v| !v.is_empty())
-        .map(String::as_str);
-    if model.is_none() {
+        .is_some()
+        || provider_model_key
+            .and_then(|k| effective.env.get(k))
+            .filter(|v| !v.is_empty())
+            .is_some();
+    if !model_present {
         missing.push(Requirement::NormalizedField {
             field: "model".to_string(),
         });
@@ -293,7 +362,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
                     key: "OPENAI_COMPAT_API_KEY".to_string(),
                 });
             }
-        Some("databricks") | Some("databricks_v2")
+        Some("databricks") | Some("databricks_v2") | Some("databricks-v2")
             // DATABRICKS_HOST is hard-required; DATABRICKS_TOKEN is optional
             // (OAuth PKCE is the normal path — see buzz-agent/src/config.rs:143).
             if env_key_missing("DATABRICKS_HOST") => {
@@ -401,7 +470,7 @@ fn goose_requirements(
                 key: "OPENAI_COMPAT_API_KEY".to_string(),
             });
         }
-        Some("databricks") | Some("databricks_v2")
+        Some("databricks") | Some("databricks_v2") | Some("databricks-v2")
             if env_key_missing("DATABRICKS_HOST") && !file_key_present("DATABRICKS_HOST") =>
         {
             missing.push(Requirement::EnvKey {
@@ -416,39 +485,95 @@ fn goose_requirements(
 
 /// Requirements for CLI-login runtimes (claude, codex).
 ///
-/// We probe the CLI's login-status command synchronously. These probes are
+/// Probes the CLI's login-status command synchronously.  These probes are
 /// fast (<300ms) and the results are memoized by the caller for the session
 /// lifetime if desired.
-fn cli_login_requirements(probe_args: &[&str], setup_copy: &str) -> Vec<Requirement> {
-    // Resolve the binary through the full PATH-search + login-shell path so
-    // the probe works in a packaged macOS DMG where the GUI PATH lacks
-    // npm/homebrew directories (where `claude` / `codex` typically live).
-    //
-    // If the binary genuinely does not exist, stay NotReady — the user needs
-    // to install it. If it exists but is not on the GUI PATH, resolve_command
-    // finds it via the login-shell fallback.
-    let Some(binary_path) = resolve_command(probe_args[0]) else {
-        // Binary not found → not installed → NotReady.
-        return vec![Requirement::CliLogin {
-            probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
-            setup_copy: setup_copy.to_string(),
-        }];
-    };
+///
+/// Computes a granular `AcpAvailabilityStatus` by running the same
+/// classifier as Doctor (`classify_runtime`) before deciding whether to
+/// probe — this lets the nudge card distinguish "not installed" from
+/// "adapter missing" from "logged out" without a new backend probe.
+fn cli_login_requirements(
+    probe_args: &[&str],
+    setup_copy: &str,
+    runtime: &KnownAcpRuntime,
+) -> Vec<Requirement> {
+    // Resolve each adapter command to find the ACP adapter binary.
+    let adapter_result = runtime
+        .commands
+        .iter()
+        .find_map(|cmd| find_command(cmd).map(|path| (*cmd, path)));
 
-    // Run the probe at the resolved absolute path so the GUI-PATH gap is bypassed.
-    let logged_in = std::process::Command::new(&binary_path)
-        .args(&probe_args[1..])
-        .output()
-        .map(|o| o.status.success())
+    // Check whether the underlying CLI itself (e.g. "claude", "codex") is on PATH.
+    let underlying_cli_found = runtime
+        .underlying_cli
+        .map(|cli| find_command(cli).is_some())
         .unwrap_or(false);
 
-    if logged_in {
-        vec![]
+    let (availability, cmd, adapter_path) =
+        classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
+
+    // For codex-acp: if the adapter resolved as Available, probe the version.
+    // An adapter with major version < 1 is the deprecated package and must be
+    // treated as outdated (blocks login probe — the agent can't reach the relay).
+    // Guard on `cmd == "codex-acp"` to match the discovery path and avoid
+    // probing when the runtime resolves via an alias command.
+    let availability = if runtime.id == "codex"
+        && availability == AcpAvailabilityStatus::Available
+        && cmd.as_deref() == Some("codex-acp")
+    {
+        adapter_path
+            .as_deref()
+            .map(|path_str| codex_adapter_availability(Path::new(path_str)))
+            .unwrap_or(availability)
     } else {
-        vec![Requirement::CliLogin {
+        availability
+    };
+
+    match availability {
+        AcpAvailabilityStatus::Available => {
+            // Both adapter and CLI are present — probe login status.
+            // Resolve via the full login-shell PATH so the probe works in a
+            // packaged macOS DMG where the GUI PATH lacks npm/homebrew.
+            let Some(binary_path) = resolve_command(probe_args[0]) else {
+                // Unexpectedly not resolvable (race or PATH edge case).
+                return vec![Requirement::CliLogin {
+                    probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
+                    setup_copy: setup_copy.to_string(),
+                    availability: AcpAvailabilityStatus::Available,
+                }];
+            };
+
+            let augmented_path = cli_probe::augmented_path();
+            let outcome =
+                cli_probe::login_probe(&binary_path, probe_args, augmented_path.as_deref());
+
+            match outcome {
+                cli_probe::ProbeOutcome::LoggedIn => vec![],
+                cli_probe::ProbeOutcome::LoggedOut => {
+                    vec![Requirement::CliLogin {
+                        probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
+                        setup_copy: setup_copy.to_string(),
+                        availability: AcpAvailabilityStatus::Available,
+                    }]
+                }
+                cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => {
+                    vec![Requirement::CliConfigInvalid {
+                        probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
+                        setup_copy: setup_copy.to_string(),
+                        diagnostic: stderr_excerpt,
+                    }]
+                }
+            }
+        }
+        // Tooling is not fully installed — emit CliLogin with the precise
+        // state so the nudge card can show the right message.  Skip the probe
+        // (can't run a missing or misconfigured CLI).
+        other => vec![Requirement::CliLogin {
             probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
             setup_copy: setup_copy.to_string(),
-        }]
+            availability: other,
+        }],
     }
 }
 
@@ -796,14 +921,12 @@ mod tests {
 
     #[test]
     fn codex_not_ready_copy_does_not_mention_openai_api_key() {
-        // codex uses its own credential store via `codex login --with-api-key`.
+        // codex uses its own credential store via `codex login` (OAuth or API key).
         // The nudge copy must NOT say "set OPENAI_API_KEY".
-        // We test the static not-logged-in path by constructing the requirement
-        // directly (the binary may or may not be installed in CI).
-        let reqs = cli_login_requirements(
-            &["codex", "login", "status"],
-            "run `codex login --with-api-key`",
-        );
+        // Use a not-installed runtime so the requirement is always emitted
+        // regardless of whether codex is on the test machine's PATH.
+        let rt = make_cli_runtime(&["__buzz_nonexistent_adapter_xyz789__"], None);
+        let reqs = cli_login_requirements(&["codex", "login", "status"], "run `codex login`", &rt);
         // Whether codex is installed or not, the copy (if any) must not mention OPENAI_API_KEY.
         for req in &reqs {
             if let Requirement::CliLogin { setup_copy, .. } = req {
@@ -821,14 +944,73 @@ mod tests {
 
     // ── cli_login_requirements: resolve_command integration ─────────────
 
+    /// Construct a minimal `KnownAcpRuntime` stub for testing cli_login_requirements.
+    /// `commands` are the adapter binaries; `underlying_cli` is the CLI name.
+    fn make_cli_runtime(
+        commands: &'static [&'static str],
+        underlying_cli: Option<&'static str>,
+    ) -> KnownAcpRuntime {
+        KnownAcpRuntime {
+            id: "test-cli-runtime",
+            label: "Test CLI",
+            commands,
+            aliases: &[],
+            avatar_url: "",
+            mcp_command: None,
+            mcp_hooks: false,
+            underlying_cli,
+            cli_install_commands: &[],
+            adapter_install_commands: &[],
+            install_instructions_url: "",
+            cli_install_hint: "",
+            adapter_install_hint: "",
+            skill_dir: None,
+            supports_acp_model_switching: false,
+            config_file_path: None,
+            config_file_format: None,
+            model_env_var: None,
+            provider_env_var: None,
+            provider_locked: false,
+            default_env: &[],
+            supports_acp_native_config: false,
+            thinking_env_var: None,
+            max_tokens_env_var: None,
+            context_limit_env_var: None,
+            required_normalized_fields: &[],
+            login_hint: None,
+            auth_probe_args: None,
+        }
+    }
+
+    /// Returns the absolute path of the currently-running test binary as a
+    /// `&'static str`.  Host-portable stand-in for a "present" binary:
+    /// the path is absolute so `find_command` resolves it via `path.exists()`
+    /// rather than searching `PATH`, and the file always exists on the host.
+    ///
+    /// The tiny allocation is intentionally leaked — this runs at most once per
+    /// test process and the process exits immediately after tests complete.
+    fn present_binary_str() -> &'static str {
+        let path = std::env::current_exe().expect("current_exe must be available in tests");
+        Box::leak(path.to_string_lossy().into_owned().into_boxed_str())
+    }
+
+    /// Leak a runtime slice of `'static` strs for use in `make_cli_runtime`.
+    fn static_commands(commands: Vec<&'static str>) -> &'static [&'static str] {
+        Box::leak(commands.into_boxed_slice())
+    }
+
     #[test]
     fn cli_login_requirements_missing_binary_is_not_ready() {
-        // A binary that cannot possibly exist on any system → binary not found
-        // → resolve_command returns None → function must return CliLogin
-        // requirement (NotReady), not panic or return Ready.
+        // Both adapter and underlying CLI are nonexistent → NotInstalled state
+        // → must return a CliLogin requirement with availability=NotInstalled.
+        let rt = make_cli_runtime(
+            &["__buzz_nonexistent_adapter_abc123__"],
+            Some("__buzz_nonexistent_cli_abc123__"),
+        );
         let reqs = cli_login_requirements(
             &["__buzz_nonexistent_binary_abc123__", "status"],
             "install the tool first",
+            &rt,
         );
         assert!(
             !reqs.is_empty(),
@@ -839,29 +1021,260 @@ mod tests {
             "requirement must be CliLogin; got {:?}",
             reqs[0]
         );
+        if let Requirement::CliLogin {
+            ref availability, ..
+        } = reqs[0]
+        {
+            assert_eq!(
+                *availability,
+                crate::managed_agents::AcpAvailabilityStatus::NotInstalled,
+                "both missing → NotInstalled"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_login_requirements_adapter_missing_emits_adapter_missing() {
+        // Underlying CLI present (use the running test binary as a portable
+        // stand-in — it's always present and resolves via absolute path),
+        // adapter absent.
+        // → AdapterMissing state → no probe run → CliLogin{AdapterMissing}.
+        let exe = present_binary_str();
+        let rt = make_cli_runtime(&["__buzz_nonexistent_adapter_xyz789__"], Some(exe));
+        let reqs = cli_login_requirements(&[exe, "--list"], "install the adapter", &rt);
+        assert!(
+            !reqs.is_empty(),
+            "adapter missing must produce a CliLogin requirement"
+        );
+        if let Requirement::CliLogin {
+            ref availability, ..
+        } = reqs[0]
+        {
+            assert_eq!(
+                *availability,
+                crate::managed_agents::AcpAvailabilityStatus::AdapterMissing,
+                "adapter absent, CLI present → AdapterMissing"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_login_requirements_cli_missing_emits_cli_missing() {
+        // Adapter present (use the running test binary as a portable stand-in),
+        // underlying CLI absent.
+        // → CliMissing state → no probe run → CliLogin{CliMissing}.
+        let exe = present_binary_str();
+        let rt = make_cli_runtime(
+            static_commands(vec![exe]),              // adapter found via absolute path
+            Some("__buzz_nonexistent_cli_abc123__"), // underlying CLI missing
+        );
+        let reqs = cli_login_requirements(&[exe, "--list"], "install the CLI", &rt);
+        assert!(
+            !reqs.is_empty(),
+            "CLI missing must produce a CliLogin requirement"
+        );
+        if let Requirement::CliLogin {
+            ref availability, ..
+        } = reqs[0]
+        {
+            assert_eq!(
+                *availability,
+                crate::managed_agents::AcpAvailabilityStatus::CliMissing,
+                "adapter present, CLI absent → CliMissing"
+            );
+        }
     }
 
     #[test]
     fn cli_login_requirements_resolvable_binary_runs_probe_at_resolved_path() {
-        // `true` is a POSIX built-in available on every CI runner and always
-        // exits 0. Use it as a probe: probe_args = ["true", "--probe-arg"]
-        // → resolved path probed → exit 0 → logged_in = true → requirements
-        // is empty (Ready). This exercises the resolve_command fast path
-        // (binary found on PATH) + the probe-at-resolved-path branch.
-        //
-        // `true` is universally resolvable on POSIX/macOS/Linux CI, so we
-        // assert the ready (empty) outcome directly rather than hedging.
+        // Both adapter and CLI present (use the running test binary as a
+        // portable stand-in — always present, resolves via absolute path),
+        // probe exits 0 (run with `--list` which lists tests and exits 0).
+        // → logged_in = true → requirements is empty (Ready).
+        let exe = present_binary_str();
+        let rt = make_cli_runtime(static_commands(vec![exe]), Some(exe));
         let reqs = cli_login_requirements(
-            &["true", "--probe-arg"],
-            "this should not show (true always succeeds)",
+            &[exe, "--list"],
+            "this should not show (probe exits 0)",
+            &rt,
         );
         assert!(
             reqs.is_empty(),
             "expected Ready (no requirements) when probe binary resolves and exits 0; \
-             got {:?} — `true` is always on PATH on POSIX/macOS/Linux CI so this \
-             must be empty",
+             got {:?}",
             reqs
         );
+    }
+
+    #[test]
+    fn cli_login_requirements_logged_out_emits_available() {
+        // Both adapter and CLI present, but probe exits non-zero (logged out).
+        // Use the test binary with an unrecognized argument as the probe —
+        // libtest exits non-zero for unknown flags on all platforms.
+        // → CliLogin{Available} (tooling installed, needs login).
+        let exe = present_binary_str();
+        let rt = make_cli_runtime(static_commands(vec![exe]), Some(exe));
+        let reqs = cli_login_requirements(&[exe, "--buzz-probe-fail-xyz"], "run `tool login`", &rt);
+        assert!(
+            !reqs.is_empty(),
+            "non-zero probe must produce a CliLogin requirement (logged out)"
+        );
+        if let Requirement::CliLogin {
+            ref availability, ..
+        } = reqs[0]
+        {
+            assert_eq!(
+                *availability,
+                crate::managed_agents::AcpAvailabilityStatus::Available,
+                "tooling installed, probe fails → Available (logged-out)"
+            );
+        }
+    }
+
+    // ── codex readiness version gate ───────────────────────────────────────
+
+    /// Build a minimal `KnownAcpRuntime` for testing the codex version gate.
+    /// `adapter_commands` are the exact strings passed to `find_command` — use
+    /// `&["codex-acp"]` when the binary is on PATH, or `&[<absolute_path>]`
+    /// when resolving via absolute path.  `underlying_cli` is a portable
+    /// stand-in so the adapter is not misclassified as `CliMissing`.
+    fn make_codex_runtime(
+        adapter_commands: &'static [&'static str],
+        underlying_cli: Option<&'static str>,
+    ) -> KnownAcpRuntime {
+        KnownAcpRuntime {
+            id: "codex",
+            label: "Codex",
+            commands: adapter_commands,
+            aliases: &[],
+            avatar_url: "",
+            mcp_command: None,
+            mcp_hooks: false,
+            underlying_cli,
+            cli_install_commands: &[],
+            adapter_install_commands: &[],
+            install_instructions_url: "",
+            cli_install_hint: "",
+            adapter_install_hint: "",
+            skill_dir: None,
+            supports_acp_model_switching: false,
+            config_file_path: None,
+            config_file_format: None,
+            model_env_var: None,
+            provider_env_var: None,
+            provider_locked: false,
+            default_env: &[],
+            supports_acp_native_config: false,
+            thinking_env_var: None,
+            max_tokens_env_var: None,
+            context_limit_env_var: None,
+            required_normalized_fields: &[],
+            login_hint: None,
+            auth_probe_args: None,
+        }
+    }
+
+    /// Build a temp dir containing a `codex-acp` script with the given body,
+    /// prepend it to PATH, and clear the resolve cache.  Returns the temp dir
+    /// and the original PATH string for restoration.
+    #[cfg(unix)]
+    fn setup_temp_codex_acp(script_body: &str) -> (tempfile::TempDir, String) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bin = dir.path().join("codex-acp");
+        std::fs::write(&bin, script_body).expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+        crate::managed_agents::clear_resolve_cache();
+
+        (dir, original_path)
+    }
+
+    /// Restore PATH and clear the resolve cache after a PATH-mutating test.
+    #[cfg(unix)]
+    fn restore_path(original: &str) {
+        std::env::set_var("PATH", original);
+        crate::managed_agents::clear_resolve_cache();
+    }
+
+    /// Codex readiness: outdated adapter (exits non-zero) → AdapterOutdated,
+    /// login probe skipped.
+    #[cfg(unix)]
+    #[test]
+    fn cli_login_requirements_codex_outdated_adapter_emits_adapter_outdated() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+
+        let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\nexit 1\n");
+        let exe = present_binary_str();
+        // underlying_cli = running test binary (always present, never probed)
+        let rt = make_codex_runtime(&["codex-acp"], Some(exe));
+        let reqs = cli_login_requirements(
+            &[exe, "--buzz-probe-must-not-run-xyz"],
+            "run `codex login`",
+            &rt,
+        );
+
+        restore_path(&orig);
+        drop(dir);
+
+        assert!(
+            !reqs.is_empty(),
+            "outdated codex adapter must produce a requirement; got {reqs:?}"
+        );
+        if let Requirement::CliLogin {
+            ref availability, ..
+        } = reqs[0]
+        {
+            assert_eq!(
+                *availability,
+                crate::managed_agents::AcpAvailabilityStatus::AdapterOutdated,
+                "0.x codex adapter must yield AdapterOutdated; got {availability:?}"
+            );
+        } else {
+            panic!("expected CliLogin requirement; got {:?}", reqs[0]);
+        }
+    }
+
+    /// Codex readiness: adapter exits 0 but output is not a parseable version
+    /// → AdapterOutdated (garbage output treated as outdated, same as non-zero).
+    #[cfg(unix)]
+    #[test]
+    fn cli_login_requirements_codex_garbage_version_output_emits_adapter_outdated() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+
+        let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\necho 'not a version string'\nexit 0\n");
+        let exe = present_binary_str();
+        let rt = make_codex_runtime(&["codex-acp"], Some(exe));
+        let reqs = cli_login_requirements(
+            &[exe, "--buzz-probe-must-not-run-xyz"],
+            "run `codex login`",
+            &rt,
+        );
+
+        restore_path(&orig);
+        drop(dir);
+
+        assert!(
+            !reqs.is_empty(),
+            "garbage version output must produce a requirement; got {reqs:?}"
+        );
+        if let Requirement::CliLogin {
+            ref availability, ..
+        } = reqs[0]
+        {
+            assert_eq!(
+                *availability,
+                crate::managed_agents::AcpAvailabilityStatus::AdapterOutdated,
+                "unparseable version output must yield AdapterOutdated; got {availability:?}"
+            );
+        } else {
+            panic!("expected CliLogin requirement; got {:?}", reqs[0]);
+        }
     }
 
     // ── custom/unknown command ─────────────────────────────────────────────
@@ -906,6 +1319,12 @@ mod tests {
     }
 
     #[test]
+    fn git_bash_requirement_serializes_correctly() {
+        let json = serde_json::to_value(Requirement::GitBash).unwrap();
+        assert_eq!(json, serde_json::json!({ "surface": "git_bash" }));
+    }
+
+    #[test]
     fn env_key_requirement_serializes_correctly() {
         let r = Requirement::EnvKey {
             key: "ANTHROPIC_API_KEY".to_string(),
@@ -923,7 +1342,8 @@ mod tests {
                 "login".to_string(),
                 "status".to_string(),
             ],
-            setup_copy: "run `codex login --with-api-key`".to_string(),
+            setup_copy: "run `codex login`".to_string(),
+            availability: crate::managed_agents::AcpAvailabilityStatus::Available,
         };
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["surface"], "cli_login");
@@ -967,9 +1387,9 @@ mod tests {
             model: None,
             provider: None,
             persona_source_version: None,
-            mcp_toolsets: None,
             env_vars,
             start_on_app_launch: false,
+            auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: Default::default(),
             backend_agent_id: None,
@@ -982,6 +1402,7 @@ mod tests {
             last_stopped_at: None,
             last_exit_code: None,
             last_error: None,
+            last_error_code: None,
             respond_to: Default::default(),
             respond_to_allowlist: vec![],
             display_name: None,
@@ -992,11 +1413,14 @@ mod tests {
             is_active: true,
             source_team: None,
             source_team_persona_slug: None,
+            definition_respond_to: None,
+            definition_respond_to_allowlist: Vec::new(),
+            definition_parallelism: None,
             relay_mesh: None,
         };
 
         let runtime = known_acp_runtime_exact("buzz-agent");
-        let effective = resolve_effective_agent_env(&record, &[], runtime);
+        let effective = resolve_effective_agent_env(&record, &[], runtime, &Default::default());
 
         // User env_vars must be present in the output (last-write-wins).
         assert_eq!(
@@ -1007,6 +1431,141 @@ mod tests {
             effective.env.get("BUZZ_AGENT_MODEL").map(String::as_str),
             Some("claude-opus-4-5")
         );
+    }
+
+    // ── provider-specific model fallback tests ────────────────────────────
+
+    #[test]
+    fn buzz_agent_databricks_v2_with_databricks_model_but_no_buzz_agent_model_is_ready() {
+        // The baked buzz-releases env sets DATABRICKS_MODEL but not BUZZ_AGENT_MODEL.
+        // An agent with only DATABRICKS_MODEL must pass the readiness gate.
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "databricks_v2"),
+                ("DATABRICKS_MODEL", "goose-claude-4-6-sonnet"),
+                ("DATABRICKS_HOST", "https://dbc.example.com"),
+            ]),
+        );
+        assert!(
+            agent_readiness(&env).is_ready(),
+            "DATABRICKS_MODEL must satisfy the model requirement for databricks_v2"
+        );
+    }
+
+    #[test]
+    fn buzz_agent_databricks_v2_hyphen_alias_with_databricks_model_is_ready() {
+        // buzz-agent accepts both "databricks_v2" and "databricks-v2". The
+        // readiness gate must recognize the hyphen alias and accept DATABRICKS_MODEL.
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "databricks-v2"),
+                ("DATABRICKS_MODEL", "goose-claude-4-6-sonnet"),
+                ("DATABRICKS_HOST", "https://dbc.example.com"),
+            ]),
+        );
+        assert!(
+            agent_readiness(&env).is_ready(),
+            "databricks-v2 alias with DATABRICKS_MODEL must be Ready"
+        );
+    }
+
+    #[test]
+    fn buzz_agent_databricks_hyphen_alias_missing_host_returns_not_ready() {
+        // The hyphen alias "databricks-v2" requires DATABRICKS_HOST just like
+        // the underscore variants. Without it the agent cannot reach the endpoint.
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "databricks-v2"),
+                ("DATABRICKS_MODEL", "goose-claude-4-6-sonnet"),
+                // DATABRICKS_HOST intentionally absent
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            !result.is_ready(),
+            "databricks-v2 without DATABRICKS_HOST must be NotReady"
+        );
+        let reqs = result.requirements();
+        assert!(
+            reqs.iter()
+                .any(|r| matches!(r, Requirement::EnvKey { key } if key == "DATABRICKS_HOST")),
+            "missing requirements must include DATABRICKS_HOST; got {reqs:?}"
+        );
+    }
+
+    #[test]
+    fn buzz_agent_databricks_v1_with_databricks_model_but_no_buzz_agent_model_is_ready() {
+        // V1 (Model Serving) also resolves DATABRICKS_MODEL — same fallback applies.
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "databricks"),
+                ("DATABRICKS_MODEL", "dbrx-instruct"),
+                ("DATABRICKS_HOST", "https://dbc.example.com"),
+            ]),
+        );
+        assert!(
+            agent_readiness(&env).is_ready(),
+            "DATABRICKS_MODEL must satisfy the model requirement for databricks (V1)"
+        );
+    }
+
+    #[test]
+    fn buzz_agent_anthropic_with_anthropic_model_but_no_buzz_agent_model_is_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "anthropic"),
+                ("ANTHROPIC_MODEL", "claude-opus-4-5"),
+                ("ANTHROPIC_API_KEY", "sk-test"),
+            ]),
+        );
+        assert!(
+            agent_readiness(&env).is_ready(),
+            "ANTHROPIC_MODEL must satisfy the model requirement for anthropic"
+        );
+    }
+
+    #[test]
+    fn buzz_agent_openai_with_openai_compat_model_but_no_buzz_agent_model_is_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "openai"),
+                ("OPENAI_COMPAT_MODEL", "gpt-4o"),
+                ("OPENAI_COMPAT_API_KEY", "sk-test"),
+            ]),
+        );
+        assert!(
+            agent_readiness(&env).is_ready(),
+            "OPENAI_COMPAT_MODEL must satisfy the model requirement for openai"
+        );
+    }
+
+    #[test]
+    fn buzz_agent_empty_provider_model_fallback_key_is_not_ready() {
+        // An empty DATABRICKS_MODEL with no BUZZ_AGENT_MODEL must still be NotReady.
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "databricks_v2"),
+                ("DATABRICKS_MODEL", ""),
+                ("DATABRICKS_HOST", "https://dbc.example.com"),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            !result.is_ready(),
+            "empty DATABRICKS_MODEL with no BUZZ_AGENT_MODEL must be NotReady"
+        );
+        assert!(result
+            .requirements()
+            .contains(&Requirement::NormalizedField {
+                field: "model".to_string()
+            }));
     }
 }
 

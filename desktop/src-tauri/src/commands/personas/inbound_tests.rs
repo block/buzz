@@ -8,8 +8,8 @@ const UUID: &str = "11111111-2222-3333-4444-555555555555";
 
 /// A local in-app persona: `source_team_persona_slug` is None, so its d-tag
 /// IS its UUID id. Carries env_vars + source_team that must survive a patch.
-fn local_in_app() -> PersonaRecord {
-    PersonaRecord {
+fn local_in_app() -> AgentDefinition {
+    AgentDefinition {
         id: UUID.to_string(),
         display_name: "Local".to_string(),
         avatar_url: None,
@@ -23,6 +23,9 @@ fn local_in_app() -> PersonaRecord {
         source_team: Some("team-1".to_string()),
         source_team_persona_slug: None,
         env_vars: BTreeMap::from([("API_KEY".to_string(), "secret".to_string())]),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
     }
@@ -30,8 +33,8 @@ fn local_in_app() -> PersonaRecord {
 
 /// An inbound persona as `persona_from_event` would produce it: id = d-tag,
 /// slug = Some(d-tag), empty env_vars, source_team None.
-fn inbound_for(d_tag: &str, display_name: &str) -> PersonaRecord {
-    PersonaRecord {
+fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
+    AgentDefinition {
         id: d_tag.to_string(),
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
@@ -45,6 +48,9 @@ fn inbound_for(d_tag: &str, display_name: &str) -> PersonaRecord {
         source_team: None,
         source_team_persona_slug: Some(d_tag.to_string()),
         env_vars: BTreeMap::new(),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        parallelism: None,
         created_at: "2025-06-01T00:00:00Z".to_string(),
         updated_at: "2025-06-01T00:00:00Z".to_string(),
     }
@@ -67,6 +73,34 @@ fn in_app_persona_matches_existing_uuid_and_patches() {
     assert_eq!(p.source_team, Some("team-1".to_string()));
     assert_eq!(p.source_team_persona_slug, None);
     assert_eq!(p.created_at, "2025-01-01T00:00:00Z");
+}
+
+#[test]
+fn inbound_quad_edit_applies_to_existing_matched_record() {
+    // B5 quad activation: a remote quad edit must land on the MATCH branch,
+    // not just the insert branch — otherwise device B keeps its stale quad
+    // and its next reconcile republishes it over device A's edit, and the
+    // two devices never converge (permanent ping-pong).
+    let mut local = local_in_app();
+    local.respond_to = Some("owner-only".to_string());
+    local.parallelism = Some(2);
+    let mut personas = vec![local];
+
+    let mut inbound = inbound_for(UUID, "Remote");
+    inbound.respond_to = Some("allowlist".to_string());
+    inbound.respond_to_allowlist = vec!["a".repeat(64)];
+    inbound.parallelism = Some(8);
+    apply_inbound_persona(&mut personas, inbound);
+
+    assert_eq!(personas.len(), 1, "no duplicate row");
+    let p = &personas[0];
+    assert_eq!(p.respond_to, Some("allowlist".to_string()));
+    assert_eq!(p.respond_to_allowlist, vec!["a".repeat(64)]);
+    assert_eq!(p.parallelism, Some(8));
+    // A quad-absent inbound also applies (clears), same as prompt/model.
+    apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
+    assert_eq!(personas[0].respond_to, None);
+    assert_eq!(personas[0].parallelism, None);
 }
 
 #[test]
@@ -141,9 +175,9 @@ fn local_agent() -> ManagedAgentRecord {
         model: Some("local-model".to_string()),
         provider: Some("local-provider".to_string()),
         persona_source_version: Some("local-hash".to_string()),
-        mcp_toolsets: Some("local".to_string()),
         env_vars: BTreeMap::from([("API_KEY".to_string(), "localsecret".to_string())]),
         start_on_app_launch: true,
+        auto_restart_on_config_change: true,
         runtime_pid: Some(1234),
         backend: crate::managed_agents::BackendKind::Provider {
             id: "buzz-backend".to_string(),
@@ -159,6 +193,7 @@ fn local_agent() -> ManagedAgentRecord {
         last_stopped_at: None,
         last_exit_code: None,
         last_error: None,
+        last_error_code: None,
         respond_to: crate::managed_agents::RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
         display_name: None,
@@ -169,6 +204,9 @@ fn local_agent() -> ManagedAgentRecord {
         is_active: true,
         source_team: None,
         source_team_persona_slug: None,
+        definition_respond_to: None,
+        definition_respond_to_allowlist: Vec::new(),
+        definition_parallelism: None,
         relay_mesh: None,
     }
 }
@@ -184,7 +222,6 @@ fn foreign_agent_event_with_secrets(d_tag: &str) -> nostr::Event {
         "system_prompt": "remote prompt",
         "model": "remote-model",
         "provider": "remote-provider",
-        "mcp_toolsets": "remote",
         "persona_source_version": "remote-hash",
         "parallelism": 99,
         "respond_to": "anyone",
@@ -267,14 +304,60 @@ fn inbound_managed_agent_drops_injected_secrets_and_harness() {
     ] {
         assert!(!json.contains(needle), "injected value leaked: {needle}");
     }
-    // Projected fields ARE updated from the inbound event.
+    // Instance-level projected fields ARE updated from the inbound event.
     assert_eq!(a.name, "Remote Agent");
-    assert_eq!(a.system_prompt, Some("remote prompt".to_string()));
-    assert_eq!(a.model, Some("remote-model".to_string()));
-    assert_eq!(a.provider, Some("remote-provider".to_string()));
     assert_eq!(a.parallelism, 99);
     assert_eq!(a.respond_to, crate::managed_agents::RespondTo::Anyone);
     assert_eq!(a.respond_to_allowlist, vec!["deadbeef".to_string()]);
+    // Definition-linked inbound (persona_id present): the definition quad is
+    // NOT applied — those fields resolve through the kind:30175 definition,
+    // and absent-on-the-wire must never clear a local snapshot.
+    assert_eq!(
+        a.system_prompt,
+        Some("local prompt".to_string()),
+        "linked inbound must not touch the local prompt snapshot"
+    );
+}
+
+/// Definition-less inbound (persona_id absent) still applies the definition
+/// quad unconditionally — the record is its own definition and the wire is
+/// its sync channel.
+#[test]
+fn inbound_definition_less_agent_applies_quad() {
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+    // Same wire shape as the hostile fixture, minus persona_id — a
+    // definition-less instance syncing its own definition fields.
+    let content = serde_json::json!({
+        "name": "Remote Agent",
+        "system_prompt": "remote prompt",
+        "model": "remote-model",
+        "provider": "remote-provider",
+        "persona_source_version": "remote-version",
+        "parallelism": 99,
+        "respond_to": "anyone",
+        "respond_to_allowlist": ["deadbeef"],
+    });
+    let keys = Keys::generate();
+    let event = EventBuilder::new(Kind::Custom(30177), content.to_string())
+        .tags(vec![Tag::parse(["d", AGENT_PUBKEY]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+
+    let content =
+        crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
+    let mut agents = vec![local_agent()];
+    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
+
+    let a = &agents[0];
+    assert_eq!(a.persona_id, None);
+    assert_eq!(a.system_prompt, Some("remote prompt".to_string()));
+    assert_eq!(a.model, Some("remote-model".to_string()));
+    assert_eq!(a.provider, Some("remote-provider".to_string()));
+    assert_eq!(
+        a.persona_source_version,
+        Some("remote-version".to_string()),
+        "all four quad fields must apply on a definition-less sync"
+    );
 }
 
 #[test]
@@ -372,24 +455,35 @@ fn inbound_team_no_match_inserts_idempotently() {
 // ── Tombstone (kind:5) consume ────────────────────────────────────────────
 
 fn deletion_event(coord: &str) -> nostr::Event {
-    use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+    deletion_event_with_keys(coord, &nostr::Keys::generate())
+}
+
+fn deletion_event_with_keys(coord: &str, keys: &nostr::Keys) -> nostr::Event {
+    use nostr::{EventBuilder, JsonUtil, Kind, Tag};
     let event = EventBuilder::new(Kind::Custom(5), "")
         .tags(vec![Tag::parse(["a", coord]).unwrap()])
-        .sign_with_keys(&Keys::generate())
+        .sign_with_keys(keys)
         .unwrap();
     nostr::Event::from_json(event.as_json()).unwrap()
 }
 
+/// A deletion event whose coordinate owner IS its signer — the only shape
+/// `parse_deletion_coordinate` accepts since the owner check landed.
+fn owned_deletion_event(kind: u32, d_tag: &str) -> nostr::Event {
+    let keys = nostr::Keys::generate();
+    let owner = keys.public_key().to_hex();
+    deletion_event_with_keys(&format!("{kind}:{owner}:{d_tag}"), &keys)
+}
+
 #[test]
 fn parse_deletion_coordinate_extracts_kind_and_d_tag() {
-    let owner = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     // Persona / team / agent coordinates all route by their leading kind.
-    let p = deletion_event(&format!("30175:{owner}:my-persona"));
+    let p = owned_deletion_event(30175, "my-persona");
     assert_eq!(
         parse_deletion_coordinate(&p),
         Some((30175, "my-persona".to_string()))
     );
-    let a = deletion_event(&format!("30177:{owner}:agentpubkeyhex"));
+    let a = owned_deletion_event(30177, "agentpubkeyhex");
     assert_eq!(
         parse_deletion_coordinate(&a),
         Some((30177, "agentpubkeyhex".to_string()))
@@ -397,10 +491,18 @@ fn parse_deletion_coordinate_extracts_kind_and_d_tag() {
 }
 
 #[test]
+fn parse_deletion_coordinate_rejects_foreign_owner() {
+    // A validly signed kind:5 naming ANOTHER owner's coordinate must no-op:
+    // NIP-09 scopes deletion to the record's own author.
+    let foreign_owner = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    let forged = deletion_event(&format!("30175:{foreign_owner}:my-persona"));
+    assert_eq!(parse_deletion_coordinate(&forged), None);
+}
+
+#[test]
 fn parse_deletion_coordinate_handles_colon_in_d_tag_and_rejects_malformed() {
-    let owner = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     // A d-tag containing ':' keeps its remainder intact (splitn(3)).
-    let weird = deletion_event(&format!("30176:{owner}:a:b:c"));
+    let weird = owned_deletion_event(30176, "a:b:c");
     assert_eq!(
         parse_deletion_coordinate(&weird),
         Some((30176, "a:b:c".to_string()))
@@ -436,4 +538,46 @@ fn tombstone_removal_predicates_match_apply_fn_keys() {
     assert_eq!(agents.len(), 1, "non-matching agent tombstone no-ops");
     agents.retain(|r| r.pubkey != AGENT_PUBKEY);
     assert!(agents.is_empty(), "agent removed by pubkey");
+}
+
+// ── Inbound signature gate ──────────────────────────────────────────────────
+
+#[test]
+fn inbound_gate_rejects_tampered_event() {
+    use nostr::JsonUtil;
+    // A validly signed event whose content was altered post-signing: the
+    // pubkey is real, the sig no longer covers the bytes. Must die at the
+    // gate before any store logic runs.
+    let keys = nostr::Keys::generate();
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(30175), "{}")
+        .tags(vec![nostr::Tag::parse(["d", "victim-slug"]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let tampered = event.as_json().replace(
+        "\"content\":\"{}\"",
+        "\"content\":\"{\\\"system_prompt\\\":\\\"pwned\\\"}\"",
+    );
+    assert_ne!(
+        tampered,
+        event.as_json(),
+        "string replace must have taken effect — if this fails the test is testing an un-tampered event"
+    );
+
+    let err = parse_verified_inbound_event(&tampered).unwrap_err();
+    assert!(
+        err.contains("signature"),
+        "tampered event must fail the signature gate: {err}"
+    );
+}
+
+#[test]
+fn inbound_gate_accepts_validly_signed_event() {
+    use nostr::JsonUtil;
+    let keys = nostr::Keys::generate();
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(30175), "{}")
+        .tags(vec![nostr::Tag::parse(["d", "slug"]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let parsed = parse_verified_inbound_event(&event.as_json()).unwrap();
+    assert_eq!(parsed.pubkey, keys.public_key());
 }

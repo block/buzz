@@ -732,6 +732,23 @@ void main() {
         expect(find.text('@Alice'), findsOneWidget);
       });
 
+      testWidgets('highlights an entire multi-word display name', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Hey @Kenny Lopez can you review this?',
+              mentionNames: {'pk1': 'Kenny Lopez'},
+            ),
+          ),
+        );
+
+        expect(find.text('@Kenny Lopez'), findsOneWidget);
+        expect(find.text('@Kenny'), findsNothing);
+        expect(_allRichText(tester), isNot(contains('Lopez Lopez')));
+      });
+
       testWidgets('renders unknown @mention as-is', (tester) async {
         await tester.pumpWidget(
           _testable(

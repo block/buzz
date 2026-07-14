@@ -4,7 +4,7 @@ import { flushSync } from "react-dom";
 import {
   getIdentity,
   importIdentity as tauriImportIdentity,
-} from "@/shared/api/tauri";
+} from "@/shared/api/tauriIdentity";
 import { NostrKeyImportForm } from "@/features/onboarding/ui/NostrKeyImportForm";
 import {
   type OnboardingTransitionDirection,
@@ -249,7 +249,7 @@ export function WelcomeSetup({
                   }}
                   type="button"
                 >
-                  Continue with Block Inc. workspace
+                  Continue with default workspace
                 </Button>
               )}
 

@@ -10,7 +10,7 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import type * as React from "react";
 
 import type { ChannelSortMode } from "@/features/sidebar/lib/channelSortPreference";
@@ -63,7 +63,7 @@ import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
 const SECTION_LABEL_CHEVRON_CLASS =
-  "relative size-2.5 shrink-0 text-current opacity-0 transition-[color,opacity] group-hover/sidebar-section:opacity-100 group-hover/section-label:opacity-100 group-focus-within/sidebar-section:opacity-100 group-focus-visible/section-label:opacity-100";
+  "relative size-2.5 shrink-0 text-current opacity-0 transition-[color,opacity] group-hover/sidebar-section:opacity-100 group-hover/section-label:opacity-100 group-focus-within/sidebar-section:opacity-100 group-focus-visible/section-label:opacity-100 group-data-[section-actions-open=true]/sidebar-section:opacity-100";
 const SECTION_LABEL_CHEVRON_ICON_CLASS =
   "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
 
@@ -119,6 +119,7 @@ export function SectionActionsMenu({
   sectionLabel,
   testId,
   visibilityClassName = SECTION_ACTION_VISIBILITY_CLASS,
+  onOpenChange,
   hasUnread,
   onMarkAllRead,
   onBrowse,
@@ -139,6 +140,7 @@ export function SectionActionsMenu({
   sectionLabel: string;
   testId?: string;
   visibilityClassName?: string;
+  onOpenChange?: (open: boolean) => void;
   hasUnread?: boolean;
   onMarkAllRead?: () => void;
   onBrowse?: () => void;
@@ -161,7 +163,7 @@ export function SectionActionsMenu({
   const showSort = Boolean(sortMode && onSortModeChange);
 
   return (
-    <DropdownMenu>
+    <DropdownMenu onOpenChange={onOpenChange}>
       <DropdownMenuTrigger asChild>
         <button
           aria-label={`More actions for ${sectionLabel}`}
@@ -403,6 +405,7 @@ export function ChannelGroupSection({
   onLeaveChannel?: (channel: Channel) => void;
 }) {
   const contentId = `sidebar-${listTestId}`;
+  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
 
   const channelList =
     items.length > 0 ? (
@@ -472,6 +475,7 @@ export function ChannelGroupSection({
   const sectionContent = (
     <SidebarGroup
       className={cn("group/sidebar-section select-none", groupClassName)}
+      data-section-actions-open={actionsMenuOpen || undefined}
     >
       <ChannelSectionHeader
         contentId={contentId}
@@ -492,6 +496,7 @@ export function ChannelGroupSection({
             <SectionActionsMenu
               sectionLabel={title}
               testId={actionsTestId}
+              onOpenChange={setActionsMenuOpen}
               hasUnread={hasUnread}
               onMarkAllRead={onMarkAllRead}
               onBrowse={onBrowseClick}
@@ -592,6 +597,7 @@ export function CustomChannelSection({
   onLeaveChannel?: (channel: Channel) => void;
 }) {
   const contentId = `sidebar-section-${section.id}`;
+  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
 
   return (
     <SortableSectionShell sectionId={section.id}>
@@ -602,6 +608,7 @@ export function CustomChannelSection({
               "group/sidebar-section select-none",
               isDragging && "opacity-30",
             )}
+            data-section-actions-open={actionsMenuOpen || undefined}
           >
             {/* modal={false}: Rename/Delete section open a modal dialog;
                 a modal ContextMenu would leave `pointer-events: none` stuck on
@@ -652,6 +659,7 @@ export function CustomChannelSection({
                     <SectionActionsMenu
                       sectionLabel={section.name}
                       testId={`section-actions-${section.id}`}
+                      onOpenChange={setActionsMenuOpen}
                       hasUnread={hasUnread}
                       onMarkAllRead={onMarkSectionRead}
                       onRenameSection={onRenameSection}

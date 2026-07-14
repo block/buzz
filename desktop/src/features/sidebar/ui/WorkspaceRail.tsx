@@ -45,21 +45,29 @@ export function workspaceInitials(name: string): string {
 /**
  * Presentation decisions for one workspace button, derived from its observed
  * mention state. Pure so it can be unit-tested without a DOM. The `state` guard
- * ensures we NEVER render a mention badge for a relay we could not observe
+ * ensures we NEVER render any indicator for a relay we could not observe
  * (`unknown`/`loading`/`error`) — only a `ready` observation is trusted.
+ *
+ * Two-tier indicator system:
+ * - `showBadge`: numeric mention count (mentions/thread-replies present).
+ * - `showDot`: plain unread dot when there are regular channel unreads but no
+ *   mentions. Mutually exclusive with `showBadge` by construction.
  */
 export function workspaceRailIndicators(unread: WorkspaceUnreadState): {
   mentionCount: number;
   showBadge: boolean;
+  showDot: boolean;
   pending: boolean;
   badgeLabel: string;
 } {
   const observed = unread.state === "ready";
   const mentionCount = observed ? (unread.count ?? 0) : 0;
   const showBadge = mentionCount > 0;
+  const showDot = observed && unread.hasUnread && !showBadge;
   return {
     mentionCount,
     showBadge,
+    showDot,
     pending: unread.state === "unknown" || unread.state === "loading",
     badgeLabel:
       mentionCount > MAX_BADGE ? `${MAX_BADGE}+` : String(mentionCount),
@@ -81,12 +89,14 @@ function WorkspaceButton({
   onSwitch: () => void;
   menu: React.ReactNode;
 }) {
-  const { mentionCount, showBadge, pending, badgeLabel } =
+  const { mentionCount, showBadge, showDot, pending, badgeLabel } =
     workspaceRailIndicators(unread);
 
   const tooltipLabel = showBadge
     ? `${workspace.name} — ${mentionCount} mention${mentionCount === 1 ? "" : "s"}`
-    : workspace.name;
+    : showDot
+      ? `${workspace.name} — unread`
+      : workspace.name;
 
   return (
     <ContextMenu>
@@ -128,6 +138,13 @@ function WorkspaceButton({
                   data-testid={`workspace-rail-mentions-${workspace.id}`}
                 >
                   {badgeLabel}
+                </span>
+              ) : showDot ? (
+                <span
+                  className="absolute -bottom-0.5 -right-0.5 h-2 w-2 shrink-0 rounded-full bg-primary ring-2 ring-sidebar"
+                  data-testid={`workspace-rail-unread-dot-${workspace.id}`}
+                >
+                  <span className="sr-only">unread</span>
                 </span>
               ) : null}
             </button>

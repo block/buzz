@@ -55,17 +55,59 @@ test("editAgent_providerFieldHidden_forBlankRuntime", () => {
 
 // ── Provider dropdown options for EditAgentProviderField ────────────────────
 //
-// The provider dropdown must always contain the well-known providers
+// The provider dropdown contains the well-known providers
 // (databricks, databricks_v2, anthropic, openai, openai-compat) plus a
 // default-provider fallback entry so users can clear a saved provider.
+//
+// On OSS builds, Databricks v1 ("databricks") is shown alongside v2 so OSS
+// users who were previously on v1 can select it. On internal Block builds,
+// callers pass hideProviderIds=new Set(["databricks"]) to suppress v1 — the
+// boot migration rewrites any persisted v1 value to v2, so offering v1 there
+// would silently undo the migration.
 
-test("editAgent_providerOptions_includesDatabricksProviders", () => {
+test("editAgent_providerOptions_includesDatabricksV2AndV1OnOSS", () => {
+  // OSS builds: no hideProviderIds → both v1 and v2 appear.
   const options = getPersonaProviderOptions("", "buzz-agent");
   const ids = options.map((o) => o.id);
-  assert.ok(ids.includes("databricks"), "databricks must be a provider option");
+  assert.ok(ids.includes("databricks_v2"), "databricks_v2 must be present");
+  assert.ok(
+    ids.includes("databricks"),
+    "bare databricks (V1) must be present on OSS builds",
+  );
+});
+
+test("editAgent_providerOptions_hidesDatabricksV1OnInternalBuild", () => {
+  // Internal Block builds: pass hideProviderIds to suppress v1.
+  const options = getPersonaProviderOptions(
+    "",
+    "buzz-agent",
+    "",
+    new Set(["databricks"]),
+  );
+  const ids = options.map((o) => o.id);
   assert.ok(
     ids.includes("databricks_v2"),
-    "databricks_v2 must be a provider option",
+    "databricks_v2 must still be present",
+  );
+  assert.ok(
+    !ids.includes("databricks"),
+    "bare databricks (V1) must be hidden on internal builds",
+  );
+});
+
+test("editAgent_providerOptions_includesDatabricksV1AsCurrentEvenWhenHidden", () => {
+  // A record already persisted with provider="databricks" must show it as the
+  // current value even when hideProviderIds hides it from fresh selection.
+  const options = getPersonaProviderOptions(
+    "databricks",
+    "buzz-agent",
+    "",
+    new Set(["databricks"]),
+  );
+  const ids = options.map((o) => o.id);
+  assert.ok(
+    ids.includes("databricks"),
+    "databricks must appear as current provider when it is the saved value",
   );
 });
 
@@ -586,7 +628,6 @@ test("editAgent_missingRequiredEnvKey_blocksSaveViaValidity", () => {
   const base = {
     name: "My Agent",
     parallelism: "",
-    turnTimeoutSeconds: "",
     agentAcpCommand: "",
     acpCommand: "",
     respondTo: "all",
@@ -616,7 +657,6 @@ test("editAgent_customCommandPinned_blocksSaveWhenCommandEmpty", () => {
   const base = {
     name: "My Agent",
     parallelism: "",
-    turnTimeoutSeconds: "",
     agentAcpCommand: "",
     acpCommand: "",
     respondTo: "all",
@@ -1186,7 +1226,7 @@ test("editAgent_findingE_capableBuzzAgentLoadedCatalog_preservedOnNoOpSave", () 
 // to id-based matching when command-path matching misses — same id-fallback used
 // by effectiveRuntimeIdForSubmit.
 
-// Helper mirrors the fixed seeding logic from EditAgentDialog.tsx open-effect /
+// Helper mirrors the fixed seeding logic from AgentInstanceEditDialog.tsx open-effect /
 // catalog-arrival effect.
 function deriveSelectedRuntimeId(agentCommand, runtimes) {
   const matched =
@@ -1390,7 +1430,7 @@ test("requiredCredentialEnvKeys: custom/unknown runtime → empty", () => {
 
 // ── Block-save gate: hasMissingRequiredEnvKey logic ────────────────────────
 //
-// The EditAgentDialog computes:
+// The AgentInstanceEditDialog computes:
 //   requiredEnvKeyMissing = hasMissingRequiredEnvKey(requiredEnvKeys, envVars)
 // and folds it into canSubmit (via computeEditAgentFormValidity). These tests
 // exercise the exported predicate directly.
@@ -1472,7 +1512,7 @@ test("blockSave_buzzAgentDatabricksHostProvided_allowed", () => {
 
 // ── Block-save gate: isMissingRequiredDropdownField ────────────────────────
 //
-// The EditAgentDialog also gates on modelRequired / providerRequired.
+// The AgentInstanceEditDialog also gates on modelRequired / providerRequired.
 // These tests guard the isMissingRequiredDropdownField predicate used for both.
 
 test("blockSave_missingRequiredModel_blocked", () => {

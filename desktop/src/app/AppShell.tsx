@@ -38,6 +38,7 @@ import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
+import { useAutoRestartPolicy } from "@/features/agents/lib/useAutoRestartPolicy";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
 import {
@@ -127,6 +128,26 @@ export function AppShell() {
   } = useAppNavigation();
   const { canGoBack, canGoForward, goBack, goForward } =
     useBackForwardControls();
+  // Navigate home before switching workspaces so the outgoing channel URL is
+  // cleared. Without this, ChannelScreen's read effect continues firing
+  // markChannelRead({ topLevelOnly: true }) for the previous workspace's
+  // channel, advancing its NIP-RS markers and causing the rail badge to vanish
+  // on the next 30s poll (A→B→A→B disappearance bug).
+  // Guard: skip goHome() when re-selecting the already-active workspace so
+  // the current channel is not unexpectedly cleared.
+  const handleSwitchWorkspace = React.useCallback(
+    (id: string) => {
+      if (id !== workspacesHook.activeWorkspace?.id) {
+        void goHome();
+      }
+      workspacesHook.switchWorkspace(id);
+    },
+    [
+      goHome,
+      workspacesHook.activeWorkspace?.id,
+      workspacesHook.switchWorkspace,
+    ],
+  );
   const { selectedChannelId, selectedView } = React.useMemo(
     () => deriveShellRoute(location.pathname),
     [location.pathname],
@@ -151,6 +172,8 @@ export function AppShell() {
   );
   usePersonaSync(identityQuery.data?.pubkey);
   useAgentsDataRefresh();
+  // Chunk F: auto-restart drifted idle agents (per-agent opt-out, default ON).
+  useAutoRestartPolicy();
   // Owner-global observer ingestion: receives + decrypts agent observer
   // frames and keeps derived active-turn liveness in sync app-wide, so no
   // individual screen/panel has to mount its own bridge for ingestion.
@@ -160,10 +183,16 @@ export function AppShell() {
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
   useArchiveSync();
-  useObserverArchiveSeed(identityQuery.data?.pubkey);
-  useAgentMetricArchiveSeed(identityQuery.data?.pubkey);
-  const profileQuery = useProfileQuery();
+  // Defer the archive *seeds* until startup is idle: they're first-run catch-up
+  // config (a one-shot mergeSaveSubscriptionKinds), not live-ingest — that's
+  // useArchiveSync's job, which stays eager above. Passing deferredPubkey makes
+  // each seed hook wait on its own `if (!pubkey) return` guard until the shell
+  // is interactive, so their IPC + sqlite archive open doesn't compete with
+  // first paint. The explicit-choice guard inside each hook is unchanged.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
+  useObserverArchiveSeed(deferredPubkey);
+  useAgentMetricArchiveSeed(deferredPubkey);
+  const profileQuery = useProfileQuery();
   useRelayAutoHeal();
   usePresenceSubscription();
   useUserStatusSubscription();
@@ -264,6 +293,7 @@ export function AppShell() {
   } = useUnreadChannels(sidebarChannels, activeChannel, {
     pubkey: identityQuery.data?.pubkey,
     relayClient,
+    relayUrl: workspacesHook.activeWorkspace?.relayUrl,
     currentPubkey: identityQuery.data?.pubkey,
     mutedChannelIds,
     notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
@@ -528,7 +558,16 @@ export function AppShell() {
     }
 
     function handleKeyDown(event: KeyboardEvent) {
-      if (!hasPrimaryShortcutModifier(event) || event.altKey) {
+      if (!hasPrimaryShortcutModifier(event) || event.altKey || event.repeat) {
+        return;
+      }
+
+      // A focused surface may claim the shortcut first — e.g. the composer
+      // consumes ⌘K to open the link editor when text is selected. Its
+      // element-level handler runs before this window-level bubble listener
+      // and calls `preventDefault()`; respect that instead of also opening
+      // the global dialog.
+      if (event.defaultPrevented) {
         return;
       }
 
@@ -619,6 +658,7 @@ export function AppShell() {
             threadActivityItems,
             threadActivityFeedItems,
             feedItemState,
+            onOpenSettings: handleOpenSettings,
           }}
         >
           <HuddleProvider>
@@ -640,7 +680,7 @@ export function AppShell() {
                       }
                       onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
                       onRemoveWorkspace={workspacesHook.removeWorkspace}
-                      onSwitchWorkspace={workspacesHook.switchWorkspace}
+                      onSwitchWorkspace={handleSwitchWorkspace}
                       onUpdateWorkspace={workspacesHook.updateWorkspace}
                       workspaces={workspacesHook.workspaces}
                     />
@@ -720,7 +760,7 @@ export function AppShell() {
                           isPresencePending={presenceSession.isPending}
                           onAddWorkspace={(workspace) => {
                             const id = workspacesHook.addWorkspace(workspace);
-                            workspacesHook.switchWorkspace(id);
+                            handleSwitchWorkspace(id);
                           }}
                           onAddWorkspaceOpenChange={setIsAddWorkspaceOpen}
                           onNewDmOpenChange={setIsNewDmOpen}
@@ -728,7 +768,7 @@ export function AppShell() {
                           onOpenAddWorkspace={() => setIsAddWorkspaceOpen(true)}
                           onUpdateWorkspace={workspacesHook.updateWorkspace}
                           onRemoveWorkspace={workspacesHook.removeWorkspace}
-                          onSwitchWorkspace={workspacesHook.switchWorkspace}
+                          onSwitchWorkspace={handleSwitchWorkspace}
                           onCreateAgent={() =>
                             void goAgents().then(requestOpenCreateAgent)
                           }
@@ -841,6 +881,7 @@ export function AppShell() {
                           <SidebarInset
                             ref={mainInsetRef}
                             className="isolate min-h-0 min-w-0 overflow-hidden bg-sidebar"
+                            data-buzz-glass-inset
                             style={chromeCssVarDefaults as React.CSSProperties}
                           >
                             <div className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">

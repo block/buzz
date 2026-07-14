@@ -58,23 +58,11 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
             );
             continue;
         };
-        // Layer the agent's own env overrides over persona env, matching
-        // create-time precedence (persona env < agent env). When the persona
-        // leaves model/provider blank, the record's own configured values are
-        // preserved — a blank persona must not clobber a user-configured agent.
-        let snapshot = super::persona_events::persona_snapshot_with_agent_config_fallback(
-            persona,
-            &record.env_vars,
-            record.model.as_deref(),    // fallback: record.model
-            record.provider.as_deref(), // fallback: record.provider
-        );
-        if let Some(prompt) = snapshot.system_prompt {
-            record.system_prompt = Some(prompt);
-        }
-        record.model = snapshot.model;
-        record.provider = snapshot.provider;
-        record.env_vars = snapshot.env_vars;
-        record.persona_source_version = Some(snapshot.source_version);
+        // Layer precedence at read time: persona env < agent env. When the
+        // persona leaves model/provider blank, the record's own configured
+        // values are preserved — a blank persona must not clobber a
+        // user-configured agent. See `apply_persona_snapshot`.
+        super::persona_events::apply_persona_snapshot(record, persona);
         record.updated_at = util::now_iso();
         changed = true;
     }
@@ -192,19 +180,7 @@ pub async fn restore_managed_agents_on_launch(
             let Some(persona) = personas_for_snapshot.iter().find(|p| p.id == persona_id) else {
                 continue;
             };
-            let snapshot = super::persona_events::persona_snapshot_with_agent_config_fallback(
-                persona,
-                &record.env_vars,
-                record.model.as_deref(),    // fallback: record.model
-                record.provider.as_deref(), // fallback: record.provider
-            );
-            if let Some(prompt) = snapshot.system_prompt {
-                record.system_prompt = Some(prompt);
-            }
-            record.model = snapshot.model;
-            record.provider = snapshot.provider;
-            record.env_vars = snapshot.env_vars;
-            record.persona_source_version = Some(snapshot.source_version);
+            super::persona_events::apply_persona_snapshot(record, persona);
             record.updated_at = util::now_iso();
             changed = true;
         }
@@ -257,6 +233,18 @@ pub async fn restore_managed_agents_on_launch(
             .collect::<Vec<_>>()
     };
     if agents_to_start.is_empty() {
+        return Ok(());
+    }
+
+    // Serialize spawning and runtime registration with shutdown cleanup. The
+    // shutdown flag is rechecked after taking the lock so shutdown either
+    // prevents this transition or waits until every child is tracked and can
+    // be terminated.
+    let restore_transition = state
+        .managed_agent_restore_transition
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
     }
 
@@ -352,6 +340,9 @@ pub async fn restore_managed_agents_on_launch(
             .collect();
 
     save_managed_agents(app, &records)?;
+    drop(runtimes);
+    drop(_store_guard);
+    drop(restore_transition);
 
     // ── Profile reconciliation (fire-and-forget) ────────────────────────────
     // Spawn background tasks to ensure each restored agent's kind:0 profile is

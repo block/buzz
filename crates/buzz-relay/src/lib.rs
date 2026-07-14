@@ -19,6 +19,8 @@ pub mod connection;
 pub mod error;
 /// WebSocket message handlers for NIP-01 client commands.
 pub mod handlers;
+/// Stateless HMAC-signed relay invite tokens (mint/verify).
+pub mod invite_token;
 /// Inter-relay mesh startup wiring (`BUZZ_MESH` seam).
 pub mod mesh_boot;
 /// Relay-signed mesh-LLM status publisher.

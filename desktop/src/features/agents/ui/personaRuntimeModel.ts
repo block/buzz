@@ -119,7 +119,7 @@ export function hasMissingRequiredEnvKey(
  * The ONE exception is the inherit-TRANSITION-from-a-harness-pin: a previously
  * harness-pinned agent (e.g. Claude — `agent.agentCommandOverride != null` at
  * dialog open) has its `provider` cleared and carries no persona credential,
- * then the user checks "Inherit runtime from persona" for a provider-backed
+ * then the user checks "Inherit runtime from template" for a provider-backed
  * persona (e.g. buzz-agent/Anthropic). Persisting the local (empty) provider +
  * credential-less env would save an agent that fails readiness on next start.
  * Only in that case — inheriting AND the local provider is empty AND the agent
@@ -210,7 +210,6 @@ export function resolveInheritedRuntimeSubmission(input: {
 export interface EditAgentFormValidityInput {
   name: string;
   parallelism: string;
-  turnTimeoutSeconds: string;
   /** The command already persisted on the agent (empty when inheriting). */
   agentAcpCommand: string;
   acpCommand: string;
@@ -249,9 +248,6 @@ export function computeEditAgentFormValidity(
   const parallelismValid =
     input.parallelism.trim() === "" ||
     !Number.isNaN(Number.parseInt(input.parallelism, 10));
-  const timeoutValid =
-    input.turnTimeoutSeconds.trim() === "" ||
-    !Number.isNaN(Number.parseInt(input.turnTimeoutSeconds, 10));
   const acpCommandValid = !(
     input.agentAcpCommand && input.acpCommand.trim() === ""
   );
@@ -266,7 +262,6 @@ export function computeEditAgentFormValidity(
   return (
     input.name.trim().length > 0 &&
     parallelismValid &&
-    timeoutValid &&
     acpCommandValid &&
     respondToValid &&
     customCommandValid &&

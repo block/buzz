@@ -631,11 +631,38 @@ test("buildMainTimelineEntries renders a relay-only thread summary", () => {
     threadHeadId: "root",
     replyCount: 4,
     lastReplyAt: 9,
+    // Relay returns participants most-recent-first (["alice", "bob"]); the
+    // facepile renders them oldest-first so the last replier lands rightmost.
     participants: [
-      { id: "alice", author: "Alice", avatarUrl: "alice.png" },
       { id: "bob", author: "bob", avatarUrl: null },
+      { id: "alice", author: "Alice", avatarUrl: "alice.png" },
     ],
   });
+});
+
+test("buildMainTimelineEntries keeps the 3 most-recent relay participants oldest-first", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const summaries = new Map([
+    [
+      "root",
+      {
+        replyCount: 4,
+        descendantCount: 4,
+        lastReplyAt: 9,
+        // Relay order is most-recent-first; only the top 3 are displayed.
+        participantPubkeys: ["newest", "middle", "oldest-shown", "dropped"],
+      },
+    ],
+  ]);
+
+  const [entry] = buildMainTimelineEntries([root], new Set(), summaries);
+
+  // Top-3 taken (drops "dropped"), then reversed to oldest-first so the last
+  // replier ("newest") renders rightmost.
+  assert.deepEqual(
+    entry.summary?.participants.map((participant) => participant.id),
+    ["oldest-shown", "middle", "newest"],
+  );
 });
 
 test("buildMainTimelineEntries merges local knowledge over the relay floor", () => {

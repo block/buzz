@@ -3,6 +3,14 @@ import * as React from "react";
 import { hasBlockMedia } from "../markdownUtils";
 import { SpoilerParticles } from "../SpoilerParticles";
 
+/**
+ * True for descendants of a spoiler that is currently hidden. Consumers (e.g.
+ * `MaskedLinkTooltip`) use it to suppress hover/focus affordances that would
+ * otherwise leak masked content before the spoiler is revealed. Default
+ * `false` — content outside any spoiler is never hidden.
+ */
+export const SpoilerHiddenContext = React.createContext(false);
+
 export function SpoilerInline({
   block = false,
   children,
@@ -80,7 +88,9 @@ export function SpoilerInline({
         >
           <SpoilerParticles active contentRef={contentRef} />
           <div className="buzz-spoiler__content" ref={setContentElement}>
-            {children}
+            <SpoilerHiddenContext.Provider value={true}>
+              {children}
+            </SpoilerHiddenContext.Provider>
           </div>
         </div>
       );
@@ -94,7 +104,9 @@ export function SpoilerInline({
       >
         <SpoilerParticles active contentRef={contentRef} />
         <span className="buzz-spoiler__content" ref={setContentElement}>
-          {children}
+          <SpoilerHiddenContext.Provider value={true}>
+            {children}
+          </SpoilerHiddenContext.Provider>
         </span>
       </span>
     );
@@ -110,7 +122,9 @@ export function SpoilerInline({
       >
         <SpoilerParticles active={!revealed} contentRef={contentRef} />
         <div className="buzz-spoiler__content" ref={setContentElement}>
-          {children}
+          <SpoilerHiddenContext.Provider value={!revealed}>
+            {children}
+          </SpoilerHiddenContext.Provider>
         </div>
       </div>
     );
@@ -125,7 +139,9 @@ export function SpoilerInline({
     >
       <SpoilerParticles active={!revealed} contentRef={contentRef} />
       <span className="buzz-spoiler__content" ref={setContentElement}>
-        {children}
+        <SpoilerHiddenContext.Provider value={!revealed}>
+          {children}
+        </SpoilerHiddenContext.Provider>
       </span>
     </span>
   );

@@ -84,6 +84,14 @@ void _insertTriggerAtCursor(
   focusNode.requestFocus();
 }
 
+bool hasMention(String text, String name) {
+  final pattern = RegExp(
+    '(?:^|\\s|[*_]{1,3}|\\|\\|)@${RegExp.escape(name)}(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
+    caseSensitive: false,
+  );
+  return pattern.hasMatch(text);
+}
+
 /// Send a typing indicator over the WebSocket (fire-and-forget).
 ///
 /// Desktop sends these as `["EVENT", signedEvent]` over the WebSocket — not

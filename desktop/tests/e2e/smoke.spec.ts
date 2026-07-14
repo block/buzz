@@ -119,35 +119,59 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByText("Custom agent").click();
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
 
-  await page.getByTestId("agent-name-input").fill(agentName);
+  await page.locator("#persona-display-name").fill(agentName);
+  await page
+    .locator("#persona-system-prompt")
+    .fill("You are concise and parallelize independent work.");
 
-  // The buzz-agent runtime requires provider + model selection. Wait for the
-  // provider field to appear (it renders once the ACP runtime catalog loads
-  // and the auto-select effect resolves to buzz-agent).
-  await expect(page.locator("#agent-provider")).toBeVisible({
-    timeout: 10_000,
-  });
-  await page.locator("#agent-provider").selectOption("anthropic");
-  await page.locator("#agent-model").selectOption("__custom_model__");
+  // The buzz-agent runtime auto-selects once the ACP runtime catalog loads;
+  // the LLM provider field renders after that.
+  const llmProvider = page.locator("#persona-llm-provider");
+  await expect(llmProvider).toBeVisible({ timeout: 10_000 });
+  await llmProvider.press("Enter");
+  await page
+    .getByRole("menuitemradio", { exact: true, name: "Anthropic" })
+    .click();
+  const model = page.locator("#persona-model");
+  await model.click();
+  await page
+    .getByRole("button", { name: "Custom model...", exact: true })
+    .click();
   await page.getByLabel("Custom model ID").fill("claude-opus-4-5");
   // Supply a credential so the agent can actually run (create is no longer
   // blocked by a missing key, but we include it for a realistic test).
+  // The required ANTHROPIC_API_KEY amber row appears in the EnvVarsEditor
+  // (Advanced auto-expands when required keys are present).
   await page
-    .getByTestId("env-vars-required-value")
+    .getByLabel("Value for ANTHROPIC_API_KEY")
     .fill("sk-test-api-key-for-e2e");
 
-  await page.getByRole("button", { name: "Advanced setup" }).click();
-  await page.getByTestId("agent-parallelism-input").fill("3");
+  // Fix 3 (auto-open Advanced when required keys appear) may have already
+  // opened the section; only click to open if it is currently collapsed.
+  const advancedToggle = page.getByRole("button", {
+    name: "Advanced",
+    exact: true,
+  });
+  if ((await advancedToggle.getAttribute("aria-expanded")) === "false") {
+    await advancedToggle.click();
+  }
+  // Parallelism is above the env-vars editor in the Advanced section; filling
+  // the required API-key row may have scrolled the dialog past it. Scroll back.
   await page
-    .getByTestId("agent-system-prompt-input")
-    .fill("You are concise and parallelize independent work.");
-  await page.getByTestId("create-agent-submit").click();
+    .locator("#persona-parallelism")
+    .evaluate((el) => el.scrollIntoView({ block: "nearest" }));
+  await expect(page.locator("#persona-parallelism")).toBeVisible();
+  await page.locator("#persona-parallelism").fill("3");
+
+  // The start-after-create toggle defaults ON, so submitting mints a running
+  // instance whose behavioral quad resolves from the definition.
+  await page.getByTestId("persona-dialog-submit").click();
 
   await expect(
     page.getByRole("heading", { name: "Agent created" }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 10_000 });
   await page.getByRole("button", { name: "Done" }).click();
 
   await expect(page.getByTestId("agents-library-personas")).toContainText(
@@ -444,6 +468,23 @@ test("sends a mocked channel message", async ({ page }) => {
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("message-timeline")).toContainText(message);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const row = Array.from(
+          document.querySelectorAll<HTMLElement>("[data-message-id]"),
+        ).at(-1);
+        const composer = document.querySelector<HTMLElement>(
+          '[data-testid="message-composer"]',
+        );
+        if (!row || !composer) return Number.NEGATIVE_INFINITY;
+        return (
+          composer.getBoundingClientRect().top -
+          row.getBoundingClientRect().bottom
+        );
+      }),
+    )
+    .toBeGreaterThanOrEqual(0);
 });
 
 test("supports multiline drafts with Ctrl+Enter and sends with Enter", async ({

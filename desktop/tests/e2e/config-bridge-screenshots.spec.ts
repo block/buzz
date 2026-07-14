@@ -12,6 +12,8 @@ const RUNTIME_OVERRIDE_PUBKEY = TEST_IDENTITIES.outsider.pubkey;
 // (matches PUBKEY_MULTI_ORIGIN in e2eBridge buildMockConfigSurface).
 const MULTI_ORIGIN_PUBKEY =
   "abc1230000000000000000000000000000000000000000000000000000000def";
+const BUZZ_AGENT_PUBKEY =
+  "b0220000000000000000000000000000000000000000000000000000000000a9";
 
 const MANAGED_AGENTS = [
   {
@@ -210,7 +212,7 @@ test.describe("config bridge screenshots", () => {
 
     // Multiple distinct provenance origins visible at once.
     await expect(panel.getByText("Set in Buzz").first()).toBeVisible();
-    await expect(panel.getByText("Inherited from persona")).toBeVisible();
+    await expect(panel.getByText("Inherited from template")).toBeVisible();
     await expect(
       panel.getByText("From environment variable (GOOSE_MODE)"),
     ).toBeVisible();
@@ -243,14 +245,43 @@ test.describe("config bridge screenshots", () => {
 
     const panel = await openAgentProfileFromChannel(page, "Goose Agent");
 
-    // Advanced runtime fields render directly in the profile panel's flat list.
-    await expect(panel.getByText("Extension: developer")).toBeVisible();
+    // Advanced runtime fields render directly in the profile panel's flat list,
+    // grouped under their own "Advanced" header.
+    await expect(panel.getByText("active_provider")).toBeVisible();
+    await expect(panel.getByText("Advanced", { exact: true })).toHaveCount(1);
+    // MCP servers render once each under their group label.
+    await expect(panel.getByText("developer", { exact: true })).toHaveCount(1);
+    await expect(panel.getByText("MCP Servers", { exact: true })).toHaveCount(
+      1,
+    );
     await settleAnimations(panel);
 
     await panel.screenshot({ path: `${SHOTS}/05-advanced-expanded.png` });
   });
 
-  test("06 — profile side panel — Configuration section", async ({ page }) => {
+  test("06 — buzz-agent empty MCP servers", async ({ page }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: BUZZ_AGENT_PUBKEY,
+          name: "Buzz Agent",
+          status: "running" as const,
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    const panel = await openAgentProfileFromChannel(page, "Buzz Agent");
+
+    await expect(
+      panel.getByText("No custom servers configured", { exact: true }),
+    ).toBeVisible();
+    await expect(panel.getByText("MCP Servers", { exact: true })).toHaveCount(
+      1,
+    );
+  });
+
+  test("07 — profile side panel — Configuration section", async ({ page }) => {
     // charlie (554cef…) is the well-known test pubkey that the mock bridge
     // seeds as a bot owned by the test viewer, so isBot + isOwner + managedAgent
     // are all true — the Configuration section renders in the profile panel.

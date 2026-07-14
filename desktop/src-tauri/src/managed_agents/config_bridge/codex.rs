@@ -122,7 +122,7 @@ fn toml_string(table: &toml::Table, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn codex_config_path() -> Option<std::path::PathBuf> {
+pub(crate) fn codex_config_path() -> Option<std::path::PathBuf> {
     if let Ok(home) = std::env::var("CODEX_HOME") {
         return Some(std::path::PathBuf::from(home).join("config.toml"));
     }

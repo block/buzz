@@ -1,9 +1,12 @@
 import {
+  commitAuthorPubkeysFromPullRequests,
   contributorKey,
-  profileForCommitAuthor,
+  profileForCommit,
   profileForContributor,
+  type ViewerGitIdentity,
 } from "@/features/projects/lib/projectContributorMatching";
 import type {
+  ProjectPullRequest,
   ProjectRepoContributor,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
@@ -12,7 +15,15 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { GitCommitHorizontal } from "lucide-react";
+
 import { cn } from "@/shared/lib/cn";
+import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
+import {
+  ProjectFeedRow,
+  ProjectFeedRowCluster,
+  ProjectFeedRowMonoCell,
+} from "./ProjectFeedRow";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 
 function compactDate(createdAt: number) {
@@ -80,14 +91,14 @@ export function ContributorsPanel({
 
   if (rows.length === 0) {
     return (
-      <p className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
+      <p className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
         No git contributors are available yet.
       </p>
     );
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
+    <div className="overflow-hidden border border-border/60 bg-card">
       {rows.map((row, index) => (
         <div
           className={cn(
@@ -111,7 +122,7 @@ export function ContributorsPanel({
             </p>
             <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
               <span className="truncate">{row.role}</span>
-              <span className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs">
+              <span className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs">
                 {row.commitCount === null
                   ? "No git commits"
                   : `${row.commitCount} commit${row.commitCount === 1 ? "" : "s"}`}
@@ -130,32 +141,63 @@ export function ContributorsPanel({
   );
 }
 
+function commitDayLabel(timestamp: number) {
+  return new Date(timestamp * 1_000).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function groupCommitsByDay(commits: ProjectRepoCommit[]) {
+  const groups: { label: string; commits: ProjectRepoCommit[] }[] = [];
+  for (const commit of commits) {
+    const label = commitDayLabel(commit.timestamp);
+    const lastGroup = groups[groups.length - 1];
+    if (lastGroup && lastGroup.label === label) {
+      lastGroup.commits.push(commit);
+    } else {
+      groups.push({ label, commits: [commit] });
+    }
+  }
+  return groups;
+}
+
 export function ActivityPanel({
   snapshot,
   isLoading,
   error,
   onSelectCommit,
   profiles,
+  pullRequests,
   repoContributors,
+  viewerGitIdentity,
 }: {
   snapshot: ProjectRepoSnapshot | null | undefined;
   isLoading: boolean;
   error: unknown;
   onSelectCommit?: (commit: ProjectRepoCommit) => void;
   profiles?: UserProfileLookup;
+  pullRequests?: ProjectPullRequest[];
   repoContributors: ProjectRepoContributor[];
+  viewerGitIdentity?: ViewerGitIdentity | null;
 }) {
   const commits = snapshot?.commits ?? [];
+  const commitAuthorPubkeys = commitAuthorPubkeysFromPullRequests(
+    pullRequests ?? [],
+  );
 
   if (isLoading) {
     return (
-      <p className="p-4 text-sm text-muted-foreground">Loading activity…</p>
+      <p className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+        Loading activity…
+      </p>
     );
   }
 
   if (commits.length === 0) {
     return (
-      <p className="p-4 text-sm text-muted-foreground">
+      <p className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
         {error
           ? "Could not load repository activity from git."
           : "No commits are available yet."}
@@ -163,94 +205,94 @@ export function ActivityPanel({
     );
   }
 
-  return (
-    <div className="relative">
-      {commits.length > 1 ? (
-        <div
-          aria-hidden="true"
-          className="absolute bottom-5 left-8 top-5 w-px bg-border/45"
-        />
-      ) : null}
-      {commits.map((commit) => {
-        const matchedProfile = profileForCommitAuthor(commit, profiles);
-        const authorLabel = matchedProfile
-          ? resolveUserLabel({ pubkey: matchedProfile.pubkey, profiles })
-          : commit.authorName || commit.authorEmail || "Unknown author";
-        const authorSubtitle = matchedProfile
-          ? `${
-              matchedProfile.profile.nip05Handle ||
-              commit.authorEmail ||
-              "Git contributor"
-            } · unverified match`
-          : commit.authorEmail || "Git contributor";
-        const matchingContributor = repoContributors.find(
-          (contributor) =>
-            contributor.name.trim().toLowerCase() ===
-              commit.authorName.trim().toLowerCase() ||
-            contributor.email.trim().toLowerCase() ===
-              commit.authorEmail.trim().toLowerCase(),
-        );
+  const groups = groupCommitsByDay(commits);
 
-        return (
-          <article
-            className="group/feed-item relative flex min-w-0 items-start gap-3 p-3 transition-colors hover:bg-muted/35"
-            data-testid="project-activity-feed-item"
-            key={commit.hash}
-          >
-            <ProfileIdentityButton
-              avatarClassName="relative z-10 mt-0.5 shrink-0 ring-2 ring-card"
-              avatarSize="md"
-              avatarUrl={matchedProfile?.profile.avatarUrl ?? null}
-              isAgent={matchedProfile?.profile.isAgent === true}
-              label={authorLabel}
-              pubkey={matchedProfile?.pubkey ?? null}
-              showLabel={false}
-            />
-            <div className="min-w-0 flex-1 space-y-1.5">
-              <div className="space-y-0.5">
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <p className="truncate text-sm font-semibold leading-5 text-foreground">
-                    {authorLabel}
-                  </p>
-                  <span className="shrink-0 text-sm leading-5 text-muted-foreground">
-                    pushed a commit
-                  </span>
-                </div>
-                <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
-                  <span className="truncate">{authorSubtitle}</span>
-                  <span>{commit.shortHash}</span>
-                  {matchingContributor?.commitCount ? (
-                    <span className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs">
-                      {pluralize(matchingContributor.commitCount, "commit")}
-                    </span>
-                  ) : null}
-                  <span>·</span>
-                  <time className="transition-colors group-hover/feed-item:text-foreground">
-                    {relativeCommitTime(commit.timestamp)}
-                  </time>
-                </div>
-              </div>
-              {onSelectCommit ? (
-                <button
-                  className="block w-full rounded-lg border border-border/50 bg-background/45 px-3 py-1.5 text-left transition-colors hover:border-border hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                  onClick={() => onSelectCommit(commit)}
-                  type="button"
-                >
-                  <p className="line-clamp-2 text-sm font-medium leading-5 text-foreground">
-                    {commit.subject}
-                  </p>
-                </button>
-              ) : (
-                <div className="rounded-lg border border-border/50 bg-background/45 px-3 py-1.5">
-                  <p className="line-clamp-2 text-sm font-medium leading-5 text-foreground">
-                    {commit.subject}
-                  </p>
-                </div>
-              )}
-            </div>
-          </article>
-        );
-      })}
+  return (
+    <div className="relative space-y-5">
+      {/* Timeline rail connecting the date group markers, GitHub-style. */}
+      <div
+        aria-hidden="true"
+        className="absolute bottom-2 left-[7px] top-2 w-px bg-border/45"
+      />
+      {groups.map((group) => (
+        <section className="relative pl-7" key={group.label}>
+          <span className="absolute left-0 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-background ring-1 ring-border/60">
+            <GitCommitHorizontal className="h-3 w-3 text-muted-foreground/80" />
+          </span>
+          <h3 className="text-xs font-medium text-muted-foreground">
+            Commits on {group.label}
+          </h3>
+          <div className="mt-2 divide-y divide-border/50 overflow-hidden border border-border/60 bg-card">
+            {group.commits.map((commit) => {
+              const matchedProfile = profileForCommit(
+                commit,
+                profiles,
+                commitAuthorPubkeys,
+                viewerGitIdentity,
+              );
+              const authorLabel = matchedProfile
+                ? resolveUserLabel({ pubkey: matchedProfile.pubkey, profiles })
+                : commit.authorName || commit.authorEmail || "Unknown author";
+              const matchingContributor = repoContributors.find(
+                (contributor) =>
+                  contributor.name.trim().toLowerCase() ===
+                    commit.authorName.trim().toLowerCase() ||
+                  contributor.email.trim().toLowerCase() ===
+                    commit.authorEmail.trim().toLowerCase(),
+              );
+
+              return (
+                <ProjectFeedRow
+                  key={commit.hash}
+                  meta={
+                    <>
+                      <ProfileIdentityButton
+                        avatarClassName="shrink-0"
+                        avatarSize="xs"
+                        avatarUrl={matchedProfile?.profile.avatarUrl ?? null}
+                        isAgent={matchedProfile?.profile.isAgent === true}
+                        label={authorLabel}
+                        pubkey={matchedProfile?.pubkey ?? null}
+                        showLabel={false}
+                      />
+                      <span className="truncate font-medium text-foreground/80">
+                        {authorLabel}
+                      </span>
+                      <span>
+                        authored {relativeCommitTime(commit.timestamp)}
+                      </span>
+                      {matchingContributor?.commitCount ? (
+                        <span className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs">
+                          {pluralize(matchingContributor.commitCount, "commit")}
+                        </span>
+                      ) : null}
+                    </>
+                  }
+                  onOpen={
+                    onSelectCommit ? () => onSelectCommit(commit) : undefined
+                  }
+                  testId="project-activity-feed-item"
+                  title={commit.subject}
+                  trailing={
+                    <ProjectFeedRowCluster>
+                      <ProjectFeedRowMonoCell
+                        label={commit.shortHash}
+                        onClick={
+                          onSelectCommit
+                            ? () => onSelectCommit(commit)
+                            : undefined
+                        }
+                        title={`View commit ${commit.shortHash}`}
+                      />
+                      <CopyCommitHashButton hash={commit.hash} />
+                    </ProjectFeedRowCluster>
+                  }
+                />
+              );
+            })}
+          </div>
+        </section>
+      ))}
     </div>
   );
 }

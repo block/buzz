@@ -1,6 +1,6 @@
 //! One-time data repair for teams created before PR 852.
 //!
-//! Backfills `TeamRecord.source_dir` and deduplicates `PersonaRecord`s that
+//! Backfills `TeamRecord.source_dir` and deduplicates `AgentDefinition`s that
 //! share a `(source_team, source_team_persona_slug)` pair — the result of
 //! repeated imports before the matching predicate was fixed.
 //!
@@ -13,7 +13,7 @@ use std::path::Path;
 
 use tauri::AppHandle;
 
-use crate::managed_agents::{ManagedAgentRecord, PersonaRecord, TeamRecord};
+use crate::managed_agents::{AgentDefinition, ManagedAgentRecord, TeamRecord};
 
 /// Derive the shared key used to match personas to a team. For directory-
 /// backed teams this is the directory name (the pack manifest ID); for others
@@ -39,7 +39,7 @@ pub fn team_persona_key(team: &TeamRecord) -> &str {
 /// Returns `true` if any team was modified.
 pub(super) fn backfill_source_dirs(
     teams: &mut [TeamRecord],
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     teams_dir: &Path,
 ) -> bool {
     let mut changed = false;
@@ -80,7 +80,7 @@ pub(super) fn backfill_source_dirs(
     changed
 }
 
-/// Deduplicate `PersonaRecord`s that share a `(source_team, source_team_persona_slug)`
+/// Deduplicate `AgentDefinition`s that share a `(source_team, source_team_persona_slug)`
 /// pair — the result of repeated imports before the matching predicate was fixed.
 ///
 /// The winner is chosen by `updated_at` descending, then `id` ascending. Loser
@@ -94,7 +94,7 @@ pub(super) fn backfill_source_dirs(
 ///
 /// Returns `true` if anything changed.
 pub(super) fn dedup_personas(
-    personas: &mut Vec<PersonaRecord>,
+    personas: &mut Vec<AgentDefinition>,
     teams: &mut [TeamRecord],
     agents: &mut [ManagedAgentRecord],
 ) -> bool {
@@ -230,12 +230,12 @@ pub fn sync_team_personas(app: &AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::managed_agents::{ManagedAgentRecord, PersonaRecord, TeamRecord};
+    use crate::managed_agents::{AgentDefinition, ManagedAgentRecord, TeamRecord};
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    fn persona(id: &str, source_team: Option<&str>, slug: Option<&str>) -> PersonaRecord {
-        PersonaRecord {
+    fn persona(id: &str, source_team: Option<&str>, slug: Option<&str>) -> AgentDefinition {
+        AgentDefinition {
             id: id.to_string(),
             display_name: id.to_string(),
             avatar_url: None,
@@ -249,6 +249,9 @@ mod tests {
             source_team: source_team.map(|s| s.to_string()),
             source_team_persona_slug: slug.map(|s| s.to_string()),
             env_vars: Default::default(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            parallelism: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T00:00:00Z".to_string(),
         }
@@ -292,8 +295,8 @@ mod tests {
             model: None,
             provider: None,
             persona_source_version: None,
-            mcp_toolsets: None,
             start_on_app_launch: false,
+            auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: Default::default(),
             backend_agent_id: None,
@@ -306,6 +309,7 @@ mod tests {
             last_stopped_at: None,
             last_exit_code: None,
             last_error: None,
+            last_error_code: None,
             respond_to: Default::default(),
             respond_to_allowlist: vec![],
             env_vars: std::collections::BTreeMap::new(),
@@ -317,6 +321,9 @@ mod tests {
             is_active: true,
             source_team: None,
             source_team_persona_slug: None,
+            definition_respond_to: None,
+            definition_respond_to_allowlist: Vec::new(),
+            definition_parallelism: None,
             relay_mesh: None,
         }
     }

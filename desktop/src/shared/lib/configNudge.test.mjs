@@ -54,6 +54,15 @@ test("extractConfigNudge parses normalized_field requirement", () => {
   assert.deepEqual(extractConfigNudge(withSentinel("prose", payload)), payload);
 });
 
+test("extractConfigNudge parses git_bash requirement", () => {
+  const payload = {
+    agent_name: "Buzz Agent",
+    agent_pubkey: ATLAS_PUBKEY,
+    requirements: [{ surface: "git_bash" }],
+  };
+  assert.deepEqual(extractConfigNudge(withSentinel("prose", payload)), payload);
+});
+
 test("extractConfigNudge parses cli_login requirement", () => {
   const payload = {
     agent_name: "Codex",
@@ -62,11 +71,54 @@ test("extractConfigNudge parses cli_login requirement", () => {
       {
         surface: "cli_login",
         probe_args: ["codex", "login", "status"],
-        setup_copy: "run `codex login --with-api-key`",
+        setup_copy: "run `codex login`",
+        availability: "available",
       },
     ],
   };
   assert.deepEqual(extractConfigNudge(withSentinel("prose", payload)), payload);
+});
+
+test("extractConfigNudge parses cli_login with adapter_outdated availability", () => {
+  // Backend emits availability: "adapter_outdated" when codex-acp is old (0.16.x).
+  // isConfigNudgeRequirement must accept this literal — regression test for the
+  // validator omission that caused it to be silently rejected.
+  const payload = {
+    agent_name: "Codex",
+    agent_pubkey: CODEX_PUBKEY,
+    requirements: [
+      {
+        surface: "cli_login",
+        probe_args: ["codex", "login", "status"],
+        setup_copy: "run `codex login`",
+        availability: "adapter_outdated",
+      },
+    ],
+  };
+  assert.deepEqual(
+    extractConfigNudge(withSentinel("prose", payload)),
+    payload,
+    "adapter_outdated availability must be accepted by the validator",
+  );
+});
+
+test("extractConfigNudge returns null for cli_login without availability", () => {
+  // availability is required — old-format payloads (no availability field)
+  // must not parse so stale nudge JSON from before the Doctor-CTA update
+  // does not silently render a broken card.
+  const payload = {
+    agent_name: "Codex",
+    agent_pubkey: CODEX_PUBKEY,
+    requirements: [
+      {
+        surface: "cli_login",
+        probe_args: ["codex", "login", "status"],
+        setup_copy: "run `codex login`",
+        // no availability field
+      },
+    ],
+  };
+  assert.equal(extractConfigNudge(withSentinel("prose", payload)), null);
 });
 
 test("extractConfigNudge parses multiple requirements of mixed types", () => {
@@ -80,6 +132,7 @@ test("extractConfigNudge parses multiple requirements of mixed types", () => {
         surface: "cli_login",
         probe_args: ["codex", "login"],
         setup_copy: "run `codex login`",
+        availability: "not_installed",
       },
     ],
   };

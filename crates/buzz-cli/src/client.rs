@@ -245,6 +245,20 @@ impl BuzzClient {
         self.handle_response(resp).await
     }
 
+    /// GET an authed relay endpoint (NIP-98), returning the raw JSON body.
+    ///
+    /// `path` is a root-relative path incl. any query string, e.g.
+    /// `/moderation/reports?status=open&limit=20`. Used by the moderation
+    /// read commands, which read structured queue/audit rows rather than
+    /// stored events.
+    pub async fn get_authed(&self, path: &str) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let auth = sign_nip98(&self.keys, "GET", &url, None)?;
+        let req = self.http.get(&url).header("Authorization", &auth);
+        let resp = self.with_auth_tag(req).send().await?;
+        self.handle_response(resp).await
+    }
+
     /// Submit a signed Nostr event via POST /events.
     pub async fn submit_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let url = format!("{}/events", self.relay_url);

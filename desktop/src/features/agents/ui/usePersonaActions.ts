@@ -2,39 +2,50 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
+  managedAgentsQueryKey,
   personasQueryKey,
   useAcpRuntimesQuery,
   useCreateManagedAgentMutation,
   useCreatePersonaMutation,
   useDeletePersonaMutation,
-  useExportPersonaJsonMutation,
+  useExportAgentSnapshotMutation,
   usePersonasQuery,
+  usePreviewAgentSnapshotImportMutation,
+  useConfirmAgentSnapshotImportMutation,
   useSetPersonaActiveMutation,
   useUpdatePersonaMutation,
+  type AgentSnapshotImportPreview,
+  type AgentSnapshotImportResult,
 } from "@/features/agents/hooks";
 import { getPersonaLibraryState } from "@/features/agents/lib/catalog";
-import {
-  parsePersonaFiles,
-  type ParsePersonaFilesResult,
+import type {
+  SnapshotFormat,
+  SnapshotMemoryLevel,
 } from "@/shared/api/tauriPersonas";
-import { isSingleItemFile } from "@/shared/lib/fileMagic";
 import type {
   AcpRuntime,
   AgentPersona,
-  CreateManagedAgentInput,
   CreateManagedAgentResponse,
   CreatePersonaInput,
+  ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import {
-  createPersonaDialogState,
   duplicatePersonaDialogState,
   editPersonaDialogState,
-  importPersonaDialogState,
   type PersonaDialogState,
 } from "./personaDialogState";
+import {
+  resolveCreateIntent,
+  type AgentCreateIntent,
+} from "./agentCreateIntent";
 import { resolveManagedAgentAvatarUrl } from "./managedAgentAvatar";
-import { usePersonaImportActions } from "./usePersonaImportActions";
+import {
+  buildInstanceInputForDefinition,
+  mintDefinitionWithPreflight,
+  type BackendIntent,
+} from "../lib/instanceInputForDefinition";
+import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 
 type PersonaFeedbackSurface = "catalog" | "library";
 
@@ -93,7 +104,9 @@ export function usePersonaActions() {
   const updatePersonaMutation = useUpdatePersonaMutation();
   const deletePersonaMutation = useDeletePersonaMutation();
   const setPersonaActiveMutation = useSetPersonaActiveMutation();
-  const exportPersonaJsonMutation = useExportPersonaJsonMutation();
+  const exportAgentSnapshotMutation = useExportAgentSnapshotMutation();
+  const previewSnapshotImportMutation = usePreviewAgentSnapshotImportMutation();
+  const confirmSnapshotImportMutation = useConfirmAgentSnapshotImportMutation();
 
   const [personaDialogState, setPersonaDialogState] =
     React.useState<PersonaDialogState | null>(null);
@@ -101,13 +114,23 @@ export function usePersonaActions() {
     React.useState<AgentPersona | null>(null);
   const [personaToShare, setPersonaToShare] =
     React.useState<AgentPersona | null>(null);
+  const [personaToExportSnapshot, setPersonaToExportSnapshot] = React.useState<{
+    persona: AgentPersona;
+    linkedAgentPubkey: string | null;
+  } | null>(null);
+  const [snapshotImportState, setSnapshotImportState] = React.useState<{
+    fileBytes: number[];
+    fileName: string;
+    preview: AgentSnapshotImportPreview;
+  } | null>(null);
+  const [snapshotImportResult, setSnapshotImportResult] =
+    React.useState<AgentSnapshotImportResult | null>(null);
+  const [snapshotImportConfirmError, setSnapshotImportConfirmError] =
+    React.useState<string | null>(null);
   const [isCatalogDialogOpen, setIsCatalogDialogOpen] = React.useState(false);
   const [sharedCatalogPersonaIds, setSharedCatalogPersonaIds] = React.useState<
     string[]
   >(readSharedCatalogPersonaIds);
-  const [batchImportResult, setBatchImportResult] =
-    React.useState<ParsePersonaFilesResult | null>(null);
-  const [batchImportFileName, setBatchImportFileName] = React.useState("");
   const [personaNoticeMessage, setPersonaNoticeMessage] = React.useState<
     string | null
   >(null);
@@ -139,13 +162,6 @@ export function usePersonaActions() {
     [personas, sharedCatalogPersonaIdSet],
   );
 
-  const personaImportActions = usePersonaImportActions(personas, {
-    clearPersonaFeedback: () => clearFeedback("library"),
-    setPersonaNoticeMessage,
-    setPersonaErrorMessage,
-    setPersonaDialogState,
-  });
-
   function clearFeedback(
     surface: PersonaFeedbackSurface = personaFeedbackSurface,
   ) {
@@ -154,9 +170,13 @@ export function usePersonaActions() {
     setPersonaErrorMessage(null);
   }
 
-  async function handleSubmit(input: CreatePersonaInput | UpdatePersonaInput) {
+  async function handleSubmit(
+    input: CreatePersonaInput | UpdatePersonaInput,
+    intent?: AgentCreateIntent,
+    backendIntent?: BackendIntent | null,
+  ): Promise<boolean> {
     if (isPersonaSubmitPending) {
-      return;
+      return false;
     }
 
     clearFeedback("library");
@@ -173,33 +193,41 @@ export function usePersonaActions() {
           setPersonaErrorMessage(
             "Choose an available provider for this agent.",
           );
-          return;
+          return false;
         }
+
+        // Stale-intent guard: a definition-only create never carries one.
+        const startIntent =
+          resolveCreateIntent(intent) === "definition_start"
+            ? (backendIntent ?? null)
+            : null;
 
         const avatarUrl = await resolveManagedAgentAvatarUrl(
           input.avatarUrl,
           undefined,
           runtime.avatarUrl,
         );
-        const persona = await createPersonaMutation.mutateAsync({
-          ...input,
-          avatarUrl,
-        });
-        const agentInput: CreateManagedAgentInput = {
-          name: persona.displayName,
-          acpCommand: "buzz-acp",
-          agentCommand: runtime.command,
-          agentArgs: runtime.defaultArgs,
-          mcpCommand: runtime.mcpCommand ?? "",
-          personaId: persona.id,
-          harnessOverride: true,
-          systemPrompt: persona.systemPrompt,
-          avatarUrl: persona.avatarUrl ?? avatarUrl,
-          model: persona.model ?? undefined,
-          spawnAfterCreate: true,
-          startOnAppLaunch: true,
-          backend: { type: "local" },
-        };
+        const persona = await mintDefinitionWithPreflight(
+          startIntent,
+          meshPrepareRelayMeshClient,
+          () =>
+            createPersonaMutation.mutateAsync({
+              ...input,
+              avatarUrl,
+            }),
+        );
+
+        if (resolveCreateIntent(intent) === "definition") {
+          setPersonaNoticeMessage(`Created ${persona.displayName}.`);
+          setPersonaDialogState(null);
+          return true;
+        }
+        const agentInput = await buildInstanceInputForDefinition(
+          persona,
+          runtime,
+          undefined,
+          startIntent ?? undefined,
+        );
 
         try {
           const created = await createAgentMutation.mutateAsync(agentInput);
@@ -227,10 +255,12 @@ export function usePersonaActions() {
         }
       }
       setPersonaDialogState(null);
+      return true;
     } catch (error) {
       setPersonaErrorMessage(
-        error instanceof Error ? error.message : "Failed to save persona.",
+        error instanceof Error ? error.message : "Failed to save agent.",
       );
+      return false;
     } finally {
       setIsPersonaSubmitPending(false);
     }
@@ -244,7 +274,7 @@ export function usePersonaActions() {
       setPersonaToDelete(null);
     } catch (error) {
       setPersonaErrorMessage(
-        error instanceof Error ? error.message : "Failed to delete persona.",
+        error instanceof Error ? error.message : "Failed to delete agent.",
       );
     }
   }
@@ -267,64 +297,73 @@ export function usePersonaActions() {
         error instanceof Error
           ? error.message
           : active
-            ? "Failed to select persona for My Agents."
-            : "Failed to deselect persona from My Agents.",
+            ? "Failed to select agent for My Agents."
+            : "Failed to deselect agent from My Agents.",
       );
     }
   }
 
-  async function handleImportFile(fileBytes: number[], fileName: string) {
+  async function handleImportSnapshotFile(
+    fileBytes: number[],
+    fileName: string,
+  ) {
     clearFeedback("library");
     try {
-      const result = await parsePersonaFiles(fileBytes, fileName);
-      if (
-        isSingleItemFile(fileBytes, fileName) &&
-        result.personas.length === 1
-      ) {
-        setShouldLoadAcpRuntimes(true);
-        setPersonaDialogState(importPersonaDialogState(result.personas[0]));
-      } else if (result.personas.length > 0) {
-        setBatchImportResult(result);
-        setBatchImportFileName(fileName);
-      } else {
-        setPersonaErrorMessage("No valid personas found in file.");
-      }
+      const preview = await previewSnapshotImportMutation.mutateAsync({
+        fileBytes,
+        fileName,
+      });
+      setSnapshotImportState({ fileBytes, fileName, preview });
+      setSnapshotImportResult(null);
+      setSnapshotImportConfirmError(null);
     } catch (err) {
       setPersonaErrorMessage(
-        err instanceof Error ? err.message : "Failed to parse persona file.",
+        err instanceof Error
+          ? err.message
+          : "Failed to read agent snapshot file.",
       );
     }
   }
 
-  function handleExport(persona: AgentPersona) {
-    clearFeedback("library");
-    exportPersonaJsonMutation.mutate(persona.id, {
-      onSuccess: (saved) => {
-        if (saved) {
-          setPersonaNoticeMessage(`Exported ${persona.displayName}.`);
-        }
-      },
-      onError: (error) => {
+  async function handleConfirmSnapshotImport(keepAllowlist: boolean) {
+    if (!snapshotImportState) {
+      return;
+    }
+    setSnapshotImportConfirmError(null);
+    try {
+      const result = await confirmSnapshotImportMutation.mutateAsync({
+        fileBytes: snapshotImportState.fileBytes,
+        keepAllowlist,
+      });
+      setSnapshotImportResult(result);
+      void queryClient.invalidateQueries({ queryKey: personasQueryKey });
+      void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+      void queryClient.invalidateQueries({
+        queryKey: ["user-profile", result.newPubkey.toLowerCase()],
+      });
+      if (result.memoryErrors.length > 0) {
         setPersonaErrorMessage(
-          error instanceof Error ? error.message : "Failed to export persona.",
+          `${result.displayName} imported, but ${result.memoryErrors.length} memory entr${result.memoryErrors.length === 1 ? "y" : "ies"} failed to restore.`,
         );
-      },
-    });
+      } else {
+        setPersonaNoticeMessage(`Imported ${result.displayName}.`);
+      }
+    } catch (err) {
+      setSnapshotImportConfirmError(
+        err instanceof Error ? err.message : "Failed to import agent snapshot.",
+      );
+    }
   }
 
-  function handleBatchImportComplete(count: number) {
-    clearFeedback("library");
-    setBatchImportResult(null);
-    setPersonaNoticeMessage(
-      `Imported ${count} persona${count !== 1 ? "s" : ""}.`,
-    );
-    void queryClient.invalidateQueries({ queryKey: personasQueryKey });
+  function closeSnapshotImportDialog() {
+    setSnapshotImportState(null);
+    setSnapshotImportResult(null);
+    setSnapshotImportConfirmError(null);
   }
 
-  function openCreate() {
+  function prepareCreate() {
     clearFeedback("library");
     setShouldLoadAcpRuntimes(true);
-    setPersonaDialogState(createPersonaDialogState());
   }
 
   function openEdit(persona: AgentPersona) {
@@ -352,6 +391,55 @@ export function usePersonaActions() {
   function openShare(persona: AgentPersona) {
     clearFeedback("library");
     setPersonaToShare(persona);
+  }
+
+  function openShareExportSnapshot(persona: AgentPersona) {
+    setPersonaToShare(null);
+    openExportSnapshot(persona, undefined);
+  }
+
+  function openExportSnapshot(
+    persona: AgentPersona,
+    linkedAgent: ManagedAgent | undefined,
+  ) {
+    clearFeedback("library");
+    setPersonaToExportSnapshot({
+      persona,
+      linkedAgentPubkey: linkedAgent?.pubkey ?? null,
+    });
+  }
+
+  function handleExportSnapshot(
+    persona: AgentPersona,
+    linkedAgentPubkey: string | null,
+    memoryLevel: SnapshotMemoryLevel,
+    format: SnapshotFormat,
+  ) {
+    clearFeedback("library");
+    setPersonaToExportSnapshot(null);
+    exportAgentSnapshotMutation.mutate(
+      {
+        id: persona.id,
+        memoryLevel,
+        format,
+        memorySourcePubkey: linkedAgentPubkey,
+        avatarUrl: persona.avatarUrl,
+      },
+      {
+        onSuccess: (saved) => {
+          if (saved) {
+            setPersonaNoticeMessage(`Exported ${persona.displayName}.`);
+          }
+        },
+        onError: (error) => {
+          setPersonaErrorMessage(
+            error instanceof Error
+              ? error.message
+              : "Failed to export agent snapshot.",
+          );
+        },
+      },
+    );
   }
 
   function setPersonaCatalogVisibility(
@@ -384,7 +472,9 @@ export function usePersonaActions() {
     updatePersonaMutation.isPending ||
     deletePersonaMutation.isPending ||
     setPersonaActiveMutation.isPending ||
-    exportPersonaJsonMutation.isPending;
+    exportAgentSnapshotMutation.isPending ||
+    previewSnapshotImportMutation.isPending ||
+    confirmSnapshotImportMutation.isPending;
 
   return {
     personasQuery,
@@ -404,29 +494,34 @@ export function usePersonaActions() {
     setPersonaToShare,
     isCatalogDialogOpen,
     setIsCatalogDialogOpen,
-    batchImportResult,
-    setBatchImportResult,
-    batchImportFileName,
     personaNoticeMessage,
     personaErrorMessage,
     personaFeedbackSurface,
     createdAgent,
     setCreatedAgent,
-    personaImportActions,
     handleSubmit,
     handleDelete,
     handleSetActive,
-    handleImportFile,
-    handleExport,
-    handleBatchImportComplete,
-    openCreate,
+    prepareCreate,
     openEdit,
     openDuplicate,
     openCatalog,
     openDelete,
     openShare,
+    openExportSnapshot,
+    openShareExportSnapshot,
+    personaToExportSnapshot,
+    setPersonaToExportSnapshot,
+    handleExportSnapshot,
     setPersonaCatalogVisibility,
     sharedCatalogPersonaIdSet,
     clearFeedback,
+    snapshotImportState,
+    snapshotImportResult,
+    snapshotImportConfirmError,
+    isSnapshotImportConfirming: confirmSnapshotImportMutation.isPending,
+    handleImportSnapshotFile,
+    handleConfirmSnapshotImport,
+    closeSnapshotImportDialog,
   };
 }

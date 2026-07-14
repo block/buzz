@@ -87,4 +87,18 @@
       )
     );
   }
+
+  /*
+   * Clamp HDR (gain-map) images to the standard SDR range. Some uploaded
+   * avatars carry HDR gain maps, which capable displays render brighter than
+   * SDR white — making the avatar glow relative to the rest of the UI. This
+   * pins their luminance to the SDR envelope so they sit at the same level as
+   * everything else. `dynamic-range-limit` is the purpose-built CSS property
+   * (Chromium 133+, WebKit/Safari 26+); on engines that don't support it the
+   * declaration is simply ignored (avatars render as before), so it's a safe
+   * progressive enhancement.
+   */
+  .avatar-sdr-clamp {
+    dynamic-range-limit: standard;
+  }
 }

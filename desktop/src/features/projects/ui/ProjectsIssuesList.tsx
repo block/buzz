@@ -114,9 +114,9 @@ function IssueGridCard({
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
 
   return (
-    <Card className="group relative flex min-h-40 flex-col overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-4 shadow-none transition-colors duration-150 hover:bg-muted/30">
+    <Card className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-card p-4 shadow-none transition-colors duration-150 hover:bg-muted/20">
       <button
-        className="absolute inset-0 rounded-xl"
+        className="absolute inset-0"
         onClick={() => onOpen(project, issue)}
         type="button"
       >
@@ -126,7 +126,7 @@ function IssueGridCard({
         <div className="flex min-w-0 items-start gap-3">
           <IssueHeader issue={issue} profiles={profiles} project={project} />
           <Button
-            className="relative z-10 h-7 shrink-0 rounded-full px-2.5"
+            className="relative z-10 h-7 shrink-0 px-2.5"
             onClick={(event) => {
               event.stopPropagation();
               onOpen(project, issue);
@@ -145,7 +145,7 @@ function IssueGridCard({
           </p>
         ) : null}
 
-        <div className="mt-auto rounded-xl bg-muted/60 px-2.5 py-2">
+        <div className="mt-auto border border-border/60 bg-muted/30 px-2.5 py-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-foreground/80">
             <span className="font-mono text-foreground">
               #{issue.id.slice(0, 8)}
@@ -180,9 +180,9 @@ function IssueListRow({
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
 
   return (
-    <Card className="group relative overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-3 shadow-none transition-colors duration-150 hover:bg-muted/30">
+    <div className="group relative px-4 py-2.5 transition-colors duration-150 hover:bg-muted/20">
       <button
-        className="absolute inset-0 rounded-xl"
+        className="absolute inset-0"
         onClick={() => onOpen(project, issue)}
         type="button"
       >
@@ -196,7 +196,7 @@ function IssueListRow({
             {authorLabel}
           </span>
           <Button
-            className="h-7 rounded-full px-2.5"
+            className="h-7 px-2.5"
             onClick={(event) => {
               event.stopPropagation();
               onOpen(project, issue);
@@ -209,7 +209,7 @@ function IssueListRow({
           </Button>
         </div>
       </div>
-    </Card>
+    </div>
   );
 }
 
@@ -222,7 +222,7 @@ export function ProjectsIssuesList({
 }: ProjectsIssuesListProps) {
   if (isLoading) {
     return (
-      <div className="rounded-xl border border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+      <div className="border border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
         Loading issues...
       </div>
     );
@@ -230,7 +230,7 @@ export function ProjectsIssuesList({
 
   if (issues.length === 0) {
     return (
-      <div className="rounded-xl border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+      <div className="border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
         No issues yet.
       </div>
     );
@@ -253,7 +253,7 @@ export function ProjectsIssuesList({
   }
 
   return (
-    <div className="space-y-2">
+    <div className="-mx-4 divide-y divide-border/60 border-y border-border/60 bg-card">
       {issues.map(({ project, issue }) => (
         <IssueListRow
           issue={issue}

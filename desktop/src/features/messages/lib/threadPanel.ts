@@ -392,11 +392,18 @@ function buildRelayThreadSummary(
     threadHeadId: messageId,
     replyCount: summary.descendantCount,
     lastReplyAt: summary.lastReplyAt,
-    participants: summary.participantPubkeys.slice(0, 3).map((pubkey) => ({
-      id: pubkey,
-      author: profiles?.[pubkey.toLowerCase()]?.displayName ?? pubkey,
-      avatarUrl: profiles?.[pubkey.toLowerCase()]?.avatarUrl ?? null,
-    })),
+    // The relay returns `participantPubkeys` most-recent-first. Take the 3 most
+    // recent, then reverse to oldest-first so the facepile renders the last
+    // replier at the end (rightmost) — matching the client-assembled path
+    // (`buildSummaryForDirectReplies`, which also reverses to oldest-first).
+    participants: summary.participantPubkeys
+      .slice(0, 3)
+      .reverse()
+      .map((pubkey) => ({
+        id: pubkey,
+        author: profiles?.[pubkey.toLowerCase()]?.displayName ?? pubkey,
+        avatarUrl: profiles?.[pubkey.toLowerCase()]?.avatarUrl ?? null,
+      })),
   };
 }
 

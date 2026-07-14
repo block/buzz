@@ -72,13 +72,67 @@ function eventToPullRequestUpdate(event) {
   };
 }
 
+// Review requests and approvals are kind:1 comments labeled with a `t` tag —
+// NIP-34 has no dedicated review kinds, and labeled text notes stay readable
+// for any client (including `buzz` CLI users) that treats them as comments.
+export const PR_REVIEW_REQUEST_LABEL = "review-request";
+export const PR_APPROVAL_LABEL = "approval";
+
 function eventToPullRequestComment(event) {
+  const labels = getAllTags(event, "t").map((label) => label.toLowerCase());
+  const isReviewRequest = labels.includes(PR_REVIEW_REQUEST_LABEL);
   return {
     id: event.id,
     content: event.content,
     author: event.pubkey,
     createdAt: event.created_at,
+    isApproval: labels.includes(PR_APPROVAL_LABEL),
+    isReviewRequest,
+    // For review requests the `p` tags are the requested reviewers.
+    reviewerPubkeys: isReviewRequest
+      ? getAllTags(event, "p").map((pubkey) => pubkey.toLowerCase())
+      : [],
   };
+}
+
+/**
+ * Requested reviewers: `p` tags on the PR root plus `p` tags of trusted
+ * review-request comments (signed by the PR author or repo owner). The PR
+ * author is never their own reviewer.
+ */
+function reviewersForPullRequest(pullRequest, comments) {
+  const allowedActors = allowedActorsForRoot(pullRequest);
+  const reviewers = new Set(
+    getAllTags(pullRequest, "p").map((pubkey) => pubkey.toLowerCase()),
+  );
+  for (const comment of comments) {
+    if (
+      comment.isReviewRequest &&
+      allowedActors.has(comment.author.toLowerCase())
+    ) {
+      for (const pubkey of comment.reviewerPubkeys) {
+        reviewers.add(pubkey);
+      }
+    }
+  }
+  reviewers.delete(pullRequest.pubkey.toLowerCase());
+  return [...reviewers];
+}
+
+/** Latest approval comment per author, oldest first. */
+function approvalsForPullRequest(comments) {
+  const byAuthor = new Map();
+  for (const comment of comments) {
+    if (!comment.isApproval) continue;
+    const key = comment.author.toLowerCase();
+    const existing = byAuthor.get(key);
+    if (!existing || comment.createdAt > existing.createdAt) {
+      byAuthor.set(key, comment);
+    }
+  }
+  return [...byAuthor.values()]
+    .map(({ id, author, createdAt }) => ({ id, author, createdAt }))
+    .sort((left, right) => left.createdAt - right.createdAt);
 }
 
 export function eventToProjectPullRequest(
@@ -96,6 +150,8 @@ export function eventToProjectPullRequest(
   const comments = eventsForPullRequest(pullRequest.id, commentEvents).map(
     eventToPullRequestComment,
   );
+  const reviewers = reviewersForPullRequest(pullRequest, comments);
+  const approvals = approvalsForPullRequest(comments);
   const title =
     getTag(pullRequest, "subject") ||
     pullRequest.content.split("\n")[0] ||
@@ -112,6 +168,8 @@ export function eventToProjectPullRequest(
     repoAddress: getTag(pullRequest, "a") ?? null,
     labels: getAllTags(pullRequest, "t"),
     recipients: getAllTags(pullRequest, "p"),
+    reviewers,
+    approvals,
     status: statusFromEvent(pullRequest, latestStatus),
     statusEventId: latestStatus?.id ?? null,
     branchName: getTag(pullRequest, "branch-name") ?? null,

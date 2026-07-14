@@ -613,7 +613,6 @@ pub async fn get_accessible_channel_ids(
         SELECT id AS channel_id
         FROM channels
         WHERE community_id = $1 AND visibility = 'open' AND deleted_at IS NULL
-        LIMIT 1000
         "#,
     )
     .bind(community_id.as_uuid())
@@ -1737,6 +1736,39 @@ mod tests {
             }),
             "reaper should carry the archived row's community id and host"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn accessible_channel_ids_are_not_truncated_at_one_thousand() {
+        let database_url =
+            std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB");
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let viewer = random_pubkey();
+        let channel_count = 1_001;
+
+        sqlx::query(
+            r#"
+            INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
+            SELECT gen_random_uuid(), $1, 'high-volume-' || n, 'stream', 'open', $2
+            FROM generate_series(1, $3) n
+            "#,
+        )
+        .bind(community_id)
+        .bind(&viewer)
+        .bind(channel_count)
+        .execute(&pool)
+        .await
+        .expect("insert high-volume open channels");
+
+        let channel_ids = get_accessible_channel_ids(&pool, community, &viewer)
+            .await
+            .expect("load accessible channel ids");
+        assert_eq!(channel_ids.len(), channel_count as usize);
     }
 
     /// A random non-admin, non-owner user cannot remove someone else's bot.

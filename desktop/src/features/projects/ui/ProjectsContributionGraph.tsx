@@ -5,12 +5,14 @@ const WEEK_COUNT = 26;
 const DAYS_PER_WEEK = 7;
 
 // Intensity ramp shared by the cells and the "Less … More" legend.
+// Grayscale on the theme's foreground token: the most active cells are
+// near-black in light mode and near-white in dark mode.
 const LEVEL_CLASSES = [
   "bg-muted/60 dark:bg-muted/40",
-  "bg-emerald-500/30",
-  "bg-emerald-500/50",
-  "bg-emerald-500/75",
-  "bg-emerald-500",
+  "bg-foreground/25",
+  "bg-foreground/50",
+  "bg-foreground/75",
+  "bg-foreground",
 ];
 
 function dayKeyOf(date: Date) {
@@ -82,7 +84,7 @@ export function ProjectsContributionGraph({
 
   return (
     <div className={cn("space-y-2", className)}>
-      <div className="grid gap-1" style={{ gridTemplateColumns }}>
+      <div className="grid gap-2" style={{ gridTemplateColumns }}>
         {labels.map((label, index) => (
           <span
             className="overflow-visible whitespace-nowrap text-2xs font-medium text-muted-foreground"
@@ -95,7 +97,7 @@ export function ProjectsContributionGraph({
         ))}
       </div>
       <div
-        className="grid grid-flow-col grid-rows-7 gap-1"
+        className="grid grid-flow-col grid-rows-7 gap-2"
         style={{ gridTemplateColumns }}
       >
         {weeks.map((week) =>

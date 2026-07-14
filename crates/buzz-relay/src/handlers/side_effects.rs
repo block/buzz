@@ -14,7 +14,7 @@ use buzz_core::kind::{
     KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
-use buzz_db::channel::MemberRole;
+use buzz_db::channel::{MemberRecord, MemberRole};
 
 use super::event::dispatch_persistent_event;
 use crate::protocol::RelayMessage;
@@ -42,7 +42,9 @@ async fn evict_live_channel_subscriptions(
     channel_id: Uuid,
     target_pubkey: &[u8],
 ) {
-    let conn_ids = state.conn_manager.connection_ids_for_pubkey(target_pubkey);
+    let conn_ids = state
+        .conn_manager
+        .connection_ids_for_pubkey_in_community(tenant.community(), target_pubkey);
 
     for conn_id in conn_ids {
         evict_conn_channel_subscriptions(tenant, state, channel_id, conn_id).await;
@@ -529,6 +531,11 @@ pub async fn validate_admin_event(
         }
         9005 => {
             // DELETE_EVENT: event author OR channel owner/admin.
+            if let Some(action_id) = extract_tag_value(event, "action_id") {
+                Uuid::parse_str(&action_id)
+                    .map_err(|_| anyhow::anyhow!("invalid action_id tag"))?;
+            }
+
             // Extract target event from e tag to check authorship.
             let target_id = event
                 .tags
@@ -567,7 +574,7 @@ pub async fn validate_admin_event(
             // For relay-signed REST messages, the real author is in the p tag.
             let author =
                 effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-            if author == actor_bytes {
+            if author_delete_can_use_self_delete_path(&author, &actor_bytes, event) {
                 // Author deleting their own message: re-gate on membership/open visibility so that
                 // a removed private-channel member cannot mutate old messages after access is revoked.
                 let is_member = state
@@ -591,23 +598,21 @@ pub async fn validate_admin_event(
             // Not the author, or author who is no longer a member of a private channel —
             // must be owner/admin or the owning human of the message's agent-author.
             let members = state.db.get_members(tenant.community(), channel_id).await?;
-            let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-            match actor_member {
-                Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
-                _ => {
-                    // Allow the owning human of the agent that authored the target message,
-                    // even when the human is not a channel member.
-                    if state
-                        .db
-                        .is_agent_owner(tenant.community(), &author, &actor_bytes)
-                        .await?
-                    {
-                        Ok(())
-                    } else {
-                        Err(anyhow::anyhow!(
-                            "must be event author or channel owner/admin"
-                        ))
-                    }
+            if actor_is_channel_owner_or_admin(&members, &actor_bytes) {
+                Ok(())
+            } else {
+                // Allow the owning human of the agent that authored the target message,
+                // even when the human is not a channel member.
+                if state
+                    .db
+                    .is_agent_owner(tenant.community(), &author, &actor_bytes)
+                    .await?
+                {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "must be event author or channel owner/admin"
+                    ))
                 }
             }
         }
@@ -1068,10 +1073,17 @@ async fn handle_agent_profile(
         .ok_or_else(|| anyhow::anyhow!("kind:10100 missing channel_add_policy field"))?;
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
-    state
+    if state
         .db
         .ensure_user(tenant.community(), &pubkey_bytes)
-        .await?;
+        .await?
+    {
+        metrics::counter!(
+            "buzz_users_created_total",
+            "community" => tenant.host().to_owned()
+        )
+        .increment(1);
+    }
     state
         .db
         .set_channel_add_policy(tenant.community(), &pubkey_bytes, policy)
@@ -1119,10 +1131,17 @@ async fn handle_kind0_profile(
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
 
-    state
+    if state
         .db
         .ensure_user(tenant.community(), &pubkey_bytes)
-        .await?;
+        .await?
+    {
+        metrics::counter!(
+            "buzz_users_created_total",
+            "community" => tenant.host().to_owned()
+        )
+        .increment(1);
+    }
 
     // Pass all fields as Some — empty string clears the field in the DB.
     // This ensures kind:0 is treated as absolute state, not a partial update.
@@ -1607,17 +1626,16 @@ async fn handle_delete_event_side_effect(
     }
 
     let actor_hex = hex::encode(event.pubkey.to_bytes());
-    emit_system_message(
-        tenant,
-        state,
-        channel_id,
-        serde_json::json!({
-            "type": "message_deleted",
-            "actor": actor_hex,
-            "target_event_id": hex::encode(&target_id),
-        }),
-    )
-    .await?;
+    let mut tombstone = serde_json::json!({
+        "type": "message_deleted",
+        "actor": actor_hex,
+        "target_event_id": hex::encode(&target_id),
+    });
+    copy_optional_string_field(event, &mut tombstone, "action_id");
+    copy_optional_string_field(event, &mut tombstone, "reason_code");
+    copy_optional_string_field(event, &mut tombstone, "public_reason");
+
+    emit_system_message(tenant, state, channel_id, tombstone).await?;
 
     info!(target_event = %hex::encode(&target_id), "NIP-29 DELETE_EVENT processed");
     Ok(())
@@ -1649,13 +1667,21 @@ async fn handle_create_group(
     // If the event has an h-tag UUID, ingest_event() already created the channel
     // via create_channel_with_id(). Fetch it rather than creating a duplicate.
     // If no h-tag, fall back to the original auto-UUID creation path.
+    //
+    // Double-count analysis (C5): the counter increments below do NOT
+    // double-count vs. ingest.rs. For the h-tag path, ingest increments on
+    // was_created=true and this handler only reaches create_channel() on a DB
+    // lookup Err — an error recovery path where ingest's channel is
+    // inaccessible, so the counter correctly records a new creation. For the
+    // no-h-tag path, ingest never creates the channel, so this is the sole
+    // increment.
     let channel = if let Some(client_uuid) = extract_h_tag_channel(event) {
         match state.db.get_channel(tenant.community(), client_uuid).await {
             Ok(ch) => ch,
             Err(_) => {
                 // Channel not found — shouldn't happen (ingest_event pre-created it),
                 // but fall back to creation to stay resilient.
-                state
+                let ch = state
                     .db
                     .create_channel(
                         tenant.community(),
@@ -1666,11 +1692,18 @@ async fn handle_create_group(
                         &actor_bytes,
                         ttl_seconds,
                     )
-                    .await?
+                    .await?;
+                metrics::counter!(
+                    "buzz_channels_created_total",
+                    "community" => tenant.host().to_owned(),
+                    "type" => channel_type.to_string()
+                )
+                .increment(1);
+                ch
             }
         }
     } else {
-        state
+        let ch = state
             .db
             .create_channel(
                 tenant.community(),
@@ -1681,7 +1714,14 @@ async fn handle_create_group(
                 &actor_bytes,
                 ttl_seconds,
             )
-            .await?
+            .await?;
+        metrics::counter!(
+            "buzz_channels_created_total",
+            "community" => tenant.host().to_owned(),
+            "type" => channel_type.to_string()
+        )
+        .increment(1);
+        ch
     };
 
     // Creator becomes owner — evict any stale negative membership lookup.
@@ -1944,6 +1984,10 @@ async fn handle_a_tag_deletion(
     let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
 
     match kind_num {
+        // kind:30350 revocation is exclusively a higher-generation inactive replacement.
+        super::push_lease::KIND_PUSH_LEASE => {
+            tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
+        }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
             // Try UUID first (workflow_id); fall back to name-based lookup.
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
@@ -2067,6 +2111,13 @@ async fn handle_standard_deletion_event(
             Some(target) => target,
             None => continue,
         };
+        if u32::from(target_event.event.kind.as_u16()) == super::push_lease::KIND_PUSH_LEASE {
+            tracing::debug!(
+                target_id = %hex::encode(&target_id),
+                "NIP-09 deletion ignored for push lease"
+            );
+            continue;
+        }
 
         let meta = state
             .db
@@ -2262,6 +2313,60 @@ fn extract_tag_value(event: &Event, tag_name: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn copy_optional_string_field(event: &Event, object: &mut serde_json::Value, tag_name: &str) {
+    let Some(value) = extract_tag_value(event, tag_name) else {
+        return;
+    };
+    copy_optional_string_value(object, tag_name, value);
+}
+
+fn copy_optional_string_value(object: &mut serde_json::Value, field_name: &str, value: String) {
+    if let Some(map) = object.as_object_mut() {
+        map.insert(field_name.to_string(), serde_json::Value::String(value));
+    }
+}
+
+fn has_moderation_delete_metadata(event: &Event) -> bool {
+    ["action_id", "reason_code", "public_reason"]
+        .iter()
+        .any(|tag_name| extract_tag_value(event, tag_name).is_some())
+}
+
+fn author_delete_can_use_self_delete_path(author: &[u8], actor: &[u8], event: &Event) -> bool {
+    author == actor && !has_moderation_delete_metadata(event)
+}
+
+fn actor_is_channel_owner_or_admin(members: &[MemberRecord], actor: &[u8]) -> bool {
+    members
+        .iter()
+        .any(|m| m.pubkey == actor && (m.role == "owner" || m.role == "admin"))
+}
+
+#[cfg(test)]
+fn delete_tombstone_content(
+    actor_hex: String,
+    target_event_id: String,
+    action_id: Option<String>,
+    reason_code: Option<String>,
+    public_reason: Option<String>,
+) -> serde_json::Value {
+    let mut tombstone = serde_json::json!({
+        "type": "message_deleted",
+        "actor": actor_hex,
+        "target_event_id": target_event_id,
+    });
+    if let Some(action_id) = action_id {
+        copy_optional_string_value(&mut tombstone, "action_id", action_id);
+    }
+    if let Some(reason_code) = reason_code {
+        copy_optional_string_value(&mut tombstone, "reason_code", reason_code);
+    }
+    if let Some(public_reason) = public_reason {
+        copy_optional_string_value(&mut tombstone, "public_reason", public_reason);
+    }
+    tombstone
 }
 
 /// Validate a git repo identifier (d-tag value from kind:30617).
@@ -2649,39 +2754,29 @@ async fn emit_initial_ref_state(
 ///
 /// Queries all current relay members and emits a relay-signed, NIP-70-protected
 /// addressable event listing every member pubkey. Replaces any previous list.
+///
+/// The member query, event construction, and replacement all happen inside
+/// the same per-community advisory lock held by
+/// `publish_nip43_membership_locked`. This prevents a stale snapshot from
+/// overwriting a newer one when two publications race: the lock serializes
+/// the entire read-build-write cycle, not just the write.
 pub async fn publish_nip43_membership_list(
     tenant: &TenantContext,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
-    let members = state.db.list_relay_members(tenant.community()).await?;
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+    let community = tenant.community();
 
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
-
-    // NIP-70 protected-event marker — prevents re-broadcasting by third parties.
-    tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
-
-    for member in &members {
-        tags.push(
-            Tag::parse(["member", &member.pubkey, &member.role])
-                .map_err(|e| anyhow::anyhow!("failed to build member tag: {e}"))?,
-        );
-    }
-
-    let event = EventBuilder::new(Kind::Custom(KIND_NIP43_MEMBERSHIP_LIST as u16), "")
-        .tags(tags)
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:13534: {e}"))?;
-
-    // NOTE: kind 13534 is technically a regular event (not in the NIP-16 replaceable
-    // range), but we intentionally use replace_addressable_event to get replacement
-    // semantics — only the latest membership snapshot matters. This function keys on
-    // (kind, pubkey, channel_id) and atomically replaces older events, which is exactly
-    // what Pyramid (the reference NIP-43 implementation) does with store.ReplaceEvent().
-    let (stored, was_inserted) = state
+    // The DB method acquires the per-community snapshot lock BEFORE reading
+    // members, so that the entire read-build-write cycle is serialized. A
+    // concurrent publication that reads newer state will block until our
+    // replacement commits, then read the updated membership. This prevents a
+    // stale snapshot from winning by arrival order.
+    let (stored, was_inserted, member_count) = state
         .db
-        .replace_addressable_event(tenant.community(), &event, None)
+        .publish_nip43_membership_locked(community, &state.relay_keypair)
         .await?;
+
     if was_inserted {
         dispatch_persistent_event(
             tenant,
@@ -2694,10 +2789,7 @@ pub async fn publish_nip43_membership_list(
         .await;
     }
 
-    info!(
-        member_count = members.len(),
-        "NIP-43 membership list published"
-    );
+    info!(member_count, "NIP-43 membership list published");
     Ok(())
 }
 
@@ -3087,5 +3179,88 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
     match channel_id {
         Some(channel_id) => EventTopic::Channel(channel_id),
         None => EventTopic::Global,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_tombstone_omits_absent_moderation_metadata() {
+        let content =
+            delete_tombstone_content("actor".to_string(), "target".to_string(), None, None, None);
+
+        assert_eq!(content["type"], "message_deleted");
+        assert_eq!(content["actor"], "actor");
+        assert_eq!(content["target_event_id"], "target");
+        assert!(content.get("action_id").is_none());
+        assert!(content.get("reason_code").is_none());
+        assert!(content.get("public_reason").is_none());
+    }
+
+    #[test]
+    fn delete_tombstone_carries_optional_moderation_metadata() {
+        let content = delete_tombstone_content(
+            "actor".to_string(),
+            "target".to_string(),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            Some("spam".to_string()),
+            Some("Removed for spam.".to_string()),
+        );
+
+        assert_eq!(content["type"], "message_deleted");
+        assert_eq!(content["actor"], "actor");
+        assert_eq!(content["target_event_id"], "target");
+        assert_eq!(content["action_id"], "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(content["reason_code"], "spam");
+        assert_eq!(content["public_reason"], "Removed for spam.");
+        assert!(!content.to_string().contains("reporter"));
+    }
+
+    #[test]
+    fn author_self_delete_with_moderation_metadata_skips_self_delete_path() {
+        let keys = nostr::Keys::generate();
+        let actor = keys.public_key().to_bytes();
+        let event = EventBuilder::new(Kind::Custom(9005), "")
+            .tags([Tag::parse(["public_reason", "Removed for spam."]).unwrap()])
+            .sign_with_keys(&keys)
+            .expect("sign");
+
+        assert!(!author_delete_can_use_self_delete_path(
+            &actor, &actor, &event
+        ));
+    }
+
+    #[test]
+    fn member_role_is_not_owner_or_admin_for_moderation_metadata() {
+        let channel_id = Uuid::new_v4();
+        let actor = vec![7_u8; 32];
+        let members = vec![MemberRecord {
+            channel_id,
+            pubkey: actor.clone(),
+            role: "member".to_string(),
+            joined_at: chrono::Utc::now(),
+            invited_by: None,
+            removed_at: None,
+        }];
+
+        assert!(!actor_is_channel_owner_or_admin(&members, &actor));
+    }
+
+    #[test]
+    fn admin_role_is_owner_or_admin_for_moderation_metadata() {
+        let channel_id = Uuid::new_v4();
+        let actor = vec![7_u8; 32];
+        let members = vec![MemberRecord {
+            channel_id,
+            pubkey: actor.clone(),
+            role: "admin".to_string(),
+            joined_at: chrono::Utc::now(),
+            invited_by: None,
+            removed_at: None,
+        }];
+
+        assert!(actor_is_channel_owner_or_admin(&members, &actor));
     }
 }

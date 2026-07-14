@@ -172,3 +172,81 @@ test("channel reconnect replay pages the missed window until a short page", asyn
   ]);
   assert.equal(delivered.length, 1008);
 });
+
+test("reconnect replay starts live REQs in parallel and preserves per-sub page order", async () => {
+  const sentPayloads = [];
+  const sendResolvers = [];
+  const historyFiltersByChannel = {
+    "channel-1": [],
+    "channel-2": [],
+  };
+  const pagesByChannel = {
+    "channel-1": [
+      eventRange("c1-full", 1501, 500),
+      eventRange("c1-short", 1490, 2),
+    ],
+    "channel-2": [
+      eventRange("c2-full", 1701, 500),
+      eventRange("c2-short", 1690, 2),
+    ],
+  };
+  const subscriptions = new Map([
+    [
+      "live-1",
+      {
+        mode: "live",
+        filter: buildChannelFilter("channel-1", 50),
+        onEvent: () => {},
+        lastSeenCreatedAt: 1000,
+      },
+    ],
+    [
+      "live-2",
+      {
+        mode: "live",
+        filter: buildChannelFilter("channel-2", 50),
+        onEvent: () => {},
+        lastSeenCreatedAt: 1000,
+      },
+    ],
+  ]);
+
+  const replayPromise = replayLiveSubscriptions({
+    subscriptions,
+    now: 2000,
+    pageReplayConcurrency: 2,
+    sendRaw: (payload) => {
+      sentPayloads.push(payload);
+      return new Promise((resolve) => {
+        sendResolvers.push(resolve);
+      });
+    },
+    requestHistory: async (filter) => {
+      const channelId = filter["#h"]?.[0];
+      historyFiltersByChannel[channelId].push(filter.until);
+      return pagesByChannel[channelId].shift() ?? [];
+    },
+  });
+
+  await Promise.resolve();
+
+  assert.deepEqual(
+    sentPayloads.map((payload) => payload[1]),
+    ["live-1", "live-2"],
+  );
+  assert.equal(sendResolvers.length, 2);
+  assert.deepEqual(historyFiltersByChannel, {
+    "channel-1": [],
+    "channel-2": [],
+  });
+
+  for (const resolve of sendResolvers) {
+    resolve();
+  }
+  await replayPromise;
+
+  assert.deepEqual(historyFiltersByChannel, {
+    "channel-1": [2000, 1501],
+    "channel-2": [2000, 1701],
+  });
+});

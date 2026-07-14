@@ -423,6 +423,26 @@ pub(super) fn commit_archive(
                 &p.matched_scope.scope_value,
                 now,
             )?;
+
+            // Index at ingest: attempt to decrypt and extract channelId.
+            // Write a status row regardless of outcome so backfill never
+            // re-processes this frame (INSERT OR IGNORE on PK is a no-op if
+            // the row is already present from a prior run).
+            let channel_id_for_index: Option<String> =
+                buzz_core_pkg::observer::decrypt_observer_payload::<serde_json::Value>(
+                    owner_keys, &p.event,
+                )
+                .ok()
+                .and_then(|v| v.get("channelId")?.as_str().map(|s| s.to_owned()));
+            store::upsert_observer_channel_index(
+                &tx,
+                identity_pk,
+                relay_url,
+                eid,
+                channel_id_for_index.as_deref(),
+                p.event.created_at.as_secs() as i64,
+            )?;
+
             persisted += 1;
         }
 

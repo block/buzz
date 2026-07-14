@@ -42,7 +42,12 @@ export function classifyChildren(childArray: React.ReactNode[]): {
     (child) =>
       !isBlockMedia(child) &&
       !(typeof child === "string" && child.trim() === "") &&
-      !(React.isValidElement(child) && child.type === "br"),
+      !(
+        React.isValidElement(child) &&
+        ((typeof child.type === "string" && child.type === "br") ||
+          (child.props as { node?: { tagName?: unknown } })?.node?.tagName ===
+            "br")
+      ),
   );
   return { imageChildren, nonImageChildren };
 }
@@ -70,6 +75,26 @@ export function shallowArrayEqual(a?: string[], b?: string[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
     if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Value-equality for the small name→pubkey mention maps. Several call sites
+ * (forum cards, feed rows) rebuild the map inline on every render — comparing
+ * by value in the `Markdown` memo keeps those fresh-but-identical objects from
+ * re-rendering (and DOM-swapping) the whole markdown tree.
+ */
+export function shallowRecordEqual(
+  a?: Record<string, string>,
+  b?: Record<string, string>,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const aKeys = Object.keys(a);
+  if (aKeys.length !== Object.keys(b).length) return false;
+  for (const key of aKeys) {
+    if (a[key] !== b[key]) return false;
   }
   return true;
 }

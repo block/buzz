@@ -240,6 +240,7 @@ export function AppSidebar({
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
+  const [dmActionsMenuOpen, setDmActionsMenuOpen] = React.useState(false);
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
 
@@ -760,6 +761,7 @@ export function AppSidebar({
                       <SectionActionsMenu
                         sectionLabel="direct messages"
                         testId="section-actions-dms"
+                        onOpenChange={setDmActionsMenuOpen}
                         onNewMessage={() => setIsNewDmOpen(true)}
                         sortMode={sortModeFor("dms")}
                         onSortModeChange={(mode) => setSortModeFor("dms", mode)}
@@ -783,6 +785,7 @@ export function AppSidebar({
                   selectedChannelId={selectedChannelId}
                   testId="dm-list"
                   title="Direct messages"
+                  sectionActionsOpen={dmActionsMenuOpen}
                   unreadChannelCounts={unreadChannelCounts}
                   unreadChannelIds={unreadChannelIds}
                   mutedChannelIds={mutedChannelIds}
@@ -800,7 +803,7 @@ export function AppSidebar({
           </SidebarContent>
         </div>
 
-        <div className="relative z-30 shrink-0">
+        <div className="relative z-30 shrink-0" data-buzz-glass-footer-wrap>
           {unreadBelowCount > 0 ? (
             <MoreUnreadButton
               bottomClassName="bottom-full"

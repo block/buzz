@@ -829,7 +829,7 @@ export function TopbarSearch({
             <>
               <span
                 className={cn(
-                  "min-w-0 flex-1 translate-y-px truncate transition-colors duration-150 ease-out",
+                  "min-w-0 flex-1 truncate transition-colors duration-150 ease-out",
                   query
                     ? "text-sidebar-foreground"
                     : "text-sidebar-foreground/55",

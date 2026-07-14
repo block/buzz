@@ -7,6 +7,25 @@ import type { RelayEvent } from "@/shared/api/types";
 
 const RECONNECT_REPLAY_SKEW_SECS = 5;
 export const RECONNECT_REPLAY_PAGE_LIMIT = 500;
+export const RECONNECT_REPLAY_PAGE_CONCURRENCY = 4;
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+) {
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  let nextIndex = 0;
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const item = items[nextIndex++];
+        await worker(item);
+      }
+    }),
+  );
+}
 
 export function buildReconnectReplayFilter(
   filter: RelaySubscriptionFilter,
@@ -84,34 +103,60 @@ export async function replayLiveSubscriptions({
   sendRaw,
   requestHistory,
   now = Math.floor(Date.now() / 1_000),
+  pageReplayConcurrency = RECONNECT_REPLAY_PAGE_CONCURRENCY,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   sendRaw: (payload: unknown[]) => Promise<void>;
   requestHistory: (filter: RelaySubscriptionFilter) => Promise<RelayEvent[]>;
   now?: number;
+  pageReplayConcurrency?: number;
 }) {
-  for (const [subId, subscription] of subscriptions) {
-    if (subscription.mode !== "live") continue;
+  const replayRequests = Array.from(subscriptions.entries())
+    .filter(
+      (
+        entry,
+      ): entry is [string, Extract<RelaySubscription, { mode: "live" }>] =>
+        entry[1].mode === "live",
+    )
+    .map(([subId, subscription]) => {
+      const replaySince =
+        subscription.lastSeenCreatedAt === undefined
+          ? undefined
+          : Math.max(
+              0,
+              subscription.lastSeenCreatedAt - RECONNECT_REPLAY_SKEW_SECS,
+            );
+      const shouldPageReplay =
+        replaySince !== undefined &&
+        shouldPageReconnectReplay(subscription.filter);
 
-    const replaySince =
-      subscription.lastSeenCreatedAt === undefined
-        ? undefined
-        : Math.max(
-            0,
-            subscription.lastSeenCreatedAt - RECONNECT_REPLAY_SKEW_SECS,
-          );
-    const shouldPageReplay =
-      replaySince !== undefined &&
-      shouldPageReconnectReplay(subscription.filter);
-    await sendRaw([
-      "REQ",
-      subId,
-      shouldPageReplay
-        ? subscription.filter
-        : buildReconnectReplayFilter(subscription.filter, replaySince),
-    ]);
+      return { subId, subscription, replaySince, shouldPageReplay };
+    });
 
-    if (shouldPageReplay) {
+  await Promise.all(
+    replayRequests.map(
+      ({ subId, subscription, replaySince, shouldPageReplay }) =>
+        sendRaw([
+          "REQ",
+          subId,
+          shouldPageReplay
+            ? subscription.filter
+            : buildReconnectReplayFilter(subscription.filter, replaySince),
+        ]),
+    ),
+  );
+
+  await runWithConcurrency(
+    replayRequests.filter(
+      (
+        request,
+      ): request is typeof request & {
+        replaySince: number;
+        shouldPageReplay: true;
+      } => request.shouldPageReplay && request.replaySince !== undefined,
+    ),
+    pageReplayConcurrency,
+    async ({ subId, subscription, replaySince }) => {
       await replayReconnectHistoryPages({
         subscription,
         since: replaySince,
@@ -119,6 +164,6 @@ export async function replayLiveSubscriptions({
         isActive: () => subscriptions.get(subId) === subscription,
         requestHistory,
       });
-    }
-  }
+    },
+  );
 }

@@ -40,6 +40,7 @@ on:
   pull_request:
     paths:
       - "deploy/charts/buzz/**"
+      - "deploy/charts/buzz-push-gateway/**"
       - ".github/workflows/helm-chart.yml"
       - "ct.yaml"
 
@@ -87,6 +88,9 @@ jobs:
 
       - name: Build chart dependencies
         run: helm dependency build deploy/charts/buzz
+
+      - name: Push gateway chart lint + render guard
+        run: deploy/charts/buzz-push-gateway/tests/render.sh
 
       - name: ct lint
         run: ct lint --config ct.yaml --all

@@ -22,6 +22,7 @@ type HuddleJoinInfo = {
 type VoiceInputMode = "push_to_talk" | "voice_activity";
 
 const MIC_ANALYSER_UPDATE_INTERVAL_MS = 33;
+const PIPELINE_HOTSTART_INTERVAL_MS = 15_000;
 const MIC_INITIAL_NOISE_FLOOR = 0.01;
 const MIC_VOICE_GATE_ON_RMS = 0.018;
 const MIC_VOICE_GATE_OFF_RMS = 0.012;
@@ -522,7 +523,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
       invoke("check_pipeline_hotstart").catch(() => {
         /* best-effort */
       });
-    }, 5_000);
+    }, PIPELINE_HOTSTART_INTERVAL_MS);
     return () => window.clearInterval(id);
   }, [ephemeralChannelId]);
 

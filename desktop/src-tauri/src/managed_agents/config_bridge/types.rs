@@ -21,6 +21,11 @@ pub enum ConfigOrigin {
     /// resolved before calling the reader, then the surface is post-processed to
     /// re-tag injected fields from `BuzzExplicit` to `PersonaDefault`.
     PersonaDefault,
+    /// Value inherited from global agent configuration defaults.
+    /// The lowest user-settable layer — active when neither the agent record nor
+    /// the linked persona specifies a value. Re-tagged from `BuzzExplicit` by the
+    /// `resolve_config_surface` call site, analogously to `PersonaDefault`.
+    GlobalDefault,
     /// Live runtime model override applied via the ModelPicker (Phase 3).
     /// The ACP session's current model diverges from the persona model because
     /// the user picked a different model on the running instance. Runtime-only —
@@ -118,6 +123,7 @@ pub struct ConfigSourceReport {
     pub env_vars: ConfigTierStatus,
     pub config_file: ConfigTierStatus,
     pub config_file_path: Option<String>,
+    pub mcp_config_file_path: Option<String>,
 }
 
 /// Full config surface returned to the frontend.
@@ -129,6 +135,7 @@ pub struct RuntimeConfigSurface {
     pub is_pre_spawn: bool,
     pub normalized: NormalizedConfig,
     pub advanced: Vec<ConfigField>,
+    pub extensions: Vec<ExtensionEntry>,
     pub sources: ConfigSourceReport,
 }
 

@@ -7,16 +7,15 @@
 //!
 //! A small set of *reserved* keys — Buzz's identity and secrets — are
 //! rejected at save time and stripped at runtime so a typo or malicious
-//! value can't swap the agent's nsec. Behavior knobs (GOOSE_MODE,
-//! BUZZ_TOOLSETS, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain
+//! value can't swap the agent's nsec. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain
 //! freely overridable — those have dedicated UI fields, but power users
 //! may want to bypass them.
 
 use std::collections::BTreeMap;
 
-/// Env var keys that are *derived* from the structured `PersonaRecord.provider`
-/// and `PersonaRecord.model` fields at spawn/deploy time. These must NOT be
-/// persisted in `PersonaRecord.env_vars` because they would shadow the
+/// Env var keys that are *derived* from the structured `AgentDefinition.provider`
+/// and `AgentDefinition.model` fields at spawn/deploy time. These must NOT be
+/// persisted in `AgentDefinition.env_vars` because they would shadow the
 /// structured fields after the user edits provider/model in the UI.
 ///
 /// At local spawn time, `runtime_metadata_env_vars` re-derives these from the
@@ -33,7 +32,7 @@ pub(crate) const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
 ];
 
 /// Returns `true` if `key` is a derived provider/model env key that should be
-/// filtered out of persisted `PersonaRecord.env_vars` at pack import time.
+/// filtered out of persisted `AgentDefinition.env_vars` at pack import time.
 pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
     DERIVED_PROVIDER_MODEL_ENV_KEYS
         .iter()
@@ -41,9 +40,9 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
 }
 
 /// Strip derived provider/model env keys from a pack persona's `runtime_env_vars`
-/// before persisting them in `PersonaRecord.env_vars`.
+/// before persisting them in `AgentDefinition.env_vars`.
 ///
-/// The structured `PersonaRecord.provider` / `PersonaRecord.model` fields are
+/// The structured `AgentDefinition.provider` / `AgentDefinition.model` fields are
 /// the authoritative source of truth. Keeping the derived copies would cause
 /// stale env values to override updated structured fields at spawn/deploy time.
 pub(crate) fn filter_derived_provider_model_env_vars(
@@ -68,8 +67,7 @@ pub(crate) fn filter_derived_provider_model_env_vars(
 ///    example), or redirect the agent to an attacker-controlled relay.
 ///
 /// This list is deliberately narrow — it only covers keys with security
-/// implications. Behavior knobs (GOOSE_MODE, BUZZ_TOOLSETS,
-/// BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
+/// implications. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
 /// overridable; those have dedicated UI fields but power users may want
 /// to bypass them.
 pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
@@ -300,12 +298,26 @@ pub(crate) fn merged_user_env(
     merged
 }
 
-/// Resolve live env_vars for a linked persona.
+/// Look up the live env map of `persona_id` within an already-loaded persona
+/// slice. Returns an empty map for standalone agents (`None`) and for links
+/// to personas that no longer exist (an orphaned agent spawns from its own
+/// overrides alone — same fallback the prompt/model resolution uses).
+pub(crate) fn live_persona_env(
+    personas: &[super::types::AgentDefinition],
+    persona_id: Option<&str>,
+) -> BTreeMap<String, String> {
+    persona_id
+        .and_then(|pid| personas.iter().find(|p| p.id == pid))
+        .map(|p| p.env_vars.clone())
+        .unwrap_or_default()
+}
+
+/// Resolve live env_vars for a linked persona, loading personas from disk.
 ///
 /// Returns the persona's `env_vars` map if a persona_id is provided and found;
-/// returns an empty map if no persona is linked or the persona is not found.
-/// Used by the provider deploy path so remote agents receive current credentials;
-/// local spawn uses only the pinned `record.env_vars` for determinism.
+/// returns an empty map if no persona is linked. Errors if the linked persona
+/// is missing. Used by the provider deploy path, which has no pre-loaded
+/// persona slice.
 pub(crate) fn resolve_persona_env(
     app: &tauri::AppHandle,
     persona_id: Option<&str>,

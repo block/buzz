@@ -61,8 +61,7 @@ test("canOpenDraft_active_resolved_channel_returns_true", () => {
 });
 
 // ── (b) sent + resolved channel → NOT openable ───────────────────────────────
-// Composer restores only active/thread keys; sent: keys cannot be restored.
-// Sent subsection is Delete-only (Will-confirmed behavior).
+// Composer restores only active/thread keys; sent: keys are dropped on read.
 
 test("canOpenDraft_sent_resolved_channel_returns_false", () => {
   const draft = sentDraft("chan-1");

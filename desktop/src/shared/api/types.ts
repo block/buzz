@@ -106,6 +106,17 @@ export type AddChannelMembersResult = {
 export type Identity = {
   pubkey: string;
   displayName: string;
+  /** True when the app booted in "identity lost" recovery mode — the OS
+   *  keyring was empty despite a prior successful migration. The frontend
+   *  should route to nsec re-import instead of normal onboarding.
+   *  Mutually exclusive with `locked`. */
+  lost?: boolean;
+  /** True when the app booted with an ephemeral key because the OS keyring
+   *  holding the real identity is UNREACHABLE (e.g. GNOME Keyring / KWallet
+   *  locked). The real key still exists; no in-app recovery is possible —
+   *  the user must unlock the keyring externally and relaunch.
+   *  Mutually exclusive with `lost`. */
+  locked?: boolean;
 };
 
 export type Profile = {
@@ -124,6 +135,10 @@ export type Profile = {
 
 export type UserProfileSummary = {
   displayName: string | null;
+  /** Kind-0 `name` field, kept separate from `displayName` so @mention text
+   * can be matched against either alias (agents/CLI resolve mentions against
+   * `display_name` *or* `name` at send time). */
+  name?: string | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
   ownerPubkey: string | null;
@@ -405,7 +420,6 @@ export type ManagedAgent = {
    * Always `false` for stopped agents.
    */
   needsRestart: boolean;
-  mcpToolsets: string | null;
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
@@ -416,8 +430,10 @@ export type ManagedAgent = {
   lastStoppedAt: string | null;
   lastExitCode: number | null;
   lastError: string | null;
+  lastErrorCode: number | null;
   logPath: string;
   startOnAppLaunch: boolean;
+  autoRestartOnConfigChange: boolean;
   backend: ManagedAgentBackend;
   backendAgentId: string | null;
   /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */
@@ -476,7 +492,6 @@ export type CreateManagedAgentInput = {
   avatarUrl?: string;
   model?: string;
   provider?: string;
-  mcpToolsets?: string;
   envVars?: Record<string, string>;
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
@@ -526,11 +541,27 @@ export type ControlResultFrame = {
   modelId?: string;
 };
 
+export type GitBashPrerequisite = {
+  available: boolean;
+  path: string | null;
+  installInstructionsUrl: string;
+  installHint: string;
+};
+
 export type AcpAvailabilityStatus =
   | "available"
   | "adapter_missing"
+  | "adapter_outdated"
   | "cli_missing"
   | "not_installed";
+
+/** Authentication/login status for a CLI-based ACP runtime. */
+export type AuthStatus =
+  | { status: "logged_in" }
+  | { status: "logged_out" }
+  | { status: "config_invalid"; diagnostic: string }
+  | { status: "not_applicable" }
+  | { status: "unknown" };
 
 export type AcpRuntimeCatalogEntry = {
   id: string;
@@ -545,6 +576,12 @@ export type AcpRuntimeCatalogEntry = {
   installInstructionsUrl: string;
   canAutoInstall: boolean;
   underlyingCliPath: string | null;
+  /** True when an npm adapter step is pending but Node.js / npm is absent. */
+  nodeRequired: boolean;
+  /** Login/auth status for CLI-based runtimes. */
+  authStatus: AuthStatus;
+  /** Hint for completing authentication; null when not applicable or already logged in. */
+  loginHint: string | null;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
@@ -561,11 +598,14 @@ export type InstallStepResult = {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  hint?: string;
 };
 
 export type InstallRuntimeResult = {
   success: boolean;
   steps: InstallStepResult[];
+  restartedCount: number;
+  failedRestartCount: number;
 };
 
 export type CommandAvailability = {
@@ -602,6 +642,7 @@ export type ConfigOrigin =
   | "envVar"
   | "configFile"
   | "personaDefault"
+  | "globalDefault"
   | "runtimeOverride"
   | "harnessConstraint";
 
@@ -645,7 +686,10 @@ export type ConfigSourceReport = {
   envVars: ConfigTierStatus;
   configFile: ConfigTierStatus;
   configFilePath: string | null;
+  mcpConfigFilePath: string | null;
 };
+
+export type ExtensionEntry = { name: string; kind: string; enabled: boolean };
 
 export type NormalizedConfig = {
   model: NormalizedField | null;
@@ -663,6 +707,7 @@ export type RuntimeConfigSurface = {
   isPreSpawn: boolean;
   normalized: NormalizedConfig;
   advanced: ConfigField[];
+  extensions: ExtensionEntry[];
   sources: ConfigSourceReport;
 };
 
@@ -672,7 +717,6 @@ export type UpdateManagedAgentInput = {
   model?: string | null;
   provider?: string | null;
   systemPrompt?: string | null;
-  mcpToolsets?: string | null;
   /** Absent = don't touch. Present = replace the env_vars map entirely. */
   envVars?: Record<string, string>;
   parallelism?: number;
@@ -716,8 +760,23 @@ export type AgentPersona = {
   /** Environment variables injected for agents created from this persona.
    * Layered as: desktop parent env < persona envVars < agent envVars. */
   envVars: Record<string, string>;
+  /** NIP-AP behavioral defaults (wire shape). Null/empty = unset. */
+  respondTo: RespondToMode | null;
+  respondToAllowlist: string[];
+  parallelism: number | null;
   createdAt: string;
   updatedAt: string;
+};
+
+/**
+ * NIP-AP behavioral group for a definition, sent as one group: absent = don't
+ * touch the stored behavior group (legacy callers), present = replace the fields as a
+ * unit. Mirrors `PersonaBehaviorRequest`.
+ */
+export type PersonaBehaviorInput = {
+  respondTo?: RespondToMode;
+  respondToAllowlist?: string[];
+  parallelism?: number;
 };
 
 export type CreatePersonaInput = {
@@ -729,6 +788,7 @@ export type CreatePersonaInput = {
   provider?: string;
   namePool?: string[];
   envVars?: Record<string, string>;
+  behavior?: PersonaBehaviorInput;
 };
 
 export type UpdatePersonaInput = {
@@ -741,6 +801,7 @@ export type UpdatePersonaInput = {
   provider?: string;
   namePool?: string[];
   envVars?: Record<string, string>;
+  behavior?: PersonaBehaviorInput;
 };
 
 // ── Team types ────────────────────────────────────────────────────────────────
@@ -940,4 +1001,37 @@ export type ChannelMessagesPageResponse = {
   events: RelayEvent[];
   /** Present only when a full page was returned — pass back to fetch the next (older) page. */
   nextCursor: ChannelPageCursor | null;
+};
+
+// ── Global agent configuration ────────────────────────────────────────────────
+
+/**
+ * Global agent configuration defaults applied to ALL agents.
+ *
+ * Lowest user-settable layer — per-agent and persona values win on any key
+ * collision. Mirrors the Rust `GlobalAgentConfig` struct.
+ *
+ * Precedence: baked floor < global < persona < per-agent.
+ */
+export type GlobalAgentConfig = {
+  /** Global env vars injected into all agents unconditionally. */
+  env_vars: Record<string, string>;
+  /** Global fallback provider (e.g. "anthropic", "databricks_v2"). Null = no global default. */
+  provider: string | null;
+  /** Global fallback model identifier. Null = no global default. */
+  model: string | null;
+};
+
+/**
+ * Result returned by `set_global_agent_config`.
+ *
+ * Mirrors the Rust `GlobalAgentConfigSaveResult` struct.
+ */
+export type GlobalAgentConfigSaveResult = {
+  /** The persisted global config (after strip-on-write). */
+  config: GlobalAgentConfig;
+  /** Number of local agents successfully stopped and restarted. */
+  restarted_count: number;
+  /** Number of agents whose stop succeeded but respawn failed. */
+  failed_restart_count: number;
 };

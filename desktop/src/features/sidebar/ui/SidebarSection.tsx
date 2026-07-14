@@ -40,7 +40,7 @@ import {
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
 const SECTION_LABEL_CHEVRON_CLASS =
-  "relative size-2.5 shrink-0 text-current opacity-0 transition-[color,opacity] group-hover/sidebar-section:opacity-100 group-hover/section-label:opacity-100 group-focus-within/sidebar-section:opacity-100 group-focus-visible/section-label:opacity-100";
+  "relative size-2.5 shrink-0 text-current opacity-0 transition-[color,opacity] group-hover/sidebar-section:opacity-100 group-hover/section-label:opacity-100 group-focus-within/sidebar-section:opacity-100 group-focus-visible/section-label:opacity-100 group-data-[section-actions-open=true]/sidebar-section:opacity-100";
 const SECTION_LABEL_CHEVRON_ICON_CLASS =
   "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
 const SIDEBAR_ROW_ACTION_VISIBILITY_CLASS =
@@ -357,6 +357,7 @@ export function SidebarSection({
   mutedChannelIds,
   onMuteChannel,
   onUnmuteChannel,
+  sectionActionsOpen,
 }: {
   action?: React.ReactNode;
   activeWorkingByChannelId?: ReadonlyMap<string, ActiveChannelTurnSummary>;
@@ -383,6 +384,7 @@ export function SidebarSection({
   mutedChannelIds?: ReadonlySet<string>;
   onMuteChannel?: (channelId: string) => void;
   onUnmuteChannel?: (channelId: string) => void;
+  sectionActionsOpen?: boolean;
 }) {
   if (items.length === 0 && !action && !emptyState) {
     return null;
@@ -392,7 +394,10 @@ export function SidebarSection({
   const canToggle = Boolean(onToggleCollapsed);
 
   return (
-    <SidebarGroup className="group/sidebar-section select-none">
+    <SidebarGroup
+      className="group/sidebar-section select-none"
+      data-section-actions-open={sectionActionsOpen || undefined}
+    >
       <div className="relative">
         <SidebarGroupLabel asChild={canToggle}>
           {canToggle ? (

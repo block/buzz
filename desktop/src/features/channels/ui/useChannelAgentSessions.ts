@@ -220,9 +220,14 @@ export function useChannelAgentSessions({
       setThreadReplyTargetId(null);
       setChannelManagementOpen(false);
       setOpenAgentSessionPubkey(pubkey);
-      setOpenAgentSessionChannelId(channelId ?? null);
+      // Fall back to activeChannelId so opening from within a channel always
+      // scopes the panel to that channel — even when no explicit channelId is
+      // supplied (e.g. activity-list click). Without this, a null channelId
+      // bypasses scopeByChannel and lets all channels' live frames through.
+      setOpenAgentSessionChannelId(channelId ?? activeChannelId ?? null);
     },
     [
+      activeChannelId,
       isAgentSessionOpen,
       openThreadHeadId,
       profilePanelPubkey,
@@ -260,9 +265,11 @@ export function useChannelAgentSessions({
   const selectAgentSession = React.useCallback(
     (pubkey: string, channelId?: string | null) => {
       setOpenAgentSessionPubkey(pubkey);
-      setOpenAgentSessionChannelId(channelId ?? null);
+      // Same fallback as openAgentSession: use activeChannelId when the caller
+      // omits channelId, so the panel is always scoped to the current channel.
+      setOpenAgentSessionChannelId(channelId ?? activeChannelId ?? null);
     },
-    [setOpenAgentSessionChannelId, setOpenAgentSessionPubkey],
+    [activeChannelId, setOpenAgentSessionChannelId, setOpenAgentSessionPubkey],
   );
 
   const openThreadAndCloseAgentSession = React.useCallback(

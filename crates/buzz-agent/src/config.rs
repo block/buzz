@@ -12,8 +12,8 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// - **Anthropic adaptive**: `low|medium|high|xhigh|max` (model-dependent; see `anthropic_thinking_config`).
 ///   `none`/`minimal` are not Anthropic values — rejected at startup.
 /// - **Anthropic manual budget** (claude-3*, opus-4-5): `low|medium|high`; `xhigh`/`max` clamp to high budget.
-/// - **OpenAI Responses / Chat Completions**: `none|minimal|low|medium|high|xhigh` (provider pass-through).
-///   `max` is not an OpenAI value — rejected at startup.
+/// - **OpenAI Responses / Chat Completions**: effort support is model-dependent and normalized at
+///   request time; `max` is valid for documented max-supporting families such as GPT-5.6.
 /// - **Databricks**: routed by model family (Claude → Anthropic mapping, GPT-5 → Responses, MLflow → Chat).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ThinkingEffort {
@@ -70,6 +70,32 @@ impl ThinkingEffort {
     }
 }
 
+/// Strip any endpoint-naming prefix from a model name so the family classifiers
+/// (`is_manual_budget_model`, `is_adaptive_thinking_model`, etc.) can match on the canonical
+/// `claude-*` form regardless of how the model is stored in the Databricks catalog.
+///
+/// Rather than maintaining an allowlist of known prefixes, this function finds the first
+/// occurrence of a known model-family token (`claude-`, `gpt-`) and drops everything before
+/// it. This handles any endpoint naming convention without needing to enumerate prefixes.
+///
+/// Examples:
+/// - `databricks-claude-fable-5`  → `claude-fable-5`
+/// - `goose-claude-fable-5`       → `claude-fable-5`
+/// - `team-x-claude-opus-4-7`     → `claude-opus-4-7`
+/// - `goose-gpt-5.5`              → `gpt-5.5`
+/// - `llama-3`                    → `llama-3` (no family token, returned unchanged)
+///
+/// If no family token is present the name is returned unchanged.
+fn strip_catalog_prefix(model: &str) -> &str {
+    const FAMILY_TOKENS: &[&str] = &["claude-", "gpt-"];
+    let lower = model.to_ascii_lowercase();
+    let first_idx = FAMILY_TOKENS.iter().filter_map(|tok| lower.find(tok)).min();
+    match first_idx {
+        Some(idx) => &model[idx..],
+        None => model,
+    }
+}
+
 /// Build the Anthropic thinking/effort request fields for the given model and effort level.
 ///
 /// API shape selection (per Anthropic extended-thinking support table,
@@ -90,8 +116,9 @@ impl ThinkingEffort {
 /// **Everything else** — omit both fields. This includes unknown/future `claude-*` names
 /// not yet in the support table. Safer to omit than to guess an unverified shape.
 ///
-/// The Databricks `databricks-` prefix is stripped before matching so that
-/// `databricks-claude-opus-4-7` routes to the adaptive bucket.
+/// The Databricks `databricks-` and other endpoint-naming prefixes are stripped before
+/// matching so that `databricks-claude-opus-4-7`, `goose-claude-fable-5`, and
+/// `team-x-claude-opus-4-7` all route to the correct bucket. See `strip_catalog_prefix`.
 ///
 /// Returns `(thinking_field, output_config_field)` where each is `None` if not applicable.
 pub fn anthropic_thinking_config(
@@ -100,11 +127,11 @@ pub fn anthropic_thinking_config(
     max_output_tokens: u32,
 ) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
     use serde_json::json;
-    // Normalise the model name for matching: strip Databricks gateway prefixes
-    // (e.g. "databricks-claude-opus-4-7" → "claude-opus-4-7").
-    let model = effective_model
-        .strip_prefix("databricks-")
-        .unwrap_or(effective_model);
+    // Normalise the model name for matching: strip any endpoint-naming prefix
+    // (e.g. "databricks-claude-opus-4-7" → "claude-opus-4-7",
+    //       "goose-claude-fable-5"        → "claude-fable-5",
+    //       "team-x-claude-opus-4-7"      → "claude-opus-4-7").
+    let model = strip_catalog_prefix(effective_model);
 
     if is_manual_budget_model(model) {
         // Manual-budget shape: budget_tokens must be strictly < max_tokens AND must leave
@@ -148,6 +175,20 @@ pub fn anthropic_thinking_config(
     }
 }
 
+/// Returns true for adaptive Anthropic models that support the `xhigh` effort level.
+///
+/// Used by both `clamp_adaptive_effort` (request-time) and `anthropic_efforts_for_model`
+/// (UI capability table) to keep xhigh-support classification in a single place.
+///
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
+fn anthropic_model_supports_xhigh(model: &str) -> bool {
+    model.starts_with("claude-opus-4-7")
+        || model.starts_with("claude-opus-4-8")
+        || model.starts_with("claude-sonnet-5")
+        || model.starts_with("claude-fable-5")
+        || model.starts_with("claude-mythos-5")
+}
+
 /// Clamp the requested effort level to the highest doc-verified level for the given adaptive model.
 ///
 /// Doc-verified availability (Anthropic effort page, July 2025):
@@ -160,16 +201,10 @@ pub fn anthropic_thinking_config(
 /// supported level below the requested one, and logs a warning. This is dynamic (not
 /// startup-time) because `session/set_model` can change the model after startup.
 ///
-/// `model` must already have the `databricks-` prefix stripped.
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 pub fn clamp_adaptive_effort(model: &str, effort: ThinkingEffort) -> ThinkingEffort {
     // Models that support all levels including xhigh (and max).
-    let supports_xhigh = model.starts_with("claude-opus-4-7")
-        || model.starts_with("claude-opus-4-8")
-        || model.starts_with("claude-sonnet-5")
-        || model.starts_with("claude-fable-5")
-        || model.starts_with("claude-mythos-5");
-    // NOTE: claude-mythos-preview does NOT support xhigh (xhigh → clamp to high).
-    // All adaptive models support low/medium/high and max.
+    let supports_xhigh = anthropic_model_supports_xhigh(model);
 
     let clamped = if supports_xhigh {
         effort // all levels pass through
@@ -275,27 +310,37 @@ fn gpt5_base_matches(lower_model: &str, token: &str) -> bool {
 /// | Model        | Supported effort values                   |
 /// |-------------|-------------------------------------------|
 /// | gpt-5-pro   | `high` only                               |
+/// | gpt-5.6     | `none, low, medium, high, xhigh, max`     |
 /// | gpt-5.5     | `none, low, medium, high, xhigh`          |
 /// | gpt-5.4     | `none, low, medium, high, xhigh`          |
 /// | gpt-5.1     | `none, low, medium, high`                 |
 /// | gpt-5 (base)| `minimal, low, medium, high`              |
-/// | unknown     | not doc-verified — pass through unchanged |
+/// | unknown     | not doc-verified — `max` clamps to `xhigh` |
 ///
 /// Note the `none` vs `minimal` split: `gpt-5` (base) supports `minimal` but not `none`;
-/// `gpt-5.1`/`gpt-5.4`/`gpt-5.5` support `none` but not `minimal`. These are matched via
+/// `gpt-5.1`/`gpt-5.4`/`gpt-5.5`/`gpt-5.6` support `none` but not `minimal`. These are matched via
 /// nearest-supported fallback in `normalize_effort_for_openai_route`.
 ///
 /// Match order: `-pro` variant checked before versioned strings to prevent `gpt-5-pro` from
 /// falling into the `gpt-5` base bucket (substring "gpt-5" is shared).
 ///
 /// `model` is a raw model name (may include Databricks gateway prefixes or date suffixes).
-/// Unknown models return `None` — caller treats `None` as "server-validated pass-through".
+/// Unknown models return `None` — callers pass through values except `max`, which clamps to
+/// `xhigh` until support is confirmed.
 /// Versioned tokens use `gpt5_token_matches` (end-of-string or `-` boundary, blocking digit
 /// and letter continuations). The base token uses `gpt5_base_matches`, which additionally
 /// rejects short `-<1-3 digit>` suffixes that look like two-digit version numbers.
 fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
     // Effort ordered from lowest to highest for each family.
     const GPT5_PRO: &[ThinkingEffort] = &[ThinkingEffort::High];
+    const GPT5_6: &[ThinkingEffort] = &[
+        ThinkingEffort::None,
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+        ThinkingEffort::XHigh,
+        ThinkingEffort::Max,
+    ];
     const GPT5_5_AND_5_4: &[ThinkingEffort] = &[
         ThinkingEffort::None,
         ThinkingEffort::Low,
@@ -321,6 +366,12 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
     // matching the base "gpt-5" prefix first.
     if gpt5_token_matches(&lower, "gpt-5-pro") || gpt5_token_matches(&lower, "gpt5-pro") {
         Some(GPT5_PRO)
+    } else if gpt5_token_matches(&lower, "gpt-5.6")
+        || gpt5_token_matches(&lower, "gpt5.6")
+        || gpt5_token_matches(&lower, "gpt-5-6")
+        || gpt5_token_matches(&lower, "gpt5-6")
+    {
+        Some(GPT5_6)
     } else if gpt5_token_matches(&lower, "gpt-5.5")
         || gpt5_token_matches(&lower, "gpt5.5")
         || gpt5_token_matches(&lower, "gpt-5-5")
@@ -347,6 +398,58 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
     }
 }
 
+/// Returns the effort capability set for a given Anthropic model.
+///
+/// This is the single production source of truth for Anthropic family routing.
+/// Both `anthropic_thinking_config` (request-time) and the effort-table UI
+/// (`valid_effort_values_for_provider_model`, via its Anthropic branch) must
+/// derive their behaviour from this helper so the two stay in sync.
+///
+/// Returns `(valid_values, default)` where:
+/// - `valid_values` is the static slice of `ThinkingEffort` values accepted
+///   by this model family's effort dropdown.
+/// - `default` is `None` for manual-budget models (no semantic default —
+///   user must choose) or `Some(High)` for adaptive families.
+///
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
+pub fn anthropic_efforts_for_model(
+    model: &str,
+) -> (&'static [ThinkingEffort], Option<ThinkingEffort>) {
+    const MANUAL: &[ThinkingEffort] = &[
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+    ];
+    const ADAPTIVE_XHIGH: &[ThinkingEffort] = &[
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+        ThinkingEffort::XHigh,
+        ThinkingEffort::Max,
+    ];
+    const ADAPTIVE_NO_XHIGH: &[ThinkingEffort] = &[
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+        ThinkingEffort::Max,
+    ];
+
+    if is_manual_budget_model(model) {
+        return (MANUAL, None);
+    }
+    if is_adaptive_thinking_model(model) {
+        // Reuse `anthropic_model_supports_xhigh` (the single source of truth
+        // shared with `clamp_adaptive_effort`) — no side-effects, no duplication.
+        if anthropic_model_supports_xhigh(model) {
+            return (ADAPTIVE_XHIGH, Some(ThinkingEffort::High));
+        } else {
+            return (ADAPTIVE_NO_XHIGH, Some(ThinkingEffort::High));
+        }
+    }
+    // Unknown Anthropic model — assume full adaptive (xhigh-capable) as a safe default.
+    (ADAPTIVE_XHIGH, Some(ThinkingEffort::High))
+}
+
 /// Resolve the nearest supported effort level for a given OpenAI model.
 ///
 /// When the requested effort is not in the model's supported set, falls back to the
@@ -356,8 +459,8 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
 ///   model families means the "closest analogue" is the other form before jumping to `low`).
 /// - Above that pair: upward clamp first, then downward (prefer more thinking over less).
 /// - `xhigh` falls back to `high` when not supported (no model skips from `high` to `xhigh`).
-/// - `max` is first clamped to `xhigh` by `normalize_effort_for_openai_route` before this
-///   function is reached; this function never sees `max`.
+/// - `max` passes through for model families whose table includes it; otherwise it resolves to
+///   the nearest supported level.
 ///
 /// Logs a `warn!` on every substitution.
 fn resolve_openai_effort(
@@ -418,42 +521,32 @@ fn resolve_openai_effort(
 
 /// Normalize the effort value for an OpenAI-shaped request body (Chat Completions or Responses).
 ///
-/// Two normalizations are applied in order:
-///
-/// 1. **`max` → `xhigh` clamp**: `max` is not a valid OpenAI reasoning effort value; clamped
-///    at this step. The pure-OpenAI startup validator already rejects `max` at startup, so this
-///    clamp only fires on `DatabricksV2` sessions that routed to the OpenAI path.
-///
-/// 2. **Per-model effort availability**: for doc-verified OpenAI model families, the requested
-///    level (post-clamp) is checked against the model's supported set. If not supported, the
-///    nearest supported level is substituted (see `resolve_openai_effort` for preference order).
-///    Unknown/unverified models are passed through unchanged — the server validates.
+/// Per-model effort availability is applied for doc-verified OpenAI model families. A requested
+/// level not in the model's supported set is substituted with the nearest supported level (see
+/// `resolve_openai_effort` for preference order). For unknown/unverified models, `max` is clamped
+/// to `xhigh` because its support cannot be confirmed; all other values pass through unchanged.
 ///
 /// Applies to pure-OpenAI request paths AND DBv2 OpenAI-shaped routes.
 ///
 /// Doc-verified model table (July 2025):
 /// - `gpt-5-pro`: `high` only
+/// - `gpt-5.6`: `none, low, medium, high, xhigh, max`
 /// - `gpt-5.5`, `gpt-5.4`: `none, low, medium, high, xhigh`
 /// - `gpt-5.1`: `none, low, medium, high`
 /// - `gpt-5` (base): `minimal, low, medium, high`
-/// - unknown: pass through (server-validated)
+/// - unknown: `max` clamps to `xhigh`; other values pass through
 pub fn normalize_effort_for_openai_route(effort: ThinkingEffort, model: &str) -> ThinkingEffort {
-    // Step 1: clamp max → xhigh (max is not a valid OpenAI value).
-    let clamped = if effort == ThinkingEffort::Max {
-        tracing::warn!(
-            requested = "max",
-            resolved = "xhigh",
-            "BUZZ_AGENT_THINKING_EFFORT=max is not valid for OpenAI-shaped requests; clamping to xhigh"
-        );
-        ThinkingEffort::XHigh
-    } else {
-        effort
-    };
-
-    // Step 2: per-model effort availability check.
     match openai_efforts_for_model(model) {
-        Some(supported) => resolve_openai_effort(model, clamped, supported),
-        None => clamped, // unknown model — pass through
+        Some(supported) => resolve_openai_effort(model, effort, supported),
+        None if effort == ThinkingEffort::Max => {
+            tracing::warn!(
+                requested = "max",
+                resolved = "xhigh",
+                "BUZZ_AGENT_THINKING_EFFORT=max not confirmed for unknown OpenAI model; clamping to xhigh"
+            );
+            ThinkingEffort::XHigh
+        }
+        None => effort,
     }
 }
 
@@ -489,7 +582,7 @@ pub fn normalize_effort_for_anthropic_route(effort: ThinkingEffort) -> Option<Th
 /// - claude-opus-4-5: effort page states "uses manual thinking, where effort works alongside
 ///   the thinking token budget" — manual bucket, not adaptive.
 ///
-/// `model` must already have the `databricks-` prefix stripped.
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 fn is_manual_budget_model(model: &str) -> bool {
     model.starts_with("claude-3") || model == "claude-opus-4-5"
 }
@@ -506,7 +599,7 @@ fn is_manual_budget_model(model: &str) -> bool {
 /// Note: Opus 4.5 is NOT in this bucket — it uses manual budget (see `is_manual_budget_model`).
 /// No prefix wildcards over version numbers; each entry is doc-verified explicitly.
 ///
-/// `model` must already have the `databricks-` prefix stripped.
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 fn is_adaptive_thinking_model(model: &str) -> bool {
     // Exact version strings for Opus 4.x adaptive models (4.6, 4.7, 4.8).
     // Opus 4.5 is excluded — manual budget only.
@@ -838,19 +931,13 @@ impl Config {
         }
         // Provider-level effort validation (fail-fast, clear error).
         // `none`/`minimal` are not Anthropic values — rejected at startup.
-        // `max` is not an OpenAI value — rejected at startup.
-        // Model-level clamping (e.g. xhigh on Opus 4.6) is dynamic: happens at request
-        // build time because `session/set_model` can change the model after startup.
         //
-        // DatabricksV2 is intentionally EXCLUDED from startup validation: it dispatches
-        // across Anthropic Messages, OpenAI Responses, and MLflow Chat routes at request
-        // build time based on the effective model. No single effort value is invalid for
-        // all three routes, so provider-wide startup rejection is wrong. Route-aware effort
-        // normalization is applied instead via `normalize_effort_for_openai_route` /
-        // `normalize_effort_for_anthropic_route` at request build time in `llm.rs`.
+        // OpenAI, Databricks, and DatabricksV2 defer effort validation to request-time routing:
+        // availability is model-dependent, and `session/set_model` can change the effective model
+        // after startup. `normalize_effort_for_openai_route` / `normalize_effort_for_anthropic_route`
+        // apply route-aware normalization in `llm.rs` when building each request.
         if let Some(effort) = self.thinking_effort {
             let is_pure_anthropic = matches!(self.provider, Provider::Anthropic);
-            let is_pure_openai = matches!(self.provider, Provider::OpenAi | Provider::Databricks);
             if is_pure_anthropic && matches!(effort, ThinkingEffort::None | ThinkingEffort::Minimal)
             {
                 return Err(format!(
@@ -858,13 +945,6 @@ impl Config {
                      (allowed: low|medium|high|xhigh|max)",
                     effort.openai_effort_str()
                 ));
-            }
-            if is_pure_openai && matches!(effort, ThinkingEffort::Max) {
-                return Err(
-                    "config: BUZZ_AGENT_THINKING_EFFORT=max is not valid for OpenAI/Databricks \
-                     providers (allowed: none|minimal|low|medium|high|xhigh)"
-                        .into(),
-                );
             }
         }
         Ok(())
@@ -1526,6 +1606,45 @@ mod tests {
         assert_eq!(oc["effort"], "medium");
     }
 
+    #[test]
+    fn anthropic_thinking_config_goose_prefix_stripped_for_fable_5() {
+        // "goose-" catalog prefix must be stripped so goose-claude-fable-5 routes to
+        // the adaptive + xhigh/max bucket, not the "unknown model → (None, None)" path.
+        let (thinking, output_config) =
+            anthropic_thinking_config("goose-claude-fable-5", ThinkingEffort::Max, 32_768);
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for goose-claude-fable-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for goose-claude-fable-5");
+        assert_eq!(oc["effort"], "max");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_goose_prefix_stripped_for_sonnet_5() {
+        // Adaptive xhigh model via goose- prefix.
+        let (thinking, output_config) =
+            anthropic_thinking_config("goose-claude-sonnet-5", ThinkingEffort::XHigh, 32_768);
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for goose-claude-sonnet-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for goose-claude-sonnet-5");
+        assert_eq!(oc["effort"], "xhigh");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_arbitrary_prefix_stripped_for_opus_4_7() {
+        // team-x-claude-opus-4-7: first claude- token at index 7 → strips "team-x-"
+        // Verifies the arbitrary-prefix normalization reaches anthropic_thinking_config
+        // end-to-end: UI exposes max as valid, and runtime must honor it.
+        let (thinking, output_config) =
+            anthropic_thinking_config("team-x-claude-opus-4-7", ThinkingEffort::Max, 32_768);
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for team-x-claude-opus-4-7");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for team-x-claude-opus-4-7");
+        assert_eq!(oc["effort"], "max");
+    }
+
     // ---- clamp_adaptive_effort — per-model clamping tests ----
 
     #[test]
@@ -1784,30 +1903,43 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_max_effort_for_openai() {
-        let cfg = make_config_for_validation(Provider::OpenAi, Some(ThinkingEffort::Max));
-        let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("BUZZ_AGENT_THINKING_EFFORT=max"),
-            "error must name the value: {err}"
-        );
-        assert!(
-            err.contains("not valid for OpenAI"),
-            "error must name the provider: {err}"
-        );
-        assert!(
-            err.contains("none|minimal|low|medium|high|xhigh"),
-            "error must name allowed values: {err}"
-        );
+    fn validate_accepts_all_efforts_for_openai() {
+        // OpenAI effort support is model-dependent and normalized at request build time.
+        for effort in [
+            ThinkingEffort::None,
+            ThinkingEffort::Minimal,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            let cfg = make_config_for_validation(Provider::OpenAi, Some(effort));
+            assert!(
+                cfg.validate().is_ok(),
+                "OpenAI must accept {effort:?} at startup (route-aware normalization at request build)"
+            );
+        }
     }
 
     #[test]
-    fn validate_rejects_max_effort_for_databricks() {
-        // Databricks legacy uses OpenAI Chat wire format — same rejection.
-        let cfg = make_config_for_validation(Provider::Databricks, Some(ThinkingEffort::Max));
-        let err = cfg.validate().unwrap_err();
-        assert!(err.contains("BUZZ_AGENT_THINKING_EFFORT=max"), "{err}");
-        assert!(err.contains("not valid for OpenAI/Databricks"), "{err}");
+    fn validate_accepts_all_efforts_for_databricks() {
+        // Legacy Databricks effort support is model-dependent and normalized at request build time.
+        for effort in [
+            ThinkingEffort::None,
+            ThinkingEffort::Minimal,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            let cfg = make_config_for_validation(Provider::Databricks, Some(effort));
+            assert!(
+                cfg.validate().is_ok(),
+                "Databricks must accept {effort:?} at startup (route-aware normalization at request build)"
+            );
+        }
     }
 
     #[test]
@@ -2070,6 +2202,26 @@ mod tests {
     }
 
     #[test]
+    fn openai_efforts_for_model_gpt5_6_includes_max() {
+        let expected: &[ThinkingEffort] = &[
+            ThinkingEffort::None,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ];
+
+        for model in ["gpt-5.6", "gpt-5.6-sol", "gpt-5-6-sol", "goose-gpt-5-6-sol"] {
+            assert_eq!(
+                openai_efforts_for_model(model),
+                Some(expected),
+                "{model} must match the gpt-5.6 effort table"
+            );
+        }
+    }
+
+    #[test]
     fn openai_efforts_for_model_gpt5_5_includes_xhigh() {
         let supported = openai_efforts_for_model("gpt-5.5").expect("gpt-5.5 must be in table");
         assert!(
@@ -2295,6 +2447,26 @@ mod tests {
     }
 
     #[test]
+    fn normalize_openai_route_passes_max_through_for_gpt5_6() {
+        for model in ["gpt-5.6", "gpt-5-6-sol"] {
+            assert_eq!(
+                normalize_effort_for_openai_route(ThinkingEffort::Max, model),
+                ThinkingEffort::Max,
+                "{model} must preserve max"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_openai_route_gpt5_5_max_becomes_xhigh() {
+        assert_eq!(
+            normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.5"),
+            ThinkingEffort::XHigh,
+            "gpt-5.5 must clamp max to xhigh"
+        );
+    }
+
+    #[test]
     fn normalize_openai_route_gpt5_5_minimal_becomes_none() {
         // gpt-5.5 supports none but not minimal. minimal → none (peer fallback).
         assert_eq!(
@@ -2363,6 +2535,166 @@ mod tests {
                 normalize_effort_for_openai_route(effort, "llama-4"),
                 effort,
                 "unknown model: {effort:?} must pass through unchanged"
+            );
+        }
+    }
+
+    // ---- effort-table fixture sync guard ----------------------------------------
+    //
+    // Loads `effortTable.fixture.json` (the single source of truth shared with
+    // the TS test in `buzzAgentConfig.test.mjs`) and verifies that this Rust
+    // implementation produces the same valid-effort-value sets and default values
+    // as the TS `getProviderEffortConfig` function.
+    //
+    // Drift (a new model family added to one side but not the other) fails CI here
+    // before it can silently diverge in production.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Compute the valid effort values for a provider/model pair, mirroring
+    /// `getProviderEffortConfig` in `buzzAgentConfig.ts`.
+    ///
+    /// Returns `(valid_values, default_value)` where `default_value` is `None`
+    /// for Anthropic manual-budget models (TS `defaultValue: null`), otherwise
+    /// `Some("medium")` or `Some("high")`.
+    fn valid_effort_values_for_provider_model(
+        provider: &str,
+        model: &str,
+    ) -> (Vec<&'static str>, Option<&'static str>) {
+        const ALL_7: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+        const ALL_EXCEPT_MAX: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+        const GPT5_PRO: &[&str] = &["high"];
+        const GPT5_1: &[&str] = &["none", "low", "medium", "high"];
+
+        let p = provider.to_ascii_lowercase();
+        // Strip arbitrary endpoint-naming prefix before model matching, mirroring TS and
+        // strip_catalog_prefix: find the first known family token (claude-, gpt-) and
+        // drop everything before it. Handles any catalog naming convention.
+        let raw_model = model.trim();
+        let lower_raw = raw_model.to_ascii_lowercase();
+        const FAMILY_TOKENS: &[&str] = &["claude-", "gpt-"];
+        let first_idx = FAMILY_TOKENS
+            .iter()
+            .filter_map(|tok| lower_raw.find(tok))
+            .min();
+        let stripped = match first_idx {
+            Some(idx) => &raw_model[idx..],
+            None => raw_model,
+        };
+        let m = stripped.to_ascii_lowercase();
+
+        // Thin adapter: converts production helper output to the string-based
+        // return type used by this function.
+        fn anthropic_result(m: &str) -> (Vec<&'static str>, Option<&'static str>) {
+            let (values, default) = anthropic_efforts_for_model(m);
+            let strs: Vec<&'static str> = values.iter().map(|e| e.openai_effort_str()).collect();
+            (strs, default.map(|e| e.openai_effort_str()))
+        }
+
+        fn openai_result(m: &str) -> (Vec<&'static str>, Option<&'static str>) {
+            if let Some(values) = openai_efforts_for_model(m) {
+                let strs: Vec<&'static str> =
+                    values.iter().map(|e| e.openai_effort_str()).collect();
+                // Determine default from the family.
+                let default_val = if strs == GPT5_PRO {
+                    Some("high")
+                } else if strs == GPT5_1 {
+                    Some("none")
+                } else {
+                    Some("medium")
+                };
+                (strs, default_val)
+            } else {
+                // Unknown model → all-except-max, default medium.
+                (ALL_EXCEPT_MAX.to_vec(), Some("medium"))
+            }
+        }
+
+        if p == "anthropic" {
+            return anthropic_result(&m);
+        }
+        if p == "openai" {
+            return openai_result(&m);
+        }
+        if p == "databricks_v2" {
+            if m.starts_with("claude-") {
+                return anthropic_result(&m);
+            }
+            // gpt-5 family check mirrors gpt5FamilyModel in TS.
+            let is_gpt5 = gpt5_token_matches(&m, "gpt-5-pro")
+                || gpt5_token_matches(&m, "gpt5-pro")
+                || gpt5_token_matches(&m, "gpt-5.6")
+                || gpt5_token_matches(&m, "gpt5.6")
+                || gpt5_token_matches(&m, "gpt-5-6")
+                || gpt5_token_matches(&m, "gpt5-6")
+                || gpt5_token_matches(&m, "gpt-5.5")
+                || gpt5_token_matches(&m, "gpt5.5")
+                || gpt5_token_matches(&m, "gpt-5.4")
+                || gpt5_token_matches(&m, "gpt5.4")
+                || gpt5_token_matches(&m, "gpt-5.1")
+                || gpt5_token_matches(&m, "gpt5.1")
+                || gpt5_base_matches(&m, "gpt-5")
+                || gpt5_base_matches(&m, "gpt5");
+            if is_gpt5 {
+                return openai_result(&m);
+            }
+            if !m.is_empty() {
+                // Concrete non-claude, non-gpt5: MLflow path → all-except-max.
+                return openai_result(&m);
+            }
+            // Blank model: route unknown, all-7.
+            return (ALL_7.to_vec(), Some("medium"));
+        }
+        if p == "databricks" {
+            return openai_result(&m);
+        }
+        // openai-compat, unknown, empty → all-7, default medium.
+        (ALL_7.to_vec(), Some("medium"))
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FixtureEntry {
+        note: Option<String>,
+        provider: String,
+        model: String,
+        #[serde(rename = "validValues")]
+        valid_values: Vec<String>,
+        #[serde(rename = "defaultValue")]
+        default_value: Option<String>,
+    }
+
+    #[test]
+    fn effort_table_fixture_matches_rust_implementation() {
+        let fixture_json =
+            include_str!("../../../desktop/src/features/agents/ui/effortTable.fixture.json");
+        let entries: Vec<FixtureEntry> =
+            serde_json::from_str(fixture_json).expect("fixture must be valid JSON");
+
+        assert!(
+            !entries.is_empty(),
+            "fixture must contain at least one entry"
+        );
+
+        for entry in &entries {
+            let label = entry.note.as_deref().unwrap_or(entry.model.as_str());
+            let (valid_values, default_value) =
+                valid_effort_values_for_provider_model(&entry.provider, &entry.model);
+
+            let expected: Vec<&str> = entry.valid_values.iter().map(String::as_str).collect();
+            assert_eq!(
+                valid_values, expected,
+                "validValues mismatch for fixture entry \"{label}\" \
+                 (provider={}, model={}): Rust side has {valid_values:?}, \
+                 fixture expects {expected:?}",
+                entry.provider, entry.model,
+            );
+
+            let expected_default: Option<&str> = entry.default_value.as_deref();
+            assert_eq!(
+                default_value, expected_default,
+                "defaultValue mismatch for fixture entry \"{label}\" \
+                 (provider={}, model={}): Rust side has {default_value:?}, \
+                 fixture expects {expected_default:?}",
+                entry.provider, entry.model,
             );
         }
     }

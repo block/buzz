@@ -39,6 +39,14 @@ test("commit detail opens from the commits feed with a diff", async ({
   const commitRows = page.getByTestId("project-activity-feed-item");
   await expect(commitRows.first()).toBeVisible({ timeout: 10_000 });
 
+  // GitHub-style feed: commits grouped under a date header with a hash cell.
+  await expect(page.getByText(/^Commits on /).first()).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({
+    fullPage: false,
+    path: `${SHOTS}/02-commits-feed.png`,
+  });
+
   // Open the newest commit via its subject button.
   await commitRows
     .first()
@@ -69,18 +77,16 @@ test("commit detail opens from the commits feed with a diff", async ({
   });
 
   // Breadcrumb category segment steps back to the commits feed.
-  await page.getByRole("button", { name: "Commit", exact: true }).click();
+  await page
+    .getByRole("navigation", { name: "Project breadcrumb" })
+    .getByRole("button", { name: "Commits", exact: true })
+    .click();
   await expect(commitRows.first()).toBeVisible();
 
-  // The back arrow also steps back one level (detail → project page),
-  // not all the way to the projects overview.
-  await commitRows
-    .first()
-    .getByRole("button", { name: /Add Trello board workflow details/ })
-    .click();
-  await expect(page.getByText("Commit from")).toBeVisible();
-  await page.getByRole("button", { name: "Back to buzz" }).click();
-  await expect(commitRows.first()).toBeVisible();
+  // The commits feed itself gets a grayed sub-tab crumb.
+  await expect(
+    page.getByRole("navigation", { name: "Project breadcrumb" }),
+  ).toContainText("Commits");
 
   // The project-name segment goes to the project home (Overview tab).
   await commitRows
@@ -103,4 +109,57 @@ test("commit detail opens from the commits feed with a diff", async ({
     .getByRole("button", { name: "Projects", exact: true })
     .click();
   await expect(projectEntry).toBeVisible();
+});
+
+test("pull request and issue feeds share the commit row structure", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+
+  const projectEntry = page
+    .locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    )
+    .first();
+  await expect(projectEntry).toBeVisible({ timeout: 10_000 });
+  await projectEntry.click();
+
+  // PR rows use the shared feed row: title button + #id cluster cell.
+  await page.getByRole("tab", { name: "PRs" }).click();
+  const prRows = page.getByTestId("project-pull-request-row");
+  await expect(prRows.first()).toBeVisible({ timeout: 10_000 });
+  await expect(
+    prRows.first().getByRole("button", { name: /^#/ }),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({ fullPage: false, path: `${SHOTS}/03-prs-feed.png` });
+
+  // The #id cell opens the PR detail, same as clicking the title.
+  await prRows.first().getByRole("button", { name: /^#/ }).click();
+  await expect(
+    page.getByRole("navigation", { name: "Project breadcrumb" }),
+  ).toContainText("PRs");
+
+  // Step back to the feed so the workspace tabs are available again.
+  await page
+    .getByRole("navigation", { name: "Project breadcrumb" })
+    .getByRole("button", { name: "PRs", exact: true })
+    .click();
+  await expect(prRows.first()).toBeVisible();
+
+  // Issue rows share the same structure.
+  await page.getByRole("tab", { name: "Issues" }).click();
+  const issueRows = page.getByTestId("project-issue-row");
+  await expect(issueRows.first()).toBeVisible({ timeout: 10_000 });
+  await expect(
+    issueRows.first().getByRole("button", { name: /^#/ }),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({
+    fullPage: false,
+    path: `${SHOTS}/04-issues-feed.png`,
+  });
 });

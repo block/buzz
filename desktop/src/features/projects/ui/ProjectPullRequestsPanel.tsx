@@ -2,7 +2,9 @@ import {
   Check,
   GitMerge,
   GitPullRequest,
+  GitPullRequestDraft,
   MessageSquare,
+  UserPlus,
   X,
 } from "lucide-react";
 import * as React from "react";
@@ -14,10 +16,32 @@ import {
   type ProjectPullRequest,
   useCreateProjectPullRequestCommentMutation,
 } from "@/features/projects/hooks";
+import {
+  useApproveProjectPullRequestMutation,
+  useRequestProjectPullRequestReviewMutation,
+  useUpdateProjectPullRequestStatusMutation,
+} from "@/features/projects/pullRequestReviews";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { Button } from "@/shared/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { Markdown } from "@/shared/ui/markdown";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  ProjectFeedRow,
+  ProjectFeedRowCluster,
+  ProjectFeedRowMonoCell,
+} from "./ProjectFeedRow";
+import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 
 function compactDate(createdAt: number) {
@@ -134,6 +158,7 @@ function PullRequestRow({
   profiles?: UserProfileLookup;
   pullRequest: ProjectPullRequest;
 }) {
+  const authorProfile = profileForPubkey(pullRequest.author, profiles);
   const authorLabel = labelForPubkey(pullRequest.author, profiles);
   const StatusIcon =
     pullRequest.status === "Closed" || pullRequest.status === "Draft"
@@ -142,46 +167,191 @@ function PullRequestRow({
   const statusClassName = pullRequestStatusClassName(pullRequest.status);
 
   return (
-    <button
-      className="flex w-full min-w-0 items-start gap-3 p-3 text-left transition-colors hover:bg-muted/30 focus-visible:bg-muted/30 focus-visible:outline-hidden"
-      onClick={onOpen}
-      type="button"
-    >
-      <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-        <GitPullRequest className="h-5 w-5" />
-      </div>
-      <div className="min-w-0 flex-1 space-y-0.5">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <p className="truncate text-sm font-semibold leading-5 text-foreground">
-            {pullRequest.title}
-          </p>
-          <StatusIcon className={`h-3.5 w-3.5 shrink-0 ${statusClassName}`} />
-        </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
-          <span>#{pullRequest.id.slice(0, 8)}</span>
+    <ProjectFeedRow
+      meta={
+        <>
+          <ProfileIdentityButton
+            avatarClassName="shrink-0"
+            avatarSize="xs"
+            avatarUrl={authorProfile?.avatarUrl ?? null}
+            isAgent={authorProfile?.isAgent === true}
+            label={authorLabel}
+            pubkey={pullRequest.author}
+            showLabel={false}
+          />
+          <span className="truncate font-medium text-foreground/80">
+            {authorLabel}
+          </span>
           <span>opened {relativeOpenedAt(pullRequest.createdAt)}</span>
-          <span>by {authorLabel}</span>
-          <span className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs">
+          <span className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs">
             Member
           </span>
           <span>·</span>
           <span>{pullRequest.status}</span>
-        </div>
-      </div>
-      {pullRequest.comments.length > 0 ? (
-        <span className="mt-1 flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-          <MessageSquare className="h-3.5 w-3.5" />
-          {pullRequest.comments.length}
-        </span>
-      ) : null}
-    </button>
+        </>
+      }
+      onOpen={onOpen}
+      statusIcon={
+        <StatusIcon className={`h-3.5 w-3.5 shrink-0 ${statusClassName}`} />
+      }
+      testId="project-pull-request-row"
+      title={pullRequest.title}
+      trailing={
+        <>
+          {pullRequest.comments.length > 0 ? (
+            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+              <MessageSquare className="h-3.5 w-3.5" />
+              {pullRequest.comments.length}
+            </span>
+          ) : null}
+          <ProjectFeedRowCluster>
+            <ProjectFeedRowMonoCell
+              label={`#${pullRequest.id.slice(0, 8)}`}
+              onClick={onOpen}
+              title="View pull request"
+            />
+          </ProjectFeedRowCluster>
+        </>
+      }
+    />
   );
 }
 
 export type PullRequestPanelMode = "conversation" | "commits" | "checks";
 
-/** GitHub-style PR title + status line, rendered above the PR tab row. */
-export function PullRequestDetailHeader({
+/** Candidate reviewers: project owner, contributors, and PR recipients —
+ * minus the PR author and anyone already requested. */
+function reviewerCandidates(project: Project, pullRequest: ProjectPullRequest) {
+  const requested = new Set(pullRequest.reviewers);
+  const author = normalizePubkey(pullRequest.author);
+  return [
+    ...new Set(
+      [project.owner, ...project.contributors, ...pullRequest.recipients].map(
+        normalizePubkey,
+      ),
+    ),
+  ].filter((pubkey) => pubkey !== author && !requested.has(pubkey));
+}
+
+function PullRequestReviewersRow({
+  canRequest,
+  profiles,
+  project,
+  pullRequest,
+}: {
+  canRequest: boolean;
+  profiles?: UserProfileLookup;
+  project: Project;
+  pullRequest: ProjectPullRequest;
+}) {
+  const requestReviewMutation =
+    useRequestProjectPullRequestReviewMutation(project);
+  const candidates = reviewerCandidates(project, pullRequest);
+  const approvedBy = new Set(
+    pullRequest.approvals.map((approval) => normalizePubkey(approval.author)),
+  );
+
+  const handleRequest = React.useCallback(
+    async (pubkey: string) => {
+      try {
+        await requestReviewMutation.mutateAsync({
+          pullRequest,
+          reviewers: [pubkey],
+          reviewerLabel: labelForPubkey(pubkey, profiles),
+        });
+        toast.success("Review requested.");
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to request review.",
+        );
+      }
+    },
+    [profiles, pullRequest, requestReviewMutation],
+  );
+
+  if (pullRequest.reviewers.length === 0 && !canRequest) {
+    return null;
+  }
+
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5 px-1 text-xs text-muted-foreground">
+      <span className="font-medium">Reviewers</span>
+      {pullRequest.reviewers.map((pubkey) => {
+        const profile = profileForPubkey(pubkey, profiles);
+        const label = labelForPubkey(pubkey, profiles);
+        const hasApproved = approvedBy.has(normalizePubkey(pubkey));
+        return (
+          <Tooltip key={pubkey}>
+            <TooltipTrigger asChild>
+              <span className="relative inline-flex">
+                <UserAvatar
+                  accent={profile?.isAgent === true}
+                  avatarUrl={profile?.avatarUrl ?? null}
+                  displayName={label}
+                  size="xs"
+                />
+                {hasApproved ? (
+                  <span className="-right-1 -bottom-1 absolute flex h-3.5 w-3.5 items-center justify-center rounded-full bg-green-600 text-white ring-2 ring-background">
+                    <Check className="h-2.5 w-2.5" />
+                  </span>
+                ) : null}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              {label}
+              {hasApproved ? " — approved" : " — review requested"}
+            </TooltipContent>
+          </Tooltip>
+        );
+      })}
+      {canRequest && candidates.length > 0 ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              className="h-6 gap-1 px-2 text-2xs text-muted-foreground hover:text-foreground"
+              disabled={requestReviewMutation.isPending}
+              size="xs"
+              type="button"
+              variant="outline"
+            >
+              <UserPlus className="h-3 w-3" />
+              Request
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="min-w-52">
+            <DropdownMenuLabel>Request a review</DropdownMenuLabel>
+            {candidates.map((pubkey) => {
+              const profile = profileForPubkey(pubkey, profiles);
+              const label = labelForPubkey(pubkey, profiles);
+              return (
+                <DropdownMenuItem
+                  key={pubkey}
+                  onSelect={() => {
+                    void handleRequest(pubkey);
+                  }}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <UserAvatar
+                      accent={profile?.isAgent === true}
+                      avatarUrl={profile?.avatarUrl ?? null}
+                      displayName={label}
+                      size="xs"
+                    />
+                    <span className="truncate">{label}</span>
+                  </span>
+                </DropdownMenuItem>
+              );
+            })}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
+    </div>
+  );
+}
+
+/** GitHub-style review box rendered in the conversation flow, above the
+ * comment composer: reviewers on top, review state + actions below. */
+function PullRequestReviewCard({
   profiles,
   project,
   pullRequest,
@@ -190,22 +360,236 @@ export function PullRequestDetailHeader({
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
+  const identityQuery = useIdentityQuery();
+  const statusMutation = useUpdateProjectPullRequestStatusMutation(project);
+  const approveMutation = useApproveProjectPullRequestMutation(project);
+
+  const viewerPubkey = identityQuery.data?.pubkey ?? null;
+  const viewer = viewerPubkey ? normalizePubkey(viewerPubkey) : null;
+  const isAuthor = viewer === normalizePubkey(pullRequest.author);
+  const isOwner = viewer === normalizePubkey(project.owner);
+  const canChangeStatus = Boolean(viewer) && (isAuthor || isOwner);
+  const canRequestReview = canChangeStatus;
+  const hasApproved = Boolean(
+    viewer &&
+      pullRequest.approvals.some(
+        (approval) => normalizePubkey(approval.author) === viewer,
+      ),
+  );
+  const canApprove =
+    Boolean(viewer) &&
+    !isAuthor &&
+    !hasApproved &&
+    (pullRequest.status === "Open" || pullRequest.status === "Draft");
+
+  const handleStatusChange = React.useCallback(
+    async (status: "open" | "draft") => {
+      try {
+        await statusMutation.mutateAsync({ pullRequest, status });
+        toast.success(
+          status === "draft"
+            ? "Converted to draft."
+            : "Marked as ready for review.",
+        );
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to update status.",
+        );
+      }
+    },
+    [pullRequest, statusMutation],
+  );
+
+  const handleApprove = React.useCallback(async () => {
+    try {
+      await approveMutation.mutateAsync({ pullRequest });
+      toast.success("Pull request approved.");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to approve.",
+      );
+    }
+  }, [approveMutation, pullRequest]);
+
+  const approvalCount = pullRequest.approvals.length;
+  const isDraft = pullRequest.status === "Draft";
+  const reviewState = isDraft
+    ? "This pull request is still a work in progress."
+    : approvalCount > 0
+      ? `Approved by ${pluralize(approvalCount, "reviewer")}.`
+      : pullRequest.reviewers.length > 0
+        ? "Review requested — no approvals yet."
+        : "No reviews yet.";
+  const reviewStateDetail = isDraft
+    ? "Draft pull requests cannot be merged."
+    : approvalCount === 0
+      ? "Approvals from reviewers will show up here."
+      : null;
+
+  return (
+    <div className="space-y-2.5">
+      <PullRequestReviewersRow
+        canRequest={canRequestReview}
+        profiles={profiles}
+        project={project}
+        pullRequest={pullRequest}
+      />
+      <div
+        className={`min-w-0 space-y-2.5 px-3 py-2.5 ${
+          isDraft
+            ? "bg-muted/40"
+            : approvalCount > 0
+              ? "bg-green-600/10 dark:bg-green-500/10"
+              : "border-green-600/35 border-l-2 bg-green-600/[0.04] pl-3 dark:border-green-500/35 dark:bg-green-500/[0.06]"
+        }`}
+      >
+        <div className="flex min-w-0 items-start gap-2">
+          {isDraft ? (
+            <GitPullRequestDraft className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : approvalCount > 0 ? (
+            <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-green-600 text-white">
+              <Check className="h-3 w-3" />
+            </span>
+          ) : (
+            <GitPullRequest className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
+          <div className="min-w-0 flex-1">
+            <p
+              className={`text-sm font-medium ${
+                approvalCount > 0
+                  ? "text-green-700 dark:text-green-400"
+                  : "text-foreground"
+              }`}
+            >
+              {reviewState}
+            </p>
+            {reviewStateDetail ? (
+              <p className="text-xs text-muted-foreground">
+                {reviewStateDetail}
+              </p>
+            ) : null}
+          </div>
+        </div>
+        {hasApproved || canApprove || (canChangeStatus && isDraft) ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {hasApproved ? (
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-green-600/40 px-2.5 py-1 text-xs font-medium text-green-600 dark:text-green-500">
+                <Check className="h-3.5 w-3.5" />
+                Approved
+              </span>
+            ) : null}
+            {canApprove ? (
+              <Button
+                className="h-8 gap-1.5 bg-green-600 px-3.5 text-white shadow-sm hover:bg-green-700"
+                disabled={approveMutation.isPending}
+                onClick={() => {
+                  void handleApprove();
+                }}
+                size="xs"
+                type="button"
+              >
+                <Check className="h-3.5 w-3.5" />
+                Approve
+              </Button>
+            ) : null}
+            {canChangeStatus && isDraft ? (
+              <Button
+                className="h-7 gap-1.5 px-3"
+                disabled={statusMutation.isPending}
+                onClick={() => {
+                  void handleStatusChange("open");
+                }}
+                size="xs"
+                type="button"
+                variant="secondary"
+              >
+                <GitPullRequest className="h-3.5 w-3.5" />
+                Ready for review
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      {canChangeStatus && pullRequest.status === "Open" ? (
+        <p className="px-1 text-xs text-muted-foreground">
+          Still in progress?{" "}
+          <button
+            className="font-medium underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
+            disabled={statusMutation.isPending}
+            onClick={() => {
+              void handleStatusChange("draft");
+            }}
+            type="button"
+          >
+            Convert to draft
+          </button>
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** GitHub-style PR title line, rendered as the top section of the PR detail
+ * card. Status, branches, and dates live in the right-hand meta rail. */
+export function PullRequestDetailHeader({
+  profiles,
+  pullRequest,
+}: {
+  profiles?: UserProfileLookup;
+  pullRequest: ProjectPullRequest;
+}) {
+  const authorProfile = profileForPubkey(pullRequest.author, profiles);
+  const authorLabel = labelForPubkey(pullRequest.author, profiles);
+
+  return (
+    <header className="min-w-0 space-y-2 p-4 pb-2">
+      <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <GitPullRequest className="h-3.5 w-3.5" />
+        Pull request from {authorLabel}
+      </p>
+      <div className="flex min-w-0 items-center gap-3">
+        <ProfileIdentityButton
+          avatarClassName="shrink-0"
+          avatarSize="md"
+          avatarUrl={authorProfile?.avatarUrl ?? null}
+          isAgent={authorProfile?.isAgent === true}
+          label={authorLabel}
+          pubkey={pullRequest.author}
+          showLabel={false}
+        />
+        <h3 className="line-clamp-2 min-w-0 flex-1 text-base font-semibold text-foreground">
+          {pullRequest.title}{" "}
+          <span className="font-normal text-muted-foreground">
+            #{pullRequest.id.slice(0, 8)}
+          </span>
+        </h3>
+      </div>
+    </header>
+  );
+}
+
+/** Right-hand meta column for the PR detail view: status, author, branches,
+ * dates, and review actions — keeps the conversation column focused. */
+export function PullRequestMetaRail({
+  profiles,
+  project,
+  pullRequest,
+}: {
+  profiles?: UserProfileLookup;
+  project: Project;
+  pullRequest: ProjectPullRequest;
+}) {
+  const authorProfile = profileForPubkey(pullRequest.author, profiles);
   const authorLabel = labelForPubkey(pullRequest.author, profiles);
   const targetBranch = project.defaultBranch || "default branch";
   const sourceBranch = pullRequest.branchName || "unknown branch";
   const commitCount = Math.max(1, pullRequest.updateCount + 1);
 
   return (
-    <div className="min-w-0 space-y-2.5">
-      <h3 className="min-w-0 text-xl font-semibold leading-snug text-foreground">
-        {pullRequest.title}{" "}
-        <span className="font-normal text-muted-foreground">
-          #{pullRequest.id.slice(0, 8)}
-        </span>
-      </h3>
-      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1.5 text-xs leading-4 text-muted-foreground">
+    <aside className="min-w-0 space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
+      <OverviewRailSection title="Status">
         <span
-          className={`mr-1 inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium text-white ${pullRequestStatusBadgeClassName(pullRequest.status)}`}
+          className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-white ${pullRequestStatusBadgeClassName(pullRequest.status)}`}
         >
           {pullRequest.status === "Merged" ? (
             <GitMerge className="h-3.5 w-3.5" />
@@ -214,21 +598,55 @@ export function PullRequestDetailHeader({
           )}
           {pullRequest.status}
         </span>
-        <span className="font-medium text-foreground">{authorLabel}</span>
-        <span>wants to merge {pluralize(commitCount, "commit")} into</span>
-        <code className="rounded-md bg-muted px-1.5 py-0.5 text-2xs text-foreground">
-          {targetBranch}
-        </code>
-        <span>from</span>
-        <code className="rounded-md bg-muted px-1.5 py-0.5 text-2xs text-foreground">
-          {sourceBranch}
-        </code>
-        <span>·</span>
-        <span>opened {compactDate(pullRequest.createdAt)}</span>
-        <span>·</span>
-        <span>updated {compactDate(pullRequest.updatedAt)}</span>
-      </div>
-    </div>
+      </OverviewRailSection>
+      <OverviewRailSection title="Author">
+        <ProfileIdentityButton
+          align="center"
+          avatarSize="xs"
+          avatarUrl={authorProfile?.avatarUrl ?? null}
+          isAgent={authorProfile?.isAgent === true}
+          label={authorLabel}
+          pubkey={pullRequest.author}
+        />
+      </OverviewRailSection>
+      <OverviewRailSection title="Branches">
+        <div className="space-y-1.5 text-xs text-muted-foreground">
+          <p>Merges {pluralize(commitCount, "commit")}</p>
+          <p className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <code className="rounded-sm bg-muted px-1.5 py-0.5 text-2xs text-foreground">
+              {sourceBranch}
+            </code>
+            <span aria-hidden>→</span>
+            <code className="rounded-sm bg-muted px-1.5 py-0.5 text-2xs text-foreground">
+              {targetBranch}
+            </code>
+          </p>
+        </div>
+      </OverviewRailSection>
+      <OverviewRailSection title="Activity">
+        <dl className="space-y-1.5 text-xs text-muted-foreground">
+          <div className="flex items-center justify-between gap-3">
+            <dt>Opened</dt>
+            <dd className="font-medium text-foreground">
+              {compactDate(pullRequest.createdAt)}
+            </dd>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <dt>Updated</dt>
+            <dd className="font-medium text-foreground">
+              {compactDate(pullRequest.updatedAt)}
+            </dd>
+          </div>
+        </dl>
+      </OverviewRailSection>
+      <OverviewRailSection title="Review">
+        <PullRequestReviewCard
+          profiles={profiles}
+          project={project}
+          pullRequest={pullRequest}
+        />
+      </OverviewRailSection>
+    </aside>
   );
 }
 
@@ -322,11 +740,9 @@ function PullRequestDetail({
 
   if (mode === "checks") {
     return (
-      <div className="p-4">
-        <div className="rounded-lg border border-border/50 bg-background/45 p-4 text-sm text-muted-foreground">
-          No checks have been reported for this pull request yet.
-        </div>
-      </div>
+      <p className="p-4 text-sm text-muted-foreground">
+        No checks have been reported for this pull request yet.
+      </p>
     );
   }
 
@@ -378,31 +794,55 @@ function PullRequestDetail({
         </h4>
         {pullRequest.comments.length > 0 ? (
           <div className="space-y-3">
-            {pullRequest.comments.map((item) => (
-              <article
-                className="rounded-lg border border-border/50 bg-background/45 p-3"
-                key={item.id}
-              >
-                <div className="mb-2">
-                  <AuthorIdentity
-                    profiles={profiles}
-                    pubkey={item.author}
-                    role={compactDate(item.createdAt)}
+            {pullRequest.comments.map((item) => {
+              // Approvals and review requests render as compact timeline
+              // rows (GitHub-style) rather than full comment cards.
+              if (item.isApproval || item.isReviewRequest) {
+                return (
+                  <div
+                    className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground"
+                    key={item.id}
+                  >
+                    {item.isApproval ? (
+                      <Check className="h-3.5 w-3.5 shrink-0 text-green-600 dark:text-green-500" />
+                    ) : (
+                      <UserPlus className="h-3.5 w-3.5 shrink-0" />
+                    )}
+                    <span className="font-medium text-foreground">
+                      {labelForPubkey(item.author, profiles)}
+                    </span>
+                    <span className="min-w-0 truncate">
+                      {item.isApproval
+                        ? "approved these changes"
+                        : item.content.trim() || "requested a review"}
+                    </span>
+                    <span>· {compactDate(item.createdAt)}</span>
+                  </div>
+                );
+              }
+              return (
+                <article key={item.id}>
+                  <div className="mb-2">
+                    <AuthorIdentity
+                      profiles={profiles}
+                      pubkey={item.author}
+                      role={compactDate(item.createdAt)}
+                    />
+                  </div>
+                  <Markdown
+                    className="text-sm"
+                    content={item.content}
+                    interactive={false}
                   />
-                </div>
-                <Markdown
-                  className="text-sm"
-                  content={item.content}
-                  interactive={false}
-                />
-              </article>
-            ))}
+                </article>
+              );
+            })}
           </div>
         ) : (
           <p className="text-sm text-muted-foreground">No comments yet.</p>
         )}
         <ForumComposer
-          className="rounded-lg border border-border/50 bg-background/45"
+          className="border border-border/60 bg-background/45"
           disabled={commentMutation.isPending}
           isSending={commentMutation.isPending}
           members={members}

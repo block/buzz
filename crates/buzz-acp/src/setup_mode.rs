@@ -43,6 +43,33 @@ use nostr::EventId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// ── Availability mirror ────────────────────────────────────────────────────────
+
+/// Granular install/auth state for a CLI-backed ACP harness.
+///
+/// Mirrors the desktop `AcpAvailabilityStatus` enum (and the FE
+/// `AcpAvailabilityStatus` type in `api/types.ts`). Carried on
+/// `RequirementPayload::CliLogin` so the sentinel JSON the desktop parses
+/// contains the exact wire literals the FE expects.
+///
+/// buzz-acp is a separate crate and must NOT depend on desktop types —
+/// this explicit mirror is the correct pattern (same as the rest of
+/// `RequirementPayload` as "the Rust counterpart to desktop's `Requirement`").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AcpAvailabilityStatus {
+    /// Adapter + CLI both present; may still need login.
+    Available,
+    /// ACP adapter binary missing; underlying CLI may be present.
+    AdapterMissing,
+    /// ACP adapter binary is from the deprecated package (< 1.0). Reinstall required.
+    AdapterOutdated,
+    /// CLI binary missing; ACP adapter may be present.
+    CliMissing,
+    /// Neither adapter nor CLI found.
+    NotInstalled,
+}
+
 use crate::{
     author_allowed,
     config::Config,
@@ -72,7 +99,22 @@ pub(crate) enum RequirementPayload {
     CliLogin {
         probe_args: Vec<String>,
         setup_copy: String,
+        /// Granular install/auth state — determines copy and CTA routing on
+        /// the desktop card. `Available` means tooling is present but login
+        /// is needed; the other three variants mean the tooling itself is
+        /// missing and the probe was skipped.
+        availability: AcpAvailabilityStatus,
     },
+    /// The CLI is installed but its config file could not be parsed.
+    /// Informational only — no in-app action can fix an external config file.
+    CliConfigInvalid {
+        probe_args: Vec<String>,
+        setup_copy: String,
+        /// One-line stderr excerpt identifying the parse error.
+        diagnostic: String,
+    },
+    /// Git for Windows is missing; open Doctor for the installation guide.
+    GitBash,
 }
 
 impl RequirementPayload {
@@ -85,7 +127,65 @@ impl RequirementPayload {
             RequirementPayload::EnvKey { key } => {
                 format!("set `{}` in Edit Agent → Environment variables", key)
             }
-            RequirementPayload::CliLogin { setup_copy, .. } => setup_copy.clone(),
+            RequirementPayload::CliLogin {
+                setup_copy,
+                availability,
+                probe_args,
+            } => match availability {
+                AcpAvailabilityStatus::Available => setup_copy.clone(),
+                AcpAvailabilityStatus::AdapterMissing => {
+                    let harness = probe_args
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("the agent");
+                    format!(
+                        "install the {} ACP adapter (open Doctor in Settings to diagnose)",
+                        harness
+                    )
+                }
+                AcpAvailabilityStatus::AdapterOutdated => {
+                    let harness = probe_args
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("the agent");
+                    format!(
+                        "reinstall the {} ACP adapter — the installed version is outdated (open Doctor in Settings to diagnose)",
+                        harness
+                    )
+                }
+                AcpAvailabilityStatus::CliMissing => {
+                    let harness = probe_args
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("the agent");
+                    format!(
+                        "install {} CLI (open Doctor in Settings to diagnose)",
+                        harness
+                    )
+                }
+                AcpAvailabilityStatus::NotInstalled => {
+                    let harness = probe_args
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("the agent");
+                    format!("install {} (open Doctor in Settings to diagnose)", harness)
+                }
+            },
+            RequirementPayload::CliConfigInvalid {
+                probe_args,
+                diagnostic,
+                ..
+            } => {
+                let cli = probe_args.first().map(String::as_str).unwrap_or("the CLI");
+                let config_file = format!("~/.{}/config.toml", cli);
+                format!(
+                    "{} is invalid: {} — fix the config and restart the agent",
+                    config_file, diagnostic
+                )
+            }
+            RequirementPayload::GitBash => {
+                "install Git for Windows (open Doctor in Settings to diagnose)".to_string()
+            }
         }
     }
 }
@@ -150,10 +250,38 @@ impl SetupPayload {
                 .map(|r| format!("- {}", r.instruction()))
                 .collect();
 
+            let has_doctor_requirement = self
+                .requirements
+                .iter()
+                .any(|r| matches!(r, RequirementPayload::GitBash));
+            let all_external = self
+                .requirements
+                .iter()
+                .all(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
+            let any_external = self
+                .requirements
+                .iter()
+                .any(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
+
+            let footer = if has_doctor_requirement {
+                "Open Doctor in the Buzz app, install Git for Windows, then re-check and restart the agent.".to_string()
+            } else if all_external {
+                // All requirements are external config files — Edit Agent cannot
+                // help. Don't send the user there.
+                "Fix the config file(s) and restart the agent.".to_string()
+            } else if any_external {
+                // Mixed: some Buzz-managed fields, some external config.
+                "Open Edit Agent in the Buzz app for the Buzz-managed fields; fix the external CLI config files manually and restart the agent.".to_string()
+            } else {
+                // All Buzz-managed — original footer unchanged.
+                "Open Edit Agent in the Buzz app to set these.".to_string()
+            };
+
             format!(
-                "**{}** needs configuration before it can respond:\n{}\n\nOpen Edit Agent in the Buzz app to set these.",
+                "**{}** needs configuration before it can respond:\n{}\n\n{}",
                 self.agent_name,
                 steps.join("\n"),
+                footer,
             )
         };
 
@@ -552,6 +680,18 @@ mod tests {
     }
 
     #[test]
+    fn setup_payload_deserializes_git_bash_requirement() {
+        let payload: SetupPayload = serde_json::from_str(
+            r#"{"agent_name":"Buzz Agent","agent_pubkey":"test","requirements":[{"surface":"git_bash"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            payload.requirements.as_slice(),
+            [RequirementPayload::GitBash]
+        ));
+    }
+
+    #[test]
     fn nudge_body_names_all_requirements() {
         let payload = SetupPayload {
             agent_name: "Fizz".to_string(),
@@ -588,7 +728,8 @@ mod tests {
                     "login".to_string(),
                     "status".to_string(),
                 ],
-                setup_copy: "run `codex login --with-api-key`".to_string(),
+                setup_copy: "run `codex login`".to_string(),
+                availability: AcpAvailabilityStatus::Available,
             }],
         };
         let body = payload.nudge_body();
@@ -612,6 +753,85 @@ mod tests {
         let body = payload.nudge_body();
         assert!(body.contains("Fizz"));
         assert!(body.contains("needs configuration"));
+    }
+
+    // ── config-invalid footer tests ────────────────────────────────────────────
+
+    fn make_cli_config_invalid(cli: &str, diagnostic: &str) -> RequirementPayload {
+        RequirementPayload::CliConfigInvalid {
+            probe_args: vec![cli.to_string()],
+            setup_copy: String::new(),
+            diagnostic: diagnostic.to_string(),
+        }
+    }
+
+    #[test]
+    fn nudge_body_all_config_invalid_omits_edit_agent_footer() {
+        // An all-CliConfigInvalid requirements list must NOT send users to
+        // Edit Agent (which cannot fix an external config file).
+        let payload = SetupPayload {
+            agent_name: "Codex".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![make_cli_config_invalid(
+                "codex",
+                "unknown variant `ultra` for field `model_reasoning_effort`",
+            )],
+        };
+        let body = payload.nudge_body();
+        assert!(
+            !body.contains("Open Edit Agent"),
+            "all-config-invalid nudge must not mention Open Edit Agent; got: {body:?}"
+        );
+        assert!(
+            body.contains("config.toml"),
+            "nudge must name the config file; got: {body:?}"
+        );
+        assert!(
+            body.contains("restart the agent"),
+            "nudge must include restart guidance; got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn nudge_body_mixed_requirements_uses_split_footer() {
+        // Mixed list: one Buzz-managed env key + one external config invalid.
+        // Footer must address both sides.
+        let payload = SetupPayload {
+            agent_name: "Codex".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![
+                RequirementPayload::EnvKey {
+                    key: "SOME_API_KEY".to_string(),
+                },
+                make_cli_config_invalid("codex", "unknown variant `gpt-5.6-sol`"),
+            ],
+        };
+        let body = payload.nudge_body();
+        assert!(
+            body.contains("Open Edit Agent"),
+            "mixed nudge must mention Open Edit Agent for managed fields; got: {body:?}"
+        );
+        assert!(
+            body.contains("fix the external CLI config"),
+            "mixed nudge must mention fixing the external config; got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn nudge_body_all_buzz_managed_retains_original_footer() {
+        // Pure Buzz-managed requirements → original "Open Edit Agent" footer unchanged.
+        let payload = SetupPayload {
+            agent_name: "Fizz".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![RequirementPayload::EnvKey {
+                key: "ANTHROPIC_API_KEY".to_string(),
+            }],
+        };
+        let body = payload.nudge_body();
+        assert!(
+            body.contains("Open Edit Agent in the Buzz app to set these."),
+            "all-managed nudge must use the original Edit Agent footer; got: {body:?}"
+        );
     }
 
     // ── sentinel block tests ───────────────────────────────────────────────────
@@ -655,6 +875,7 @@ mod tests {
                 RequirementPayload::CliLogin {
                     probe_args: vec!["codex".to_string(), "login".to_string()],
                     setup_copy: "run `codex login`".to_string(),
+                    availability: AcpAvailabilityStatus::Available,
                 },
             ],
         };
@@ -764,6 +985,96 @@ mod tests {
         assert!(
             !second,
             "replay of the same event-id must be rejected (dedup)"
+        );
+    }
+
+    // ── availability round-trip tests ─────────────────────────────────────────
+    //
+    // These tests prove the desktop→buzz-acp→sentinel path preserves the
+    // `availability` field. They simulate what actually happens at runtime:
+    // desktop serializes a `cli_login` JSON blob → buzz-acp parses it via
+    // `from_raw_env_value` → `nudge_body()` re-serializes into the sentinel →
+    // the sentinel JSON is extracted and checked for the `availability` field.
+    //
+    // This guards the prior regression where `RequirementPayload::CliLogin`
+    // had no `availability` field, so serde silently dropped it during
+    // deserialization and the desktop card never rendered.
+
+    fn extract_sentinel_json(body: &str) -> String {
+        let fence_open = "```buzz:config-nudge\n";
+        let fence_close = "\n```";
+        let start = body
+            .rfind(fence_open)
+            .expect("sentinel open fence not found")
+            + fence_open.len();
+        let end = body[start..]
+            .rfind(fence_close)
+            .expect("sentinel close fence not found")
+            + start;
+        body[start..end].to_string()
+    }
+
+    fn make_desktop_cli_login_json(availability: &str) -> String {
+        // Simulate the JSON desktop's runtime.rs emits — a full SetupPayload
+        // with one cli_login requirement carrying the given availability state.
+        format!(
+            r#"{{"agent_name":"TestAgent","agent_pubkey":"aa","requirements":[{{"surface":"cli_login","probe_args":["claude"],"setup_copy":"run claude login","availability":"{availability}"}}]}}"#
+        )
+    }
+
+    #[test]
+    fn cli_login_availability_available_survives_sentinel_round_trip() {
+        let raw = make_desktop_cli_login_json("available");
+        let payload = SetupPayload::from_raw_env_value(Some(raw))
+            .unwrap()
+            .expect("must parse");
+        let body = payload.nudge_body();
+        let sentinel_json = extract_sentinel_json(&body);
+        assert!(
+            sentinel_json.contains(r#""availability":"available""#),
+            "sentinel must carry availability=available; got: {sentinel_json:?}"
+        );
+    }
+
+    #[test]
+    fn cli_login_availability_adapter_missing_survives_sentinel_round_trip() {
+        let raw = make_desktop_cli_login_json("adapter_missing");
+        let payload = SetupPayload::from_raw_env_value(Some(raw))
+            .unwrap()
+            .expect("must parse");
+        let body = payload.nudge_body();
+        let sentinel_json = extract_sentinel_json(&body);
+        assert!(
+            sentinel_json.contains(r#""availability":"adapter_missing""#),
+            "sentinel must carry availability=adapter_missing; got: {sentinel_json:?}"
+        );
+    }
+
+    #[test]
+    fn cli_login_availability_cli_missing_survives_sentinel_round_trip() {
+        let raw = make_desktop_cli_login_json("cli_missing");
+        let payload = SetupPayload::from_raw_env_value(Some(raw))
+            .unwrap()
+            .expect("must parse");
+        let body = payload.nudge_body();
+        let sentinel_json = extract_sentinel_json(&body);
+        assert!(
+            sentinel_json.contains(r#""availability":"cli_missing""#),
+            "sentinel must carry availability=cli_missing; got: {sentinel_json:?}"
+        );
+    }
+
+    #[test]
+    fn cli_login_availability_not_installed_survives_sentinel_round_trip() {
+        let raw = make_desktop_cli_login_json("not_installed");
+        let payload = SetupPayload::from_raw_env_value(Some(raw))
+            .unwrap()
+            .expect("must parse");
+        let body = payload.nudge_body();
+        let sentinel_json = extract_sentinel_json(&body);
+        assert!(
+            sentinel_json.contains(r#""availability":"not_installed""#),
+            "sentinel must carry availability=not_installed; got: {sentinel_json:?}"
         );
     }
 }

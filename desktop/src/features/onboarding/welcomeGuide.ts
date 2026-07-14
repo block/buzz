@@ -96,7 +96,7 @@ async function ensureWelcomeGuidePersonaActive() {
     (persona) => persona.id === WELCOME_GUIDE_PERSONA_ID,
   );
   if (!guidePersona) {
-    throw new Error(`${WELCOME_GUIDE_AGENT_NAME} persona not found.`);
+    throw new Error(`${WELCOME_GUIDE_AGENT_NAME} agent not found.`);
   }
   if (!guidePersona.isActive) {
     await setPersonaActive(WELCOME_GUIDE_PERSONA_ID, true);

@@ -198,6 +198,11 @@ jobs:
           fi
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
 
+      - name: Set DMG Finder label text size
+        env:
+          DMG_PATH: ${{ steps.unsigned.outputs.dmg }}
+        run: desktop/scripts/set-dmg-finder-text-size.sh "$DMG_PATH" 14
+
       - name: Codesign and Notarize
         id: codesign
         uses: block/apple-codesign-action@679535d1ab7c5a7c18e6f9afcba3464512cc3dde # v1.1.0
@@ -359,6 +364,11 @@ jobs:
           fi
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
 
+      - name: Set DMG Finder label text size
+        env:
+          DMG_PATH: ${{ steps.unsigned.outputs.dmg }}
+        run: desktop/scripts/set-dmg-finder-text-size.sh "$DMG_PATH" 14
+
       - name: Codesign and Notarize
         id: codesign
         uses: block/apple-codesign-action@679535d1ab7c5a7c18e6f9afcba3464512cc3dde # v1.1.0
@@ -445,42 +455,48 @@ jobs:
     name: Release Linux
     if: github.repository == 'block/buzz'
     runs-on: ubuntu-latest
+    # Digest-pinned like the SHA-pinned actions below; Renovate keeps it fresh.
+    container: ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
     needs: setup
     timeout-minutes: 60
     permissions:
       contents: write
+    env:
+      # AppImage tools (linuxdeploy, appimagetool) are themselves AppImages.
+      # Containers lack FUSE, so we must use the extract-and-run fallback.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    # This job runs in a container where the default run shell is dash;
+    # the AppImage steps below use bash-only syntax ([[ ]], mapfile, arrays).
+    defaults:
+      run:
+        shell: bash
     outputs:
       archive_name: ${{ steps.linux-artifacts.outputs.archive_name }}
       sig: ${{ steps.read-sig.outputs.sig }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
-          persist-credentials: false
-
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: desktop/src-tauri
-          lookup-only: true
-
-      - name: Install Tauri dependencies (Linux)
+      - name: Install system dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update \
+          # Must run first: bare ubuntu:22.04 ships without curl, wget, git, or
+          # ca-certificates. activate-hermit bootstraps via curl+HTTPS (needs
+          # both), and actions/checkout falls back to a REST tarball without git.
+          # Running as root — no sudo needed.
+          apt-get update \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 \
             -o Acquire::https::Timeout=30
-          sudo apt-get install -y --no-install-recommends \
+          apt-get install -y --no-install-recommends \
             -o Acquire::Retries=3 \
             -o Acquire::http::Timeout=30 \
             -o Acquire::https::Timeout=30 \
             -o DPkg::Lock::Timeout=120 \
             build-essential \
+            ca-certificates \
             curl \
+            desktop-file-utils \
             file \
+            git \
             libasound2-dev \
             libayatana-appindicator3-dev \
             libgtk-3-dev \
@@ -489,7 +505,73 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             patchelf \
-            wget
+            pkg-config \
+            squashfs-tools \
+            wget \
+            xdg-utils
+          # Install GitHub CLI — preinstalled on runners but absent in containers.
+          # wget and ca-certificates are now available from the step above.
+          mkdir -p -m 755 /etc/apt/keyrings
+          wget -q --tries=3 --timeout=30 -O /usr/share/keyrings/githubcli-archive-keyring.gpg \
+            https://cli.github.com/packages/githubcli-archive-keyring.gpg
+          # Pin the keyring like appimagetool below. If GitHub rotates the
+          # keyring this fails loudly — recompute and update the hash.
+          echo "6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b  /usr/share/keyrings/githubcli-archive-keyring.gpg" | sha256sum -c
+          chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y --no-install-recommends gh
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
+          persist-credentials: false
+
+      - name: Mark workspace safe for git (containerized job)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: desktop/src-tauri
+          lookup-only: true
+
+      - name: Install appimagetool
+        run: |
+          # Pin to an immutable release tag to avoid supply-chain drift from the
+          # mutable `continuous` tag. Tag: 1.9.1, asset: appimagetool-<arch>.AppImage
+          # (https://github.com/AppImage/appimagetool/releases/tag/1.9.1)
+          case "$(uname -m)" in
+            x86_64)  ARCH_SUFFIX="x86_64" ;;
+            aarch64) ARCH_SUFFIX="aarch64" ;;
+            *)
+              echo "::error::Unsupported architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          wget -q --tries=3 --timeout=30 -O /tmp/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${ARCH_SUFFIX}.AppImage"
+          # SHA256 integrity check. Refuse to run an unverified binary: if a new
+          # arch (e.g. aarch64) is enabled in CI, compute its hash and add it here.
+          if [[ "$ARCH_SUFFIX" == "x86_64" ]]; then
+            echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | sha256sum -c
+          else
+            echo "::error::No pinned SHA256 for appimagetool-${ARCH_SUFFIX} — add it before enabling this architecture"
+            exit 1
+          fi
+          install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
+          # appimagetool otherwise fetches the AppImage type2 runtime from the
+          # MUTABLE `continuous` tag at repack time — the runtime is the first
+          # code users execute, so pin it too. Tag: 20251108, hash is for the
+          # x86_64 asset (non-x86_64 already hard-fails above).
+          # (https://github.com/AppImage/type2-runtime/releases/tag/20251108)
+          wget -q --tries=3 --timeout=30 -O /tmp/appimage-runtime \
+            "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${ARCH_SUFFIX}"
+          echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  /tmp/appimage-runtime" | sha256sum -c
+          install -D -m 644 /tmp/appimage-runtime /usr/local/lib/appimage-runtime
+          echo "APPIMAGETOOL_RUNTIME_FILE=/usr/local/lib/appimage-runtime" >> "$GITHUB_ENV"
 
       - name: Install desktop dependencies
         run: just desktop-install-ci
@@ -518,6 +600,22 @@ jobs:
           BUZZ_UPDATER_PUBLIC_KEY: ${{ secrets.BUZZ_UPDATER_PUBLIC_KEY || secrets.SPROUT_UPDATER_PUBLIC_KEY }}
           BUZZ_UPDATER_ENDPOINT: https://github.com/block/buzz/releases/download/buzz-desktop-latest/latest.json
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Fix AppImage (remove infra libs, symlink system GStreamer)
+        run: |
+          mapfile -t APPIMAGES < <(find desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' -type f)
+          if [[ ${#APPIMAGES[@]} -eq 0 ]]; then
+            echo "::error::No AppImage found to post-process"
+            exit 1
+          fi
+          if [[ ${#APPIMAGES[@]} -gt 1 ]]; then
+            echo "::error::Expected exactly one AppImage, found ${#APPIMAGES[@]}: ${APPIMAGES[*]}"
+            exit 1
+          fi
+          bash desktop/scripts/fix-appimage.sh "${APPIMAGES[0]}"
+        env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 

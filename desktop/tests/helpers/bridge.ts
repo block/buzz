@@ -53,6 +53,7 @@ type MockManagedAgentSeed = {
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
   lastError?: string | null;
+  lastErrorCode?: number | null;
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
 };
@@ -106,6 +107,35 @@ export type MockAgentMemoryListing = {
 
 type MockBridgeOptions = {
   acpRuntimesCatalog?: Record<string, unknown>[];
+  /** Override the result returned by the `install_acp_runtime` mock command.
+   *  Pass `{ success: false, steps: [...] }` to exercise error/Retry states. */
+  installAcpRuntimeResult?: {
+    success: boolean;
+    steps: {
+      step: string;
+      command: string;
+      success: boolean;
+      stdout: string;
+      stderr: string;
+      exit_code: number | null;
+      hint?: string;
+    }[];
+  };
+  /** Sequence of results for successive `install_acp_runtime` calls. Call N
+   *  returns results[N]; when exhausted the last entry repeats. Takes precedence
+   *  over `installAcpRuntimeResult`. Use for fail-then-succeed Retry tests. */
+  installAcpRuntimeResults?: Array<{
+    success: boolean;
+    steps: {
+      step: string;
+      command: string;
+      success: boolean;
+      stdout: string;
+      stderr: string;
+      exit_code: number | null;
+      hint?: string;
+    }[];
+  }>;
   activePersonaIds?: string[];
   /**
    * Listing returned by the mocked `get_agent_memory` command. Pass a single
@@ -123,12 +153,17 @@ type MockBridgeOptions = {
   createManagedAgentDelayMs?: number;
   addChannelMembersDelayMs?: number;
   channelsReadError?: string;
+  /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
+  deepHistoryMessageCount?: number;
   feedReadError?: string;
   canvasReadError?: string;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
   applyWorkspaceDelayMs?: number;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Delay (ms) after snapshotting a thread-replies page so E2E tests can
+   * deliver live reply/aux events while an older response is in flight. */
+  threadRepliesDelayMs?: number;
   usersBatchDelayMs?: number;
   /** Delay (ms) for older-history fetches; see e2eBridge mock config. */
   channelWindowDelayMs?: number;
@@ -177,6 +212,17 @@ type MockBridgeOptions = {
    * explicit `[]` is honoured (models a picker cancel / no files selected).
    */
   uploadDelayMs?: number;
+  /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
+   *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
+  encodeDelayMs?: number;
+  /** Delay (ms) applied to `get_relay_self` so E2E tests can prove the
+   *  fail-closed race: DMs are withheld while classification is unresolved. */
+  relaySelfDelayMs?: number;
+  /**
+   * When set to a non-empty string, `fetch_snapshot_bytes` throws with this
+   * message — lets specs prove malformed/hash/size-mismatch error paths.
+   */
+  snapshotFetchError?: string;
   uploadDescriptors?: {
     url: string;
     sha256: string;
@@ -206,6 +252,57 @@ type MockBridgeOptions = {
    * can exercise the "Thread deleted" label / disabled-send path.
    */
   deletedEventIds?: string[];
+  /**
+   * When true, `get_identity` returns `lost: true` until `persist_current_identity`
+   * or `import_identity` is invoked. Drives the identity-lost recovery UX in tests.
+   */
+  identityLost?: boolean;
+  /**
+   * When true, `get_identity` returns `locked: true` until `import_identity` is
+   * invoked. Drives the keyring-locked screen in tests.
+   */
+  identityLocked?: boolean;
+  /**
+   * Global agent config returned by `get_global_agent_config`. Defaults to
+   * an empty config (no provider, model, or env vars) if not specified.
+   * Pass a config with a provider to test Inherit-from-global behavior.
+   */
+  globalAgentConfig?: {
+    env_vars: Record<string, string>;
+    provider: string | null;
+    model: string | null;
+  };
+  /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
+   *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
+  setGlobalAgentConfigDelayMs?: number;
+  /**
+   * When set, `get_nsec` throws with this message. For a single always-fail
+   * scenario. Use `nsecErrors` for sequenced fail/succeed.
+   */
+  nsecError?: string;
+  /**
+   * Sequenced results for `get_nsec`. String = throw with that message;
+   * null = succeed. Call N uses results[N]; last entry repeats when exhausted.
+   */
+  nsecErrors?: (string | null)[];
+  /**
+   * The `restarted_count` returned by `set_global_agent_config`. Defaults to
+   * 0 (no agents restarted). Set to a positive integer to drive the
+   * "Saved. Restarted N agent(s)." status text in GlobalAgentConfigSettingsCard.
+   */
+  globalConfigRestartedCount?: number;
+  /**
+   * The `failed_restart_count` returned by `set_global_agent_config`. Defaults
+   * to 0. Set to a positive integer to drive the "failed to restart — check
+   * the Agents tab." status text in GlobalAgentConfigSettingsCard.
+   */
+  globalConfigFailedRestartCount?: number;
+  /**
+   * Milliseconds to delay the mocked `set_global_agent_config` response.
+   * Defaults to 0 (resolve immediately). Use to hold a save in flight so a
+   * test can interleave edits and exercise the mid-save race handling.
+   */
+  globalConfigSaveDelayMs?: number;
 };
 
 type BridgeOptions = {

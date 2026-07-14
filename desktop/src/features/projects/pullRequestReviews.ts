@@ -1,0 +1,208 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import * as React from "react";
+
+import { relayClient } from "@/shared/api/relayClient";
+import { signRelayEvent } from "@/shared/api/tauri";
+import {
+  KIND_GIT_STATUS_CLOSED,
+  KIND_GIT_STATUS_DRAFT,
+  KIND_GIT_STATUS_OPEN,
+  KIND_TEXT_NOTE,
+} from "@/shared/constants/kinds";
+import type { Project } from "./hooks";
+import type { ProjectPullRequest } from "./projectPullRequests.mjs";
+import {
+  PR_APPROVAL_LABEL,
+  PR_REVIEW_REQUEST_LABEL,
+} from "./projectPullRequests.mjs";
+
+/** NIP-34 lifecycle states the desktop can publish for a PR. Merged (1631)
+ * is intentionally excluded — merges happen through git, not this UI. */
+export type ProjectPullRequestLifecycleStatus = "open" | "draft" | "closed";
+
+const PR_STATUS_KIND_BY_LIFECYCLE: Record<
+  ProjectPullRequestLifecycleStatus,
+  number
+> = {
+  open: KIND_GIT_STATUS_OPEN,
+  draft: KIND_GIT_STATUS_DRAFT,
+  closed: KIND_GIT_STATUS_CLOSED,
+};
+
+// Same shape as `buzz pr status` (buzz-sdk build_git_status): root `e` tag,
+// repo `a` tag, and `p` tags for the repo owner + PR author. Only the PR
+// author or repo owner are trusted for status changes (allowedActorsForRoot).
+async function updateProjectPullRequestStatus({
+  project,
+  pullRequest,
+  status,
+}: {
+  project: Project;
+  pullRequest: ProjectPullRequest;
+  status: ProjectPullRequestLifecycleStatus;
+}): Promise<void> {
+  const recipients = new Set([
+    project.owner.toLowerCase(),
+    pullRequest.author.toLowerCase(),
+  ]);
+  const event = await signRelayEvent({
+    kind: PR_STATUS_KIND_BY_LIFECYCLE[status],
+    content: "",
+    tags: [
+      ["e", pullRequest.id, "", "root"],
+      ["a", project.repoAddress],
+      ...[...recipients].map((recipient) => ["p", recipient]),
+    ],
+  });
+
+  await relayClient.publishEvent(
+    event,
+    "Timed out updating pull request status.",
+    "Failed to update pull request status.",
+  );
+}
+
+// Review requests and approvals are labeled kind:1 comments (see
+// projectPullRequests.mjs) — NIP-34 has no dedicated review kinds, and the
+// relay does not register kind 1111. `p` tags on a review request are the
+// requested reviewers; parsing only trusts requests signed by the PR author
+// or repo owner.
+async function requestProjectPullRequestReview({
+  project,
+  pullRequest,
+  reviewers,
+  reviewerLabel,
+}: {
+  project: Project;
+  pullRequest: ProjectPullRequest;
+  reviewers: string[];
+  reviewerLabel: string;
+}): Promise<void> {
+  if (reviewers.length === 0) {
+    throw new Error("Select at least one reviewer.");
+  }
+  const reviewerPubkeys = [
+    ...new Set(reviewers.map((pubkey) => pubkey.toLowerCase())),
+  ];
+  const event = await signRelayEvent({
+    kind: KIND_TEXT_NOTE,
+    content: `Requested a review from ${reviewerLabel}`,
+    tags: [
+      ["e", pullRequest.id, "", "root"],
+      ["a", project.repoAddress],
+      ...reviewerPubkeys.map((pubkey) => ["p", pubkey]),
+      ["t", PR_REVIEW_REQUEST_LABEL],
+    ],
+  });
+
+  await relayClient.publishEvent(
+    event,
+    "Timed out requesting review.",
+    "Failed to request review.",
+  );
+}
+
+async function approveProjectPullRequest({
+  project,
+  pullRequest,
+}: {
+  project: Project;
+  pullRequest: ProjectPullRequest;
+}): Promise<void> {
+  const recipients = new Set([
+    project.owner.toLowerCase(),
+    pullRequest.author.toLowerCase(),
+  ]);
+  const event = await signRelayEvent({
+    kind: KIND_TEXT_NOTE,
+    content: "Approved these changes",
+    tags: [
+      ["e", pullRequest.id, "", "root"],
+      ["a", project.repoAddress],
+      ...[...recipients].map((recipient) => ["p", recipient]),
+      ["t", PR_APPROVAL_LABEL],
+    ],
+  });
+
+  await relayClient.publishEvent(
+    event,
+    "Timed out approving pull request.",
+    "Failed to approve pull request.",
+  );
+}
+
+function usePullRequestWriteInvalidation(project: Project | null | undefined) {
+  const queryClient = useQueryClient();
+  return React.useCallback(() => {
+    void queryClient.invalidateQueries({
+      queryKey: ["project", project?.id ?? "none", "pull-requests"],
+    });
+    void queryClient.invalidateQueries({
+      queryKey: ["projects", "pull-requests"],
+    });
+    void queryClient.invalidateQueries({
+      queryKey: ["projects", "activity-summaries"],
+    });
+  }, [project?.id, queryClient]);
+}
+
+export function useUpdateProjectPullRequestStatusMutation(
+  project: Project | null | undefined,
+) {
+  const invalidate = usePullRequestWriteInvalidation(project);
+
+  return useMutation({
+    mutationFn: ({
+      pullRequest,
+      status,
+    }: {
+      pullRequest: ProjectPullRequest;
+      status: ProjectPullRequestLifecycleStatus;
+    }) => {
+      if (!project) throw new Error("No project selected.");
+      return updateProjectPullRequestStatus({ project, pullRequest, status });
+    },
+    onSuccess: invalidate,
+  });
+}
+
+export function useRequestProjectPullRequestReviewMutation(
+  project: Project | null | undefined,
+) {
+  const invalidate = usePullRequestWriteInvalidation(project);
+
+  return useMutation({
+    mutationFn: ({
+      pullRequest,
+      reviewers,
+      reviewerLabel,
+    }: {
+      pullRequest: ProjectPullRequest;
+      reviewers: string[];
+      reviewerLabel: string;
+    }) => {
+      if (!project) throw new Error("No project selected.");
+      return requestProjectPullRequestReview({
+        project,
+        pullRequest,
+        reviewers,
+        reviewerLabel,
+      });
+    },
+    onSuccess: invalidate,
+  });
+}
+
+export function useApproveProjectPullRequestMutation(
+  project: Project | null | undefined,
+) {
+  const invalidate = usePullRequestWriteInvalidation(project);
+
+  return useMutation({
+    mutationFn: ({ pullRequest }: { pullRequest: ProjectPullRequest }) => {
+      if (!project) throw new Error("No project selected.");
+      return approveProjectPullRequest({ project, pullRequest });
+    },
+    onSuccess: invalidate,
+  });
+}

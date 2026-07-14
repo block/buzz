@@ -126,7 +126,7 @@ export function PersonaCatalogDetailsSheet({
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
                     Type
                   </p>
-                  <p className="mt-2 text-sm font-medium">Built-in persona</p>
+                  <p className="mt-2 text-sm font-medium">Built-in agent</p>
                 </div>
                 <div className="rounded-xl border border-border/70 bg-card/70 p-4">
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">

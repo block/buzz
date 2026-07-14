@@ -975,7 +975,16 @@ test("channel date divider keeps the date sticky while the separator rule scroll
     if (!firstGroup) {
       throw new Error("missing first day group");
     }
-    element.scrollTop = firstGroup.offsetTop + 180;
+    const groupRect = firstGroup.getBoundingClientRect();
+    const stickyTop = Number.parseFloat(
+      getComputedStyle(
+        firstGroup.querySelector<HTMLElement>(
+          '[data-testid="message-timeline-day-divider"]',
+        ) ?? firstGroup,
+      ).top,
+    );
+    element.scrollTop +=
+      groupRect.top - (element.getBoundingClientRect().top + stickyTop - 32);
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
   await page.waitForTimeout(50);
@@ -1068,15 +1077,16 @@ test("shows and clears activity indicators for active channel agents", async ({
   }, TEST_IDENTITIES.alice.pubkey);
 
   await expect(page.getByTestId("bot-activity-composer-trigger")).toBeVisible();
-  await page.getByTestId("bot-activity-composer-trigger").click();
   await expect(
-    page.getByTestId(
-      `bot-activity-composer-item-${TEST_IDENTITIES.alice.pubkey}`,
-    ),
-  ).toBeVisible();
-  await page
-    .getByTestId(`bot-activity-composer-item-${TEST_IDENTITIES.alice.pubkey}`)
-    .click({ force: true });
+    page.getByTestId("bot-activity-composer-trigger"),
+  ).not.toContainText("View activity");
+  await page.getByTestId("bot-activity-composer-trigger").click();
+  const aliceActivityItem = page.getByTestId(
+    `bot-activity-composer-item-${TEST_IDENTITIES.alice.pubkey}`,
+  );
+  await expect(aliceActivityItem).toBeVisible();
+  await expect(aliceActivityItem).toContainText("View activity");
+  await aliceActivityItem.click({ force: true });
   await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
   await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
     "alice",
@@ -1901,6 +1911,44 @@ test("new DM picker pages people search beyond the first 50 results", async ({
       }),
       expect.objectContaining({
         payload: expect.objectContaining({ cursor: "2", limit: 50 }),
+      }),
+    ]),
+  );
+});
+
+test("member people search starts at two characters", async ({ page }) => {
+  const jmPubkey =
+    "abababababababababababababababababababababababababababababababab";
+  await installMockBridge(page, {
+    searchProfiles: [{ pubkey: jmPubkey, displayName: "jm" }],
+  });
+
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+  await page.getByTestId("channel-management-search-users").fill("j");
+  await expect(
+    page.getByTestId(`channel-user-search-result-${jmPubkey}`),
+  ).toHaveCount(0);
+  expect(
+    (await readCommandPayloadLog(page)).filter(
+      (entry) =>
+        entry.command === "search_users" &&
+        (entry.payload as { query?: string }).query === "j",
+    ),
+  ).toHaveLength(0);
+
+  await page.getByTestId("channel-management-search-users").fill("jm");
+  await expect(
+    page.getByTestId(`channel-user-search-result-${jmPubkey}`),
+  ).toContainText("jm");
+
+  const searchCalls = (await readCommandPayloadLog(page)).filter(
+    (entry) => entry.command === "search_users",
+  );
+  expect(searchCalls).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        payload: expect.objectContaining({ query: "jm" }),
       }),
     ]),
   );

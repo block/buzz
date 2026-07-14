@@ -1,5 +1,7 @@
 mod agent_env;
 pub(crate) mod agent_events;
+pub(crate) mod agent_snapshot;
+pub(crate) mod team_snapshot;
 pub(crate) use agent_env::{
     baked_build_env, build_buzz_agent_provider_defaults, discovery_env_with_baked_floor,
 };
@@ -7,6 +9,8 @@ mod backend;
 pub(crate) mod config_bridge;
 mod discovery;
 mod env_vars;
+mod git_bash;
+pub(crate) mod global_config;
 mod nest;
 mod persona_avatars;
 mod persona_card;
@@ -29,11 +33,27 @@ mod team_repair;
 mod teams;
 mod types;
 
+// Shared guard for tests that mutate or read process-global PATH.
+#[cfg(test)]
+static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
+    PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub use backend::*;
 pub use discovery::*;
 pub use env_vars::*;
+#[cfg(windows)]
+pub(crate) use git_bash::git_bash_available;
+pub(crate) use git_bash::{discover_git_bash, GitBashPrerequisite};
+pub(crate) use global_config::{
+    load_global_agent_config, resolve_effective_model_provider, save_global_agent_config,
+    validate_global_config, GlobalAgentConfig,
+};
 pub use nest::*;
-pub use persona_card::*;
+pub use persona_card::find_plugin_json;
 pub use personas::*;
 #[cfg(windows)]
 pub use process_lifecycle::*;

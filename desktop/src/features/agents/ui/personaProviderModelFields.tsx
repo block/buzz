@@ -1,7 +1,7 @@
 /**
  * Shared provider and model field components for agent dialogs.
  *
- * Both CreateAgentDialog (local mode) and EditAgentDialog import these
+ * Both CreateAgentDialog (local mode) and AgentInstanceEditDialog import these
  * instead of duplicating the picker logic.
  */
 import type * as React from "react";
@@ -13,6 +13,7 @@ import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  getDefaultLlmModelLabel,
   getModelSelectValue,
   getPersonaProviderOptions,
   hasPersonaModelOption,
@@ -45,6 +46,8 @@ export function RequiredFieldLabel({
 export function AgentModelField({
   disabled,
   discoveredModelOptions,
+  globalModel,
+  id = "agent-model",
   isCustomModelEditing,
   isRequired,
   model,
@@ -55,6 +58,12 @@ export function AgentModelField({
 }: {
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
+  /** Global model default; when set, the zero-value option reads `Inherit global default (<model>)`. */
+  globalModel?: string;
+  /** DOM id for the model select. Defaults to `"agent-model"`. Override in
+   *  contexts where multiple instances coexist on the same page (e.g. the
+   *  global-config settings card) to avoid duplicate DOM ids. */
+  id?: string;
   isCustomModelEditing: boolean;
   isRequired: boolean;
   model: string;
@@ -69,7 +78,7 @@ export function AgentModelField({
   // returned yet. Discovered options are ADDITIVE — we never disable the picker
   // or hide the custom input just because discovery returned null.
   const staticModelOptions: readonly PersonaModelOption[] = [
-    { id: "", label: "Default model" },
+    { id: "", label: getDefaultLlmModelLabel(globalModel) },
   ];
   const effectiveModelOptions = discoveredModelOptions ?? staticModelOptions;
 
@@ -97,14 +106,14 @@ export function AgentModelField({
 
   return (
     <div className="space-y-1.5">
-      <RequiredFieldLabel htmlFor="agent-model" isRequired={isRequired}>
+      <RequiredFieldLabel htmlFor={id} isRequired={isRequired}>
         Model
       </RequiredFieldLabel>
       <select
         aria-required={isRequired}
         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
         disabled={selectDisabled}
-        id="agent-model"
+        id={id}
         onChange={(event) => {
           const nextValue = event.target.value;
           if (nextValue === AUTO_MODEL_DROPDOWN_VALUE) {
@@ -161,6 +170,7 @@ export function AgentModelField({
 
 export function AgentProviderField({
   disabled,
+  globalProvider,
   isCustomProviderEditing,
   isRequired,
   onProviderChange,
@@ -168,6 +178,7 @@ export function AgentProviderField({
   selectedRuntime,
 }: {
   disabled: boolean;
+  globalProvider?: string;
   isCustomProviderEditing: boolean;
   isRequired: boolean;
   onProviderChange: (value: string) => void;
@@ -178,6 +189,7 @@ export function AgentProviderField({
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
     selectedRuntime?.id ?? "",
+    globalProvider,
   );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE

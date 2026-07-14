@@ -118,10 +118,10 @@ export function AddChannelBotPersonasSection({
     <div className="space-y-3">
       <div className="space-y-3">
         <div>
-          <div className="text-sm font-medium">Personas</div>
+          <div className="text-sm font-medium">Agents</div>
           <p className="text-xs text-muted-foreground">
-            Toggle as many as you want. Each selected persona is added as its
-            own agent. Hover a persona to preview its role.
+            Toggle as many as you want. Each selected agent is added to the
+            channel. Hover an agent to preview its role.
           </p>
         </div>
 
@@ -215,7 +215,7 @@ export function AddChannelBotPersonasSection({
         </TooltipProvider>
 
         {isLoading ? (
-          <p className="text-xs text-muted-foreground">Loading personas...</p>
+          <p className="text-xs text-muted-foreground">Loading agents...</p>
         ) : null}
       </div>
     </div>

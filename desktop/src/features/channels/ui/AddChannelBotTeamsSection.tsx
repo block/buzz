@@ -74,7 +74,7 @@ export function AddChannelBotTeamsSection({
       <div>
         <div className="text-sm font-medium">Teams</div>
         <p className="text-xs text-muted-foreground">
-          Select a team to toggle all its personas at once.
+          Select a team to toggle all its agents at once.
         </p>
       </div>
 

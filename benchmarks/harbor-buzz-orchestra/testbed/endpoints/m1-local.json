@@ -1,0 +1,16 @@
+{
+  "local/placeholder-orchestrator": {
+    "provider": "openai",
+    "api_key_env": "OPENAI_COMPAT_API_KEY",
+    "env": {
+      "OPENAI_COMPAT_BASE_URL": "http://127.0.0.1:8091/v1"
+    }
+  },
+  "local/placeholder-worker": {
+    "provider": "openai",
+    "api_key_env": "OPENAI_COMPAT_API_KEY",
+    "env": {
+      "OPENAI_COMPAT_BASE_URL": "http://127.0.0.1:8091/v1"
+    }
+  }
+}

@@ -6,13 +6,12 @@ use crate::{
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        managed_agent_avatar_url, managed_agent_log_path, managed_agents_base_dir,
-        normalize_agent_args, provider_deploy, read_log_tail, resolve_provider_binary,
-        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentLogResponse,
-        ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND,
-        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args, provider_deploy,
+        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
+        stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -21,7 +20,7 @@ use crate::{
 /// Read the workspace owner's pubkey hex from app state without holding the
 /// lock for longer than necessary. Used to populate `BUZZ_ACP_AGENT_OWNER`
 /// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
-fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
+pub(super) fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
     Ok(keys.public_key().to_hex())
 }
@@ -61,7 +60,7 @@ pub(super) fn retain_managed_agent_pending(
         let content = serde_json::to_string(&agent_event_content(record))
             .map_err(|e| format!("failed to serialize managed-agent content: {e}"))?;
         let (owner_pubkey, event) = {
-            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            let keys = state.signing_keys()?;
             let owner_pubkey = keys.public_key().to_hex();
             let existing =
                 get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
@@ -108,7 +107,11 @@ pub(super) fn retain_managed_agent_pending(
 /// `pending_sync = 1`. The `d_tag` is the agent's pubkey. Best-effort: a
 /// failure is logged and swallowed so a retention hiccup never blocks the
 /// disk-authoritative delete.
-fn tombstone_managed_agent_pending(app: &AppHandle, state: &AppState, agent_pubkey: &str) {
+pub(super) fn tombstone_managed_agent_pending(
+    app: &AppHandle,
+    state: &AppState,
+    agent_pubkey: &str,
+) {
     use crate::managed_agents::{
         agent_events::build_agent_delete,
         retention::{
@@ -123,7 +126,7 @@ fn tombstone_managed_agent_pending(app: &AppHandle, state: &AppState, agent_pubk
 
     let result = (|| -> Result<(), String> {
         let (owner_pubkey, event) = {
-            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            let keys = state.signing_keys()?;
             let owner_pubkey = keys.public_key().to_hex();
             let event = build_agent_delete(agent_pubkey, &owner_pubkey)?
                 .sign_with_keys(&keys)
@@ -215,7 +218,7 @@ async fn ensure_relay_mesh_for_record(
     Ok(())
 }
 
-async fn start_local_agent_with_preflight(
+pub(super) async fn start_local_agent_with_preflight(
     app: &AppHandle,
     state: &AppState,
     pubkey: &str,
@@ -256,28 +259,15 @@ async fn start_local_agent_with_preflight(
     }
     // Re-snapshot the persona onto the record at every spawn so the agent always
     // starts with the current persona config (system_prompt, model, provider,
-    // env_vars). This clears the "out of date" drift badge without requiring a
-    // delete+recreate. Agent-level env_vars overrides still win (persona_snapshot
-    // layers persona env under agent overrides). When the persona leaves model or
-    // provider blank, the agent record's own configured values are preserved so a
-    // user-set model/provider is never clobbered by an unconfigured persona.
+    // runtime). This clears the "out of date" drift badge without requiring a
+    // delete+recreate. See `apply_persona_snapshot` for the precedence and
+    // env-override self-heal rules.
+    // Load personas once: used for snapshot application below and summary build
+    // at the end — avoids a second disk read for the same file in the same call.
+    let personas = load_personas(app).unwrap_or_default();
     if let Some(persona_id) = record.persona_id.clone() {
-        let personas = load_personas(app).unwrap_or_default();
         if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
-            let snapshot =
-                crate::managed_agents::persona_events::persona_snapshot_with_agent_config_fallback(
-                    persona,
-                    &record.env_vars,
-                    record.model.as_deref(),    // fallback: record.model
-                    record.provider.as_deref(), // fallback: record.provider
-                );
-            if let Some(prompt) = snapshot.system_prompt {
-                record.system_prompt = Some(prompt);
-            }
-            record.model = snapshot.model;
-            record.provider = snapshot.provider;
-            record.env_vars = snapshot.env_vars;
-            record.persona_source_version = Some(snapshot.source_version);
+            crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
             record.updated_at = crate::util::now_iso();
         }
     }
@@ -290,108 +280,7 @@ async fn start_local_agent_with_preflight(
         .iter()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    let personas = load_personas(app).unwrap_or_default();
     build_managed_agent_summary(app, record, &runtimes, &personas)
-}
-
-/// Build the standard agent JSON payload for provider deploy calls.
-///
-/// Unlike local spawn (which uses only pinned `record.env_vars` for
-/// determinism), provider deploy re-reads live persona env vars and
-/// structured model/provider so remote agents receive current credentials
-/// and the same authoritative values that local spawn derives from
-/// `runtime_metadata_env_vars`. The only field still pinned is
-/// `agent_command`/`agent_args` — those were captured at create time.
-/// The only read-time resolution is `relay_url`: a blank pin resolves to
-/// the active workspace relay here, matching the create-path contract.
-///
-/// Fails closed when the private key is unavailable (keyring outage leaves
-/// it empty after hydration): without this guard a provider deploy would
-/// serialize `"private_key_nsec": ""` and launch the agent with no
-/// identity — the same hazard the local spawn path refuses via
-/// `spawn_key_refusal`.
-fn build_deploy_payload(
-    app: &AppHandle,
-    state: &AppState,
-    record: &ManagedAgentRecord,
-) -> Result<serde_json::Value, String> {
-    // Fails closed when the private key is unavailable — same guard as local
-    // spawn. Without this, a keyring outage would serialize `"private_key_nsec": ""`
-    // and launch the agent with no identity.
-    if let Some(err) = crate::managed_agents::spawn_key_refusal(record) {
-        return Err(err);
-    }
-
-    // Merge persona env_vars + agent env_vars for provider deploy. Provider
-    // deploy re-reads live persona env vars so remote agents receive current
-    // credentials; local spawn uses only pinned record.env_vars for determinism
-    // across restarts. Without this, provider-backed agents wouldn't receive
-    // credentials saved on the persona or the agent itself.
-    let persona_env =
-        crate::managed_agents::resolve_persona_env(app, record.persona_id.as_deref())?;
-    let merged_env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
-
-    // Resolve the persona's structured provider/model so the remote provider
-    // receives the same authoritative values that local spawn derives from
-    // `runtime_metadata_env_vars`. Without this, remote deploy would rely on
-    // stale derived env copies in `env_vars` (or have no provider at all for
-    // imported personas whose derived keys were filtered at import time).
-    //
-    // Precedence: persona field wins when non-blank; otherwise falls back to the
-    // record's own field (same blank-normalization as the snapshot path). This
-    // matches `persona_snapshot_with_agent_config_fallback` exactly — a blank
-    // persona field must not wipe a record value that the user configured.
-    let (effective_model, effective_provider) = if let Some(pid) = record.persona_id.as_deref() {
-        let personas = load_personas(app).map_err(|e| {
-            format!(
-                "failed to load personas while building deploy payload for persona `{pid}`: {e}"
-            )
-        })?;
-        let persona = personas
-            .into_iter()
-            .find(|p| p.id == pid)
-            .ok_or_else(|| format!("persona `{pid}` not found while building deploy payload"))?;
-        let fallback = crate::managed_agents::persona_events::persona_field_with_record_fallback;
-        let model = fallback(persona.model.as_deref(), record.model.as_deref()); // fallback: record.model
-        let provider = fallback(persona.provider.as_deref(), record.provider.as_deref()); // fallback: record.provider
-        (model, provider)
-    } else {
-        (record.model.clone(), record.provider.clone())
-    };
-
-    Ok(serde_json::json!({
-        "name": &record.name,
-        // Resolve the per-agent pin against the active workspace relay here:
-        // this payload crosses the host boundary to a remote provider harness
-        // that has no notion of the desktop's workspace, so the blank→workspace
-        // fallback (otherwise applied at read-time in `effective_agent_relay_url`)
-        // must be materialized into a concrete URL before serializing.
-        "relay_url": crate::relay::effective_agent_relay_url(
-            &record.relay_url,
-            &relay_ws_url_with_override(state),
-        ),
-        "private_key_nsec": &record.private_key_nsec,
-        "auth_tag": &record.auth_tag,
-        "agent_command": &record.agent_command,
-        "agent_args": &record.agent_args,
-        "system_prompt": &record.system_prompt,
-        "model": effective_model,
-        // Structured provider from the persona record. Providers that don't
-        // yet read this field will fall back to env_vars or their own default
-        // — no protocol break.
-        "provider": effective_provider,
-        "turn_timeout_seconds": record.turn_timeout_seconds,
-        "idle_timeout_seconds": record.idle_timeout_seconds,
-        "max_turn_duration_seconds": record.max_turn_duration_seconds,
-        "parallelism": record.parallelism,
-        // Inbound author gate. Providers that don't yet read these fall back
-        // to the harness default (`owner-only`) — no protocol break.
-        "respond_to": record.respond_to,
-        "respond_to_allowlist": &record.respond_to_allowlist,
-        // Merged persona + agent env vars. Providers that don't read this
-        // field will simply ignore it — no protocol break.
-        "env_vars": merged_env,
-    }))
 }
 
 /// Deploy an agent to a provider backend. Resolves the binary, calls deploy via
@@ -527,10 +416,13 @@ pub async fn create_managed_agent(
     // Validate & normalize the respond-to allowlist BEFORE any side effects.
     // The harness has its own validator (buzz-acp/src/config.rs) but we want
     // to catch malformed input at the boundary so the agent never tries to
-    // start with a list that will crash it on launch.
+    // start with a list that will crash it on launch. The mode/allowlist
+    // pairing (and the definition-default fallback) is resolved later at the
+    // mint site via `resolve_mint_behavioral_defaults`, where the linked
+    // definition is in hand.
     let respond_to_allowlist =
         crate::managed_agents::validate_respond_to_allowlist(&input.respond_to_allowlist)?;
-    if input.respond_to == crate::managed_agents::RespondTo::Allowlist
+    if input.respond_to == Some(crate::managed_agents::RespondTo::Allowlist)
         && respond_to_allowlist.is_empty()
     {
         return Err(
@@ -602,7 +494,7 @@ pub async fn create_managed_agent(
     // Agents authenticate via the auth tag in their kind:0 profile event.
     // No tokens are minted. Fail closed: bad auth tag → don't create agent.
     let auth_tag = {
-        let owner_keys = state.keys.lock().map_err(|e| e.to_string())?;
+        let owner_keys = state.signing_keys()?;
         // Bridge nostr 0.37 → 0.36 (buzz-sdk) via hex round-trip.
         let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
             .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
@@ -684,18 +576,14 @@ pub async fn create_managed_agent(
                 .collect::<Vec<_>>(),
         );
 
-        let mcp_command = input
-            .mcp_command
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(
-                || match crate::managed_agents::known_acp_runtime(&agent_command) {
-                    Some(p) => p.mcp_command.unwrap_or("").to_string(),
-                    None => String::new(),
-                },
-            );
+        // Derive MCP command exclusively from the runtime catalog — the
+        // per-record field is never read at spawn time so user-supplied input
+        // is silently discarded. Always sourcing from the catalog ensures
+        // new agents pick up the correct value without any stored override.
+        let mcp_command = match crate::managed_agents::known_acp_runtime(&agent_command) {
+            Some(p) => p.mcp_command.unwrap_or("").to_string(),
+            None => String::new(),
+        };
 
         // For pack-backed personas, resolve the installed pack path and the
         // persona's internal name (slug). ACP's resolve_persona_by_name()
@@ -733,30 +621,36 @@ pub async fn create_managed_agent(
         // and deploy read these snapshotted fields, never the live persona, so
         // the agent stays on the config it was created with across restarts;
         // delete+respawn re-runs create and rewrites the snapshot. env_vars are
-        // pinned too — without that, persona credential edits would leak into a
-        // running agent on restart. Agent-level env overrides (input.env_vars)
-        // layer on top, matching spawn precedence (persona env < agent env).
-        let persona_snapshot = requested_persona_id.as_deref().and_then(|pid| {
+        // NOT pinned: `record.env_vars` holds agent-level overrides only
+        // (input.env_vars), and the live persona env is merged underneath at
+        // read time (spawn / readiness / deploy) so persona credential edits
+        // refresh on the next spawn like prompt/model/provider already do.
+        let linked_persona = requested_persona_id.as_deref().and_then(|pid| {
             load_personas(&app)
                 .ok()?
                 .into_iter()
                 .find(|persona| persona.id == pid)
-                .map(|persona| {
-                    crate::managed_agents::persona_events::persona_snapshot(
-                        &persona,
-                        &input.env_vars,
-                    )
-                })
         });
+        let persona_snapshot = linked_persona
+            .as_ref()
+            .map(crate::managed_agents::persona_events::persona_snapshot);
         let snapshot_prompt = persona_snapshot
             .as_ref()
             .and_then(|s| s.system_prompt.clone());
         let snapshot_model = persona_snapshot.as_ref().and_then(|s| s.model.clone());
         let snapshot_provider = persona_snapshot.as_ref().and_then(|s| s.provider.clone());
         let snapshot_source_version = persona_snapshot.as_ref().map(|s| s.source_version.clone());
-        let snapshot_env_vars = persona_snapshot
-            .map(|s| s.env_vars)
-            .unwrap_or_else(|| input.env_vars.clone());
+
+        // Mint-time behavioral quad: explicit input wins, then the linked
+        // definition's NIP-AP defaults, then client defaults. The ONLY parse
+        // point for definition behavioral strings — fails loudly on a bad
+        // mode/range instead of minting an agent the author didn't describe.
+        let minted = crate::managed_agents::resolve_mint_behavioral_defaults(
+            input.respond_to,
+            respond_to_allowlist.clone(),
+            input.parallelism,
+            linked_persona.as_ref(),
+        )?;
 
         let record = crate::managed_agents::ManagedAgentRecord {
             pubkey: pubkey.clone(),
@@ -777,17 +671,14 @@ pub async fn create_managed_agent(
             agent_command_override,
             agent_args,
             mcp_command,
-            turn_timeout_seconds: input
-                .turn_timeout_seconds
-                .filter(|seconds| *seconds > 0)
-                .unwrap_or(DEFAULT_AGENT_TURN_TIMEOUT_SECONDS),
+            // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness;
+            // store the schema default only. Use idle_timeout_seconds or
+            // max_turn_duration_seconds for actual turn-length control.
+            turn_timeout_seconds: DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
             // 0 or None → harness uses its own default (320s idle, 3600s max), and the CLI also clamps 0 → minimum.
             idle_timeout_seconds: input.idle_timeout_seconds.filter(|s| *s > 0),
             max_turn_duration_seconds: input.max_turn_duration_seconds.filter(|s| *s > 0),
-            parallelism: input
-                .parallelism
-                .filter(|count| (1..=32).contains(count))
-                .unwrap_or(DEFAULT_AGENT_PARALLELISM),
+            parallelism: minted.parallelism.unwrap_or(DEFAULT_AGENT_PARALLELISM),
             system_prompt: snapshot_prompt.or_else(|| {
                 input
                     .system_prompt
@@ -813,18 +704,13 @@ pub async fn create_managed_agent(
                     .map(str::to_string)
             }),
             persona_source_version: snapshot_source_version,
-            mcp_toolsets: input
-                .mcp_toolsets
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
             // Provider agents are managed externally — force false.
             start_on_app_launch: if input.backend != BackendKind::Local {
                 false
             } else {
                 input.start_on_app_launch
             },
+            auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: input.backend.clone(),
             backend_agent_id: None,
@@ -834,15 +720,16 @@ pub async fn create_managed_agent(
             // NOT the display_name — ACP's resolve_persona_by_name() matches slugs.
             persona_team_dir: pack_metadata.as_ref().map(|(path, _)| path.clone()),
             persona_name_in_team: pack_metadata.as_ref().map(|(_, name)| name.clone()),
-            env_vars: snapshot_env_vars,
+            env_vars: input.env_vars.clone(),
             created_at: now_iso(),
             updated_at: now_iso(),
             last_started_at: None,
             last_stopped_at: None,
             last_exit_code: None,
             last_error: None,
-            respond_to: input.respond_to,
-            respond_to_allowlist: respond_to_allowlist.clone(),
+            last_error_code: None,
+            respond_to: minted.respond_to,
+            respond_to_allowlist: minted.respond_to_allowlist.clone(),
             display_name: None,
             slug: None,
             runtime: None,
@@ -851,6 +738,9 @@ pub async fn create_managed_agent(
             is_active: true,
             source_team: None,
             source_team_persona_slug: None,
+            definition_respond_to: None,
+            definition_respond_to_allowlist: Vec::new(),
+            definition_parallelism: None,
             relay_mesh: relay_mesh.clone(),
         };
 
@@ -1250,38 +1140,19 @@ pub async fn delete_managed_agent(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
-#[tauri::command]
-pub fn get_managed_agent_log(
-    pubkey: String,
-    line_count: Option<u32>,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<ManagedAgentLogResponse, String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let records = load_managed_agents(&app)?;
-    let record = records
-        .iter()
-        .find(|record| record.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    if record.backend != BackendKind::Local {
-        return Err("logs are not available for remote agents".to_string());
-    }
-
-    let log_path = managed_agent_log_path(&app, &pubkey)?;
-    Ok(ManagedAgentLogResponse {
-        content: read_log_tail(&log_path, line_count.unwrap_or(120) as usize)?,
-        log_path: log_path.display().to_string(),
-    })
-}
-
 // Remote agent shutdown is handled entirely by the frontend:
 // 1. Frontend sends "!shutdown" @mention via WebSocket (signed by user's key)
 // 2. Harness sees it, exits gracefully, sets presence to "offline"
 // 3. Desktop's existing presence polling sees "offline" — UI updates automatically
 // No backend Tauri command needed. Presence IS the status.
+
+#[path = "agents_deploy.rs"]
+mod deploy;
+use deploy::build_deploy_payload;
+#[cfg(test)]
+use deploy::deploy_payload_json;
+#[cfg(test)]
+pub(crate) use deploy::resolve_deploy_model_provider;
 
 #[path = "agents_profile.rs"]
 mod profile;

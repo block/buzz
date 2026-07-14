@@ -55,8 +55,10 @@ import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { Button } from "@/shared/ui/button";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useProjectCommitDiffQuery } from "@/features/projects/useProjectCommitDiff";
+import { useGitIdentityQuery } from "@/features/projects/useGitIdentity";
+import type { ViewerGitIdentity } from "@/features/projects/lib/projectContributorMatching";
 import { WorkspaceTabs } from "./ProjectWorkspaceTabs";
-import { RepositorySourceCard } from "./ProjectRepositorySource";
+import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 import {
   projectTerminalLabel,
   useOpenProjectTerminal,
@@ -145,6 +147,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   // Bumped when breadcrumb navigation should land on the project Overview
   // tab; remounts WorkspaceTabs, which owns the selected-tab state.
   const [tabsResetKey, setTabsResetKey] = React.useState(0);
+  // Mirror of the WorkspaceTabs selection so the breadcrumb can name the
+  // active sub-tab. The Overview (readme) tab is "home" and gets no crumb.
+  const [activeTab, setActiveTab] = React.useState("overview");
   // Commit selection has no URL param, so reset it when navigating to a
   // different project within the same mounted route.
   const commitProjectIdRef = React.useRef(projectId);
@@ -242,11 +247,41 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repoSource === "local"
       ? localRepoDiffQuery.isLoading
       : repoDiffQuery.isLoading;
-  const isWorkItemDetailOpen = Boolean(
-    selectedPullRequestId || selectedIssueId || selectedCommitHash,
-  );
+  // Compact branch + remote/local controls shared by the readme and Code
+  // tab headers.
+  const filesSourceControls: RepoSourceHeaderControls = {
+    branch: activeBranch ?? "",
+    branchOptions,
+    onBranchChange: setSelectedBranch,
+    source: repoSource,
+    onSourceChange: setRepoSource,
+    localDisabled:
+      !repoSyncStatusQuery.data?.localPath &&
+      !localRepoSnapshotQuery.data &&
+      !localRepoSnapshotQuery.isLoading,
+    localLabel: localRepoSnapshotQuery.isLoading
+      ? "Local checking"
+      : repoSyncStatusQuery.data?.localPath || localRepoSnapshotQuery.data
+        ? "Local"
+        : "Local missing",
+    remoteLabel: repoSnapshotQuery.isLoading ? "Remote checking" : "Remote",
+    canPush: repoSyncStatusQuery.data?.canPush ?? false,
+    onPush: () => {
+      void handlePushLocalRepo();
+    },
+    pushDisabled:
+      pushLocalRepoMutation.isPending || !repoSyncStatusQuery.data?.canPush,
+    pushPending: pushLocalRepoMutation.isPending,
+    pushTitle:
+      repoSyncStatusQuery.data?.pushBlockReason ?? "Push local commits",
+  };
+  const projectPending = projectQuery.isPending;
   React.useEffect(() => {
     if (!project) {
+      // While the project query is still loading, keep the URL-seeded
+      // pullRequestId/issueId selections — clearing here would discard them
+      // before the detail view ever gets a chance to open.
+      if (projectPending) return;
       setSelectedBranch(null);
       setSelectedPullRequestId(null);
       setSelectedIssueId(null);
@@ -259,7 +294,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       }
       return project.defaultBranch ?? branchOptions[0] ?? null;
     });
-  }, [project, branchOptions]);
+  }, [project, branchOptions, projectPending]);
   React.useEffect(() => {
     setRepoSource((currentSource) => {
       if (currentSource === "local" && !hasLocalCheckout) return "remote";
@@ -273,10 +308,18 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       return currentSource;
     });
   }, [hasLocalCheckout, hasRemoteSnapshot]);
-  const peoplePubkeys = React.useMemo(
-    () => (project ? projectPeople(project) : []),
-    [project],
-  );
+  const peoplePubkeys = React.useMemo(() => {
+    if (!project) return [];
+    // Include PR authors/updaters so commit rows can resolve avatars for
+    // publishers who are not listed as project contributors.
+    const pullRequestPubkeys = (pullRequestsQuery.data ?? []).flatMap(
+      (pullRequest) => [
+        pullRequest.author,
+        ...pullRequest.updates.map((update) => update.author),
+      ],
+    );
+    return [...new Set([...projectPeople(project), ...pullRequestPubkeys])];
+  }, [project, pullRequestsQuery.data]);
   const profilesQuery = useUsersBatchQuery(peoplePubkeys, {
     enabled: peoplePubkeys.length > 0,
   });
@@ -290,6 +333,16 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     [currentProfileQuery.data, profilesQuery.data?.profiles],
   );
   const identityQuery = useIdentityQuery();
+  const gitIdentityQuery = useGitIdentityQuery();
+  const viewerGitIdentity = React.useMemo<ViewerGitIdentity | null>(() => {
+    const pubkey = identityQuery.data?.pubkey ?? null;
+    if (!pubkey || !gitIdentityQuery.data) return null;
+    return {
+      pubkey,
+      name: gitIdentityQuery.data.name,
+      email: gitIdentityQuery.data.email,
+    };
+  }, [gitIdentityQuery.data, identityQuery.data?.pubkey]);
   const { applyPatch, values } = useHistorySearchState(
     PROJECT_DETAIL_PANEL_SEARCH_KEYS,
   );
@@ -428,26 +481,38 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     : null;
 
   // The active work item drives the breadcrumb trail: Projects › project ›
-  // category › title. `clear` steps back to the item's list tab.
+  // sub-tab › title. `clear` steps back to the item's list tab. Categories
+  // match the workspace tab labels.
   const activeWorkItemCrumb = selectedPullRequest
     ? {
-        category: "Pull request",
+        category: "PRs",
         title: selectedPullRequest.title,
         clear: () => setSelectedPullRequestId(null),
       }
     : selectedIssue
       ? {
-          category: "Issue",
+          category: "Issues",
           title: selectedIssue.title,
           clear: () => setSelectedIssueId(null),
         }
       : selectedCommitHash
         ? {
-            category: "Commit",
+            category: "Commits",
             title: selectedCommit?.subject ?? selectedCommitHash.slice(0, 7),
             clear: () => setSelectedCommitHash(null),
           }
         : null;
+  // Sub-tab crumb when no work item is open. Overview (readme) is home.
+  const TAB_CRUMB_LABELS: Record<string, string> = {
+    files: "Code",
+    activity: "Commits",
+    issues: "Issues",
+    prs: "PRs",
+    contributors: "Contributors",
+  };
+  const activeTabCrumb = activeWorkItemCrumb
+    ? null
+    : (TAB_CRUMB_LABELS[activeTab] ?? null);
   const handleGoToProjectHome = () => {
     setSelectedPullRequestId(null);
     setSelectedIssueId(null);
@@ -478,32 +543,13 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 className="-ml-1 flex min-w-0 items-center gap-0.5 text-xs text-muted-foreground"
               >
                 <button
-                  aria-label={
-                    activeWorkItemCrumb
-                      ? `Back to ${project.name}`
-                      : "Back to projects"
-                  }
-                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                  onClick={() => {
-                    // One step back: work item detail → project page,
-                    // project page → all projects.
-                    if (activeWorkItemCrumb) {
-                      activeWorkItemCrumb.clear();
-                    } else {
-                      void goProjects();
-                    }
-                  }}
-                  type="button"
-                >
-                  <ArrowLeft className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  className="shrink-0 rounded-md px-0.5 py-1 font-medium transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  className="flex shrink-0 items-center gap-1.5 rounded-md px-1 py-1 font-medium transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() => {
                     void goProjects();
                   }}
                   type="button"
                 >
+                  <FolderGit2 className="h-3.5 w-3.5" />
                   Projects
                 </button>
                 <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/60" />
@@ -525,12 +571,35 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                       {activeWorkItemCrumb.category}
                     </button>
                     <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/60" />
-                    <span className="min-w-0 truncate px-0.5 font-medium text-foreground">
+                    <span
+                      aria-current="page"
+                      className="min-w-0 truncate px-0.5 font-medium text-muted-foreground/60"
+                    >
                       {activeWorkItemCrumb.title}
                     </span>
                   </>
+                ) : activeTabCrumb ? (
+                  <>
+                    <button
+                      className="min-w-0 truncate rounded-md px-0.5 py-1 font-medium transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={handleGoToProjectHome}
+                      type="button"
+                    >
+                      {project.name}
+                    </button>
+                    <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+                    <span
+                      aria-current="page"
+                      className="min-w-0 truncate px-0.5 font-medium text-muted-foreground/60"
+                    >
+                      {activeTabCrumb}
+                    </span>
+                  </>
                 ) : (
-                  <span className="min-w-0 truncate px-0.5 font-medium text-foreground">
+                  <span
+                    aria-current="page"
+                    className="min-w-0 truncate px-0.5 font-medium text-muted-foreground/60"
+                  >
                     {project.name}
                   </span>
                 )}
@@ -555,81 +624,34 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
             <div className="w-full space-y-5 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
-              {/* When a PR or issue is open, the breadcrumb already names the
-                  project — let the work item's own title lead the page and
-                  skip the project header section entirely. */}
-              {!isWorkItemDetailOpen ? (
-                <section className="space-y-3">
-                  <div className="flex min-w-0 items-start justify-between gap-3">
-                    <div className="min-w-0 flex-1 space-y-0.5">
-                      <div className="flex min-w-0 items-center gap-1.5">
-                        <h2 className="truncate text-xl font-semibold tracking-tight">
-                          {project.name}
-                        </h2>
-                        {safeWebUrl ? (
-                          <Button
-                            asChild
-                            aria-label="Open project web page"
-                            className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
-                            size="icon-xs"
-                            variant="ghost"
+              <section className="space-y-3">
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1 space-y-0.5">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <h2 className="truncate text-xl font-semibold tracking-tight">
+                        {project.name}
+                      </h2>
+                      {safeWebUrl ? (
+                        <Button
+                          asChild
+                          aria-label="Open project web page"
+                          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+                          size="icon-xs"
+                          variant="ghost"
+                        >
+                          <a
+                            href={safeWebUrl}
+                            rel="noopener noreferrer"
+                            target="_blank"
                           >
-                            <a
-                              href={safeWebUrl}
-                              rel="noopener noreferrer"
-                              target="_blank"
-                            >
-                              <ExternalLink className="h-3.5 w-3.5" />
-                            </a>
-                          </Button>
-                        ) : null}
-                      </div>
-                      {project.description ? (
-                        <p className="max-w-2xl text-sm font-normal text-muted-foreground">
-                          {project.description}
-                        </p>
+                            <ExternalLink className="h-3.5 w-3.5" />
+                          </a>
+                        </Button>
                       ) : null}
                     </div>
                   </div>
-                  <RepositorySourceCard
-                    branch={activeBranch ?? ""}
-                    branchOptions={branchOptions}
-                    cloneUrls={project.cloneUrls}
-                    localDisabled={
-                      !repoSyncStatusQuery.data?.localPath &&
-                      !localRepoSnapshotQuery.data &&
-                      !localRepoSnapshotQuery.isLoading
-                    }
-                    localLabel={
-                      localRepoSnapshotQuery.isLoading
-                        ? "Local checking"
-                        : repoSyncStatusQuery.data?.localPath ||
-                            localRepoSnapshotQuery.data
-                          ? "Local"
-                          : "Local missing"
-                    }
-                    localPath={
-                      repoSyncStatusQuery.data?.localPath ??
-                      localRepoSnapshotQuery.data?.path
-                    }
-                    onBranchChange={setSelectedBranch}
-                    onPush={() => {
-                      void handlePushLocalRepo();
-                    }}
-                    onSourceChange={setRepoSource}
-                    pushDisabled={
-                      pushLocalRepoMutation.isPending ||
-                      !repoSyncStatusQuery.data?.canPush
-                    }
-                    pushPending={pushLocalRepoMutation.isPending}
-                    remoteLabel={
-                      repoSnapshotQuery.isLoading ? "Remote checking" : "Remote"
-                    }
-                    source={repoSource}
-                    status={repoSyncStatusQuery.data}
-                  />
-                </section>
-              ) : null}
+                </div>
+              </section>
 
               <WorkspaceTabs
                 key={`${project.id}:${tabsResetKey}`}
@@ -649,6 +671,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 onSelectedPullRequestIdChange={
                   handleSelectedPullRequestIdChange
                 }
+                onSelectedTabChange={setActiveTab}
                 profiles={profiles}
                 project={project}
                 repoDiff={displayedRepoDiff}
@@ -665,9 +688,11 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 snapshot={repoSnapshotQuery.data}
                 snapshotError={repoSnapshotQuery.error}
                 snapshotLoading={repoSnapshotQuery.isLoading}
+                sourceControls={filesSourceControls}
+                viewerGitIdentity={viewerGitIdentity}
               />
 
-              <section className="flex min-w-0 items-center gap-2 rounded-xl border border-border/50 bg-card/60 px-4 py-3 text-sm text-muted-foreground">
+              <section className="flex min-w-0 items-center gap-2 border border-border/60 bg-card px-4 py-3 text-sm text-muted-foreground">
                 <span className="shrink-0 font-medium text-foreground">
                   Details:
                 </span>

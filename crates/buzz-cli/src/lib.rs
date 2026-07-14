@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
+use uuid::Uuid;
 
 /// Run the Buzz CLI from raw arguments (including `argv[0]`).
 ///
@@ -213,6 +214,9 @@ enum Cmd {
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
+    /// Community moderation — reports queue, bans, timeouts, audit trail
+    #[command(subcommand)]
+    Moderation(ModerationCmd),
 }
 
 #[derive(Subcommand)]
@@ -294,6 +298,15 @@ pub enum MessagesCmd {
         /// Event ID to delete (64-char hex)
         #[arg(long)]
         event: String,
+        /// Optional moderation audit action UUID for the public tombstone
+        #[arg(long)]
+        action_id: Option<Uuid>,
+        /// Optional machine-readable public reason code for the tombstone
+        #[arg(long)]
+        reason_code: Option<String>,
+        /// Optional human-readable public reason for the tombstone
+        #[arg(long)]
+        public_reason: Option<String>,
     },
     /// Retrieve messages from a channel
     #[command(
@@ -332,10 +345,19 @@ pub enum MessagesCmd {
         depth_limit: Option<u32>,
     },
     /// Full-text search across messages
+    #[command(
+        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20"
+    )]
     Search {
-        /// Search query string
+        /// Search query string (optional when --author is given)
         #[arg(long)]
-        query: String,
+        query: Option<String>,
+        /// Filter by author: 64-char hex pubkey, npub, or display name
+        #[arg(long)]
+        author: Option<String>,
+        /// Unix timestamp — return messages after this time
+        #[arg(long)]
+        since: Option<i64>,
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
@@ -1408,6 +1430,102 @@ pub enum PackCmd {
     },
 }
 
+/// Community moderation commands.
+///
+/// The community (tenant) is selected by the relay host in `--relay` /
+/// `BUZZ_RELAY_URL` — moderation commands are community-global and carry no
+/// channel scope. The signing key must be a community owner/admin; the relay
+/// authorizes every command.
+#[derive(Subcommand)]
+pub enum ModerationCmd {
+    /// List reports in the moderation queue (newest first)
+    #[command(
+        after_help = "Examples:\n  buzz moderation reports\n  buzz moderation reports --status open --limit 20"
+    )]
+    Reports {
+        /// Filter by status: open | resolved | dismissed | escalated (default: all)
+        #[arg(long)]
+        status: Option<String>,
+        /// Maximum number of reports to return
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Resolve or dismiss a report (kind 9044)
+    #[command(
+        after_help = "Examples:\n  buzz moderation resolve --report <REPORT_EVENT_ID> --status dismissed --action dismiss\n  buzz moderation resolve --report <REPORT_EVENT_ID> --status resolved --action ban --reason \"rule 3\""
+    )]
+    Resolve {
+        /// Hex event id of the kind:1984 report being resolved
+        #[arg(long)]
+        report: String,
+        /// Resolution status: resolved | dismissed
+        #[arg(long)]
+        status: String,
+        /// Action taken: delete | kick | ban | timeout | dismiss | escalate
+        #[arg(long)]
+        action: String,
+        /// Optional reason — relayed to the reporter, so keep it tombstone-safe
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Ban a member from the community (kind 9040)
+    #[command(
+        after_help = "Examples:\n  buzz moderation ban --pubkey <HEX>\n  buzz moderation ban --pubkey <HEX> --expires-in 604800 --reason \"repeated spam\""
+    )]
+    Ban {
+        /// Target member pubkey (hex)
+        #[arg(long)]
+        pubkey: String,
+        /// Ban duration in seconds from now (omit for a permanent ban)
+        #[arg(long, conflicts_with = "expires_at")]
+        expires_in: Option<u64>,
+        /// Absolute ban expiry as a unix timestamp (seconds)
+        #[arg(long)]
+        expires_at: Option<u64>,
+        /// Optional private ban reason (audit only)
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Lift a member's ban (kind 9041)
+    Unban {
+        /// Target member pubkey (hex)
+        #[arg(long)]
+        pubkey: String,
+    },
+    /// Time out a member — a write-block, not a disconnect (kind 9042)
+    #[command(
+        after_help = "Examples:\n  buzz moderation timeout --pubkey <HEX> --expires-in 3600\n  buzz moderation timeout --pubkey <HEX> --expires-at 1783500000 --reason \"cool off\""
+    )]
+    Timeout {
+        /// Target member pubkey (hex)
+        #[arg(long)]
+        pubkey: String,
+        /// Timeout duration in seconds from now
+        #[arg(long, conflicts_with = "expires_at")]
+        expires_in: Option<u64>,
+        /// Absolute timeout expiry as a unix timestamp (seconds)
+        #[arg(long)]
+        expires_at: Option<u64>,
+        /// Optional private timeout reason (audit only)
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Clear a member's timeout early (kind 9043)
+    Untimeout {
+        /// Target member pubkey (hex)
+        #[arg(long)]
+        pubkey: String,
+    },
+    /// List currently-restricted members (active ban or timeout)
+    Restricted,
+    /// Read the moderation audit trail (newest first)
+    Audit {
+        /// Maximum number of audit rows to return
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+}
+
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
@@ -1463,6 +1581,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Pr(sub) => commands::pr::dispatch(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
+        Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -1489,6 +1608,7 @@ mod tests {
             "issues",
             "mem",
             "messages",
+            "moderation",
             "notes",
             "pack",
             "patches",
@@ -1620,6 +1740,19 @@ mod tests {
         );
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
+        assert_eq!(
+            names(&cmd, "moderation"),
+            vec![
+                "audit",
+                "ban",
+                "reports",
+                "resolve",
+                "restricted",
+                "timeout",
+                "unban",
+                "untimeout"
+            ]
+        );
     }
 
     #[test]

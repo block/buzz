@@ -1,5 +1,4 @@
 import {
-  BookOpen,
   Braces,
   ChevronRight,
   CodeXml,
@@ -32,8 +31,13 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { Markdown, SyntaxHighlightedCode } from "@/shared/ui/markdown";
+import { SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  type RepoSourceHeaderControls,
+  RepoSourceToggle,
+  RepositoryBranchDropdown,
+} from "./ProjectRepositorySource";
 
 function relativeCommitTime(createdAt: number) {
   const elapsedSeconds = Math.max(
@@ -64,7 +68,7 @@ function pluralize(count: number, singular: string) {
   return `${count} ${singular}${count === 1 ? "" : "s"}`;
 }
 
-function formatLastChangedAt(timestamp: number | null) {
+export function formatLastChangedAt(timestamp: number | null) {
   if (!timestamp) return "—";
   return new Date(timestamp * 1_000).toLocaleString(undefined, {
     month: "short",
@@ -175,7 +179,7 @@ function RepositoryCommitCell({
   );
 }
 
-function baseName(path: string) {
+export function baseName(path: string) {
   return path.split("/").pop() || path;
 }
 
@@ -213,7 +217,7 @@ const FILE_LANGUAGE_BY_EXTENSION: Record<string, string> = {
   zig: "zig",
 };
 
-function languageForPath(path: string) {
+export function languageForPath(path: string) {
   const fileName = baseName(path).toLowerCase();
   if (fileName === "dockerfile") return "dockerfile";
   if (fileName === "makefile") return "make";
@@ -438,7 +442,7 @@ function RepositoryEntryIcon({ entry }: { entry: RepositoryFileEntry }) {
   return (
     <span
       className={cn(
-        "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+        "flex h-6 w-6 shrink-0 items-center justify-center",
         visual.containerClassName,
       )}
     >
@@ -538,68 +542,6 @@ function handleRepositoryEntryKeyDown(
   onOpen();
 }
 
-export function findReadmeFile(files: ProjectRepoFile[]) {
-  const readmes = files.filter((file) =>
-    /^readme(?:\.(?:md|markdown|mdx|txt))?$/i.test(baseName(file.path)),
-  );
-
-  return readmes.find((file) => !file.path.includes("/")) ?? readmes[0] ?? null;
-}
-
-function decodeHtmlEntities(value: string) {
-  return value
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-}
-
-function htmlInlineToMarkdown(value: string): string {
-  return decodeHtmlEntities(value)
-    .replace(/<br\s*\/?\s*>/gi, "\n")
-    .replace(/<img\b([^>]*)>/gi, (_match: string, attrs: string) => {
-      const src = attrs.match(/\bsrc=["']([^"']+)["']/i)?.[1];
-      const alt = attrs.match(/\balt=["']([^"']*)["']/i)?.[1] ?? "";
-      return src ? `![${alt}](${src})` : "";
-    })
-    .replace(
-      /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
-      (_match: string, href: string, label: string) =>
-        `[${htmlInlineToMarkdown(label).trim()}](${href})`,
-    )
-    .replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, "**$2**")
-    .replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, "*$2*")
-    .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, "`$1`")
-    .replace(/<sub\b[^>]*>([\s\S]*?)<\/sub>/gi, "$1")
-    .replace(/<span\b[^>]*>([\s\S]*?)<\/span>/gi, "$1")
-    .replace(/<[^>]+>/g, "")
-    .trim();
-}
-
-function normalizeReadmeMarkdown(content: string) {
-  return content
-    .replace(
-      /<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi,
-      (_match, depth: string, value: string) =>
-        `${"#".repeat(Number(depth))} ${htmlInlineToMarkdown(value)}\n\n`,
-    )
-    .replace(
-      /<p\b[^>]*>([\s\S]*?)<\/p>/gi,
-      (_match, value: string) => `${htmlInlineToMarkdown(value)}\n\n`,
-    )
-    .replace(
-      /<div\b[^>]*>([\s\S]*?)<\/div>/gi,
-      (_match, value: string) => `${htmlInlineToMarkdown(value)}\n\n`,
-    )
-    .replace(
-      /<center\b[^>]*>([\s\S]*?)<\/center>/gi,
-      (_match, value: string) => `${htmlInlineToMarkdown(value)}\n\n`,
-    )
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
 function BreadcrumbButton({
   children,
   onClick,
@@ -631,7 +573,7 @@ function FileContentPanel({
   const directorySegments = pathSegments.slice(0, -1);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
+    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
       <div className="flex min-h-10 items-center gap-1 border-border/50 border-b bg-muted/20 px-3">
         <BreadcrumbButton onClick={() => onOpenPath("")}>
           Files
@@ -694,6 +636,7 @@ export function RepositoryFilesPanel({
   error,
   profiles,
   fallbackAuthorPubkey,
+  sourceControls,
 }: {
   files: ProjectRepoFile[];
   snapshot: ProjectRepoSnapshot | null | undefined;
@@ -701,6 +644,8 @@ export function RepositoryFilesPanel({
   error: unknown;
   profiles?: UserProfileLookup;
   fallbackAuthorPubkey?: string;
+  /** Branch picker + remote/local toggle rendered in the panel header. */
+  sourceControls?: RepoSourceHeaderControls;
 }) {
   const [currentPath, setCurrentPath] = React.useState("");
   const [selectedFile, setSelectedFile] =
@@ -753,26 +698,37 @@ export function RepositoryFilesPanel({
     setSelectedFile(null);
   }, [filesKey]);
 
-  if (isLoading) {
+  // Loading/error/empty states keep the header controls visible — the
+  // remote/local toggle must stay reachable when one source fails to load.
+  const stateMessage = isLoading
+    ? "Loading repository files…"
+    : error
+      ? "Could not load the repository file tree."
+      : files.length === 0
+        ? "No files have been pushed yet."
+        : null;
+  if (stateMessage) {
+    if (!sourceControls) {
+      return (
+        <div className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+          {stateMessage}
+        </div>
+      );
+    }
     return (
-      <div className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
-        Loading repository files…
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
-        Could not load the repository file tree.
-      </div>
-    );
-  }
-
-  if (files.length === 0) {
-    return (
-      <div className="rounded-xl border border-border/50 bg-card/60 p-6 text-center text-sm text-muted-foreground">
-        No files have been pushed yet.
+      <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
+        <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
+          <RepositoryBranchDropdown
+            branch={sourceControls.branch}
+            branchOptions={sourceControls.branchOptions}
+            compact
+            onBranchChange={sourceControls.onBranchChange}
+          />
+          <div className="ml-auto flex shrink-0 items-center">
+            <RepoSourceToggle controls={sourceControls} />
+          </div>
+        </div>
+        <div className="p-4 text-sm text-muted-foreground">{stateMessage}</div>
       </div>
     );
   }
@@ -790,11 +746,28 @@ export function RepositoryFilesPanel({
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
-      <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3">
-        <BreadcrumbButton onClick={() => setCurrentPath("")}>
-          Files
-        </BreadcrumbButton>
+    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
+      <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
+        {sourceControls ? (
+          <RepositoryBranchDropdown
+            branch={sourceControls.branch}
+            branchOptions={sourceControls.branchOptions}
+            compact
+            onBranchChange={sourceControls.onBranchChange}
+          />
+        ) : (
+          <BreadcrumbButton onClick={() => setCurrentPath("")}>
+            Files
+          </BreadcrumbButton>
+        )}
+        {sourceControls && pathSegments.length > 0 ? (
+          <>
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+            <BreadcrumbButton onClick={() => setCurrentPath("")}>
+              Files
+            </BreadcrumbButton>
+          </>
+        ) : null}
         {pathSegments.map((segment, index) => {
           const nextPath = pathSegments.slice(0, index + 1).join("/");
           return (
@@ -806,6 +779,11 @@ export function RepositoryFilesPanel({
             </React.Fragment>
           );
         })}
+        {sourceControls ? (
+          <div className="ml-auto flex shrink-0 items-center">
+            <RepoSourceToggle controls={sourceControls} />
+          </div>
+        ) : null}
       </div>
 
       <div className="overflow-x-auto">
@@ -923,59 +901,5 @@ export function RepositoryFilesPanel({
         </p>
       ) : null}
     </div>
-  );
-}
-
-export function ReadmePanel({ file }: { file: ProjectRepoFile | null }) {
-  if (!file?.previewContent) {
-    return (
-      <div className="rounded-xl border border-border/50 bg-card/60 p-6 text-sm text-muted-foreground">
-        Add a README to this repository to describe setup, usage, and project
-        context.
-      </div>
-    );
-  }
-
-  const language = languageForPath(file.path);
-  const isMarkdown = /\.(?:md|markdown|mdx)$/i.test(file.path);
-  const readmeContent = isMarkdown
-    ? normalizeReadmeMarkdown(file.previewContent)
-    : file.previewContent;
-
-  return (
-    <section className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
-      <div className="flex min-h-10 items-center gap-2 border-border/50 border-b bg-muted/20 px-4">
-        <BookOpen className="h-4 w-4 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-          {baseName(file.path)}
-        </span>
-        <span className="hidden shrink-0 text-2xs text-muted-foreground sm:block">
-          Last changed {formatLastChangedAt(file.lastChangedAt)}
-        </span>
-      </div>
-      <div className="p-4">
-        {isMarkdown ? (
-          <Markdown
-            className="text-sm"
-            content={readmeContent}
-            interactive={false}
-          />
-        ) : language ? (
-          <pre className="overflow-x-auto rounded-lg bg-muted/40 p-4">
-            <SyntaxHighlightedCode
-              className="text-xs leading-relaxed"
-              code={file.previewContent}
-              language={language}
-            />
-          </pre>
-        ) : (
-          <pre className="overflow-x-auto rounded-lg bg-muted/40 p-4">
-            <code className="block min-w-full whitespace-pre font-mono text-xs leading-relaxed text-foreground">
-              {file.previewContent}
-            </code>
-          </pre>
-        )}
-      </div>
-    </section>
   );
 }

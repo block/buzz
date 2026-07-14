@@ -34,9 +34,9 @@ use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
-    PromptResult, PromptSource, SessionState,
+    PromptResult, PromptSource, SessionState, TimeoutKind,
 };
-use queue::{CancelReason, EventQueue, QueuedEvent, ThreadTags};
+use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
@@ -1143,6 +1143,7 @@ async fn tokio_main() -> Result<()> {
             &config.agent_command,
             &config.agent_args,
             &config.persona_env_vars,
+            config.has_generated_codex_config,
         )
         .await;
         match spawn_result {
@@ -1386,7 +1387,8 @@ async fn tokio_main() -> Result<()> {
     }
 
     let dedup_mode = config.dedup_mode;
-    let mut queue = EventQueue::new(dedup_mode);
+    let mut queue =
+        EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
 
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
@@ -1581,10 +1583,11 @@ async fn tokio_main() -> Result<()> {
                 let cmd = config.agent_command.clone();
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
+                let has_codex = config.has_generated_codex_config;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, idx, observer).await;
+                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
                     guard.send(result);
                 });
             }
@@ -2669,6 +2672,29 @@ fn dispatch_pending(
     dispatched_channels
 }
 
+/// Spawn a task that posts a user-visible failure notice to the relay.
+///
+/// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
+/// dead-letter path so neither duplicates the tokio::spawn block.
+fn spawn_failure_notice(
+    rest_client: Option<&relay::RestClient>,
+    batch: &FlushBatch,
+    content: String,
+) {
+    if let Some(rest) = rest_client {
+        let thread_tags = batch
+            .events
+            .last()
+            .map(|be| queue::parse_thread_tags(&be.event))
+            .unwrap_or_default();
+        let rest = rest.clone();
+        let channel_id = batch.channel_id;
+        tokio::spawn(async move {
+            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -2709,31 +2735,42 @@ fn handle_prompt_result(
                 // system default — rather than telling the agent to supersede.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
+            } else if matches!(result.outcome, PromptOutcome::Timeout(TimeoutKind::Hard)) {
+                // Hard-cap timeout is deterministic: re-running the same task
+                // from a fresh session will reproduce the same death. Dead-letter
+                // immediately without requeueing so the channel isn't subjected to
+                // up to 10 × 1-hour retry cycles.
+                tracing::error!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch after hard-cap timeout — discarding {} events",
+                    batch.events.len(),
+                );
+                let content = format!(
+                    "⚠️ I couldn't process the last request (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
+                    config.max_turn_duration_secs
+                );
+                spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
                 // Dead-lettered: retries exhausted and the events are gone.
                 // Post a visible notice so the channel isn't left waiting on
                 // a turn that will never happen.
-                if let Some(rest) = rest_client {
-                    let thread_tags = dead
-                        .events
-                        .last()
-                        .map(|be| queue::parse_thread_tags(&be.event))
-                        .unwrap_or_default();
-                    let reason = match &result.outcome {
-                        PromptOutcome::Timeout => "the turn timed out".to_string(),
-                        PromptOutcome::AgentExited => "the agent process exited".to_string(),
-                        PromptOutcome::Error(e) => format!("{e}"),
-                        _ => "repeated failures".to_string(),
-                    };
-                    let content = format!(
-                        "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
-                    );
-                    let rest = rest.clone();
-                    let channel_id = dead.channel_id;
-                    tokio::spawn(async move {
-                        pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
-                    });
-                }
+                let reason = match &result.outcome {
+                    PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
+                    // Unreachable today: Timeout(Hard) is consumed by the immediate
+                    // dead-letter arm above before requeue() runs. Fail soft rather
+                    // than panicking the main loop if that chain is ever reordered.
+                    PromptOutcome::Timeout(TimeoutKind::Hard) => {
+                        "the turn exceeded the maximum duration".to_string()
+                    }
+                    PromptOutcome::AgentExited => "the agent process exited".to_string(),
+                    PromptOutcome::Error(e) => format!("{e}"),
+                    _ => "repeated failures".to_string(),
+                };
+                let content = format!(
+                    "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
+                );
+                spawn_failure_notice(rest_client, &dead, content);
             }
         } else {
             tracing::debug!(
@@ -2759,7 +2796,8 @@ fn handle_prompt_result(
     let outcome_label = match &result.outcome {
         PromptOutcome::Ok(_) => "ok",
         PromptOutcome::Error(_) => "error",
-        PromptOutcome::Timeout => "timeout",
+        PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
+        PromptOutcome::Timeout(TimeoutKind::Hard) => "hard_timeout",
         PromptOutcome::AgentExited => "exited",
         PromptOutcome::Cancelled => "cancelled",
     };
@@ -2782,16 +2820,20 @@ fn handle_prompt_result(
         PromptSource::Channel(ch) => Some(*ch),
         PromptSource::Heartbeat => None,
     };
-    let emit_turn_error = |error_msg: &str| {
+    let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
+            let mut payload = serde_json::json!({
+                "outcome": outcome_label,
+                "error": error_msg,
+            });
+            if let Some(code) = error_code {
+                payload["code"] = serde_json::json!(code);
+            }
             observer.emit(
                 "turn_error",
                 Some(agent_index),
                 &observer::context_for(channel_id, None, None),
-                serde_json::json!({
-                    "outcome": outcome_label,
-                    "error": error_msg,
-                }),
+                payload,
             );
         }
     };
@@ -2807,7 +2849,7 @@ fn handle_prompt_result(
             pool.return_agent(result.agent);
         }
         // Fatal outcomes: the agent subprocess is dead or poisoned — respawn it.
-        PromptOutcome::AgentExited | PromptOutcome::Timeout => {
+        PromptOutcome::AgentExited | PromptOutcome::Timeout(_) => {
             tracing::warn!(
                 agent = agent_index,
                 outcome = outcome_label,
@@ -2815,11 +2857,15 @@ fn handle_prompt_result(
                 pid = harness_pid,
                 "agent_returned — respawning"
             );
-            let death_message = match outcome_label {
-                "exited" => "Agent process exited unexpectedly",
-                _ => "Agent session timed out due to inactivity",
+            let death_message: String = match outcome_label {
+                "exited" => "Agent process exited unexpectedly".to_string(),
+                "hard_timeout" => format!(
+                    "Agent turn exceeded the maximum duration ({}s)",
+                    config.max_turn_duration_secs
+                ),
+                _ => "Agent session timed out due to inactivity".to_string(),
             };
-            emit_turn_error(death_message);
+            emit_turn_error(&death_message, None);
 
             let index = result.agent.index;
             let slot_history = &mut crash_history[index];
@@ -2871,6 +2917,10 @@ fn handle_prompt_result(
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
             );
+            let error_code = match &e {
+                acp::AcpError::AgentError { code, .. } => Some(*code),
+                _ => None,
+            };
             if is_transport_error {
                 tracing::warn!(
                     agent = agent_index,
@@ -2880,7 +2930,7 @@ fn handle_prompt_result(
                     error = %e,
                     "transport/protocol error — respawning agent"
                 );
-                emit_turn_error(&e.to_string());
+                emit_turn_error(&e.to_string(), error_code);
 
                 let index = result.agent.index;
                 let slot_history = &mut crash_history[index];
@@ -2906,7 +2956,7 @@ fn handle_prompt_result(
                     error = %e,
                     "agent_returned (application error — pipe intact)"
                 );
-                emit_turn_error(&e.to_string());
+                emit_turn_error(&e.to_string(), error_code);
                 pool.return_agent(result.agent);
             }
         }
@@ -3002,12 +3052,13 @@ fn recover_panicked_agent(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, i, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
         guard.send(result);
     });
 }
@@ -3150,6 +3201,7 @@ fn spawn_respawn_task(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -3161,7 +3213,7 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, index, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
         guard.send(result);
     });
 
@@ -3177,10 +3229,11 @@ async fn spawn_and_init(
     command: &str,
     args: &[String],
     extra_env: &[(String, String)],
+    has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, bool)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env)
+    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
@@ -3222,8 +3275,8 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         .to_string();
 
     // Spawn outside the timeout so we always own the child for cleanup.
-    // `models` subcommand doesn't use persona packs — no extra env.
-    let mut client = match AcpClient::spawn(&args.agent_command, &agent_args, &[]).await {
+    // `models` subcommand doesn't use persona packs — no extra env, no codex config.
+    let mut client = match AcpClient::spawn(&args.agent_command, &agent_args, &[], false).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: failed to spawn agent: {e}");
@@ -3822,7 +3875,7 @@ mod build_mcp_servers_tests {
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
-            max_turn_duration_secs: 3600,
+            max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -3848,6 +3901,7 @@ mod build_mcp_servers_tests {
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -3967,7 +4021,11 @@ mod error_outcome_emission_tests {
     use super::*;
     use crate::acp::{AcpClient, AcpError};
     use crate::observer::ObserverHandle;
-    use crate::pool::{AgentPool, OwnedAgent, PromptOutcome, PromptResult, PromptSource};
+    use crate::pool::{
+        AgentPool, OwnedAgent, PromptOutcome, PromptResult, PromptSource, TimeoutKind,
+    };
+    use crate::queue::{BatchEvent, FlushBatch};
+    use nostr::{EventBuilder, Keys, Kind};
     use std::collections::HashSet;
 
     fn test_config() -> Config {
@@ -3981,7 +4039,7 @@ mod error_outcome_emission_tests {
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
-            max_turn_duration_secs: 3600,
+            max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -4007,6 +4065,7 @@ mod error_outcome_emission_tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -4020,7 +4079,7 @@ mod error_outcome_emission_tests {
     async fn dummy_agent(index: usize) -> OwnedAgent {
         OwnedAgent {
             index,
-            acp: AcpClient::spawn("cat", &[], &[])
+            acp: AcpClient::spawn("cat", &[], &[], false)
                 .await
                 .expect("spawn cat as inert agent"),
             state: Default::default(),
@@ -4102,8 +4161,174 @@ mod error_outcome_emission_tests {
     }
 
     #[tokio::test]
-    async fn timeout_emits_exactly_one_feed_event() {
-        assert_eq!(turn_errors_emitted_for(PromptOutcome::Timeout).await, 1);
+    async fn idle_timeout_emits_exactly_one_feed_event() {
+        assert_eq!(
+            turn_errors_emitted_for(PromptOutcome::Timeout(TimeoutKind::Idle)).await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_timeout_emits_exactly_one_feed_event() {
+        assert_eq!(
+            turn_errors_emitted_for(PromptOutcome::Timeout(TimeoutKind::Hard)).await,
+            1
+        );
+    }
+
+    /// idle_timeout outcome_label is "idle_timeout"; hard_timeout is "hard_timeout".
+    #[tokio::test]
+    async fn timeout_outcome_labels_differ() {
+        let check_label = |outcome: PromptOutcome, expected_label: &'static str| async move {
+            let agent = dummy_agent(0).await;
+            let mut pool = AgentPool::from_slots(vec![None]);
+            let task_id = pool.join_set.spawn(async {}).id();
+            pool.task_map_mut().insert(
+                task_id,
+                crate::pool::TaskMeta {
+                    agent_index: 0,
+                    channel_id: None,
+                    recoverable_batch: None,
+                    control_tx: None,
+                    steer_tx: None,
+                },
+            );
+            let mut queue = EventQueue::new(config::DedupMode::Queue);
+            let config = test_config();
+            let mut heartbeat_in_flight = false;
+            let removed_channels = HashSet::new();
+            let mut crash_history = vec![SlotCircuit {
+                crash_times: Vec::new(),
+                open_until: None,
+                respawn_in_flight: false,
+            }];
+            let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+            let mut respawn_tasks = tokio::task::JoinSet::new();
+            let observer = ObserverHandle::in_process();
+            let result = PromptResult {
+                agent,
+                source: PromptSource::Channel(Uuid::new_v4()),
+                outcome,
+                batch: None,
+            };
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                Some(observer.clone()),
+                None,
+            );
+            let events = observer.snapshot();
+            let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
+            assert_eq!(
+                turn_error.payload["outcome"].as_str().unwrap(),
+                expected_label
+            );
+        };
+        check_label(PromptOutcome::Timeout(TimeoutKind::Idle), "idle_timeout").await;
+        check_label(PromptOutcome::Timeout(TimeoutKind::Hard), "hard_timeout").await;
+    }
+
+    /// hard-cap timeout dead-letters immediately (no requeue); idle timeout is requeued.
+    #[tokio::test]
+    async fn hard_timeout_not_requeued_idle_timeout_is_requeued() {
+        let make_batch = || {
+            let keys = Keys::generate();
+            let event = EventBuilder::new(Kind::Custom(9), "test")
+                .sign_with_keys(&keys)
+                .unwrap();
+            FlushBatch {
+                channel_id: Uuid::new_v4(),
+                events: vec![BatchEvent {
+                    event,
+                    prompt_tag: "test".into(),
+                    received_at: std::time::Instant::now(),
+                }],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            }
+        };
+
+        // Returns (pending_channels, queued_event_count_for_channel).
+        let run = |outcome: PromptOutcome, batch: FlushBatch| async move {
+            let channel_id = batch.channel_id;
+            let agent = dummy_agent(0).await;
+            let mut pool = AgentPool::from_slots(vec![None]);
+            let task_id = pool.join_set.spawn(async {}).id();
+            pool.task_map_mut().insert(
+                task_id,
+                crate::pool::TaskMeta {
+                    agent_index: 0,
+                    channel_id: None,
+                    recoverable_batch: None,
+                    control_tx: None,
+                    steer_tx: None,
+                },
+            );
+            let mut queue = EventQueue::new(config::DedupMode::Queue);
+            let config = test_config();
+            let mut heartbeat_in_flight = false;
+            let removed_channels = HashSet::new();
+            let mut crash_history = vec![SlotCircuit {
+                crash_times: Vec::new(),
+                open_until: None,
+                respawn_in_flight: false,
+            }];
+            let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+            let mut respawn_tasks = tokio::task::JoinSet::new();
+            let result = PromptResult {
+                agent,
+                source: PromptSource::Channel(channel_id),
+                outcome,
+                batch: Some(batch),
+            };
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                None,
+                None,
+            );
+            (
+                queue.pending_channels(),
+                queue.queued_event_count(&channel_id),
+            )
+        };
+
+        // Hard timeout: batch must NOT be requeued (dead-lettered immediately).
+        let hard_batch = make_batch();
+        let (hard_channels, hard_events) =
+            run(PromptOutcome::Timeout(TimeoutKind::Hard), hard_batch).await;
+        assert_eq!(
+            hard_channels, 0,
+            "hard-cap timeout must not requeue the batch"
+        );
+        assert_eq!(hard_events, 0, "hard-cap timeout must drop all events");
+
+        // Idle timeout: batch IS requeued (first attempt, not yet dead-lettered).
+        let idle_batch = make_batch();
+        let (idle_channels, idle_events) =
+            run(PromptOutcome::Timeout(TimeoutKind::Idle), idle_batch).await;
+        assert_eq!(
+            idle_channels, 1,
+            "idle timeout must requeue the batch for retry"
+        );
+        assert_eq!(
+            idle_events, 1,
+            "idle timeout must preserve the event for retry"
+        );
     }
 
     #[tokio::test]

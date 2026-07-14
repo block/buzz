@@ -1,4 +1,4 @@
-//! Serialize `PersonaRecord` ↔ kind:30175 persona events and publish/fetch via relay.
+//! Serialize `AgentDefinition` ↔ kind:30175 persona events and publish/fetch via relay.
 //!
 //! Persona events are NIP-33 parameterized replaceable events keyed by
 //! `(pubkey, kind, d_tag)` where `d_tag` is the plaintext persona slug.
@@ -9,7 +9,7 @@ use buzz_core_pkg::kind::KIND_PERSONA;
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
-use super::PersonaRecord;
+use super::{AgentDefinition, ManagedAgentRecord};
 use crate::app_state::AppState;
 
 /// The JSON body stored in a persona event's content field.
@@ -23,7 +23,12 @@ use crate::app_state::AppState;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersonaEventContent {
     pub display_name: String,
-    pub system_prompt: String,
+    /// Optional since the unified agent model (NIP-AP revision): a definition
+    /// can be pure configuration. Writers emit `Some` whenever the record has
+    /// a prompt (including the empty string) so pre-revision content bytes —
+    /// and therefore `persona_content_hash` — are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34,9 +39,18 @@ pub struct PersonaEventContent {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub name_pool: Vec<String>,
+    /// Definition-level defaults copied onto instances at creation
+    /// (NIP-AP behavioral fields). Absent = defer to client defaults;
+    /// `skip_serializing_if` keeps pre-revision hashes stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respond_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub respond_to_allowlist: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<u32>,
 }
 
-/// Derive the d-tag (persona slug) from a `PersonaRecord`.
+/// Derive the d-tag (persona slug) from a `AgentDefinition`.
 ///
 /// Uses `source_team_persona_slug` if available, otherwise falls back to `id`,
 /// then normalizes to the NIP-AP slug grammar (`^[a-z0-9][a-z0-9_-]{0,63}$`,
@@ -48,7 +62,7 @@ pub struct PersonaEventContent {
 ///
 /// Both the outbound publish and the inbound match key route through this fn,
 /// so the normalized value is consistent in both directions and cannot drift.
-pub fn persona_d_tag(record: &PersonaRecord) -> String {
+pub fn persona_d_tag(record: &AgentDefinition) -> String {
     let raw = record
         .source_team_persona_slug
         .as_deref()
@@ -112,19 +126,13 @@ pub fn monotonic_created_at(prior_head_created_at: Option<i64>) -> nostr::Timest
     nostr::Timestamp::from(now.max(floor) as u64)
 }
 
-/// Build a kind:30175 event from a `PersonaRecord`.
+/// Build a kind:30175 event from a `AgentDefinition`.
 ///
 /// Returns an unsigned `EventBuilder` — the caller signs and submits.
-pub fn build_persona_event(record: &PersonaRecord) -> Result<EventBuilder, String> {
-    let content = PersonaEventContent {
-        display_name: record.display_name.clone(),
-        avatar_url: record.avatar_url.clone(),
-        system_prompt: record.system_prompt.clone(),
-        runtime: record.runtime.clone(),
-        model: record.model.clone(),
-        provider: record.provider.clone(),
-        name_pool: record.name_pool.clone(),
-    };
+pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, String> {
+    // Single projection point — persona_event_content owns the field mapping
+    // (and the hash-stability rules that come with it).
+    let content = persona_event_content(record);
 
     let content_json = serde_json::to_string(&content)
         .map_err(|e| format!("failed to serialize persona content: {e}"))?;
@@ -147,10 +155,10 @@ pub fn build_persona_delete(d_tag: &str, owner_pubkey_hex: &str) -> Result<Event
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag]))
 }
 
-/// Parse a kind:30175 event back into a `PersonaRecord`.
+/// Parse a kind:30175 event back into a `AgentDefinition`.
 ///
 /// The event's d-tag becomes the persona ID and slug.
-pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String> {
+pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, String> {
     let d_tag = event
         .tags
         .iter()
@@ -169,11 +177,11 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String>
 
     let created_at = event.created_at.to_human_datetime();
 
-    Ok(PersonaRecord {
+    Ok(AgentDefinition {
         id: d_tag.clone(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
-        system_prompt: content.system_prompt,
+        system_prompt: content.system_prompt.unwrap_or_default(),
         runtime: content.runtime,
         model: content.model,
         provider: content.provider,
@@ -183,6 +191,9 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String>
         source_team: None,
         source_team_persona_slug: Some(d_tag),
         env_vars: BTreeMap::new(),
+        respond_to: content.respond_to,
+        respond_to_allowlist: content.respond_to_allowlist,
+        parallelism: content.parallelism,
         created_at: created_at.clone(),
         updated_at: created_at,
     })
@@ -212,7 +223,8 @@ pub async fn flush_pending_events(
     state: &AppState,
 ) -> Result<u32, String> {
     use crate::managed_agents::retention::{
-        get_pending_sync, get_retained_event, mark_synced, open_retention_db,
+        deferred_behind_failed_tombstone, get_pending_sync, get_retained_event, mark_synced,
+        open_retention_db,
     };
     use nostr::JsonUtil;
 
@@ -222,7 +234,12 @@ pub async fn flush_pending_events(
     }; // connection dropped before any .await
 
     let mut flushed = 0u32;
+    let mut failed_tombstones: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
     for row in pending {
+        if deferred_behind_failed_tombstone(row.kind, &row.pubkey, &row.d_tag, &failed_tombstones) {
+            continue; // its tombstone failed this sweep; next sweep re-orders them
+        }
         // Re-read immediately before publishing; the row may have been edited
         // or deleted since the pending snapshot above.
         let current = {
@@ -243,6 +260,9 @@ pub async fn flush_pending_events(
             .await
             .is_err()
         {
+            if current.kind == 5 {
+                failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
+            }
             continue; // relay unreachable — stays pending for the next sweep
         }
 
@@ -275,18 +295,29 @@ pub fn persona_content_hash(content: &PersonaEventContent) -> String {
     hex::encode(digest)
 }
 
-/// Project a `PersonaRecord` onto the content fields published in persona
+/// Project a `AgentDefinition` onto the content fields published in persona
 /// events and engrams. Centralizes the field mapping so a new persona field is
 /// added in exactly one place.
-pub fn persona_event_content(record: &PersonaRecord) -> PersonaEventContent {
+pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
     PersonaEventContent {
         display_name: record.display_name.clone(),
         avatar_url: record.avatar_url.clone(),
-        system_prompt: record.system_prompt.clone(),
+        // Always Some — including for an empty prompt — so pre-revision
+        // records serialize byte-identically and persona_content_hash is
+        // stable across the upgrade (drift badges must not flip).
+        system_prompt: Some(record.system_prompt.clone()),
         runtime: record.runtime.clone(),
         model: record.model.clone(),
         provider: record.provider.clone(),
         name_pool: record.name_pool.clone(),
+        // NIP-AP behavioral defaults: live since the create-path unification
+        // (B5) — carried on AgentDefinition in wire shape and copied verbatim.
+        // Quad-absent records serialize identically to the reserved era, so
+        // persona_content_hash is stable across the activation (guarded by
+        // `quad_absent_definition_hash_stable_across_activation`).
+        respond_to: record.respond_to.clone(),
+        respond_to_allowlist: record.respond_to_allowlist.clone(),
+        parallelism: record.parallelism,
     }
 }
 
@@ -299,9 +330,12 @@ pub struct PersonaSnapshot {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
-    /// Persona env layered under the agent's own overrides (agent wins). This
-    /// is the complete env map the agent spawns with — no live persona lookup.
-    pub env_vars: BTreeMap<String, String>,
+    /// Preferred ACP runtime ID, copied verbatim from the persona (including
+    /// `None`). Unlike `model`/`provider`, there is no record-fallback: the
+    /// materialized instance `runtime` must mirror the definition so that
+    /// definition edits propagate on the next spawn rather than being silently
+    /// shadowed by the stale materialized value.
+    pub runtime: Option<String>,
     /// `persona_content_hash` of the persona at snapshot time; the drift basis.
     pub source_version: String,
 }
@@ -326,23 +360,16 @@ pub fn persona_field_with_record_fallback(
 
 /// Build the pinned snapshot for an agent created from `persona`.
 ///
-/// `agent_env_overrides` are the agent's own env vars (persona-independent);
-/// they win over persona env on key collision, matching spawn-time precedence
-/// (persona env < agent env). The persona's `system_prompt` is always present,
-/// so it is wrapped in `Some`.
-pub fn persona_snapshot(
-    persona: &PersonaRecord,
-    agent_env_overrides: &BTreeMap<String, String>,
-) -> PersonaSnapshot {
-    let mut env_vars = persona.env_vars.clone();
-    for (key, value) in agent_env_overrides {
-        env_vars.insert(key.clone(), value.clone());
-    }
+/// The persona's `system_prompt` is always present, so it is wrapped in
+/// `Some`. Env vars are deliberately absent: `record.env_vars` holds agent
+/// overrides only, and the live persona env is merged underneath at read
+/// time (spawn / readiness / deploy) — never snapshotted.
+pub fn persona_snapshot(persona: &AgentDefinition) -> PersonaSnapshot {
     PersonaSnapshot {
         system_prompt: Some(persona.system_prompt.clone()),
         model: persona.model.clone(),
         provider: persona.provider.clone(),
-        env_vars,
+        runtime: persona.runtime.clone(),
         source_version: persona_content_hash(&persona_event_content(persona)),
     }
 }
@@ -360,21 +387,19 @@ pub fn persona_snapshot(
 /// `source_version` is always updated to the current persona content hash so the
 /// drift badge clears correctly even when model/provider are not touched.
 ///
-/// Env-var layering is unchanged: persona env < agent env (agent wins on collision).
-/// A persona with an empty env map does not wipe the agent's env vars — the agent's
-/// own overrides are merged on top and always win.
+/// Env vars are not part of the snapshot: `record.env_vars` (agent overrides)
+/// is left untouched and the live persona env is merged underneath at read time.
 ///
 /// The two fields (`model`, `provider`) are independent: a persona that sets only
 /// `model` wins on `model` while the agent's `provider` is preserved, and vice versa.
 pub fn persona_snapshot_with_agent_config_fallback(
-    persona: &PersonaRecord,
-    agent_env_overrides: &BTreeMap<String, String>,
+    persona: &AgentDefinition,
     current_agent_model: Option<&str>,
     current_agent_provider: Option<&str>,
 ) -> PersonaSnapshot {
-    // Delegate env-merge, system_prompt, and source_version to persona_snapshot
-    // so future PersonaSnapshot field additions stay automatically consistent.
-    let base = persona_snapshot(persona, agent_env_overrides);
+    // Delegate system_prompt and source_version to persona_snapshot so future
+    // PersonaSnapshot field additions stay automatically consistent.
+    let base = persona_snapshot(persona);
 
     // Apply the shared precedence rule: persona wins when non-blank, else
     // the agent record's value is preserved so a configured agent stays configured.
@@ -389,540 +414,42 @@ pub fn persona_snapshot_with_agent_config_fallback(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_persona() -> PersonaRecord {
-        PersonaRecord {
-            id: "test-persona".to_string(),
-            display_name: "Test Persona".to_string(),
-            avatar_url: Some("https://example.com/avatar.png".to_string()),
-            system_prompt: "You are a test assistant.".to_string(),
-            runtime: Some("goose".to_string()),
-            model: Some("claude-opus-4".to_string()),
-            provider: Some("anthropic".to_string()),
-            name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
-            is_builtin: false,
-            is_active: true,
-            source_team: None,
-            source_team_persona_slug: Some("test-slug".to_string()),
-            env_vars: BTreeMap::from([("KEY".to_string(), "value".to_string())]),
-            created_at: "2025-01-01T00:00:00Z".to_string(),
-            updated_at: "2025-01-01T00:00:00Z".to_string(),
-        }
+/// Re-pin `record` to `persona`: build the snapshot (via
+/// [`persona_snapshot_with_agent_config_fallback`], so blank persona
+/// `model`/`provider` preserve the record's own values) and mirror it onto the
+/// record — the definition quad (`system_prompt`/`model`/`provider`/`runtime`),
+/// the env-override self-heal, and the `persona_source_version` drift basis.
+///
+/// This is the single apply used by every snapshot-apply site: the spawn
+/// re-pin (`start_local_agent_with_preflight`), the launch backfill and
+/// restore re-snapshot (`restore.rs`), and the prospective re-snapshot inside
+/// `spawn_config_hash` — so a future `PersonaSnapshot` field addition
+/// propagates to all of them at once.
+///
+/// Deliberately does NOT touch `updated_at`: persistence stamps are the
+/// caller's concern, and `spawn_config_hash` (which applies this to a clone)
+/// must stay pure.
+pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDefinition) {
+    let snapshot = persona_snapshot_with_agent_config_fallback(
+        persona,
+        record.model.as_deref(),    // fallback: record.model
+        record.provider.as_deref(), // fallback: record.provider
+    );
+    if let Some(prompt) = snapshot.system_prompt {
+        record.system_prompt = Some(prompt);
     }
-
-    #[test]
-    fn monotonic_created_at_bumps_past_head() {
-        // No head: uses now (floor 0).
-        let now = nostr::Timestamp::now().as_secs() as i64;
-        let none = monotonic_created_at(None).as_secs() as i64;
-        assert!(none >= now, "no-head write must be >= now");
-
-        // Head in the FUTURE (same-second or clock-skewed): must bump to head+1,
-        // never reuse now (which would be <= head and lose the NIP-33 tiebreak).
-        let future_head = now + 1000;
-        let bumped = monotonic_created_at(Some(future_head)).as_secs() as i64;
-        assert_eq!(
-            bumped,
-            future_head + 1,
-            "must supersede a future head by +1"
-        );
-
-        // Head in the PAST: now already exceeds it, so now wins.
-        let past = monotonic_created_at(Some(now - 1000)).as_secs() as i64;
-        assert!(past >= now, "past head must not drag created_at backward");
-    }
-
-    #[test]
-    fn d_tag_uses_slug_when_available() {
-        let record = sample_persona();
-        assert_eq!(persona_d_tag(&record), "test-slug");
-    }
-
-    #[test]
-    fn d_tag_falls_back_to_id() {
-        let mut record = sample_persona();
-        record.source_team_persona_slug = None;
-        assert_eq!(persona_d_tag(&record), "test-persona");
-    }
-
-    /// Mirror of the relay slug grammar (`ingest.rs:923` `^[a-z0-9][a-z0-9_-]{0,63}$`)
-    /// so the normalization tests assert what the relay actually enforces.
-    fn passes_relay_slug_grammar(d: &str) -> bool {
-        let bytes = d.as_bytes();
-        !d.is_empty()
-            && d.len() <= 64
-            && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
-            && bytes[1..]
-                .iter()
-                .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-    }
-
-    #[test]
-    fn d_tag_normalizes_pack_slug_to_relay_grammar() {
-        // The cited failing cases: mixed-case and leading-underscore pack slugs
-        // that the relay rejects un-normalized → pending forever.
-        for (raw, expected) in [
-            ("CodeReviewer", "codereviewer"),
-            ("_ops", "a_ops"),
-            ("Code-Reviewer", "code-reviewer"),
-            ("UPPER_snake", "upper_snake"),
-            ("-leading-dash", "a-leading-dash"),
-        ] {
-            let mut record = sample_persona();
-            record.source_team_persona_slug = Some(raw.to_string());
-            let d = persona_d_tag(&record);
-            assert_eq!(d, expected, "normalization of {raw:?}");
-            assert!(
-                passes_relay_slug_grammar(&d),
-                "normalized {raw:?} -> {d:?} still fails the relay grammar"
-            );
-        }
-    }
-
-    #[test]
-    fn d_tag_already_valid_slug_is_unchanged() {
-        // In-app personas use a lowercase-hex UUID id — already valid, must pass
-        // through untouched (no spurious coordinate change on existing data).
-        let mut record = sample_persona();
-        record.source_team_persona_slug = None;
-        record.id = "11111111-2222-3333-4444-555555555555".to_string();
-        let d = persona_d_tag(&record);
-        assert_eq!(d, "11111111-2222-3333-4444-555555555555");
-        assert!(passes_relay_slug_grammar(&d));
-    }
-
-    #[test]
-    fn build_persona_event_produces_correct_kind() {
-        let record = sample_persona();
-        let builder = build_persona_event(&record).unwrap();
-        let keys = nostr::Keys::generate();
-        let event = builder.sign_with_keys(&keys).unwrap();
-        assert_eq!(event.kind.as_u16() as u32, KIND_PERSONA);
-    }
-
-    #[test]
-    fn round_trip_serialization() {
-        let record = sample_persona();
-        let builder = build_persona_event(&record).unwrap();
-        let keys = nostr::Keys::generate();
-        let event = builder.sign_with_keys(&keys).unwrap();
-
-        let restored = persona_from_event(&event).unwrap();
-        assert_eq!(restored.id, "test-slug");
-        assert_eq!(restored.display_name, "Test Persona");
-        assert_eq!(
-            restored.avatar_url,
-            Some("https://example.com/avatar.png".to_string())
-        );
-        assert_eq!(restored.system_prompt, "You are a test assistant.");
-        assert_eq!(restored.runtime, Some("goose".to_string()));
-        assert_eq!(restored.model, Some("claude-opus-4".to_string()));
-        assert_eq!(restored.provider, Some("anthropic".to_string()));
-        assert_eq!(restored.name_pool, vec!["Alpha", "Beta"]);
-        // env_vars are not included in public persona events (secrets travel
-        // via NIP-44-encrypted engrams only).
-        assert!(restored.env_vars.is_empty());
-        assert_eq!(
-            restored.source_team_persona_slug,
-            Some("test-slug".to_string())
-        );
-        assert!(!restored.is_builtin);
-        assert!(restored.is_active);
-    }
-
-    /// NIP-AP reference vector (Event 1, `docs/nips/NIP-AP.md:195-207`): the
-    /// serialized content bytes MUST match the spec exactly, byte-for-byte.
-    /// serde emits fields in declaration order, so this pins the content
-    /// encoding — and therefore the NIP-01 event id — for cross-implementation
-    /// interop. The field order is `display_name, system_prompt, avatar_url,
-    /// runtime, model, provider, name_pool`.
-    #[test]
-    fn content_matches_nip_ap_vector() {
-        // Exact body from NIP-AP.md Event 1 (no trailing whitespace, no BOM).
-        const VECTOR: &str = r#"{"display_name":"Test Agent","system_prompt":"You are a test assistant.","avatar_url":"https://example.com/avatar.png","runtime":"goose","model":"claude-opus-4","provider":"anthropic","name_pool":["Alpha","Beta"]}"#;
-
-        let content = PersonaEventContent {
-            display_name: "Test Agent".to_string(),
-            system_prompt: "You are a test assistant.".to_string(),
-            avatar_url: Some("https://example.com/avatar.png".to_string()),
-            runtime: Some("goose".to_string()),
-            model: Some("claude-opus-4".to_string()),
-            provider: Some("anthropic".to_string()),
-            name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
-        };
-        assert_eq!(
-            serde_json::to_string(&content).unwrap(),
-            VECTOR,
-            "serialized content drifted from the NIP-AP Event 1 vector"
-        );
-
-        // An event built from this content carries the byte-exact vector as its
-        // signed content, so a second implementer following the spec computes
-        // the same NIP-01 id.
-        let record = PersonaRecord {
-            id: "test-agent".to_string(),
-            display_name: "Test Agent".to_string(),
-            avatar_url: Some("https://example.com/avatar.png".to_string()),
-            system_prompt: "You are a test assistant.".to_string(),
-            runtime: Some("goose".to_string()),
-            model: Some("claude-opus-4".to_string()),
-            provider: Some("anthropic".to_string()),
-            name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
-            is_builtin: false,
-            is_active: true,
-            source_team: None,
-            source_team_persona_slug: None,
-            env_vars: BTreeMap::new(),
-            created_at: "2025-01-01T00:00:00Z".to_string(),
-            updated_at: "2025-01-01T00:00:00Z".to_string(),
-        };
-        let event = build_persona_event(&record)
-            .unwrap()
-            .sign_with_keys(&nostr::Keys::generate())
-            .unwrap();
-        assert_eq!(event.content, VECTOR);
-    }
-
-    #[test]
-    fn round_trip_minimal_persona() {
-        let record = PersonaRecord {
-            id: "minimal".to_string(),
-            display_name: "Minimal".to_string(),
-            avatar_url: None,
-            system_prompt: "Hello".to_string(),
-            runtime: None,
-            model: None,
-            provider: None,
-            name_pool: vec![],
-            is_builtin: true,
-            is_active: false,
-            source_team: Some("team-1".to_string()),
-            source_team_persona_slug: None,
-            env_vars: BTreeMap::new(),
-            created_at: "2025-01-01T00:00:00Z".to_string(),
-            updated_at: "2025-01-01T00:00:00Z".to_string(),
-        };
-
-        let builder = build_persona_event(&record).unwrap();
-        let keys = nostr::Keys::generate();
-        let event = builder.sign_with_keys(&keys).unwrap();
-
-        let restored = persona_from_event(&event).unwrap();
-        assert_eq!(restored.id, "minimal");
-        assert_eq!(restored.display_name, "Minimal");
-        assert_eq!(restored.avatar_url, None);
-        assert_eq!(restored.runtime, None);
-        assert_eq!(restored.model, None);
-        assert_eq!(restored.provider, None);
-        assert!(restored.name_pool.is_empty());
-        assert!(restored.env_vars.is_empty());
-        // Deserialized persona is always non-builtin and active
-        assert!(!restored.is_builtin);
-        assert!(restored.is_active);
-    }
-
-    #[test]
-    fn build_persona_delete_has_single_a_tag_no_e_tag() {
-        const OWNER: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-        let builder = build_persona_delete("test-slug", OWNER).unwrap();
-        let keys = nostr::Keys::generate();
-        let event = builder.sign_with_keys(&keys).unwrap();
-
-        assert_eq!(event.kind, Kind::Custom(5));
-
-        let a_tags: Vec<&[String]> = event
-            .tags
-            .iter()
-            .map(|t| t.as_slice())
-            .filter(|v| v.first().map(String::as_str) == Some("a"))
-            .collect();
-        assert_eq!(a_tags.len(), 1);
-        assert_eq!(a_tags[0][1], format!("{KIND_PERSONA}:{OWNER}:test-slug"));
-
-        // An e-tag would route to the event-id deletion path and leave the
-        // replaceable coordinate live — the tombstone must carry none.
-        assert!(event
-            .tags
-            .iter()
-            .all(|t| t.as_slice().first().map(String::as_str) != Some("e")));
-    }
-
-    #[test]
-    fn persona_content_hash_is_deterministic() {
-        let content = PersonaEventContent {
-            display_name: "Test".to_string(),
-            avatar_url: None,
-            system_prompt: "Hello".to_string(),
-            runtime: None,
-            model: None,
-            provider: None,
-            name_pool: vec![],
-        };
-        let hash1 = persona_content_hash(&content);
-        let hash2 = persona_content_hash(&content);
-        assert_eq!(hash1, hash2);
-        assert_eq!(hash1.len(), 64); // SHA-256 hex
-    }
-
-    #[test]
-    fn persona_content_hash_changes_on_edit() {
-        let content1 = PersonaEventContent {
-            display_name: "Test".to_string(),
-            avatar_url: None,
-            system_prompt: "Hello".to_string(),
-            runtime: None,
-            model: None,
-            provider: None,
-            name_pool: vec![],
-        };
-        let mut content2 = content1.clone();
-        content2.system_prompt = "Goodbye".to_string();
-        assert_ne!(
-            persona_content_hash(&content1),
-            persona_content_hash(&content2)
-        );
-    }
-
-    // ── persona_field_with_record_fallback ────────────────────────────────────
-
-    #[test]
-    fn field_fallback_persona_present_wins() {
-        assert_eq!(
-            persona_field_with_record_fallback(Some("persona-model"), Some("record-model")),
-            Some("persona-model".to_owned()),
-        );
-    }
-
-    #[test]
-    fn field_fallback_persona_blank_uses_record() {
-        assert_eq!(
-            persona_field_with_record_fallback(None, Some("record-model")),
-            Some("record-model".to_owned()),
-        );
-        assert_eq!(
-            persona_field_with_record_fallback(Some("  "), Some("record-model")),
-            Some("record-model".to_owned()),
-        );
-    }
-
-    #[test]
-    fn field_fallback_both_blank_is_none() {
-        assert_eq!(persona_field_with_record_fallback(None, None), None);
-        assert_eq!(persona_field_with_record_fallback(Some(""), Some("")), None);
-    }
-
-    #[test]
-    fn field_fallback_record_blank_is_none() {
-        assert_eq!(
-            persona_field_with_record_fallback(None, Some("  ")),
-            None,
-            "whitespace-only record value must also be treated as blank"
-        );
-    }
-
-    // ── persona_snapshot_with_agent_config_fallback ────────────────────────────
-
-    /// Helper: a persona with no model/provider configured.
-    fn blank_model_persona() -> PersonaRecord {
-        PersonaRecord {
-            model: None,
-            provider: None,
-            ..sample_persona()
-        }
-    }
-
-    /// (a) Persona leaves model/provider blank, agent record has values →
-    /// record values preserved AND source_version still updated to current hash.
-    #[test]
-    fn fallback_preserves_record_values_when_persona_blank() {
-        let persona = blank_model_persona();
-        let expected_version = persona_content_hash(&persona_event_content(&persona));
-
-        let snapshot = persona_snapshot_with_agent_config_fallback(
-            &persona,
-            &BTreeMap::new(),
-            Some("gpt-4o"),
-            Some("openai"),
-        );
-
-        assert_eq!(
-            snapshot.model.as_deref(),
-            Some("gpt-4o"),
-            "blank persona model must fall back to agent record value"
-        );
-        assert_eq!(
-            snapshot.provider.as_deref(),
-            Some("openai"),
-            "blank persona provider must fall back to agent record value"
-        );
-        assert_eq!(
-            snapshot.source_version, expected_version,
-            "source_version must still reflect current persona hash"
-        );
-    }
-
-    /// (b) Persona has model/provider set → persona wins over agent record.
-    #[test]
-    fn fallback_persona_wins_when_set() {
-        let persona = sample_persona(); // has model=Some("claude-opus-4"), provider=Some("anthropic")
-
-        let snapshot = persona_snapshot_with_agent_config_fallback(
-            &persona,
-            &BTreeMap::new(),
-            Some("gpt-4o"), // agent had a different model
-            Some("openai"), // agent had a different provider
-        );
-
-        assert_eq!(
-            snapshot.model.as_deref(),
-            Some("claude-opus-4"),
-            "persona model must win when persona has a value"
-        );
-        assert_eq!(
-            snapshot.provider.as_deref(),
-            Some("anthropic"),
-            "persona provider must win when persona has a value"
-        );
-    }
-
-    /// (c) Both blank → snapshot keeps None; a genuinely unconfigured agent
-    /// stays unconfigured (no fabricated values).
-    #[test]
-    fn fallback_both_blank_stays_none() {
-        let persona = blank_model_persona();
-
-        let snapshot = persona_snapshot_with_agent_config_fallback(
-            &persona,
-            &BTreeMap::new(),
-            None, // agent also has no model
-            None, // agent also has no provider
-        );
-
-        assert!(
-            snapshot.model.is_none(),
-            "neither persona nor agent has model — snapshot must be None"
-        );
-        assert!(
-            snapshot.provider.is_none(),
-            "neither persona nor agent has provider — snapshot must be None"
-        );
-    }
-
-    /// Whitespace-only values on the persona are treated as blank; agent
-    /// fallback applies.
-    #[test]
-    fn fallback_treats_whitespace_only_persona_value_as_blank() {
-        let mut persona = sample_persona();
-        persona.model = Some("  ".to_string());
-        persona.provider = Some("\t".to_string());
-
-        let snapshot = persona_snapshot_with_agent_config_fallback(
-            &persona,
-            &BTreeMap::new(),
-            Some("claude-opus-4"),
-            Some("anthropic"),
-        );
-
-        assert_eq!(
-            snapshot.model.as_deref(),
-            Some("claude-opus-4"),
-            "whitespace-only persona model must be treated as blank"
-        );
-        assert_eq!(
-            snapshot.provider.as_deref(),
-            Some("anthropic"),
-            "whitespace-only persona provider must be treated as blank"
-        );
-    }
-
-    /// Cross-field independence: persona sets model but not provider → model
-    /// comes from persona, provider falls back to the record.  This is the
-    /// practically common case (model-only personas).
-    #[test]
-    fn fallback_persona_model_set_provider_blank_uses_record_provider() {
-        let mut persona = sample_persona(); // model=Some("claude-opus-4"), provider=Some("anthropic")
-        persona.provider = None; // blank provider on persona
-
-        let snapshot = persona_snapshot_with_agent_config_fallback(
-            &persona,
-            &BTreeMap::new(),
-            Some("gpt-4o"), // record model (should be overridden by persona)
-            Some("openai"), // record provider (should be preserved)
-        );
-
-        assert_eq!(
-            snapshot.model.as_deref(),
-            Some("claude-opus-4"),
-            "persona model must win when persona has a value"
-        );
-        assert_eq!(
-            snapshot.provider.as_deref(),
-            Some("openai"),
-            "record provider must be used when persona provider is blank"
-        );
-    }
-
-    /// Inverse: persona sets provider but not model → provider comes from
-    /// persona, model falls back to the record.
-    #[test]
-    fn fallback_persona_provider_set_model_blank_uses_record_model() {
-        let mut persona = sample_persona(); // model=Some("claude-opus-4"), provider=Some("anthropic")
-        persona.model = None; // blank model on persona
-
-        let snapshot = persona_snapshot_with_agent_config_fallback(
-            &persona,
-            &BTreeMap::new(),
-            Some("gpt-4o"), // record model (should be preserved)
-            Some("openai"), // record provider (should be overridden by persona)
-        );
-
-        assert_eq!(
-            snapshot.model.as_deref(),
-            Some("gpt-4o"),
-            "record model must be used when persona model is blank"
-        );
-        assert_eq!(
-            snapshot.provider.as_deref(),
-            Some("anthropic"),
-            "persona provider must win when persona has a value"
-        );
-    }
-
-    /// Env-var layering: persona env < agent env — agent overrides always win
-    /// on key collision and a persona with an empty env map does not wipe the
-    /// agent's env vars.
-    #[test]
-    fn fallback_agent_env_wins_over_persona_env() {
-        let mut persona = blank_model_persona();
-        persona.env_vars = BTreeMap::from([
-            ("SHARED_KEY".to_string(), "persona-value".to_string()),
-            ("PERSONA_ONLY".to_string(), "from-persona".to_string()),
-        ]);
-        let agent_env = BTreeMap::from([
-            ("SHARED_KEY".to_string(), "agent-override".to_string()),
-            ("AGENT_ONLY".to_string(), "from-agent".to_string()),
-        ]);
-
-        let snapshot =
-            persona_snapshot_with_agent_config_fallback(&persona, &agent_env, None, None);
-
-        assert_eq!(
-            snapshot.env_vars.get("SHARED_KEY").map(String::as_str),
-            Some("agent-override"),
-            "agent env must win on key collision"
-        );
-        assert_eq!(
-            snapshot.env_vars.get("PERSONA_ONLY").map(String::as_str),
-            Some("from-persona"),
-            "persona-only key must be present"
-        );
-        assert_eq!(
-            snapshot.env_vars.get("AGENT_ONLY").map(String::as_str),
-            Some("from-agent"),
-            "agent-only key must be present"
-        );
-    }
+    record.model = snapshot.model;
+    record.provider = snapshot.provider;
+    record.runtime = snapshot.runtime;
+    // env_vars stay overrides-only. Self-heal records written before the env
+    // refresh: persona env used to be baked into `record.env_vars`, turning
+    // inherited values into pseudo-overrides that shadow later persona edits.
+    // An override equal to the persona's current value is indistinguishable
+    // from inheritance, so drop it and let the live merge supply it.
+    record
+        .env_vars
+        .retain(|k, v| persona.env_vars.get(k) != Some(v));
+    record.persona_source_version = Some(snapshot.source_version);
 }
+#[cfg(test)]
+mod tests;

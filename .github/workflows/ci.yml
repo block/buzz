@@ -156,6 +156,10 @@ jobs:
         run: just desktop-test
       - name: Desktop build
         run: just desktop-build
+      - name: Desktop Tauri clippy
+        run: just desktop-tauri-clippy
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
       - name: Desktop Tauri check
         run: just desktop-tauri-check
         env:
@@ -230,15 +234,21 @@ jobs:
         run: just desktop-build
       - name: Desktop smoke e2e
         run: cd desktop && pnpm exec playwright test --project=smoke --shard=${{ matrix.shard }}/4
+      - name: Summarize flaky tests
+        if: ${{ !cancelled() }}
+        run: node scripts/summarize-flaky-tests.mjs playwright-report.json "Desktop Smoke E2E (${{ matrix.shard }})"
+        working-directory: desktop
       - name: Upload desktop smoke e2e artifacts
-        if: failure()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: desktop-smoke-e2e-artifacts-${{ matrix.shard }}
           path: |
             desktop/playwright-report
+            desktop/playwright-report.json
             desktop/test-results
           if-no-files-found: ignore
+          retention-days: 7
 
   desktop:
     name: Desktop
@@ -439,16 +449,22 @@ jobs:
         run: bash scripts/setup-desktop-test-data.sh
       - name: Desktop relay-backed e2e
         run: cd desktop && pnpm exec playwright test --project=integration --shard=${{ matrix.shard }}/2
+      - name: Summarize flaky tests
+        if: ${{ !cancelled() }}
+        run: node scripts/summarize-flaky-tests.mjs playwright-report.json "Desktop E2E Integration (${{ matrix.shard }}/2)"
+        working-directory: desktop
       - name: Upload desktop integration artifacts
-        if: failure()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: desktop-e2e-integration-artifacts-${{ matrix.shard }}
           path: |
             desktop/playwright-report
+            desktop/playwright-report.json
             desktop/test-results
             /tmp/buzz-relay.log
           if-no-files-found: ignore
+          retention-days: 7
       - name: Save pnpm store cache
         if: github.event_name == 'push'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5

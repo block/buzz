@@ -91,9 +91,10 @@ impl Llm {
             }
             Provider::OpenAi | Provider::Databricks => {
                 self.openai_request(cfg, effective_model, |use_responses| {
-                    // Normalize effort for model-specific availability (per-model table; max is
-                    // already rejected at startup for pure OpenAI, but other per-model corrections
-                    // like none→minimal on gpt-5 base still apply).
+                    // Normalize effort for model-specific availability. Startup no longer rejects
+                    // `max` for pure OpenAI/Databricks; this per-model table is the single authority
+                    // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
+                    // models, and still applies corrections like none→minimal on the gpt-5 base.
                     let e = effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
                     if use_responses {
                         (
@@ -112,7 +113,7 @@ impl Llm {
             Provider::DatabricksV2 => {
                 self.databricks_v2_request(cfg, effective_model, |route| match route {
                     DatabricksV2Route::OpenAiResponses => {
-                        // OpenAI Responses path: normalize effort (max → xhigh, per-model table).
+                        // OpenAI Responses path: normalize effort against the per-model table.
                         let e =
                             effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
                         (
@@ -129,7 +130,7 @@ impl Llm {
                         )
                     }
                     DatabricksV2Route::MlflowChatCompletions => {
-                        // MLflow Chat path (OpenAI-shaped): normalize effort (max → xhigh, per-model table).
+                        // MLflow Chat path (OpenAI-shaped): normalize effort against the per-model table.
                         let e =
                             effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
                         (
@@ -149,6 +150,9 @@ impl Llm {
         // is centralized and never needs to be repeated in each provider arm.
         result.map_err(|e| match e {
             AgentError::Llm(s) => AgentError::Llm(format!("({effective_model}) {s}")),
+            AgentError::LlmModelNotFound(s) => {
+                AgentError::LlmModelNotFound(format!("({effective_model}) {s}"))
+            }
             other => other,
         })
     }
@@ -1071,6 +1075,12 @@ where
             backoff_with_jitter(attempt).await;
             continue;
         }
+        if status == 404 {
+            return Err(AgentError::LlmModelNotFound(format!(
+                "{status}: {}",
+                read_error_body(resp).await
+            )));
+        }
         if !status.is_success() {
             return Err(AgentError::Llm(format!(
                 "{status}: {}",
@@ -1970,6 +1980,24 @@ mod tests {
         assert_eq!(
             body["reasoning"]["effort"], "xhigh",
             "DBv2 GPT-5.5 route: max must be clamped to xhigh before responses_body"
+        );
+    }
+
+    #[test]
+    fn dbv2_openai_route_max_effort_passes_through_for_gpt5_6() {
+        let normalized =
+            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.6-sol");
+        let body = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "gpt-5.6-sol",
+            Some(normalized),
+        );
+        assert_eq!(
+            body["reasoning"]["effort"], "max",
+            "DBv2 GPT-5.6 route must serialize max to the Responses API"
         );
     }
 

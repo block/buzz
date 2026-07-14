@@ -14,7 +14,6 @@ import type {
   CreateChannelInput,
   GetHomeFeedInput,
   HomeFeedResponse,
-  Identity,
   ManagedAgent,
   ManagedAgentBackend,
   RelayAgent,
@@ -22,7 +21,6 @@ import type {
   RelayMemberRole,
   PresenceLookup,
   PresenceStatus,
-  Profile,
   RelayEvent,
   SearchMessagesInput,
   SearchMessagesResponse,
@@ -33,50 +31,19 @@ import type {
   SetChannelTopicInput,
   ThreadCursor,
   ThreadRepliesResponse,
-  UpdateProfileInput,
   UpdateChannelInput,
-  UserProfileSummary,
-  UserSearchPage,
-  UserSearchResult,
-  UsersBatchResponse,
   CreateManagedAgentInput,
   AgentModelsResponse,
   UpdateManagedAgentInput,
   AcpAvailabilityStatus,
   AcpRuntimeCatalogEntry,
+  AuthStatus,
   CommandAvailability,
   InstallRuntimeResult,
+  GitBashPrerequisite,
   OpenDmInput,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
-
-type RawIdentity = { pubkey: string; display_name: string };
-
-type RawProfile = {
-  pubkey: string;
-  display_name: string | null;
-  avatar_url: string | null;
-  about: string | null;
-  nip05_handle: string | null;
-  owner_pubkey: string | null;
-  has_profile_event?: boolean;
-};
-
-type RawUserProfileSummary = Omit<RawProfile, "pubkey" | "about"> & {
-  is_agent?: boolean;
-};
-
-type RawUsersBatchResponse = {
-  profiles: Record<string, RawUserProfileSummary>;
-  missing: string[];
-};
-
-type RawUserSearchResult = RawUserProfileSummary & { pubkey: string };
-
-type RawSearchUsersResponse = {
-  users: RawUserSearchResult[];
-  next_cursor?: string | null;
-};
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
 
@@ -216,7 +183,6 @@ export type RawManagedAgent = {
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
   needs_restart: boolean;
-  mcp_toolsets: string | null;
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
   pid: number | null;
@@ -226,8 +192,10 @@ export type RawManagedAgent = {
   last_stopped_at: string | null;
   last_exit_code: number | null;
   last_error: string | null;
+  last_error_code: number | null;
   log_path: string;
   start_on_app_launch: boolean;
+  auto_restart_on_config_change?: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
   // Optional: pre-feature mock fixtures may omit these. Mapped to
@@ -261,6 +229,10 @@ export type RawAcpRuntimeCatalogEntry = {
   install_instructions_url: string;
   can_auto_install: boolean;
   underlying_cli_path: string | null;
+  node_required: boolean;
+  /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
+  auth_status: AuthStatus;
+  login_hint?: string;
 };
 
 export type RawInstallStepResult = {
@@ -270,11 +242,21 @@ export type RawInstallStepResult = {
   stdout: string;
   stderr: string;
   exit_code: number | null;
+  hint?: string;
 };
 
 export type RawInstallRuntimeResult = {
   success: boolean;
   steps: RawInstallStepResult[];
+  restarted_count: number;
+  failed_restart_count: number;
+};
+
+type RawGitBashPrerequisite = {
+  available: boolean;
+  path: string | null;
+  install_instructions_url: string;
+  install_hint: string;
 };
 
 type RawCommandAvailability = {
@@ -418,110 +400,6 @@ function fromRawSearchHit(hit: RawSearchHit) {
     channelName: hit.channel_name,
     createdAt: hit.created_at,
     score: hit.score,
-  };
-}
-
-function fromRawProfile(profile: RawProfile): Profile {
-  return {
-    pubkey: profile.pubkey,
-    displayName: profile.display_name,
-    avatarUrl: profile.avatar_url,
-    about: profile.about,
-    nip05Handle: profile.nip05_handle,
-    ownerPubkey: profile.owner_pubkey,
-    hasProfileEvent: profile.has_profile_event ?? false,
-  };
-}
-
-function fromRawUserProfileSummary(
-  profile: RawUserProfileSummary,
-): UserProfileSummary {
-  return {
-    displayName: profile.display_name,
-    avatarUrl: profile.avatar_url,
-    nip05Handle: profile.nip05_handle,
-    ownerPubkey: profile.owner_pubkey,
-    isAgent: profile.is_agent ?? false,
-  };
-}
-
-function fromRawUserSearchResult(user: RawUserSearchResult): UserSearchResult {
-  return {
-    pubkey: user.pubkey,
-    displayName: user.display_name,
-    avatarUrl: user.avatar_url,
-    nip05Handle: user.nip05_handle,
-    ownerPubkey: user.owner_pubkey,
-    isAgent: user.is_agent ?? false,
-  };
-}
-
-export async function getIdentity(): Promise<Identity> {
-  const identity = await invokeTauri<RawIdentity>("get_identity");
-
-  return {
-    pubkey: identity.pubkey,
-    displayName: identity.display_name,
-  };
-}
-
-export async function getNsec(): Promise<string> {
-  return invokeTauri<string>("get_nsec");
-}
-
-export async function importIdentity(nsec: string): Promise<Identity> {
-  const raw = await invokeTauri<RawIdentity>("import_identity", { nsec });
-  return { pubkey: raw.pubkey, displayName: raw.display_name };
-}
-
-export async function getProfile(): Promise<Profile> {
-  const profile = await invokeTauri<RawProfile>("get_profile");
-  return fromRawProfile(profile);
-}
-
-export async function updateProfile(
-  input: UpdateProfileInput,
-): Promise<Profile> {
-  const profile = await invokeTauri<RawProfile>("update_profile", input);
-  return fromRawProfile(profile);
-}
-
-export async function getUserProfile(pubkey?: string): Promise<Profile> {
-  const profile = await invokeTauri<RawProfile>("get_user_profile", { pubkey });
-  return fromRawProfile(profile);
-}
-
-export async function getUsersBatch(
-  pubkeys: string[],
-): Promise<UsersBatchResponse> {
-  const response = await invokeTauri<RawUsersBatchResponse>("get_users_batch", {
-    pubkeys,
-  });
-
-  return {
-    profiles: Object.fromEntries(
-      Object.entries(response.profiles).map(([pubkey, profile]) => [
-        pubkey,
-        fromRawUserProfileSummary(profile),
-      ]),
-    ),
-    missing: response.missing,
-  };
-}
-
-export async function searchUsers(
-  query: string,
-  limit = 8,
-  cursor?: string | null,
-): Promise<UserSearchPage> {
-  const response = await invokeTauri<RawSearchUsersResponse>("search_users", {
-    query,
-    limit,
-    cursor: cursor ?? null,
-  });
-  return {
-    users: response.users.map(fromRawUserSearchResult),
-    nextCursor: response.next_cursor ?? null,
   };
 }
 
@@ -993,7 +871,6 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
     needsRestart: agent.needs_restart ?? false,
-    mcpToolsets: agent.mcp_toolsets,
     envVars: agent.env_vars ?? {},
     status: agent.status,
     pid: agent.pid,
@@ -1003,8 +880,10 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     lastStoppedAt: agent.last_stopped_at,
     lastExitCode: agent.last_exit_code,
     lastError: agent.last_error,
+    lastErrorCode: agent.last_error_code ?? null,
     logPath: agent.log_path,
     startOnAppLaunch: agent.start_on_app_launch,
+    autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
     // Fallbacks for pre-feature mocks/fixtures that don't carry these fields.
@@ -1030,6 +909,9 @@ function fromRawAcpRuntimeCatalogEntry(
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
     underlyingCliPath: entry.underlying_cli_path,
+    nodeRequired: entry.node_required,
+    authStatus: entry.auth_status,
+    loginHint: entry.login_hint ?? null,
   };
 }
 
@@ -1045,7 +927,10 @@ function fromRawInstallRuntimeResult(
       stdout: step.stdout,
       stderr: step.stderr,
       exitCode: step.exit_code,
+      hint: step.hint,
     })),
+    restartedCount: raw.restarted_count,
+    failedRestartCount: raw.failed_restart_count,
   };
 }
 
@@ -1137,7 +1022,6 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         harnessOverride: input.harnessOverride ?? false,
         agentArgs: input.agentArgs,
         mcpCommand: input.mcpCommand,
-        mcpToolsets: input.mcpToolsets,
         turnTimeoutSeconds: input.turnTimeoutSeconds,
         idleTimeoutSeconds: input.idleTimeoutSeconds,
         maxTurnDurationSeconds: input.maxTurnDurationSeconds,
@@ -1186,6 +1070,20 @@ export async function getManagedAgentLog(pubkey: string, lineCount?: number) {
     content: response.content,
     logPath: response.log_path,
   };
+}
+
+export async function discoverGitBashPrerequisite(): Promise<GitBashPrerequisite | null> {
+  const prerequisite = await invokeTauri<RawGitBashPrerequisite | null>(
+    "discover_git_bash_prerequisite",
+  );
+  return (
+    prerequisite && {
+      available: prerequisite.available,
+      path: prerequisite.path,
+      installInstructionsUrl: prerequisite.install_instructions_url,
+      installHint: prerequisite.install_hint,
+    }
+  );
 }
 
 export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
@@ -1282,6 +1180,36 @@ export async function getRuntimeFileConfig(
  */
 export async function getBakedBuildEnvKeys(): Promise<string[]> {
   return invokeTauri<string[]>("get_baked_build_env_keys");
+}
+
+/**
+ * A single baked build env entry.
+ *
+ * The value is already masked in Rust for secret keys (keys not in the
+ * explicit safe-to-reveal allowlist: `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL`,
+ * `DATABRICKS_HOST`, `DATABRICKS_MODEL`). Non-allowlisted keys have their
+ * values replaced with `••••••`. Non-secret values are shown as-is.
+ * Empty-value keys are filtered out.
+ */
+export type BakedEnvEntry = {
+  key: string;
+  /** Display value — real value or `••••••` for masked keys. */
+  value: string;
+  /** `true` when the value was replaced by the mask placeholder in Rust. */
+  masked: boolean;
+};
+
+/**
+ * Return the baked build env entries with values shown (masked where
+ * appropriate) for display in the Agent defaults card.
+ *
+ * Provider and model arrive as `BUZZ_AGENT_PROVIDER` / `BUZZ_AGENT_MODEL`
+ * keys and are included in the list alongside other baked vars.
+ *
+ * OSS builds return an empty array — the baked-env section is hidden.
+ */
+export async function getBakedBuildEnv(): Promise<BakedEnvEntry[]> {
+  return invokeTauri<BakedEnvEntry[]>("get_baked_build_env");
 }
 
 type RawUpdateManagedAgentResponse = {
