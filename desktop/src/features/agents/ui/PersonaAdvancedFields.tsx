@@ -1,6 +1,7 @@
 import { Input } from "@/shared/ui/input";
 import { cn } from "@/shared/lib/cn";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
+import { McpServersEditor, type McpServersValue } from "./McpServersEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
 import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
@@ -16,11 +17,14 @@ export function PersonaAdvancedFields({
   disabled,
   envVars,
   inheritedEnvVars = {},
+  mcpServers,
+  inheritedMcpServers = [],
   model,
   modelTuningRuntimeId = "",
   namePoolText,
   onBehaviorDraftChange,
   onEnvVarsChange,
+  onMcpServersChange,
   onNamePoolTextChange,
   provider,
   requiredEnvKeys = [],
@@ -32,6 +36,10 @@ export function PersonaAdvancedFields({
   /** Env vars to display as inherited defaults in tuning-field placeholders.
    *  For templates, pass `globalConfig.env_vars` (the fallback layer). */
   inheritedEnvVars?: EnvVarsValue;
+  /** This definition's local-only MCP server layer. */
+  mcpServers: McpServersValue;
+  /** Read-only servers inherited from the global layer, already merged. */
+  inheritedMcpServers?: McpServersValue;
   /** Active LLM model — forwarded to BuzzAgentModelTuningFields for effort filtering. */
   model?: string;
   /** Runtime id for the buzz-agent tuning knobs visibility gate. */
@@ -39,6 +47,7 @@ export function PersonaAdvancedFields({
   namePoolText: string;
   onBehaviorDraftChange: (value: PersonaBehaviorDraft) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
+  onMcpServersChange: (value: McpServersValue) => void;
   onNamePoolTextChange: (value: string) => void;
   /** Active LLM provider id — forwarded to BuzzAgentModelTuningFields for effort filtering. */
   provider?: string;
@@ -142,6 +151,16 @@ export function PersonaAdvancedFields({
         onChange={onEnvVarsChange}
         requiredKeys={requiredEnvKeys}
         value={envVars}
+      />
+
+      <McpServersEditor
+        disabled={disabled}
+        helperText="Local-only MCP servers spawned alongside buzz-agent instances created from this definition."
+        inheritedLabel="global"
+        inheritedServers={inheritedMcpServers}
+        label="MCP servers"
+        onChange={onMcpServersChange}
+        value={mcpServers}
       />
 
       {/* Tier-1 buzz-agent model-tuning knobs — only shown for buzz-agent. */}

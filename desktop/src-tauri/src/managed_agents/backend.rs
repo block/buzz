@@ -318,14 +318,22 @@ fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
     result
 }
 
-/// Collect string values from `request["agent"]["env_vars"]` (if present)
-/// to feed into [`redact_secrets_with`]. Returns an empty Vec if the
-/// request shape doesn't match, which is fine — falls back to the default
-/// prefix-based scrubbing.
+/// Collect secret values from a provider deploy request to feed into
+/// [`redact_secrets_with`]. Harvests:
+/// - `request["agent"]["env_vars"]` — flat string map of env values.
+/// - `request["agent"]["mcp_servers"][*]["env"][*]["value"]` — per-server env
+///   values, which may hold API keys for third-party MCP servers.
+///
+/// Returns an empty Vec if the request shape doesn't match, which is fine —
+/// falls back to the default prefix-based scrubbing.
 fn env_secrets_from_request(request: &serde_json::Value) -> Vec<String> {
-    request
-        .get("agent")
-        .and_then(|a| a.get("env_vars"))
+    let agent = match request.get("agent") {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+
+    let mut secrets: Vec<String> = agent
+        .get("env_vars")
         .and_then(|e| e.as_object())
         .map(|obj| {
             obj.values()
@@ -334,7 +342,25 @@ fn env_secrets_from_request(request: &serde_json::Value) -> Vec<String> {
                 .map(String::from)
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    if let Some(servers) = agent.get("mcp_servers").and_then(|s| s.as_array()) {
+        for server in servers {
+            if let Some(env) = server.get("env").and_then(|e| e.as_array()) {
+                for entry in env {
+                    if let Some(value) = entry
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        secrets.push(value.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    secrets
 }
 
 /// Public-in-crate helper: redact every non-empty value from `env` (plus
@@ -582,6 +608,76 @@ mod tests {
         assert!(
             env_secrets_from_request(&serde_json::json!({"agent": {"env_vars": null}})).is_empty()
         );
+    }
+
+    #[test]
+    fn env_secrets_from_request_extracts_mcp_server_env_values() {
+        let req = serde_json::json!({
+            "op": "deploy",
+            "agent": {
+                "env_vars": {
+                    "ANTHROPIC_API_KEY": "sk-ant-agent",
+                },
+                "mcp_servers": [
+                    {
+                        "name": "github",
+                        "command": "npx",
+                        "args": [],
+                        "env": [
+                            {"name": "GITHUB_TOKEN", "value": "ghp-secret"},
+                            {"name": "EMPTY_VAR", "value": ""},
+                        ],
+                    },
+                    {
+                        "name": "no-env",
+                        "command": "npx",
+                        "args": [],
+                    },
+                ],
+            },
+        });
+        let secrets = env_secrets_from_request(&req);
+        assert!(
+            secrets.iter().any(|v| v == "sk-ant-agent"),
+            "env_vars value missing"
+        );
+        assert!(
+            secrets.iter().any(|v| v == "ghp-secret"),
+            "mcp server env value missing"
+        );
+        // Empty values must be filtered out.
+        assert!(
+            !secrets.iter().any(|v| v.is_empty()),
+            "empty value must not be collected"
+        );
+        assert_eq!(secrets.len(), 2);
+    }
+
+    #[test]
+    fn mcp_server_env_secret_is_redacted_from_provider_error() {
+        // Regression test for F1: a provider that echoes an MCP env value in
+        // its stderr must not leak the secret into the desktop-visible error.
+        let secret = "ghp-very-secret-token";
+        let request = serde_json::json!({
+            "agent": {
+                "env_vars": {},
+                "mcp_servers": [{
+                    "name": "github",
+                    "command": "npx",
+                    "args": [],
+                    "env": [{"name": "GITHUB_TOKEN", "value": secret}],
+                }],
+            },
+        });
+        let secrets = env_secrets_from_request(&request);
+        let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+        let stderr = format!("provider failed: invalid token {secret}");
+        let redacted = redact_secrets_with(&stderr, &secret_refs);
+        assert!(
+            !redacted.contains(secret),
+            "secret must be redacted from provider error"
+        );
+        assert!(redacted.contains("[REDACTED]"));
     }
 
     #[test]

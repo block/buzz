@@ -67,6 +67,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             source_team: None,
             source_team_persona_slug: None,
             env_vars: Default::default(),
+            mcp_servers: vec![],
             respond_to: None,
             respond_to_allowlist: vec![],
             parallelism: None,
@@ -87,6 +88,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             source_team: None,
             source_team_persona_slug: None,
             env_vars: Default::default(),
+            mcp_servers: vec![],
             respond_to: None,
             respond_to_allowlist: vec![],
             parallelism: None,
@@ -148,6 +150,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         source_team: None,
         source_team_persona_slug: None,
         env_vars: Default::default(),
+        mcp_servers: vec![],
         respond_to: None,
         respond_to_allowlist: vec![],
         parallelism: None,
@@ -194,6 +197,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         provider: None,
         persona_source_version: None,
         env_vars: Default::default(),
+        mcp_servers: vec![],
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
         runtime_pid: None,
@@ -315,6 +319,7 @@ fn team_import_definitions_are_built_for_all_members() {
         definition.id.len() == 36
             && definition.source_team.is_none()
             && definition.env_vars.is_empty()
+            && definition.mcp_servers.is_empty()
             && definition.respond_to_allowlist.is_empty()
     }));
     assert_eq!(definitions[0].system_prompt, "Alice prompt");

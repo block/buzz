@@ -123,6 +123,7 @@ fn fixture(
     auth_tag: Option<String>,
 ) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        mcp_servers: vec![],
         pubkey: "p".into(),
         name: "n".into(),
         persona_id: None,
@@ -277,6 +278,7 @@ fn persona_with_provider(
     provider: Option<&str>,
 ) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        mcp_servers: vec![],
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,
@@ -548,6 +550,30 @@ fn runtime_metadata_env_vars_injects_model_even_with_acp_model_switching() {
 }
 
 // ── name_matches_known_binary / name_matches_interpreter tests ───────────
+
+#[test]
+fn mcp_transport_is_absent_for_non_buzz_agent_children() {
+    let mut command = std::process::Command::new("true");
+    command.env("BUZZ_ACP_MCP_SERVERS", "inherited");
+
+    super::set_buzz_agent_mcp_servers_env(&mut command, "goose", "[]".into());
+    assert!(
+        !command
+            .get_envs()
+            .any(|(key, value)| key == "BUZZ_ACP_MCP_SERVERS" && value.is_some()),
+        "non-buzz-agent child must not receive MCP transport"
+    );
+}
+
+#[test]
+fn mcp_transport_is_set_for_buzz_agent_children() {
+    let mut command = std::process::Command::new("true");
+    super::set_buzz_agent_mcp_servers_env(&mut command, "buzz-agent", "[]".into());
+
+    assert!(command.get_envs().any(|(key, value)| {
+        key == "BUZZ_ACP_MCP_SERVERS" && value == Some(std::ffi::OsStr::new("[]"))
+    }));
+}
 
 #[test]
 fn name_matches_known_binary_rejects_node() {

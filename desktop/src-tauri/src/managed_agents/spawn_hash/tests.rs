@@ -1,9 +1,25 @@
 use super::*;
-use crate::managed_agents::types::RespondTo;
+use crate::managed_agents::{
+    types::RespondTo, AgentDefinition, GlobalAgentConfig, McpServerConfig, McpServerEnvVar,
+};
 use std::collections::BTreeMap;
+
+fn mcp_server(name: &str) -> McpServerConfig {
+    McpServerConfig {
+        name: name.into(),
+        command: "mcp-command".into(),
+        args: vec![],
+        env: vec![McpServerEnvVar {
+            name: "MCP_TOKEN".into(),
+            value: "secret".into(),
+        }],
+        enabled: true,
+    }
+}
 
 fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        mcp_servers: vec![],
         pubkey: "p".repeat(64),
         name: "agent".into(),
         persona_id: None,
@@ -60,6 +76,7 @@ fn record() -> ManagedAgentRecord {
 
 fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
     AgentDefinition {
+        mcp_servers: vec![],
         id: id.into(),
         display_name: id.into(),
         avatar_url: None,
@@ -122,6 +139,80 @@ fn materializing_runtime_keeps_hash_stable() {
             &Default::default()
         )
     );
+}
+
+#[test]
+fn buzz_agent_mcp_edit_changes_hash_but_other_runtime_ignores_it() {
+    let mut buzz_agent = record();
+    buzz_agent.runtime = Some("buzz-agent".into());
+    let mut edited = buzz_agent.clone();
+    edited.mcp_servers = vec![mcp_server("local-mcp")];
+
+    assert_ne!(
+        spawn_config_hash(
+            &buzz_agent,
+            &[],
+            &[],
+            "wss://ws.example",
+            &GlobalAgentConfig::default()
+        ),
+        spawn_config_hash(
+            &edited,
+            &[],
+            &[],
+            "wss://ws.example",
+            &GlobalAgentConfig::default()
+        )
+    );
+
+    let mut goose = buzz_agent;
+    goose.runtime = Some("goose".into());
+    let mut goose_edited = goose.clone();
+    goose_edited.mcp_servers = vec![mcp_server("local-mcp")];
+    assert_eq!(
+        spawn_config_hash(
+            &goose,
+            &[],
+            &[],
+            "wss://ws.example",
+            &GlobalAgentConfig::default()
+        ),
+        spawn_config_hash(
+            &goose_edited,
+            &[],
+            &[],
+            "wss://ws.example",
+            &GlobalAgentConfig::default()
+        )
+    );
+}
+
+#[test]
+fn definition_mcp_edit_changes_buzz_agent_hash_without_becoming_agent_override() {
+    let mut record = record();
+    record.runtime = Some("buzz-agent".into());
+    record.persona_id = Some("persona".into());
+    let persona = persona("persona", Some("buzz-agent"), "prompt");
+    let mut edited_persona = persona.clone();
+    edited_persona.mcp_servers = vec![mcp_server("definition-mcp")];
+
+    assert_ne!(
+        spawn_config_hash(
+            &record,
+            &[persona],
+            &[],
+            "wss://ws.example",
+            &GlobalAgentConfig::default()
+        ),
+        spawn_config_hash(
+            &record,
+            &[edited_persona],
+            &[],
+            "wss://ws.example",
+            &GlobalAgentConfig::default()
+        )
+    );
+    assert!(record.mcp_servers.is_empty());
 }
 
 #[test]

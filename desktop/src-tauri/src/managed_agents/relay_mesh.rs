@@ -62,6 +62,7 @@ mod tests {
 
     fn fixture() -> ManagedAgentRecord {
         ManagedAgentRecord {
+            mcp_servers: vec![],
             pubkey: "p".into(),
             name: "n".into(),
             persona_id: None,

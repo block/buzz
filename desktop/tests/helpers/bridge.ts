@@ -58,6 +58,16 @@ type MockManagedAgentSeed = {
   autoRestartOnConfigChange?: boolean;
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
+  /** Override the default "goose" agent command (e.g. "buzz-agent"). */
+  agentCommand?: string;
+  /** Pre-seeded MCP server layer for the agent record. */
+  mcpServers?: Array<{
+    name: string;
+    command: string;
+    args: string[];
+    env: Array<{ name: string; value: string }>;
+    enabled: boolean;
+  }>;
 };
 
 type MockSearchProfileSeed = {
@@ -283,11 +293,19 @@ type MockBridgeOptions = {
   identityLocked?: boolean;
   /**
    * Global agent config returned by `get_global_agent_config`. Defaults to
-   * an empty config (no provider, model, or env vars) if not specified.
-   * Pass a config with a provider to test Inherit-from-global behavior.
+   * an empty config (no provider, model, env vars, or MCP servers) if not
+   * specified. Pass a config with a provider to test Inherit-from-global
+   * behavior.
    */
   globalAgentConfig?: {
     env_vars: Record<string, string>;
+    mcp_servers?: Array<{
+      name: string;
+      command: string;
+      args: string[];
+      env: Array<{ name: string; value: string }>;
+      enabled: boolean;
+    }>;
     provider: string | null;
     model: string | null;
   };

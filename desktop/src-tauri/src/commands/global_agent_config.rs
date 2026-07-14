@@ -76,6 +76,16 @@ pub async fn set_global_agent_config(
     let phase1 = tokio::task::spawn_blocking(move || {
         validate_global_config(&config)?;
 
+        // Reject global save if the prospective MCP config would push any
+        // existing buzz-agent record over the effective-server cap.
+        let records = load_managed_agents(&app_for_write)?;
+        let personas = load_personas(&app_for_write)?;
+        crate::managed_agents::validate_effective_mcp_cap_for_records(
+            &records,
+            &personas,
+            &config.mcp_servers,
+        )?;
+
         let old_global = load_global_agent_config(&app_for_write).unwrap_or_default();
 
         save_global_agent_config(&app_for_write, &config)?;

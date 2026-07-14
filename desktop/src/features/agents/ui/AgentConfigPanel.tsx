@@ -17,7 +17,7 @@ import { useAgentConfigSurface } from "../hooks";
 import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Spinner } from "@/shared/ui/spinner";
-import { McpServersSection } from "./McpServersSection";
+import { McpServersSection, BuzzAgentMcpServerRow } from "./McpServersSection";
 import type {
   ConfigField,
   ConfigOrigin,
@@ -366,8 +366,15 @@ export function AgentConfigPanel({
     );
   }
 
-  const { normalized, advanced, extensions, runtimeId, sources, isPreSpawn } =
-    data;
+  const {
+    normalized,
+    advanced,
+    extensions,
+    runtimeId,
+    sources,
+    isPreSpawn,
+    buzzAgentMcpServers,
+  } = data;
   const configFilePath = sources.configFilePath;
 
   const normalizedEntries = (
@@ -419,6 +426,19 @@ export function AgentConfigPanel({
       </div>
 
       <McpServersSection
+        buzzAgentSlot={
+          buzzAgentMcpServers.length > 0 ? (
+            <div className="divide-y divide-border/50">
+              {buzzAgentMcpServers.map((server) => (
+                <BuzzAgentMcpServerRow
+                  key={server.name}
+                  server={server}
+                  variant={advancedMode === "flat" ? "profile" : "compact"}
+                />
+              ))}
+            </div>
+          ) : undefined
+        }
         extensions={extensions}
         runtimeId={runtimeId}
         variant={advancedMode === "flat" ? "profile" : "compact"}

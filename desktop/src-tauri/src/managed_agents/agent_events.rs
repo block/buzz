@@ -18,6 +18,7 @@
 //! - `private_key_nsec` — the agent's secret key.
 //! - `auth_tag` — the NIP-OA owner attestation.
 //! - `env_vars` — may hold API keys / credentials.
+//! - `mcp_servers` — env entries may hold API keys / credentials.
 //! - `backend` — `Provider { config }` is an opaque blob that may hold secrets.
 //! - any runtime field (`runtime_pid`, `last_*`, `backend_agent_id`, …) — these
 //!   mutate on every start/stop and describe transient process state.
@@ -179,6 +180,16 @@ mod tests {
             provider: Some("anthropic".to_string()),
             persona_source_version: Some("abc123".to_string()),
             env_vars: BTreeMap::from([("OPENAI_API_KEY".to_string(), "sk-secret".to_string())]),
+            mcp_servers: vec![super::super::McpServerConfig {
+                name: "secret-mcp".to_string(),
+                command: "mcp-command".to_string(),
+                args: vec!["--secret".to_string()],
+                env: vec![super::super::McpServerEnvVar {
+                    name: "MCP_TOKEN".to_string(),
+                    value: "mcp-secret".to_string(),
+                }],
+                enabled: true,
+            }],
             start_on_app_launch: true,
             auto_restart_on_config_change: true,
             runtime_pid: Some(4242),
@@ -260,6 +271,9 @@ mod tests {
         assert!(!json.contains("OPENAI_API_KEY"), "leaked env var key");
         assert!(!json.contains("sk-secret"), "leaked env var value");
         assert!(!json.contains("env_vars"), "leaked env var field");
+        assert!(!json.contains("mcp_servers"), "leaked MCP server field");
+        assert!(!json.contains("secret-mcp"), "leaked MCP server name");
+        assert!(!json.contains("mcp-secret"), "leaked MCP server secret");
         assert!(
             !json.contains("sk-provider-secret"),
             "leaked provider config secret"

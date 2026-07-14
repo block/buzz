@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, process::Child};
 
+mod mcp_servers;
+pub(crate) use mcp_servers::*;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendKind {
@@ -63,6 +66,9 @@ pub struct AgentDefinition {
     /// Stored as a BTreeMap for deterministic on-disk ordering.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
+    /// Local-only MCP server layer. Never included in kind:30175 content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServerConfig>,
     /// NIP-AP behavioral defaults, stored in WIRE shape (kebab-case string,
     /// not the `RespondTo` enum) so `persona_event_content` is a verbatim
     /// copy and quad-absent records serialize byte-identically to the
@@ -106,6 +112,10 @@ impl AgentDefinition {
             provider: self.provider,
             persona_source_version: None,
             env_vars: self.env_vars,
+            // Definition MCP servers stay on the definition layer and are
+            // resolved live at spawn/deploy. Copying them here would turn
+            // inheritance into a per-agent override and block later edits.
+            mcp_servers: Vec::new(),
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
@@ -164,6 +174,7 @@ impl ManagedAgentRecord {
             source_team: self.source_team.clone(),
             source_team_persona_slug: self.source_team_persona_slug.clone(),
             env_vars: self.env_vars.clone(),
+            mcp_servers: self.mcp_servers.clone(),
             respond_to: self.definition_respond_to.clone(),
             respond_to_allowlist: self.definition_respond_to_allowlist.clone(),
             parallelism: self.definition_parallelism,
@@ -281,6 +292,10 @@ pub struct ManagedAgentRecord {
     /// To "override" a persona env var: set the same key here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
+    /// Local-only per-agent MCP overrides. Higher entries replace definition
+    /// and global entries by name; disabled entries mask inherited servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default = "default_start_on_app_launch")]
     pub start_on_app_launch: bool,
     /// Auto-restart this agent when its effective spawn config drifts from

@@ -3402,48 +3402,86 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
-        return vec![];
-    }
-    vec![McpServer {
-        name: std::path::Path::new(&config.mcp_command)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("mcp")
-            .to_string(),
-        command: config.mcp_command.clone(),
-        args: vec![],
-        env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
+    let mut servers = Vec::new();
+    if !config.mcp_command.is_empty() {
+        servers.push(McpServer {
+            name: std::path::Path::new(&config.mcp_command)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("mcp")
+                .to_string(),
+            command: config.mcp_command.clone(),
+            args: vec![],
+            env: {
+                let mut env = vec![
+                    EnvVar {
+                        name: "BUZZ_RELAY_URL".into(),
+                        value: config.relay_url.clone(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_PRIVATE_KEY".into(),
+                        // bech32 encoding of a valid secret key is infallible.
+                        // Panic here is correct: injecting a bogus secret would cause
+                        // delayed, hard-to-diagnose agent failures downstream.
+                        value: config
+                            .keys
+                            .secret_key()
+                            .to_bech32()
+                            .expect("secret key bech32 encoding should never fail"),
+                    },
+                ];
+                // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
+                // so the MCP server can attach it to every signed event.
+                if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+                    if !auth_tag.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_AUTH_TAG".into(),
+                            value: auth_tag,
+                        });
+                    }
                 }
-            }
-            env
-        },
-    }]
+                env
+            },
+        });
+    }
+    servers.extend(
+        config
+            .configured_mcp_servers
+            .iter()
+            .map(configured_mcp_server),
+    );
+    servers
+}
+
+fn configured_mcp_server(server: &config::ConfiguredMcpServer) -> McpServer {
+    // Shell-word split: users may type `uv run "/My Bot/jambot"` as the command.
+    // shlex handles quoting so paths with spaces survive. On parse failure
+    // (unmatched quote), pass the whole string as the command verbatim — the
+    // spawn will fail, and D1 surfaces MCP spawn errors as warnings.
+    let (command, prefix_args) = match shlex::split(&server.command) {
+        Some(mut tokens) if !tokens.is_empty() => {
+            let cmd = tokens.remove(0);
+            (cmd, tokens)
+        }
+        _ => (server.command.clone(), vec![]),
+    };
+
+    let mut args = prefix_args;
+    args.extend(server.args.iter().cloned());
+
+    McpServer {
+        name: server.name.clone(),
+        command,
+        args,
+        env: server
+            .env
+            .iter()
+            .map(|variable| EnvVar {
+                name: variable.name.clone(),
+                value: variable.value.clone(),
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -3875,6 +3913,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            configured_mcp_servers: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -3909,6 +3948,28 @@ mod build_mcp_servers_tests {
             no_base_prompt: false,
             base_prompt_content: None,
         }
+    }
+
+    #[test]
+    fn build_mcp_servers_appends_configured_servers_after_builtin() {
+        let mut config = test_config();
+        config.configured_mcp_servers = vec![config::ConfiguredMcpServer {
+            name: "github".into(),
+            command: "npx".into(),
+            args: vec!["github-mcp".into()],
+            env: vec![config::ConfiguredMcpEnvVar {
+                name: "TOKEN".into(),
+                value: "secret".into(),
+            }],
+        }];
+
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].name, "github");
+        assert_eq!(servers[1].command, "npx");
+        assert_eq!(servers[1].args, vec!["github-mcp"]);
+        assert_eq!(servers[1].env[0].name, "TOKEN");
     }
 
     #[test]
@@ -3961,13 +4022,32 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
-    fn empty_mcp_command_returns_no_servers() {
+    fn empty_mcp_command_omits_builtin_but_includes_user_servers() {
         let mut config = test_config();
         config.mcp_command = "".into();
+        config.configured_mcp_servers = vec![config::ConfiguredMcpServer {
+            name: "github".into(),
+            command: "npx".into(),
+            args: vec![],
+            env: vec![],
+        }];
+
         let servers = build_mcp_servers(&config);
+        // The built-in slot is omitted (mcp_command is empty), but user-configured
+        // servers are always included — they do not depend on the built-in server.
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "github");
+    }
+
+    #[test]
+    fn empty_mcp_command_with_no_user_servers_returns_empty() {
+        let mut config = test_config();
+        config.mcp_command = "".into();
+        config.configured_mcp_servers = vec![];
+
         assert!(
-            servers.is_empty(),
-            "empty mcp_command should produce no MCP servers"
+            build_mcp_servers(&config).is_empty(),
+            "no built-in and no user servers should yield an empty list"
         );
     }
 
@@ -4002,6 +4082,71 @@ mod build_mcp_servers_tests {
             servers[0].name, "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
+    }
+
+    #[test]
+    fn configured_mcp_server_shell_splits_command() {
+        let server = config::ConfiguredMcpServer {
+            name: "jambot".into(),
+            command: "uv run /path/to/jambot".into(),
+            args: vec!["--port".into(), "8080".into()],
+            env: vec![],
+        };
+
+        let result = super::configured_mcp_server(&server);
+        assert_eq!(result.command, "uv");
+        assert_eq!(
+            result.args,
+            vec!["run", "/path/to/jambot", "--port", "8080"],
+        );
+        assert_eq!(result.name, "jambot");
+    }
+
+    #[test]
+    fn configured_mcp_server_bare_command_unchanged() {
+        let server = config::ConfiguredMcpServer {
+            name: "github".into(),
+            command: "npx".into(),
+            args: vec!["github-mcp".into()],
+            env: vec![],
+        };
+
+        let result = super::configured_mcp_server(&server);
+        assert_eq!(result.command, "npx");
+        assert_eq!(result.args, vec!["github-mcp"]);
+    }
+
+    #[test]
+    fn configured_mcp_server_quoted_path_with_spaces() {
+        let server = config::ConfiguredMcpServer {
+            name: "jambot".into(),
+            command: r#"uv run "/Users/me/My Bot/.venv/bin/jambot""#.into(),
+            args: vec!["--port".into(), "8080".into()],
+            env: vec![],
+        };
+
+        let result = super::configured_mcp_server(&server);
+        assert_eq!(result.command, "uv");
+        assert_eq!(
+            result.args,
+            vec!["run", "/Users/me/My Bot/.venv/bin/jambot", "--port", "8080"],
+            "quoted path must preserve internal spaces and strip quotes"
+        );
+    }
+
+    #[test]
+    fn configured_mcp_server_unmatched_quote_falls_back_to_verbatim() {
+        let server = config::ConfiguredMcpServer {
+            name: "broken".into(),
+            command: r#"uv run "/unclosed/path"#.into(),
+            args: vec!["--flag".into()],
+            env: vec![],
+        };
+
+        let result = super::configured_mcp_server(&server);
+        // Unmatched quote → shlex returns None → verbatim fallback
+        assert_eq!(result.command, r#"uv run "/unclosed/path"#);
+        assert_eq!(result.args, vec!["--flag"]);
     }
 }
 
@@ -4040,6 +4185,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            configured_mcp_servers: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,

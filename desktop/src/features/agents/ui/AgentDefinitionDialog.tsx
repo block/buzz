@@ -16,6 +16,7 @@ import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
+import type { McpServersValue } from "./McpServersEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
 import {
@@ -128,6 +129,7 @@ export function AgentDefinitionDialog({
     React.useState(false);
   const [namePoolText, setNamePoolText] = React.useState("");
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
+  const [mcpServers, setMcpServers] = React.useState<McpServersValue>([]);
   const [behaviorDraft, setBehaviorDraft] = React.useState(
     emptyPersonaBehaviorDraft,
   );
@@ -179,14 +181,18 @@ export function AgentDefinitionDialog({
         : "";
     const nextEnvVars =
       "envVars" in initialValues ? (initialValues.envVars ?? {}) : {};
+    const nextMcpServers =
+      "mcpServers" in initialValues ? (initialValues.mcpServers ?? []) : [];
     const nextBehaviorDraft = draftFromBehavior(initialValues.behavior);
     behaviorSeedRef.current = draftFromBehavior(initialValues.behavior);
     setBehaviorDraft(nextBehaviorDraft);
     setNamePoolText(nextNamePoolText);
     setEnvVars(nextEnvVars);
+    setMcpServers(nextMcpServers);
     setShowAdvancedFields(
       nextNamePoolText.trim().length > 0 ||
         Object.keys(nextEnvVars).length > 0 ||
+        nextMcpServers.length > 0 ||
         nextBehaviorDraft.respondTo !== null ||
         nextBehaviorDraft.parallelism.trim().length > 0,
     );
@@ -282,6 +288,7 @@ export function AgentDefinitionDialog({
       provider: providerForSubmit,
       namePool: namePoolInput,
       envVars,
+      mcpServers,
       behavior: behaviorForSubmit(
         behaviorDraft,
         behaviorSeedRef.current,
@@ -867,11 +874,14 @@ export function AgentDefinitionDialog({
                       envVars={envVars}
                       fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
                       inheritedEnvVars={globalConfig.env_vars}
+                      inheritedMcpServers={globalConfig.mcp_servers}
+                      mcpServers={mcpServers}
                       model={model}
                       modelTuningRuntimeId={runtime}
                       namePoolText={namePoolText}
                       onBehaviorDraftChange={setBehaviorDraft}
                       onEnvVarsChange={setEnvVars}
+                      onMcpServersChange={setMcpServers}
                       onNamePoolTextChange={setNamePoolText}
                       provider={provider}
                       requiredEnvKeys={requiredEnvKeys}

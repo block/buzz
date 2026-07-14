@@ -8,6 +8,7 @@ use crate::managed_agents::AgentDefinition;
 
 fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        mcp_servers: vec![],
         id: id.to_string(),
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -330,6 +331,7 @@ fn migrate_retires_unmodified_personas() {
     let mut stored: Vec<AgentDefinition> = RETIRED_PERSONAS
         .iter()
         .map(|(id, prompt)| AgentDefinition {
+            mcp_servers: vec![],
             id: id.to_string(),
             system_prompt: prompt.to_string(),
             is_builtin: false, // already demoted by merge_personas
@@ -365,6 +367,7 @@ fn migrate_retires_unmodified_personas() {
 fn migrate_preserves_customized_personas() {
     let now = "2026-04-01T00:00:00Z";
     let mut stored = vec![AgentDefinition {
+        mcp_servers: vec![],
         id: "builtin:researcher".to_string(),
         display_name: "My Researcher".to_string(),
         system_prompt: "My custom research workflow with special instructions".to_string(),
@@ -398,6 +401,7 @@ fn migrate_is_idempotent() {
 
     // 2. Already-retired persona (display_name ends with " (retired)") — no-op.
     let mut stored_with_retired = vec![AgentDefinition {
+        mcp_servers: vec![],
         id: "builtin:researcher".to_string(),
         display_name: "Researcher (retired)".to_string(),
         system_prompt: "My custom prompt".to_string(),
@@ -413,6 +417,7 @@ fn migrate_is_idempotent() {
     // 3. Retired persona still marked is_builtin: true (pre-demotion).
     // migrate_retired_personas should still soft-deprecate it.
     let mut stored_pre_demotion = vec![AgentDefinition {
+        mcp_servers: vec![],
         id: "builtin:reviewer".to_string(),
         display_name: "Reviewer".to_string(),
         system_prompt: "Custom review prompt".to_string(),

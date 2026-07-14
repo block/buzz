@@ -872,6 +872,10 @@ pub async fn update_managed_agent(
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
             record.env_vars = env_vars;
         }
+        if let Some(mcp_servers) = input.mcp_servers {
+            crate::managed_agents::validate_mcp_servers(&mcp_servers)?;
+            record.mcp_servers = mcp_servers;
+        }
 
         // Inbound author gate: merge patch onto current values, then validate
         // the merged state. This lets a single update switch to Allowlist AND
@@ -894,6 +898,22 @@ pub async fn update_managed_agent(
         // when the caller explicitly supplied a new list.
         if input.respond_to_allowlist.is_some() {
             record.respond_to_allowlist = prospective_allowlist;
+        }
+
+        // Effective-merge cap: the record now carries the updated fields —
+        // validate that the three-layer merge stays within the cap. A rename
+        // can un-mask an inherited server, pushing the effective count over.
+        {
+            let personas = load_personas(&app).unwrap_or_default();
+            let effective_command = crate::managed_agents::record_agent_command(record, &personas);
+            let global_config =
+                crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+            crate::managed_agents::validate_effective_mcp_cap(
+                record,
+                &personas,
+                &global_config.mcp_servers,
+                &effective_command,
+            )?;
         }
 
         record.updated_at = now_iso();

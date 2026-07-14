@@ -30,7 +30,9 @@ use crate::managed_agents::env_vars::{
     validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_VALUE_BYTES,
 };
 use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
-use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
+use crate::managed_agents::types::{
+    validate_mcp_servers, AgentDefinition, ManagedAgentRecord, McpServerConfig,
+};
 
 /// The global agent configuration record.
 ///
@@ -49,6 +51,10 @@ pub struct GlobalAgentConfig {
     /// stripped at spawn time.
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
+
+    /// Local-only MCP servers inherited by every buzz-agent instance.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
 
     /// Global fallback provider (e.g. `"databricks_v2"`, `"anthropic"`).
     ///
@@ -92,6 +98,8 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
 
     // Standard env-var key validation (POSIX shape, reserved-key check, NUL/size caps).
     validate_user_env_keys(&non_empty)?;
+
+    validate_mcp_servers(&config.mcp_servers)?;
 
     // Reject derived provider/model keys in global env_vars.
     let derived: Vec<&str> = non_empty

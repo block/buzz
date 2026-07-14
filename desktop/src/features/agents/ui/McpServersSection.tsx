@@ -1,6 +1,6 @@
 import type * as React from "react";
 import { CheckCircle2, CircleSlash } from "lucide-react";
-import type { ExtensionEntry } from "@/shared/api/types";
+import type { ExtensionEntry, McpServerConfig } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
 type McpServersSectionProps = {
@@ -38,9 +38,18 @@ export function McpServersSection({
         MCP Servers
       </p>
 
-      {isBuzzAgent && buzzAgentSlot ? buzzAgentSlot : null}
-
-      {extensions.length > 0 ? (
+      {isBuzzAgent ? (
+        (buzzAgentSlot ?? (
+          <p
+            className={cn(
+              "text-sm text-muted-foreground",
+              variant === "compact" ? "py-2" : "px-4 py-3",
+            )}
+          >
+            No custom servers configured
+          </p>
+        ))
+      ) : extensions.length > 0 ? (
         <div className="divide-y divide-border/50">
           {extensions.map((extension) => (
             <McpServerRow
@@ -95,6 +104,54 @@ function McpServerRow({
         <span className="mt-0.5 block truncate text-2xs text-muted-foreground/70">
           {extension.kind}
           {extension.enabled ? " enabled" : " disabled"}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Read-only row for an *effective merged* buzz-agent MCP server — "what
+ * runs." Shows the resolved command line rather than `kind`/enabled state
+ * (unlike `McpServerRow`), since every entry here is already enabled by
+ * contract (`RuntimeConfigSurface.buzzAgentMcpServers` is enabled-only).
+ */
+export function BuzzAgentMcpServerRow({
+  server,
+  variant,
+}: {
+  server: McpServerConfig;
+  variant: "compact" | "profile";
+}) {
+  const StatusIcon = server.enabled ? CheckCircle2 : CircleSlash;
+  const commandLine = [server.command, ...server.args]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <div
+      className={cn(
+        "flex min-w-0 items-center gap-3",
+        variant === "compact" ? "py-2" : "px-4 py-3",
+      )}
+    >
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted/50">
+        <StatusIcon
+          className={cn(
+            "h-4 w-4",
+            server.enabled ? "text-emerald-600" : "text-muted-foreground",
+          )}
+        />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium text-foreground">
+          {server.name}
+        </span>
+        <span
+          className="mt-0.5 block truncate text-2xs text-muted-foreground/70"
+          title={commandLine || undefined}
+        >
+          {commandLine || "stdio"}
         </span>
       </span>
     </div>

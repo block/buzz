@@ -8,6 +8,7 @@ use crate::managed_agents::{AgentDefinition, BackendKind, ManagedAgentRecord, Re
 
 fn config_with_env(pairs: &[(&str, &str)]) -> GlobalAgentConfig {
     GlobalAgentConfig {
+        mcp_servers: vec![],
         env_vars: pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -92,6 +93,7 @@ fn validate_ignores_empty_values_for_reserved_key_check() {
 #[test]
 fn validate_rejects_provider_with_nul_byte() {
     let config = GlobalAgentConfig {
+        mcp_servers: vec![],
         provider: Some("anthropic\0evil".to_string()),
         ..Default::default()
     };
@@ -105,6 +107,7 @@ fn validate_rejects_provider_with_nul_byte() {
 #[test]
 fn validate_rejects_model_with_nul_byte() {
     let config = GlobalAgentConfig {
+        mcp_servers: vec![],
         model: Some("claude-opus-4\0evil".to_string()),
         ..Default::default()
     };
@@ -119,6 +122,7 @@ fn validate_rejects_model_with_nul_byte() {
 fn validate_rejects_provider_exceeding_size_cap() {
     use crate::managed_agents::env_vars::MAX_ENV_VALUE_BYTES;
     let config = GlobalAgentConfig {
+        mcp_servers: vec![],
         provider: Some("x".repeat(MAX_ENV_VALUE_BYTES + 1)),
         ..Default::default()
     };
@@ -133,6 +137,7 @@ fn validate_rejects_provider_exceeding_size_cap() {
 fn validate_rejects_model_exceeding_size_cap() {
     use crate::managed_agents::env_vars::MAX_ENV_VALUE_BYTES;
     let config = GlobalAgentConfig {
+        mcp_servers: vec![],
         model: Some("x".repeat(MAX_ENV_VALUE_BYTES + 1)),
         ..Default::default()
     };
@@ -146,6 +151,7 @@ fn validate_rejects_model_exceeding_size_cap() {
 #[test]
 fn validate_accepts_valid_provider_and_model() {
     let config = GlobalAgentConfig {
+        mcp_servers: vec![],
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-5".to_string()),
         ..Default::default()
@@ -158,6 +164,7 @@ fn validate_accepts_valid_provider_and_model() {
 #[test]
 fn normalize_some_empty_provider_becomes_none() {
     let mut config = GlobalAgentConfig {
+        mcp_servers: vec![],
         provider: Some("".to_string()),
         ..Default::default()
     };
@@ -171,6 +178,7 @@ fn normalize_some_empty_provider_becomes_none() {
 #[test]
 fn normalize_whitespace_only_provider_becomes_none() {
     let mut config = GlobalAgentConfig {
+        mcp_servers: vec![],
         provider: Some("   ".to_string()),
         ..Default::default()
     };
@@ -184,6 +192,7 @@ fn normalize_whitespace_only_provider_becomes_none() {
 #[test]
 fn normalize_some_empty_model_becomes_none() {
     let mut config = GlobalAgentConfig {
+        mcp_servers: vec![],
         model: Some("".to_string()),
         ..Default::default()
     };
@@ -197,6 +206,7 @@ fn normalize_some_empty_model_becomes_none() {
 #[test]
 fn normalize_whitespace_only_model_becomes_none() {
     let mut config = GlobalAgentConfig {
+        mcp_servers: vec![],
         model: Some("  \t ".to_string()),
         ..Default::default()
     };
@@ -210,6 +220,7 @@ fn normalize_whitespace_only_model_becomes_none() {
 #[test]
 fn normalize_valid_provider_and_model_unchanged() {
     let mut config = GlobalAgentConfig {
+        mcp_servers: vec![],
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-5".to_string()),
         ..Default::default()
@@ -256,6 +267,7 @@ fn strip_is_idempotent_on_all_non_empty() {
 fn default_config_is_all_none_empty() {
     let config = GlobalAgentConfig::default();
     assert!(config.env_vars.is_empty());
+    assert!(config.mcp_servers.is_empty());
     assert!(config.provider.is_none());
     assert!(config.model.is_none());
 }
@@ -263,6 +275,7 @@ fn default_config_is_all_none_empty() {
 #[test]
 fn roundtrip_serialization() {
     let config = GlobalAgentConfig {
+        mcp_servers: vec![],
         env_vars: BTreeMap::from([("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string())]),
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4".to_string()),
@@ -285,6 +298,10 @@ fn default_global_config_serializes_all_fields() {
         "serialized JSON must always include env_vars; got: {json}"
     );
     assert!(
+        json.contains("\"mcp_servers\""),
+        "serialized JSON must always include mcp_servers; got: {json}"
+    );
+    assert!(
         json.contains("\"provider\""),
         "serialized JSON must always include provider; got: {json}"
     );
@@ -298,6 +315,7 @@ fn default_global_config_serializes_all_fields() {
 
 fn bare_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        mcp_servers: vec![],
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
         persona_id: None,
@@ -354,6 +372,7 @@ fn bare_record() -> ManagedAgentRecord {
 
 fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     AgentDefinition {
+        mcp_servers: vec![],
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: None,
@@ -390,6 +409,7 @@ fn resolve_agent_record_wins_over_persona_and_global() {
         Some("persona-provider"),
     )];
     let global = GlobalAgentConfig {
+        mcp_servers: vec![],
         model: Some("global-model".to_string()),
         provider: Some("global-provider".to_string()),
         ..Default::default()
@@ -419,6 +439,7 @@ fn resolve_persona_fallback_when_record_has_none() {
         Some("persona-provider"),
     )];
     let global = GlobalAgentConfig {
+        mcp_servers: vec![],
         model: Some("global-model".to_string()),
         provider: Some("global-provider".to_string()),
         ..Default::default()
@@ -449,6 +470,7 @@ fn resolve_global_fallback_when_record_and_persona_have_none() {
     // record.model / provider = None; persona.model / provider = None
     let personas = vec![persona("p1", None, None)];
     let global = GlobalAgentConfig {
+        mcp_servers: vec![],
         model: Some("global-model".to_string()),
         provider: Some("global-provider".to_string()),
         ..Default::default()
@@ -475,6 +497,7 @@ fn resolve_global_fallback_when_no_persona_linked() {
     let record = bare_record(); // persona_id = None, model/provider = None
     let personas: Vec<AgentDefinition> = vec![];
     let global = GlobalAgentConfig {
+        mcp_servers: vec![],
         model: Some("global-model".to_string()),
         provider: Some("global-provider".to_string()),
         ..Default::default()
@@ -519,6 +542,7 @@ fn resolve_each_field_resolves_independently_through_tiers() {
     // persona.model = None → global fills model if record also had none, but
     // record has model here so global is not needed for model.
     let global = GlobalAgentConfig {
+        mcp_servers: vec![],
         model: Some("global-model".to_string()),
         provider: Some("global-provider".to_string()),
         ..Default::default()
@@ -541,6 +565,7 @@ fn resolve_each_field_resolves_independently_through_tiers() {
 #[test]
 fn populated_global_config_round_trips() {
     let original = GlobalAgentConfig {
+        mcp_servers: vec![],
         env_vars: [("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string())]
             .into_iter()
             .collect(),
@@ -572,6 +597,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
     record.persona_id = Some("p1".to_string());
 
     let persona = AgentDefinition {
+        mcp_servers: vec![],
         id: "p1".to_string(),
         display_name: "Goose persona".to_string(),
         avatar_url: None,

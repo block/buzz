@@ -209,6 +209,10 @@ pub(crate) fn read_config_surface(
         normalized,
         advanced,
         extensions,
+        // Populated by `resolve_config_surface` for the buzz-agent runtime only;
+        // this reader has no access to the global/persona MCP layers needed to
+        // compute the effective merge.
+        buzz_agent_mcp_servers: Vec::new(),
         sources,
     }
 }

@@ -2,6 +2,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 import type {
   AgentPersona,
   CreatePersonaInput,
+  McpServerConfig,
   RespondToMode,
   UpdatePersonaInput,
 } from "@/shared/api/types";
@@ -19,6 +20,7 @@ export type RawPersona = {
   is_active?: boolean;
   source_team?: string | null;
   env_vars?: Record<string, string>;
+  mcp_servers?: McpServerConfig[];
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
@@ -42,6 +44,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     isActive: persona.is_active ?? true,
     sourceTeam: persona.source_team ?? null,
     envVars: persona.env_vars ?? {},
+    mcpServers: persona.mcp_servers ?? [],
     respondTo: (persona.respond_to as RespondToMode | undefined) ?? null,
     respondToAllowlist: persona.respond_to_allowlist ?? [],
     parallelism: persona.parallelism ?? null,
@@ -68,6 +71,7 @@ export async function createPersona(
         provider: input.provider,
         namePool: input.namePool ?? [],
         envVars: input.envVars ?? {},
+        mcpServers: input.mcpServers ?? [],
         behavior: input.behavior,
       },
     }),
@@ -91,6 +95,8 @@ export async function updatePersona(
       // tells the backend "don't touch the stored env vars" so editing
       // unrelated fields can't silently wipe saved credentials.
       envVars: input.envVars,
+      // Same absent-vs-present contract as envVars for the local MCP layer.
+      mcpServers: input.mcpServers,
       // Same absent-vs-present contract as envVars for the behavioral quad.
       behavior: input.behavior,
     },

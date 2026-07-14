@@ -71,6 +71,9 @@ toml = "1.0"
 # Filter expressions
 evalexpr = { workspace = true }
 
+# Shell-word splitting (MCP server command field)
+shlex = "1"
+
 # Process-group kill (safe wrapper around killpg) — Unix-only; kill_process_group
 # has a #[cfg(not(unix))] fallback in acp.rs.
 [target.'cfg(unix)'.dependencies]

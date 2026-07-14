@@ -2,6 +2,7 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
+import { McpServersEditor, type McpServersValue } from "./McpServersEditor";
 import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
@@ -21,8 +22,10 @@ export function EditAgentAdvancedFields({
   fileSatisfiedEnvKeys,
   focusKey,
   inheritedEnvVars,
+  inheritedMcpServers = [],
   inheritHarness,
   linkedPersona,
+  mcpServers,
   model,
   modelTuningRuntimeId,
   parallelism,
@@ -36,6 +39,7 @@ export function EditAgentAdvancedFields({
   onAgentCommandChange,
   onEnvVarsChange,
   onInheritHarnessChange,
+  onMcpServersChange,
   onParallelismChange,
   onRelayUrlChange,
   onAutoRestartChange,
@@ -51,7 +55,11 @@ export function EditAgentAdvancedFields({
   /** When set, EnvVarsEditor scrolls and focuses this key's input on mount. */
   focusKey?: string;
   inheritedEnvVars: Record<string, string>;
+  /** Read-only MCP servers inherited from the global + persona layers, merged. */
+  inheritedMcpServers?: McpServersValue;
   inheritHarness: boolean;
+  /** This agent instance's own MCP server layer. */
+  mcpServers: McpServersValue;
   linkedPersona: AgentPersona | null;
   /** Active LLM model — forwarded to BuzzAgentModelTuningFields for effort filtering. */
   model?: string;
@@ -73,6 +81,7 @@ export function EditAgentAdvancedFields({
   onAgentCommandChange: (value: string) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onInheritHarnessChange: (value: boolean) => void;
+  onMcpServersChange: (value: McpServersValue) => void;
   onParallelismChange: (value: string) => void;
   onRelayUrlChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
@@ -310,6 +319,17 @@ export function EditAgentAdvancedFields({
         onChange={onEnvVarsChange}
         requiredKeys={requiredEnvKeys}
         value={envVars}
+      />
+
+      {/* MCP servers */}
+      <McpServersEditor
+        disabled={disabled}
+        helperText="Per-instance MCP servers. Override same-named servers from the template and global layers."
+        inheritedLabel="template / global defaults"
+        inheritedServers={inheritedMcpServers}
+        label="MCP servers"
+        onChange={onMcpServersChange}
+        value={mcpServers}
       />
 
       {/* Tier-1 buzz-agent model-tuning knobs — only shown for buzz-agent. */}

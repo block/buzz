@@ -412,6 +412,7 @@ pub async fn create_managed_agent(
         }
     }
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+    crate::managed_agents::validate_mcp_servers(&input.mcp_servers)?;
 
     // Validate & normalize the respond-to allowlist BEFORE any side effects.
     // The harness has its own validator (buzz-acp/src/config.rs) but we want
@@ -716,6 +717,7 @@ pub async fn create_managed_agent(
             persona_team_dir: None,
             persona_name_in_team: None,
             env_vars: input.env_vars.clone(),
+            mcp_servers: input.mcp_servers.clone(),
             created_at: now_iso(),
             updated_at: now_iso(),
             last_started_at: None,
@@ -738,6 +740,19 @@ pub async fn create_managed_agent(
             definition_parallelism: None,
             relay_mesh: relay_mesh.clone(),
         };
+
+        // Effective-merge cap: validate the prospective three-layer merge
+        // (global < definition < agent) stays within MAX_USER_MCP_SERVERS.
+        // Per-layer validation already ran, but a per-layer-valid agent can
+        // still exceed the cap when layered on top of inherited servers.
+        let global_config =
+            crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+        crate::managed_agents::validate_effective_mcp_cap(
+            &record,
+            &personas,
+            &global_config.mcp_servers,
+            &record.agent_command,
+        )?;
 
         records.push(record);
 

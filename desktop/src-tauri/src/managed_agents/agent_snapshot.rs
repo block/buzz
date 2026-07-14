@@ -21,7 +21,7 @@
 //! The following fields are NEVER serialized:
 //!   - `private_key_nsec` / any private key material
 //!   - `auth_tag` (NIP-OA)
-//!   - `env_vars` (API keys / credentials)
+//!   - `env_vars` and `mcp_servers` (API keys / credentials)
 //!   - `relay_url` (machine-local endpoint)
 //!   - `acp_command` / `agent_command` / `agent_command_override` / `agent_args`
 //!     (machine-local harness paths)
@@ -500,6 +500,16 @@ mod tests {
                 m.insert("API_KEY".to_string(), "secret123".to_string()); // MUST NOT appear
                 m
             },
+            mcp_servers: vec![crate::managed_agents::McpServerConfig {
+                name: "SENTINEL_MCP_NAME".to_string(),
+                command: "SENTINEL_MCP_COMMAND".to_string(),
+                args: Vec::new(),
+                env: vec![crate::managed_agents::McpServerEnvVar {
+                    name: "SENTINEL_MCP_TOKEN".to_string(),
+                    value: "SENTINEL_MCP_SECRET".to_string(),
+                }],
+                enabled: true,
+            }], // MUST NOT appear in snapshot
             start_on_app_launch: true,
             auto_restart_on_config_change: true,
             runtime_pid: Some(12345), // MUST NOT appear
@@ -741,6 +751,18 @@ mod tests {
         assert!(
             !json.contains("envVars") && !json.contains("env_vars"),
             "envVars field must not appear in snapshot"
+        );
+    }
+
+    #[test]
+    fn secret_exclusion_mcp_servers_absent() {
+        let json = snapshot_json_string(&minimal_record());
+        assert!(
+            !json.contains("mcpServers")
+                && !json.contains("mcp_servers")
+                && !json.contains("SENTINEL_MCP_NAME")
+                && !json.contains("SENTINEL_MCP_SECRET"),
+            "local MCP configuration must not appear in snapshots"
         );
     }
 

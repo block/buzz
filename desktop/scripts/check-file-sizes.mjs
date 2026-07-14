@@ -79,7 +79,10 @@ const overrides = new Map([
   // 3-phase (stage/stop/commit) + commit_cascade_agents injectable helper for
   // retry-safety. Load-bearing reviewer-required change; queued to split.
   // Consolidation removed the legacy persona-card import/export codecs.
-  ["src-tauri/src/commands/personas/mod.rs", 984],
+  // +6: local-only MCP layer validation/update wiring. Load-bearing; queued to split.
+  // MCP validation and inherited-layer effective-cap save gate; the gate counts
+  // trailing newlines, so 994 physical lines are 995 counted lines.
+  ["src-tauri/src/commands/personas/mod.rs", 995],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
@@ -165,9 +168,10 @@ const overrides = new Map([
   // setup-mode requirements. The Windows-only requirement and serialization
   // test add eight lines; split remains queued with the existing file debt.
   // Windows Doctor install fix: cli_install_commands_windows field added to test stubs.
-  // team-instructions-first-class: ManagedAgentRecord fixture gains the new
-  // team_id field (+1 line).
-  ["src-tauri/src/managed_agents/readiness.rs", 1765],
+  // `team-instructions-first-class` added `team_id`; MCP configuration added
+  // the required `mcp_servers` minimal-fixture field. The gate counts the
+  // trailing newline, so 1,765 physical lines are 1,766 counted lines.
+  ["src-tauri/src/managed_agents/readiness.rs", 1766],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -200,9 +204,10 @@ const overrides = new Map([
   // RawInstallRuntimeResult + fromRawInstallRuntimeResult mapper (+2).
   // Git Bash Doctor discovery adds the raw Tauri response and its camelCase
   // mapper. This is the existing API boundary; split remains queued.
-  // team-instructions-first-class: createManagedAgent Tauri bridge threads the
-  // new teamId input through to the backend (+1 line).
-  ["src/shared/api/tauri.ts", 1305],
+  // `team-instructions-first-class` added the create `teamId` wire field; MCP
+  // configuration adds the raw/read/create `mcpServers` plumbing. The gate
+  // counts trailing newlines, so 1,308 physical lines are 1,309 counted lines.
+  ["src/shared/api/tauri.ts", 1309],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
   // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
   // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/
@@ -212,12 +217,16 @@ const overrides = new Map([
   // mcp-readonly-view rebase: PR2 MCP config surface FE-type fields force +1 over the grandfathered ceiling.
   // Git Bash prerequisite payload adds four fields to the shared Tauri API
   // contract. This is the canonical type location; split remains queued.
-  // signout-wipe: resetFailed field added to Identity type (+6 lines).
-  // team-instructions-first-class: CreateManagedAgentInput.teamId (+2, incl.
-  // doc comment) and AgentTeam/CreateTeamInput/UpdateTeamInput.instructions
-  // (+3) — the new team-id spawn link and the runtime-layered instructions
-  // field.
-  ["src/shared/api/types.ts", 1047],
+  // `signout-wipe` added `Identity.resetFailed`; `team-instructions-first-class`
+  // added team/instructions fields; MCP config adds the shared server types,
+  // layer fields, IPC input fields, and effective-surface field. The gate
+  // counts trailing newlines. Upstream added eight non-MCP type lines after the
+  // prior ceiling, and the MCP snapshot exclusion added no production types.
+  ["src/shared/api/types.ts", 1085],
+  // MCP snapshot-exclusion coverage adds a credential-bearing fixture and a
+  // negative serialization assertion. `agent_snapshot.rs` was already exactly
+  // at the 1,000-line limit; the gate counts trailing newlines.
+  ["src-tauri/src/managed_agents/agent_snapshot.rs", 1010],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -289,9 +298,10 @@ const overrides = new Map([
   // candidates, cli_install_commands_for_os PowerShell selection, login_shell_path
   // None regression, .cmd shim resolution, no-git-bash error hint.
   // +32: deterministic .cmd resolver + no-registry + install_shell_from tests.
-  // team-instructions-first-class: record_with test fixture gained the new
-  // ManagedAgentRecord.team_id field (+1 line) alongside persona_team_dir.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1271],
+  // `team-instructions-first-class` added `team_id`; MCP configuration added
+  // two required `mcp_servers` test-fixture fields. The gate counts the
+  // trailing newline, so 1,272 physical lines are 1,273 counted lines.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1273],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -419,7 +429,9 @@ const overrides = new Map([
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   // +8: harness_override thread-through in update_managed_agent so a deliberate
   // Custom pin routes to update_time_agent_command_override (comment + call).
-  ["src-tauri/src/commands/agent_models.rs", 1079],
+  // +3: effective-merge MCP cap backstop in update_managed_agent — validates
+  // the three-layer merge stays within MAX_USER_MCP_SERVERS at save time.
+  ["src-tauri/src/commands/agent_models.rs", 1082],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.
@@ -427,7 +439,11 @@ const overrides = new Map([
   // is_safe_to_reveal allowlist + baked_env_thinking_effort_is_unmasked test.
   // +1: doctor-install-reliability: login_hint: None added to goose_runtime test stub.
   // +1: doctor-install-reliability review fixes: auth_probe_args: None added to stub.
-  ["src-tauri/src/commands/agent_config.rs", 1021],
+  // MCP config surface: `resolve_config_surface` receives the effective command
+  // and exposes the effective `buzz_agent_mcp_servers` merge; coverage pins the
+  // merge, disabled-mask, and non-buzz-agent cases. The gate counts trailing
+  // newlines, so 1,139 physical lines are 1,140 counted lines.
+  ["src-tauri/src/commands/agent_config.rs", 1140],
   // codex-install-auto-restart review-fixes: should_restart_after_install
   // takes pid_alive:bool (pure predicate, no OS-dependent call); 3 racy
   // cache tests replaced with 6 pure availability_drift predicate tests;
@@ -479,7 +495,9 @@ const overrides = new Map([
   // +2 provider-aware effort: model/provider props threaded to BuzzAgentModelTuningFields.
   // +15 provider/model dropdown fixes: useBakedBuildEnvKeysQuery + hideProviderIds
   // for Databricks v1 gate; prospectiveRuntimeId default fallback for builtins.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1180],
+  // +18 PR3 MCP servers UI: mcpServers state, inheritedMcpServers memo,
+  // submit wire, and EditAgentAdvancedFields prop threading.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1198],
   // AgentDefinitionDialog grew past 1000 with the following load-bearing fixes:
   // isRuntimeAutoSeededRef tracking for edit-mode seeding (Fizz shows models);
   // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);

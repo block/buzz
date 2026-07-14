@@ -707,14 +707,39 @@ async fn create_session_and_apply_model(
         None
     };
 
-    let resp = agent
+    let resp = match agent
         .acp
         .session_new_full(
             &ctx.cwd,
             ctx.mcp_servers.clone(),
             combined_system_prompt.as_deref(),
         )
-        .await?;
+        .await
+    {
+        Ok(r) => r,
+        Err(AcpError::AgentError { ref message, .. })
+            if !ctx.mcp_servers.is_empty() && message.to_lowercase().contains("mcp") =>
+        {
+            // MCP spawn failure — retry without MCP servers so the agent can
+            // still respond. Surface the original error as a warning.
+            tracing::warn!(
+                target: "pool::mcp",
+                "MCP server spawn failed ({message}); retrying session without MCP servers"
+            );
+            agent.acp.observe(
+                "mcp_spawn_warning",
+                serde_json::json!({
+                    "error": message,
+                    "action": "retried_without_mcp_servers",
+                }),
+            );
+            agent
+                .acp
+                .session_new_full(&ctx.cwd, vec![], combined_system_prompt.as_deref())
+                .await?
+        }
+        Err(e) => return Err(e),
+    };
 
     // Populate model capabilities on first session creation.
     if agent.model_capabilities.is_none() {
@@ -4873,6 +4898,193 @@ mod tests {
         assert!(
             !section.contains("+00:00"),
             "timestamp must not use +00:00 offset"
+        );
+    }
+
+    // ── MCP fallback (D1) regression tests ───────────────────────────────────
+
+    use crate::acp::{AcpClient, McpServer};
+    use crate::relay::RestClient;
+
+    /// Spawn a bash script as an AcpClient, matching the acp.rs test helper.
+    async fn spawn_script(script: &str) -> AcpClient {
+        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+            .await
+            .expect("failed to spawn test script")
+    }
+
+    /// Build a minimal `PromptContext` with the given MCP servers.
+    /// Only `mcp_servers` and `cwd` are exercised by `create_session_and_apply_model`;
+    /// other fields are inert defaults.
+    fn test_prompt_context(mcp_servers: Vec<McpServer>) -> PromptContext {
+        let keys = Keys::generate();
+        PromptContext {
+            mcp_servers,
+            initial_message: None,
+            idle_timeout: Duration::from_secs(60),
+            max_turn_duration: Duration::from_secs(60),
+            turn_liveness_interval: Duration::ZERO,
+            dedup_mode: crate::config::DedupMode::Drop,
+            system_prompt: None,
+            team_instructions: None,
+            heartbeat_prompt: None,
+            base_prompt: None,
+            cwd: "/tmp".to_string(),
+            rest_client: RestClient {
+                http: reqwest::Client::new(),
+                base_url: String::new(),
+                keys: keys.clone(),
+                auth_tag_json: None,
+            },
+            channel_info: std::collections::HashMap::new(),
+            context_message_limit: 0,
+            max_turns_per_session: 0,
+            permission_mode: crate::config::PermissionMode::Default,
+            agent_keys: keys,
+            agent_owner_pubkey: None,
+            memory_enabled: false,
+            harness_name: "test".to_string(),
+        }
+    }
+
+    /// Build a minimal `OwnedAgent` from a pre-initialized `AcpClient`.
+    fn test_owned_agent(acp: AcpClient) -> OwnedAgent {
+        OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState {
+                sessions: HashMap::new(),
+                heartbeat_session: None,
+                turn_counts: HashMap::new(),
+                heartbeat_turn_count: 0,
+                core_sections: HashMap::new(),
+                canvas_sections: HashMap::new(),
+            },
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            protocol_version: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mcp_spawn_error_retries_without_mcp_servers() {
+        // Script: respond to initialize, then return an MCP error on the first
+        // session/new, and a valid session on the second (which should carry
+        // empty mcpServers).
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ1
+            echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"mcp: spawn jambot: No such file or directory"}}'
+            read -t 2 REQ2
+            echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_fallback","_retryRequest":'"$REQ2"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let mut agent = test_owned_agent(client);
+        let ctx = test_prompt_context(vec![McpServer {
+            name: "jambot".into(),
+            command: "jambot".into(),
+            args: vec![],
+            env: vec![],
+        }]);
+
+        let result = create_session_and_apply_model(&mut agent, &ctx, None, None).await;
+        let session_id = result.expect("fallback session should succeed");
+        assert_eq!(session_id, "ses_fallback");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_retry_sends_empty_mcp_servers() {
+        // Capture the retry request to a temp file and assert mcpServers: [].
+        let capture_file =
+            std::env::temp_dir().join(format!("buzz_mcp_retry_test_{}.json", std::process::id()));
+        let capture_path = capture_file.display().to_string();
+        let script = format!(
+            r#"
+            read -t 2 _init
+            echo '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentCapabilities":{{}}}}}}'
+            read -t 2 _req1
+            echo '{{"jsonrpc":"2.0","id":1,"error":{{"code":-32000,"message":"mcp: spawn failed"}}}}'
+            read -t 2 REQ2
+            echo "$REQ2" > {capture_path}
+            echo '{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"ses_ok"}}}}'
+            sleep 1
+        "#
+        );
+        let mut client = spawn_script(&script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let mut agent = test_owned_agent(client);
+        let ctx = test_prompt_context(vec![McpServer {
+            name: "broken".into(),
+            command: "broken-server".into(),
+            args: vec![],
+            env: vec![],
+        }]);
+
+        let result = create_session_and_apply_model(&mut agent, &ctx, None, None).await;
+        let session_id = result.expect("retry should succeed");
+        assert_eq!(session_id, "ses_ok");
+
+        // Read the captured retry request and verify mcpServers is empty.
+        let captured = std::fs::read_to_string(&capture_file)
+            .expect("retry request should have been written to capture file");
+        std::fs::remove_file(&capture_file).ok();
+        let parsed: serde_json::Value =
+            serde_json::from_str(captured.trim()).expect("captured request should be valid JSON");
+        let mcp_servers = parsed
+            .pointer("/params/mcpServers")
+            .expect("retry request must contain params.mcpServers");
+        assert_eq!(
+            mcp_servers,
+            &serde_json::json!([]),
+            "retry must send empty mcpServers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_mcp_agent_error_propagates() {
+        // Non-MCP AgentError must NOT trigger the retry — it should propagate.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 _req
+            echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"authentication failed"}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let mut agent = test_owned_agent(client);
+        let ctx = test_prompt_context(vec![McpServer {
+            name: "server".into(),
+            command: "some-server".into(),
+            args: vec![],
+            env: vec![],
+        }]);
+
+        let result = create_session_and_apply_model(&mut agent, &ctx, None, None).await;
+        assert!(
+            result.is_err(),
+            "non-MCP error must propagate, not trigger retry"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("authentication failed"),
+            "error message must be preserved: {err}"
         );
     }
 }

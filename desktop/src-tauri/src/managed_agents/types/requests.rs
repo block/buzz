@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{
     default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    RelayMeshConfig, RespondTo,
+    McpServerConfig, RelayMeshConfig, RespondTo,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -88,6 +88,9 @@ pub struct CreatePersonaRequest {
     /// Environment variables for agents created from this persona.
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
+    /// Local-only MCP server layer inherited by agents created from this definition.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
     /// NIP-AP behavioral group. Absent = behavior group stays unset.
     #[serde(default)]
     pub behavior: Option<PersonaBehaviorRequest>,
@@ -116,6 +119,9 @@ pub struct UpdatePersonaRequest {
     /// stored credentials when an unrelated field is edited.
     #[serde(default)]
     pub env_vars: Option<BTreeMap<String, String>>,
+    /// Absent = don't touch. Present = replace this local-only MCP layer.
+    #[serde(default)]
+    pub mcp_servers: Option<Vec<McpServerConfig>>,
     /// NIP-AP behavioral group. Same absent-vs-present contract as `env_vars`:
     /// absent = don't touch the stored behavior group (legacy callers don't send it),
     /// present = validate and replace the fields as a unit.
@@ -166,6 +172,9 @@ pub struct CreateManagedAgentRequest {
     /// Environment variables for this agent. Layered on top of persona env.
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
+    /// Local-only MCP overrides for this agent.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
     pub spawn_after_create: bool,
     #[serde(default = "default_start_on_app_launch")]
@@ -207,6 +216,9 @@ pub struct UpdateManagedAgentRequest {
     /// Absent = don't touch. Present = replace the env_vars map entirely.
     #[serde(default)]
     pub env_vars: Option<BTreeMap<String, String>>,
+    /// Absent = don't touch. Present = replace this local-only MCP layer.
+    #[serde(default)]
+    pub mcp_servers: Option<Vec<McpServerConfig>>,
     #[serde(default)]
     pub parallelism: Option<u32>,
     /// Accepted for wire compatibility; not applied to the stored record.
@@ -265,6 +277,7 @@ mod tests {
 
     fn record_without_quad() -> AgentDefinition {
         AgentDefinition {
+            mcp_servers: vec![],
             id: "p-1".to_string(),
             display_name: "Test".to_string(),
             avatar_url: None,

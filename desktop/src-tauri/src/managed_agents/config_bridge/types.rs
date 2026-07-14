@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::managed_agents::types::McpServerConfig;
+
 /// Where a config value came from — determines precedence and UI annotations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,6 +138,12 @@ pub struct RuntimeConfigSurface {
     pub normalized: NormalizedConfig,
     pub advanced: Vec<ConfigField>,
     pub extensions: Vec<ExtensionEntry>,
+    /// Effective (global < definition < agent merged, enabled-only) buzz-agent
+    /// MCP servers — "what runs." Populated only for the `buzz-agent` runtime;
+    /// empty for every other runtime, which surface their servers via
+    /// `extensions` instead.
+    #[serde(default)]
+    pub buzz_agent_mcp_servers: Vec<McpServerConfig>,
     pub sources: ConfigSourceReport,
 }
 

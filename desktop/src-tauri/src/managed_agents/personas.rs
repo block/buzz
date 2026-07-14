@@ -237,6 +237,7 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
             source_team: None,
             source_team_persona_slug: None,
             env_vars: std::collections::BTreeMap::new(),
+            mcp_servers: Vec::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
@@ -295,6 +296,7 @@ fn merge_personas(mut stored: Vec<AgentDefinition>, now: &str) -> (Vec<AgentDefi
                 || !existing.is_builtin
             {
                 *existing = AgentDefinition {
+                    mcp_servers: vec![],
                     created_at,
                     updated_at,
                     is_active,

@@ -14,6 +14,10 @@ import type {
 } from "@/shared/api/types";
 import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
 import type { InheritedEnvRow } from "@/features/agents/ui/EnvVarsEditor";
+import {
+  McpServersEditor,
+  type McpServersValue,
+} from "@/features/agents/ui/McpServersEditor";
 import { getBakedProviderInheritLabel } from "@/features/agents/ui/bakedEnvHelpers";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -37,6 +41,7 @@ import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup"
 /** Sentinel value for an unconfigured global agent config. */
 export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   env_vars: {},
+  mcp_servers: [],
   provider: null,
   model: null,
 };
@@ -139,6 +144,10 @@ export function GlobalAgentConfigFields({
 
   function handleModelChange(value: string) {
     onConfigChange({ ...config, model: value || null });
+  }
+
+  function handleMcpServersChange(next: McpServersValue) {
+    onConfigChange({ ...config, mcp_servers: next });
   }
 
   function handleEnvVarsChange(next: Record<string, string>) {
@@ -281,6 +290,16 @@ export function GlobalAgentConfigFields({
               ([k]) => k !== BUZZ_AGENT_THINKING_EFFORT,
             ),
           )}
+        />
+      </div>
+
+      {/* MCP servers */}
+      <div className="p-3">
+        <McpServersEditor
+          helperText="Global base layer — applied to all buzz-agent instances. Per-definition and per-instance servers layer on top."
+          label="Global MCP servers"
+          onChange={handleMcpServersChange}
+          value={config.mcp_servers}
         />
       </div>
     </SettingsOptionGroup>

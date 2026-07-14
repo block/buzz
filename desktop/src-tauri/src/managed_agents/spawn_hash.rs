@@ -88,6 +88,21 @@ pub(crate) fn spawn_config_hash(
     let effective_command = crate::managed_agents::record_agent_command(record, personas);
     let runtime_meta = known_acp_runtime(&effective_command);
     let effective = resolve_effective_agent_env(record, personas, runtime_meta, global);
+    let effective_mcp_servers = (runtime_meta.is_some_and(|runtime| runtime.id == "buzz-agent"))
+        .then(|| {
+            super::effective_buzz_agent_mcp_servers(
+                record,
+                personas,
+                &global.mcp_servers,
+                &effective_command,
+            )
+            // Invalid legacy disk state must still affect restart detection rather than
+            // panicking the summary path. A real spawn rejects the same configuration.
+            .unwrap_or_else(|error| {
+                eprintln!("buzz-desktop: invalid persisted MCP server configuration: {error}");
+                Vec::new()
+            })
+        });
 
     let mut hasher = DefaultHasher::new();
 
@@ -103,6 +118,7 @@ pub(crate) fn spawn_config_hash(
     // Effective env layering (baked floor → runtime metadata → user env).
     // BTreeMap iteration is ordered, so this is deterministic.
     effective.env.hash(&mut hasher);
+    effective_mcp_servers.hash(&mut hasher);
 
     // Record fields the spawn env writes read directly. The relay is hashed
     // resolved: a blank record relay spawns on the workspace relay, so a

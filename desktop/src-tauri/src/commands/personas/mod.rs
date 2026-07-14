@@ -77,6 +77,7 @@ pub async fn create_persona(
             .filter(|s| !s.is_empty())
             .collect();
         crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+        crate::managed_agents::validate_mcp_servers(&input.mcp_servers)?;
         let mut persona = AgentDefinition {
             id: Uuid::new_v4().to_string(),
             display_name,
@@ -91,6 +92,7 @@ pub async fn create_persona(
             source_team: None,
             source_team_persona_slug: None,
             env_vars: input.env_vars,
+            mcp_servers: input.mcp_servers,
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
@@ -200,10 +202,38 @@ pub async fn update_persona(
                 crate::managed_agents::validate_user_env_keys(&env_vars)?;
                 persona.env_vars = env_vars;
             }
+            crate::managed_agents::replace_mcp_servers(
+                &mut persona.mcp_servers,
+                &input.mcp_servers,
+            )?;
             apply_persona_behavior(persona, input.behavior)?;
             persona.updated_at = now_iso();
 
+            // Clone before the cap check so the mutable borrow from
+            // `personas.iter_mut().find()` ends here.
             let result = persona.clone();
+
+            // Reject persona save if the prospective MCP config would push
+            // any existing buzz-agent referencing this persona over the
+            // effective-server cap.
+            {
+                let agents = load_managed_agents(&app)?;
+                let global_config =
+                    crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+                // Filter to agents referencing this persona — the rest are
+                // unaffected and skipped by the resolver (wrong persona_id).
+                let referencing: Vec<_> = agents
+                    .iter()
+                    .filter(|a| a.persona_id.as_deref() == Some(input.id.as_str()))
+                    .cloned()
+                    .collect();
+                crate::managed_agents::validate_effective_mcp_cap_for_records(
+                    &referencing,
+                    &personas,
+                    &global_config.mcp_servers,
+                )?;
+            }
+
             save_personas(&app, &personas)?;
 
             retain_persona_pending(&app, &state, &result);

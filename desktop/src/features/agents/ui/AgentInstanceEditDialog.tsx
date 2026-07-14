@@ -63,6 +63,11 @@ import {
 } from "./runtimeModelProviderSelection";
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import type { EnvVarsValue } from "./EnvVarsEditor";
+import {
+  mergeMcpServersByName,
+  serversEqual,
+  type McpServersValue,
+} from "./McpServersEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { CreateAgentRespondToField } from "./RespondToField";
 import { PersonaDropdownField } from "./PersonaDropdownField";
@@ -125,6 +130,9 @@ export function AgentInstanceEditDialog({
   const [isCustomProviderEditing, setIsCustomProviderEditing] =
     React.useState(false);
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
+  const [mcpServers, setMcpServers] = React.useState<McpServersValue>(
+    agent.mcpServers,
+  );
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
   const personasQuery = usePersonasQuery();
@@ -175,6 +183,7 @@ export function AgentInstanceEditDialog({
       setProvider(agent.provider ?? "");
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
+      setMcpServers(agent.mcpServers);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
@@ -423,6 +432,17 @@ export function AgentInstanceEditDialog({
   const inheritedWithGlobal = React.useMemo(() => {
     return { ...globalConfig.env_vars, ...inheritedEnvVars };
   }, [globalConfig.env_vars, inheritedEnvVars]);
+
+  // Merge global + persona MCP servers for the inherited display hint in
+  // McpServersEditor. Persona-layer servers override same-named global ones.
+  const inheritedMcpServers = React.useMemo(
+    () =>
+      mergeMcpServersByName(
+        globalConfig.mcp_servers,
+        linkedPersona?.mcpServers ?? [],
+      ),
+    [globalConfig.mcp_servers, linkedPersona?.mcpServers],
+  );
 
   // Auto-expand Advanced whenever the prospective runtime is buzz-agent so the
   // model-tuning knobs are reachable even when no required key is missing.
@@ -684,6 +704,9 @@ export function AgentInstanceEditDialog({
         envVars: envVarsChanged(submitEnvVars, agent.envVars)
           ? submitEnvVars
           : undefined,
+        mcpServers: serversEqual(mcpServers, agent.mcpServers)
+          ? undefined
+          : mcpServers,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
         // The allowlist is preserved across mode toggles in local UI state
         // (so a user can flip away from allowlist and back without losing
@@ -1081,8 +1104,10 @@ export function AgentInstanceEditDialog({
                           : undefined
                       }
                       inheritedEnvVars={inheritedWithGlobal}
+                      inheritedMcpServers={inheritedMcpServers}
                       inheritHarness={inheritHarness}
                       linkedPersona={linkedPersona}
+                      mcpServers={mcpServers}
                       model={model}
                       modelTuningRuntimeId={prospectiveRuntimeId}
                       parallelism={parallelism}
@@ -1097,6 +1122,7 @@ export function AgentInstanceEditDialog({
                       onAutoRestartChange={setAutoRestartOnConfigChange}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
+                      onMcpServersChange={setMcpServers}
                       onParallelismChange={setParallelism}
                       onRelayUrlChange={setRelayUrl}
                       onSystemPromptChange={setSystemPrompt}
