@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-import { installMockBridge } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
+import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
@@ -225,7 +226,7 @@ test("built-in personas are used from the catalog dialog", async ({ page }) => {
     page.getByTestId("persona-catalog-use-agent-target-builtin:fizz"),
   ).toBeDisabled();
   await expect(page.getByTestId("persona-catalog-dialog")).not.toContainText(
-    "Remove from My Agents",
+    "Delete",
   );
   await expect.poll(() => getCatalogOrder(page)).toEqual(initialCatalogOrder);
 });
@@ -359,14 +360,37 @@ test("catalog detail pane shows the full persona details", async ({ page }) => {
   );
 });
 
-test("custom personas can be shown in the agent catalog", async ({ page }) => {
-  const analystPersonaId = "custom:analyst";
+test("custom personas share with people and keep export separate", async ({
+  page,
+}) => {
+  const sharedAgentUrl = `https://mock.relay/media/${"b".repeat(64)}.png`;
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await installMockBridge(page, {
     personas: [
       {
-        id: analystPersonaId,
-        displayName: "Analyst",
-        systemPrompt: "You are Analyst.",
+        id: "custom:analyst",
+        displayName: "Animation Auditor",
+        systemPrompt: "You audit animations.",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        displayName: "Charlie",
+      },
+      {
+        pubkey: TEST_IDENTITIES.bob.pubkey,
+        displayName: "Bob",
+      },
+    ],
+    uploadDescriptors: [
+      {
+        url: sharedAgentUrl,
+        sha256: "b".repeat(64),
+        size: 1234,
+        type: "image/png",
+        uploaded: Math.floor(Date.now() / 1000),
+        filename: "analyst.agent.png",
       },
     ],
   });
@@ -374,46 +398,451 @@ test("custom personas can be shown in the agent catalog", async ({ page }) => {
 
   await page.getByTestId("open-agents-view").click();
   await expect(page.getByTestId("agents-library-personas")).toContainText(
-    "Analyst",
+    "Animation Auditor",
   );
 
-  await page.getByLabel("Open actions for Analyst").click();
+  const actionsButton = page.getByLabel("Open actions for Animation Auditor");
+  await expect(actionsButton.locator("svg")).toHaveClass(
+    /lucide-ellipsis-vertical/,
+  );
+  await actionsButton.click();
   await expect(page.getByRole("menuitem")).toHaveText([
-    "Catalog options",
     "Edit",
     "Duplicate",
-    "Export snapshot",
-    "Remove from My Agents",
+    "Share",
+    "Delete",
   ]);
+  await page.getByRole("menuitem", { name: "Share" }).click();
+
+  const shareDialog = page.getByTestId("persona-share-dialog");
+  await expect(shareDialog).toBeVisible();
   await expect(
-    page.getByRole("menuitem", { name: "Catalog options" }),
+    page.getByRole("heading", { name: "Share Animation Auditor" }),
   ).toBeVisible();
-  await page.getByRole("menuitem", { name: "Catalog options" }).click();
-
-  await expect(page.getByTestId("persona-share-dialog")).toBeVisible();
-  await expect(page.getByTestId("persona-share-dialog")).toContainText(
-    "Catalog options",
-  );
-  await expect(page.getByTestId("persona-share-dialog")).toContainText(
-    "Added by You",
-  );
-  await expect(page.getByTestId("persona-share-copy-link")).toHaveCount(0);
-  await expect(page.getByText("Show in my catalog")).toBeVisible();
-  await expect(page.getByTestId("persona-share-export")).toBeVisible();
-  await page.getByTestId("persona-share-show-in-catalog").click();
-  await page.keyboard.press("Escape");
-
-  await openPersonaCatalog(page);
-  await expect(
-    page.getByTestId(`persona-catalog-list-item-${analystPersonaId}`),
-  ).toContainText("Analyst");
-  await selectCatalogPersona(page, analystPersonaId);
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
-    "Custom agent",
+  await expect(shareDialog.getByText("Added by You")).toHaveCount(0);
+  await expect(shareDialog).toContainText(
+    "Anyone in this workspace with the link can duplicate and use this agent.",
   );
   await expect(
-    page.getByTestId(`persona-catalog-use-agent-target-${analystPersonaId}`),
-  ).toHaveText("Added to My Agents");
+    shareDialog.getByText(
+      "Anyone in this workspace with the link can duplicate and use this agent.",
+    ),
+  ).toHaveClass(/text-xs.*text-secondary-foreground\/75/);
+  await expect(
+    shareDialog.getByRole("heading", { name: "Who has access" }),
+  ).toBeVisible();
+  const accessLink = page.getByTestId("persona-share-access-link");
+  const accessOwner = page.getByTestId("persona-share-access-owner");
+  const accessSection = page.getByTestId("persona-share-access");
+  const copyLinkFooter = page.getByTestId("persona-share-copy-link-footer");
+  await expect(accessLink).toContainText("Anyone with a link");
+  await expect(page.getByTestId("persona-share-link-access")).toHaveText(
+    "Agent",
+  );
+  await expect(page.getByTestId("persona-share-recipient-access")).toHaveCount(
+    0,
+  );
+  await expect(shareDialog.getByLabel("Link access")).toHaveCount(0);
+  await expect(shareDialog.getByLabel("Recipient access")).toHaveCount(0);
+  await expect(accessOwner).toContainText("(You)");
+  await expect(accessOwner).toContainText("Owner");
+  const accessLinkBox = await accessLink.boundingBox();
+  const accessOwnerBox = await accessOwner.boundingBox();
+  expect(accessLinkBox?.y).toBeLessThan(accessOwnerBox?.y ?? 0);
+  await expect(
+    page.getByTestId("persona-share-send").locator("svg"),
+  ).toHaveCount(0);
+  await expect(
+    accessSection.getByTestId("persona-share-copy-link-footer"),
+  ).toHaveCount(0);
+  const accessSectionBox = await accessSection.boundingBox();
+  const copyLinkFooterBox = await copyLinkFooter.boundingBox();
+  expect(
+    (copyLinkFooterBox?.y ?? 0) -
+      ((accessSectionBox?.y ?? 0) + (accessSectionBox?.height ?? 0)),
+  ).toBeGreaterThanOrEqual(15);
+  await expect(shareDialog.getByText("Memories")).toHaveCount(0);
+  await expect(shareDialog.getByText("File format")).toHaveCount(0);
+  await expect(page.getByText("Show in my catalog")).toHaveCount(0);
+  const shareMainCard = page.getByTestId("persona-share-main-card");
+  const exportAgentRow = page.getByTestId("persona-share-export");
+  await expect(exportAgentRow).toHaveText("Export agent");
+  await expect(shareMainCard.getByTestId("persona-share-export")).toHaveCount(
+    0,
+  );
+  await waitForAnimations(page);
+  const shareMainCardBox = await shareMainCard.boundingBox();
+  const exportAgentRowBox = await exportAgentRow.boundingBox();
+  expect(
+    (exportAgentRowBox?.y ?? 0) -
+      ((shareMainCardBox?.y ?? 0) + (shareMainCardBox?.height ?? 0)),
+  ).toBeGreaterThanOrEqual(16);
+  const [shareMainCardShadow, exportAgentRowShadow] = await Promise.all([
+    shareMainCard.evaluate((element) => getComputedStyle(element).boxShadow),
+    exportAgentRow.evaluate((element) => getComputedStyle(element).boxShadow),
+  ]);
+  expect(exportAgentRowShadow).toBe(shareMainCardShadow);
+  expect(exportAgentRowShadow).not.toBe("none");
+  await expect(exportAgentRow).toHaveCSS("position", "relative");
+  await expect(page.getByTestId("agent-snapshot-export-dialog")).toHaveCount(0);
+
+  await exportAgentRow.click();
+  await expect(shareDialog).toHaveCount(0);
+  const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
+  await expect(exportDialog).toBeVisible();
+  const exportDialogBox = await exportDialog.boundingBox();
+  expect(exportDialogBox?.width).toBeLessThanOrEqual(448);
+  await expect(
+    exportDialog.getByRole("heading", {
+      name: "Export Animation Auditor",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(exportDialog.getByText("portable snapshot")).toHaveCount(0);
+  await expect(
+    exportDialog.getByRole("button", { name: "Send in Buzz" }),
+  ).toHaveCount(0);
+  await expect(exportDialog.getByLabel("Memories")).toHaveCount(0);
+  await expect(
+    exportDialog.getByTestId("agent-snapshot-memory-value"),
+  ).toHaveText("Agent only");
+  await expect(exportDialog.getByText("Start this agent")).toHaveCount(0);
+  await expect(
+    exportDialog.getByTestId("agent-snapshot-memory-value").locator("svg"),
+  ).toHaveCount(0);
+  const formatTrigger = exportDialog.getByLabel("File format");
+  await expect(formatTrigger).toHaveText("PNG");
+  expect((await formatTrigger.boundingBox())?.width).toBeLessThan(80);
+  expect(await formatTrigger.evaluate((element) => element.tagName)).toBe(
+    "BUTTON",
+  );
+  await formatTrigger.click();
+  await expect(page.getByRole("menuitemradio", { name: "JSON" })).toBeVisible();
+  await page.getByRole("menuitemradio", { name: "PNG" }).click();
+  const exportFooter = exportDialog.getByTestId("agent-snapshot-export-footer");
+  const cancelButtonBox = await exportFooter
+    .getByRole("button", { name: "Cancel" })
+    .boundingBox();
+  const exportButtonBox = await exportFooter
+    .getByRole("button", { name: "Export" })
+    .boundingBox();
+  expect(cancelButtonBox?.x).toBeLessThan(exportButtonBox?.x ?? 0);
+  expect(
+    (exportButtonBox?.x ?? 0) -
+      ((cancelButtonBox?.x ?? 0) + (cancelButtonBox?.width ?? 0)),
+  ).toBeLessThanOrEqual(12);
+  await exportDialog.getByRole("button", { name: "Cancel" }).click();
+
+  await actionsButton.click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  await expect(shareDialog).toBeVisible();
+  await page.getByTestId("persona-share-copy-link").click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(sharedAgentUrl);
+
+  const recipientSearch = page.getByTestId("persona-share-recipient-search");
+  await recipientSearch.fill("charlie");
+  await page
+    .getByTestId(
+      `persona-share-recipient-option-${TEST_IDENTITIES.charlie.pubkey}`,
+    )
+    .click();
+  await expect(
+    page.getByTestId(
+      `persona-share-recipient-chip-${TEST_IDENTITIES.charlie.pubkey}`,
+    ),
+  ).toBeVisible();
+  await expect(recipientSearch).toHaveValue("");
+  await expect(recipientSearch).toHaveAttribute("placeholder", "");
+  await expect(
+    page
+      .getByTestId("persona-share-recipient-field")
+      .locator("svg.lucide-search"),
+  ).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("persona-share-recipient-field")
+      .getByTestId("persona-share-recipient-access"),
+  ).toHaveText("Agent");
+
+  await recipientSearch.fill("bob");
+  await page
+    .getByTestId(`persona-share-recipient-option-${TEST_IDENTITIES.bob.pubkey}`)
+    .click();
+  const bobChip = page.getByTestId(
+    `persona-share-recipient-chip-${TEST_IDENTITIES.bob.pubkey}`,
+  );
+  await expect(bobChip).toBeVisible();
+  await bobChip.click();
+  await expect(bobChip).toHaveCount(0);
+
+  await recipientSearch.fill("bob");
+  await page
+    .getByTestId(`persona-share-recipient-option-${TEST_IDENTITIES.bob.pubkey}`)
+    .click();
+  await page.getByTestId("persona-share-send").click();
+  await expect(page.getByText("Sent Animation Auditor")).toBeVisible();
+
+  const sentAgentMessages = await page.evaluate(() =>
+    (
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: { content?: string };
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+    ).filter((entry) => entry.command === "send_channel_message"),
+  );
+  expect(sentAgentMessages.at(-1)?.payload.content).toBe(
+    `\n[Animation Auditor](${sharedAgentUrl})`,
+  );
+  await expect(shareDialog).toHaveCount(0);
+});
+
+test("share access controls include the selected memories", async ({
+  page,
+}) => {
+  const linkedAgentPubkey = TEST_IDENTITIES.alice.pubkey;
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:animation-auditor",
+        displayName: "Animation Auditor",
+        systemPrompt: "You audit animations.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: linkedAgentPubkey,
+        name: "Animation Auditor",
+        personaId: "custom:animation-auditor",
+        status: "running",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        displayName: "Charlie",
+      },
+    ],
+    uploadDescriptors: [
+      {
+        url: `https://mock.relay/media/${"c".repeat(64)}.png`,
+        sha256: "c".repeat(64),
+        size: 1234,
+        type: "image/png",
+        uploaded: Math.floor(Date.now() / 1000),
+        filename: "animation-auditor.agent.png",
+      },
+    ],
+  });
+  await gotoApp(page);
+
+  await page.getByTestId("open-agents-view").click();
+  await page.getByLabel("Open actions for Animation Auditor").click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+
+  const shareDialog = page.getByTestId("persona-share-dialog");
+  const linkAccess = shareDialog.getByLabel("Link access");
+  await expect(linkAccess).toHaveText("Agent");
+  expect((await linkAccess.boundingBox())?.width).toBeLessThan(96);
+  expect(await linkAccess.evaluate((element) => element.tagName)).toBe(
+    "BUTTON",
+  );
+  await expect(linkAccess).toHaveCSS("text-decoration-line", "none");
+  await expect(linkAccess).toHaveCSS("padding-left", "8px");
+  await expect(linkAccess).toHaveCSS("padding-right", "8px");
+  await waitForAnimations(page);
+  const linkAccessChevronBox = await linkAccess
+    .locator("svg.lucide-chevron-down")
+    .boundingBox();
+  const ownerLabelBox = await shareDialog
+    .getByText("Owner", { exact: true })
+    .boundingBox();
+  const sendButtonBox = await shareDialog
+    .getByTestId("persona-share-send")
+    .boundingBox();
+  const copyLinkButtonBox = await shareDialog
+    .getByTestId("persona-share-copy-link")
+    .boundingBox();
+  const alignedRightEdges = [
+    (linkAccessChevronBox?.x ?? 0) + (linkAccessChevronBox?.width ?? 0),
+    (ownerLabelBox?.x ?? 0) + (ownerLabelBox?.width ?? 0),
+    (sendButtonBox?.x ?? 0) + (sendButtonBox?.width ?? 0),
+    (copyLinkButtonBox?.x ?? 0) + (copyLinkButtonBox?.width ?? 0),
+  ];
+  expect(
+    Math.max(...alignedRightEdges) - Math.min(...alignedRightEdges),
+  ).toBeLessThanOrEqual(1);
+  await expect(shareDialog.getByLabel("Recipient access")).toHaveCount(0);
+
+  await linkAccess.click();
+  await expect(page.getByRole("menuitemradio")).toHaveText([
+    "Agent",
+    "Agent + core memory",
+    "Agent + all memories",
+  ]);
+  await page
+    .getByRole("menuitemradio", { name: "Agent + core memory" })
+    .click();
+  await expect(linkAccess).toHaveText("Agent + core memory");
+  await page.getByTestId("persona-share-copy-link").click();
+  await expect(page.getByText("Link copied")).toBeVisible();
+
+  const recipientSearch = page.getByTestId("persona-share-recipient-search");
+  await recipientSearch.fill("charlie");
+  await page
+    .getByTestId(
+      `persona-share-recipient-option-${TEST_IDENTITIES.charlie.pubkey}`,
+    )
+    .click();
+  const recipientField = page.getByTestId("persona-share-recipient-field");
+  const recipientInputRegion = recipientField.getByTestId(
+    "persona-share-recipient-input-region",
+  );
+  const recipientAccess = recipientField.getByLabel("Recipient access");
+  await expect(recipientAccess).toHaveText("Agent");
+  expect((await recipientAccess.boundingBox())?.width).toBeLessThan(96);
+  await expect(recipientField).toHaveCSS("column-gap", "12px");
+  await expect(recipientInputRegion).toHaveCSS("flex-wrap", "wrap");
+  const recipientFieldBox = await recipientField.boundingBox();
+  const recipientInputRegionBox = await recipientInputRegion.boundingBox();
+  const recipientAccessBox = await recipientAccess.boundingBox();
+  expect(
+    (recipientAccessBox?.x ?? 0) -
+      ((recipientInputRegionBox?.x ?? 0) +
+        (recipientInputRegionBox?.width ?? 0)),
+  ).toBeGreaterThanOrEqual(12);
+  const recipientAccessRightEdge =
+    (recipientAccessBox?.x ?? 0) + (recipientAccessBox?.width ?? 0);
+  expect(
+    Math.abs(
+      (recipientFieldBox?.x ?? 0) +
+        (recipientFieldBox?.width ?? 0) -
+        8 -
+        recipientAccessRightEdge,
+    ),
+  ).toBeLessThanOrEqual(1);
+  await recipientAccess.click();
+  await page
+    .getByRole("menuitemradio", { name: "Agent + all memories" })
+    .click();
+  await expect(recipientAccess).toHaveText("Agent + all memories");
+  await waitForAnimations(page);
+  const expandedRecipientAccessBox = await recipientAccess.boundingBox();
+  expect(
+    Math.abs(
+      (expandedRecipientAccessBox?.x ?? 0) +
+        (expandedRecipientAccessBox?.width ?? 0) -
+        recipientAccessRightEdge,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    await recipientAccess
+      .locator("span")
+      .evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+  await page.getByTestId("persona-share-send").click();
+  await expect(page.getByText("Sent Animation Auditor")).toBeVisible();
+
+  const encodePayloads = await page.evaluate(() =>
+    (
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+    )
+      .filter((entry) => entry.command === "encode_agent_snapshot_for_send")
+      .map((entry) => entry.payload),
+  );
+  expect(encodePayloads).toEqual([
+    expect.objectContaining({
+      memoryLevel: "core",
+      memorySourcePubkey: linkedAgentPubkey,
+    }),
+    expect.objectContaining({
+      memoryLevel: "everything",
+      memorySourcePubkey: linkedAgentPubkey,
+    }),
+  ]);
+});
+
+test("export from share aligns selections and animates memory details", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:animation-auditor",
+        displayName: "Animation Auditor",
+        systemPrompt: "You audit animations.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        name: "Animation Auditor",
+        personaId: "custom:animation-auditor",
+        status: "running",
+      },
+    ],
+  });
+  await gotoApp(page);
+
+  await page.getByTestId("open-agents-view").click();
+  await page.getByLabel("Open actions for Animation Auditor").click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  await page.getByTestId("persona-share-export").click();
+
+  const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
+  const memoryTrigger = exportDialog.getByLabel("Memories");
+  await expect(memoryTrigger).toHaveText("Agent only");
+  expect((await memoryTrigger.boundingBox())?.width).toBeLessThan(112);
+  await expect(memoryTrigger).toHaveCSS("text-align", "right");
+  await expect(memoryTrigger.locator("svg.lucide-chevron-down")).toBeVisible();
+
+  const initialHeight = await exportDialog.evaluate(
+    (element) => element.getBoundingClientRect().height,
+  );
+  await memoryTrigger.click();
+  await page
+    .getByRole("menuitemradio", { name: "Agent + core memory" })
+    .click();
+  const heightSamples = await exportDialog.evaluate(async (element) => {
+    const samples: number[] = [];
+    const start = performance.now();
+
+    await new Promise<void>((resolve) => {
+      const sample = (now: number) => {
+        samples.push(element.getBoundingClientRect().height);
+        if (now - start >= 280) {
+          resolve();
+          return;
+        }
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+
+    return samples;
+  });
+
+  await expect(
+    exportDialog.getByTestId("agent-snapshot-memory-warning"),
+  ).toBeVisible();
+  expect(heightSamples.at(-1)).toBeGreaterThan(initialHeight);
+  expect(
+    new Set(heightSamples.map((height) => Math.round(height))).size,
+  ).toBeGreaterThan(2);
 });
 
 test("team-managed personas do not expose editable actions", async ({
@@ -435,15 +864,12 @@ test("team-managed personas do not expose editable actions", async ({
   await page.getByLabel("Open actions for Team Analyst").click();
 
   await expect(page.getByRole("menuitem")).toHaveText([
-    "Catalog options",
     "Duplicate",
-    "Export snapshot",
+    "Share",
     "Managed by team",
   ]);
   await expect(page.getByRole("menuitem", { name: "Edit" })).toHaveCount(0);
-  await expect(
-    page.getByRole("menuitem", { name: "Remove from My Agents" }),
-  ).toHaveCount(0);
+  await expect(page.getByRole("menuitem", { name: "Delete" })).toHaveCount(0);
 });
 
 test("inactive built-ins cannot be used to create teams", async ({ page }) => {
@@ -478,7 +904,7 @@ test("built-in removal failures show up from My Agents", async ({ page }) => {
 
   await page.keyboard.press("Escape");
   await page.getByLabel("Open actions for Fizz").click();
-  await page.getByRole("menuitem", { name: "Remove from My Agents" }).click();
+  await page.getByRole("menuitem", { name: "Delete" }).click();
 
   await expect(
     page

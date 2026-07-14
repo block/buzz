@@ -146,7 +146,6 @@ export function AgentsView() {
               onDuplicatePersona={personas.openDuplicate}
               onEditPersona={personas.openEdit}
               onSharePersona={personas.openShare}
-              onExportPersonaSnapshot={personas.openExportSnapshot}
               onDeactivatePersona={(persona) => {
                 void personas.handleSetActive(persona, false, "library");
               }}
@@ -289,23 +288,13 @@ export function AgentsView() {
       ) : null}
       {personas.personaToShare ? (
         <PersonaShareDialog
-          isCatalogVisible={
-            personas.personaToShare.isBuiltIn ||
-            personas.sharedCatalogPersonaIdSet.has(personas.personaToShare.id)
-          }
           isPending={personas.isPending}
-          onCatalogVisibilityChange={(visible) => {
-            if (personas.personaToShare) {
-              personas.setPersonaCatalogVisibility(
-                personas.personaToShare,
-                visible,
-              );
-            }
-          }}
+          linkedAgentPubkey={personas.personaToShare.linkedAgentPubkey}
           onExport={() => {
-            if (personas.personaToShare) {
-              personas.openShareExportSnapshot(personas.personaToShare);
-            }
+            const shareTarget = personas.personaToShare;
+            if (!shareTarget) return;
+            personas.setPersonaToShare(null);
+            personas.setPersonaToExportSnapshot(shareTarget);
           }}
           onOpenChange={(open) => {
             if (!open) {
@@ -313,14 +302,14 @@ export function AgentsView() {
             }
           }}
           open={personas.personaToShare !== null}
-          persona={personas.personaToShare}
+          persona={personas.personaToShare.persona}
         />
       ) : null}
       {personas.personaToExportSnapshot ? (
         <AgentSnapshotExportDialog
+          agentName={personas.personaToExportSnapshot.persona.displayName}
           isSavePending={personas.isPending}
           open={personas.personaToExportSnapshot !== null}
-          persona={personas.personaToExportSnapshot.persona}
           linkedAgentPubkey={personas.personaToExportSnapshot.linkedAgentPubkey}
           onSaveFile={(memoryLevel, format) => {
             if (personas.personaToExportSnapshot) {

@@ -347,6 +347,7 @@ export const MessageRow = React.memo(
               mentionNames={mentionNames}
               mentionPubkeysByName={mentionPubkeysByName}
               searchQuery={searchQuery}
+              snapshotSharedBy={message.author}
               videoReviewContext={videoReviewContext}
             />
           );

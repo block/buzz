@@ -1,13 +1,24 @@
 import * as React from "react";
-import { AlertCircle, Bot, Download, Loader2 } from "lucide-react";
+import { Bot, Download, Loader2 } from "lucide-react";
 
 import { invokeTauri } from "@/shared/api/tauri";
 import { fetchSnapshotBytes } from "@/shared/api/tauriMedia";
-import { useSmoothCorners } from "@/shared/ui/smoothCorners";
+import { cn } from "@/shared/lib/cn";
+import {
+  Attachment,
+  AttachmentAction,
+  AttachmentActions,
+  AttachmentContent,
+  AttachmentDescription,
+  AttachmentMedia,
+  AttachmentTitle,
+} from "@/shared/ui/attachment";
 
 export type AgentSnapshotCardProps = {
+  displayName: string;
   href: string;
   filename: string;
+  sharedBy?: string;
   size?: number;
   sha256: string;
   /** Discriminant used to label the card and route the import. */
@@ -34,29 +45,28 @@ type ImportState =
   | { phase: "error"; message: string };
 
 /**
- * Snapshot attachment card rendered in a message timeline when an `.agent.json`
- * or `.agent.png` attachment is classified as an agent snapshot candidate.
+ * Snapshot attachment card rendered in a message timeline when an agent or
+ * team snapshot attachment is classified as an importable snapshot candidate.
  *
  * Shows two independent actions:
- * - **Import agent** — bounded, verified in-memory fetch → existing importer
+ * - **Add agent/team** — bounded, verified in-memory fetch → existing importer
  * - **Download** — native save dialog via the unchanged `download_file` command
  *
- * The card text identifies the attachment as "Agent snapshot" (untrusted label)
- * until the bytes have been verified by the Rust decoder; the sender-supplied
- * agent name is never shown here.
+ * The display name and sharer are presentation-only message metadata. Import
+ * still fetches and verifies the snapshot bytes before the existing preview
+ * flow presents the decoded snapshot details.
  */
 export function AgentSnapshotCard({
+  displayName,
   href,
   filename,
+  sharedBy,
   size,
   sha256,
   snapshotKind,
   thumb,
   onImport,
 }: AgentSnapshotCardProps) {
-  const cardRef = React.useRef<HTMLDivElement | null>(null);
-  useSmoothCorners(cardRef);
-
   const [importState, setImportState] = React.useState<ImportState>({
     phase: "idle",
   });
@@ -80,7 +90,9 @@ export function AgentSnapshotCard({
       setImportState({
         phase: "error",
         message:
-          err instanceof Error ? err.message : "Failed to fetch snapshot.",
+          err instanceof Error
+            ? err.message
+            : `Couldn’t load this ${snapshotKind}. Try again.`,
       });
     } finally {
       inFlightRef.current = false;
@@ -95,87 +107,107 @@ export function AgentSnapshotCard({
 
   const isFetching = importState.phase === "fetching";
   const showThumb = !!thumb && !thumbError;
+  const formattedSize =
+    size == null
+      ? null
+      : size < 1024
+        ? `${size} B`
+        : size < 1024 * 1024
+          ? `${(size / 1024).toFixed(1)} KB`
+          : `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  const metadata = [sharedBy ? `Shared by ${sharedBy}` : null, formattedSize]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
-    <div
-      ref={cardRef}
-      className="my-1 inline-flex max-w-sm flex-col gap-2 rounded-2xl border border-primary/25 bg-primary/5 px-3 py-2 text-left"
-      style={{ borderRadius: "1rem" }}
+    <Attachment
+      className="my-1 inline-flex w-fit max-w-full shadow-none"
       data-testid="agent-snapshot-card"
+      state={importState.phase === "error" ? "error" : "done"}
     >
-      {/* Header row: icon + filename */}
-      <div className="flex items-center gap-2">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary overflow-hidden">
-          {showThumb ? (
+      <AttachmentMedia
+        className={cn(
+          showThumb
+            ? "relative h-9 w-9"
+            : "bg-primary/10 text-primary ring-1 ring-primary/20 dark:bg-primary/15",
+        )}
+        variant={showThumb ? "image" : "icon"}
+      >
+        {showThumb ? (
+          <>
             <img
               alt=""
-              className="h-full w-full object-cover"
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 h-full w-full scale-150 object-cover"
+              src={thumb}
+              referrerPolicy="no-referrer"
+            />
+            <img
+              alt=""
+              className="relative h-full w-full object-cover"
               data-testid="agent-snapshot-card-thumb"
               src={thumb}
               referrerPolicy="no-referrer"
               onError={() => setThumbError(true)}
             />
-          ) : (
-            <Bot className="h-4 w-4" />
-          )}
-        </span>
-        <div className="min-w-0 flex-1">
-          <span
-            className="block truncate text-sm font-medium text-foreground"
-            title={filename}
-          >
-            {filename}
-          </span>
-          <span className="block text-xs text-muted-foreground">
-            {snapshotKind === "team" ? "Team snapshot" : "Agent snapshot"}
-            {size != null
-              ? ` · ${size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`}`
-              : ""}
-          </span>
-        </div>
-      </div>
-
-      {/* Error row */}
-      {importState.phase === "error" && (
-        <div
-          className="flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive"
-          data-testid="agent-snapshot-card-error"
+          </>
+        ) : (
+          <Bot />
+        )}
+      </AttachmentMedia>
+      <AttachmentContent>
+        <AttachmentTitle
+          className="overflow-visible whitespace-normal text-clip"
+          title={displayName}
         >
-          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>{importState.message}</span>
-        </div>
-      )}
-
-      {/* Action row */}
-      <div className="flex items-center gap-2">
-        <button
+          {displayName}
+        </AttachmentTitle>
+        {importState.phase === "error" ? (
+          <AttachmentDescription
+            className="overflow-visible whitespace-normal text-clip text-destructive"
+            data-testid="agent-snapshot-card-error"
+          >
+            {importState.message}
+          </AttachmentDescription>
+        ) : metadata ? (
+          <AttachmentDescription className="overflow-visible whitespace-normal text-clip text-secondary-foreground/75">
+            {metadata}
+          </AttachmentDescription>
+        ) : null}
+      </AttachmentContent>
+      <AttachmentActions
+        aria-label={`Actions for ${displayName}`}
+        className="ml-4 gap-2"
+        role="group"
+      >
+        <AttachmentAction
+          aria-label={`Download ${displayName}`}
+          data-testid="agent-snapshot-card-download"
+          onClick={handleDownload}
+          size="icon"
+          title="Download"
           type="button"
+          variant="ghost"
+        >
+          <Download />
+        </AttachmentAction>
+        <AttachmentAction
+          className="text-primary-foreground shadow-none hover:bg-primary/90 hover:text-primary-foreground hover:shadow-none"
+          data-testid="agent-snapshot-card-import"
           disabled={isFetching}
           onClick={handleImport}
-          className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
-          data-testid="agent-snapshot-card-import"
-        >
-          {isFetching ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Bot className="h-3.5 w-3.5" />
-          )}
-          {isFetching
-            ? "Fetching…"
-            : snapshotKind === "team"
-              ? "Import team"
-              : "Import agent"}
-        </button>
-        <button
+          size="sm"
           type="button"
-          onClick={handleDownload}
-          className="flex h-7 items-center justify-center gap-1 rounded-lg border border-border bg-background px-3 text-xs font-medium text-foreground transition-colors hover:bg-muted"
-          data-testid="agent-snapshot-card-download"
+          variant="default"
         >
-          <Download className="h-3 w-3" />
-          Download
-        </button>
-      </div>
-    </div>
+          {isFetching ? <Loader2 className="animate-spin" /> : <Bot />}
+          {isFetching
+            ? "Loading…"
+            : snapshotKind === "team"
+              ? "Add team"
+              : "Add agent"}
+        </AttachmentAction>
+      </AttachmentActions>
+    </Attachment>
   );
 }

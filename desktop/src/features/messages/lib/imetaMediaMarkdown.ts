@@ -240,7 +240,7 @@ export function findSpoileredImetaMediaUrls(
  */
 export function formatImetaMediaLine(
   { url, type, filename }: ImetaMedia,
-  options: { spoiler?: boolean } = {},
+  options: { label?: string; spoiler?: boolean } = {},
 ): string {
   // A PNG snapshot is image/png on the wire, but it is an importable file, not
   // inline media. Keep it on the anchor renderer's snapshot-card path.
@@ -255,8 +255,11 @@ export function formatImetaMediaLine(
     const line = `![image](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }
-  // Generic file: plain link, label is the original filename (fallback to url tail).
-  const label = filename || url.split("/").pop() || "file";
+  // Generic file: plain link, label is the caller-provided display label when
+  // available, otherwise the original filename (falling back to the URL tail).
+  // The filename remains in imeta for download/import integrity.
+  const label =
+    options.label?.trim() || filename || url.split("/").pop() || "file";
   // Escape markdown link-label metacharacters so filenames containing `[`, `]`,
   // or `\` (e.g. `a].pdf`) still render as a FileCard with the correct label
   // rather than breaking the link or mangling the visible text.

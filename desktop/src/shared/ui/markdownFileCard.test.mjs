@@ -94,6 +94,7 @@ test("resolveSnapshotCard: .agent.json with sha256 returns snapshot card", () =>
     "",
   );
   assert.ok(card !== null, "expected a snapshot card");
+  assert.equal(card.displayName, "Analyst");
   assert.equal(card.filename, "analyst.agent.json");
   assert.equal(card.sha256, SHA256);
   assert.equal(card.snapshotKind, "agent");
@@ -107,8 +108,25 @@ test("resolveSnapshotCard: .agent.png with image/png mime returns snapshot card"
     "",
   );
   assert.ok(card !== null);
+  assert.equal(card.displayName, "Analyst");
   assert.equal(card.filename, "analyst.agent.png");
   assert.equal(card.snapshotKind, "agent");
+});
+
+test("resolveSnapshotCard: sender label is used as the agent name", () => {
+  const card = resolveSnapshotCard(
+    {
+      m: "image/png",
+      size: 2048,
+      filename: "animation-auditor.agent.png",
+      x: SHA256,
+    },
+    PNG_URL,
+    "Animation Auditor",
+  );
+  assert.ok(card !== null);
+  assert.equal(card.displayName, "Animation Auditor");
+  assert.equal(card.filename, "animation-auditor.agent.png");
 });
 
 test("resolveSnapshotCard: .agent.json with octet-stream mime is eligible", () => {

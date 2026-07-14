@@ -170,6 +170,7 @@ export function AgentSnapshotSendDialog({
           avatarPngDataUrl: await resolveSnapshotAvatarPng(persona.avatarUrl),
         }),
       destination.id,
+      persona.displayName,
     );
     // Phase transitions (done/error) are driven by beginSend via setState
     // inside the controller; the mirror effect above keeps `step` in sync.

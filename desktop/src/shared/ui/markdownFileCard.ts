@@ -25,6 +25,8 @@ export type ResolvedFileCard = {
  * can share the same routing path without mixing agent-only assumptions.
  */
 export type ResolvedSnapshotCard = {
+  /** Sender-provided display label, with a filename-derived fallback. */
+  displayName: string;
   href: string;
   filename: string;
   size?: number;
@@ -39,6 +41,23 @@ export type ResolvedSnapshotCard = {
    */
   thumb?: string;
 };
+
+function snapshotDisplayName(filename: string, childText: string): string {
+  const label = childText.trim();
+  const labelIsSnapshotFilename = /\.agent\.(?:json|png)$/i.test(label);
+  if (label && !labelIsSnapshotFilename) return label;
+
+  const filenameStem = filename
+    .replace(/\.agent\.(?:json|png)$/i, "")
+    .replace(/[-_]+/g, " ")
+    .trim();
+  if (!filenameStem) return "Agent";
+
+  return filenameStem
+    .split(/\s+/)
+    .map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
+    .join(" ");
+}
 
 /**
  * Classify a markdown link as a snapshot candidate.
@@ -86,6 +105,7 @@ export function resolveSnapshotCard(
   const snapshotKind: "agent" | "team" = isJson || isPng ? "agent" : "team";
 
   return {
+    displayName: snapshotDisplayName(filename, childText),
     href,
     filename,
     size: entry.size,

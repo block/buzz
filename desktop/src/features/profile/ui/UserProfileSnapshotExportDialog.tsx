@@ -16,10 +16,10 @@ export function UserProfileSnapshotExportDialog({
 
   return (
     <AgentSnapshotExportDialog
+      agentName={persona.displayName}
       isSavePending={exportSnapshotMutation.isPending}
       linkedAgentPubkey={linkedAgentPubkey}
       open
-      persona={persona}
       onOpenChange={onOpenChange}
       onSaveFile={(memoryLevel, format) => {
         exportSnapshotMutation.mutate(

@@ -19,7 +19,10 @@ import type { QueryClient } from "@tanstack/react-query";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { uploadMediaBytes, type BlobDescriptor } from "@/shared/api/tauri";
-import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
+import {
+  buildOutgoingMessage,
+  formatImetaMediaLine,
+} from "@/features/messages/lib/imetaMediaMarkdown";
 import { channelsQueryKey, useChannelsQuery } from "@/features/channels/hooks";
 import { isModerationDm } from "@/features/moderation/lib/moderationDm";
 import {
@@ -360,6 +363,7 @@ export type UseSnapshotSendControllerResult = {
   beginSend: (
     encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
     channelId: string,
+    attachmentLabel?: string,
   ) => Promise<boolean>;
   /** Set state to error with a message (for pre-send gate failures). */
   setErrorState: (message: string) => void;
@@ -452,6 +456,7 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
   async function beginSend(
     encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
     channelId: string,
+    attachmentLabel?: string,
   ): Promise<boolean> {
     return runGuardedSend(guardRef.current, {
       encodeFn,
@@ -462,7 +467,17 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
       uploadFn: (bytes, filename) => uploadMediaBytes(bytes, filename),
       sendFn: (args) => sendMutation.mutateAsync(args),
       setStateFn: setState,
-      buildMessageFn: (descriptor) => buildOutgoingMessage("", [descriptor]),
+      buildMessageFn: (descriptor) => {
+        const message = buildOutgoingMessage("", [descriptor]);
+        return attachmentLabel?.trim()
+          ? {
+              ...message,
+              content: formatImetaMediaLine(descriptor, {
+                label: attachmentLabel,
+              }),
+            }
+          : message;
+      },
     });
   }
 

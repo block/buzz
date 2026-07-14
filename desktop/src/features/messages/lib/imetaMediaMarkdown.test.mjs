@@ -139,6 +139,20 @@ test("formatImetaMediaLine: team snapshot PNG → filename link", () => {
   );
 });
 
+test("formatImetaMediaLine: agent snapshot can use a display label", () => {
+  assert.equal(
+    formatImetaMediaLine(
+      {
+        url: "https://b/animation-auditor.png",
+        type: "image/png",
+        filename: "animation-auditor.agent.png",
+      },
+      { label: "Animation Auditor" },
+    ),
+    "\n[Animation Auditor](https://b/animation-auditor.png)",
+  );
+});
+
 test("buildImetaTags keeps media filenames in imeta", () => {
   // Filenames are included for every MIME type — the video review dialog
   // and file cards use them as display titles.
