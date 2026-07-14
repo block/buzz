@@ -3,13 +3,14 @@ import { expect, test } from "@playwright/test";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const BAKED_DEFAULTS = [
-  { key: "BUZZ_AGENT_PROVIDER", value: "databricks_v2", masked: false },
+  { key: "BUZZ_AGENT_PROVIDER", value: "anthropic", masked: false },
   {
     key: "BUZZ_AGENT_MODEL",
-    value: "goose-claude-opus-4-8",
+    value: "claude-opus-4-8",
     masked: false,
   },
   { key: "BUZZ_AGENT_THINKING_EFFORT", value: "high", masked: false },
+  { key: "ANTHROPIC_API_KEY", value: "sk-ant-baked-test", masked: true },
 ];
 
 // Edit-agent dialog coverage (Phase 1B.3b-pre). Written against TODAY'S
@@ -168,10 +169,10 @@ test.describe("edit agent dialog", () => {
     await openEditDialog(page);
 
     await expect(page.locator("#edit-agent-llm-provider")).toHaveText(
-      "Databricks v2 (inherited from build)",
+      "Anthropic (inherited from build)",
     );
     await expect(page.locator("#edit-agent-model")).toHaveText(
-      "Inherit build default (goose-claude-opus-4-8)",
+      "Inherit build default (claude-opus-4-8)",
     );
     await expect(
       page.getByText("Using build defaults: effort high"),

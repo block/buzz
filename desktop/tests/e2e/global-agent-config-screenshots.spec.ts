@@ -126,12 +126,12 @@ test.describe("global agent config screenshots", () => {
       bakedBuildEnv: [
         {
           key: "BUZZ_AGENT_PROVIDER",
-          value: "databricks_v2",
+          value: "anthropic",
           masked: false,
         },
         {
           key: "BUZZ_AGENT_MODEL",
-          value: "goose-claude-opus-4-8",
+          value: "claude-opus-4-8",
           masked: false,
         },
         {
@@ -139,16 +139,21 @@ test.describe("global agent config screenshots", () => {
           value: "high",
           masked: false,
         },
+        {
+          key: "ANTHROPIC_API_KEY",
+          value: "sk-ant-baked-test",
+          masked: true,
+        },
       ],
     });
 
     await openCreateDialog(page);
 
     await expect(page.locator("#persona-llm-provider")).toHaveText(
-      "Databricks v2 (inherited from build)",
+      "Anthropic (inherited from build)",
     );
     await expect(page.locator("#persona-model")).toHaveText(
-      "Inherit build default (goose-claude-opus-4-8)",
+      "Inherit build default (claude-opus-4-8)",
     );
     await expect(
       page.getByText("Using build defaults: effort high"),
