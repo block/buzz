@@ -26,6 +26,7 @@ import { AvatarStep } from "./AvatarStep";
 import { BackupStep } from "./BackupStep";
 import { MembershipDenied } from "./MembershipDenied";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
+import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
@@ -77,10 +78,8 @@ async function checkMembershipDenied(): Promise<boolean> {
 
 type OnboardingFlowProps = {
   actions: OnboardingActions;
-  canBackToCommunitySetup: boolean;
   identityLost?: boolean;
   initialProfile: OnboardingProfileSeed;
-  onBackToCommunitySetup: () => void;
 };
 
 function isFallbackDisplayName(value?: string | null) {
@@ -147,10 +146,8 @@ function resolveProfileSaveRecovery(
 
 export function OnboardingFlow({
   actions,
-  canBackToCommunitySetup,
   identityLost = false,
   initialProfile,
-  onBackToCommunitySetup,
 }: OnboardingFlowProps) {
   const { complete, skipForNow } = actions;
   const queryClient = useQueryClient();
@@ -175,6 +172,10 @@ export function OnboardingFlow({
   const [identityWasImported, setIdentityWasImported] = React.useState(false);
   const [membershipRetryPage, setMembershipRetryPage] =
     React.useState<OnboardingPage>("avatar");
+  const [deniedFromPage, setDeniedFromPage] =
+    React.useState<OnboardingPage>("profile");
+  const [isCommunityChangeOpen, setIsCommunityChangeOpen] =
+    React.useState(false);
   const [transitionDirection, setTransitionDirection] =
     React.useState<OnboardingTransitionDirection>("forward");
   const systemColorScheme = useSystemColorScheme();
@@ -285,6 +286,9 @@ export function OnboardingFlow({
           } catch {
             setDeniedPubkey("");
           }
+          setDeniedFromPage((prev) =>
+            currentPage === "membership-denied" ? prev : currentPage,
+          );
           setMembershipRetryPage(nextPage);
           setCurrentPage("membership-denied");
           return;
@@ -306,6 +310,9 @@ export function OnboardingFlow({
               } catch {
                 setDeniedPubkey("");
               }
+              setDeniedFromPage((prev) =>
+                currentPage === "membership-denied" ? prev : currentPage,
+              );
               setMembershipRetryPage(nextPage);
               setCurrentPage("membership-denied");
               return;
@@ -328,6 +335,7 @@ export function OnboardingFlow({
       }
     },
     [
+      currentPage,
       isProfileAdvancePending,
       profileDraft,
       profileUpdateMutation,
@@ -466,182 +474,188 @@ export function OnboardingFlow({
 
   if (currentPage === "membership-denied") {
     return (
-      <MembershipDenied
-        onChangeKey={
-          canBackToCommunitySetup
-            ? () => {
-                setTransitionDirection("backward");
-                onBackToCommunitySetup();
-              }
-            : undefined
-        }
-        onImportKey={canBackToCommunitySetup ? undefined : importExistingKey}
-        onRetry={() => {
-          void saveProfileAndContinue(membershipRetryPage);
-        }}
-        pubkey={deniedPubkey}
-      />
+      <>
+        <MembershipDenied
+          onBack={() => {
+            setTransitionDirection("backward");
+            setCurrentPage(deniedFromPage);
+          }}
+          onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+          onImportKey={importExistingKey}
+          onRetry={() => {
+            void saveProfileAndContinue(membershipRetryPage);
+          }}
+          pubkey={deniedPubkey}
+        />
+        {isCommunityChangeOpen ? (
+          <CommunityChangeOverlay
+            onClose={() => setIsCommunityChangeOpen(false)}
+          />
+        ) : null}
+      </>
     );
   }
 
   return (
-    <div
-      className={`buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground ${
-        currentPage === "profile" ||
-        currentPage === "backup" ||
-        currentPage === "avatar" ||
-        currentPage === "key-import"
-          ? "buzz-onboarding-neutral-theme"
-          : ""
-      }`}
-      data-testid="onboarding-gate"
-      data-system-color-scheme={systemColorScheme}
-    >
-      <StartupWindowDragRegion />
+    <>
       <div
-        className={`relative flex w-full flex-col items-center text-center ${
-          currentPage === "theme"
-            ? "max-w-[1180px]"
-            : currentPage === "avatar"
-              ? "max-w-[1080px]"
-              : currentPage === "setup"
-                ? "max-w-[920px]"
-                : "max-w-[500px]"
+        className={`buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground ${
+          currentPage === "profile" ||
+          currentPage === "backup" ||
+          currentPage === "avatar" ||
+          currentPage === "key-import"
+            ? "buzz-onboarding-neutral-theme"
+            : ""
         }`}
+        data-testid="onboarding-gate"
+        data-system-color-scheme={systemColorScheme}
       >
-        <OnboardingSlideTransition
-          className="w-auto"
-          containerClassName={`fixed bottom-12 left-1/2 z-40 w-auto -translate-x-1/2 ${
-            hideFixedProgressOnCompact ? "max-lg:hidden" : ""
-          }`}
-          direction={transitionDirection}
-          transitionKey={`progress-${currentStep}-${transitionDirection}-${
-            hideFixedProgressOnCompact ? "compact-hidden" : "visible"
+        <StartupWindowDragRegion />
+        <div
+          className={`relative flex w-full flex-col items-center text-center ${
+            currentPage === "theme"
+              ? "max-w-[1180px]"
+              : currentPage === "avatar"
+                ? "max-w-[1080px]"
+                : currentPage === "setup"
+                  ? "max-w-[920px]"
+                  : "max-w-[500px]"
           }`}
         >
-          <StepProgress
-            activeSegmentClassName="bg-primary"
-            completeSegmentClassName="bg-primary/35"
-            currentStep={currentStep}
-            inactiveSegmentClassName="bg-muted-foreground/25"
-            totalSteps={totalOnboardingSteps}
-          />
-        </OnboardingSlideTransition>
-
-        {currentPage === "profile" ? (
-          <ProfileStep
-            actions={{
-              advanceWithoutSaving: advanceFromProfileWithoutSaving,
-              back: canBackToCommunitySetup
-                ? () => {
-                    setTransitionDirection("backward");
-                    onBackToCommunitySetup();
-                  }
-                : undefined,
-              clearAvatarDraft: resetAvatarDraft,
-              importExistingKey: showKeyImportPage,
-              onUploadingChange: setIsUploadingAvatar,
-              skipForNow,
-              submit: () => {
-                void saveProfileAndContinue(
-                  identityWasImported ? "avatar" : "backup",
-                );
-              },
-              updateAvatarUrl: updateAvatarUrlDraft,
-              updateDisplayName: updateDisplayNameDraft,
-            }}
-            direction={transitionDirection}
-            state={profileStepState}
-          />
-        ) : currentPage === "key-import" ? (
           <OnboardingSlideTransition
-            className="flex w-full flex-col items-center text-center"
+            className="w-auto"
+            containerClassName={`fixed bottom-12 left-1/2 z-40 w-auto -translate-x-1/2 ${
+              hideFixedProgressOnCompact ? "max-lg:hidden" : ""
+            }`}
             direction={transitionDirection}
-            transitionKey={`key-import-${transitionDirection}`}
+            transitionKey={`progress-${currentStep}-${transitionDirection}-${
+              hideFixedProgressOnCompact ? "compact-hidden" : "visible"
+            }`}
           >
-            <div className="w-full max-w-[440px]">
-              {identityLost ? (
-                <>
-                  <h1 className="text-3xl font-semibold tracking-tight">
-                    Re-import your key
-                  </h1>
-                  <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                    Your identity is no longer in the system keyring. Re-import
-                    your nsec to restore it — Buzz will restart to finish
-                    recovery. Or go back to start a new identity with a fresh
-                    key.
-                  </p>
-                </>
-              ) : (
-                <>
-                  <h1 className="text-3xl font-semibold tracking-tight">
-                    Use your existing key
-                  </h1>
-                  <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                    Import your Nostr private key to use that identity with
-                    Buzz. If this key already has a profile on the relay, your
-                    name and avatar are restored automatically.
-                  </p>
-                </>
-              )}
-            </div>
-
-            {persistError ? (
-              <p className="mt-4 w-full max-w-[440px] text-sm text-destructive">
-                {persistError}
-              </p>
-            ) : null}
-
-            <NostrKeyImportForm
-              backLabel={identityLost ? "Start new identity" : undefined}
-              onBack={identityLost ? handleLostModeBack : showProfilePage}
-              onImport={importExistingKey}
+            <StepProgress
+              activeSegmentClassName="bg-primary"
+              completeSegmentClassName="bg-primary/35"
+              currentStep={currentStep}
+              inactiveSegmentClassName="bg-muted-foreground/25"
+              totalSteps={totalOnboardingSteps}
             />
           </OnboardingSlideTransition>
-        ) : currentPage === "backup" ? (
-          <BackupStep
-            currentStep={currentStep}
-            direction={transitionDirection}
-            onBack={showProfilePage}
-            onNext={() => showAvatarPage()}
-            totalSteps={totalOnboardingSteps}
-          />
-        ) : currentPage === "avatar" ? (
-          <AvatarStep
-            actions={{
-              advanceWithoutSaving: () => showThemePage(),
-              back: identityWasImported ? showProfilePage : showBackupPage,
-              onUploadingChange: setIsUploadingAvatar,
-              skipForNow,
-              submit: () => {
-                void saveProfileAndContinue("theme");
-              },
-              updateAvatarUrl: updateAvatarUrlDraft,
-            }}
-            currentStep={currentStep}
-            direction={transitionDirection}
-            showAlwaysSkip={true}
-            state={avatarStepState}
-            totalSteps={totalOnboardingSteps}
-          />
-        ) : currentPage === "theme" ? (
-          <ThemeStep
-            actions={{
-              skip: showSetupPage,
-              submit: showSetupPage,
-            }}
-            direction={transitionDirection}
-          />
-        ) : (
-          <SetupStep
-            actions={{
-              back: () => showThemePage("backward"),
-              complete,
-            }}
-            direction={transitionDirection}
-          />
-        )}
+
+          {currentPage === "profile" ? (
+            <ProfileStep
+              actions={{
+                advanceWithoutSaving: advanceFromProfileWithoutSaving,
+                back: () => setIsCommunityChangeOpen(true),
+                clearAvatarDraft: resetAvatarDraft,
+                importExistingKey: showKeyImportPage,
+                onUploadingChange: setIsUploadingAvatar,
+                skipForNow,
+                submit: () => {
+                  void saveProfileAndContinue(
+                    identityWasImported ? "avatar" : "backup",
+                  );
+                },
+                updateAvatarUrl: updateAvatarUrlDraft,
+                updateDisplayName: updateDisplayNameDraft,
+              }}
+              direction={transitionDirection}
+              state={profileStepState}
+            />
+          ) : currentPage === "key-import" ? (
+            <OnboardingSlideTransition
+              className="flex w-full flex-col items-center text-center"
+              direction={transitionDirection}
+              transitionKey={`key-import-${transitionDirection}`}
+            >
+              <div className="w-full max-w-[440px]">
+                {identityLost ? (
+                  <>
+                    <h1 className="text-3xl font-semibold tracking-tight">
+                      Re-import your key
+                    </h1>
+                    <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                      Your identity is no longer in the system keyring.
+                      Re-import your nsec to restore it — Buzz will restart to
+                      finish recovery. Or go back to start a new identity with a
+                      fresh key.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <h1 className="text-3xl font-semibold tracking-tight">
+                      Use your existing key
+                    </h1>
+                    <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                      Import your Nostr private key to use that identity with
+                      Buzz. If this key already has a profile on the relay, your
+                      name and avatar are restored automatically.
+                    </p>
+                  </>
+                )}
+              </div>
+
+              {persistError ? (
+                <p className="mt-4 w-full max-w-[440px] text-sm text-destructive">
+                  {persistError}
+                </p>
+              ) : null}
+
+              <NostrKeyImportForm
+                backLabel={identityLost ? "Start new identity" : undefined}
+                onBack={identityLost ? handleLostModeBack : showProfilePage}
+                onImport={importExistingKey}
+              />
+            </OnboardingSlideTransition>
+          ) : currentPage === "backup" ? (
+            <BackupStep
+              currentStep={currentStep}
+              direction={transitionDirection}
+              onBack={showProfilePage}
+              onNext={() => showAvatarPage()}
+              totalSteps={totalOnboardingSteps}
+            />
+          ) : currentPage === "avatar" ? (
+            <AvatarStep
+              actions={{
+                advanceWithoutSaving: () => showThemePage(),
+                back: identityWasImported ? showProfilePage : showBackupPage,
+                onUploadingChange: setIsUploadingAvatar,
+                skipForNow,
+                submit: () => {
+                  void saveProfileAndContinue("theme");
+                },
+                updateAvatarUrl: updateAvatarUrlDraft,
+              }}
+              currentStep={currentStep}
+              direction={transitionDirection}
+              showAlwaysSkip={true}
+              state={avatarStepState}
+              totalSteps={totalOnboardingSteps}
+            />
+          ) : currentPage === "theme" ? (
+            <ThemeStep
+              actions={{
+                skip: showSetupPage,
+                submit: showSetupPage,
+              }}
+              direction={transitionDirection}
+            />
+          ) : (
+            <SetupStep
+              actions={{
+                back: () => showThemePage("backward"),
+                complete,
+              }}
+              direction={transitionDirection}
+            />
+          )}
+        </div>
       </div>
-    </div>
+      {isCommunityChangeOpen ? (
+        <CommunityChangeOverlay
+          onClose={() => setIsCommunityChangeOpen(false)}
+        />
+      ) : null}
+    </>
   );
 }

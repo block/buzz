@@ -1537,3 +1537,114 @@ test("onboarding relay reconnect — connected without a prior click does not sh
   await expect(card).toContainText("Can't reach the relay");
   await expect(card).not.toContainText("Connected");
 });
+
+test("membership denied shows all four affordances and change-community edits non-destructively", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      relayRole: null,
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  // Fill the display name and advance — membership check triggers denial.
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  // Membership-denied screen renders with all four affordances.
+  const denied = page.getByTestId("membership-denied");
+  await expect(denied).toBeVisible();
+  await expect(denied.getByRole("button", { name: "Try again" })).toBeVisible();
+  await expect(denied.getByRole("button", { name: "Back" })).toBeVisible();
+  await expect(
+    denied.getByRole("button", { name: "Change community" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("membership-denied-change-key")).toBeVisible();
+  await expect(
+    page.getByTestId("membership-denied-redeem-invite"),
+  ).toBeVisible();
+
+  // Click "Change community" → the overlay opens.
+  await denied.getByRole("button", { name: "Change community" }).click();
+  const overlay = page.getByTestId("community-change-overlay");
+  await expect(overlay).toBeVisible();
+
+  // Change the relay URL to a new one. The probe will time out for a fake URL
+  // so we wait for the "Use anyway" button.
+  await overlay.locator("#community-edit-url").fill("wss://new-relay.example.com");
+  await overlay.getByRole("button", { name: "Save changes" }).click();
+  await expect(
+    overlay.getByRole("button", { name: "Use anyway" }),
+  ).toBeVisible();
+  await overlay.getByRole("button", { name: "Use anyway" }).click();
+
+  // The community update triggers a remount (reinitKey bump). The persisted
+  // community should now point to the new relay URL.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const raw = window.localStorage.getItem("buzz-communities");
+        const communities = raw
+          ? (JSON.parse(raw) as Array<{ relayUrl?: string }>)
+          : [];
+        return communities[0]?.relayUrl ?? null;
+      }),
+    )
+    .toBe("wss://new-relay.example.com");
+
+  // Identity was NOT wiped — the override storage key is still intact.
+  await expect
+    .poll(() =>
+      page.evaluate((storageKey) => {
+        return window.localStorage.getItem(storageKey) !== null;
+      }, E2E_IDENTITY_OVERRIDE_STORAGE_KEY),
+    )
+    .toBe(true);
+});
+
+test("cancel from profile Back preserves drafts and denied Back returns to interrupted page", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      relayRole: null,
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  // --- Profile step: Back opens community-change overlay ---
+  const nameInput = page.getByTestId("onboarding-display-name");
+  await nameInput.fill("Morty QA");
+  await page.getByTestId("onboarding-back").click();
+
+  // The community change overlay should open.
+  const overlay = page.getByTestId("community-change-overlay");
+  await expect(overlay).toBeVisible();
+
+  // Cancel the overlay — profile should still be visible with the name intact.
+  await overlay.getByRole("button", { name: "Cancel" }).click();
+  await expect(overlay).toHaveCount(0);
+  await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
+  await expect(nameInput).toHaveValue("Morty QA");
+
+  // --- Profile → membership denied → Back returns to profile ---
+  // Advance triggers membership check → denied (relayRole is null).
+  await page.getByTestId("onboarding-next").click();
+  await expect(page.getByTestId("membership-denied")).toBeVisible();
+
+  // Press Back on the denied screen — should return to the profile page
+  // (deniedFromPage = "profile") with the name draft intact.
+  await page
+    .getByTestId("membership-denied")
+    .getByRole("button", { name: "Back" })
+    .click();
+  await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
+  await expect(nameInput).toHaveValue("Morty QA");
+});

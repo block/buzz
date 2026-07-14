@@ -9,14 +9,16 @@ import { Spinner } from "@/shared/ui/spinner";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 
 type MembershipDeniedProps = {
-  onChangeKey?: () => void;
-  onImportKey?: (nsec: string) => Promise<void>;
+  onBack: () => void;
+  onChangeCommunity: () => void;
+  onImportKey: (nsec: string) => Promise<void>;
   onRetry: () => void;
   pubkey: string;
 };
 
 export function MembershipDenied({
-  onChangeKey,
+  onBack,
+  onChangeCommunity,
   onImportKey,
   onRetry,
   pubkey,
@@ -39,7 +41,6 @@ export function MembershipDenied({
   const [nsecInput, setNsecInput] = React.useState("");
   const previewNpub = React.useMemo(() => nsecToNpub(nsecInput), [nsecInput]);
   const trimmedNsec = nsecInput.trim();
-  const canImportKey = typeof onImportKey === "function";
   const isValidNsec = previewNpub !== null;
 
   const handleCopy = React.useCallback(async () => {
@@ -53,10 +54,6 @@ export function MembershipDenied({
   }, [npub]);
 
   const handleImportKey = React.useCallback(async () => {
-    if (!onImportKey) {
-      return;
-    }
-
     if (!previewNpub) {
       setImportError(
         "That doesn't look like a valid nsec. Paste an nsec1 key.",
@@ -224,25 +221,36 @@ export function MembershipDenied({
               <Button className="w-full" onClick={onRetry} type="button">
                 Try again
               </Button>
-              {onChangeKey || canImportKey ? (
-                <button
-                  className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-                  data-testid="membership-denied-change-key"
-                  onClick={() => {
-                    if (onChangeKey) {
-                      onChangeKey();
-                      return;
-                    }
-
-                    setImportError(null);
-                    setIsImportFormOpen(true);
-                  }}
+              <div className="flex gap-2">
+                <Button
+                  className="flex-1 text-muted-foreground hover:text-accent-foreground"
+                  onClick={onBack}
                   type="button"
+                  variant="ghost"
                 >
-                  <KeyRound className="h-4 w-4" />
-                  Use a different key
-                </button>
-              ) : null}
+                  Back
+                </Button>
+                <Button
+                  className="flex-1 text-muted-foreground hover:text-accent-foreground"
+                  onClick={onChangeCommunity}
+                  type="button"
+                  variant="ghost"
+                >
+                  Change community
+                </Button>
+              </div>
+              <button
+                className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                data-testid="membership-denied-change-key"
+                onClick={() => {
+                  setImportError(null);
+                  setIsImportFormOpen(true);
+                }}
+                type="button"
+              >
+                <KeyRound className="h-4 w-4" />
+                Use a different key
+              </button>
             </>
           )}
         </div>

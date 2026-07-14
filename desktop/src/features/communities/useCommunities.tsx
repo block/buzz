@@ -21,6 +21,57 @@ import { removeChannelSnapshotForRelay } from "@/features/channels/channelSnapsh
 import { removeMessageSnapshotsForRelay } from "@/features/messages/lib/messageSnapshot";
 import { clearSavedCommunitySnapshot } from "@/features/agents/activeAgentTurnsStore";
 
+export type UpdateCommunityResult =
+  | { kind: "updated"; requiresReinit: boolean }
+  | { kind: "unchanged" }
+  | { kind: "duplicate-relay" }
+  | { kind: "not-found" };
+
+/**
+ * Pure decision logic for updateCommunity — determines the outcome from a
+ * synchronous snapshot of communities without side effects.  Extracted so the
+ * 5-case result matrix is unit-testable outside React.
+ */
+export function resolveCommunityUpdateResult(
+  communities: Community[],
+  activeId: string | null,
+  id: string,
+  updates: Partial<
+    Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
+  >,
+): UpdateCommunityResult {
+  const current = communities.find((w) => w.id === id);
+  if (!current) return { kind: "not-found" };
+
+  if (
+    updates.relayUrl !== undefined &&
+    updates.relayUrl !== current.relayUrl &&
+    communities.some((w) => w.id !== id && w.relayUrl === updates.relayUrl)
+  ) {
+    return { kind: "duplicate-relay" };
+  }
+
+  const hasChange =
+    (updates.name !== undefined && updates.name !== current.name) ||
+    (updates.relayUrl !== undefined && updates.relayUrl !== current.relayUrl) ||
+    (updates.token !== undefined && updates.token !== current.token) ||
+    (updates.pubkey !== undefined && updates.pubkey !== current.pubkey) ||
+    (updates.reposDir !== undefined && updates.reposDir !== current.reposDir);
+
+  if (!hasChange) return { kind: "unchanged" };
+
+  const isActive = id === activeId;
+  const backendFieldsChanged =
+    isActive &&
+    ((updates.relayUrl !== undefined &&
+      updates.relayUrl !== current.relayUrl) ||
+      (updates.token !== undefined && updates.token !== current.token) ||
+      (updates.reposDir !== undefined &&
+        updates.reposDir !== current.reposDir));
+
+  return { kind: "updated", requiresReinit: backendFieldsChanged };
+}
+
 export type UseCommunitiesReturn = {
   communities: Community[];
   activeCommunity: Community | null;
@@ -38,7 +89,7 @@ export type UseCommunitiesReturn = {
     updates: Partial<
       Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
     >,
-  ) => void;
+  ) => UpdateCommunityResult;
 };
 
 const CommunitiesContext = createContext<UseCommunitiesReturn | null>(null);
@@ -164,27 +215,29 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
       updates: Partial<
         Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
       >,
-    ) => {
-      setCommunitiesState((prev) => {
-        // Prevent duplicate relay URLs across communities
-        if (
-          updates.relayUrl &&
-          prev.some((w) => w.id !== id && w.relayUrl === updates.relayUrl)
-        ) {
-          return prev;
+    ): UpdateCommunityResult => {
+      const result = resolveCommunityUpdateResult(
+        communitiesRef.current,
+        activeId,
+        id,
+        updates,
+      );
+
+      if (result.kind === "updated") {
+        setCommunitiesState((prev) => {
+          const next = prev.map((w) =>
+            w.id === id ? { ...w, ...updates } : w,
+          );
+          saveCommunities(next);
+          return next;
+        });
+
+        if (result.requiresReinit) {
+          setReinitKey((k) => k + 1);
         }
-        const next = prev.map((w) => (w.id === id ? { ...w, ...updates } : w));
-        saveCommunities(next);
-        return next;
-      });
-      // If the active community's relay URL or token changed, bump reinitKey
-      // so the React tree remounts with the new config.
-      if (
-        id === activeId &&
-        (updates.relayUrl || updates.token !== undefined)
-      ) {
-        setReinitKey((k) => k + 1);
       }
+
+      return result;
     },
     [activeId],
   );

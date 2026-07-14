@@ -11,14 +11,13 @@ import {
   OnboardingSlideTransition,
 } from "@/features/onboarding/ui/OnboardingSlideTransition";
 import { Button } from "@/shared/ui/button";
-import { Input } from "@/shared/ui/input";
-import { Spinner } from "@/shared/ui/spinner";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 
 import type { Community } from "../types";
 import { initFirstCommunity } from "../communityStorage";
+import { CommunityEditForm } from "./CommunityEditForm";
 
 type WelcomeSetupPage = "welcome" | "create-community" | "nostr-key";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
@@ -91,8 +90,6 @@ export function WelcomeSetup({
   const [page, setPage] = React.useState<WelcomeSetupPage>("welcome");
   const [transitionMode, setTransitionMode] =
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
-  const [customCommunityName, setCustomCommunityName] = React.useState("");
-  const [customRelayUrl, setCustomRelayUrl] = React.useState("");
   const [isConnecting, setIsConnecting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const systemColorScheme = useSystemColorScheme();
@@ -154,24 +151,6 @@ export function WelcomeSetup({
       await handleConnect(defaultRelayUrl, undefined, identity.pubkey);
     },
     [defaultRelayUrl, handleConnect],
-  );
-
-  const handleCustomCommunitySubmit = React.useCallback(
-    (event: React.FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const trimmedName = customCommunityName.trim();
-      const trimmedUrl = customRelayUrl.trim();
-      if (!trimmedName) {
-        setError("Please enter a community name.");
-        return;
-      }
-      if (!trimmedUrl) {
-        setError("Please enter a community URL.");
-        return;
-      }
-      void handleConnect(trimmedUrl, trimmedName);
-    },
-    [customRelayUrl, customCommunityName, handleConnect],
   );
 
   const showCreateCommunityPage = React.useCallback(() => {
@@ -307,88 +286,24 @@ export function WelcomeSetup({
               </p>
             </div>
 
-            <form
-              className="mt-8 flex w-full flex-col gap-4"
-              onSubmit={handleCustomCommunitySubmit}
-            >
-              <div className="space-y-1.5 text-left">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="community-name"
-                >
-                  Community name
-                </label>
-                <Input
-                  autoFocus
-                  className="h-10 bg-background"
-                  id="community-name"
-                  onChange={(event) => {
-                    setCustomCommunityName(event.target.value);
-                    setError(null);
-                  }}
-                  placeholder="Design team"
-                  type="text"
-                  value={customCommunityName}
-                />
-              </div>
-
-              <div className="space-y-1.5 text-left">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="community-url"
-                >
-                  Community URL
-                </label>
-                <Input
-                  className="h-10 bg-background"
-                  id="community-url"
-                  onChange={(event) => {
-                    setCustomRelayUrl(event.target.value);
-                    setError(null);
-                  }}
-                  placeholder="wss://relay.example.com"
-                  type="text"
-                  value={customRelayUrl}
-                />
-              </div>
-
-              <div className="flex w-full flex-col gap-3 pt-1">
-                <Button
-                  className="h-10 w-full"
-                  disabled={
-                    isConnecting ||
-                    !customCommunityName.trim() ||
-                    !customRelayUrl.trim()
-                  }
-                  type="submit"
-                >
-                  {isConnecting ? (
-                    <Spinner
-                      aria-label="Joining community"
-                      className="h-4 w-4 border-2"
-                    />
-                  ) : (
-                    "Join a community"
-                  )}
-                </Button>
-
-                <Button
-                  className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
-                  disabled={isConnecting}
-                  onClick={showWelcomePage}
-                  type="button"
-                  variant="ghost"
-                >
-                  Back
-                </Button>
-
-                {error ? (
-                  <p className="text-center text-sm text-destructive">
-                    {error}
-                  </p>
-                ) : null}
-              </div>
-            </form>
+            <div className="mt-8 w-full">
+              <CommunityEditForm
+                cancelLabel="Back"
+                initialName=""
+                initialRelayUrl=""
+                isSubmitting={isConnecting}
+                onCancel={showWelcomePage}
+                onSubmit={(name, url) => {
+                  void handleConnect(url, name);
+                }}
+                submitLabel="Join a community"
+              />
+              {error ? (
+                <p className="mt-2 text-center text-sm text-destructive">
+                  {error}
+                </p>
+              ) : null}
+            </div>
           </OnboardingSlideTransition>
         ) : (
           <NostrKeyImportPage
