@@ -62,6 +62,12 @@ export function useWelcomeAgentCreate({
         content: `@${welcomeGuideAgent.name}, help me create a new agent.`,
         mentionPubkeys: [welcomeGuideAgent.pubkey],
       });
+      window.requestAnimationFrame(() => {
+        const timeline = document.querySelector<HTMLElement>(
+          '[data-testid="message-timeline"]',
+        );
+        timeline?.scrollTo({ top: timeline.scrollHeight, behavior: "smooth" });
+      });
       setIsOpen(false);
     } catch (cause) {
       setError(
