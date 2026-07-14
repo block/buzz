@@ -291,6 +291,11 @@ type MockBridgeOptions = {
     provider: string | null;
     model: string | null;
   };
+  bakedBuildEnv?: Array<{
+    key: string;
+    masked: boolean;
+    value: string;
+  }>;
   /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
    *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
   setGlobalAgentConfigDelayMs?: number;

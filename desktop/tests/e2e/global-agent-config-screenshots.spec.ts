@@ -76,10 +76,7 @@ test.describe("global agent config screenshots", () => {
     });
   });
 
-  // Shot 02: Create Agent with global provider = anthropic, no per-agent
-  // provider selected, Advanced section auto-expanded, ANTHROPIC_API_KEY
-  // shown as a required amber row (Test 2.1 + 2.2 fix).
-  test("02-create-global-provider-required-key-advanced-open", async ({
+  test("02-create-global-provider-shows-top-level-api-key", async ({
     page,
   }) => {
     await installMockBridge(page, {
@@ -92,30 +89,15 @@ test.describe("global agent config screenshots", () => {
 
     await openCreateDialog(page);
 
-    // With global provider = anthropic and no per-agent provider set, the gate
-    // derives the effective provider as anthropic → ANTHROPIC_API_KEY required.
-    // The Advanced section auto-expands when required env keys appear.
-    await expect(page.getByTestId("env-vars-required-key")).toHaveText(
-      "ANTHROPIC_API_KEY",
-      { timeout: 10_000 },
-    );
-
-    // Scroll the required row into view.
-    // Use evaluate to avoid detachment races with the motion.div container.
-    await page
-      .getByTestId("env-vars-required-key")
-      .evaluate((el) => el.scrollIntoView({ block: "nearest" }));
-    await settleAnimations(page);
-
-    const dialog = page.getByRole("dialog");
-    await dialog.screenshot({
-      path: `${SHOTS}/02-create-global-provider-required-key-advanced-open.png`,
+    await expect(page.getByLabel("Anthropic API Key")).toBeVisible({
+      timeout: 10_000,
     });
+    await expect(
+      page.getByRole("button", { name: "Advanced", exact: true }),
+    ).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByTestId("env-vars-required-key")).not.toBeVisible();
   });
 
-  // Shot 03: Global env satisfies ANTHROPIC_API_KEY — no required amber row,
-  // Advanced stays collapsed, and the Create button is enabled (Test 4 nuance fix:
-  // globally-satisfied keys are excluded from requiredKeys entirely).
   test("03-global-env-satisfies-required-key", async ({ page }) => {
     await installMockBridge(page, {
       globalAgentConfig: {
@@ -127,30 +109,87 @@ test.describe("global agent config screenshots", () => {
 
     await openCreateDialog(page);
 
-    // Global env_vars satisfies ANTHROPIC_API_KEY, so computeLocalModeGate
-    // excludes it from requiredEnvKeys — no locked amber row rendered.
-    await expect(page.locator("#persona-llm-provider")).toBeVisible({
-      timeout: 10_000,
-    });
-    // No required rows present — globally satisfied keys have no amber row.
+    await expect(page.getByLabel("Anthropic API Key")).toHaveAttribute(
+      "placeholder",
+      "Inherited from global config",
+    );
     await expect(page.getByTestId("env-vars-required-key")).not.toBeVisible({
       timeout: 5_000,
     });
-    // Submit is enabled: effectiveProvider = global "anthropic" is valid.
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 5_000,
     });
+  });
 
-    // Scroll down to show the env section — empty of amber required rows because
-    // the globally-satisfied key is excluded from requiredEnvKeys entirely.
-    const dialog = page.getByRole("dialog");
-    const envEditor = dialog.getByTestId("env-vars-editor");
-    await envEditor.evaluate((el) => el.scrollIntoView({ block: "nearest" }));
-    await settleAnimations(page);
-
-    await dialog.screenshot({
-      path: `${SHOTS}/03-global-env-satisfies-required-key.png`,
+  test("06-baked-defaults-labels-appear-in-create-dialog", async ({ page }) => {
+    await installMockBridge(page, {
+      bakedBuildEnv: [
+        {
+          key: "BUZZ_AGENT_PROVIDER",
+          value: "databricks_v2",
+          masked: false,
+        },
+        {
+          key: "BUZZ_AGENT_MODEL",
+          value: "goose-claude-opus-4-8",
+          masked: false,
+        },
+        {
+          key: "BUZZ_AGENT_THINKING_EFFORT",
+          value: "high",
+          masked: false,
+        },
+      ],
     });
+
+    await openCreateDialog(page);
+
+    await expect(page.locator("#persona-llm-provider")).toHaveText(
+      "Databricks v2 (inherited from build)",
+    );
+    await expect(page.locator("#persona-model")).toHaveText(
+      "Inherit build default (goose-claude-opus-4-8)",
+    );
+    await expect(
+      page.getByText("Using build defaults: effort high"),
+    ).toBeVisible();
+  });
+
+  test("07-explicit-global-defaults-override-baked-labels", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: { BUZZ_AGENT_THINKING_EFFORT: "low" },
+      },
+      bakedBuildEnv: [
+        {
+          key: "BUZZ_AGENT_PROVIDER",
+          value: "databricks_v2",
+          masked: false,
+        },
+        { key: "BUZZ_AGENT_MODEL", value: "build-model", masked: false },
+        {
+          key: "BUZZ_AGENT_THINKING_EFFORT",
+          value: "high",
+          masked: false,
+        },
+      ],
+    });
+
+    await openCreateDialog(page);
+
+    await expect(page.locator("#persona-llm-provider")).toHaveText(
+      "Inherit global default (anthropic)",
+    );
+    await expect(page.locator("#persona-model")).toHaveText(
+      "Inherit global default (claude-opus-4-5)",
+    );
+    await expect(
+      page.getByText("Using global defaults: effort low"),
+    ).toBeVisible();
   });
 
   // Shot 04: Create gate BLOCKED — no per-agent provider, no global provider

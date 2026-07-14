@@ -268,3 +268,35 @@ export function computeEditAgentFormValidity(
     !input.requiredEnvKeyMissing
   );
 }
+
+export function isEditAgentProviderSaveValid({
+  llmProviderFieldVisible,
+  currentProvider,
+  originalProvider,
+  globalProvider,
+  originalRuntimeSupportsProvider,
+}: {
+  llmProviderFieldVisible: boolean;
+  currentProvider: string;
+  originalProvider: string | null | undefined;
+  globalProvider: string | null | undefined;
+  originalRuntimeSupportsProvider: boolean;
+}): boolean {
+  if (!llmProviderFieldVisible) return true;
+  if (currentProvider.trim() || (globalProvider ?? "").trim()) return true;
+  return (
+    (originalProvider ?? "").trim().length === 0 &&
+    originalRuntimeSupportsProvider
+  );
+}
+
+export function envVarsEqual(
+  a: Record<string, string>,
+  b: Record<string, string>,
+): boolean {
+  const aKeys = Object.keys(a);
+  return (
+    aKeys.length === Object.keys(b).length &&
+    aKeys.every((key) => a[key] === b[key])
+  );
+}

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isEditAgentProviderSaveValid } from "./AgentInstanceEditDialog.tsx";
+import { isEditAgentProviderSaveValid } from "./personaRuntimeModel.ts";
 
 // Shorthand for test args.
 const visible = true;

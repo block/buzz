@@ -237,6 +237,12 @@ type E2eConfig = {
       provider: string | null;
       model: string | null;
     };
+    /** Baked build env returned by the display and key-name Tauri commands. */
+    bakedBuildEnv?: Array<{
+      key: string;
+      masked: boolean;
+      value: string;
+    }>;
     /** Delay (ms) applied to `set_global_agent_config` so tests can observe
      *  autosave behaviour while a request is in flight. 0/undefined = instant.
      *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
@@ -9301,11 +9307,9 @@ export function maybeInstallE2eTauriMocks() {
         };
       }
       case "get_baked_build_env":
-        // Mock always returns an empty baked env (OSS build simulation).
-        return [];
+        return config?.mock?.bakedBuildEnv ?? [];
       case "get_baked_build_env_keys":
-        // Mock always returns no baked env key names (OSS build simulation).
-        return [];
+        return (config?.mock?.bakedBuildEnv ?? []).map((entry) => entry.key);
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],

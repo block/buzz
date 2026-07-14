@@ -140,23 +140,13 @@ test("create agent supports parallelism and system prompt overrides", async ({
     .getByRole("button", { name: "Custom model...", exact: true })
     .click();
   await page.getByLabel("Custom model ID").fill("claude-opus-4-5");
-  // Supply a credential so the agent can actually run (create is no longer
-  // blocked by a missing key, but we include it for a realistic test).
-  // The required ANTHROPIC_API_KEY amber row appears in the EnvVarsEditor
-  // (Advanced auto-expands when required keys are present).
-  await page
-    .getByLabel("Value for ANTHROPIC_API_KEY")
-    .fill("sk-test-api-key-for-e2e");
+  await page.getByLabel("Anthropic API Key").fill("sk-test-api-key-for-e2e");
 
-  // Fix 3 (auto-open Advanced when required keys appear) may have already
-  // opened the section; only click to open if it is currently collapsed.
   const advancedToggle = page.getByRole("button", {
     name: "Advanced",
     exact: true,
   });
-  if ((await advancedToggle.getAttribute("aria-expanded")) === "false") {
-    await advancedToggle.click();
-  }
+  await advancedToggle.click();
   // Parallelism is above the env-vars editor in the Advanced section; filling
   // the required API-key row may have scrolled the dialog past it. Scroll back.
   await page
