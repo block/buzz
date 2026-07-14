@@ -36,6 +36,8 @@ import { invokeTauri } from "@/shared/api/tauri";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+
+
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
   getErrorMessage,
@@ -92,6 +94,8 @@ type UseMentionSendFlowOptions = {
   }) => void;
   resolvePostSendContent?: (effectiveExplicitAgentPubkeys: string[]) => string;
 };
+
+
 export function useMentionSendFlow({
   channelId,
   channelLinks,
@@ -511,6 +515,7 @@ export function useMentionSendFlow({
             [...draft.savedSpoileredAttachmentUrls],
             draft.savedMentionRefs,
           );
+
         };
         const restoreComposerAfterFailure = () => {
           persistCanceledDraft();
@@ -555,13 +560,14 @@ export function useMentionSendFlow({
               ),
             ]),
           );
-          const finalOutgoingTags = mergeOutgoingTags(
-            mediaTags,
-            outgoingTags ?? [],
+          const finalOutgoingTags = mergeOutgoingTagsWithReferenceMentions(
+            mergeOutgoingTags(mediaTags, outgoingTags ?? []),
+            mentionPubkeys,
           );
           if (signal?.aborted) return;
           await send(
             finalContent,
+
             mentionPubkeys,
             finalOutgoingTags,
             sendChannelId,
@@ -867,8 +873,8 @@ export function useMentionSendFlow({
     const mentionPubkeys = pendingNonMemberSend.mentionPubkeys.filter(
       (pubkey) => !nonMemberPubkeys.has(normalizePubkey(pubkey)),
     );
-    const outgoingTags = mergeOutgoingTagsWithReferenceMentions(
-      pendingNonMemberSend.outgoingTags,
+    const outgoingTags = withMentionReferenceTags(
+      pendingNonMemberSend.outgoingTags ?? [],
       nonMemberPubkeys,
     );
     void completeSend(pendingNonMemberSend, mentionPubkeys, outgoingTags);
