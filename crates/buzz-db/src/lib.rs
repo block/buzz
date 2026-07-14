@@ -31,6 +31,8 @@ pub mod migration;
 pub mod moderation;
 /// Monthly table partition management.
 pub mod partition;
+/// Buzz product-feedback sidecar persistence.
+pub mod product_feedback;
 /// Community-scoped push lease and durable wake-outbox persistence.
 pub mod push;
 /// Reaction persistence.
@@ -2667,6 +2669,23 @@ impl Db {
     /// inserted, or 0 if the `pubkey_allowlist` table doesn't exist.
     pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
         relay_members::backfill_from_allowlist(&self.pool, community).await
+    }
+
+    /// Sidecar an accepted product-feedback event, idempotent by event id.
+    pub async fn insert_product_feedback(
+        &self,
+        community: CommunityId,
+        feedback: product_feedback::NewProductFeedback<'_>,
+    ) -> Result<Uuid> {
+        product_feedback::insert(&self.pool, community, feedback).await
+    }
+
+    /// List product feedback across the deployment, newest first.
+    pub async fn list_product_feedback(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<product_feedback::ProductFeedbackRecord>> {
+        product_feedback::list(&self.pool, limit).await
     }
 
     /// Insert a tenant-scoped NIP-56 report row, idempotent by report event id.

@@ -28,8 +28,8 @@ use buzz_core::kind::{
     KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
     KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
     KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
-    KIND_PRESENCE_UPDATE, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE,
+    KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
     KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
@@ -125,6 +125,22 @@ impl IngestAuth {
     }
 }
 
+fn emit_product_feedback_success(
+    tracer: &Arc<dyn buzz_conformance::Tracer>,
+    tenant: &TenantContext,
+    event: &Event,
+    auth: &IngestAuth,
+) {
+    emit(
+        tracer,
+        TraceAction::WriteInsertGlobal {
+            msg_id: msg_id_label(event.id.as_bytes()),
+            claimed_community: claimed_community_from_event(event),
+        },
+        state_for_request(tenant, auth.pubkey()),
+    );
+}
+
 /// Successful ingestion result.
 pub struct IngestResult {
     /// Hex-encoded event ID.
@@ -172,7 +188,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // NIP-56 reports are ordinary member writes into the mod-only queue.
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
-        KIND_REPORT => Ok(Scope::MessagesWrite),
+        KIND_REPORT | KIND_PRODUCT_FEEDBACK => Ok(Scope::MessagesWrite),
         // Community moderation commands are direct, mod-authz-gated writes.
         // Scope only proves the transport can submit message writes; the
         // command handler owns role/capability authorization.
@@ -1445,6 +1461,23 @@ async fn ingest_event_inner(
         return super::command_executor::handle_command(tenant, state, event, auth).await;
     }
 
+    // Product feedback is sidecarred directly into its private deployment table.
+    // It never enters ordinary event storage or subscription fan-out.
+    if kind_u32 == KIND_PRODUCT_FEEDBACK {
+        super::product_feedback::handle(tenant, &event, state)
+            .await
+            .map_err(IngestError::Rejected)?;
+        // Feedback is a host-resolved, channel-less write. Although its row is
+        // private to operator tooling rather than ordinary event reads, this is
+        // the matching modeled success action at the ingest isolation seam.
+        emit_product_feedback_success(tracer, tenant, &event, &auth);
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
     // NIP-56 reports are persisted only to the mod queue. They are not stored in
     // the public events table and never fan out to subscribers. Reports remain
     // available while timed out so users can signal abuse during a write-block.
@@ -2402,12 +2435,64 @@ async fn ingest_event_inner(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+    use buzz_conformance::{TraceStep, Tracer};
     use buzz_core::kind::{
         KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_LONG_FORM,
         KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
+    use nostr::{EventBuilder, Kind};
+
+    #[derive(Debug, Default)]
+    struct VecTracer {
+        steps: Mutex<Vec<TraceStep>>,
+    }
+
+    impl Tracer for VecTracer {
+        fn record(&self, step: TraceStep) {
+            self.steps.lock().expect("trace lock").push(step);
+        }
+    }
+
+    #[test]
+    fn feedback_success_action_satisfies_ingest_emit_guard() {
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let tenant = TenantContext::resolved(community, "feedback.test");
+        let keys = nostr::Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_PRODUCT_FEEDBACK as u16),
+            "Useful feedback",
+        )
+        .sign_with_keys(&keys)
+        .expect("sign feedback");
+        let auth = IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let tracer = Arc::new(VecTracer::default());
+        let abstract_state = state_for_request(&tenant, auth.pubkey());
+
+        {
+            let (guard, counting) = EmitGuard::arm(
+                tracer.clone(),
+                abstract_state.clone(),
+                "ingest_event_exited_without_trace",
+            );
+            emit_product_feedback_success(&counting, &tenant, &event, &auth);
+            drop(guard);
+        }
+
+        let steps = tracer.steps.lock().expect("trace lock");
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(
+            steps[0].action,
+            TraceAction::WriteInsertGlobal { .. }
+        ));
+    }
 
     #[test]
     fn nip_ia_requests_are_global_only() {
@@ -2525,10 +2610,11 @@ mod tests {
     }
 
     #[test]
-    fn reports_and_moderation_commands_require_messages_write_scope() {
+    fn private_sidecars_and_moderation_commands_require_messages_write_scope() {
         let dummy = make_dummy_event();
         for kind in [
             KIND_REPORT,
+            KIND_PRODUCT_FEEDBACK,
             KIND_MODERATION_BAN,
             KIND_MODERATION_UNBAN,
             KIND_MODERATION_TIMEOUT,
@@ -2617,6 +2703,7 @@ mod tests {
             KIND_DELETION,
             KIND_REACTION,
             KIND_REPORT,
+            KIND_PRODUCT_FEEDBACK,
             KIND_MODERATION_BAN,
             KIND_MODERATION_UNBAN,
             KIND_MODERATION_TIMEOUT,

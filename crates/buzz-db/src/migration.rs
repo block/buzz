@@ -338,6 +338,7 @@ mod tests {
             "push_gateway_endpoint_quotas",
             "push_gateway_delivery_auth_replays",
             "push_gateway_delivery_request_replays",
+            "product_feedback",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -763,6 +764,23 @@ mod tests {
             .sql
             .as_str()
             .contains("_operator_global_tables"));
+
+        // Product feedback is a deployment-private sidecar; community_id is
+        // provenance, not an operator-review authorization boundary.
+        assert_eq!(migrations[15].version, 16);
+        assert!(migrations[15]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE product_feedback"));
+        assert!(migrations[15]
+            .sql
+            .as_str()
+            .contains("community_id UUID NOT NULL"));
+        assert!(migrations[15]
+            .sql
+            .as_str()
+            .contains("('product_feedback', 'deployment product inbox"));
+        assert!(!migrations[0].sql.as_str().contains("product_feedback"));
 
         // Matching is driven from a parent-table trigger so all partition and
         // internal insertion paths share the same crash-safe allowlist seam.
