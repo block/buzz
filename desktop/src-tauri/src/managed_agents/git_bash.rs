@@ -32,7 +32,7 @@ pub(crate) const GIT_BASH_INSTALL_HINT: &str = INSTALL_HINT;
 /// Returns `Some(path)` on Windows when a usable bash is found, `None` otherwise
 /// (including all non-Windows platforms). Honors `BUZZ_SHELL` (any executable) —
 /// correct for the Doctor readiness gate where any shell suffices.
-#[allow(dead_code)] // used only on Windows, from discover_git_bash + git_bash_available
+#[allow(dead_code)] // used only on Windows; called by discover_git_bash()
 pub(crate) fn resolve_git_bash_path() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     {
@@ -82,16 +82,7 @@ pub(crate) fn resolve_bash_path() -> Option<std::path::PathBuf> {
 pub(crate) fn discover_git_bash() -> Option<GitBashPrerequisite> {
     #[cfg(windows)]
     {
-        let env = GitBashEnv::from_process();
-        let path = resolve_git_bash(
-            &env.path,
-            env.shell_override,
-            env.git_bash_override,
-            env.system_root,
-            env.program_files,
-            env.program_files_x86,
-            env.local_app_data,
-        );
+        let path = resolve_git_bash_path();
         return Some(GitBashPrerequisite {
             available: path.is_some(),
             path: path.map(|path| path.display().to_string()),
