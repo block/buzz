@@ -38,7 +38,7 @@ use buzz_core::StoredEvent;
 use buzz_pubsub::EventTopic;
 
 use crate::audio::room::PeerCtrl;
-use crate::state::AppState;
+use crate::state::{run_registered_community_connection, AppState};
 
 /// Maximum binary frame size: 4 KB is generous for a single Opus packet.
 const MAX_AUDIO_FRAME_BYTES: usize = 4096;
@@ -113,6 +113,29 @@ async fn handle_audio_connection(
     tenant: TenantContext,
     channel_id: Uuid,
 ) {
+    let cancel = CancellationToken::new();
+    let community_id = tenant.community();
+    let registry = Arc::clone(&state.community_connections);
+    let check_state = Arc::clone(&state);
+    let run_state = Arc::clone(&state);
+    run_registered_community_connection(
+        &registry,
+        Uuid::new_v4(),
+        community_id,
+        cancel.clone(),
+        move || async move { check_state.db.is_community_active(community_id).await },
+        move || handle_active_audio_connection(socket, run_state, tenant, channel_id, cancel),
+    )
+    .await;
+}
+
+async fn handle_active_audio_connection(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    tenant: TenantContext,
+    channel_id: Uuid,
+    cancel: CancellationToken,
+) {
     let (mut ws_send, mut ws_recv) = socket.split();
 
     let challenge = generate_challenge();
@@ -126,23 +149,26 @@ async fn handle_audio_connection(
         return;
     }
 
-    let auth_result = tokio::time::timeout(AUTH_TIMEOUT, async {
-        while let Some(Ok(msg)) = ws_recv.next().await {
-            if let WsMessage::Text(text) = msg {
-                if text.len() > MAX_TEXT_FRAME_BYTES {
-                    warn!(channel_id = %channel_id, "auth text frame too large — dropping");
-                    continue;
-                }
-                if let Ok(auth) = serde_json::from_str::<AuthMsg>(&text) {
-                    if auth.msg_type == "auth" {
-                        return Some(auth);
+    let auth_result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return,
+        result = tokio::time::timeout(AUTH_TIMEOUT, async {
+            while let Some(Ok(msg)) = ws_recv.next().await {
+                if let WsMessage::Text(text) = msg {
+                    if text.len() > MAX_TEXT_FRAME_BYTES {
+                        warn!(channel_id = %channel_id, "auth text frame too large — dropping");
+                        continue;
+                    }
+                    if let Ok(auth) = serde_json::from_str::<AuthMsg>(&text) {
+                        if auth.msg_type == "auth" {
+                            return Some(auth);
+                        }
                     }
                 }
             }
-        }
-        None
-    })
-    .await;
+            None
+        }) => result,
+    };
 
     let auth_msg = match auth_result {
         Ok(Some(a)) => a,
@@ -395,7 +421,6 @@ async fn handle_audio_connection(
     )
     .await;
 
-    let cancel = CancellationToken::new();
     let missed_pongs = Arc::new(AtomicU8::new(0));
 
     // Dual-channel pattern (matches connection.rs): data channel for audio,

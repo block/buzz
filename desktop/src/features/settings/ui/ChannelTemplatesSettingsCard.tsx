@@ -234,7 +234,7 @@ function TemplateRow({
         </div>
       </div>
 
-      <DropdownMenu>
+      <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button
             className="h-7 w-7 shrink-0 opacity-0 group-hover:opacity-100"

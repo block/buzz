@@ -192,6 +192,75 @@ pub async fn provision_community(
     }
 }
 
+/// Owner assertion supplied by the trusted operator client.
+#[derive(Debug, Deserialize)]
+pub struct ArchiveCommunityRequest {
+    host: String,
+    owner_pubkey: String,
+}
+
+/// Idempotently archive a community owned by the asserted end-user identity.
+pub async fn archive_community(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    const PATH: &str = "/operator/communities/archive";
+    authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+    let request: ArchiveCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid archive-community JSON: {e}"),
+        )
+    })?;
+    let normalized_host = normalize_candidate_host(&request.host)
+        .map_err(|msg| api_error(StatusCode::BAD_REQUEST, &msg))?;
+    let deployment_host = buzz_core::tenant::relay_url_authority(&state.config.relay_url);
+    if normalized_host == deployment_host {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "the deployment community cannot be archived",
+        ));
+    }
+    let owner = validate_pubkey_hex(&request.owner_pubkey).ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid owner_pubkey: expected 64-char hex pubkey",
+        )
+    })?;
+    let record = state
+        .db
+        .archive_community_owned_by(&normalized_host, &owner, &deployment_host)
+        .await
+        .map_err(|e| internal_error(&format!("archive community: {e}")))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
+    let tenant = TenantContext::resolved(record.id, &record.host);
+    let closed = match state.disconnect_community_clusterwide(&tenant).await {
+        Ok(closed) => closed,
+        Err(error) => {
+            tracing::warn!(community = %record.id, host = %record.host, %error, "community archived but disconnect propagation is pending");
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "community_id": record.id.to_string(),
+                    "host": record.host,
+                    "archived_at": record.archived_at,
+                    "status": "archived",
+                    "propagation": "pending",
+                    "error": "connection propagation pending — retry this request",
+                })),
+            ));
+        }
+    };
+    tracing::info!(community = %record.id, host = %record.host, local_connections_closed = closed, "community archived");
+    Ok(Json(serde_json::json!({
+        "community_id": record.id.to_string(),
+        "host": record.host,
+        "archived_at": record.archived_at,
+        "status": "archived",
+    })))
+}
+
 /// List communities where a pubkey currently holds the `owner` role.
 pub async fn list_owned_communities(
     State(state): State<Arc<AppState>>,
@@ -228,6 +297,7 @@ pub async fn list_owned_communities(
             "community_id": row.id.to_string(),
             "host": row.host,
             "created_at": row.created_at,
+            "archived_at": row.archived_at,
         })).collect::<Vec<_>>(),
     })))
 }
@@ -378,7 +448,7 @@ pub async fn community_availability(
         .map_err(|msg| api_error(StatusCode::BAD_REQUEST, &msg))?;
     let existing = state
         .db
-        .lookup_community_by_host(&normalized_host)
+        .lookup_community_by_host_for_management(&normalized_host)
         .await
         .map_err(|e| internal_error(&format!("check community availability: {e}")))?;
 
@@ -725,6 +795,118 @@ mod tests {
         assert_eq!(
             json.get("owner_pubkey").and_then(Value::as_str),
             Some(owner_hex.as_str())
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn archive_publish_failure_is_retryable_and_preserves_timestamp() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        let owner_hex = owner.public_key().to_hex();
+        let create_body = serde_json::json!({
+            "host": host,
+            "initial_owner_pubkey": owner_hex,
+            "create_only": true,
+        })
+        .to_string();
+        let create_url = format!("http://{INGRESS_HOST}/operator/communities");
+        let create_auth =
+            nip98_auth_header(&operator, &create_url, "POST", Some(create_body.as_bytes()));
+        let create_response = build_router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/operator/communities")
+                    .header(header::HOST, INGRESS_HOST)
+                    .header(header::AUTHORIZATION, create_auth)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(create_body))
+                    .expect("create request"),
+            )
+            .await
+            .expect("create response");
+        assert_eq!(create_response.status(), StatusCode::OK);
+
+        let archive_body = serde_json::json!({
+            "host": host,
+            "owner_pubkey": owner.public_key().to_hex(),
+        })
+        .to_string();
+        let archive_url = format!("http://{INGRESS_HOST}/operator/communities/archive");
+        let archive_once = |state: Arc<AppState>| {
+            let auth = nip98_auth_header(
+                &operator,
+                &archive_url,
+                "POST",
+                Some(archive_body.as_bytes()),
+            );
+            let body = archive_body.clone();
+            async move {
+                build_router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/operator/communities/archive")
+                            .header(header::HOST, INGRESS_HOST)
+                            .header(header::AUTHORIZATION, auth)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(body))
+                            .expect("archive request"),
+                    )
+                    .await
+                    .expect("archive response")
+            }
+        };
+
+        let first = archive_once(Arc::clone(&state)).await;
+        assert_eq!(first.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let first_json = read_json(first).await;
+        assert_eq!(first_json["status"], "archived");
+        assert_eq!(first_json["propagation"], "pending");
+        let first_archived_at = first_json["archived_at"].clone();
+        assert!(!first_archived_at.is_null());
+        assert!(state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("active lookup")
+            .is_none());
+
+        assert_eq!(
+            state
+                .community_disconnect_publish_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        let second = archive_once(Arc::clone(&state)).await;
+        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let second_json = read_json(second).await;
+        assert_eq!(second_json["archived_at"], first_archived_at);
+        assert_eq!(
+            state
+                .community_disconnect_publish_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "idempotent archive retry must republish the disconnect"
+        );
+
+        let owned = state
+            .db
+            .list_communities_owned_by(&owner.public_key().to_hex())
+            .await
+            .expect("owned communities");
+        let row = owned
+            .iter()
+            .find(|row| row.host == host)
+            .expect("archived row");
+        assert_eq!(
+            serde_json::to_value(row.archived_at).expect("timestamp JSON"),
+            first_archived_at
         );
     }
 

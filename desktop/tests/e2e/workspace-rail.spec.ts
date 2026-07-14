@@ -55,6 +55,38 @@ test.describe("workspace rail", () => {
     await expect(page.getByTestId("workspace-rail-add")).toBeVisible();
   });
 
+  test("restores pointer events after dismissing workspace settings", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipWorkspaceSeed: true });
+    await seedWorkspaces(page, [WORKSPACE_A, WORKSPACE_B], WORKSPACE_A.id);
+    await page.goto("/");
+
+    const workspaceButton = page.getByTestId(
+      `workspace-rail-button-${WORKSPACE_A.id}`,
+    );
+    await workspaceButton.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Workspace settings" }).click();
+
+    await expect(
+      page.getByRole("dialog", { name: "Edit Workspace" }),
+    ).toBeVisible();
+    await page.mouse.click(0, 0);
+
+    await expect(
+      page.getByRole("dialog", { name: "Edit Workspace" }),
+    ).toHaveCount(0);
+    await expect(page.locator("body")).not.toHaveCSS("pointer-events", "none");
+    await page.getByTestId(`workspace-rail-button-${WORKSPACE_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-workspace-id"),
+        ),
+      )
+      .toBe(WORKSPACE_B.id);
+  });
+
   test("switches the active workspace on click", async ({ page }) => {
     await installMockBridge(page, undefined, { skipWorkspaceSeed: true });
     await seedWorkspaces(page, [WORKSPACE_A, WORKSPACE_B], WORKSPACE_A.id);

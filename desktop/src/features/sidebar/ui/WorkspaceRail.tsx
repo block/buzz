@@ -99,7 +99,7 @@ function WorkspaceButton({
       : workspace.name;
 
   return (
-    <ContextMenu>
+    <ContextMenu modal={false}>
       <Tooltip>
         <TooltipTrigger asChild>
           <ContextMenuTrigger asChild>
