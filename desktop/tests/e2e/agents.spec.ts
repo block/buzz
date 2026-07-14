@@ -479,6 +479,12 @@ test("custom personas share with people and keep export separate", async ({
 
   const shareDialog = page.getByTestId("persona-share-dialog");
   await expect(shareDialog).toBeVisible();
+  const shareCloseButton = shareDialog.getByRole("button", { name: "Close" });
+  expect(
+    await shareCloseButton.evaluate(
+      (button) => getComputedStyle(button).boxShadow,
+    ),
+  ).not.toContain("1px");
   await expect(
     page.getByRole("heading", { name: "Share Animation Auditor" }),
   ).toBeVisible();
