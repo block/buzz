@@ -130,6 +130,10 @@ type E2eConfig = {
     channelMembersReadDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
+    /** Reject successive mock `create_channel` calls, then resume. */
+    createChannelErrors?: string[];
+    /** Reject successive mock `join_channel` calls, then resume. */
+    joinChannelErrors?: string[];
     channelsReadDelayMs?: number;
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
@@ -5293,6 +5297,11 @@ async function handleCreateChannel(
       ? new Date(Date.now() + args.ttlSeconds * 1_000).toISOString()
       : null;
   if (!identity) {
+    const createChannelError = config?.mock?.createChannelErrors?.shift();
+    if (createChannelError) {
+      throw new Error(createChannelError);
+    }
+
     const owner = createCurrentMember(config, "owner");
     const channel = createMockChannel({
       id: crypto.randomUUID(),
@@ -5989,6 +5998,11 @@ async function handleJoinChannel(
 ) {
   const identity = getIdentity(config);
   if (!identity) {
+    const joinChannelError = config?.mock?.joinChannelErrors?.shift();
+    if (joinChannelError) {
+      throw new Error(joinChannelError);
+    }
+
     const channel = getMockChannel(args.channelId);
     const currentPubkey = getMockMemberPubkey(config);
 

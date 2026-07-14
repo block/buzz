@@ -1032,6 +1032,143 @@ test("first-run onboarding keeps the shell hidden through setup and lands on Wel
   await expectWelcomeGuideIntro(page);
 });
 
+function retryToast(page: Page, title: string) {
+  return page
+    .locator("[data-sonner-toast][data-removed='false']")
+    .filter({ hasText: title });
+}
+
+async function retryToastAction(
+  page: Page,
+  { command, title }: { command: string; title: string },
+) {
+  const activeToast = retryToast(page, title);
+  await expect(activeToast).toBeVisible();
+  await expect(
+    activeToast.getByRole("button", { name: "Retry" }),
+  ).toBeVisible();
+
+  const commandCountBeforeRetry = await page.evaluate(
+    (retryCommand) =>
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMANDS__?: string[];
+        }
+      ).__BUZZ_E2E_COMMANDS__?.filter((entry) => entry === retryCommand)
+        .length ?? 0,
+    command,
+  );
+  await activeToast
+    .getByRole("button", { name: "Retry" })
+    .evaluate((button) => (button as HTMLButtonElement).click());
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ retryCommand }) =>
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMANDS__?: string[];
+            }
+          ).__BUZZ_E2E_COMMANDS__?.filter((entry) => entry === retryCommand)
+            .length ?? 0,
+        { retryCommand: command, minimum: commandCountBeforeRetry + 1 },
+      ),
+    )
+    .toBeGreaterThanOrEqual(commandCountBeforeRetry + 1);
+}
+
+async function expectRetryFailureRecreatesActionableToast(
+  page: Page,
+  { command, error, title }: { command: string; error: string; title: string },
+) {
+  const activeToast = retryToast(page, title);
+  await expect(activeToast).toContainText(error);
+
+  await retryToastAction(page, { command, title });
+
+  await expect(activeToast).toHaveCount(1);
+  await expect(activeToast).toContainText(error);
+  await expect(
+    activeToast.getByRole("button", { name: "Retry" }),
+  ).toBeVisible();
+}
+
+async function expectRetrySuccessDismissesToast(
+  page: Page,
+  { command, title }: { command: string; title: string },
+) {
+  const activeToast = retryToast(page, title);
+
+  await retryToastAction(page, { command, title });
+
+  await expect(activeToast).toHaveCount(0);
+}
+
+test("failed Welcome and general retries recreate actionable toasts", async ({
+  page,
+}) => {
+  const welcomeError = "Mock Welcome create failed.";
+  const generalError = "Mock general join failed.";
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      createChannelErrors: [welcomeError, welcomeError],
+      joinChannelErrors: [generalError, generalError],
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await continueToSetupPage(page);
+  await page.getByTestId("onboarding-finish").click();
+
+  await expectRetryFailureRecreatesActionableToast(page, {
+    command: "create_channel",
+    error: welcomeError,
+    title: "Couldn't set up the Welcome channel",
+  });
+  await expectRetryFailureRecreatesActionableToast(page, {
+    command: "join_channel",
+    error: generalError,
+    title: "Couldn't join #general",
+  });
+});
+
+test("successful Welcome and general retries clear their actionable toasts", async ({
+  page,
+}) => {
+  const welcomeError = "Mock Welcome create failed.";
+  const generalError = "Mock general join failed.";
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      createChannelErrors: [welcomeError],
+      joinChannelErrors: [generalError],
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await continueToSetupPage(page);
+  await page.getByTestId("onboarding-finish").click();
+
+  await expectRetrySuccessDismissesToast(page, {
+    command: "create_channel",
+    title: "Couldn't set up the Welcome channel",
+  });
+  await expectRetrySuccessDismissesToast(page, {
+    command: "join_channel",
+    title: "Couldn't join #general",
+  });
+  await expectWelcomeView(page);
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+});
+
 test("first-run onboarding shows setup loading until Welcome bootstrap completes", async ({
   page,
 }) => {
