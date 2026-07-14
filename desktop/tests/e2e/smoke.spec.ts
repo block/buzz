@@ -234,7 +234,7 @@ test("inbox feed shows channel and agent activity sections", async ({
   );
 });
 
-test("inbox agent hover only exposes message action", async ({ page }) => {
+test("inbox agent hover hides actions without agent access", async ({ page }) => {
   await page.goto("/");
 
   await selectHomeInboxFilter(page, "Agents");
@@ -252,7 +252,7 @@ test("inbox agent hover only exposes message action", async ({ page }) => {
     profilePopover.getByTestId(
       `user-profile-popover-message-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
     ),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(
     profilePopover.getByTestId(
       `user-profile-popover-wave-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
