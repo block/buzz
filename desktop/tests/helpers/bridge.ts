@@ -55,6 +55,7 @@ type MockManagedAgentSeed = {
   lastError?: string | null;
   lastErrorCode?: number | null;
   needsRestart?: boolean;
+  autoRestartOnConfigChange?: boolean;
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
 };

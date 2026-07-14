@@ -69,6 +69,7 @@ type MockManagedAgentSeed = {
   lastError?: string | null;
   lastErrorCode?: number | null;
   needsRestart?: boolean;
+  autoRestartOnConfigChange?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
 };
@@ -1734,7 +1735,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     needs_restart: seed.needsRestart ?? false,
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
-    auto_restart_on_config_change: true,
+    auto_restart_on_config_change: seed.autoRestartOnConfigChange ?? true,
     backend: seed.backend ?? { type: "local" },
     backend_agent_id: null,
     respond_to: seed.respondTo ?? "owner-only",

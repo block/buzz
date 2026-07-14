@@ -733,6 +733,7 @@ function ArchiveStatusTooltip() {
 
 export function ProfileRuntimeTabContent({
   agentInstruction,
+  autoRestartEnabled = false,
   diagnosticsFields,
   diagnosticsSummary,
   needsRestart = false,
@@ -744,6 +745,8 @@ export function ProfileRuntimeTabContent({
   showInstructionBlock,
 }: {
   agentInstruction: string | null;
+  /** Whether the per-agent auto-restart toggle is ON. */
+  autoRestartEnabled?: boolean;
   diagnosticsFields: ProfileField[];
   diagnosticsSummary: React.ReactNode;
   /** True when the running agent's config has drifted from what it was spawned with. */
@@ -787,9 +790,9 @@ export function ProfileRuntimeTabContent({
               Restart required
             </p>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              Configuration changed since this agent started. It will restart
-              automatically after ~3 minutes idle, or restart manually for
-              immediate effect.
+              {autoRestartEnabled
+                ? "Configuration changed since this agent started. Buzz can restart it automatically after ~3 minutes idle, or restart manually to apply now."
+                : "Configuration changed since this agent started. Automatic restart is off for this agent \u2014 restart manually to apply the changes."}
             </p>
           </div>
         </div>
