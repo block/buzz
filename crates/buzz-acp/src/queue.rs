@@ -1592,7 +1592,7 @@ pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind};
+    use nostr::{EventBuilder, Keys, Kind, Timestamp};
     use std::time::Duration;
 
     /// Build a test event with the given content and kind.
@@ -1620,6 +1620,26 @@ mod tests {
             channel_id,
             event: make_event(content),
             received_at: Instant::now() - age,
+            prompt_tag: "test".into(),
+        }
+    }
+
+    /// Build a QueuedEvent with an explicit Nostr `created_at` timestamp.
+    fn make_queued_created_at(
+        channel_id: Uuid,
+        content: &str,
+        created_at_secs: u64,
+    ) -> QueuedEvent {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), content)
+            .custom_created_at(Timestamp::from(created_at_secs))
+            .tags([])
+            .sign_with_keys(&keys)
+            .unwrap();
+        QueuedEvent {
+            channel_id,
+            event,
+            received_at: Instant::now(),
             prompt_tag: "test".into(),
         }
     }
@@ -1720,6 +1740,34 @@ mod tests {
         // All drained.
         assert_eq!(pending_count(&q), 0);
         assert_eq!(q.queues.len(), 0);
+    }
+
+    #[test]
+    fn test_flush_orders_replayed_events_chronologically() {
+        // Relay replay after a reconnect/restart delivers stored events newest
+        // first (`ORDER BY created_at DESC`), but `format_prompt` derives the
+        // reply anchor and scope from the LAST batch event on the assumption
+        // that it is the newest. The drained batch must therefore be
+        // chronological regardless of delivery order.
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        q.push(make_queued_created_at(ch, "newest", 2_000));
+        q.push(make_queued_created_at(ch, "oldest", 1_000));
+
+        let batch = q.flush_next().expect("should return batch");
+        assert_eq!(batch.events.len(), 2);
+        assert_eq!(batch.events[0].event.content, "oldest");
+        assert_eq!(batch.events[1].event.content, "newest");
+
+        // The rendered prompt's reply anchor must cite the newest event, so
+        // the agent's reply threads under the message it is responding to.
+        let newest_id = batch.events[1].event.id.to_hex();
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(
+            prompt.contains(&format!("--reply-to {newest_id}")),
+            "reply anchor must target the newest event; prompt was:\n{prompt}"
+        );
     }
 
     #[test]
