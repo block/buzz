@@ -192,8 +192,13 @@ pub struct UsageMetricsLeader {
 
 impl UsageMetricsLeader {
     /// Returns whether the lock-owning session is still reachable.
+    ///
+    /// Bounded to 5 seconds — a blackholed connection (no RST) would otherwise
+    /// stall the entire poller tick until the OS TCP timeout.
     pub async fn is_live(&mut self) -> bool {
-        self.connection.ping().await.is_ok()
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.connection.ping())
+            .await
+            .is_ok_and(|r| r.is_ok())
     }
 }
 

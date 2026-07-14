@@ -965,6 +965,11 @@ async fn main() -> anyhow::Result<()> {
                 {
                     error!(error = %e, "Usage metrics tick failed — skipping");
                 }
+                metrics::gauge!("buzz_usage_poller_is_leader").set(if leader.is_some() {
+                    1.0
+                } else {
+                    0.0
+                });
             }
         });
     }
@@ -1311,6 +1316,10 @@ async fn run_usage_metrics_tick(
             .map(|community| (community.id, community.host))
             .collect(),
         Err(error) => {
+            if leader.is_some() {
+                warn!("Usage metrics leader demoting: host map collection failed");
+                *leader = None;
+            }
             emit_in_memory_usage_metrics(state, emission_scope, None, emitted_in_memory);
             return Err(error.into());
         }
@@ -1335,7 +1344,11 @@ async fn run_usage_metrics_tick(
         }
     }
     if leader.is_some() {
-        emit_db_usage_metrics(state, emission_scope, &host_map).await?;
+        if let Err(error) = emit_db_usage_metrics(state, emission_scope, &host_map).await {
+            warn!("Usage metrics leader demoting: DB collection failed");
+            *leader = None;
+            return Err(error);
+        }
     }
 
     Ok(())
