@@ -2740,6 +2740,12 @@ fn handle_prompt_result(
                 // from a fresh session will reproduce the same death. Dead-letter
                 // immediately without requeueing so the channel isn't subjected to
                 // up to 10 × 1-hour retry cycles.
+                tracing::error!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch after hard-cap timeout — discarding {} events",
+                    batch.events.len(),
+                );
                 let content = format!(
                     "⚠️ I couldn't process the last request (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
                     config.max_turn_duration_secs
@@ -2751,8 +2757,11 @@ fn handle_prompt_result(
                 // a turn that will never happen.
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
+                    // Unreachable today: Timeout(Hard) is consumed by the immediate
+                    // dead-letter arm above before requeue() runs. Fail soft rather
+                    // than panicking the main loop if that chain is ever reordered.
                     PromptOutcome::Timeout(TimeoutKind::Hard) => {
-                        unreachable!("hard timeout handled above")
+                        "the turn exceeded the maximum duration".to_string()
                     }
                     PromptOutcome::AgentExited => "the agent process exited".to_string(),
                     PromptOutcome::Error(e) => format!("{e}"),
