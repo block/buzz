@@ -483,7 +483,7 @@ export function PersonaShareDialog({
                 Anyone with the link can duplicate and use this agent.
               </p>
               <Button
-                className="ml-auto shrink-0"
+                className="ml-auto shrink-0 shadow-none"
                 data-testid="persona-share-copy-link"
                 disabled={isActionPending}
                 onClick={() => requestMemoryShare("copy", linkShareLevel)}

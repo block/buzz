@@ -509,9 +509,21 @@ test("custom personas share with people and keep export separate", async ({
   const accessSection = page.getByTestId("persona-share-access");
   const copyLinkFooter = page.getByTestId("persona-share-copy-link-footer");
   await expect(page.getByTestId("persona-share-send")).toHaveCount(0);
-  await expect(page.getByTestId("persona-share-copy-link")).toHaveClass(
-    /bg-primary/,
-  );
+  const copyLinkButton = page.getByTestId("persona-share-copy-link");
+  await expect(copyLinkButton).toHaveClass(/bg-primary/);
+  const copyLinkHasVisibleShadow = () =>
+    copyLinkButton.evaluate((element) => {
+      const boxShadow = getComputedStyle(element).boxShadow;
+      if (boxShadow === "none") return false;
+      return [...boxShadow.matchAll(/rgba?\(([^)]+)\)/g)].some((match) => {
+        if (match[0].startsWith("rgb(")) return true;
+        const channels = match[1]?.split(/[\s,/]+/).filter(Boolean) ?? [];
+        return Number(channels.at(-1)) > 0;
+      });
+    });
+  await expect.poll(copyLinkHasVisibleShadow).toBe(false);
+  await copyLinkButton.hover();
+  await expect.poll(copyLinkHasVisibleShadow).toBe(false);
   await expect(accessLink).toContainText("Anyone with a link");
   await expect(page.getByTestId("persona-share-link-access")).toHaveText(
     "Agent",
