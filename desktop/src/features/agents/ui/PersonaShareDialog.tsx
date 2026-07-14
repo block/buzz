@@ -1,5 +1,12 @@
 import * as React from "react";
-import { ChevronRight, Download, Link2, Loader2, X } from "lucide-react";
+import {
+  AlertCircle,
+  ChevronRight,
+  Download,
+  Link2,
+  Loader2,
+  X,
+} from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
@@ -57,6 +64,11 @@ const SHARE_LEVELS: { value: SnapshotMemoryLevel; label: string }[] = [
 
 const RECIPIENT_ACTION_TRANSITION = {
   duration: 0.18,
+  ease: [0.23, 1, 0.32, 1],
+} as const;
+
+const SHARE_WARNING_TRANSITION = {
+  duration: 0.22,
   ease: [0.23, 1, 0.32, 1],
 } as const;
 
@@ -209,9 +221,15 @@ export function PersonaShareDialog({
   const isActionPending = isPending || isCopying || isSending;
   const hasLinkedAgent = linkedAgentPubkey !== null;
   const hasSelectedRecipients = selectedRecipients.length > 0;
+  const showMemoryWarning =
+    linkShareLevel !== "none" ||
+    (hasSelectedRecipients && recipientShareLevel !== "none");
   const recipientActionTransition = shouldReduceMotion
     ? { duration: 0 }
     : RECIPIENT_ACTION_TRANSITION;
+  const warningTransition = shouldReduceMotion
+    ? { duration: 0 }
+    : SHARE_WARNING_TRANSITION;
   const ownerDisplayName =
     profileQuery.data?.displayName?.trim() || "Your account";
   const excludedRecipientPubkeys = React.useMemo(
@@ -475,28 +493,55 @@ export function PersonaShareDialog({
               </div>
             </section>
 
-            <div
-              className="flex items-center gap-4 pt-2"
-              data-testid="persona-share-copy-link-footer"
-            >
-              <p className="min-w-0 max-w-64 flex-1 text-xs text-secondary-foreground/75">
-                Anyone with the link can duplicate and use this agent.
-              </p>
-              <Button
-                className="ml-auto shrink-0 shadow-none"
-                data-testid="persona-share-copy-link"
-                disabled={isActionPending}
-                onClick={() => requestMemoryShare("copy", linkShareLevel)}
-                size="sm"
-                type="button"
+            <div>
+              <AnimatePresence initial={false}>
+                {showMemoryWarning ? (
+                  <motion.div
+                    animate={{ height: "auto", opacity: 1 }}
+                    className="overflow-hidden pb-4"
+                    data-testid="persona-share-memory-warning-motion"
+                    exit={{ height: 0, opacity: 0 }}
+                    initial={{ height: 0, opacity: 0 }}
+                    key="persona-share-memory-warning"
+                    transition={warningTransition}
+                  >
+                    <div
+                      className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"
+                      data-testid="persona-share-memory-warning"
+                    >
+                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <p>
+                        Memory is stored as <strong>plaintext</strong> in the
+                        snapshot. Only share it with people you trust.
+                      </p>
+                    </div>
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+
+              <div
+                className="flex items-center gap-4 pt-2"
+                data-testid="persona-share-copy-link-footer"
               >
-                {isCopying ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Link2 className="h-4 w-4" />
-                )}
-                {isCopying ? "Copying…" : "Copy link"}
-              </Button>
+                <p className="min-w-0 max-w-64 flex-1 text-xs text-secondary-foreground/75">
+                  Anyone with the link can duplicate and use this agent.
+                </p>
+                <Button
+                  className="ml-auto shrink-0 shadow-none"
+                  data-testid="persona-share-copy-link"
+                  disabled={isActionPending}
+                  onClick={() => requestMemoryShare("copy", linkShareLevel)}
+                  size="sm"
+                  type="button"
+                >
+                  {isCopying ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Link2 className="h-4 w-4" />
+                  )}
+                  {isCopying ? "Copying…" : "Copy link"}
+                </Button>
+              </div>
             </div>
           </div>
         </div>

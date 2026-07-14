@@ -815,6 +815,7 @@ test("custom personas share with people and keep export separate", async ({
 test("share access controls include the selected memories", async ({
   page,
 }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
   const linkedAgentPubkey = TEST_IDENTITIES.alice.pubkey;
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await installMockBridge(page, {
@@ -857,6 +858,10 @@ test("share access controls include the selected memories", async ({
   await page.getByRole("menuitem", { name: "Share" }).click();
 
   const shareDialog = page.getByTestId("persona-share-dialog");
+  const shareMainCard = shareDialog.getByTestId("persona-share-main-card");
+  const initialShareCardHeight = await shareMainCard.evaluate(
+    (element) => element.getBoundingClientRect().height,
+  );
   const linkAccess = shareDialog.getByLabel("Link access");
   const recipientField = page.getByTestId("persona-share-recipient-field");
   const emptyRecipientFieldBox = await recipientField.boundingBox();
@@ -888,6 +893,9 @@ test("share access controls include the selected memories", async ({
     Math.max(...alignedRightEdges) - Math.min(...alignedRightEdges),
   ).toBeLessThanOrEqual(1);
   await expect(shareDialog.getByLabel("Recipient access")).toHaveCount(0);
+  await expect(
+    shareDialog.getByTestId("persona-share-memory-warning"),
+  ).toHaveCount(0);
 
   await linkAccess.click();
   await expect(page.getByRole("menuitemradio")).toHaveText([
@@ -899,6 +907,40 @@ test("share access controls include the selected memories", async ({
     .getByRole("menuitemradio", { name: "Agent + core memory" })
     .click();
   await expect(linkAccess).toHaveText("Agent + core memory");
+  const shareCardHeightSamples = await shareMainCard.evaluate(
+    async (element) => {
+      const samples: number[] = [];
+      const start = performance.now();
+
+      await new Promise<void>((resolve) => {
+        const sample = (now: number) => {
+          samples.push(element.getBoundingClientRect().height);
+          if (now - start >= 280) {
+            resolve();
+            return;
+          }
+          requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      });
+
+      return samples;
+    },
+  );
+  const inlineMemoryWarning = shareDialog.getByTestId(
+    "persona-share-memory-warning",
+  );
+  await expect(inlineMemoryWarning).toBeVisible();
+  await expect(inlineMemoryWarning).toContainText(
+    "Memory is stored as plaintext in the snapshot.",
+  );
+  await expect(inlineMemoryWarning).toContainText(
+    "Only share it with people you trust.",
+  );
+  expect(shareCardHeightSamples.at(-1)).toBeGreaterThan(initialShareCardHeight);
+  expect(
+    new Set(shareCardHeightSamples.map((height) => Math.round(height))).size,
+  ).toBeGreaterThan(2);
   await page.getByTestId("persona-share-copy-link").click();
   const memoryConfirmation = page.getByTestId(
     "persona-share-memory-confirmation",
@@ -927,6 +969,10 @@ test("share access controls include the selected memories", async ({
   expect(encodeCountBeforeLinkConfirmation).toBe(0);
   await memoryConfirmation.getByTestId("persona-share-memory-confirm").click();
   await expect(page.getByText("Link copied")).toBeVisible();
+  await linkAccess.click();
+  await page.getByRole("menuitemradio", { name: "Agent", exact: true }).click();
+  await expect(linkAccess).toHaveText("Agent");
+  await expect(inlineMemoryWarning).toHaveCount(0);
 
   const recipientSearch = page.getByTestId("persona-share-recipient-search");
   await recipientSearch.fill("charlie");
@@ -974,12 +1020,13 @@ test("share access controls include the selected memories", async ({
         8 -
         recipientAccessRightEdge,
     ),
-  ).toBeLessThanOrEqual(1);
+  ).toBeLessThanOrEqual(1.1);
   await recipientAccess.click();
   await page
     .getByRole("menuitemradio", { name: "Agent + all memories" })
     .click();
   await expect(recipientAccess).toHaveText("Agent + all memories");
+  await expect(inlineMemoryWarning).toBeVisible();
   await waitForAnimations(page);
   const expandedRecipientAccessBox = await recipientAccess.boundingBox();
   expect(
