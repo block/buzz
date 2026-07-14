@@ -478,6 +478,8 @@ class _ThreadMessage extends ConsumerWidget {
                         currentChannelId: channelId,
                       );
                     },
+                    onMentionTap: (pubkey) =>
+                        showUserProfileSheet(context, pubkey),
                   ),
                   if (message.reactions.isNotEmpty)
                     ReactionRow(
