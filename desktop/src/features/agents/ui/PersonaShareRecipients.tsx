@@ -239,9 +239,12 @@ export function PersonaShareRecipients({
           sideOffset={6}
         >
           <div
-            className="max-h-64 overflow-y-auto py-1"
+            className="max-h-64 overflow-y-auto overscroll-contain py-1"
+            data-testid="persona-share-recipient-results"
             id="persona-share-recipient-results"
             onScroll={handleDirectoryScroll}
+            onTouchMoveCapture={(event) => event.stopPropagation()}
+            onWheelCapture={(event) => event.stopPropagation()}
             role="listbox"
           >
             {isSearchSettling ? (

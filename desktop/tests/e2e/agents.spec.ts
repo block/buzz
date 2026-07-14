@@ -445,6 +445,10 @@ test("custom personas share with people and keep export separate", async ({
         pubkey: TEST_IDENTITIES.bob.pubkey,
         displayName: "Bob",
       },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        pubkey: (index + 10).toString(16).padStart(64, "0"),
+        displayName: `Person ${index + 1}`,
+      })),
     ],
     uploadDescriptors: [
       {
@@ -677,6 +681,27 @@ test("custom personas share with people and keep export separate", async ({
   await expect(shareDialog).toBeVisible();
 
   const recipientSearch = page.getByTestId("persona-share-recipient-search");
+  await recipientSearch.click();
+  const recipientList = page.getByTestId("persona-share-recipient-results");
+  await expect(recipientList).toBeVisible();
+  await expect
+    .poll(() =>
+      recipientList.evaluate(
+        (element) => element.scrollHeight - element.clientHeight,
+      ),
+    )
+    .toBeGreaterThan(0);
+  const recipientListBox = await recipientList.boundingBox();
+  expect(recipientListBox).not.toBeNull();
+  if (!recipientListBox) return;
+  await page.mouse.move(
+    recipientListBox.x + recipientListBox.width / 2,
+    recipientListBox.y + recipientListBox.height / 2,
+  );
+  await page.mouse.wheel(0, 300);
+  await expect
+    .poll(() => recipientList.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0);
   await recipientSearch.fill("charlie");
   await page
     .getByTestId(
