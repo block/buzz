@@ -141,6 +141,45 @@ test("reconcileRefreshedCachedChannel_preservesOptimisticParticipantAcrossStaleR
   assert.equal(reconciled[0].memberCount, 3);
 });
 
+test("reconcileRefreshedCachedChannel_preservesRefreshedDmRecency", () => {
+  const charliePubkey = "charlie-pubkey";
+  const ownerPubkey = "owner-pubkey";
+  const fizzPubkey = "fizz-pubkey";
+  const openedDm = makeChannel("new-dm", "DM", "dm", {
+    participantPubkeys: [charliePubkey, ownerPubkey],
+    participants: ["charlie", "owner"],
+  });
+  const cachedBeforeRefresh = upsertCachedChannelMember(
+    [openedDm],
+    openedDm.id,
+    {
+      membershipAdded: true,
+      name: "Fizz",
+      pubkey: fizzPubkey,
+    },
+  )?.[0];
+  const refreshedDm = {
+    ...openedDm,
+    lastMessageAt: "2026-07-14T11:21:26Z",
+    name: "Group DM (3)",
+  };
+
+  const reconciled = reconcileRefreshedCachedChannel(
+    [refreshedDm],
+    openedDm,
+    cachedBeforeRefresh,
+  );
+
+  assert.equal(reconciled[0].lastMessageAt, refreshedDm.lastMessageAt);
+  assert.equal(reconciled[0].name, refreshedDm.name);
+  assert.deepEqual(reconciled[0].participantPubkeys, [
+    charliePubkey,
+    ownerPubkey,
+    fizzPubkey,
+  ]);
+  assert.deepEqual(reconciled[0].participants, ["charlie", "owner", "Fizz"]);
+});
+
 test("upsertCachedChannel_preservesParticipantsAddedAfterDmOpened", () => {
   const charliePubkey = "charlie-pubkey";
   const ownerPubkey = "owner-pubkey";

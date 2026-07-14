@@ -208,22 +208,34 @@ export function upsertCachedChannel(
 /**
  * Reconciles a relay-returned channel after a list refresh without losing a
  * newer participant addition that was optimistically cached before the refresh
- * completed. Exported for focused cache race regression coverage.
+ * completed. When the refresh already contains the channel, its current
+ * metadata wins over the older relay snapshot used to open the route. Exported
+ * for focused cache race regression coverage.
  */
 export function reconcileRefreshedCachedChannel(
   refreshed: Channel[] | undefined,
   channel: Channel,
   cachedBeforeRefresh: Channel | undefined,
 ): Channel[] {
+  const refreshedChannel = refreshed?.find(
+    (candidate) => candidate.id === channel.id,
+  );
   const withPreRefreshParticipants = cachedBeforeRefresh
     ? upsertCachedChannel(refreshed, cachedBeforeRefresh, {
         preserveCachedDmParticipants: true,
       })
     : refreshed;
+  const withOpenedChannelParticipants = upsertCachedChannel(
+    withPreRefreshParticipants,
+    channel,
+    { preserveCachedDmParticipants: true },
+  );
 
-  return upsertCachedChannel(withPreRefreshParticipants, channel, {
-    preserveCachedDmParticipants: true,
-  });
+  return refreshedChannel
+    ? upsertCachedChannel(withOpenedChannelParticipants, refreshedChannel, {
+        preserveCachedDmParticipants: true,
+      })
+    : withOpenedChannelParticipants;
 }
 
 async function invalidateChannelState(
