@@ -11,7 +11,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -19,7 +19,6 @@ use buzz_core::{CommunityId, TenantContext};
 
 use crate::handlers::community_provisioning::{
     normalize_candidate_host, validate_pubkey_hex, ProvisionCommunityRequest,
-    TransferCommunityRequest, TransferCommunityResponse,
 };
 use crate::state::AppState;
 
@@ -35,6 +34,22 @@ pub struct ListCommunitiesQuery {
 #[derive(Debug, Deserialize)]
 pub struct CommunityAvailabilityQuery {
     host: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferCommunityRequest {
+    community_id: String,
+    new_owner_pubkey: String,
+    expected_owner_pubkey: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TransferCommunityResponse {
+    community_id: String,
+    new_owner_pubkey: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_owner: Option<String>,
 }
 
 const OPERATOR_REPLAY_SCOPE: &str = "operator-management";
@@ -163,7 +178,9 @@ pub async fn provision_community(
         Err(msg) if msg.starts_with("actor not authorized") => {
             Err(api_error(StatusCode::FORBIDDEN, &msg))
         }
-        Err(msg) if msg == "community already exists" => Err(api_error(StatusCode::CONFLICT, &msg)),
+        Err(msg) if msg == "community already exists" || msg.starts_with("limit_reached:") => {
+            Err(api_error(StatusCode::CONFLICT, &msg))
+        }
         Err(msg)
             if msg.starts_with("failed to create community:")
                 || msg.starts_with("community provisioned but owner bootstrap failed:") =>
@@ -388,7 +405,7 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
+    use buzz_core::{kind::KIND_NIP43_MEMBERSHIP_LIST, CommunityId};
     use buzz_db::event::EventQuery;
 
     use crate::router::build_router;
@@ -497,6 +514,85 @@ mod tests {
             .await
             .expect("read response body");
         serde_json::from_slice(&bytes).expect("response JSON")
+    }
+
+    async fn signed_operator_request(
+        state: Arc<AppState>,
+        keys: &Keys,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+    ) -> axum::response::Response {
+        let url = format!("http://{INGRESS_HOST}{path}");
+        let auth = nip98_auth_header(keys, &url, method, body.as_deref().map(str::as_bytes));
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, INGRESS_HOST)
+            .header(header::AUTHORIZATION, auth);
+        if body.is_some() {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+        }
+        build_router(state)
+            .oneshot(
+                request
+                    .body(body.map_or_else(Body::empty, Body::from))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+    }
+
+    async fn provision_community(
+        state: Arc<AppState>,
+        operator: &Keys,
+        host: &str,
+        owner: &Keys,
+    ) -> axum::response::Response {
+        let body = serde_json::json!({
+            "host": host,
+            "initial_owner_pubkey": owner.public_key().to_hex(),
+            "create_only": true,
+        })
+        .to_string();
+        signed_operator_request(state, operator, "POST", "/operator/communities", Some(body)).await
+    }
+
+    fn is_member_tag(tag: &Tag, pubkey: &str, role: &str) -> bool {
+        let values = tag.as_slice();
+        values.first().is_some_and(|value| value == "member")
+            && values.get(1).is_some_and(|value| value == pubkey)
+            && values.get(2).is_some_and(|value| value == role)
+    }
+
+    async fn assert_snapshot_roles(
+        state: &AppState,
+        community: CommunityId,
+        expected: &[(&str, &str)],
+    ) {
+        let snapshot = state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![KIND_NIP43_MEMBERSHIP_LIST as i32]),
+                global_only: true,
+                limit: Some(1),
+                ..EventQuery::for_community(community)
+            })
+            .await
+            .expect("query membership snapshot")
+            .into_iter()
+            .next()
+            .expect("membership snapshot published");
+        for &(pubkey, role) in expected {
+            assert!(
+                snapshot
+                    .event
+                    .tags
+                    .iter()
+                    .any(|tag| is_member_tag(tag, pubkey, role)),
+                "missing {role} snapshot tag for {pubkey}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -641,28 +737,7 @@ mod tests {
             return;
         };
         let host = format!("community-{}.example", Uuid::new_v4().simple());
-        let body = serde_json::json!({
-            "host": host,
-            "initial_owner_pubkey": owner.public_key().to_hex(),
-            "create_only": true,
-        })
-        .to_string();
-        let url = format!("http://{INGRESS_HOST}/operator/communities");
-        let auth = nip98_auth_header(&operator, &url, "POST", Some(body.as_bytes()));
-
-        let response = build_router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/operator/communities")
-                    .header(header::HOST, INGRESS_HOST)
-                    .header(header::AUTHORIZATION, auth)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
+        let response = provision_community(state.clone(), &operator, &host, &owner).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let json = read_json(response).await;
@@ -686,29 +761,41 @@ mod tests {
             .expect("owner member exists");
         assert_eq!(member.role, "owner");
 
-        let membership_events = state
+        assert_snapshot_roles(&state, community.id, &[(&owner_hex, "owner")]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn fresh_host_at_owner_limit_returns_limit_reached_conflict() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+
+        for _ in 0..buzz_db::relay_members::MAX_COMMUNITIES_PER_OWNER {
+            let host = format!("community-{}.example", Uuid::new_v4().simple());
+            assert_eq!(
+                provision_community(state.clone(), &operator, &host, &owner)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+        }
+
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        let response = provision_community(state.clone(), &operator, &host, &owner).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let json = read_json(response).await;
+        assert!(json["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("limit_reached:")));
+        assert!(state
             .db
-            .query_events(&EventQuery {
-                kinds: Some(vec![KIND_NIP43_MEMBERSHIP_LIST as i32]),
-                global_only: true,
-                limit: Some(1),
-                ..EventQuery::for_community(community.id)
-            })
+            .lookup_community_by_host(&host)
             .await
-            .expect("query membership snapshot");
-        let snapshot = membership_events
-            .first()
-            .expect("membership snapshot published during provisioning");
-        assert!(snapshot.event.tags.iter().any(|tag| {
-            tag.as_slice()
-                .first()
-                .is_some_and(|value| value == "member")
-                && tag
-                    .as_slice()
-                    .get(1)
-                    .is_some_and(|value| value == &owner_hex)
-                && tag.as_slice().get(2).is_some_and(|value| value == "owner")
-        }));
+            .expect("look up rejected fresh host")
+            .is_none());
     }
 
     /// Happy path: POST /operator/communities/transfer swaps ownership, demotes
@@ -724,30 +811,10 @@ mod tests {
             return;
         };
 
-        // Create a community with initial_owner.
         let host = format!("community-{}.example", Uuid::new_v4().simple());
-        let create_body = serde_json::json!({
-            "host": host,
-            "initial_owner_pubkey": initial_owner.public_key().to_hex(),
-            "create_only": true,
-        })
-        .to_string();
-        let create_url = format!("http://{INGRESS_HOST}/operator/communities");
-        let create_auth =
-            nip98_auth_header(&operator, &create_url, "POST", Some(create_body.as_bytes()));
-        build_router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/operator/communities")
-                    .header(header::HOST, INGRESS_HOST)
-                    .header(header::AUTHORIZATION, create_auth)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(create_body))
-                    .expect("create request"),
-            )
-            .await
-            .expect("create response");
+        let create_response =
+            provision_community(state.clone(), &operator, &host, &initial_owner).await;
+        assert_eq!(create_response.status(), StatusCode::OK);
 
         let community = state
             .db
@@ -759,34 +826,20 @@ mod tests {
         let initial_owner_hex = initial_owner.public_key().to_hex();
         let new_owner_hex = new_owner.public_key().to_hex();
 
-        // Transfer ownership.
         let transfer_body = serde_json::json!({
             "community_id": community_id,
             "new_owner_pubkey": new_owner_hex,
             "expected_owner_pubkey": initial_owner_hex,
         })
         .to_string();
-        let transfer_url = format!("http://{INGRESS_HOST}/operator/communities/transfer");
-        let transfer_auth = nip98_auth_header(
+        let response = signed_operator_request(
+            state.clone(),
             &operator,
-            &transfer_url,
             "POST",
-            Some(transfer_body.as_bytes()),
-        );
-
-        let response = build_router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/operator/communities/transfer")
-                    .header(header::HOST, INGRESS_HOST)
-                    .header(header::AUTHORIZATION, transfer_auth)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(transfer_body))
-                    .expect("transfer request"),
-            )
-            .await
-            .expect("transfer response");
+            "/operator/communities/transfer",
+            Some(transfer_body),
+        )
+        .await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let json = read_json(response).await;
@@ -826,33 +879,12 @@ mod tests {
             "member"
         );
 
-        // NIP-43 snapshot reflects the new roles.
-        let membership_events = state
-            .db
-            .query_events(&EventQuery {
-                kinds: Some(vec![KIND_NIP43_MEMBERSHIP_LIST as i32]),
-                global_only: true,
-                limit: Some(1),
-                ..EventQuery::for_community(community.id)
-            })
-            .await
-            .expect("query membership snapshot");
-        let snapshot = membership_events
-            .first()
-            .expect("membership snapshot published after transfer");
-        assert!(snapshot.event.tags.iter().any(|tag| {
-            tag.as_slice().first().is_some_and(|v| v == "member")
-                && tag.as_slice().get(1).is_some_and(|v| v == &new_owner_hex)
-                && tag.as_slice().get(2).is_some_and(|v| v == "owner")
-        }));
-        assert!(snapshot.event.tags.iter().any(|tag| {
-            tag.as_slice().first().is_some_and(|v| v == "member")
-                && tag
-                    .as_slice()
-                    .get(1)
-                    .is_some_and(|v| v == &initial_owner_hex)
-                && tag.as_slice().get(2).is_some_and(|v| v == "member")
-        }));
+        assert_snapshot_roles(
+            &state,
+            community.id,
+            &[(&new_owner_hex, "owner"), (&initial_owner_hex, "member")],
+        )
+        .await;
     }
 
     /// Transfer with an invalid community_id returns 400.
@@ -870,22 +902,14 @@ mod tests {
             "expected_owner_pubkey": new_owner.public_key().to_hex(),
         })
         .to_string();
-        let url = format!("http://{INGRESS_HOST}/operator/communities/transfer");
-        let auth = nip98_auth_header(&operator, &url, "POST", Some(body.as_bytes()));
-
-        let response = build_router(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/operator/communities/transfer")
-                    .header(header::HOST, INGRESS_HOST)
-                    .header(header::AUTHORIZATION, auth)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
+        let response = signed_operator_request(
+            state,
+            &operator,
+            "POST",
+            "/operator/communities/transfer",
+            Some(body),
+        )
+        .await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
@@ -904,22 +928,14 @@ mod tests {
             "expected_owner_pubkey": "not-a-pubkey",
         })
         .to_string();
-        let url = format!("http://{INGRESS_HOST}/operator/communities/transfer");
-        let auth = nip98_auth_header(&operator, &url, "POST", Some(body.as_bytes()));
-
-        let response = build_router(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/operator/communities/transfer")
-                    .header(header::HOST, INGRESS_HOST)
-                    .header(header::AUTHORIZATION, auth)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
+        let response = signed_operator_request(
+            state,
+            &operator,
+            "POST",
+            "/operator/communities/transfer",
+            Some(body),
+        )
+        .await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }

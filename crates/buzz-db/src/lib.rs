@@ -55,6 +55,33 @@ use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
 
+fn event_replacement_lock_key(
+    community_id: CommunityId,
+    kind: i32,
+    pubkey: &[u8],
+    coordinate: Option<&[u8]>,
+) -> i64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let kind_bytes = kind.to_le_bytes();
+    for bytes in [
+        community_id.as_uuid().as_bytes().as_slice(),
+        kind_bytes.as_slice(),
+        pubkey,
+    ] {
+        for byte in bytes {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    if let Some(coordinate) = coordinate {
+        for byte in coordinate {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash as i64
+}
+
 /// Extract p-tag mentions from an event and insert into the `event_mentions` table.
 ///
 /// Called after event insertion. Failures are logged but do not block event storage.
@@ -210,6 +237,17 @@ pub struct CreatedCommunityRecord {
     pub id: CommunityId,
     /// Normalized host stored for the community.
     pub host: String,
+}
+
+/// Result of atomically creating a community with its initial owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateCommunityWithOwnerResult {
+    /// The community was created, or an identical retried create found it.
+    Created(CreatedCommunityRecord),
+    /// The host already belongs to another owner.
+    HostExists,
+    /// The intended owner already owns the maximum number of communities.
+    LimitReached,
 }
 
 /// Community row returned by operator-plane ownership reads.
@@ -528,15 +566,14 @@ impl Db {
 
     /// Atomically creates a community and its initial owner.
     ///
-    /// Atomically create a community host and bootstrap its initial owner,
-    /// enforcing the per-owner community limit inside a transaction that holds
-    /// a per-owner advisory lock. This is the authoritative limit check — kgoose
-    /// preflight counts are advisory only.
+    /// Holds a per-owner advisory lock while enforcing the ownership limit.
+    /// Identical create retries return the original record; host collisions and
+    /// limit failures remain distinguishable to the operator API.
     pub async fn create_community_with_owner(
         &self,
         normalized_host: &str,
         owner_pubkey: &str,
-    ) -> Result<Option<CreatedCommunityRecord>> {
+    ) -> Result<CreateCommunityWithOwnerResult> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let mut tx = self.pool.begin().await?;
 
@@ -573,7 +610,7 @@ impl Db {
 
             if owned_count >= relay_members::MAX_COMMUNITIES_PER_OWNER {
                 tx.rollback().await?;
-                return Ok(None);
+                return Ok(CreateCommunityWithOwnerResult::LimitReached);
             }
 
             sqlx::query(
@@ -601,16 +638,18 @@ impl Db {
             .await?;
             let Some(existing) = existing else {
                 tx.rollback().await?;
-                return Ok(None);
+                return Ok(CreateCommunityWithOwnerResult::HostExists);
             };
             (existing.try_get("id")?, existing.try_get("host")?)
         };
 
         tx.commit().await?;
-        Ok(Some(CreatedCommunityRecord {
-            id: CommunityId::from_uuid(id),
-            host,
-        }))
+        Ok(CreateCommunityWithOwnerResult::Created(
+            CreatedCommunityRecord {
+                id: CommunityId::from_uuid(id),
+                host,
+            },
+        ))
     }
 
     /// Returns the community that owns a channel, if the channel exists.
@@ -2685,31 +2724,13 @@ impl Db {
         let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
             .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
 
-        // Stable advisory-lock key: hash (kind, pubkey, channel_id) to i64.
-        // Uses FNV-1a for determinism — Rust's DefaultHasher is NOT stable across processes.
-        // Collisions cause extra serialization, not incorrect behavior.
-        let lock_key = {
-            let mut h: u64 = 0xcbf29ce484222325; // FNV offset basis
-            for b in community_id.as_uuid().as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in kind_i32.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3); // FNV prime
-            }
-            for b in pubkey_bytes.as_slice() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            if let Some(ch) = channel_id {
-                for b in ch.as_bytes() {
-                    h ^= *b as u64;
-                    h = h.wrapping_mul(0x100000001b3);
-                }
-            }
-            h as i64
-        };
+        // Collisions only cause extra serialization; they cannot change behavior.
+        let lock_key = event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
+        );
 
         let mut tx = self.pool.begin().await?;
 
@@ -2817,123 +2838,6 @@ impl Db {
         ))
     }
 
-    /// Authoritative replacement for relay-generated snapshots (NIP-43
-    /// membership lists).
-    ///
-    /// Unlike [`replace_addressable_event`], this method does NOT apply
-    /// stale-write protection based on `created_at` / event-id ordering. The
-    /// relay is the authoritative source for these events — it always wants
-    /// the latest snapshot to replace any prior one, regardless of
-    /// same-second timestamp races on random event IDs. This fixes the bug
-    /// where a transfer snapshot published in the same second as a create
-    /// snapshot could be rejected as "stale" purely because its random event
-    /// ID happened to be lexicographically larger.
-    ///
-    /// All other semantics (advisory lock serialization, soft-delete old,
-    /// insert new, mentions) match `replace_addressable_event`.
-    pub async fn replace_addressable_event_forced(
-        &self,
-        community_id: CommunityId,
-        event: &nostr::Event,
-        channel_id: Option<Uuid>,
-    ) -> Result<(StoredEvent, bool)> {
-        let kind_i32 = buzz_core::kind::event_kind_i32(event);
-        let pubkey_bytes = event.pubkey.to_bytes();
-        let created_at_secs = event.created_at.as_secs() as i64;
-        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
-            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
-
-        // Same advisory-lock key algorithm as replace_addressable_event.
-        let lock_key = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            for b in community_id.as_uuid().as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in kind_i32.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in pubkey_bytes.as_slice() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            if let Some(ch) = channel_id {
-                for b in ch.as_bytes() {
-                    h ^= *b as u64;
-                    h = h.wrapping_mul(0x100000001b3);
-                }
-            }
-            h as i64
-        };
-
-        let mut tx = self.pool.begin().await?;
-
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(&mut *tx)
-            .await?;
-
-        // Soft-delete ALL existing events for this (kind, pubkey, channel_id)
-        // without any created_at/id comparison. The relay is authoritative.
-        sqlx::query(
-            "UPDATE events SET deleted_at = NOW() \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-             AND channel_id IS NOT DISTINCT FROM $4 \
-             AND deleted_at IS NULL",
-        )
-        .bind(community_id.as_uuid())
-        .bind(kind_i32)
-        .bind(pubkey_bytes.as_slice())
-        .bind(channel_id)
-        .execute(&mut *tx)
-        .await?;
-
-        let sig_bytes = event.sig.serialize();
-        let tags_json = serde_json::to_value(&event.tags)?;
-        let received_at = chrono::Utc::now();
-        let d_tag = crate::event::extract_d_tag(event);
-
-        let insert_result = sqlx::query(
-            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(community_id.as_uuid())
-        .bind(event.id.as_bytes().as_slice())
-        .bind(pubkey_bytes.as_slice())
-        .bind(created_at)
-        .bind(kind_i32)
-        .bind(&tags_json)
-        .bind(&event.content)
-        .bind(sig_bytes.as_slice())
-        .bind(received_at)
-        .bind(channel_id)
-        .bind(d_tag.as_deref())
-        .execute(&mut *tx)
-        .await?;
-
-        let was_inserted = insert_result.rows_affected() > 0;
-        if !was_inserted {
-            tx.rollback().await?;
-            return Ok((
-                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
-                false,
-            ));
-        }
-
-        tx.commit().await?;
-
-        if let Err(e) = crate::insert_mentions(&self.pool, community_id, event, channel_id).await {
-            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
-        }
-
-        Ok((
-            StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
-            true,
-        ))
-    }
-
     /// Atomically publish a NIP-43 membership snapshot under a single
     /// transaction-scoped advisory lock.
     ///
@@ -2943,10 +2847,6 @@ impl Db {
     /// prevents the stale-snapshot race where a concurrent publication reads
     /// older state and overwrites a newer snapshot by arrival order.
     ///
-    /// The lock key matches the one used by
-    /// `replace_addressable_event_forced` for the same (kind, pubkey,
-    /// channel_id) tuple, so publications through both code paths serialize
-    /// against each other.
     pub async fn publish_nip43_membership_locked(
         &self,
         community_id: CommunityId,
@@ -2957,23 +2857,8 @@ impl Db {
         let kind_i32 = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
         let pubkey_bytes = relay_keypair.public_key().to_bytes();
 
-        // Same advisory-lock key algorithm as replace_addressable_event.
-        let lock_key = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            for b in community_id.as_uuid().as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in kind_i32.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in pubkey_bytes.as_slice() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h as i64
-        };
+        let lock_key =
+            event_replacement_lock_key(community_id, kind_i32, pubkey_bytes.as_slice(), None);
 
         let mut tx = self.pool.begin().await?;
 
@@ -3000,23 +2885,23 @@ impl Db {
         // Build the NIP-43 event from the locked member rows.
         let mut tags: Vec<Tag> = Vec::with_capacity(member_count + 1);
         // NIP-70 protected-event marker.
-        tags.push(
-            Tag::parse(["-"])
-                .map_err(|e| crate::error::DbError::InvalidData(format!("failed to build '-' tag: {e}")))?,
-        );
+        tags.push(Tag::parse(["-"]).map_err(|e| {
+            crate::error::DbError::InvalidData(format!("failed to build '-' tag: {e}"))
+        })?);
         for row in &rows {
             let pubkey: String = row.try_get("pubkey")?;
             let role: String = row.try_get("role")?;
-            tags.push(
-                Tag::parse(["member", &pubkey, &role])
-                    .map_err(|e| crate::error::DbError::InvalidData(format!("failed to build member tag: {e}")))?,
-            );
+            tags.push(Tag::parse(["member", &pubkey, &role]).map_err(|e| {
+                crate::error::DbError::InvalidData(format!("failed to build member tag: {e}"))
+            })?);
         }
 
         let event = EventBuilder::new(Kind::Custom(kind_i32 as u16), "")
             .tags(tags)
             .sign_with_keys(relay_keypair)
-            .map_err(|e| crate::error::DbError::InvalidData(format!("failed to sign kind:13534: {e}")))?;
+            .map_err(|e| {
+                crate::error::DbError::InvalidData(format!("failed to sign kind:13534: {e}"))
+            })?;
 
         let created_at_secs = event.created_at.as_secs() as i64;
         let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
@@ -3113,28 +2998,12 @@ impl Db {
         let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
             .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
 
-        // Stable advisory-lock key: FNV-1a over (kind, pubkey, d_tag).
-        // Same algorithm as replace_addressable_event — deterministic across processes.
-        let lock_key = {
-            let mut h: u64 = 0xcbf29ce484222325; // FNV offset basis
-            for b in community_id.as_uuid().as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in kind_i32.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in pubkey_bytes.as_slice() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in d_tag.as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h as i64
-        };
+        let lock_key = event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            Some(d_tag.as_bytes()),
+        );
 
         let mut tx = self.pool.begin().await?;
 
@@ -4102,8 +3971,10 @@ mod tests {
         let created = db
             .create_community_with_owner(&host, owner)
             .await
-            .expect("create community")
-            .expect("new host");
+            .expect("create community");
+        let CreateCommunityWithOwnerResult::Created(created) = created else {
+            panic!("expected new community");
+        };
         assert_eq!(created.host, host);
         let owner_role: Option<String> = sqlx::query_scalar(
             "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2",
@@ -4118,15 +3989,18 @@ mod tests {
         let retry = db
             .create_community_with_owner(&host.to_ascii_uppercase(), owner)
             .await
-            .expect("same-owner retry")
-            .expect("existing same-owner community");
-        assert_eq!(retry, created, "retry returns the original row");
+            .expect("same-owner retry");
+        assert_eq!(
+            retry,
+            CreateCommunityWithOwnerResult::Created(created.clone()),
+            "retry returns the original row"
+        );
 
         let collision = db
             .create_community_with_owner(&host, other)
             .await
             .expect("collision result");
-        assert!(collision.is_none());
+        assert_eq!(collision, CreateCommunityWithOwnerResult::HostExists);
         let roles: Vec<(String, String)> = sqlx::query_as(
             "SELECT pubkey, role FROM relay_members WHERE community_id = $1 ORDER BY pubkey",
         )
@@ -4143,7 +4017,10 @@ mod tests {
             .create_community_with_owner(&host, owner)
             .await
             .expect("post-rotation retry");
-        assert!(post_rotation_retry.is_none());
+        assert_eq!(
+            post_rotation_retry,
+            CreateCommunityWithOwnerResult::HostExists
+        );
     }
 
     #[tokio::test]
@@ -4155,21 +4032,27 @@ mod tests {
         // Create 3 communities for this owner (the max).
         for i in 0..3 {
             let host = format!("limit-test-{}-{}.example", i, Uuid::new_v4().simple());
-            db.create_community_with_owner(&host, &owner)
-                .await
-                .expect("create community")
-                .expect("new host");
+            assert!(matches!(
+                db.create_community_with_owner(&host, &owner)
+                    .await
+                    .expect("create community"),
+                CreateCommunityWithOwnerResult::Created(_)
+            ));
         }
 
-        // 4th community for the same owner should fail with None.
         let host = format!("limit-test-3-{}.example", Uuid::new_v4().simple());
-        let result = db
-            .create_community_with_owner(&host, &owner)
-            .await
-            .expect("create community call");
+        assert_eq!(
+            db.create_community_with_owner(&host, &owner)
+                .await
+                .expect("create community call"),
+            CreateCommunityWithOwnerResult::LimitReached
+        );
         assert!(
-            result.is_none(),
-            "4th community for the same owner should be rejected by limit"
+            db.lookup_community_by_host(&host)
+                .await
+                .expect("look up rolled-back fresh host")
+                .is_none(),
+            "limit rejection must roll back the fresh community row"
         );
     }
 
@@ -4184,13 +4067,10 @@ mod tests {
             db.create_community_with_owner(&host, owner),
             db.create_community_with_owner(&host, owner),
         );
-        let first = first
-            .expect("first concurrent create")
-            .expect("first result");
-        let second = second
-            .expect("second concurrent create")
-            .expect("second result");
+        let first = first.expect("first concurrent create");
+        let second = second.expect("second concurrent create");
 
+        assert!(matches!(first, CreateCommunityWithOwnerResult::Created(_)));
         assert_eq!(first, second, "conflict loser re-reads the winning row");
     }
 

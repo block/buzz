@@ -2778,10 +2778,7 @@ pub async fn publish_nip43_membership_list(
         .await;
     }
 
-    info!(
-        member_count,
-        "NIP-43 membership list published"
-    );
+    info!(member_count, "NIP-43 membership list published");
     Ok(())
 }
 

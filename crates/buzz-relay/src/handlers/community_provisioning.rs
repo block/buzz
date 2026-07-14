@@ -170,33 +170,6 @@ fn validate_domain_labels(domain: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// JSON body for `POST /operator/communities/transfer`.
-#[derive(Debug, Deserialize)]
-pub struct TransferCommunityRequest {
-    /// UUID of the community to transfer.
-    pub community_id: String,
-    /// 64-char hex pubkey of the new owner.
-    pub new_owner_pubkey: String,
-    /// 64-char hex pubkey of the current owner. The relay verifies this
-    /// matches inside the transfer transaction and returns `owner_conflict`
-    /// if it doesn't. Prevents stale-owner races.
-    pub expected_owner_pubkey: String,
-}
-
-/// JSON response from `POST /operator/communities/transfer`.
-#[derive(Debug, Serialize)]
-pub struct TransferCommunityResponse {
-    /// UUID of the transferred community.
-    pub community_id: String,
-    /// 64-char hex pubkey of the new owner.
-    pub new_owner_pubkey: String,
-    /// `"transferred"` or `"already_owner"`.
-    pub status: &'static str,
-    /// Hex pubkey of the previous owner, if one existed and was demoted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_owner: Option<String>,
-}
-
 /// Normalize and validate a host supplied to read-only operator endpoints.
 ///
 /// Unlike create, availability checks may accept non-canonical but normalizable
@@ -308,12 +281,23 @@ pub async fn provision_community(
         let owner_hex = initial_owner.as_deref().ok_or_else(|| {
             "initial_owner_pubkey is required when create_only is true".to_string()
         })?;
-        let record = state
+        let record = match state
             .db
             .create_community_with_owner(&request.host, owner_hex)
             .await
             .map_err(|e| format!("failed to create community: {e}"))?
-            .ok_or_else(|| "community already exists".to_string())?;
+        {
+            buzz_db::CreateCommunityWithOwnerResult::Created(record) => record,
+            buzz_db::CreateCommunityWithOwnerResult::HostExists => {
+                return Err("community already exists".to_string());
+            }
+            buzz_db::CreateCommunityWithOwnerResult::LimitReached => {
+                return Err(
+                    "limit_reached: owner already owns the maximum number of communities"
+                        .to_string(),
+                );
+            }
+        };
 
         info!(
             operator = %operator_hex,

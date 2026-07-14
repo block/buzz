@@ -334,7 +334,7 @@ pub fn owner_count_advisory_lock_key(pubkey_hex: &str) -> i64 {
 /// Runs in a single transaction:
 /// 1. Acquires a transaction-scoped advisory lock on the *transferee* pubkey
 ///    so that concurrent transfers to the same recipient serialize. The same
-///    lock key is used by [`create_community_with_owner_locked`] to prevent
+///    lock key is also used by `Db::create_community_with_owner` to prevent
 ///    transfer-vs-create races.
 /// 2. Locks the current owner row `FOR UPDATE` and verifies
 ///    `expected_owner_pubkey` matches. This prevents a stale-owner race where
@@ -520,6 +520,30 @@ mod tests {
         CommunityId::from_uuid(id)
     }
 
+    fn test_pubkey() -> String {
+        format!("{:064x}", Uuid::new_v4().as_u128())
+    }
+
+    async fn assert_role(pool: &PgPool, community: CommunityId, pubkey: &str, role: &str) {
+        assert_eq!(
+            get_relay_member(pool, community, pubkey)
+                .await
+                .expect("get relay member")
+                .map(|member| member.role)
+                .as_deref(),
+            Some(role)
+        );
+    }
+
+    async fn owned_community(pool: &PgPool) -> (CommunityId, String) {
+        let community = make_test_community(pool).await;
+        let owner = test_pubkey();
+        bootstrap_owner(pool, community, &owner)
+            .await
+            .expect("bootstrap owner");
+        (community, owner)
+    }
+
     /// NIP-43 admission confinement: a pubkey admitted to community A is *not*
     /// admitted to community B. This is the exact mutation #1285 targets — a
     /// `WHERE pubkey = $1` membership check (no community predicate) would let an
@@ -533,7 +557,7 @@ mod tests {
         let community_a = make_test_community(&pool).await;
         let community_b = make_test_community(&pool).await;
         // 64-char lowercase hex, unique per run so reruns don't collide.
-        let pubkey = format!("{:064x}", Uuid::new_v4().as_u128());
+        let pubkey = test_pubkey();
 
         let inserted = add_relay_member(&pool, community_a, &pubkey, "member", None)
             .await
@@ -597,7 +621,7 @@ mod tests {
         let pool = setup_pool().await;
         let community_a = make_test_community(&pool).await;
         let community_b = make_test_community(&pool).await;
-        let owner = format!("{:064x}", Uuid::new_v4().as_u128());
+        let owner = test_pubkey();
 
         bootstrap_owner(&pool, community_a, &owner)
             .await
@@ -623,13 +647,8 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn transfer_ownership_demotes_old_owner_to_member() {
         let pool = setup_pool().await;
-        let community = make_test_community(&pool).await;
-        let old_owner = format!("{:064x}", Uuid::new_v4().as_u128());
-        let new_owner = format!("{:064x}", Uuid::new_v4().as_u128());
-
-        bootstrap_owner(&pool, community, &old_owner)
-            .await
-            .expect("bootstrap initial owner");
+        let (community, old_owner) = owned_community(&pool).await;
+        let new_owner = test_pubkey();
 
         let result = transfer_ownership(&pool, community, &new_owner, &old_owner)
             .await
@@ -642,21 +661,8 @@ mod tests {
             }
         );
 
-        // New owner is owner.
-        let new_role = get_relay_member(&pool, community, &new_owner)
-            .await
-            .expect("get new owner")
-            .expect("new owner exists")
-            .role;
-        assert_eq!(new_role, "owner");
-
-        // Old owner is member, not admin, not owner.
-        let old_role = get_relay_member(&pool, community, &old_owner)
-            .await
-            .expect("get old owner")
-            .expect("old owner still exists")
-            .role;
-        assert_eq!(old_role, "member");
+        assert_role(&pool, community, &new_owner, "owner").await;
+        assert_role(&pool, community, &old_owner, "member").await;
     }
 
     /// Transferring to the current sole owner is a no-op (`AlreadyOwner`).
@@ -664,12 +670,7 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn transfer_ownership_already_owner_is_noop() {
         let pool = setup_pool().await;
-        let community = make_test_community(&pool).await;
-        let owner = format!("{:064x}", Uuid::new_v4().as_u128());
-
-        bootstrap_owner(&pool, community, &owner)
-            .await
-            .expect("bootstrap owner");
+        let (community, owner) = owned_community(&pool).await;
 
         let result = transfer_ownership(&pool, community, &owner, &owner)
             .await
@@ -677,13 +678,7 @@ mod tests {
 
         assert_eq!(result, TransferResult::AlreadyOwner);
 
-        // Still owner.
-        let role = get_relay_member(&pool, community, &owner)
-            .await
-            .expect("get owner")
-            .expect("owner exists")
-            .role;
-        assert_eq!(role, "owner");
+        assert_role(&pool, community, &owner, "owner").await;
     }
 
     /// Transferring a community with no owner row returns `NoOwner`.
@@ -692,8 +687,8 @@ mod tests {
     async fn transfer_ownership_no_owner_returns_no_owner() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let new_owner = format!("{:064x}", Uuid::new_v4().as_u128());
-        let expected = format!("{:064x}", Uuid::new_v4().as_u128());
+        let new_owner = test_pubkey();
+        let expected = test_pubkey();
 
         // No bootstrap — community exists but has no owner row.
 
@@ -712,9 +707,9 @@ mod tests {
         let pool = setup_pool().await;
         let community_a = make_test_community(&pool).await;
         let community_b = make_test_community(&pool).await;
-        let owner_a = format!("{:064x}", Uuid::new_v4().as_u128());
-        let owner_b = format!("{:064x}", Uuid::new_v4().as_u128());
-        let new_owner = format!("{:064x}", Uuid::new_v4().as_u128());
+        let owner_a = test_pubkey();
+        let owner_b = test_pubkey();
+        let new_owner = test_pubkey();
 
         bootstrap_owner(&pool, community_a, &owner_a)
             .await
@@ -727,33 +722,9 @@ mod tests {
             .await
             .expect("transfer A");
 
-        // A: new owner is owner, old owner is member.
-        assert_eq!(
-            get_relay_member(&pool, community_a, &new_owner)
-                .await
-                .expect("get new owner A")
-                .expect("exists")
-                .role,
-            "owner"
-        );
-        assert_eq!(
-            get_relay_member(&pool, community_a, &owner_a)
-                .await
-                .expect("get old owner A")
-                .expect("exists")
-                .role,
-            "member"
-        );
-
-        // B: untouched — owner_b is still owner, new_owner is not a member.
-        assert_eq!(
-            get_relay_member(&pool, community_b, &owner_b)
-                .await
-                .expect("get owner B")
-                .expect("exists")
-                .role,
-            "owner"
-        );
+        assert_role(&pool, community_a, &new_owner, "owner").await;
+        assert_role(&pool, community_a, &owner_a, "member").await;
+        assert_role(&pool, community_b, &owner_b, "owner").await;
         assert!(
             !is_relay_member(&pool, community_b, &new_owner)
                 .await
@@ -769,8 +740,8 @@ mod tests {
     async fn transfer_ownership_promotes_existing_member() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let old_owner = format!("{:064x}", Uuid::new_v4().as_u128());
-        let existing_member = format!("{:064x}", Uuid::new_v4().as_u128());
+        let old_owner = test_pubkey();
+        let existing_member = test_pubkey();
 
         bootstrap_owner(&pool, community, &old_owner)
             .await
@@ -811,9 +782,9 @@ mod tests {
     async fn transfer_ownership_returns_owner_conflict_when_expected_mismatches() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let old_owner = format!("{:064x}", Uuid::new_v4().as_u128());
-        let new_owner = format!("{:064x}", Uuid::new_v4().as_u128());
-        let wrong_expected = format!("{:064x}", Uuid::new_v4().as_u128());
+        let old_owner = test_pubkey();
+        let new_owner = test_pubkey();
+        let wrong_expected = test_pubkey();
 
         bootstrap_owner(&pool, community, &old_owner)
             .await
@@ -852,8 +823,8 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn transfer_ownership_returns_limit_reached_for_maxed_transferee() {
         let pool = setup_pool().await;
-        let owner = format!("{:064x}", Uuid::new_v4().as_u128());
-        let transferee = format!("{:064x}", Uuid::new_v4().as_u128());
+        let owner = test_pubkey();
+        let transferee = test_pubkey();
 
         // Give the transferee 3 communities (the max).
         for _ in 0..3 {
