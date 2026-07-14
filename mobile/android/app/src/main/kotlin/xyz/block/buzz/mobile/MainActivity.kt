@@ -1,4 +1,4 @@
-package com.buzz.buzz_mobile
+package xyz.block.buzz.mobile
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
