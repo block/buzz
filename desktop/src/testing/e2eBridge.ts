@@ -136,6 +136,8 @@ type E2eConfig = {
     applyWorkspaceDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Reject successive kind-9 sends with these messages, then resume. */
+    sendMessageErrors?: string[];
     /** Delay (ms) after snapshotting a thread-replies page so E2E tests can
      *  deliver live reply/aux events while an older response is in flight. */
     threadRepliesDelayMs?: number;
@@ -8127,6 +8129,13 @@ function sendToMockSocket(args: {
         false,
         "Missing channel tag.",
       ]);
+      return;
+    }
+
+    const sendMessageError =
+      event.kind === 9 ? getConfig()?.mock?.sendMessageErrors?.shift() : null;
+    if (sendMessageError) {
+      sendWsText(socket.handler, ["OK", event.id, false, sendMessageError]);
       return;
     }
 

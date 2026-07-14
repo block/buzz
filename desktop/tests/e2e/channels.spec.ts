@@ -713,6 +713,93 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("drops an expanded DM after the first message fails", async ({ page }) => {
+  const retryMessage = "Retry without the agent";
+  const sendError = "Mock first DM send failed.";
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+    sendMessageErrors: [sendError],
+  });
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" for a hand");
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByText(sendError)).toBeVisible();
+  await expect(input).toContainText("Fizz");
+
+  const commandsAfterFailure = await readCommandPayloadLog(page);
+  const originalDmId = (
+    commandsAfterFailure.find(
+      (entry) => entry.command === "add_channel_members",
+    )?.payload as { channelId?: string } | undefined
+  )?.channelId;
+  expect(originalDmId).toBeTruthy();
+  const baselineOpenDmCount = commandCount(
+    commandsAfterFailure.map((entry) => entry.command),
+    "open_dm",
+  );
+
+  await input.fill(retryMessage);
+  const retryBaseline = commandsAfterFailure.length;
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    retryMessage,
+  );
+
+  const allCommands = await readCommandPayloadLog(page);
+  expect(
+    commandCount(
+      allCommands.map((entry) => entry.command),
+      "open_dm",
+    ),
+  ).toBe(baselineOpenDmCount + 1);
+  const retryCommands = allCommands.slice(retryBaseline);
+  const retrySend = retryCommands.find((entry) => {
+    if (entry.command !== "plugin:websocket|send") {
+      return false;
+    }
+    const data = (entry.payload as { message?: { data?: string } } | undefined)
+      ?.message?.data;
+    if (!data) {
+      return false;
+    }
+    const frame = JSON.parse(data) as unknown[];
+    return (
+      frame[0] === "EVENT" &&
+      (frame[1] as { content?: string } | undefined)?.content === retryMessage
+    );
+  });
+  const retrySendData = (
+    retrySend?.payload as { message?: { data?: string } } | undefined
+  )?.message?.data;
+  expect(retrySendData).toBeTruthy();
+  const retryEvent = (
+    JSON.parse(retrySendData ?? "[]") as [string, { tags?: string[][] }]
+  )[1];
+  expect(retryEvent.tags).toContainEqual(["h", originalDmId]);
+  await expect(
+    page.locator("[data-active='true'][data-channel-id]"),
+  ).toHaveAttribute("data-channel-id", originalDmId ?? "");
+});
+
 test("closes direct message results while opening", async ({ page }) => {
   await page.goto("/");
   await page.evaluate(() => {

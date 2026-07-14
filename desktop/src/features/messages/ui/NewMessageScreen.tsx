@@ -264,6 +264,7 @@ export function NewMessageScreen() {
           mediaTags,
         });
       } catch (error) {
+        preparedDirectMessageRef.current = null;
         const message =
           error instanceof Error ? error.message : "Failed to send message.";
         setSubmitErrorMessage(message);
