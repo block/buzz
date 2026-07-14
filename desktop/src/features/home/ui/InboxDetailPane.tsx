@@ -77,7 +77,12 @@ type InboxDetailPaneProps = {
   latchedDefaultParentId?: string | null;
   onBack?: () => void;
   onDelete: () => void;
-  onOpenChannel: (channelId: string) => void;
+  onManageChannel: (channelId: string) => void;
+  onOpenContext: (
+    channelId: string,
+    messageId: string,
+    threadRootId?: string | null,
+  ) => void;
   onSendReply: (input: {
     content: string;
     mediaTags?: string[][];
@@ -111,7 +116,8 @@ export function InboxDetailPane({
   latchedDefaultParentId = null,
   onBack,
   onDelete,
-  onOpenChannel,
+  onManageChannel,
+  onOpenContext,
   onSendReply,
   onToggleReaction,
 }: InboxDetailPaneProps) {
@@ -318,6 +324,7 @@ export function InboxDetailPane({
   const contextLabel = channelContextName ?? formatInboxTypeLabel(item);
   const hasChannelContext = Boolean(channelContextName);
   const contextChannelId = item.item.channelId;
+  const contextThreadRootId = getThreadReference(item.item.tags).rootId;
 
   const handleSelectReplyTarget = (message: InboxDisplayMessage) => {
     setReplyTargetId((currentReplyTargetId) =>
@@ -358,7 +365,13 @@ export function InboxDetailPane({
                   {canOpenChannel && contextChannelId ? (
                     <button
                       className="flex min-w-0 items-center gap-[4px] text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                      onClick={() => onOpenChannel(contextChannelId)}
+                      onClick={() =>
+                        onOpenContext(
+                          contextChannelId,
+                          item.id,
+                          contextThreadRootId,
+                        )
+                      }
                       title={item.fullTimestampLabel}
                       type="button"
                     >
@@ -394,7 +407,7 @@ export function InboxDetailPane({
                       currentPubkey={currentPubkey}
                       onManageChannel={() => {
                         if (contextChannelId) {
-                          onOpenChannel(contextChannelId);
+                          onManageChannel(contextChannelId);
                         }
                       }}
                       onToggleMembers={() =>
