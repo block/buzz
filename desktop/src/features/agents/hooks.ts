@@ -141,6 +141,23 @@ function invalidateAgentQueriesInBackground(
   );
 }
 
+function isCachedDmChannel(
+  queryClient: ReturnType<typeof useQueryClient>,
+  channelId: string | null,
+) {
+  if (!channelId) {
+    return false;
+  }
+
+  return Boolean(
+    queryClient
+      .getQueryData<Channel[]>(channelsQueryKey)
+      ?.some(
+        (channel) => channel.id === channelId && channel.channelType === "dm",
+      ),
+  );
+}
+
 function invalidateManagedAgentQueriesInBackground(
   queryClient: ReturnType<typeof useQueryClient>,
 ) {
@@ -557,13 +574,12 @@ export function useAttachManagedAgentToChannelMutation(
       // hook-closure channelId when the user has already switched away would
       // leave the compose-time channel stale.
       const effectiveChannelId = variables?.channelId ?? channelId;
-      // The exact membership has already been applied to channelsQueryKey by
-      // onSuccess. Mark the list stale without starting a background refetch
-      // that could replace that optimistic participant with a lagged snapshot;
-      // mounted channel readers and the first-DM navigation repair provide the
-      // next authoritative refetch.
+      // Stream membership is already applied to channelsQueryKey by onSuccess,
+      // so avoid replacing it with a lagged snapshot. DM membership is
+      // immutable: adding the agent creates a separate conversation, so refresh
+      // the list to discover that target instead of decorating the source DM.
       invalidateAgentQueriesInBackground(queryClient, effectiveChannelId, {
-        refetchChannels: false,
+        refetchChannels: isCachedDmChannel(queryClient, effectiveChannelId),
       });
     },
   });
@@ -628,13 +644,11 @@ export function useCreateChannelManagedAgentMutation(channelId: string | null) {
     },
     onSettled: (_data, _err, variables) => {
       const effectiveChannelId = variables?.channelId ?? channelId;
-      // The exact membership has already been applied to channelsQueryKey by
-      // onSuccess. Mark the list stale without starting a background refetch
-      // that could replace that optimistic participant with a lagged snapshot;
-      // mounted channel readers and the first-DM navigation repair provide the
-      // next authoritative refetch.
+      // Stream membership is already applied to channelsQueryKey by onSuccess,
+      // while immutable DM membership produces a separate conversation that
+      // must be discovered by refetching the channel list.
       invalidateAgentQueriesInBackground(queryClient, effectiveChannelId, {
-        refetchChannels: false,
+        refetchChannels: isCachedDmChannel(queryClient, effectiveChannelId),
       });
     },
   });

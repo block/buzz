@@ -78,6 +78,52 @@ async function hasOutgoingEventWithContent(
   }, content);
 }
 
+async function readOutgoingChannelId(
+  page: import("@playwright/test").Page,
+  content: string,
+) {
+  return page.evaluate((expectedContent) => {
+    const entries =
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+
+    for (const entry of entries) {
+      if (entry.command !== "plugin:websocket|send") {
+        continue;
+      }
+
+      const data = (
+        entry.payload as { message?: { data?: string } } | undefined
+      )?.message?.data;
+      if (!data) {
+        continue;
+      }
+
+      try {
+        const frame = JSON.parse(data) as [
+          string,
+          { content?: string; tags?: string[][] },
+        ];
+        if (
+          frame[0] !== "EVENT" ||
+          !frame[1]?.content?.includes(expectedContent)
+        ) {
+          continue;
+        }
+        return frame[1].tags?.find((tag) => tag[0] === "h")?.[1] ?? null;
+      } catch {}
+    }
+
+    return null;
+  }, content);
+}
+
 async function openChannelManagement(
   page: import("@playwright/test").Page,
   channelName: string,
@@ -711,6 +757,46 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
       .last()
       .locator("[data-mention].agent-mention-highlight", { hasText: "Fizz" }),
   ).toBeVisible();
+});
+
+test("routes an agent mention from an existing DM to the expanded conversation", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+  });
+  await page.goto("/");
+
+  const sourceDm = page.getByTestId("channel-alice-tyler");
+  const sourceDmId = await sourceDm.getAttribute("data-channel-id");
+  expect(sourceDmId).toBeTruthy();
+  await sourceDm.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const messageTail = "in this DM";
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" in this DM");
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(async () => readOutgoingChannelId(page, messageTail))
+    .not.toBeNull();
+  const sentChannelId = await readOutgoingChannelId(page, messageTail);
+  expect(sentChannelId).not.toBe(sourceDmId);
+  await expect(
+    page.locator("[data-active='true'][data-channel-id]"),
+  ).toHaveAttribute("data-channel-id", sentChannelId ?? "");
+  await expect(page.getByTestId("chat-title")).toContainText("alice");
+  await expect(page.getByTestId("chat-title")).toContainText("Fizz");
+  await expect(sourceDm).not.toContainText("Fizz");
 });
 
 test("drops an expanded DM after the first message fails", async ({ page }) => {

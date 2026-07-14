@@ -51,6 +51,7 @@ import {
 } from "@/features/channels/ui/ChannelPane.helpers";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
+import { usePrepareDmSendChannel } from "@/features/channels/ui/usePrepareDmSendChannel";
 import { Button } from "@/shared/ui/button";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
@@ -158,6 +159,10 @@ export const ChannelPane = React.memo(function ChannelPane({
   const [welcomeComposerBannerState, setWelcomeComposerBannerState] =
     React.useState<WelcomeComposerBannerState>("prompt");
   const { goChannel } = useAppNavigation();
+  const prepareDmSendChannel = usePrepareDmSendChannel(
+    activeChannel,
+    currentPubkey,
+  );
   const mainComposerMedia = useMediaUpload();
   const isNonMemberView =
     activeChannel !== null &&
@@ -350,12 +355,18 @@ export const ChannelPane = React.memo(function ChannelPane({
       messageTimelineRef.current?.scrollToBottomOnNextUpdate();
       await onSendMessage(content, mentionPubkeys, mediaTags, channelId);
 
+      if (channelId && channelId !== activeChannelId) {
+        await goChannel(channelId, { replace: true });
+      }
+
       if (shouldCompleteWelcomeBanner) {
         completeWelcomeComposerBanner();
       }
     },
     [
+      activeChannelId,
       completeWelcomeComposerBanner,
+      goChannel,
       isActiveWelcomeChannel,
       knownAgentPubkeys,
       onSendMessage,
@@ -721,6 +732,11 @@ export const ChannelPane = React.memo(function ChannelPane({
                   onCancelEdit={onCancelEdit}
                   onEditLastOwnMessage={handleEditLastOwnMainMessage}
                   onEditSave={onEditSave}
+                  onPrepareSendChannel={
+                    activeChannel?.channelType === "dm"
+                      ? prepareDmSendChannel
+                      : undefined
+                  }
                   onSend={handleSendMessage}
                   profiles={profiles}
                   placeholder={
