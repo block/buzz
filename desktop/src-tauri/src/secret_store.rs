@@ -787,7 +787,9 @@ impl SecretStore {
                         Err(e) => return Err(format!("dpk per-key delete {key}: {e}")),
                     }
                 }
-                if let Ok(entry) = keyring_entry(&self.service, key) {
+                {
+                    let entry = keyring_entry(&self.service, key)
+                        .map_err(|e| format!("keyring entry constructor {key}: {e}"))?;
                     match entry.delete_credential() {
                         Ok(()) | Err(keyring::Error::NoEntry) => {}
                         Err(e) if is_keyring_availability_error(&e.to_string()) => {
@@ -811,14 +813,16 @@ impl SecretStore {
             }
 
             // Step 4: delete the main blob entry.
-            if let Ok(entry) = keyring_entry(&self.service, BLOB_KEY) {
+            {
+                let entry = keyring_entry(&self.service, BLOB_KEY)
+                    .map_err(|e| format!("keyring entry constructor blob: {e}"))?;
                 match entry.delete_credential() {
                     Ok(()) | Err(keyring::Error::NoEntry) => {}
                     Err(e) if is_keyring_availability_error(&e.to_string()) => {
                         return Err(format!("keyring unavailable: {e}"));
                     }
                     Err(e) => {
-                        eprintln!("buzz-desktop reset: keychain blob delete: {e}");
+                        return Err(format!("keyring blob delete: {e}"));
                     }
                 }
             }
@@ -851,31 +855,38 @@ impl SecretStore {
                 Err(_) => return false,
             }
             // 2. Per-key "identity" via legacy keyring must be absent.
-            if let Ok(entry) = keyring_entry(&self.service, "identity") {
-                match entry.get_password() {
+            match keyring_entry(&self.service, "identity") {
+                Ok(entry) => match entry.get_password() {
                     Err(keyring::Error::NoEntry) => {}
                     Ok(_) => return false,
-                    Err(e) if is_keyring_availability_error(&e.to_string()) => {
-                        return false; // can't verify → fail closed
-                    }
-                    Err(_) => {} // other errors = absent-enough
-                }
+                    // Any other error (availability, unknown, transient) → fail closed.
+                    // Only explicit NoEntry is proof of absence.
+                    Err(_) => return false,
+                },
+                // Constructor failure → cannot verify → fail closed.
+                Err(_) => return false,
             }
             // 3. DPK blob (macOS only).
             #[cfg(target_os = "macos")]
             {
                 match generic_password(dpk_opts(&self.service, BLOB_KEY)) {
                     Err(ref e) if is_not_found(e) => {}
-                    Err(ref e) if is_dpk_unavailable(e) => {} // unsigned dev = no DPK
+                    // dpk-unavailable is symmetric with load(): if load() can't
+                    // consume DPK in this state, a surviving entry is harmless.
+                    Err(ref e) if is_dpk_unavailable(e) => {}
                     Ok(_) => return false,
-                    Err(_) => {} // other errors = absent-enough
+                    // Any other error → fail closed (not proof of absence).
+                    Err(_) => return false,
                 }
                 // 4. Per-key DPK "identity" (macOS only).
                 match generic_password(dpk_opts(&self.service, "identity")) {
                     Err(ref e) if is_not_found(e) => {}
+                    // dpk-unavailable: symmetric with load() — if load() can't
+                    // read DPK, a surviving entry can't resurrect identity.
                     Err(ref e) if is_dpk_unavailable(e) => {}
                     Ok(_) => return false,
-                    Err(_) => {}
+                    // Any other error → fail closed.
+                    Err(_) => return false,
                 }
             }
             true

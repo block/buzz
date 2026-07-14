@@ -294,7 +294,7 @@ const overrides = new Map([
   // am review fix: also clear stale V1 model field on provider rewrite +
   // new model-clear test. Load-bearing chimera fix.
   // keyring-dev-isolation: run_boot_migrations wires agent-key migration.
-  ["src-tauri/src/migration.rs", 1415],
+  ["src-tauri/src/migration.rs", 1428],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
@@ -327,7 +327,7 @@ const overrides = new Map([
   // signout-wipe pass-2 (F2): delete_all_with_legacy_cleanup DPK deletes now
   // observable (propagate real errors); verify_fully_wiped checks all three
   // keychain shapes (main blob, DPK blob, per-key "identity"). +73 lines.
-  ["src-tauri/src/secret_store.rs", 1296],
+  ["src-tauri/src/secret_store.rs", 1307],
   // sign-out wipe: Sign Out section (AlertDialog + controlled state) added
   // at the bottom of the Profile settings page. Load-bearing UX feature;
   // queued to split when ProfileSettingsCard is broken into sub-components.

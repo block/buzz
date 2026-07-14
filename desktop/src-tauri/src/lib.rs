@@ -451,7 +451,11 @@ pub fn run() {
             }
 
             // Run all pre-identity data migrations before state loads from disk.
-            migration::run_boot_migrations(&app_handle);
+            if reset_outcome.completed {
+                migration::run_boot_migrations_after_reset(&app_handle);
+            } else {
+                migration::run_boot_migrations(&app_handle);
+            }
 
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity

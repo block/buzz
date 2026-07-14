@@ -119,6 +119,15 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// readers — reader-first loses a launch (stale harness/`mcp_command` until
 /// the next boot).
 pub fn run_boot_migrations(app: &tauri::AppHandle) {
+    run_boot_migrations_inner(app, false);
+}
+
+/// Entry point when a completed reset must suppress dev-nest re-import.
+pub fn run_boot_migrations_after_reset(app: &tauri::AppHandle) {
+    run_boot_migrations_inner(app, true);
+}
+
+fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // Initialize the process-lifetime nest directory before any filesystem
     // operation that calls nest_dir(). The discriminator matches the existing
     // pattern used by reconcile_target_dir: dev instances have an app-data-dir
@@ -139,7 +148,7 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
     // ensures the dev nest boots with the correct workspace on its first launch,
     // matching what the prod nest had configured. Skip-if-dest-exists so it is
     // idempotent and never clobbers a value the dev nest already set explicitly.
-    if is_dev {
+    if should_migrate_dev_repos_dir(is_dev, reset_completed) {
         migrate_dev_repos_dir();
     }
 
@@ -318,13 +327,20 @@ fn migrate_legacy_nest_at(legacy: &Path, current: &Path) -> bool {
 /// also copies into `~/.buzz-dev` and could otherwise set the sentinel early.
 const DEV_NEST_MIGRATED_SENTINEL: &str = ".dev-nest-migrated";
 
+/// Returns true when `migrate_dev_repos_dir` should run: dev build AND no
+/// completed reset this boot (a completed reset means the dev nest was just
+/// wiped — re-importing from prod would undo the sign-out).
+pub(crate) fn should_migrate_dev_repos_dir(is_dev: bool, reset_completed: bool) -> bool {
+    is_dev && !reset_completed
+}
+
 /// Copy the `.repos-dir` dotfile from `~/.buzz` → `~/.buzz-dev`, non-destructively.
 ///
 /// Must be called on dev builds BEFORE `resolve_repos_at_boot()` reads the
 /// dotfile, so the dev nest boots with the correct workspace configuration on
 /// its first launch. Skip-if-dest-exists so it is idempotent and never
 /// overwrites a value set directly by the dev nest.
-fn migrate_dev_repos_dir() {
+pub(crate) fn migrate_dev_repos_dir() {
     let Some(home) = dirs::home_dir() else {
         return;
     };
