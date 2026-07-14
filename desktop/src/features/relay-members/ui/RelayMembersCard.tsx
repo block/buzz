@@ -116,7 +116,7 @@ function MemberRow({
       </div>
 
       {showActions ? (
-        <DropdownMenu>
+        <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
               data-testid={`relay-member-actions-${member.pubkey}`}

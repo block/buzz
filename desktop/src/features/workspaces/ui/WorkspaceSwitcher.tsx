@@ -281,7 +281,11 @@ export function WorkspaceSwitcher({
     ) : null;
 
   const switcherDropdown = (
-    <DropdownMenu open={dropdownOpen} onOpenChange={setDropdownOpen}>
+    <DropdownMenu
+      modal={false}
+      open={dropdownOpen}
+      onOpenChange={setDropdownOpen}
+    >
       <DropdownMenuTrigger asChild>
         {variant === "profile" ? (
           <button
