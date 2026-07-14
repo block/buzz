@@ -43,6 +43,7 @@ export type ProjectPullRequest = {
   approvals: ProjectPullRequestApproval[];
   status: "Open" | "Merged" | "Closed" | "Draft";
   statusEventId: string | null;
+  statusCreatedAt: number | null;
   branchName: string | null;
   initialCommit: string | null;
   commit: string | null;
@@ -59,6 +60,10 @@ export function eventToProjectPullRequest(
   commentEvents?: RelayEvent[],
   statusEvents?: RelayEvent[],
 ): ProjectPullRequest;
+export function nextProjectPullRequestStatusCreatedAt(
+  pullRequest: Pick<ProjectPullRequest, "statusCreatedAt">,
+  now: number,
+): number;
 export function projectPullRequestEventsToPullRequests(
   pullRequestEvents: RelayEvent[],
   updateEvents?: RelayEvent[],
