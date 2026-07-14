@@ -459,7 +459,7 @@ function SectionHeader({
       <div>
         <h3 className="text-sm font-semibold tracking-tight">Agents</h3>
         <p className="text-sm text-secondary-foreground/75">
-          Agents in this workspace.
+          Agents in this community.
         </p>
       </div>
       <input

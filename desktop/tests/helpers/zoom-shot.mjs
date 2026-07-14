@@ -41,15 +41,15 @@ const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: vw, height: vh } });
 
 await page.addInitScript(() => {
-  const id = "e2e-default-workspace";
+  const id = "e2e-default-community";
   const ws = {
     id,
     name: "E2E Test",
     relayUrl: "ws://localhost:3000",
     addedAt: new Date().toISOString(),
   };
-  window.localStorage.setItem("buzz-workspaces", JSON.stringify([ws]));
-  window.localStorage.setItem("buzz-active-workspace-id", id);
+  window.localStorage.setItem("buzz-communities", JSON.stringify([ws]));
+  window.localStorage.setItem("buzz-active-community-id", id);
 });
 await page.addInitScript(
   ({ prefix, pubkeys }) => {

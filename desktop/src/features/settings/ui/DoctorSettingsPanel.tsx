@@ -294,7 +294,7 @@ function RuntimeRow({
                 codex-acp
               </code>{" "}
               adapter. Older Buzz releases using the legacy adapter contract may
-              lose relay access until{" "}
+              lose community access until{" "}
               <code className="rounded bg-muted px-1 py-0.5 text-2xs">
                 @zed-industries/codex-acp@0.16.0
               </code>{" "}

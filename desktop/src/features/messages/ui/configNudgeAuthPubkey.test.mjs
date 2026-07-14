@@ -27,7 +27,7 @@ const HUMAN_SIGNER =
 const AGENT_PUBKEY =
   "2222222222222222222222222222222222222222222222222222222222222222";
 
-// MessageRow passes a predicate combining the workspace known-agent set with
+// MessageRow passes a predicate combining the community known-agent set with
 // per-pubkey profile `isAgent` checks; the set-membership form is the minimal
 // equivalent for exercising the signer-selection seam.
 const AGENT_PUBKEYS = new Set([AGENT_PUBKEY]);

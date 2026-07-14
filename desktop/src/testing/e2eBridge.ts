@@ -136,8 +136,8 @@ type E2eConfig = {
     feedReadError?: string;
     canvasReadError?: string;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
-     *  workspace-switch gate. 0/undefined = instant. */
-    applyWorkspaceDelayMs?: number;
+     *  community-switch gate. 0/undefined = instant. */
+    applyCommunityDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
     /** Reject successive kind-9 sends with these messages, then resume. */
@@ -673,7 +673,7 @@ function createMockRelayMembershipEvent(): RelayEvent {
 
 /**
  * Per-user custom emoji sets (kind:30030) the mock WS serves for
- * `listCustomEmoji` REQs. The workspace palette is the client-side UNION of
+ * `listCustomEmoji` REQs. The community palette is the client-side UNION of
  * every member's own set (d=`buzz:custom-emoji`). We serve TWO member-authored
  * sets from distinct pubkeys so the e2e exercises the union/collapse path, not
  * a single relay-owned set. `:buzz:` is the stable shortcode exercised by
@@ -2283,7 +2283,7 @@ const mockChannels: MockChannel[] = [
     visibility: "private",
     description: "Company announcements",
     topic: "Leadership updates",
-    purpose: "Read-only announcements for the workspace.",
+    purpose: "Read-only announcements for the community.",
     last_message_at: null,
     archived_at: null,
     created_by: ALICE_PUBKEY,
@@ -4453,7 +4453,7 @@ const MOCK_PROJECT_SEEDS = [
     dtag: "buzz",
     name: "buzz",
     description:
-      "Relay, desktop, and mobile clients for the Buzz workspace platform.",
+      "Relay, desktop, and mobile clients for the Buzz community platform.",
     owner: MOCK_IDENTITY_PUBKEY,
     contributors: [ALICE_PUBKEY, BOB_PUBKEY, CHARLIE_PUBKEY],
     activityLevel: 4,
@@ -7978,7 +7978,7 @@ function sendToMockSocket(args: {
     if (filter.kinds?.includes(KIND_EMOJI_SET)) {
       // Honor `authors` so `fetchOwnEmoji` (authors:[me]) sees only the
       // caller's set, while the union fetch (no authors) sees every member's —
-      // matching the real relay and the own-vs-workspace split in the UI.
+      // matching the real relay and the own-vs-community split in the UI.
       const authors = filter.authors?.map((a) => a.toLowerCase());
       for (const emojiEvent of createMockCustomEmojiSetEvents()) {
         if (authors && !authors.includes(emojiEvent.pubkey.toLowerCase())) {
@@ -8632,7 +8632,7 @@ export function maybeInstallE2eTauriMocks() {
           (payload as { nsec?: string } | null)?.nsec ?? "",
         );
       case "apply_workspace": {
-        const applyDelayMs = activeConfig?.mock?.applyWorkspaceDelayMs ?? 0;
+        const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
           return new Promise((resolve) =>
             window.setTimeout(resolve, applyDelayMs),
@@ -8734,7 +8734,7 @@ export function maybeInstallE2eTauriMocks() {
               author_name: "Git Importer",
               author_email: "git-importer@example.com",
               timestamp: Math.floor(Date.now() / 1000) - 7_200,
-              subject: "Merge remote project history into local workspace",
+              subject: "Merge remote project history into local community",
             },
           ],
           contributors: [
@@ -8763,7 +8763,7 @@ export function maybeInstallE2eTauriMocks() {
               kind: "blob",
               size: 18420,
               preview_content:
-                'export function ProjectDetailScreen() {\n  return <WorkspaceTabs defaultValue="files" />;\n}\n',
+                'export function ProjectDetailScreen() {\n  return <CommunityTabs defaultValue="files" />;\n}\n',
             },
             {
               path: "desktop/src/features/projects/ui/ProjectsView.tsx",
@@ -8803,8 +8803,8 @@ export function maybeInstallE2eTauriMocks() {
                 "@@ -1,6 +1,8 @@",
                 ' import { Tabs } from "@/shared/ui/tabs";',
                 "",
-                "-function WorkspaceTabs() {",
-                "+function WorkspaceTabs({ selectedCommitHash }) {",
+                "-function CommunityTabs() {",
+                "+function CommunityTabs({ selectedCommitHash }) {",
                 '+  const [selectedTab, setSelectedTab] = useState("overview");',
                 "+",
                 "   return (",

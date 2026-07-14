@@ -27,7 +27,7 @@ import type {
   NotificationSettings,
 } from "@/features/notifications/hooks";
 import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
-import { RelayMembersSettingsCard } from "@/features/relay-members/ui/RelayMembersSettingsCard";
+import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
 import { cn } from "@/shared/lib/cn";
@@ -76,7 +76,7 @@ export type SettingsSection =
   | "compute"
   | "appearance"
   | "shortcuts"
-  | "relay-members"
+  | "community-members"
   | "moderation"
   | "custom-emoji"
   | "local-archive"
@@ -95,7 +95,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "compute",
   "appearance",
   "shortcuts",
-  "relay-members",
+  "community-members",
   "moderation",
   "custom-emoji",
   "local-archive",
@@ -178,8 +178,8 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     icon: Keyboard,
   },
   {
-    value: "relay-members",
-    label: "Relay Access",
+    value: "community-members",
+    label: "Community Access",
     icon: LockKeyhole,
   },
   {
@@ -721,8 +721,10 @@ export function renderSettingsSection(
       return <ThemeSettingsCard />;
     case "shortcuts":
       return <KeyboardShortcutsCard />;
-    case "relay-members":
-      return <RelayMembersSettingsCard currentPubkey={props.currentPubkey} />;
+    case "community-members":
+      return (
+        <CommunityMembersSettingsCard currentPubkey={props.currentPubkey} />
+      );
     case "moderation":
       return <ModerationQueueCard />;
     case "custom-emoji":

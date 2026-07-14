@@ -10,7 +10,7 @@ import {
   useUnbanMemberMutation,
   useUntimeoutMemberMutation,
 } from "@/features/moderation/hooks";
-import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
+import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isTimedOut } from "@/features/moderation/lib/restrictionState";
 import { useIdentityQuery } from "@/shared/api/hooks";

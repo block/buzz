@@ -5,8 +5,8 @@ import { NostrBindConsentDialog } from "@/features/profile/ui/NostrBindConsentDi
 import "@fontsource-variable/inter/wght.css";
 import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
-import { migrateLegacyWorkspaceStorageBeforeRender } from "@/features/workspaces/legacyWorkspaceStorage";
-import { WorkspacesProvider } from "@/features/workspaces/useWorkspaces";
+import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
+import { CommunitiesProvider } from "@/features/communities/useCommunities";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
@@ -18,7 +18,7 @@ type E2eWindow = Window & {
 };
 
 const E2E_DEFAULT_PUBKEY = "deadbeef".repeat(8);
-const E2E_WORKSPACE_ID = "e2e-default-workspace";
+const E2E_COMMUNITY_ID = "e2e-default-community";
 const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX = "buzz-onboarding-complete.v1:";
 
 function configureDevE2eBridgeFromUrl() {
@@ -34,14 +34,14 @@ function configureDevE2eBridgeFromUrl() {
   const e2eWindow = window as E2eWindow;
   e2eWindow.__BUZZ_E2E__ ??= { mode: "mock" };
 
-  const workspace = {
+  const community = {
     addedAt: new Date().toISOString(),
-    id: E2E_WORKSPACE_ID,
+    id: E2E_COMMUNITY_ID,
     name: "E2E Test",
     relayUrl: "ws://localhost:3000",
   };
-  window.localStorage.setItem("buzz-workspaces", JSON.stringify([workspace]));
-  window.localStorage.setItem("buzz-active-workspace-id", E2E_WORKSPACE_ID);
+  window.localStorage.setItem("buzz-communities", JSON.stringify([community]));
+  window.localStorage.setItem("buzz-active-community-id", E2E_COMMUNITY_ID);
   window.localStorage.setItem(
     `${ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX}${E2E_DEFAULT_PUBKEY}`,
     "true",
@@ -51,7 +51,7 @@ function configureDevE2eBridgeFromUrl() {
 function renderApp() {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-      <WorkspacesProvider>
+      <CommunitiesProvider>
         <ThemeProvider defaultTheme="houston">
           <TooltipProvider delayDuration={300}>
             <EmojiBurstProvider>
@@ -65,7 +65,7 @@ function renderApp() {
             </EmojiBurstProvider>
           </TooltipProvider>
         </ThemeProvider>
-      </WorkspacesProvider>
+      </CommunitiesProvider>
     </React.StrictMode>,
   );
 }
@@ -84,7 +84,7 @@ async function installE2eBridgeIfConfigured() {
 async function bootstrap() {
   configureDevE2eBridgeFromUrl();
   await installE2eBridgeIfConfigured();
-  await migrateLegacyWorkspaceStorageBeforeRender();
+  await migrateLegacyCommunityStorageBeforeRender();
   renderApp();
 }
 

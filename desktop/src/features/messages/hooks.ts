@@ -636,7 +636,7 @@ export function useToggleReactionMutation() {
       }
 
       // Custom-emoji reaction: emoji is `:shortcode:`. Resolve its image URL
-      // from the cached workspace palette so the kind:7 carries the NIP-30
+      // from the cached community palette so the kind:7 carries the NIP-30
       // `["emoji", shortcode, url]` tag. Unicode reactions resolve to no URL.
       const emojiUrl = reactionEmojiUrl(
         emoji,

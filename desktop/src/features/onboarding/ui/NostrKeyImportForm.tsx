@@ -20,8 +20,8 @@ type NostrKeyImportFormProps = {
 /**
  * Paste-or-drop nsec import form with a live npub preview.
  *
- * Shared between the first-run welcome flow (no workspace yet) and the
- * onboarding profile flow (workspace exists, user wants to reuse an
+ * Shared between the first-run welcome flow (no community yet) and the
+ * onboarding profile flow (community exists, user wants to reuse an
  * existing key). The caller owns what happens after `onImport` resolves.
  */
 export function NostrKeyImportForm({

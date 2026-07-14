@@ -8,7 +8,7 @@ import { closeWebSocket } from "./relayWebSocketClose.ts";
 
 test("closeWebSocket sends a Close frame through plugin:websocket|send", async () => {
   const calls = [];
-  await closeWebSocket(42, "workspace switch", async (cmd, args) => {
+  await closeWebSocket(42, "community switch", async (cmd, args) => {
     calls.push({ cmd, args });
   });
 
@@ -18,7 +18,7 @@ test("closeWebSocket sends a Close frame through plugin:websocket|send", async (
     id: 42,
     message: {
       type: "Close",
-      data: { code: 1000, reason: "workspace switch" },
+      data: { code: 1000, reason: "community switch" },
     },
   });
 });
@@ -31,7 +31,7 @@ test("closeWebSocket swallows send failures (socket already gone)", async () => 
 
 // Regression guard: tauri-plugin-websocket registers only `connect` and
 // `send` — there is no `disconnect` command. Invoking one rejects silently
-// and leaks the socket (relay zombie pile, workspace-switch disconnects).
+// and leaks the socket (relay zombie pile, community-switch disconnects).
 // Any socket teardown must go through closeWebSocket.
 test("no source file invokes the nonexistent plugin:websocket|disconnect command", () => {
   const srcRoot = path.resolve(

@@ -50,7 +50,7 @@ import {
   useUserStatusQuery,
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
-import { useWorkspaceEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
+import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
 import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
 import { useObserverArchiveSeed } from "@/features/local-archive/useObserverArchiveSeed";
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
@@ -65,10 +65,10 @@ import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
-import { WorkspaceRail } from "@/features/sidebar/ui/WorkspaceRail";
+import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
 import { useFeatureEnabled } from "@/shared/features";
@@ -98,9 +98,9 @@ export function AppShell() {
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
 
-  const workspacesHook = useWorkspaces();
-  const workspaceRailEnabled = useFeatureEnabled("workspaceRail");
-  const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
+  const communitiesHook = useCommunities();
+  const communityRailEnabled = useFeatureEnabled("workspaceRail");
+  const [isAddCommunityOpen, setIsAddCommunityOpen] = React.useState(false);
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
   const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
@@ -128,24 +128,24 @@ export function AppShell() {
   } = useAppNavigation();
   const { canGoBack, canGoForward, goBack, goForward } =
     useBackForwardControls();
-  // Navigate home before switching workspaces so the outgoing channel URL is
+  // Navigate home before switching communities so the outgoing channel URL is
   // cleared. Without this, ChannelScreen's read effect continues firing
-  // markChannelRead({ topLevelOnly: true }) for the previous workspace's
+  // markChannelRead({ topLevelOnly: true }) for the previous community's
   // channel, advancing its NIP-RS markers and causing the rail badge to vanish
   // on the next 30s poll (A→B→A→B disappearance bug).
-  // Guard: skip goHome() when re-selecting the already-active workspace so
+  // Guard: skip goHome() when re-selecting the already-active community so
   // the current channel is not unexpectedly cleared.
-  const handleSwitchWorkspace = React.useCallback(
+  const handleSwitchCommunity = React.useCallback(
     (id: string) => {
-      if (id !== workspacesHook.activeWorkspace?.id) {
+      if (id !== communitiesHook.activeCommunity?.id) {
         void goHome();
       }
-      workspacesHook.switchWorkspace(id);
+      communitiesHook.switchCommunity(id);
     },
     [
       goHome,
-      workspacesHook.activeWorkspace?.id,
-      workspacesHook.switchWorkspace,
+      communitiesHook.activeCommunity?.id,
+      communitiesHook.switchCommunity,
     ],
   );
   const { selectedChannelId, selectedView } = React.useMemo(
@@ -196,7 +196,7 @@ export function AppShell() {
   useRelayAutoHeal();
   usePresenceSubscription();
   useUserStatusSubscription();
-  useWorkspaceEmojiLiveUpdates();
+  useCommunityEmojiLiveUpdates();
   useMembershipNotifications(identityQuery.data?.pubkey);
   const presenceSession = usePresenceSession(deferredPubkey);
   const selfStatusQuery = useUserStatusQuery(
@@ -227,7 +227,7 @@ export function AppShell() {
       : undefined;
   const relayConnectionCard = useSidebarRelayConnectionCard(
     channelsErrorMessage,
-    workspacesHook.activeWorkspace?.relayUrl,
+    communitiesHook.activeCommunity?.relayUrl,
   );
   const memberChannels = React.useMemo(
     () => channels.filter((channel) => channel.isMember),
@@ -293,7 +293,7 @@ export function AppShell() {
   } = useUnreadChannels(sidebarChannels, activeChannel, {
     pubkey: identityQuery.data?.pubkey,
     relayClient,
-    relayUrl: workspacesHook.activeWorkspace?.relayUrl,
+    relayUrl: communitiesHook.activeCommunity?.relayUrl,
     currentPubkey: identityQuery.data?.pubkey,
     mutedChannelIds,
     notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
@@ -676,16 +676,16 @@ export function AppShell() {
                     isHuddleDrawerOpen && "buzz-huddle-app-surface-open",
                   )}
                 >
-                  {workspaceRailEnabled ? (
-                    <WorkspaceRail
-                      activeWorkspaceId={
-                        workspacesHook.activeWorkspace?.id ?? null
+                  {communityRailEnabled ? (
+                    <CommunityRail
+                      activeCommunityId={
+                        communitiesHook.activeCommunity?.id ?? null
                       }
-                      onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
-                      onRemoveWorkspace={workspacesHook.removeWorkspace}
-                      onSwitchWorkspace={handleSwitchWorkspace}
-                      onUpdateWorkspace={workspacesHook.updateWorkspace}
-                      workspaces={workspacesHook.workspaces}
+                      onAddCommunity={() => setIsAddCommunityOpen(true)}
+                      onRemoveCommunity={communitiesHook.removeCommunity}
+                      onSwitchCommunity={handleSwitchCommunity}
+                      onUpdateCommunity={communitiesHook.updateCommunity}
+                      communities={communitiesHook.communities}
                     />
                   ) : null}
                   <SidebarProvider className="min-h-0 flex-1 flex-col overflow-hidden">
@@ -693,9 +693,9 @@ export function AppShell() {
                       <AppTopChrome
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
-                        hasWorkspaceRail={
-                          workspaceRailEnabled &&
-                          workspacesHook.workspaces.length > 1
+                        hasCommunityRail={
+                          communityRailEnabled &&
+                          communitiesHook.communities.length > 1
                         }
                         onGoBack={goBack}
                         onGoForward={goForward}
@@ -746,35 +746,35 @@ export function AppShell() {
                     ) : (
                       <div className="flex min-h-0 flex-1 overflow-hidden">
                         <AppSidebar
-                          activeWorkspace={workspacesHook.activeWorkspace}
+                          activeCommunity={communitiesHook.activeCommunity}
                           channels={sidebarChannels}
                           currentPubkey={identityQuery.data?.pubkey}
                           errorMessage={channelsErrorMessage}
                           fallbackDisplayName={identityQuery.data?.displayName}
                           homeBadgeCount={homeBadgeCount + dueReminderBadge}
-                          isAddWorkspaceOpen={isAddWorkspaceOpen}
+                          isAddCommunityOpen={isAddCommunityOpen}
                           relayConnectionCard={relayConnectionCard}
                           isCreatingChannel={createChannelMutation.isPending}
                           isCreatingForum={createForumMutation.isPending}
                           isLoading={channelsQuery.isLoading}
                           isCreateChannelOpen={isCreateChannelOpen}
                           isPresencePending={presenceSession.isPending}
-                          onAddWorkspace={(workspace) => {
-                            const id = workspacesHook.addWorkspace(workspace);
-                            handleSwitchWorkspace(id);
+                          onAddCommunity={(community) => {
+                            const id = communitiesHook.addCommunity(community);
+                            handleSwitchCommunity(id);
                           }}
-                          onAddWorkspaceOpenChange={setIsAddWorkspaceOpen}
+                          onAddCommunityOpenChange={setIsAddCommunityOpen}
                           onNewMessage={handleOpenNewDm}
                           onCreateChannelOpenChange={setIsCreateChannelOpen}
-                          onOpenAddWorkspace={() => setIsAddWorkspaceOpen(true)}
-                          onUpdateWorkspace={workspacesHook.updateWorkspace}
-                          onRemoveWorkspace={workspacesHook.removeWorkspace}
-                          onSwitchWorkspace={handleSwitchWorkspace}
+                          onOpenAddCommunity={() => setIsAddCommunityOpen(true)}
+                          onUpdateCommunity={communitiesHook.updateCommunity}
+                          onRemoveCommunity={communitiesHook.removeCommunity}
+                          onSwitchCommunity={handleSwitchCommunity}
                           onCreateAgent={() =>
                             void goAgents().then(requestOpenCreateAgent)
                           }
                           selfPresenceStatus={presenceSession.currentStatus}
-                          workspaces={workspacesHook.workspaces}
+                          communities={communitiesHook.communities}
                           onCreateChannel={async ({
                             description,
                             name,
@@ -893,9 +893,9 @@ export function AppShell() {
                         <RelayConnectionOverlay
                           card={relayConnectionCard}
                           errorMessage={channelsErrorMessage}
-                          hasWorkspaceRail={
-                            workspaceRailEnabled &&
-                            workspacesHook.workspaces.length > 1
+                          hasCommunityRail={
+                            communityRailEnabled &&
+                            communitiesHook.communities.length > 1
                           }
                           isHuddleDrawerOpen={isHuddleDrawerOpen}
                         />

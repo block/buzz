@@ -31,7 +31,7 @@ import type {
   SetChannelTopicInput,
   UpdateChannelInput,
 } from "@/shared/api/types";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
+import { useCommunities } from "@/features/communities/useCommunities";
 import {
   readChannelSnapshot,
   writeChannelSnapshot,
@@ -188,8 +188,8 @@ function setChannelArchivedState(
 }
 
 export function useChannelsQuery(options?: { enabled?: boolean }) {
-  const { activeWorkspace } = useWorkspaces();
-  const relayUrl = activeWorkspace?.relayUrl ?? null;
+  const { activeCommunity } = useCommunities();
+  const relayUrl = activeCommunity?.relayUrl ?? null;
 
   return useQuery({
     enabled: options?.enabled ?? true,

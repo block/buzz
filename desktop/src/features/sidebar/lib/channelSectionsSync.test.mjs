@@ -15,7 +15,7 @@ function makeStore(overrides = {}) {
 
 // ─── destroy() must cancel pending publish, not flush ─────────────────────────
 
-// Regression guard for the workspace-switch cross-relay publish vector:
+// Regression guard for the community-switch cross-relay publish vector:
 // edit sections in relay A → destroy() is called (relayUrl dep change) →
 // no publish should fire. The scoped localStorage write is durable; when the
 // user returns to relay A the seed-publish path handles it.
@@ -62,7 +62,7 @@ test("destroy: cancels pending publish without flushing to the relay", () => {
     manager.publishSections(store);
     assert.ok(timerCallback !== null, "debounce timer should be set");
 
-    // Destroy before the debounce fires — simulates workspace switch.
+    // Destroy before the debounce fires — simulates community switch.
     manager.destroy();
 
     // Timer must be cleared and no publish should fire now.

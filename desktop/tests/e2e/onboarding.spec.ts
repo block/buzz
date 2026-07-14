@@ -550,7 +550,7 @@ test("completed users skip the loading gate while profile is still settling", as
   await expectHomeView(page);
 });
 
-test("first-run default workspace handoff gives immediate stepper feedback", async ({
+test("first-run default community handoff gives immediate stepper feedback", async ({
   page,
 }) => {
   // Use a blank-username identity so the profile has no display name and
@@ -565,14 +565,14 @@ test("first-run default workspace handoff gives immediate stepper feedback", asy
     {
       relayWsUrl: "wss://default.example.com",
       skipOnboardingSeed: true,
-      skipWorkspaceSeed: true,
+      skipCommunitySeed: true,
     },
   );
   await page.goto("/");
 
   await expect(page.getByText("Welcome to Buzz")).toBeVisible();
   await page
-    .getByRole("button", { name: "Continue with default workspace" })
+    .getByRole("button", { name: "Continue with default community" })
     .click();
 
   await page.waitForTimeout(80);
@@ -580,7 +580,7 @@ test("first-run default workspace handoff gives immediate stepper feedback", asy
     0,
   );
   await expect(
-    page.getByRole("button", { name: "Continue with default workspace" }),
+    page.getByRole("button", { name: "Continue with default community" }),
   ).toBeVisible();
   await expect(page.getByRole("progressbar")).toHaveAttribute(
     "aria-valuenow",
@@ -607,7 +607,7 @@ test("welcome can continue using an existing Nostr key", async ({ page }) => {
   await installMockBridge(page, undefined, {
     relayWsUrl: "wss://default.example.com",
     skipOnboardingSeed: true,
-    skipWorkspaceSeed: true,
+    skipCommunitySeed: true,
   });
   await page.goto("/");
 
@@ -626,11 +626,11 @@ test("welcome can continue using an existing Nostr key", async ({ page }) => {
   await expect
     .poll(() =>
       page.evaluate(() => {
-        const rawWorkspaces = window.localStorage.getItem("buzz-workspaces");
-        const workspaces = rawWorkspaces
-          ? (JSON.parse(rawWorkspaces) as Array<{ pubkey?: string }>)
+        const rawCommunities = window.localStorage.getItem("buzz-communities");
+        const communities = rawCommunities
+          ? (JSON.parse(rawCommunities) as Array<{ pubkey?: string }>)
           : [];
-        return workspaces[0]?.pubkey ?? null;
+        return communities[0]?.pubkey ?? null;
       }),
     )
     .toBe(TEST_IDENTITIES.alice.pubkey);
@@ -638,25 +638,25 @@ test("welcome can continue using an existing Nostr key", async ({ page }) => {
   await expectHomeView(page);
 });
 
-test("welcome presents custom workspace setup as joining a workspace", async ({
+test("welcome presents custom community setup as joining a community", async ({
   page,
 }) => {
   await installMockBridge(page, undefined, {
     skipOnboardingSeed: true,
-    skipWorkspaceSeed: true,
+    skipCommunitySeed: true,
   });
   await page.goto("/");
 
   await expect(
-    page.getByRole("button", { name: "Continue with default workspace" }),
+    page.getByRole("button", { name: "Continue with default community" }),
   ).toHaveCount(0);
-  await page.getByRole("button", { name: "Join a workspace" }).click();
+  await page.getByRole("button", { name: "Join a community" }).click();
 
   await expect(
-    page.getByRole("heading", { name: "Join a workspace" }),
+    page.getByRole("heading", { name: "Join a community" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Join a workspace" }),
+    page.getByRole("button", { name: "Join a community" }),
   ).toBeVisible();
 });
 
@@ -1050,7 +1050,7 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   const loadingGate = page.getByTestId("app-loading-gate");
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expect(loadingGate).toBeVisible();
-  await expect(loadingGate).toContainText("Setting up your workspace...");
+  await expect(loadingGate).toContainText("Setting up your community...");
 
   // The boot gate is the theme-adaptive grainient with the flapping Buzz bee
   // as its hero. The mark must paint complete on the FIRST frame — a blank
@@ -1136,10 +1136,10 @@ test("existing relay profile with display name auto-skips onboarding without loc
   await expectHomeView(page);
 });
 
-test("onboarding can import an existing key when the workspace is already set up", async ({
+test("onboarding can import an existing key when the community is already set up", async ({
   page,
 }) => {
-  // Workspace exists (default seed), but this identity has no profile yet,
+  // Community exists (default seed), but this identity has no profile yet,
   // so the app lands on the onboarding name step — Tyler's moved-laptop /
   // fresh-dev-instance case.
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -1311,7 +1311,7 @@ test("custom relay proxy sign-in failures use the generic reconnect card", async
   ).toContainText("Can't reach the relay");
 });
 
-test("relay access failures use the generic reconnect card", async ({
+test("community access failures use the generic reconnect card", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);

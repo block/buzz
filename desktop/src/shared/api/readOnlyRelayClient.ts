@@ -27,9 +27,9 @@ type PendingPublish = {
 };
 
 /**
- * Minimal relay session for inactive-workspace observation (and the rail's
+ * Minimal relay session for inactive-community observation (and the rail's
  * cross-relay "mark all as read" publish). It never reads or mutates the
- * active workspace backend relay URL; callers pass an explicit URL and should
+ * active community backend relay URL; callers pass an explicit URL and should
  * disconnect as soon as their polling batch finishes.
  */
 export class ReadOnlyRelayClient {
