@@ -391,8 +391,13 @@ export function PersonaShareDialog({
               </Button>
             </div>
 
-            <section className="space-y-3" data-testid="persona-share-access">
-              <h3 className="text-sm font-semibold">Who has access</h3>
+            <section
+              className="space-y-3 pt-2"
+              data-testid="persona-share-access"
+            >
+              <h3 className="text-sm font-semibold text-secondary-foreground/75">
+                Who has access
+              </h3>
               <div
                 className="flex min-h-9 items-center gap-3"
                 data-testid="persona-share-access-link"
