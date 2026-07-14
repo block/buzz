@@ -548,7 +548,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 16);
+        assert_eq!(migrations.len(), 17);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -763,6 +763,15 @@ mod tests {
             .sql
             .as_str()
             .contains("_operator_global_tables"));
+
+        // Matching is driven from a parent-table trigger so all partition and
+        // internal insertion paths share the same crash-safe allowlist seam.
+        assert_eq!(migrations[16].version, 17);
+        let matcher = migrations[16].sql.as_str();
+        assert!(matcher.contains("CREATE TABLE push_match_queue"));
+        assert!(matcher.contains("AFTER INSERT ON events"));
+        assert!(matcher.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
+        assert!(!migrations[0].sql.as_str().contains("push_match_queue"));
     }
 
     #[test]

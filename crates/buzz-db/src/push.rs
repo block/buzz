@@ -78,10 +78,16 @@ pub struct NewWake<'a> {
 /// One exclusively claimed wake, already revalidated against its current lease.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaimedWake {
+    /// Server-resolved tenant that owns this wake.
+    pub community: CommunityId,
     /// Durable job id; this is also the stable gateway/APNs request id.
     pub id: Uuid,
     /// Claim fencing token required by every completion operation.
     pub claim_id: Uuid,
+    /// Accepted event that caused the wake.
+    pub event_id: Vec<u8>,
+    /// Event channel used for send-time authorization revalidation.
+    pub channel_id: Option<Uuid>,
     /// Lease author whose read authorization must be rechecked by the relay.
     pub author: Vec<u8>,
     /// Installation address within the community.
@@ -105,6 +111,32 @@ pub enum RevalidateWakeOutcome {
     Deliver(ClaimedWake),
     /// The claim was lost or the lease rotated, revoked, expired, or disabled.
     Suppressed,
+}
+
+/// One durably accepted event claimed for push matching.
+#[derive(Debug, Clone)]
+pub struct ClaimedMatch {
+    /// Tenant that owns both the event and matcher job.
+    pub community: CommunityId,
+    /// Non-deleted source event loaded after the claim commits.
+    pub event: buzz_core::StoredEvent,
+    /// Fencing token required to complete or retry this claim.
+    pub claim_id: Uuid,
+}
+
+/// Current active lease candidate for matcher evaluation.
+#[derive(Debug, Clone)]
+pub struct MatchLease {
+    /// Lease owner's raw public key.
+    pub author: Vec<u8>,
+    /// Installation address within the tenant.
+    pub installation_id: String,
+    /// Monotonic generation captured into any resulting wake.
+    pub generation: i64,
+    /// Validated restricted subscription array.
+    pub subscriptions: Value,
+    /// Lease expiry as a Unix timestamp.
+    pub expires_at: i64,
 }
 
 /// Result of atomically accepting a signed push lease and its effective state.
@@ -538,6 +570,109 @@ pub async fn enqueue_wake(
     Ok(outcome)
 }
 
+/// Exclusively claim the next due matcher job and load its non-deleted event.
+pub async fn claim_due_match(
+    pool: &PgPool,
+    lease_until: DateTime<Utc>,
+) -> Result<Option<ClaimedMatch>> {
+    let claim_id = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        WITH candidate AS (
+            SELECT community_id, event_id
+            FROM push_match_queue
+            WHERE next_attempt_at <= now()
+              AND (state = 'pending' OR (state = 'matching' AND lease_until < now()))
+            ORDER BY next_attempt_at, created_at
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE push_match_queue q
+        SET state='matching', claim_id=$1, lease_until=$2, attempts=attempts+1
+        FROM candidate c
+        WHERE q.community_id=c.community_id AND q.event_id=c.event_id
+        RETURNING q.community_id, q.event_id
+        "#,
+    )
+    .bind(claim_id)
+    .bind(lease_until)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let community = CommunityId::from_uuid(row.try_get("community_id")?);
+    let event_id: Vec<u8> = row.try_get("event_id")?;
+    tx.commit().await?;
+    let event = crate::event::get_events_by_ids(pool, community, &[&event_id])
+        .await?
+        .into_iter()
+        .next();
+    let Some(event) = event else {
+        // Source absence and soft deletion are deliberate privacy-preserving
+        // terminal outcomes. Query errors above propagate instead, leaving the
+        // fenced job recoverable after its claim lease expires.
+        sqlx::query(
+            "DELETE FROM push_match_queue \
+             WHERE community_id=$1 AND event_id=$2 AND claim_id=$3 AND state='matching'",
+        )
+        .bind(community.as_uuid())
+        .bind(&event_id)
+        .bind(claim_id)
+        .execute(pool)
+        .await?;
+        return Ok(None);
+    };
+    Ok(Some(ClaimedMatch {
+        community,
+        event,
+        claim_id,
+    }))
+}
+
+/// Load active endpoint-enabled leases for one tenant.
+pub async fn active_match_leases(pool: &PgPool, community: CommunityId) -> Result<Vec<MatchLease>> {
+    let rows = sqlx::query(
+        "SELECT author, installation_id, generation, subscriptions, expires_at \
+         FROM push_leases WHERE community_id=$1 AND active AND endpoint_enabled \
+         AND expires_at > EXTRACT(EPOCH FROM now())::bigint",
+    )
+    .bind(community.as_uuid())
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(MatchLease {
+                author: row.try_get("author")?,
+                installation_id: row.try_get("installation_id")?,
+                generation: row.try_get("generation")?,
+                subscriptions: row.try_get("subscriptions")?,
+                expires_at: row.try_get("expires_at")?,
+            })
+        })
+        .collect()
+}
+
+/// Delete a matcher job only while its claim fence is held.
+pub async fn complete_match(pool: &PgPool, match_job: &ClaimedMatch) -> Result<bool> {
+    Ok(sqlx::query("DELETE FROM push_match_queue WHERE community_id=$1 AND event_id=$2 AND claim_id=$3 AND state='matching'")
+        .bind(match_job.community.as_uuid()).bind(match_job.event.event.id.as_bytes().as_slice())
+        .bind(match_job.claim_id).execute(pool).await?.rows_affected() == 1)
+}
+
+/// Release a fenced matcher claim for retry at the supplied time.
+pub async fn retry_match(
+    pool: &PgPool,
+    match_job: &ClaimedMatch,
+    next: DateTime<Utc>,
+) -> Result<bool> {
+    Ok(sqlx::query("UPDATE push_match_queue SET state='pending', claim_id=NULL, lease_until=NULL, next_attempt_at=$4 WHERE community_id=$1 AND event_id=$2 AND claim_id=$3 AND state='matching'")
+        .bind(match_job.community.as_uuid()).bind(match_job.event.event.id.as_bytes().as_slice())
+        .bind(match_job.claim_id).bind(next).execute(pool).await?.rows_affected() == 1)
+}
+
 /// Claim due jobs for one community, recovering expired worker leases.
 ///
 /// Claiming performs an early lease check, but callers MUST invoke
@@ -552,7 +687,7 @@ pub async fn claim_due_wakes(
     let rows = sqlx::query(
         r#"
         WITH candidates AS (
-            SELECT o.id
+            SELECT o.id, e.channel_id
             FROM push_wake_outbox o
             JOIN push_leases l
               ON l.community_id = o.community_id
@@ -560,7 +695,12 @@ pub async fn claim_due_wakes(
              AND l.installation_id = o.installation_id
              AND l.generation = o.lease_generation
              AND l.endpoint_hash = o.endpoint_hash
+            LEFT JOIN events e
+              ON e.community_id = o.community_id
+             AND e.id = o.event_id
+             AND e.deleted_at IS NULL
             WHERE o.community_id = $1
+              AND e.id IS NOT NULL
               AND o.expires_at > EXTRACT(EPOCH FROM now())::bigint
               AND o.next_attempt_at <= now()
               AND (o.state = 'pending' OR (o.state = 'sending' AND o.lease_until < now()))
@@ -581,9 +721,9 @@ pub async fn claim_due_wakes(
           AND l.installation_id = o.installation_id
           AND l.generation = o.lease_generation
           AND l.endpoint_hash = o.endpoint_hash
-        RETURNING o.id, o.claim_id, o.author, o.installation_id,
-                  o.lease_generation, l.endpoint_grant, o.class,
-                  o.expires_at, o.attempts
+        RETURNING o.community_id, o.id, o.claim_id, o.event_id, c.channel_id,
+                  o.author, o.installation_id, o.lease_generation,
+                  l.endpoint_grant, o.class, o.expires_at, o.attempts
         "#,
     )
     .bind(community.as_uuid())
@@ -609,9 +749,9 @@ pub async fn revalidate_wake_for_send(
 ) -> Result<RevalidateWakeOutcome> {
     let row = sqlx::query(
         r#"
-        SELECT o.id, o.claim_id, o.author, o.installation_id,
-               o.lease_generation, l.endpoint_grant, o.class,
-               o.expires_at, o.attempts
+        SELECT o.community_id, o.id, o.claim_id, o.event_id, e.channel_id,
+               o.author, o.installation_id, o.lease_generation,
+               l.endpoint_grant, o.class, o.expires_at, o.attempts
         FROM push_wake_outbox o
         JOIN push_leases l
           ON l.community_id = o.community_id
@@ -619,6 +759,10 @@ pub async fn revalidate_wake_for_send(
          AND l.installation_id = o.installation_id
          AND l.generation = o.lease_generation
          AND l.endpoint_hash = o.endpoint_hash
+        JOIN events e
+          ON e.community_id = o.community_id
+         AND e.id = o.event_id
+         AND e.deleted_at IS NULL
         WHERE o.community_id = $1
           AND o.id = $2
           AND o.claim_id = $3
@@ -737,10 +881,14 @@ pub async fn prune_wake_outbox(
     before: DateTime<Utc>,
 ) -> Result<u64> {
     let result = sqlx::query(
-        "DELETE FROM push_wake_outbox \
-         WHERE community_id = $1 AND created_at < $2 \
-           AND (state IN ('delivered', 'failed') \
-                OR expires_at <= EXTRACT(EPOCH FROM now())::bigint)",
+        "DELETE FROM push_wake_outbox o \
+         WHERE o.community_id = $1 AND o.created_at < $2 \
+           AND (o.state IN ('delivered', 'failed') \
+                OR o.expires_at <= EXTRACT(EPOCH FROM now())::bigint) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM push_match_queue q \
+               WHERE q.community_id = o.community_id AND q.event_id = o.event_id \
+           )",
     )
     .bind(community.as_uuid())
     .bind(before)
@@ -751,8 +899,11 @@ pub async fn prune_wake_outbox(
 
 fn row_to_claimed_wake(row: sqlx::postgres::PgRow) -> Result<ClaimedWake> {
     Ok(ClaimedWake {
+        community: CommunityId::from_uuid(row.try_get("community_id")?),
         id: row.try_get("id")?,
         claim_id: row.try_get("claim_id")?,
+        event_id: row.try_get("event_id")?,
+        channel_id: row.try_get("channel_id")?,
         author: row.try_get("author")?,
         installation_id: row.try_get("installation_id")?,
         lease_generation: row.try_get("lease_generation")?,
@@ -1090,9 +1241,20 @@ mod tests {
         pool: &PgPool,
         community: CommunityId,
         author: &[u8],
-        event: &[u8],
+        event_id: &[u8; 32],
         generation: i64,
     ) -> Uuid {
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+             VALUES ($1, $2, $3, to_timestamp(1), 9, '[]', '', $4)",
+        )
+        .bind(community.as_uuid())
+        .bind(event_id)
+        .bind([42_u8; 32])
+        .bind([43_u8; 64])
+        .execute(pool)
+        .await
+        .expect("insert wake source event");
         match enqueue_wake(
             pool,
             community,
@@ -1100,7 +1262,7 @@ mod tests {
             "install",
             NewWake {
                 lease_generation: generation,
-                event_id: event,
+                event_id,
                 class: "default",
                 expires_at: i64::MAX / 2,
             },
@@ -1260,5 +1422,86 @@ mod tests {
             .expect("new generation stays enabled"),
             EnqueueWakeOutcome::Enqueued(_)
         ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn matcher_trigger_is_allowlisted_and_deleted_events_are_discarded() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let keys = nostr::Keys::generate();
+        let push_event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "push")
+            .sign_with_keys(&keys)
+            .expect("sign push event");
+        let read_state = nostr::EventBuilder::new(nostr::Kind::Custom(30_078), "read")
+            .sign_with_keys(&keys)
+            .expect("sign read state");
+        crate::event::insert_event(&pool, community, &push_event, None)
+            .await
+            .expect("insert push event");
+        crate::event::insert_event(&pool, community, &read_state, None)
+            .await
+            .expect("insert non-push event");
+
+        let queued: Vec<i32> = sqlx::query_scalar(
+            "SELECT e.kind FROM push_match_queue q JOIN events e \
+             ON e.community_id=q.community_id AND e.id=q.event_id \
+             WHERE q.community_id=$1",
+        )
+        .bind(community.as_uuid())
+        .fetch_all(&pool)
+        .await
+        .expect("read matcher queue");
+        assert_eq!(queued, vec![9]);
+
+        sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
+            .bind(community.as_uuid())
+            .bind(push_event.id.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .expect("soft delete before matching");
+        assert!(
+            claim_due_match(&pool, Utc::now() + chrono::Duration::minutes(1))
+                .await
+                .expect("claim deleted event")
+                .is_none()
+        );
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM push_match_queue WHERE community_id=$1")
+                .bind(community.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .expect("count discarded job");
+        assert_eq!(remaining, 0, "deleted content must never produce a wake");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn matcher_claim_is_exclusive_across_workers() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "one job")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign event");
+        crate::event::insert_event(&pool, community, &event, None)
+            .await
+            .expect("insert event");
+        let barrier = Arc::new(Barrier::new(8));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let pool = pool.clone();
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                claim_due_match(&pool, Utc::now() + chrono::Duration::minutes(1))
+                    .await
+                    .expect("claim matcher job")
+            }));
+        }
+        let mut claimed = 0;
+        for task in tasks {
+            claimed += usize::from(task.await.expect("join").is_some());
+        }
+        assert_eq!(claimed, 1);
     }
 }

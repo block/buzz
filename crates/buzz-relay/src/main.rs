@@ -599,6 +599,17 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // NIP-PL matcher and worker are enabled as one unit. Lease acceptance is
+    // already disabled without the exact gateway URL, so discovery and runtime
+    // cannot advertise or accumulate work for an undeliverable configuration.
+    if state.config.push_gateway_delivery_url.is_some() {
+        tokio::spawn(buzz_relay::push_runtime::run_matcher(Arc::clone(&state)));
+        tokio::spawn(buzz_relay::push_runtime::run_delivery_worker(Arc::clone(
+            &state,
+        )));
+        info!("NIP-PL push matcher and delivery worker started");
+    }
+
     // NIP-ER reminder scheduler — polls for due reminders and publishes them
     // to Redis pub/sub for cross-pod fan-out. Each pod's existing
     // subscribe_local consumer picks them up and applies the author-only gate.

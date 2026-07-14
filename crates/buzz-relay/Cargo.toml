@@ -54,6 +54,7 @@ redis = { workspace = true }
 # main(). Mirrors buzz-acp's rustls setup for wss://.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 sqlx = { workspace = true }
+reqwest = { workspace = true }
 base64 = "0.22"
 buzz-sdk = { workspace = true }
 buzz-workflow = { workspace = true, features = ["reqwest"] }

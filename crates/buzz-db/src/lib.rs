@@ -949,6 +949,116 @@ impl Db {
         event::get_events_by_ids(&self.pool, community_id, ids).await
     }
 
+    /// Exclusively claim the next due event-to-push matcher job.
+    pub async fn claim_due_push_match(
+        &self,
+        lease_until: DateTime<Utc>,
+    ) -> Result<Option<push::ClaimedMatch>> {
+        push::claim_due_match(&self.pool, lease_until).await
+    }
+
+    /// Load active endpoint-enabled leases eligible for push matching.
+    pub async fn active_push_match_leases(
+        &self,
+        community: CommunityId,
+    ) -> Result<Vec<push::MatchLease>> {
+        push::active_match_leases(&self.pool, community).await
+    }
+
+    /// Complete a matcher job if its claim fence is still held.
+    pub async fn complete_push_match(&self, job: &push::ClaimedMatch) -> Result<bool> {
+        push::complete_match(&self.pool, job).await
+    }
+
+    /// Release a matcher claim for retry at the supplied time.
+    pub async fn retry_push_match(
+        &self,
+        job: &push::ClaimedMatch,
+        next: DateTime<Utc>,
+    ) -> Result<bool> {
+        push::retry_match(&self.pool, job, next).await
+    }
+
+    /// Idempotently enqueue a wake for a matched lease and event.
+    pub async fn enqueue_push_wake(
+        &self,
+        community: CommunityId,
+        author: &[u8],
+        installation_id: &str,
+        wake: push::NewWake<'_>,
+    ) -> Result<push::EnqueueWakeOutcome> {
+        push::enqueue_wake(&self.pool, community, author, installation_id, wake).await
+    }
+
+    /// Exclusively claim due wake jobs for one community.
+    pub async fn claim_due_push_wakes(
+        &self,
+        community: CommunityId,
+        limit: i64,
+        lease_until: DateTime<Utc>,
+    ) -> Result<Vec<push::ClaimedWake>> {
+        push::claim_due_wakes(&self.pool, community, limit, lease_until).await
+    }
+
+    /// Revalidate a wake's claim, source event, and current lease before send.
+    pub async fn revalidate_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+    ) -> Result<push::RevalidateWakeOutcome> {
+        push::revalidate_wake_for_send(&self.pool, community, id, claim_id).await
+    }
+
+    /// Mark a fenced wake claim delivered.
+    pub async fn complete_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+    ) -> Result<bool> {
+        push::complete_wake(&self.pool, community, id, claim_id).await
+    }
+
+    /// Release a fenced wake claim for retry at the supplied time.
+    pub async fn retry_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+        next: DateTime<Utc>,
+    ) -> Result<bool> {
+        push::retry_wake(&self.pool, community, id, claim_id, next).await
+    }
+
+    /// Mark a fenced wake claim terminally failed.
+    pub async fn fail_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+    ) -> Result<bool> {
+        push::fail_wake(&self.pool, community, id, claim_id).await
+    }
+
+    /// Disable an endpoint only if the specified lease generation is current.
+    pub async fn disable_push_endpoint(
+        &self,
+        community: CommunityId,
+        author: &[u8],
+        installation_id: &str,
+        generation: i64,
+    ) -> Result<bool> {
+        push::disable_endpoint_generation(
+            &self.pool,
+            community,
+            author,
+            installation_id,
+            generation,
+        )
+        .await
+    }
+
     /// Atomically persist a validated kind:30350 event and its effective lease.
     #[allow(clippy::too_many_arguments)]
     pub async fn accept_push_lease_event(

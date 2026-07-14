@@ -40,6 +40,9 @@ pub struct RelayInfo {
     /// Draft/extension protocol identifiers supported by this relay.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supported_extensions: Option<Vec<String>>,
+    /// NIP-PL executor descriptor. Present only when push delivery is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub push: Option<serde_json::Value>,
     /// URL of the relay software repository.
     pub software: String,
     /// Relay software version string.
@@ -155,6 +158,7 @@ impl RelayInfo {
             contact: None,
             supported_nips,
             supported_extensions: Some(vec!["nip-er".to_string()]),
+            push: None,
             software: "https://github.com/block/buzz".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             limitation: Some(relay_limitation(max_message_length)),
@@ -185,13 +189,56 @@ pub async fn relay_info_handler(
 pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &str) -> RelayInfo {
     let (relay_self, advertise_nip43) = nip11_facts(state);
     let icon = workspace_icon_for_host(state, raw_host).await;
-    RelayInfo::build(
+    let mut info = RelayInfo::build(
         relay_self.as_deref(),
         icon.as_deref(),
         advertise_nip43,
         state.config.max_frame_bytes,
         state.config.pairing_relay_url.as_deref(),
-    )
+    );
+    if state.config.push_gateway_delivery_url.is_some() {
+        if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+            let scheme = if state.config.relay_url.starts_with("wss://") {
+                "wss"
+            } else {
+                "ws"
+            };
+            info.supported_extensions
+                .get_or_insert_default()
+                .push("nip-pl".to_string());
+            info.push = Some(serde_json::json!({
+                "origin": format!("{scheme}://{}", tenant.host()),
+                "keys": [{
+                    "id": state.config.push_executor_key_id,
+                    "pubkey": state.relay_keypair.public_key().to_hex(),
+                    "current": true
+                }],
+                "app_profiles": [
+                    {"id": "buzz-ios-production", "transport": "apns"},
+                    {"id": "buzz-ios-sandbox", "transport": "apns"}
+                ],
+                "push_kinds": crate::handlers::push_lease::PUSH_KINDS,
+                "urgent_kinds": crate::handlers::push_lease::URGENT_KINDS,
+                "h_grammar": "uuid-v4-lowercase",
+                "class_support": {"apns": ["silent", "default", "time_sensitive"]},
+                "limitation": {
+                    "max_lease_ttl": 2592000,
+                    "max_leases_per_pubkey": 16,
+                    "max_subscriptions_per_lease": 16,
+                    "max_kinds": 16,
+                    "max_authors": 20,
+                    "max_h": 50,
+                    "max_tag_values": 20,
+                    "max_ignore": 8,
+                    "max_content_len": 65536,
+                    "max_plaintext_len": 32768,
+                    "max_endpoint_len": 4096,
+                    "max_string_len": 512
+                }
+            }));
+        }
+    }
+    info
 }
 
 /// Fetches the workspace icon for the community bound to `raw_host`, as the

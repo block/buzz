@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use sha2::Digest as _;
 
+pub(crate) const PUSH_KINDS: &[u64] = &[7, 9, 1059, 40007, 46010];
+pub(crate) const URGENT_KINDS: &[u64] = &[];
+
 /// NIP-PL addressable push-lease event kind.
 pub const KIND_PUSH_LEASE: u32 = 30_350;
 /// Largest integer represented exactly by interoperable JSON number implementations.
@@ -504,8 +507,8 @@ pub async fn accept(
             },
         ],
         supported_classes: &["silent", "default", "time_sensitive"],
-        push_kinds: &[7, 9, 1059, 40007, 46010],
-        urgent_kinds: &[],
+        push_kinds: PUSH_KINDS,
+        urgent_kinds: URGENT_KINDS,
         max_subscriptions: 16,
         max_kinds: 16,
         max_authors: 20,
