@@ -2939,16 +2939,15 @@ impl Db {
         // Stale-write protection: reject if either durable ordering source
         // dominates the incoming tuple. Equal timestamps use lowest event id.
         let incoming_id = event.id.as_bytes().as_slice();
-        let existing_ordering = existing
-            .as_ref()
-            .map(|(ts, id, _)| (ts.clone(), id.clone()));
-        let dominated = existing_ordering
-            .iter()
-            .chain(watermark.iter())
-            .any(|(accepted_ts, accepted_id)| {
-                created_at < *accepted_ts
-                    || (created_at == *accepted_ts && incoming_id >= accepted_id.as_slice())
-            });
+        let existing_ordering = existing.as_ref().map(|(ts, id, _)| (*ts, id.clone()));
+        let dominated =
+            existing_ordering
+                .iter()
+                .chain(watermark.iter())
+                .any(|(accepted_ts, accepted_id)| {
+                    created_at < *accepted_ts
+                        || (created_at == *accepted_ts && incoming_id >= accepted_id.as_slice())
+                });
         if dominated {
             tx.rollback().await?;
             let received_at = chrono::Utc::now();
