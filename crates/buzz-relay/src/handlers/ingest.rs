@@ -28,8 +28,8 @@ use buzz_core::kind::{
     KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
     KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
     KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
-    KIND_PRESENCE_UPDATE, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE,
+    KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
     KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
@@ -172,7 +172,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // NIP-56 reports are ordinary member writes into the mod-only queue.
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
-        KIND_REPORT => Ok(Scope::MessagesWrite),
+        KIND_REPORT | KIND_PRODUCT_FEEDBACK => Ok(Scope::MessagesWrite),
         // Community moderation commands are direct, mod-authz-gated writes.
         // Scope only proves the transport can submit message writes; the
         // command handler owns role/capability authorization.
@@ -1445,6 +1445,19 @@ async fn ingest_event_inner(
         return super::command_executor::handle_command(tenant, state, event, auth).await;
     }
 
+    // Product feedback is sidecarred directly into its private deployment table.
+    // It never enters ordinary event storage or subscription fan-out.
+    if kind_u32 == KIND_PRODUCT_FEEDBACK {
+        super::product_feedback::handle(tenant, &event, state)
+            .await
+            .map_err(IngestError::Rejected)?;
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
     // NIP-56 reports are persisted only to the mod queue. They are not stored in
     // the public events table and never fan out to subscribers. Reports remain
     // available while timed out so users can signal abuse during a write-block.
@@ -2525,10 +2538,11 @@ mod tests {
     }
 
     #[test]
-    fn reports_and_moderation_commands_require_messages_write_scope() {
+    fn private_sidecars_and_moderation_commands_require_messages_write_scope() {
         let dummy = make_dummy_event();
         for kind in [
             KIND_REPORT,
+            KIND_PRODUCT_FEEDBACK,
             KIND_MODERATION_BAN,
             KIND_MODERATION_UNBAN,
             KIND_MODERATION_TIMEOUT,
@@ -2617,6 +2631,7 @@ mod tests {
             KIND_DELETION,
             KIND_REACTION,
             KIND_REPORT,
+            KIND_PRODUCT_FEEDBACK,
             KIND_MODERATION_BAN,
             KIND_MODERATION_UNBAN,
             KIND_MODERATION_TIMEOUT,

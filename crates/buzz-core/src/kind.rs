@@ -190,6 +190,10 @@ pub const KIND_MANAGED_AGENT: u32 = 30177;
 /// the relay never auto-actions on them (NIP-56).
 pub const KIND_REPORT: u32 = 1984;
 
+/// Buzz product feedback submission. Accepted at ingest, sidecarred to the
+/// deployment feedback table, and never stored or fanned out as an event.
+pub const KIND_PRODUCT_FEEDBACK: u32 = 42000;
+
 // NIP-29 group admin events
 /// NIP-29: Add a user to a group.
 pub const KIND_NIP29_PUT_USER: u32 = 9000;
@@ -530,6 +534,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_TEAM,
     KIND_MANAGED_AGENT,
     KIND_REPORT,
+    KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,
     KIND_NIP29_EDIT_METADATA,
