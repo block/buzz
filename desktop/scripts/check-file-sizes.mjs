@@ -220,8 +220,13 @@ const overrides = new Map([
   // `signout-wipe` added `Identity.resetFailed`; `team-instructions-first-class`
   // added team/instructions fields; MCP config adds the shared server types,
   // layer fields, IPC input fields, and effective-surface field. The gate
-  // counts trailing newlines, so 1,076 physical lines are 1,077 counted lines.
-  ["src/shared/api/types.ts", 1077],
+  // counts trailing newlines. Upstream added eight non-MCP type lines after the
+  // prior ceiling, and the MCP snapshot exclusion added no production types.
+  ["src/shared/api/types.ts", 1085],
+  // MCP snapshot-exclusion coverage adds a credential-bearing fixture and a
+  // negative serialization assertion. `agent_snapshot.rs` was already exactly
+  // at the 1,000-line limit; the gate counts trailing newlines.
+  ["src-tauri/src/managed_agents/agent_snapshot.rs", 1010],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with

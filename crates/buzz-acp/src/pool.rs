@@ -4926,6 +4926,7 @@ mod tests {
             turn_liveness_interval: Duration::ZERO,
             dedup_mode: crate::config::DedupMode::Drop,
             system_prompt: None,
+            team_instructions: None,
             heartbeat_prompt: None,
             base_prompt: None,
             cwd: "/tmp".to_string(),
