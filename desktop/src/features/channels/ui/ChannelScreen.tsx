@@ -15,6 +15,7 @@ import {
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
 import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader";
 import { ChannelPane } from "@/features/channels/ui/ChannelScreenLazyViews";
+import { WelcomeAgentCreateDialog } from "@/features/channels/ui/WelcomeAgentCreateDialog";
 import { ForumChannelContent } from "@/features/channels/ui/ForumChannelContent";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
 import {
@@ -23,6 +24,8 @@ import {
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
+import { pickWelcomeGuideAgent } from "@/features/onboarding/welcomeGuide";
+import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
 import {
   mergeMessages,
   useChannelMessagesQuery,
@@ -144,9 +147,6 @@ export function ChannelScreen({
     string | null
   >(null);
   const [editTargetId, setEditTargetId] = React.useState<string | null>(null);
-  // Thread panel state is URL-backed, but router navigation is deferred out
-  // of the click handler; a tiny optimistic override lets the auxiliary pane
-  // open/close in the urgent render before the URL-backed state catches up.
   const [optimisticOpenThreadHeadId, setOptimisticOpenThreadHeadId] =
     React.useState<string | null | undefined>(undefined);
   const clearOptimisticThreadOverride = React.useCallback(() => {
@@ -283,6 +283,15 @@ export function ChannelScreen({
   const channelMembers = channelMembersQuery.data;
   const managedAgentsQuery = useManagedAgentsQuery();
   const managedAgents = managedAgentsQuery.data ?? [];
+  const welcomeGuideAgent = React.useMemo(
+    () => pickWelcomeGuideAgent(managedAgents),
+    [managedAgents],
+  );
+  const welcomeAgentCreate = useWelcomeAgentCreate({
+    activeChannel,
+    currentIdentity,
+    welcomeGuideAgent,
+  });
   const relayAgentsQuery = useRelayAgentsQuery();
   const relayAgents = relayAgentsQuery.data ?? [];
   const knownAgentPubkeys = React.useMemo(() => {
@@ -341,9 +350,6 @@ export function ChannelScreen({
     relayAgents,
     typingEntries,
   });
-  // Observer ingestion (frame decryption + derived active-turn liveness) is
-  // owner-global — mounted once in AppShell via useAgentObserverIngestion —
-  // so this screen no longer mounts its own observer/turns bridges.
   const messageProfiles = useMessageProfiles({
     channelMembers,
     currentProfile,
@@ -514,8 +520,6 @@ export function ChannelScreen({
         : undefined,
     [activeChannel, handleToggleReaction],
   );
-  // The menu actions are typed (message) => void; the read-state handlers
-  // key off the message id (message + subtree). Adapt at the seam.
   const handleMessageMarkUnread = React.useCallback(
     (message: TimelineMessage) => handleMarkMessageUnread(message.id),
     [handleMarkMessageUnread],
@@ -546,7 +550,10 @@ export function ChannelScreen({
     activeChannel && !activeChannel.archivedAt && activeChannel.isMember
       ? handleSendVideoReviewComment
       : undefined;
-  const handleOpenAddBot = React.useCallback(() => setIsAddBotOpen(true), []);
+  const openWelcomeAgentCreate = welcomeAgentCreate.openAddAgent;
+  const handleOpenAddBot = React.useCallback(() => {
+    openWelcomeAgentCreate(() => setIsAddBotOpen(true));
+  }, [openWelcomeAgentCreate]);
   const handleOpenMembersSidebar = React.useCallback(
     () => setIsMembersSidebarOpen(true),
     [],
@@ -570,9 +577,6 @@ export function ChannelScreen({
   } = useChannelAgentSessions({
     activeChannel,
     activeChannelId,
-    // Loaded only once none of the three agent queries are in their initial
-    // fetch, so a channel with genuinely zero agents still auto-closes a stale
-    // agentSession param (a disabled query reports isLoading=false — fine).
     agentsLoaded:
       !channelMembersQuery.isLoading &&
       !managedAgentsQuery.isLoading &&
@@ -602,10 +606,6 @@ export function ChannelScreen({
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     });
-  // `data !== undefined` is not "loaded" (the cache is seeded early by stale
-  // placeholders and the live subscription); wait for the history fetch to
-  // settle, latched per channel so a background refetch can't re-flip to the
-  // skeleton (the "skeleton bouncing up and down" on entry).
   const settledChannelIdRef = React.useRef<string | null>(null);
   const hasSettledThisChannel =
     activeChannelId !== null && settledChannelIdRef.current === activeChannelId;
@@ -628,8 +628,6 @@ export function ChannelScreen({
       timelineLoadingNow,
     );
   settledChannelIdRef.current = settledChannelId;
-  // Panel identity (thread/profile/agent session) lives in the URL search
-  // params and carries per history entry — only ephemeral targets reset here.
   const resetComposerTargets = React.useCallback(
     (_channelId: string | null) => {
       setExpandedThreadReplyIds(new Set());
@@ -663,8 +661,6 @@ export function ChannelScreen({
   });
   React.useEffect(() => {
     if (openThreadHeadId && !openThreadHeadMessage) {
-      // While the timeline is still loading (e.g. a reload restoring the
-      // thread param from the URL) the head simply hasn't arrived yet.
       if (isTimelineLoading) {
         return;
       }
@@ -807,6 +803,15 @@ export function ChannelScreen({
   return (
     <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
       <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
+        <WelcomeAgentCreateDialog
+          guideName={welcomeGuideAgent?.name ?? "your welcome guide"}
+          isSending={welcomeAgentCreate.isSending}
+          onCreateInChat={() => void welcomeAgentCreate.createInChat()}
+          onCreateManually={welcomeAgentCreate.createManually}
+          onOpenChange={welcomeAgentCreate.setIsOpen}
+          open={welcomeAgentCreate.isOpen}
+          sendError={welcomeAgentCreate.error}
+        />
         <div
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           ref={channelContentRef}

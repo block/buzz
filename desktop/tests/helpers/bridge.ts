@@ -154,6 +154,8 @@ type MockBridgeOptions = {
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
   addChannelMembersDelayMs?: number;
+  /** Sequenced add-member failures. A string fails that call; null succeeds. */
+  addChannelMembersErrors?: (string | null)[];
   channelMembersReadDelayMs?: number;
   channelsReadError?: string;
   /** Reject successive mock `create_channel` calls, then resume. */

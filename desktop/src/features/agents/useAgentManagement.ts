@@ -2,11 +2,11 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
-  createInputFromFizzRequest,
-  fizzRequestTargetsEditablePersona,
-  type FizzAgentManagementRequest,
-} from "./fizzAgentManagement";
-import { subscribeFizzAgentManagementRequests } from "./observerRelayStore";
+  createInputFromRequest,
+  requestTargetsEditablePersona,
+  type AgentManagementRequest,
+} from "./agentManagement";
+import { subscribeAgentManagementRequests } from "./observerRelayStore";
 import {
   managedAgentsQueryKey,
   personasQueryKey,
@@ -23,20 +23,19 @@ import {
   mintDefinitionWithPreflight,
   type BackendIntent,
 } from "./lib/instanceInputForDefinition";
-import { attachManagedAgentToChannel } from "./channelAgents";
+import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
+import { editPersonaDialogState } from "./ui/personaDialogState";
 import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 
-const FIZZ_PERSONA_ID = "builtin:fizz";
-
-function updateInput(
-  request: Extract<FizzAgentManagementRequest, { action: "update" }>,
+function updateInputFromRequest(
+  request: Extract<AgentManagementRequest, { action: "update" }>,
   current: UpdatePersonaInput,
 ): UpdatePersonaInput {
   const changes = request.request;
@@ -52,7 +51,6 @@ function updateInput(
           behavior: {
             respondTo: changes.respondTo,
             respondToAllowlist: [],
-            mcpToolsets: current.behavior?.mcpToolsets,
             parallelism: current.behavior?.parallelism,
           },
         }
@@ -60,7 +58,7 @@ function updateInput(
   };
 }
 
-export function useFizzAgentManagement() {
+export function useAgentManagement() {
   const queryClient = useQueryClient();
   const personasQuery = usePersonasQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
@@ -69,25 +67,26 @@ export function useFizzAgentManagement() {
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const createAgentMutation = useCreateManagedAgentMutation();
-  const [request, setRequest] =
-    React.useState<FizzAgentManagementRequest | null>(null);
+  const [request, setRequest] = React.useState<AgentManagementRequest | null>(
+    null,
+  );
   const [error, setError] = React.useState<string | null>(null);
+  const createdAgentAttachment = useCreatedAgentChannelAttachment();
   const seenRequestIds = React.useRef(new Set<string>());
   const pendingRequestId = React.useRef<string | null>(null);
   const sourceAgentPubkey = React.useRef<string | null>(null);
 
   React.useEffect(
     () =>
-      subscribeFizzAgentManagementRequests((agentPubkey, next) => {
-        // Observer frames are owner-scoped and authenticated, but only Fizz gets
-        // this extra product authority. Other agents' tool telemetry cannot open
-        // a configuration review surface.
-        const isFizz = (managedAgentsQuery.data ?? []).some(
-          (agent) =>
-            agent.pubkey.toLowerCase() === agentPubkey.toLowerCase() &&
-            agent.personaId === FIZZ_PERSONA_ID,
+      subscribeAgentManagementRequests((agentPubkey, next) => {
+        // Observer frames are owner-scoped and authenticated. Any managed agent
+        // this Desktop owns may draft an agent change; the normal create/edit
+        // modal remains the owner-confirmed write gate. Frames from unknown
+        // pubkeys cannot open a configuration surface.
+        const isOwnedAgent = (managedAgentsQuery.data ?? []).some(
+          (agent) => agent.pubkey.toLowerCase() === agentPubkey.toLowerCase(),
         );
-        if (!isFizz || seenRequestIds.current.has(next.requestId)) return;
+        if (!isOwnedAgent || seenRequestIds.current.has(next.requestId)) return;
         seenRequestIds.current.add(next.requestId);
         setError(null);
         if (pendingRequestId.current === null) {
@@ -105,7 +104,7 @@ export function useFizzAgentManagement() {
     return (personasQuery.data ?? []).filter(
       (persona) =>
         persona.displayName.trim().toLocaleLowerCase() === target &&
-        fizzRequestTargetsEditablePersona(persona),
+        requestTargetsEditablePersona(persona),
     );
   }, [personasQuery.data, request]);
   const currentPersona =
@@ -116,20 +115,20 @@ export function useFizzAgentManagement() {
     updatePersonaMutation.isPending ||
     createAgentMutation.isPending;
 
-  function assertFizzCanActFromOrigin(channelId: string) {
+  function assertAgentCanActFromOrigin(channelId: string) {
     const targetChannel = (channelsQuery.data ?? []).find(
       (channel) => channel.id === channelId,
     );
-    const fizzPubkey = sourceAgentPubkey.current?.toLowerCase();
+    const requestingPubkey = sourceAgentPubkey.current?.toLowerCase();
     if (
       !targetChannel?.isMember ||
-      !fizzPubkey ||
+      !requestingPubkey ||
       !targetChannel.memberPubkeys.some(
-        (pubkey) => pubkey.toLowerCase() === fizzPubkey,
+        (pubkey) => pubkey.toLowerCase() === requestingPubkey,
       )
     ) {
       throw new Error(
-        "Fizz can only manage agents from a channel you both belong to.",
+        "An agent can only manage agents from a channel you both belong to.",
       );
     }
   }
@@ -144,7 +143,7 @@ export function useFizzAgentManagement() {
     }
     setError(null);
     try {
-      assertFizzCanActFromOrigin(request.request.channelId);
+      assertAgentCanActFromOrigin(request.request.channelId);
       const runtimes = await availableRuntimesForStart(runtimesQuery);
       const runtime = runtimes.find(
         (candidate) => candidate.id === input.runtime,
@@ -178,10 +177,12 @@ export function useFizzAgentManagement() {
           ),
         );
         if (created.spawnError) throw new Error(created.spawnError);
-        await attachManagedAgentToChannel(request.request.channelId, {
-          agent: created.agent,
-          role: "bot",
-          ensureRunning: true,
+        const targetChannel = (channelsQuery.data ?? []).find(
+          (channel) => channel.id === request.request.channelId,
+        );
+        await createdAgentAttachment.presentCreatedAgent(created, {
+          id: request.request.channelId,
+          name: targetChannel?.name ?? "this channel",
         });
       }
 
@@ -199,46 +200,25 @@ export function useFizzAgentManagement() {
     }
   }
 
-  async function confirmUpdate() {
-    if (request?.action !== "update") return;
+  async function submitUpdate(input: CreatePersonaInput | UpdatePersonaInput) {
+    if (request?.action !== "update" || !("id" in input)) {
+      return false;
+    }
     setError(null);
     try {
-      assertFizzCanActFromOrigin(request.request.channelId);
-      if (!currentPersona) {
-        throw new Error(
-          matchingPersonas.length > 1
-            ? "More than one personal agent has that name. Rename it in Agents, then ask Fizz again."
-            : "Fizz can only update a personal agent profile by its current name.",
-        );
-      }
-      const persona = currentPersona;
-      const current: UpdatePersonaInput = {
-        id: persona.id,
-        displayName: persona.displayName,
-        avatarUrl: persona.avatarUrl ?? undefined,
-        systemPrompt: persona.systemPrompt,
-        runtime: persona.runtime ?? undefined,
-        provider: persona.provider ?? undefined,
-        model: persona.model ?? undefined,
-        namePool: persona.namePool,
-        // Never route stored environment variables through this feature.
-        behavior: {
-          respondTo: persona.respondTo ?? undefined,
-          respondToAllowlist: persona.respondToAllowlist,
-          mcpToolsets: persona.mcpToolsets ?? undefined,
-          parallelism: persona.parallelism ?? undefined,
-        },
-      };
-      await updatePersonaMutation.mutateAsync(updateInput(request, current));
+      assertAgentCanActFromOrigin(request.request.channelId);
+      await updatePersonaMutation.mutateAsync(input);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
       ]);
       dismiss();
+      return true;
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Could not save this agent.",
       );
+      return false;
     }
   }
 
@@ -250,20 +230,43 @@ export function useFizzAgentManagement() {
 
   const createInitialValues = React.useMemo(
     () =>
-      request?.action === "create" ? createInputFromFizzRequest(request) : null,
+      request?.action === "create" ? createInputFromRequest(request) : null,
     [request],
   );
+
+  const editInitialValues = React.useMemo(() => {
+    if (request?.action !== "update" || !currentPersona) return null;
+    return updateInputFromRequest(
+      request,
+      editPersonaDialogState(currentPersona)
+        .initialValues as UpdatePersonaInput,
+    );
+  }, [currentPersona, request]);
+
+  const editError = React.useMemo(() => {
+    if (request?.action !== "update") return error;
+    if (error) return error;
+    if (matchingPersonas.length > 1) {
+      return "More than one personal agent has that name. Rename it in Agents, then ask the agent again.";
+    }
+    if (!currentPersona) {
+      return "Agents can only update a personal agent profile by its current name.";
+    }
+    return null;
+  }, [currentPersona, error, matchingPersonas.length, request]);
 
   return {
     request,
     createInitialValues,
-    currentPersona,
+    editInitialValues,
+    editError,
     error,
+    ...createdAgentAttachment,
     isPending,
     runtimes: runtimesQuery.data ?? [],
     runtimesLoading: runtimesQuery.isLoading,
     submitCreate,
-    confirmUpdate,
+    submitUpdate,
     dismiss,
   };
 }

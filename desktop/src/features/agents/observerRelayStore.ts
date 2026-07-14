@@ -7,9 +7,9 @@ import { putAgentSessionConfig } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
 import {
-  parseFizzAgentManagementRequest,
-  type FizzAgentManagementRequest,
-} from "./fizzAgentManagement";
+  parseAgentManagementRequest,
+  type AgentManagementRequest,
+} from "./agentManagement";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
@@ -99,8 +99,8 @@ const controlResultListeners = new Map<
   Set<(frame: ControlResultFrame) => void>
 >();
 
-const fizzManagementListeners = new Set<
-  (agentPubkey: string, request: FizzAgentManagementRequest) => void
+const agentManagementListeners = new Set<
+  (agentPubkey: string, request: AgentManagementRequest) => void
 >();
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
@@ -374,9 +374,9 @@ async function handleRelayObserverEvent(
       }
     }
     appendAgentEvent(agentPubkey, parsed);
-    const managementRequest = parseFizzAgentManagementRequest(parsed.payload);
+    const managementRequest = parseAgentManagementRequest(parsed.payload);
     if (managementRequest) {
-      for (const listener of fizzManagementListeners) {
+      for (const listener of agentManagementListeners) {
         listener(agentPubkey, managementRequest);
       }
     }
@@ -489,12 +489,12 @@ function dispatchControlResult(agentPubkey: string, payload: unknown) {
  * unsubscribe function. Used by the ModelPicker to learn the async outcome of
  * a `switch_model` frame.
  */
-export function subscribeFizzAgentManagementRequests(
-  listener: (agentPubkey: string, request: FizzAgentManagementRequest) => void,
+export function subscribeAgentManagementRequests(
+  listener: (agentPubkey: string, request: AgentManagementRequest) => void,
 ) {
-  fizzManagementListeners.add(listener);
+  agentManagementListeners.add(listener);
   return () => {
-    fizzManagementListeners.delete(listener);
+    agentManagementListeners.delete(listener);
   };
 }
 
@@ -724,7 +724,7 @@ export function resetAgentObserverStore() {
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
   latestLiveSessionByAgentChannel.clear();
-  fizzManagementListeners.clear();
+  agentManagementListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;

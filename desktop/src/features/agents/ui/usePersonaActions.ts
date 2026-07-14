@@ -18,6 +18,7 @@ import {
   type AgentSnapshotImportResult,
 } from "@/features/agents/hooks";
 import { getPersonaLibraryState } from "@/features/agents/lib/catalog";
+import { useCreatedAgentChannelAttachment } from "@/features/agents/useCreatedAgentChannelAttachment";
 import type {
   SnapshotFormat,
   SnapshotMemoryLevel,
@@ -25,7 +26,7 @@ import type {
 import type {
   AcpRuntime,
   AgentPersona,
-  CreateManagedAgentResponse,
+  Channel,
   CreatePersonaInput,
   ManagedAgent,
   UpdatePersonaInput,
@@ -139,8 +140,7 @@ export function usePersonaActions() {
   >(null);
   const [personaFeedbackSurface, setPersonaFeedbackSurface] =
     React.useState<PersonaFeedbackSurface>("library");
-  const [createdAgent, setCreatedAgent] =
-    React.useState<CreateManagedAgentResponse | null>(null);
+  const createdAgentAttachment = useCreatedAgentChannelAttachment();
   const [isPersonaSubmitPending, setIsPersonaSubmitPending] =
     React.useState(false);
 
@@ -174,6 +174,7 @@ export function usePersonaActions() {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent?: AgentCreateIntent,
     backendIntent?: BackendIntent | null,
+    targetChannel?: Pick<Channel, "id" | "name"> | null,
   ): Promise<boolean> {
     if (isPersonaSubmitPending) {
       return false;
@@ -231,7 +232,10 @@ export function usePersonaActions() {
 
         try {
           const created = await createAgentMutation.mutateAsync(agentInput);
-          setCreatedAgent(created);
+          await createdAgentAttachment.presentCreatedAgent(
+            created,
+            targetChannel,
+          );
           if (created.spawnError) {
             setPersonaErrorMessage(
               `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
@@ -497,8 +501,7 @@ export function usePersonaActions() {
     personaNoticeMessage,
     personaErrorMessage,
     personaFeedbackSurface,
-    createdAgent,
-    setCreatedAgent,
+    ...createdAgentAttachment,
     handleSubmit,
     handleDelete,
     handleSetActive,

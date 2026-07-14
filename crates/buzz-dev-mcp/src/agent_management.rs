@@ -1,8 +1,9 @@
-//! Narrow, owner-visible agent-management requests for Fizz.
+//! Narrow, owner-visible agent-management requests from Buzz-harness agents.
 //!
 //! These tools never write Desktop's agent store. They send an encrypted,
-//! owner-scoped observer frame; Desktop validates that the sender is its Fizz
-//! instance, opens a review surface, and performs the existing confirmed write.
+//! owner-scoped observer frame; Desktop validates that the sender is one of
+//! its own managed agents, opens the standard create/edit form, and lets the
+//! owner edit and save the draft through the existing UI.
 
 use buzz_core::observer::{encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY};
 use buzz_sdk::{build_agent_observer_frame, nip_oa};
@@ -11,48 +12,30 @@ use rmcp::{model::CallToolResult, ErrorData};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-const REQUEST_KIND: &str = "fizz_agent_management_request";
-const OBSERVER_EVENT_KIND: &str = "fizz_agent_management_request";
+const REQUEST_KIND: &str = "agent_management_request";
+const OBSERVER_EVENT_KIND: &str = "agent_management_request";
 const MAX_NAME_CHARS: usize = 120;
 const MAX_PROMPT_CHARS: usize = 20_000;
-const MAX_RATIONALE_CHARS: usize = 2_000;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateAgentParams {
-    /// The channel UUID where the new agent should be added after confirmation.
+    /// The channel UUID where the new agent should be added after the owner saves it.
     pub channel_id: String,
     /// The agent's human-readable name.
     pub display_name: String,
     /// Instructions that define the agent's role and behavior.
     pub system_prompt: String,
-    /// Why this agent is useful, shown to the owner in the review UI.
-    pub rationale: String,
-    /// Optional runtime ID suggested by Fizz (for example `buzz-agent`).
-    #[serde(default)]
-    pub runtime: Option<String>,
-    /// Optional provider suggested by Fizz. Credentials are never accepted here.
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// Optional model ID suggested by Fizz.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Who may invoke the agent: `owner-only` or `anyone`. Allowlist changes
-    /// stay in Desktop because they require selecting real people, not chat text.
-    #[serde(default)]
-    pub respond_to: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct UpdateAgentParams {
-    /// The channel UUID where this conversation with Fizz is taking place.
+    /// The channel UUID where this conversation is taking place.
     pub channel_id: String,
     /// The current display name of the reusable personal agent to update.
     /// Desktop resolves it locally so profile IDs never have to enter chat.
     pub agent_name: String,
-    /// A concise explanation of the requested changes, shown in review.
-    pub rationale: String,
     #[serde(default)]
     pub display_name: Option<String>,
     #[serde(default)]
@@ -212,11 +195,6 @@ pub async fn create(mut request: CreateAgentParams) -> Result<CallToolResult, Er
     request.display_name = trim_required(&request.display_name, "display_name", MAX_NAME_CHARS)?;
     request.system_prompt =
         trim_required(&request.system_prompt, "system_prompt", MAX_PROMPT_CHARS)?;
-    request.rationale = trim_required(&request.rationale, "rationale", MAX_RATIONALE_CHARS)?;
-    request.runtime = validate_optional(request.runtime, "runtime")?;
-    request.provider = validate_optional(request.provider, "provider")?;
-    request.model = validate_optional(request.model, "model")?;
-    request.respond_to = validate_respond_to(request.respond_to)?;
     let request_id = uuid::Uuid::new_v4().to_string();
     publish_request(ManagementRequest {
         request_type: REQUEST_KIND,
@@ -225,13 +203,12 @@ pub async fn create(mut request: CreateAgentParams) -> Result<CallToolResult, Er
         request,
     })
     .await?;
-    text_result(format!("Agent creation is ready for the owner's review (request {request_id}). Do not claim it was created until Buzz confirms it."))
+    text_result(format!("Buzz opened the owner's create-agent form with this draft (request {request_id}). Do not claim it was created until the owner saves it."))
 }
 
 pub async fn update(mut request: UpdateAgentParams) -> Result<CallToolResult, ErrorData> {
     request.channel_id = trim_required(&request.channel_id, "channel_id", 128)?;
     request.agent_name = trim_required(&request.agent_name, "agent_name", MAX_NAME_CHARS)?;
-    request.rationale = trim_required(&request.rationale, "rationale", MAX_RATIONALE_CHARS)?;
     request.display_name = request
         .display_name
         .map(|value| trim_required(&value, "display_name", MAX_NAME_CHARS))
@@ -264,5 +241,5 @@ pub async fn update(mut request: UpdateAgentParams) -> Result<CallToolResult, Er
         request,
     })
     .await?;
-    text_result(format!("Agent update is ready for the owner's review (request {request_id}). Do not claim it was updated until Buzz confirms it."))
+    text_result(format!("Buzz opened the owner's edit-agent form with this draft (request {request_id}). Do not claim it was updated until the owner saves it."))
 }

@@ -423,6 +423,7 @@ export function AgentDefinitionDialog({
     localModeSatisfied &&
     !isAvatarUploadPending;
 
+
   // Merge global env as the base layer so credential keys satisfied via global
   // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
   const envVarsForDiscovery = React.useMemo(

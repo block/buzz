@@ -40,7 +40,7 @@ impl DevMcp {
 
     #[tool(
         name = "create_agent",
-        description = "Ask the Buzz Desktop owner to create a reusable agent and add it to the current channel. Use after collaboratively deciding the name, instructions, and access. This creates a review request only: Buzz will show the owner the details and they must confirm before anything is saved. Never ask for or accept API keys, credentials, environment variables, shell commands, or arbitrary MCP setup."
+        description = "Open Buzz Desktop's standard create-agent form for the owner, prefilled with a reusable agent draft for the current channel. Use after collaboratively deciding only the agent's name and instructions. Do not ask about runtime, provider, model, credentials, or access: Buzz Desktop resolves local runtime/provider/model defaults, and new agents default to owner-only access. The owner can review and edit the form and must save it before anything is created. Never ask for or accept API keys, credentials, environment variables, shell commands, or arbitrary MCP setup."
     )]
     async fn create_agent(
         &self,
@@ -51,7 +51,7 @@ impl DevMcp {
 
     #[tool(
         name = "update_agent",
-        description = "Ask the Buzz Desktop owner to review an update to a reusable agent profile. Use for changes agreed in conversation. This creates a review request only: Buzz will show the owner the changes and they must confirm before anything is saved. Never ask for or accept API keys, credentials, environment variables, shell commands, or arbitrary MCP setup."
+        description = "Open Buzz Desktop's standard edit-agent form for the owner, prefilled with agreed changes to a reusable agent profile. The owner can edit the form and must save it before anything changes. Never ask for or accept API keys, credentials, environment variables, shell commands, or arbitrary MCP setup."
     )]
     async fn update_agent(
         &self,

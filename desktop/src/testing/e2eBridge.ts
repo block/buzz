@@ -127,6 +127,8 @@ type E2eConfig = {
     agentListDelayMs?: number;
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
     addChannelMembersDelayMs?: number;
+    /** Sequenced add-member failures. A string fails that call; null succeeds. */
+    addChannelMembersErrors?: (string | null)[];
     channelMembersReadDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
@@ -5871,6 +5873,21 @@ async function handleAddChannelMembers(
       window.setTimeout(resolve, addChannelMembersDelayMs),
     );
   }
+  const configuredErrors = config?.mock?.addChannelMembersErrors;
+  if (configuredErrors && configuredErrors.length > 0) {
+    const index = Math.min(
+      addChannelMembersCallCount,
+      configuredErrors.length - 1,
+    );
+    addChannelMembersCallCount += 1;
+    const error = configuredErrors[index];
+    if (error) {
+      return {
+        added: [],
+        errors: args.pubkeys.map((pubkey) => ({ pubkey, error })),
+      };
+    }
+  }
   const identity = getIdentity(config);
   if (!identity) {
     const channel = getMockChannel(args.channelId);
@@ -6493,6 +6510,7 @@ async function handleDiscoverAcpRuntimes(
 // Per-page install call counter. Reset each test run because this module is
 // re-evaluated via addInitScript, so the counter starts at 0 for every test.
 let installCallCount = 0;
+let addChannelMembersCallCount = 0;
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;

@@ -41,9 +41,8 @@ import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh
 import { useAutoRestartPolicy } from "@/features/agents/lib/useAutoRestartPolicy";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
-import { useFizzAgentManagement } from "@/features/agents/useFizzAgentManagement";
-import { AgentDialog } from "@/features/agents/ui/AgentDialog";
-import { FizzAgentManagementReview } from "@/features/agents/ui/FizzAgentManagementReview";
+import { AgentManagementDialogs } from "@/features/agents/ui/AgentManagementDialogs";
+import { RequestedAgentCreateDialogs } from "@/features/agents/ui/RequestedAgentCreateDialogs";
 import {
   usePresenceSession,
   usePresenceSubscription,
@@ -185,7 +184,6 @@ export function AppShell() {
   // relay-owned agents join automatically once identity arrives. Adding a
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
-  const fizzAgentManagement = useFizzAgentManagement();
   useArchiveSync();
   // Defer the archive *seeds* until startup is idle: they're first-run catch-up
   // config (a one-shot mergeSaveSubscriptionKinds), not live-ingest — that's
@@ -774,9 +772,7 @@ export function AppShell() {
                           onUpdateCommunity={communitiesHook.updateCommunity}
                           onRemoveCommunity={communitiesHook.removeCommunity}
                           onSwitchCommunity={handleSwitchCommunity}
-                          onCreateAgent={() =>
-                            void goAgents().then(requestOpenCreateAgent)
-                          }
+                          onCreateAgent={() => requestOpenCreateAgent()}
                           selfPresenceStatus={presenceSession.currentStatus}
                           communities={communitiesHook.communities}
                           onCreateChannel={async ({
@@ -905,38 +901,8 @@ export function AppShell() {
                         />
                       </div>
                     )}
-                    {fizzAgentManagement.request?.action === "create" ? (
-                      <AgentDialog
-                        definitionError={
-                          fizzAgentManagement.error
-                            ? new Error(fizzAgentManagement.error)
-                            : null
-                        }
-                        initialValues={fizzAgentManagement.createInitialValues}
-                        isDefinitionPending={fizzAgentManagement.isPending}
-                        mode="definition"
-                        onOpenChange={(open) => {
-                          if (!open) fizzAgentManagement.dismiss();
-                        }}
-                        onSubmitDefinition={fizzAgentManagement.submitCreate}
-                        runtimes={fizzAgentManagement.runtimes}
-                        runtimesLoading={fizzAgentManagement.runtimesLoading}
-                        startAfterCreateDefault
-                      />
-                    ) : null}
-                    <FizzAgentManagementReview
-                      error={fizzAgentManagement.error}
-                      existingPersona={fizzAgentManagement.currentPersona}
-                      isPending={fizzAgentManagement.isPending}
-                      onConfirm={() => {
-                        void fizzAgentManagement.confirmUpdate();
-                      }}
-                      onOpenChange={(open) => {
-                        if (!open) fizzAgentManagement.dismiss();
-                      }}
-                      open={fizzAgentManagement.request?.action === "update"}
-                      request={fizzAgentManagement.request}
-                    />
+                    <RequestedAgentCreateDialogs />
+                    <AgentManagementDialogs />
                     <AppShellOverlays
                       activeChannel={managedChannel}
                       browseDialogType={browseDialogType}

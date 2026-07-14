@@ -1,9 +1,5 @@
 import * as React from "react";
 import {
-  consumePendingOpenCreateAgent,
-  subscribeOpenCreateAgent,
-} from "@/features/agents/openCreateAgentEvent";
-import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
 } from "@/features/agents/openSnapshotImportFromUrlEvent";
@@ -59,19 +55,6 @@ export function AgentsView() {
     teamActions.createTeamMutation.isPending ||
     teamActions.updateTeamMutation.isPending ||
     teamActions.deleteTeamMutation.isPending;
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only shortcut subscription; openUnifiedCreate only calls stable setState-backed callbacks
-  React.useEffect(() => {
-    // The app-wide "create agent" shortcut routes to the unified definition
-    // flow (B5): one create path, always starting the agent after creation.
-    if (consumePendingOpenCreateAgent()) {
-      openUnifiedCreate();
-    }
-
-    return subscribeOpenCreateAgent(() => {
-      openUnifiedCreate();
-    });
-  }, []);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile and teamActions.handleImportTeamSnapshotFile are stable
   React.useEffect(() => {
@@ -222,9 +205,7 @@ export function AgentsView() {
           isDefinitionPending={personas.isPending}
           mode="definition"
           onOpenChange={(open) => {
-            if (!open) {
-              setIsCreateDialogOpen(false);
-            }
+            if (!open) setIsCreateDialogOpen(false);
           }}
           onSubmitDefinition={personas.handleSubmit}
           runtimes={personas.acpRuntimesQuery.data ?? []}
@@ -257,9 +238,7 @@ export function AgentsView() {
         <SecretRevealDialog
           created={personas.createdAgent}
           onOpenChange={(open) => {
-            if (!open) {
-              personas.setCreatedAgent(null);
-            }
+            if (!open) personas.dismissCreatedAgent();
           }}
         />
       ) : null}
