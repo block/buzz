@@ -483,6 +483,23 @@ test("custom personas share with people and keep export separate", async ({
 
   const shareDialog = page.getByTestId("persona-share-dialog");
   await expect(shareDialog).toBeVisible();
+  const emptyRecipientSearch = shareDialog.getByTestId(
+    "persona-share-recipient-search",
+  );
+  const [searchIconColor, searchPlaceholderColor, searchInputColor] =
+    await Promise.all([
+      shareDialog
+        .locator("svg.lucide-search")
+        .evaluate((element) => getComputedStyle(element).color),
+      emptyRecipientSearch.evaluate(
+        (element) => getComputedStyle(element, "::placeholder").color,
+      ),
+      emptyRecipientSearch.evaluate(
+        (element) => getComputedStyle(element).color,
+      ),
+    ]);
+  expect(searchIconColor).toBe(searchPlaceholderColor);
+  expect(searchPlaceholderColor).not.toBe(searchInputColor);
   const shareCloseButton = shareDialog.getByRole("button", { name: "Close" });
   expect(
     await shareCloseButton.evaluate(
