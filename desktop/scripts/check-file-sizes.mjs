@@ -294,7 +294,7 @@ const overrides = new Map([
   // am review fix: also clear stale V1 model field on provider rewrite +
   // new model-clear test. Load-bearing chimera fix.
   // keyring-dev-isolation: run_boot_migrations wires agent-key migration.
-  ["src-tauri/src/migration.rs", 1428],
+  ["src-tauri/src/migration.rs", 1436],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.

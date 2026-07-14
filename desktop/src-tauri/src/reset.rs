@@ -686,6 +686,8 @@ mod tests {
     }
 
     // ── Test 11: completed dev reset suppresses dev repos-dir migration ────
+    // Behavioral test at the composed seam: exercises real filesystem effects
+    // through maybe_migrate_dev_repos_dir, not just the boolean predicate.
 
     #[test]
     fn test_completed_dev_reset_suppresses_dev_repos_dir_migration() {
@@ -697,34 +699,54 @@ mod tests {
         std::fs::create_dir_all(&app_data).unwrap();
         write_sentinel(&app_data).unwrap();
 
+        // Seed prod ~/.buzz/.repos-dir so the migration has something to copy.
+        let home = tmp.path().join("home");
+        let prod_nest = home.join(".buzz");
+        std::fs::create_dir_all(&prod_nest).unwrap();
+        std::fs::write(prod_nest.join(".repos-dir"), "/some/workspace").unwrap();
+
+        let dev_nest = tmp.path().join(".buzz-dev");
+
+        // Run a real reset and take the REAL outcome.completed.
         let kc = FakeKeychain::ok();
         let ctx = ResetContext {
             app_data_dir: &app_data,
             legacy_app_data_dir: None,
-            nest_dir: Some(tmp.path().join(".buzz-dev")),
+            nest_dir: Some(dev_nest.clone()),
             keychain: &kc,
             home_dir: None,
             is_dev: true,
         };
-
         let outcome = run_boot_reset_with_keychain(ctx);
         assert!(outcome.completed, "reset must complete");
 
-        // The gate that lib.rs uses to decide whether to run
-        // migrate_dev_repos_dir: should_migrate_dev_repos_dir(is_dev, completed).
-        // A completed dev reset must suppress the migration.
+        // Arm 1: completed dev reset → dev nest must NOT get .repos-dir.
+        crate::migration::maybe_migrate_dev_repos_dir(true, outcome.completed, &home, &dev_nest);
         assert!(
-            !crate::migration::should_migrate_dev_repos_dir(true, outcome.completed),
-            "completed dev reset must suppress dev repos-dir migration"
+            !dev_nest.join(".repos-dir").exists(),
+            "completed dev reset must suppress .repos-dir import into dev nest"
         );
-        // Conversely, a non-reset dev boot must allow it.
+
+        // Arm 2 (positive control): non-reset dev boot → dev nest IS created
+        // with .repos-dir copied. This proves the test would have caught the
+        // pass-3 resurrection live.
+        let dev_nest_2 = tmp.path().join(".buzz-dev-control");
+        crate::migration::maybe_migrate_dev_repos_dir(true, false, &home, &dev_nest_2);
         assert!(
-            crate::migration::should_migrate_dev_repos_dir(true, false),
-            "non-reset dev boot must allow dev repos-dir migration"
+            dev_nest_2.join(".repos-dir").exists(),
+            "non-reset dev boot must import .repos-dir into dev nest"
         );
-        // Prod builds never run it regardless.
+        assert_eq!(
+            std::fs::read_to_string(dev_nest_2.join(".repos-dir")).unwrap(),
+            "/some/workspace",
+            ".repos-dir content must match prod source"
+        );
+
+        // Arm 3: prod build (is_dev=false) → nothing created regardless.
+        let dev_nest_3 = tmp.path().join(".buzz-dev-prod");
+        crate::migration::maybe_migrate_dev_repos_dir(false, false, &home, &dev_nest_3);
         assert!(
-            !crate::migration::should_migrate_dev_repos_dir(false, false),
+            !dev_nest_3.join(".repos-dir").exists(),
             "prod builds must never run dev repos-dir migration"
         );
     }

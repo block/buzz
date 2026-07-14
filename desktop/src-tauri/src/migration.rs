@@ -148,8 +148,10 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // ensures the dev nest boots with the correct workspace on its first launch,
     // matching what the prod nest had configured. Skip-if-dest-exists so it is
     // idempotent and never clobbers a value the dev nest already set explicitly.
-    if should_migrate_dev_repos_dir(is_dev, reset_completed) {
-        migrate_dev_repos_dir();
+    // Uses the composed helper so the gate + migration run through the same
+    // code path that the behavioral test exercises.
+    if let (Some(home), Some(dev_nest)) = (dirs::home_dir(), crate::managed_agents::nest_dir()) {
+        maybe_migrate_dev_repos_dir(is_dev, reset_completed, &home, &dev_nest);
     }
 
     migrate_legacy_app_data_dir(app);
@@ -334,23 +336,14 @@ pub(crate) fn should_migrate_dev_repos_dir(is_dev: bool, reset_completed: bool) 
     is_dev && !reset_completed
 }
 
-/// Copy the `.repos-dir` dotfile from `~/.buzz` → `~/.buzz-dev`, non-destructively.
-///
-/// Must be called on dev builds BEFORE `resolve_repos_at_boot()` reads the
-/// dotfile, so the dev nest boots with the correct workspace configuration on
-/// its first launch. Skip-if-dest-exists so it is idempotent and never
-/// overwrites a value set directly by the dev nest.
-pub(crate) fn migrate_dev_repos_dir() {
-    let Some(home) = dirs::home_dir() else {
-        return;
-    };
+/// Injectable core: copy `.repos-dir` from `<home>/.buzz/` into `dev_nest`,
+/// non-destructively. Extracted so tests can inject temp paths without
+/// touching `dirs::home_dir()` or the global `nest_dir()` OnceLock.
+pub(crate) fn migrate_dev_repos_dir_at(home: &Path, dev_nest: &Path) {
     let src = home.join(".buzz").join(".repos-dir");
     if !src.exists() {
         return;
     }
-    let Some(dev_nest) = crate::managed_agents::nest_dir() else {
-        return;
-    };
     let dst = dev_nest.join(".repos-dir");
     // Skip if the dev nest already has its own .repos-dir.
     if dst.exists() {
@@ -358,7 +351,7 @@ pub(crate) fn migrate_dev_repos_dir() {
     }
     // Ensure the dev nest directory itself exists — this migration runs before
     // ensure_nest() in the boot sequence, so the directory may not yet exist.
-    if let Err(e) = std::fs::create_dir_all(&dev_nest) {
+    if let Err(e) = std::fs::create_dir_all(dev_nest) {
         eprintln!(
             "buzz-desktop: dev-nest-migration: failed to create dev nest {}: {e}",
             dev_nest.display()
@@ -371,6 +364,21 @@ pub(crate) fn migrate_dev_repos_dir() {
             dst.display()
         ),
         Err(e) => eprintln!("buzz-desktop: dev-nest-migration: failed to migrate .repos-dir: {e}"),
+    }
+}
+
+/// Composed gate + migration: applies `should_migrate_dev_repos_dir` and, if
+/// the gate passes, runs the injectable migration core. This is the seam that
+/// `run_boot_migrations_inner` calls with real paths — a future mis-wired flag
+/// or inverted gate breaks tests at this level, not just the predicate.
+pub(crate) fn maybe_migrate_dev_repos_dir(
+    is_dev: bool,
+    reset_completed: bool,
+    home: &Path,
+    dev_nest: &Path,
+) {
+    if should_migrate_dev_repos_dir(is_dev, reset_completed) {
+        migrate_dev_repos_dir_at(home, dev_nest);
     }
 }
 
