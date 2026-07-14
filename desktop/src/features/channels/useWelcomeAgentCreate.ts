@@ -26,14 +26,17 @@ export function useWelcomeAgentCreate({
   );
   const [isOpen, setIsOpen] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const beforeSendRef = React.useRef<(() => void) | null>(null);
 
   const openAddAgent = React.useCallback(
-    (openRegularPicker: () => void) => {
+    (openRegularPicker: () => void, options?: { beforeSend?: () => void }) => {
       setError(null);
       if (isWelcomeChannel(activeChannel)) {
+        beforeSendRef.current = options?.beforeSend ?? null;
         setIsOpen(true);
         return;
       }
+      beforeSendRef.current = null;
       openRegularPicker();
     },
     [activeChannel],
@@ -57,16 +60,11 @@ export function useWelcomeAgentCreate({
     }
     setError(null);
     try {
+      beforeSendRef.current?.();
       await sendMessageMutation.mutateAsync({
         channelId: activeChannel.id,
         content: `@${welcomeGuideAgent.name}, help me create a new agent.`,
         mentionPubkeys: [welcomeGuideAgent.pubkey],
-      });
-      window.requestAnimationFrame(() => {
-        const timeline = document.querySelector<HTMLElement>(
-          '[data-testid="message-timeline"]',
-        );
-        timeline?.scrollTo({ top: timeline.scrollHeight, behavior: "smooth" });
       });
       setIsOpen(false);
     } catch (cause) {

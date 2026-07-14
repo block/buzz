@@ -232,26 +232,19 @@ export function ChannelScreen({
   const deleteMessageMutation = useDeleteMessageMutation(activeChannel);
   const editMessageMutation = useEditMessageMutation(activeChannel);
   const joinChannelMutation = useJoinChannelMutation(activeChannelId);
-  const [findTargetEvents, setFindTargetEvents] = React.useState<RelayEvent[]>(
-    [],
-  );
+  const [findEvents, setFindEvents] = React.useState<RelayEvent[]>([]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: clear spliced find results exactly when the active channel changes.
   React.useEffect(() => {
-    setFindTargetEvents([]);
+    setFindEvents([]);
   }, [activeChannelId]);
   const resolvedMessages = React.useMemo(() => {
     const currentMessages = messagesQuery.data ?? [];
-    const extraEvents = [...targetMessageEvents, ...findTargetEvents];
+    const extraEvents = [...targetMessageEvents, ...findEvents];
     if (!activeChannel || extraEvents.length === 0) {
       return currentMessages;
     }
     return extraEvents.reduce(mergeMessages, currentMessages);
-  }, [
-    activeChannel,
-    findTargetEvents,
-    messagesQuery.data,
-    targetMessageEvents,
-  ]);
+  }, [activeChannel, findEvents, messagesQuery.data, targetMessageEvents]);
   const threadReplyEvents = threadRepliesQuery.data ?? EMPTY_RELAY_EVENTS;
   const messageEventProfilePubkeys = React.useMemo(() => {
     const events = [...resolvedMessages, ...threadReplyEvents];
@@ -422,7 +415,7 @@ export function ChannelScreen({
     );
   const handleFindSearchHit = React.useCallback((hit: SearchHit) => {
     const event = cacheSearchHitEvent(hit);
-    setFindTargetEvents((currentEvents) =>
+    setFindEvents((currentEvents) =>
       currentEvents.some((currentEvent) => currentEvent.id === event.id)
         ? currentEvents
         : [...currentEvents, event],
@@ -550,10 +543,11 @@ export function ChannelScreen({
     activeChannel && !activeChannel.archivedAt && activeChannel.isMember
       ? handleSendVideoReviewComment
       : undefined;
-  const openWelcomeAgentCreate = welcomeAgentCreate.openAddAgent;
-  const handleOpenAddBot = React.useCallback(() => {
-    openWelcomeAgentCreate(() => setIsAddBotOpen(true));
-  }, [openWelcomeAgentCreate]);
+  const handleOpenAddBot = React.useCallback(
+    (options?: { beforeSend?: () => void }) =>
+      welcomeAgentCreate.openAddAgent(() => setIsAddBotOpen(true), options),
+    [welcomeAgentCreate],
+  );
   const handleOpenMembersSidebar = React.useCallback(
     () => setIsMembersSidebarOpen(true),
     [],

@@ -441,7 +441,11 @@ export const ChannelPane = React.memo(function ChannelPane({
         actions.push({
           icon: <Bot aria-hidden className="h-6 w-6" />,
           label: "Create an agent",
-          onClick: onAddAgent,
+          onClick: () =>
+            onAddAgent({
+              beforeSend: () =>
+                messageTimelineRef.current?.scrollToBottomOnNextUpdate(),
+            }),
           testId: "welcome-intro-action-create-agent",
         });
       }
