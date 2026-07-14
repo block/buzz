@@ -1,4 +1,6 @@
 apiVersion: v2
+# Published to oci://ghcr.io/block/buzz/charts via push-chart-release/<version>
+# branches (see docs/push-gateway-deployment.md, "Gateway chart release").
 name: buzz-push-gateway
 description: Public capability-gated APNs last-hop gateway for Buzz
 version: 0.1.0
