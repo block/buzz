@@ -16,7 +16,6 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { buildTranscriptState } from "@/features/agents/ui/agentSessionTranscript.ts";
 import {
   buildTranscriptDisplayBlocks,
   getDisplayBlockKey,
@@ -57,18 +56,6 @@ function mkItem(id, sessionId, turnId, ts = "2026-07-08T00:00:00.000Z") {
 /** Build a minimal ObserverEvent for raw-mode id derivation. */
 function mkEvent(seq, ts = "2026-07-08T00:00:00.000Z") {
   return { seq, timestamp: ts };
-}
-
-/**
- * Derive transcript block ids through the FULL production chain:
- * raw ObserverEvents → buildTranscriptState → buildTranscriptDisplayBlocks → getDisplayBlockKey.
- *
- * This mirrors AgentSessionThreadPanel's memo exactly.
- */
-function deriveBlockIdsFromEvents(events) {
-  const items = buildTranscriptState(events).items;
-  const blocks = buildTranscriptDisplayBlocks(items);
-  return blocks.map(getDisplayBlockKey);
 }
 
 /**

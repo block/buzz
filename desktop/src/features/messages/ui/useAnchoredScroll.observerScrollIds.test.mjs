@@ -439,7 +439,6 @@ test("mid-history: new message id → no floor write (unread path)", async () =>
   });
   await flushRaf();
 
-  const writesBeforeNewBlock = container.writes.length;
   const scrollTopBeforeNewBlock = container.scrollTop;
 
   // New block arrives while mid-history.
