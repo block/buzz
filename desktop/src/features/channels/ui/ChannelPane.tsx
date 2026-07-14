@@ -172,7 +172,14 @@ export const ChannelPane = React.memo(function ChannelPane({
   const hasMainComposerOverlay = !isNonMemberView;
   const activeChannelId = activeChannel?.id ?? null;
   const activeChannelIdRef = React.useRef(activeChannelId);
+  const channelPaneMountedRef = React.useRef(false);
   activeChannelIdRef.current = activeChannelId;
+  React.useEffect(() => {
+    channelPaneMountedRef.current = true;
+    return () => {
+      channelPaneMountedRef.current = false;
+    };
+  }, []);
   // Clear the ?autoSend search param once the auto-submit fires so
   // back-navigation cannot re-trigger the send.
   // When `onAutoSendComplete` is provided it does a surgical single-key clear
@@ -360,6 +367,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       if (
         channelId &&
         channelId !== activeChannelId &&
+        channelPaneMountedRef.current &&
         activeChannelIdRef.current === activeChannelId
       ) {
         await goChannel(channelId, { replace: true });

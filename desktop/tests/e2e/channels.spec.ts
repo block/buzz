@@ -904,6 +904,36 @@ test("does not reroute an expanded DM after the user navigates away", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
+test("does not reroute an expanded DM after the channel pane unmounts", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+    sendMessageDelayMs: 1_000,
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @fi");
+  await expect(
+    page
+      .getByTestId("message-composer")
+      .getByTestId("mention-autocomplete")
+      .locator("button", { hasText: "Fizz" }),
+  ).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" while I open settings");
+  await page.getByTestId("send-message").click();
+
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await page.waitForTimeout(1_250);
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+});
+
 test("drops an expanded DM after the first message fails", async ({ page }) => {
   const retryMessage = "Retry without the agent";
   const sendError = "Mock first DM send failed.";
