@@ -223,7 +223,7 @@ enum Cmd {
     Moderation(ModerationCmd),
 }
 
-#[derive(Clone, clap::ValueEnum)]
+#[derive(Clone, Copy, clap::ValueEnum)]
 pub enum RespondToArg {
     #[value(name = "owner-only")]
     OwnerOnly,
