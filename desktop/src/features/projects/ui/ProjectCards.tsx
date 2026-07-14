@@ -566,18 +566,21 @@ export function ProjectRailRow({
       data-testid={`project-rail-row-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-w-0 items-start gap-2">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted/50">
           <FolderGit2 className="h-3.5 w-3.5 text-muted-foreground" />
         </span>
-        <span className="block min-w-0 flex-1 truncate text-xs font-semibold text-foreground">
-          {project.name}
-        </span>
-      </div>
-      {/* Cap the bar so it never runs past a full row of People avatars
-          (24px avatar + 6px gap ≈ one trailing slot). */}
-      <div className="relative z-10 mt-1.5 w-full max-w-[calc(100%-1.875rem)]">
-        <ProjectActivityBar summary={summary} />
+        <div className="min-w-0 flex-1">
+          <span className="block min-w-0 truncate text-xs font-semibold text-foreground">
+            {project.name}
+          </span>
+          {/* Cap the bar so its right edge always lands at least one avatar
+              slot (24px + 6px gap) short of the section edge, keeping it
+              within the width of the People avatar row above. */}
+          <div className="relative z-10 mt-1.5 w-full max-w-[calc(100%-1.875rem)]">
+            <ProjectActivityBar summary={summary} />
+          </div>
+        </div>
       </div>
     </div>
   );
