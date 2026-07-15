@@ -21,6 +21,7 @@ import {
   discoverGitBashPrerequisite,
   discoverManagedAgentPrereqs,
   getAgentConfigSurface,
+  getBakedBuildEnv,
   getBakedBuildEnvKeys,
   getChannelMembers,
   getManagedAgentLog,
@@ -863,6 +864,22 @@ export function useRuntimeFileConfigQuery(
 }
 
 export const bakedBuildEnvKeysQueryKey = ["baked-build-env-keys"] as const;
+export const bakedBuildEnvQueryKey = ["baked-build-env"] as const;
+
+/**
+ * Query safely displayable baked build env entries. The backend masks secrets,
+ * so this is only used for inherited provider/model/effort labels.
+ */
+export function useBakedBuildEnvQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: bakedBuildEnvQueryKey,
+    queryFn: () => getBakedBuildEnv(),
+    enabled: options?.enabled ?? true,
+    staleTime: Infinity,
+    refetchInterval: false,
+    retry: false,
+  });
+}
 
 /**
  * Query the key names of baked build env vars.

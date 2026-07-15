@@ -168,6 +168,21 @@ async function expectAgentProfileMessageOnly(
   ).toHaveCount(0);
 }
 
+async function expectAgentProfileActionsHidden(
+  profilePopover: import("@playwright/test").Locator,
+  pubkey: string,
+) {
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-message-${pubkey}`),
+  ).toHaveCount(0);
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-wave-${pubkey}`),
+  ).toHaveCount(0);
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-huddle-${pubkey}`),
+  ).toHaveCount(0);
+}
+
 test("@ trigger prioritizes channel members before runnable personas and other agents", async ({
   page,
 }) => {
@@ -1273,7 +1288,7 @@ test("system agent avatar only exposes message action", async ({ page }) => {
   );
 });
 
-test("profile-only agent author popover only exposes message action", async ({
+test("profile-only agent author hides actions without agent access", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -1305,7 +1320,7 @@ test("profile-only agent author popover only exposes message action", async ({
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await expectAgentProfileMessageOnly(
+  await expectAgentProfileActionsHidden(
     profilePopover,
     PROFILE_ONLY_AGENT_PUBKEY,
   );
@@ -1684,7 +1699,16 @@ test("clicking a mention chip in a forum post opens the profile panel", async ({
   );
 });
 
-test("bot profile only exposes message action", async ({ page }) => {
+test("owned bot profile only exposes message action", async ({ page }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "online",
+      },
+    ],
+  });
   await page.goto("/");
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
@@ -1699,14 +1723,24 @@ test("bot profile only exposes message action", async ({ page }) => {
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await expect(profilePopover.getByText("Codex")).toBeVisible();
   await expectAgentProfileMessageOnly(
     profilePopover,
     TEST_IDENTITIES.charlie.pubkey,
   );
 });
 
-test("agent mention profile only exposes message action", async ({ page }) => {
+test("owned agent mention profile only exposes message action", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "online",
+      },
+    ],
+  });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -1813,7 +1847,7 @@ test("profile popover wave sends a direct message for a human profile", async ({
   );
 });
 
-test("delayed agent profile keeps wave and huddle hidden while classifying", async ({
+test("delayed inaccessible agent profile keeps all actions hidden", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -1853,8 +1887,19 @@ test("delayed agent profile keeps wave and huddle hidden while classifying", asy
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await expectAgentProfileMessageOnly(
-    profilePopover,
-    DELAYED_RELAY_AGENT_PUBKEY,
-  );
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-message-${DELAYED_RELAY_AGENT_PUBKEY}`,
+    ),
+  ).toHaveCount(0);
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-wave-${DELAYED_RELAY_AGENT_PUBKEY}`,
+    ),
+  ).toHaveCount(0);
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-huddle-${DELAYED_RELAY_AGENT_PUBKEY}`,
+    ),
+  ).toHaveCount(0);
 });

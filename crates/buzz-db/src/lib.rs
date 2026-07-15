@@ -52,8 +52,8 @@ pub use error::{DbError, Result};
 pub use event::{EventQuery, ReactionEventInsertOutcome};
 
 use chrono::{DateTime, Utc};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, QueryBuilder, Row};
+use sqlx::postgres::{PgConnection, PgPoolOptions};
+use sqlx::{Connection, PgPool, QueryBuilder, Row};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -179,6 +179,27 @@ pub struct DbPoolStats {
     pub idle: u32,
     /// Pool ceiling — the `max_connections` value set at construction.
     pub max: u32,
+}
+
+/// Owns the detached Postgres session holding the relay usage-metrics advisory lock.
+///
+/// The connection deliberately does not return to the main pool: session advisory
+/// locks must remain bound to this exact physical connection, and the poller
+/// pings it before each leader-only collection tick.
+pub struct UsageMetricsLeader {
+    connection: PgConnection,
+}
+
+impl UsageMetricsLeader {
+    /// Returns whether the lock-owning session is still reachable.
+    ///
+    /// Bounded to 5 seconds — a blackholed connection (no RST) would otherwise
+    /// stall the entire poller tick until the OS TCP timeout.
+    pub async fn is_live(&mut self) -> bool {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.connection.ping())
+            .await
+            .is_ok_and(|r| r.is_ok())
+    }
 }
 
 /// Configuration for the Postgres connection pool.
@@ -340,6 +361,30 @@ impl Db {
             size: self.pool.size(),
             idle: self.pool.num_idle() as u32,
             max: self.max_connections,
+        }
+    }
+
+    /// Try to acquire the detached session advisory lock for relay usage metrics.
+    ///
+    /// The returned guard owns the exact connection that acquired the lock. It is
+    /// detached from the shared pool so a stable leader neither returns a locked
+    /// session to other callers nor permanently consumes a pool slot. Dropping the
+    /// guard closes the connection and releases the session-scoped lock.
+    pub async fn try_lock_usage_metrics(
+        &self,
+        lock_key: i64,
+    ) -> Result<Option<UsageMetricsLeader>> {
+        let mut connection = self.pool.acquire().await?;
+        let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+            .bind(lock_key)
+            .fetch_one(&mut *connection)
+            .await?;
+        if acquired {
+            Ok(Some(UsageMetricsLeader {
+                connection: connection.detach(),
+            }))
+        } else {
+            Ok(None)
         }
     }
 
@@ -949,6 +994,116 @@ impl Db {
         ids: &[&[u8]],
     ) -> Result<Vec<StoredEvent>> {
         event::get_events_by_ids(&self.pool, community_id, ids).await
+    }
+
+    /// Exclusively claim the next due event-to-push matcher job.
+    pub async fn claim_due_push_match(
+        &self,
+        lease_until: DateTime<Utc>,
+    ) -> Result<Option<push::ClaimedMatch>> {
+        push::claim_due_match(&self.pool, lease_until).await
+    }
+
+    /// Load active endpoint-enabled leases eligible for push matching.
+    pub async fn active_push_match_leases(
+        &self,
+        community: CommunityId,
+    ) -> Result<Vec<push::MatchLease>> {
+        push::active_match_leases(&self.pool, community).await
+    }
+
+    /// Complete a matcher job if its claim fence is still held.
+    pub async fn complete_push_match(&self, job: &push::ClaimedMatch) -> Result<bool> {
+        push::complete_match(&self.pool, job).await
+    }
+
+    /// Release a matcher claim for retry at the supplied time.
+    pub async fn retry_push_match(
+        &self,
+        job: &push::ClaimedMatch,
+        next: DateTime<Utc>,
+    ) -> Result<bool> {
+        push::retry_match(&self.pool, job, next).await
+    }
+
+    /// Idempotently enqueue a wake for a matched lease and event.
+    pub async fn enqueue_push_wake(
+        &self,
+        community: CommunityId,
+        author: &[u8],
+        installation_id: &str,
+        wake: push::NewWake<'_>,
+    ) -> Result<push::EnqueueWakeOutcome> {
+        push::enqueue_wake(&self.pool, community, author, installation_id, wake).await
+    }
+
+    /// Exclusively claim due wake jobs for one community.
+    pub async fn claim_due_push_wakes(
+        &self,
+        community: CommunityId,
+        limit: i64,
+        lease_until: DateTime<Utc>,
+    ) -> Result<Vec<push::ClaimedWake>> {
+        push::claim_due_wakes(&self.pool, community, limit, lease_until).await
+    }
+
+    /// Revalidate a wake's claim, source event, and current lease before send.
+    pub async fn revalidate_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+    ) -> Result<push::RevalidateWakeOutcome> {
+        push::revalidate_wake_for_send(&self.pool, community, id, claim_id).await
+    }
+
+    /// Mark a fenced wake claim delivered.
+    pub async fn complete_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+    ) -> Result<bool> {
+        push::complete_wake(&self.pool, community, id, claim_id).await
+    }
+
+    /// Release a fenced wake claim for retry at the supplied time.
+    pub async fn retry_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+        next: DateTime<Utc>,
+    ) -> Result<bool> {
+        push::retry_wake(&self.pool, community, id, claim_id, next).await
+    }
+
+    /// Mark a fenced wake claim terminally failed.
+    pub async fn fail_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+    ) -> Result<bool> {
+        push::fail_wake(&self.pool, community, id, claim_id).await
+    }
+
+    /// Disable an endpoint only if the specified lease generation is current.
+    pub async fn disable_push_endpoint(
+        &self,
+        community: CommunityId,
+        author: &[u8],
+        installation_id: &str,
+        generation: i64,
+    ) -> Result<bool> {
+        push::disable_endpoint_generation(
+            &self.pool,
+            community,
+            author,
+            installation_id,
+            generation,
+        )
+        .await
     }
 
     /// Atomically persist a validated kind:30350 event and its effective lease.
@@ -3400,6 +3555,7 @@ mod tests {
     //! channels, that fail-closed chain would go blind.
     use super::*;
     use buzz_core::CommunityId;
+    use sqlx::postgres::PgPoolOptions;
     use sqlx::{Acquire, PgPool};
     use uuid::Uuid;
 
@@ -4051,6 +4207,44 @@ mod tests {
         .expect("read C watermark");
         assert_eq!(watermark.0.timestamp(), base as i64 + 3);
         assert_eq!(watermark.1, c.id.as_bytes().as_slice());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_usage_metrics_lock_has_single_owner_and_releases_on_drop() {
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(TEST_DB_URL)
+            .await
+            .expect("connect to test DB");
+        let first = Db::from_pool(pool.clone());
+        let second = Db::from_pool(pool);
+        let key = 0x4255_5A5A_4D45_5452;
+
+        let mut leader = first
+            .try_lock_usage_metrics(key)
+            .await
+            .expect("first lock attempt")
+            .expect("first database handle becomes leader");
+        assert!(leader.is_live().await, "lock owner remains reachable");
+        assert!(
+            second
+                .try_lock_usage_metrics(key)
+                .await
+                .expect("second lock attempt")
+                .is_none(),
+            "another session cannot become leader while the guard exists"
+        );
+
+        drop(leader);
+        assert!(
+            second
+                .try_lock_usage_metrics(key)
+                .await
+                .expect("lock attempt after leader drop")
+                .is_some(),
+            "dropping the detached session releases its advisory lock"
+        );
     }
 
     #[tokio::test]

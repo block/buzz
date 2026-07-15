@@ -4,16 +4,17 @@
 //! `#[path]`-included from there.
 
 use super::{
-    encode_team_json, merge_teams, merge_teams_impl, parse_team_json, sort_teams,
+    agents_referencing_team, load_teams_readonly, merge_teams, merge_teams_impl, sort_teams,
     validate_team_deletion, BuiltInTeam,
 };
-use crate::managed_agents::{AgentDefinition, TeamRecord};
+use crate::managed_agents::{ManagedAgentRecord, TeamRecord};
 
 fn team(id: &str, name: &str) -> TeamRecord {
     TeamRecord {
         id: id.to_string(),
         name: name.to_string(),
         description: None,
+        instructions: None,
         persona_ids: Vec::new(),
         is_builtin: false,
         source_dir: None,
@@ -48,137 +49,6 @@ fn sort_teams_empty_is_noop() {
     let mut teams: Vec<TeamRecord> = Vec::new();
     sort_teams(&mut teams);
     assert!(teams.is_empty());
-}
-
-fn persona(id: &str, name: &str, prompt: &str) -> AgentDefinition {
-    AgentDefinition {
-        id: id.to_string(),
-        display_name: name.to_string(),
-        avatar_url: None,
-        system_prompt: prompt.to_string(),
-        runtime: None,
-        model: None,
-        provider: None,
-        name_pool: Vec::new(),
-        is_builtin: false,
-        is_active: true,
-        source_team: None,
-        source_team_persona_slug: None,
-        env_vars: std::collections::BTreeMap::new(),
-        respond_to: None,
-        respond_to_allowlist: Vec::new(),
-        parallelism: None,
-        created_at: "2026-03-20T00:00:00Z".to_string(),
-        updated_at: "2026-03-20T00:00:00Z".to_string(),
-    }
-}
-
-#[test]
-fn encode_parse_round_trip() {
-    let t = team("t1", "My Team");
-    let t = TeamRecord {
-        description: Some("A great team".to_string()),
-        persona_ids: vec!["p1".to_string(), "p2".to_string()],
-        ..t
-    };
-    let personas = vec![
-        persona("p1", "Alice", "You are Alice"),
-        persona("p2", "Bob", "You are Bob"),
-    ];
-
-    let bytes = encode_team_json(&t, &personas).unwrap();
-    let parsed = parse_team_json(&bytes).unwrap();
-
-    assert_eq!(parsed.name, "My Team");
-    assert_eq!(parsed.description.as_deref(), Some("A great team"));
-    assert_eq!(parsed.personas.len(), 2);
-    assert_eq!(parsed.personas[0].display_name, "Alice");
-    assert_eq!(parsed.personas[0].system_prompt, "You are Alice");
-    assert_eq!(parsed.personas[1].display_name, "Bob");
-    assert_eq!(parsed.personas[1].system_prompt, "You are Bob");
-}
-
-#[test]
-fn encode_errors_for_missing_personas() {
-    let t = TeamRecord {
-        persona_ids: vec!["p1".to_string(), "missing".to_string()],
-        ..team("t1", "Team")
-    };
-    let personas = vec![persona("p1", "Alice", "prompt")];
-
-    let err = encode_team_json(&t, &personas).unwrap_err();
-
-    assert_eq!(
-        err,
-        "Team Team references missing personas: missing. Repair the team before exporting."
-    );
-}
-
-#[test]
-fn parse_team_json_invalid_version() {
-    let json = serde_json::json!({
-        "version": 99,
-        "type": "team",
-        "name": "X",
-    });
-    let bytes = serde_json::to_vec(&json).unwrap();
-    let err = parse_team_json(&bytes).unwrap_err();
-    assert!(err.contains("Unsupported team version"), "{err}");
-}
-
-#[test]
-fn parse_team_json_wrong_type() {
-    let json = serde_json::json!({
-        "version": 1,
-        "type": "persona",
-        "name": "X",
-    });
-    let bytes = serde_json::to_vec(&json).unwrap();
-    let err = parse_team_json(&bytes).unwrap_err();
-    assert!(err.contains("Not a team export file"), "{err}");
-}
-
-#[test]
-fn parse_team_json_empty_name() {
-    let json = serde_json::json!({
-        "version": 1,
-        "type": "team",
-        "name": "  ",
-    });
-    let bytes = serde_json::to_vec(&json).unwrap();
-    let err = parse_team_json(&bytes).unwrap_err();
-    assert!(err.contains("Team name is empty"), "{err}");
-}
-
-#[test]
-fn parse_team_json_skips_invalid_personas() {
-    let json = serde_json::json!({
-        "version": 1,
-        "type": "team",
-        "name": "Team",
-        "personas": [
-            { "displayName": "Good", "systemPrompt": "prompt" },
-            { "displayName": "", "systemPrompt": "prompt" },
-            { "displayName": "NoPrompt" },
-        ],
-    });
-    let bytes = serde_json::to_vec(&json).unwrap();
-    let parsed = parse_team_json(&bytes).unwrap();
-    assert_eq!(parsed.personas.len(), 1);
-    assert_eq!(parsed.personas[0].display_name, "Good");
-}
-
-#[test]
-fn parse_team_json_no_personas_key() {
-    let json = serde_json::json!({
-        "version": 1,
-        "type": "team",
-        "name": "Fizz",
-    });
-    let bytes = serde_json::to_vec(&json).unwrap();
-    let parsed = parse_team_json(&bytes).unwrap();
-    assert!(parsed.personas.is_empty());
-    assert_eq!(parsed.name, "Fizz");
 }
 
 #[test]
@@ -289,6 +159,106 @@ fn validate_team_deletion_rejects_built_ins() {
     assert_eq!(err, "Built-in teams cannot be deleted.");
 }
 
+// ── agents_referencing_team ─────────────────────────────────────────────
+
+fn managed_agent(name: &str) -> ManagedAgentRecord {
+    ManagedAgentRecord {
+        pubkey: name.to_string(),
+        name: name.to_string(),
+        persona_id: None,
+        team_id: None,
+        private_key_nsec: String::new(),
+        auth_tag: None,
+        relay_url: "ws://localhost:3000".to_string(),
+        avatar_url: None,
+        acp_command: "buzz-acp".to_string(),
+        agent_command: "buzz-agent".to_string(),
+        agent_command_override: None,
+        agent_args: vec![],
+        mcp_command: String::new(),
+        turn_timeout_seconds: 300,
+        idle_timeout_seconds: None,
+        max_turn_duration_seconds: None,
+        parallelism: 1,
+        system_prompt: None,
+        model: None,
+        provider: None,
+        persona_source_version: None,
+        env_vars: std::collections::BTreeMap::new(),
+        start_on_app_launch: false,
+        auto_restart_on_config_change: false,
+        runtime_pid: None,
+        backend: crate::managed_agents::BackendKind::Local,
+        backend_agent_id: None,
+        provider_binary_path: None,
+        persona_team_dir: None,
+        persona_name_in_team: None,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        last_started_at: None,
+        last_stopped_at: None,
+        last_exit_code: None,
+        last_error: None,
+        last_error_code: None,
+        respond_to: crate::managed_agents::RespondTo::OwnerOnly,
+        respond_to_allowlist: vec![],
+        display_name: None,
+        slug: None,
+        runtime: None,
+        name_pool: vec![],
+        is_builtin: false,
+        is_active: true,
+        source_team: None,
+        source_team_persona_slug: None,
+        relay_mesh: None,
+        definition_respond_to: None,
+        definition_respond_to_allowlist: vec![],
+        definition_parallelism: None,
+    }
+}
+
+/// A new-style agent (created after the `team_id` seam landed) that links to
+/// a JSON-only team purely via `team_id` — the only kind of team that carries
+/// no `source_dir`/`persona_team_dir` at all — must still be caught, or the
+/// "team in use" delete guard silently never fires for it.
+#[test]
+fn agents_referencing_team_matches_on_team_id() {
+    let t = team("json-team-1", "Json Team");
+    let mut linked = managed_agent("Linked Agent");
+    linked.team_id = Some("json-team-1".to_string());
+    let unrelated = managed_agent("Unrelated Agent");
+
+    let agents = vec![linked, unrelated];
+    let referencing = agents_referencing_team(&agents, &t);
+
+    assert_eq!(referencing, vec!["Linked Agent"]);
+}
+
+/// Legacy pack-backed agents that predate the `team_id` field record their
+/// link solely via `persona_team_dir` (matched against the team's directory
+/// name) — this path must keep working after the `team_id` check was added.
+#[test]
+fn agents_referencing_team_matches_on_persona_team_dir() {
+    let mut t = team("uuid-1", "Dir Team");
+    t.source_dir = Some(std::path::PathBuf::from("/teams/com.example.pack"));
+    let mut legacy = managed_agent("Legacy Agent");
+    legacy.persona_team_dir = Some(std::path::PathBuf::from("/installed/com.example.pack"));
+    let unrelated = managed_agent("Unrelated Agent");
+
+    let agents = vec![legacy, unrelated];
+    let referencing = agents_referencing_team(&agents, &t);
+
+    assert_eq!(referencing, vec!["Legacy Agent"]);
+}
+
+#[test]
+fn agents_referencing_team_empty_when_no_matches() {
+    let t = team("json-team-2", "Json Team");
+    let agents = vec![managed_agent("Agent A"), managed_agent("Agent B")];
+
+    assert!(agents_referencing_team(&agents, &t).is_empty());
+}
+
 // Migration pins — exercise the real merge_teams wrapper (with production consts).
 
 #[test]
@@ -299,6 +269,7 @@ fn migration_pristine_fizz_is_purged() {
         id: "builtin-team:fizz".to_string(),
         name: "Fizz".to_string(),
         description: Some("Fizz works carefully and collaboratively.".to_string()),
+        instructions: None,
         persona_ids: vec!["builtin:fizz".to_string()],
         is_builtin: true,
         source_dir: None,
@@ -323,6 +294,7 @@ fn migration_customized_fizz_is_demoted_to_user_team() {
         id: "builtin-team:fizz".to_string(),
         name: "Fizz (customized)".to_string(),
         description: Some("Fizz works carefully and collaboratively.".to_string()),
+        instructions: None,
         persona_ids: vec!["builtin:fizz".to_string(), "extra:persona".to_string()],
         is_builtin: true,
         source_dir: None,
@@ -351,4 +323,62 @@ fn migration_empty_store_stays_empty() {
 
     assert!(!changed);
     assert!(records.is_empty());
+}
+
+// ── load_teams_readonly tests ──────────────────────────────────────────
+
+#[test]
+fn load_teams_readonly_absent_file_performs_no_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("teams.json");
+
+    // File does not exist.
+    assert!(!path.exists());
+
+    let records = load_teams_readonly(&path).unwrap();
+
+    // Returns the merged built-in list (currently empty since BUILT_IN_TEAMS
+    // is empty, but the function ran merge_teams + sort_teams).
+    assert!(records.is_empty());
+
+    // The file must still NOT exist — no write-on-load side effect.
+    assert!(
+        !path.exists(),
+        "load_teams_readonly must not create the file"
+    );
+}
+
+#[test]
+fn load_teams_readonly_surfaces_parse_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("teams.json");
+    std::fs::write(&path, b"not valid json").unwrap();
+
+    let result = load_teams_readonly(&path);
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().contains("failed to parse teams store"),
+        "parse error must be surfaced"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn load_teams_readonly_surfaces_read_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("teams.json");
+    std::fs::write(&path, b"[]").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let result = load_teams_readonly(&path);
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().contains("failed to read teams store"),
+        "read error must be surfaced"
+    );
 }

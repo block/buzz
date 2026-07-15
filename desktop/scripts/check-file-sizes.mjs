@@ -107,7 +107,8 @@ const overrides = new Map([
   ["src-tauri/src/managed_agents/nest.rs", 704],
   // keyring-dev-isolation: agent key migration added copy_agent_keys_between_stores
   // and load_readonly support; file grew past 1000 default. Queued to split.
-  ["src-tauri/src/managed_agents/storage.rs", 1325],
+  // +7 for try_delete_agent_key result-returning seam (snapshot-import rollback).
+  ["src-tauri/src/managed_agents/storage.rs", 1335],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
@@ -164,7 +165,9 @@ const overrides = new Map([
   // setup-mode requirements. The Windows-only requirement and serialization
   // test add eight lines; split remains queued with the existing file debt.
   // Windows Doctor install fix: cli_install_commands_windows field added to test stubs.
-  ["src-tauri/src/managed_agents/readiness.rs", 1764],
+  // team-instructions-first-class: ManagedAgentRecord fixture gains the new
+  // team_id field (+1 line).
+  ["src-tauri/src/managed_agents/readiness.rs", 1765],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -197,7 +200,9 @@ const overrides = new Map([
   // RawInstallRuntimeResult + fromRawInstallRuntimeResult mapper (+2).
   // Git Bash Doctor discovery adds the raw Tauri response and its camelCase
   // mapper. This is the existing API boundary; split remains queued.
-  ["src/shared/api/tauri.ts", 1304],
+  // team-instructions-first-class: createManagedAgent Tauri bridge threads the
+  // new teamId input through to the backend (+1 line).
+  ["src/shared/api/tauri.ts", 1305],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
   // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
   // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/
@@ -207,7 +212,12 @@ const overrides = new Map([
   // mcp-readonly-view rebase: PR2 MCP config surface FE-type fields force +1 over the grandfathered ceiling.
   // Git Bash prerequisite payload adds four fields to the shared Tauri API
   // contract. This is the canonical type location; split remains queued.
-  ["src/shared/api/types.ts", 1038],
+  // signout-wipe: resetFailed field added to Identity type (+6 lines).
+  // team-instructions-first-class: CreateManagedAgentInput.teamId (+2, incl.
+  // doc comment) and AgentTeam/CreateTeamInput/UpdateTeamInput.instructions
+  // (+3) — the new team-id spawn link and the runtime-layered instructions
+  // field.
+  ["src/shared/api/types.ts", 1047],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -279,7 +289,9 @@ const overrides = new Map([
   // candidates, cli_install_commands_for_os PowerShell selection, login_shell_path
   // None regression, .cmd shim resolution, no-git-bash error hint.
   // +32: deterministic .cmd resolver + no-registry + install_shell_from tests.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1270],
+  // team-instructions-first-class: record_with test fixture gained the new
+  // ManagedAgentRecord.team_id field (+1 line) alongside persona_team_dir.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1271],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -307,7 +319,7 @@ const overrides = new Map([
   // am review fix: also clear stale V1 model field on provider rewrite +
   // new model-clear test. Load-bearing chimera fix.
   // keyring-dev-isolation: run_boot_migrations wires agent-key migration.
-  ["src-tauri/src/migration.rs", 1415],
+  ["src-tauri/src/migration.rs", 1436],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
@@ -331,7 +343,22 @@ const overrides = new Map([
   // security fix for the lost-update race that stranded agent keys.
   // identity-import-keyring: KeyringLockedScreen, RecoveryScreen,
   // load_readonly + load_all_readonly + store_all for safe cross-service reads.
-  ["src-tauri/src/secret_store.rs", 1140],
+  // sign-out wipe: delete_all() method removes the entire keychain blob under
+  // the interprocess advisory lock; +8 lines. Load-bearing; queued to split.
+  // signout-wipe phase 2: delete_all_with_legacy_cleanup replaces delete_all;
+  // reads blob keys + deletes per-key legacy entries to prevent resurrection.
+  // + regression test for per-key resurrection via real OS keychain.
+  // Net growth ~36+32 lines over prior cap. Load-bearing correctness fix.
+  // signout-wipe pass-2 (F2): delete_all_with_legacy_cleanup DPK deletes now
+  // observable (propagate real errors); verify_fully_wiped checks all three
+  // keychain shapes (main blob, DPK blob, per-key "identity"). +73 lines.
+  ["src-tauri/src/secret_store.rs", 1307],
+  // sign-out wipe: Sign Out section (AlertDialog + controlled state) added
+  // at the bottom of the Profile settings page. Load-bearing UX feature;
+  // queued to split when ProfileSettingsCard is broken into sub-components.
+  // +20 lines: scroll-position save/restore across avatar editor open/close
+  // to prevent layout shift from the Sign Out section causing a viewport jump.
+  ["src/features/settings/ui/ProfileSettingsCard.tsx", 1033],
   // keyring-dev-isolation: keyring_service() fn (7 lines) replaces the const
   // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
   ["src-tauri/src/app_state.rs", 1042],
@@ -452,7 +479,9 @@ const overrides = new Map([
   // +2 provider-aware effort: model/provider props threaded to BuzzAgentModelTuningFields.
   // +15 provider/model dropdown fixes: useBakedBuildEnvKeysQuery + hideProviderIds
   // for Databricks v1 gate; prospectiveRuntimeId default fallback for builtins.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1180],
+  // PR-B moves default/API-key derivation into shared hooks; the explicit
+  // hidden-key projection keeps the top-level secret out of Advanced rows.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1195],
   // AgentDefinitionDialog grew past 1000 with the following load-bearing fixes:
   // isRuntimeAutoSeededRef tracking for edit-mode seeding (Fizz shows models);
   // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);

@@ -775,6 +775,56 @@ void main() {
         expect(_allRichText(tester), contains('alice@example.com'));
         expect(find.text('@example.com'), findsNothing);
       });
+
+      testWidgets('mention tap callback fires with pubkey', (tester) async {
+        String? tappedPubkey;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: 'Hey @Alice check this out',
+              mentionNames: const {'pk1': 'Alice'},
+              onMentionTap: (pubkey) => tappedPubkey = pubkey,
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('@Alice'));
+        expect(tappedPubkey, 'pk1');
+      });
+
+      testWidgets('multi-word mention tap callback fires with pubkey', (
+        tester,
+      ) async {
+        String? tappedPubkey;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: 'Hey @Kenny Lopez can you review this?',
+              mentionNames: const {'pk1': 'Kenny Lopez'},
+              onMentionTap: (pubkey) => tappedPubkey = pubkey,
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('@Kenny Lopez'));
+        expect(tappedPubkey, 'pk1');
+      });
+
+      testWidgets('unknown mention renders without tap', (tester) async {
+        var tapped = false;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: 'Hey @unknown check this',
+              mentionNames: const {},
+              onMentionTap: (_) => tapped = true,
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('@unknown'), warnIfMissed: false);
+        expect(tapped, isFalse);
+      });
     });
 
     group('#channel links', () {

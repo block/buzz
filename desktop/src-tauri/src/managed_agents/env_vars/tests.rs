@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    display_invalid_key, filter_derived_provider_model_env_vars, is_derived_provider_model_key,
-    is_reserved_env_key, is_well_formed_env_key, merged_user_env, validate_user_env_keys,
+    display_invalid_key, is_derived_provider_model_key, is_reserved_env_key,
+    is_well_formed_env_key, merged_user_env, validate_user_env_keys,
     DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_TOTAL_BYTES, MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
 };
 
@@ -449,85 +449,6 @@ fn is_derived_key_does_not_match_unrelated_keys() {
     assert!(!is_derived_provider_model_key("BUZZ_PRIVATE_KEY"));
     assert!(!is_derived_provider_model_key("MODEL"));
     assert!(!is_derived_provider_model_key("PROVIDER"));
-}
-
-#[test]
-fn filter_derived_strips_provider_model_keys_preserves_rest() {
-    let input = vec![
-        ("GOOSE_MODEL".to_string(), "old-model".to_string()),
-        ("GOOSE_PROVIDER".to_string(), "old-provider".to_string()),
-        ("BUZZ_AGENT_MODEL".to_string(), "gpt-4o".to_string()),
-        ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
-        ("GOOSE_TEMPERATURE".to_string(), "0.7".to_string()),
-        ("GOOSE_CONTEXT_LIMIT".to_string(), "128000".to_string()),
-        ("CUSTOM_KEY".to_string(), "custom-value".to_string()),
-    ];
-
-    let filtered = filter_derived_provider_model_env_vars(input);
-
-    // Derived keys must be gone.
-    assert!(!filtered.contains_key("GOOSE_MODEL"));
-    assert!(!filtered.contains_key("GOOSE_PROVIDER"));
-    assert!(!filtered.contains_key("BUZZ_AGENT_MODEL"));
-    assert!(!filtered.contains_key("BUZZ_AGENT_PROVIDER"));
-
-    // Non-derived keys must survive.
-    assert_eq!(
-        filtered.get("GOOSE_TEMPERATURE").map(String::as_str),
-        Some("0.7")
-    );
-    assert_eq!(
-        filtered.get("GOOSE_CONTEXT_LIMIT").map(String::as_str),
-        Some("128000")
-    );
-    assert_eq!(
-        filtered.get("CUSTOM_KEY").map(String::as_str),
-        Some("custom-value")
-    );
-}
-
-#[test]
-fn filter_derived_empty_input_returns_empty() {
-    let filtered = filter_derived_provider_model_env_vars(std::iter::empty());
-    assert!(filtered.is_empty());
-}
-
-#[test]
-fn stale_derived_env_does_not_override_structured_fields() {
-    // Scenario: A persona was imported WITH stale derived keys (pre-fix).
-    // At merge time, `merged_user_env` passes them through (it doesn't filter).
-    // The fix is at *import* time — this test documents that merged_user_env
-    // is transparent, and the import filter is the correct defense.
-    let stale_persona_env = map(&[
-        ("BUZZ_AGENT_MODEL", "stale-model"),
-        ("BUZZ_AGENT_PROVIDER", "stale-provider"),
-        ("GOOSE_TEMPERATURE", "0.5"),
-    ]);
-    let agent_env = BTreeMap::new();
-
-    let merged = merged_user_env(&stale_persona_env, &agent_env);
-
-    // merged_user_env is transparent — stale keys pass through.
-    assert_eq!(
-        merged.get("BUZZ_AGENT_MODEL").map(String::as_str),
-        Some("stale-model")
-    );
-    assert_eq!(
-        merged.get("BUZZ_AGENT_PROVIDER").map(String::as_str),
-        Some("stale-provider")
-    );
-
-    // But the import filter WOULD have caught them:
-    let would_be_filtered = filter_derived_provider_model_env_vars(stale_persona_env);
-    assert!(!would_be_filtered.contains_key("BUZZ_AGENT_MODEL"));
-    assert!(!would_be_filtered.contains_key("BUZZ_AGENT_PROVIDER"));
-    // Non-derived keys survive the filter.
-    assert_eq!(
-        would_be_filtered
-            .get("GOOSE_TEMPERATURE")
-            .map(String::as_str),
-        Some("0.5")
-    );
 }
 
 // ── deploy payload model precedence ────────────────────────────────

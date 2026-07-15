@@ -130,6 +130,10 @@ type E2eConfig = {
     channelMembersReadDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
+    /** Reject successive mock `create_channel` calls, then resume. */
+    createChannelErrors?: string[];
+    /** Reject successive mock `join_channel` calls, then resume. */
+    joinChannelErrors?: string[];
     channelsReadDelayMs?: number;
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
@@ -193,6 +197,18 @@ type E2eConfig = {
      *  fail-closed race: DMs are withheld while classification is unresolved. */
     relaySelfDelayMs?: number;
     /**
+     * Sequenced results for `confirm_team_snapshot_import`. String = throw
+     * with that message; null = succeed. Call N uses results[N]; last entry
+     * repeats when exhausted. Follows the `nsecErrors` precedent.
+     */
+    teamSnapshotConfirmErrors?: (string | null)[];
+    /**
+     * When true, `preview_team_snapshot_import` returns a preview with
+     * `hasSourceAllowlist: true` so the allowlist section renders in the
+     * import dialog.
+     */
+    teamSnapshotPreviewHasSourceAllowlist?: boolean;
+    /**
      * When set to a non-empty string, `fetch_snapshot_bytes` throws with this
      * message — lets specs prove malformed/hash/size-mismatch error paths.
      */
@@ -225,6 +241,12 @@ type E2eConfig = {
       provider: string | null;
       model: string | null;
     };
+    /** Baked build env returned by the display and key-name Tauri commands. */
+    bakedBuildEnv?: Array<{
+      key: string;
+      masked: boolean;
+      value: string;
+    }>;
     /** Delay (ms) applied to `set_global_agent_config` so tests can observe
      *  autosave behaviour while a request is in flight. 0/undefined = instant.
      *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
@@ -763,6 +785,12 @@ declare global {
     __BUZZ_E2E_COMMAND_LOG__?: Array<{
       command: string;
       payload: unknown;
+    }>;
+    /** Results emitted only after a mocked mesh-availability request resolves. */
+    __BUZZ_E2E_MESH_AVAILABILITY_RESULTS__?: Array<{
+      admitted: boolean;
+      available: boolean;
+      reason: string | null;
     }>;
     __BUZZ_E2E_WEBVIEW_ZOOM__?: number;
     __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
@@ -5275,6 +5303,11 @@ async function handleCreateChannel(
       ? new Date(Date.now() + args.ttlSeconds * 1_000).toISOString()
       : null;
   if (!identity) {
+    const createChannelError = config?.mock?.createChannelErrors?.shift();
+    if (createChannelError) {
+      throw new Error(createChannelError);
+    }
+
     const owner = createCurrentMember(config, "owner");
     const channel = createMockChannel({
       id: crypto.randomUUID(),
@@ -5971,6 +6004,11 @@ async function handleJoinChannel(
 ) {
   const identity = getIdentity(config);
   if (!identity) {
+    const joinChannelError = config?.mock?.joinChannelErrors?.shift();
+    if (joinChannelError) {
+      throw new Error(joinChannelError);
+    }
+
     const channel = getMockChannel(args.channelId);
     const currentPubkey = getMockMemberPubkey(config);
 
@@ -6458,6 +6496,9 @@ let installCallCount = 0;
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
+
+// Per-page confirm_team_snapshot_import call counter for sequenced error testing.
+let teamSnapshotConfirmCallCount = 0;
 
 async function handleInstallAcpRuntime(
   args: {
@@ -8208,6 +8249,7 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_COMMANDS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
+  window.__BUZZ_E2E_MESH_AVAILABILITY_RESULTS__ = [];
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
   window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
   window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ = ({
@@ -8454,12 +8496,16 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
-      case "mesh_availability":
-        return {
+      case "mesh_availability": {
+        const result = {
           capable: true,
           admitted: mockMeshState.admitted,
-          available: mockMeshState.admitted,
-          reason: mockMeshState.admitted ? null : mockMeshState.denyReason,
+          available: mockMeshState.admitted && mockMeshState.models.length > 0,
+          reason: !mockMeshState.admitted
+            ? mockMeshState.denyReason
+            : mockMeshState.models.length === 0
+              ? "no relay mesh serve targets are available"
+              : null,
           models: mockMeshState.models,
           serveTargets: mockMeshState.models.map((model) => ({
             modelId: model.id,
@@ -8476,6 +8522,17 @@ export function maybeInstallE2eTauriMocks() {
             deviceName: "Mock desktop",
           })),
         };
+        return Promise.resolve(result).then((resolved) => {
+          // Unlike the command log above, record this only after the mocked
+          // result has resolved so E2E can distinguish it from loading.
+          window.__BUZZ_E2E_MESH_AVAILABILITY_RESULTS__?.push({
+            admitted: resolved.admitted,
+            available: resolved.available,
+            reason: resolved.reason,
+          });
+          return resolved;
+        });
+      }
       case "mesh_installed_models":
         return mockMeshState.models;
       case "mesh_node_status":
@@ -9047,6 +9104,91 @@ export function maybeInstallE2eTauriMocks() {
         };
         return importResult;
       }
+      case "export_team_snapshot":
+        // Mimics the save-to-disk path: report success without a real dialog.
+        return true;
+      case "encode_team_snapshot_for_send": {
+        // Return a minimal PNG-shaped payload so the send flow can proceed
+        // through upload_media_bytes without a real Rust encode step.
+        const encodeDelayMs = activeConfig?.mock?.encodeDelayMs ?? 0;
+        if (encodeDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, encodeDelayMs),
+          );
+        }
+        return {
+          fileBytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+          fileName: "e2e-team.team.png",
+        };
+      }
+      case "preview_team_snapshot_import": {
+        // Return a minimal preview — no writes performed.
+        const previewHasAllowlist =
+          activeConfig?.mock?.teamSnapshotPreviewHasSourceAllowlist ?? false;
+        return {
+          name: "Imported Team",
+          description: null,
+          instructions: null,
+          members: [
+            {
+              displayName: "Team Member",
+              systemPrompt: null,
+              avatarUrl: null,
+              hasSourceAllowlist: previewHasAllowlist,
+              sourceAllowlistCount: previewHasAllowlist ? 3 : 0,
+            },
+          ],
+          hasSourceAllowlist: previewHasAllowlist,
+        };
+      }
+      case "confirm_team_snapshot_import": {
+        // Sequenced failure injection: fail once, then succeed (retry test).
+        const confirmSequence = activeConfig?.mock?.teamSnapshotConfirmErrors;
+        if (confirmSequence && confirmSequence.length > 0) {
+          const idx = Math.min(
+            teamSnapshotConfirmCallCount,
+            confirmSequence.length - 1,
+          );
+          teamSnapshotConfirmCallCount++;
+          const entry = confirmSequence[idx];
+          if (entry !== null) {
+            throw new Error(entry);
+          }
+        }
+        // Return a successful import result with fresh synthetic keys.
+        // The nested `team` uses snake_case (Rust TeamRecord has no rename_all);
+        // the outer struct and members use camelCase (their Rust types do).
+        const importTs = Date.now();
+        return {
+          team: {
+            id: `e2e-team-${importTs}`,
+            name: "Imported Team",
+            description: null,
+            persona_ids: [`e2e-persona-${importTs}`],
+            instructions: null,
+            is_builtin: false,
+            source_dir: null,
+            is_symlink: false,
+            symlink_target: null,
+            version: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+          personaIds: [`e2e-persona-${importTs}`],
+          members: [
+            {
+              displayName: "Team Member",
+              pubkey:
+                "e2e000000000000000000000000000000000000000000000000000000000000ee",
+              personaId: `e2e-persona-${importTs}`,
+              memoryWritten: 0,
+              memoryTotal: 0,
+              memoryErrors: [],
+              profileSyncError: null,
+            },
+          ],
+        };
+      }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);
       case "get_agent_memory":
@@ -9186,11 +9328,9 @@ export function maybeInstallE2eTauriMocks() {
         };
       }
       case "get_baked_build_env":
-        // Mock always returns an empty baked env (OSS build simulation).
-        return [];
+        return config?.mock?.bakedBuildEnv ?? [];
       case "get_baked_build_env_keys":
-        // Mock always returns no baked env key names (OSS build simulation).
-        return [];
+        return (config?.mock?.bakedBuildEnv ?? []).map((entry) => entry.key);
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],
@@ -9533,7 +9673,7 @@ export function maybeInstallE2eTauriMocks() {
       case "get_relay_self":
         if ((activeConfig?.mock?.relaySelfDelayMs ?? 0) > 0) {
           await new Promise((resolve) =>
-            window.setTimeout(resolve, activeConfig!.mock!.relaySelfDelayMs),
+            window.setTimeout(resolve, activeConfig?.mock?.relaySelfDelayMs),
           );
         }
         return activeConfig?.mock?.relaySelf ?? null;

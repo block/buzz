@@ -422,14 +422,9 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_ALLOWED_RESPOND_TO", value_delimiter = ',')]
     pub allowed_respond_to: Option<Vec<String>>,
 
-    /// Path to a persona pack directory. Used with --persona-name to configure
-    /// the agent from a .persona.md pack instead of CLI flags.
-    #[arg(long, env = "BUZZ_ACP_PERSONA_PACK")]
-    pub persona_pack: Option<PathBuf>,
-
-    /// Name of the persona within the pack to use. Required when --persona-pack is set.
-    #[arg(long, env = "BUZZ_ACP_PERSONA_NAME")]
-    pub persona_name: Option<String>,
+    /// Team-owned instructions layered after `[System]` and before agent memory.
+    #[arg(long, env = "BUZZ_ACP_TEAM_INSTRUCTIONS")]
+    pub team_instructions: Option<String>,
 
     /// Publish encrypted ACP observer frames over the relay.
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
@@ -462,6 +457,8 @@ pub struct Config {
     pub turn_liveness_secs: u64,
     pub heartbeat_prompt: Option<String>,
     pub system_prompt: Option<String>,
+    /// Team-owned instructions layered separately from the agent system prompt.
+    pub team_instructions: Option<String>,
     pub initial_message: Option<String>,
     pub subscribe_mode: SubscribeMode,
     pub dedup_mode: DedupMode,
@@ -705,7 +702,7 @@ impl Config {
             .replace_range(.., &"0".repeat(args.private_key.len()));
         args.private_key.clear();
 
-        let mut system_prompt = if let Some(text) = args.system_prompt {
+        let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
         } else if let Some(ref path) = args.system_prompt_file {
             Some(std::fs::read_to_string(path)?)
@@ -902,52 +899,10 @@ impl Config {
             Vec::new()
         };
 
-        //
-        // Precedence: CLI/env args > persona values > built-in defaults.
-        // Persona fills in what's missing. Explicit flags always win.
-        let (persona_system_prompt, persona_model, mut persona_env_vars) =
-            match (&args.persona_pack, &args.persona_name) {
-                (Some(pack_dir), Some(name)) => {
-                    let pack = buzz_persona::resolve::resolve_pack(pack_dir).map_err(|e| {
-                        ConfigError::ConfigFile(format!(
-                            "failed to resolve pack {}: {e}",
-                            pack_dir.display()
-                        ))
-                    })?;
-                    let persona = pack
-                        .personas
-                        .into_iter()
-                        .find(|p| p.name == *name)
-                        .ok_or_else(|| {
-                            ConfigError::ConfigFile(format!(
-                                "persona '{name}' not found in pack {}",
-                                pack_dir.display()
-                            ))
-                        })?;
-                    (
-                        Some(persona.system_prompt),
-                        persona.model,
-                        persona.runtime_env_vars,
-                    )
-                }
-                (Some(_), None) => {
-                    return Err(ConfigError::ConfigFile(
-                        "--persona-pack requires --persona-name".into(),
-                    ));
-                }
-                (None, Some(_)) => {
-                    return Err(ConfigError::ConfigFile(
-                        "--persona-name requires --persona-pack".into(),
-                    ));
-                }
-                (None, None) => (None, None, vec![]),
-            };
-
-        // Apply persona defaults: CLI/env wins, persona fills gaps.
-        if system_prompt.is_none() {
-            system_prompt = persona_system_prompt;
-        }
-        let model = args.model.or(persona_model);
+        // Spawned desktop agents now carry a complete instance snapshot. Team
+        // instructions arrive independently so they can be layered at runtime.
+        let mut persona_env_vars = Vec::new();
+        let model = args.model;
 
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
@@ -975,6 +930,12 @@ impl Config {
             turn_liveness_secs,
             heartbeat_prompt,
             system_prompt,
+            team_instructions: args
+                .team_instructions
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
             initial_message: args.initial_message,
             subscribe_mode: args.subscribe,
             dedup_mode: args.dedup,
@@ -1346,6 +1307,7 @@ mod tests {
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
+            team_instructions: None,
             initial_message: None,
             subscribe_mode: mode,
             dedup_mode: DedupMode::Queue,

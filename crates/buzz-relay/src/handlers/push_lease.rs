@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use sha2::Digest as _;
 
+pub(crate) const PUSH_KINDS: &[u64] = &[7, 9, 1059, 40007, 46010];
+pub(crate) const URGENT_KINDS: &[u64] = &[];
+
 /// NIP-PL addressable push-lease event kind.
 pub const KIND_PUSH_LEASE: u32 = 30_350;
 /// Largest integer represented exactly by interoperable JSON number implementations.
@@ -504,8 +507,8 @@ pub async fn accept(
             },
         ],
         supported_classes: &["silent", "default", "time_sensitive"],
-        push_kinds: &[7, 9, 1059, 40007, 46010],
-        urgent_kinds: &[],
+        push_kinds: PUSH_KINDS,
+        urgent_kinds: URGENT_KINDS,
         max_subscriptions: 16,
         max_kinds: 16,
         max_authors: 20,
@@ -689,6 +692,21 @@ mod tests {
             max_endpoint_len: 128,
             max_string_len: 128,
         }
+    }
+
+    #[test]
+    fn migration_trigger_allowlist_matches_advertised_push_kinds() {
+        let kinds = PUSH_KINDS
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let predicate = format!("NEW.kind IN ({kinds})");
+        let migration = include_str!("../../../../migrations/0018_push_match_queue.sql");
+        assert!(
+            migration.contains(&predicate),
+            "migration trigger must use PUSH_KINDS exactly: {predicate}"
+        );
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub struct TeamEventContent {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub persona_ids: Vec<String>,
 }
@@ -35,6 +37,7 @@ pub fn team_event_content(record: &TeamRecord) -> TeamEventContent {
     TeamEventContent {
         name: record.name.clone(),
         description: record.description.clone(),
+        instructions: record.instructions.clone(),
         persona_ids: record.persona_ids.clone(),
     }
 }
@@ -86,6 +89,7 @@ mod tests {
             id: "team-123".to_string(),
             name: "Test Team".to_string(),
             description: Some("A test team".to_string()),
+            instructions: Some("Coordinate carefully.".to_string()),
             persona_ids: vec!["p1".to_string(), "p2".to_string()],
             is_builtin: false,
             source_dir: Some(PathBuf::from("/local/only/path")),
@@ -130,6 +134,7 @@ mod tests {
         // Published fields present.
         assert!(json.contains("\"name\""));
         assert!(json.contains("\"persona_ids\""));
+        assert!(json.contains("\"instructions\""));
         // Local-only / install-specific fields never published.
         assert!(!json.contains("source_dir"));
         assert!(!json.contains("is_symlink"));

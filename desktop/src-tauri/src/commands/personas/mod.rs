@@ -8,9 +8,9 @@ use crate::{
         delete_agent_key, effective_agent_command, load_managed_agents, load_personas, load_teams,
         managed_agent_avatar_url, persona_events::persona_d_tag, save_managed_agents,
         save_personas, stop_managed_agent_process, sync_managed_agent_processes,
-        team_events::TeamEventContent, team_persona_key, try_regenerate_nest,
-        validate_persona_activation_change, validate_persona_deletion, AgentDefinition,
-        CreatePersonaRequest, ManagedAgentRecord, TeamRecord, UpdatePersonaRequest,
+        team_events::TeamEventContent, try_regenerate_nest, validate_persona_activation_change,
+        validate_persona_deletion, AgentDefinition, CreatePersonaRequest, ManagedAgentRecord,
+        TeamRecord, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -109,18 +109,12 @@ pub async fn create_persona(
 }
 
 /// Return value of the `update_persona` command. Uses flatten so all
-/// `AgentDefinition` fields appear at the top level of the JSON response,
-/// alongside the optional `writeback_warning` field — backward-compatible with
-/// callers that already destructure a raw persona object.
+/// `AgentDefinition` fields appear at the top level of the JSON response —
+/// backward-compatible with callers that already destructure a raw persona object.
 #[derive(Debug, serde::Serialize)]
 pub struct UpdatePersonaResult {
     #[serde(flatten)]
     persona: AgentDefinition,
-    /// Non-`None` when the pack `.persona.md` write-back failed (non-fatal).
-    /// The in-app edit was already saved; the frontend can use this to surface
-    /// a "pack file diverged" indicator so the user knows to check the file.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub writeback_warning: Option<String>,
 }
 
 /// Propagate a persona definition's display_name rename to linked agent instances.
@@ -160,15 +154,11 @@ pub async fn update_persona(
     type ProfileSyncParams = Vec<(nostr::Keys, String, String, Option<String>, Option<String>)>;
 
     // Phase 1: synchronous save (persona record + linked agent avatar updates)
-    let (result, profile_sync_params, writeback_warning) = tokio::task::spawn_blocking({
+    let (result, profile_sync_params) = tokio::task::spawn_blocking({
         let app = app.clone();
-        move || -> Result<(AgentDefinition, ProfileSyncParams, Option<String>), String> {
+        move || -> Result<(AgentDefinition, ProfileSyncParams), String> {
             let state = app.state::<AppState>();
             let display_name = trim_required(&input.display_name, "Display name")?;
-            // Do not trim system_prompt: `compose_prompt` appends pack_instructions
-            // verbatim (including any trailing newline), and write_back_persona_md
-            // decomposes by suffix-stripping. Trimming would break that exact-suffix
-            // match for the common case where instructions.md has a trailing newline.
             let system_prompt = input.system_prompt.clone();
             let avatar_url = trim_optional(input.avatar_url);
             let runtime = trim_optional(input.runtime);
@@ -215,11 +205,6 @@ pub async fn update_persona(
 
             let result = persona.clone();
             save_personas(&app, &personas)?;
-
-            // For pack-backed personas, also write the edit back to the source
-            // `.persona.md` so that launch sync (which reads the file) becomes a
-            // no-op rather than overwriting the record we just saved.
-            let writeback_warning = write_back_persona_md(&app, &result);
 
             retain_persona_pending(&app, &state, &result);
             try_regenerate_nest(&app);
@@ -298,7 +283,7 @@ pub async fn update_persona(
                 Vec::new()
             };
 
-            Ok((result, sync_params, writeback_warning))
+            Ok((result, sync_params))
         }
     })
     .await
@@ -326,14 +311,8 @@ pub async fn update_persona(
         }
     }
 
-    Ok(UpdatePersonaResult {
-        persona: result,
-        writeback_warning,
-    })
+    Ok(UpdatePersonaResult { persona: result })
 }
-
-mod writeback;
-use writeback::write_back_persona_md;
 
 #[cfg(test)]
 mod delete_cascade_tests;
@@ -901,12 +880,14 @@ fn apply_inbound_team(teams: &mut Vec<TeamRecord>, d_tag: String, inbound: TeamE
         Some(local) => {
             local.name = inbound.name;
             local.description = inbound.description;
+            local.instructions = inbound.instructions;
             local.persona_ids = inbound.persona_ids;
         }
         None => teams.push(TeamRecord {
             id: d_tag,
             name: inbound.name,
             description: inbound.description,
+            instructions: inbound.instructions,
             persona_ids: inbound.persona_ids,
             is_builtin: false,
             source_dir: None,

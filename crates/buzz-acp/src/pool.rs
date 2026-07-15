@@ -379,6 +379,7 @@ pub struct PromptContext {
     pub turn_liveness_interval: Duration,
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
+    pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
     /// Base prompt content, or `None` if `--no-base-prompt` was passed.
     ///
@@ -694,7 +695,10 @@ async fn create_session_and_apply_model(
     let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
         with_canvas(
             with_core(
-                framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                with_team(
+                    framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                    ctx.team_instructions.as_deref(),
+                ),
                 agent_core,
             ),
             agent_canvas,
@@ -1024,6 +1028,21 @@ fn workspace_section(cwd: &str) -> Option<String> {
         ))
     } else {
         None
+    }
+}
+
+/// Append the team-owned instruction section after `[System]` and before core memory.
+fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
+    let instructions = instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (prompt, instructions) {
+        (Some(prompt), Some(instructions)) => {
+            Some(format!("{prompt}\n\n[Team Instructions]\n{instructions}"))
+        }
+        (None, Some(instructions)) => Some(format!("[Team Instructions]\n{instructions}")),
+        (Some(prompt), None) => Some(prompt),
+        (None, None) => None,
     }
 }
 
@@ -1552,6 +1571,7 @@ pub async fn run_prompt_task(
                 has_system_prompt_support: agent.protocol_version >= 2,
                 base_prompt: ctx.base_prompt,
                 system_prompt: ctx.system_prompt.as_deref(),
+                team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
             },
         )
@@ -4527,6 +4547,7 @@ mod tests {
             turn_liveness_interval: Duration::ZERO,
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
+            team_instructions: None,
             heartbeat_prompt: None,
             base_prompt: None,
             cwd: ".".to_string(),

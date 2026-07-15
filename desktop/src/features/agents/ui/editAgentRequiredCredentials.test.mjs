@@ -19,14 +19,21 @@ import { hasMissingRequiredEnvKey } from "./personaRuntimeModel.ts";
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * Simulate the hook's filtered key list: allRequiredKeys minus globally-satisfied.
+ * Simulate the hook's filtered key list: allRequiredKeys minus globally/persona-satisfied.
  * Delegates to `isGloballySatisfiedCredentialKey` — the same helper used by
  * `computeLocalModeGate` and `useRequiredCredentialState` — so this test
  * exercises production semantics rather than a local approximation.
  */
-function filterRequiredKeys(allKeys, globalEnvVars, envVars = {}) {
+function filterRequiredKeys(
+  allKeys,
+  globalEnvVars,
+  envVars = {},
+  personaEnvVars = {},
+) {
   return allKeys.filter(
-    (key) => !isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars),
+    (key) =>
+      !isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars) &&
+      !isGloballySatisfiedCredentialKey(key, personaEnvVars, envVars),
   );
 }
 
@@ -183,5 +190,46 @@ test("editAgent_globalSatisfied_agentLocalKeyAbsent_stillSilenced", () => {
     hasMissingRequiredEnvKey(filteredKeys, perAgentEnvVars),
     false,
     "requiredEnvKeyMissing must be false when global key is not shadowed",
+  );
+});
+
+// ── F2: persona-satisfied credential keys ──────────────────────────────────
+
+test("editAgent_personaSatisfied_keyNotRequired", () => {
+  const allKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const personaEnvVars = { ANTHROPIC_API_KEY: "sk-persona" };
+
+  const filteredKeys = filterRequiredKeys(allKeys, {}, {}, personaEnvVars);
+  assert.equal(
+    filteredKeys.includes("ANTHROPIC_API_KEY"),
+    false,
+    "persona-satisfied key must be excluded from required keys",
+  );
+  assert.equal(
+    hasMissingRequiredEnvKey(filteredKeys, {}),
+    false,
+    "requiredEnvKeyMissing must be false when persona satisfies the key",
+  );
+});
+
+test("editAgent_personaSatisfied_agentLocalEmpty_stillRequired", () => {
+  const allKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const personaEnvVars = { ANTHROPIC_API_KEY: "sk-persona" };
+  const perAgentEnvVars = { ANTHROPIC_API_KEY: "" };
+
+  const filteredKeys = filterRequiredKeys(
+    allKeys,
+    {},
+    perAgentEnvVars,
+    personaEnvVars,
+  );
+  assert.ok(
+    filteredKeys.includes("ANTHROPIC_API_KEY"),
+    "explicit local empty must shadow persona value",
+  );
+  assert.equal(
+    hasMissingRequiredEnvKey(filteredKeys, perAgentEnvVars),
+    true,
+    "requiredEnvKeyMissing must be true when local empty shadows persona",
   );
 });

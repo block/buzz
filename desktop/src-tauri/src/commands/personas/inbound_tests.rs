@@ -185,6 +185,7 @@ fn local_agent() -> ManagedAgentRecord {
         },
         backend_agent_id: Some("local-remote-id".to_string()),
         provider_binary_path: Some("/local/bin".to_string()),
+        team_id: None,
         persona_team_dir: None,
         persona_name_in_team: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
@@ -385,6 +386,7 @@ fn local_team() -> TeamRecord {
         id: TEAM_ID.to_string(),
         name: "Local Team".to_string(),
         description: Some("local desc".to_string()),
+        instructions: None,
         persona_ids: vec!["p-local".to_string()],
         is_builtin: false,
         source_dir: Some(std::path::PathBuf::from("/local/team/dir")),
@@ -400,6 +402,7 @@ fn team_content(name: &str) -> TeamEventContent {
     TeamEventContent {
         name: name.to_string(),
         description: Some("remote desc".to_string()),
+        instructions: Some("remote instructions".to_string()),
         persona_ids: vec!["p-remote-1".to_string(), "p-remote-2".to_string()],
     }
 }
@@ -418,6 +421,7 @@ fn inbound_team_match_patches_shared_preserves_local() {
     // Shared fields overwritten.
     assert_eq!(t.name, "Renamed Team");
     assert_eq!(t.description, Some("remote desc".to_string()));
+    assert_eq!(t.instructions, Some("remote instructions".to_string()));
     assert_eq!(
         t.persona_ids,
         vec!["p-remote-1".to_string(), "p-remote-2".to_string()]

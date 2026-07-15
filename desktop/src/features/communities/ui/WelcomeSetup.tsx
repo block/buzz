@@ -5,22 +5,24 @@ import {
   getIdentity,
   importIdentity as tauriImportIdentity,
 } from "@/shared/api/tauriIdentity";
+import { claimInvite } from "@/shared/api/invites";
+import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
+import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
 import { NostrKeyImportForm } from "@/features/onboarding/ui/NostrKeyImportForm";
 import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "@/features/onboarding/ui/OnboardingSlideTransition";
 import { Button } from "@/shared/ui/button";
-import { Input } from "@/shared/ui/input";
-import { Spinner } from "@/shared/ui/spinner";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 
 import type { Community } from "../types";
 import { initFirstCommunity } from "../communityStorage";
+import { CommunityEditForm } from "./CommunityEditForm";
 
-type WelcomeSetupPage = "welcome" | "create-community" | "nostr-key";
+type WelcomeSetupPage = "welcome" | "create-community" | "invite" | "nostr-key";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
@@ -91,10 +93,10 @@ export function WelcomeSetup({
   const [page, setPage] = React.useState<WelcomeSetupPage>("welcome");
   const [transitionMode, setTransitionMode] =
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
-  const [customCommunityName, setCustomCommunityName] = React.useState("");
-  const [customRelayUrl, setCustomRelayUrl] = React.useState("");
   const [isConnecting, setIsConnecting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [isRedeeming, setIsRedeeming] = React.useState(false);
+  const [inviteError, setInviteError] = React.useState<string | null>(null);
   const systemColorScheme = useSystemColorScheme();
 
   const handleConnect = React.useCallback(
@@ -156,28 +158,32 @@ export function WelcomeSetup({
     [defaultRelayUrl, handleConnect],
   );
 
-  const handleCustomCommunitySubmit = React.useCallback(
-    (event: React.FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const trimmedName = customCommunityName.trim();
-      const trimmedUrl = customRelayUrl.trim();
-      if (!trimmedName) {
-        setError("Please enter a community name.");
-        return;
+  const handleWelcomeInviteRedeem = React.useCallback(
+    async (relayWsUrl: string, code: string) => {
+      setIsRedeeming(true);
+      setInviteError(null);
+      try {
+        await claimInvite(relayWsUrl, code);
+        await handleConnect(relayWsUrl);
+      } catch (err) {
+        setInviteError(inviteErrorMessage(err));
+      } finally {
+        setIsRedeeming(false);
       }
-      if (!trimmedUrl) {
-        setError("Please enter a community URL.");
-        return;
-      }
-      void handleConnect(trimmedUrl, trimmedName);
     },
-    [customRelayUrl, customCommunityName, handleConnect],
+    [handleConnect],
   );
 
   const showCreateCommunityPage = React.useCallback(() => {
     setError(null);
     setTransitionMode("forward");
     setPage("create-community");
+  }, []);
+
+  const showInvitePage = React.useCallback(() => {
+    setInviteError(null);
+    setTransitionMode("forward");
+    setPage("invite");
   }, []);
 
   const showNostrKeyPage = React.useCallback(() => {
@@ -188,12 +194,19 @@ export function WelcomeSetup({
 
   const showWelcomePage = React.useCallback(() => {
     setError(null);
+    setInviteError(null);
     setTransitionMode("backward");
     setPage("welcome");
   }, []);
 
   const currentStep =
-    page === "welcome" ? (isConnecting ? 2 : 1) : page === "nostr-key" ? 1 : 2;
+    page === "welcome"
+      ? isConnecting
+        ? 2
+        : 1
+      : page === "nostr-key" || page === "invite"
+        ? 1
+        : 2;
   const transitionDirection =
     transitionMode === "backward" ? "backward" : "forward";
   const welcomeEffect =
@@ -271,6 +284,21 @@ export function WelcomeSetup({
               <Button
                 className="h-10 w-full"
                 aria-disabled={isConnecting}
+                onClick={() => {
+                  if (isConnecting) {
+                    return;
+                  }
+                  showInvitePage();
+                }}
+                type="button"
+                variant="ghost"
+              >
+                Have an invite?
+              </Button>
+
+              <Button
+                className="h-10 w-full"
+                aria-disabled={isConnecting}
                 data-testid="welcome-continue-nostr"
                 onClick={() => {
                   if (isConnecting) {
@@ -307,88 +335,56 @@ export function WelcomeSetup({
               </p>
             </div>
 
-            <form
-              className="mt-8 flex w-full flex-col gap-4"
-              onSubmit={handleCustomCommunitySubmit}
-            >
-              <div className="space-y-1.5 text-left">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="community-name"
-                >
-                  Community name
-                </label>
-                <Input
-                  autoFocus
-                  className="h-10 bg-background"
-                  id="community-name"
-                  onChange={(event) => {
-                    setCustomCommunityName(event.target.value);
-                    setError(null);
-                  }}
-                  placeholder="Design team"
-                  type="text"
-                  value={customCommunityName}
-                />
-              </div>
+            <div className="mt-8 w-full">
+              <CommunityEditForm
+                cancelLabel="Back"
+                initialName=""
+                initialRelayUrl=""
+                isSubmitting={isConnecting}
+                onCancel={showWelcomePage}
+                onSubmit={(name, url) => {
+                  void handleConnect(url, name);
+                }}
+                submitLabel="Join a community"
+              />
+              {error ? (
+                <p className="mt-2 text-center text-sm text-destructive">
+                  {error}
+                </p>
+              ) : null}
+            </div>
+          </OnboardingSlideTransition>
+        ) : page === "invite" ? (
+          <OnboardingSlideTransition
+            className="flex w-full flex-col items-center text-center"
+            direction={transitionDirection}
+            transitionKey={`invite-${transitionDirection}`}
+          >
+            <div className="w-full max-w-[440px]">
+              <h1 className="text-3xl font-semibold tracking-tight">
+                Redeem an invite
+              </h1>
+              <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                Paste an invite link or code from a relay admin to join their
+                community.
+              </p>
+            </div>
 
-              <div className="space-y-1.5 text-left">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="community-url"
-                >
-                  Community URL
-                </label>
-                <Input
-                  className="h-10 bg-background"
-                  id="community-url"
-                  onChange={(event) => {
-                    setCustomRelayUrl(event.target.value);
-                    setError(null);
-                  }}
-                  placeholder="wss://relay.example.com"
-                  type="text"
-                  value={customRelayUrl}
-                />
-              </div>
-
-              <div className="flex w-full flex-col gap-3 pt-1">
-                <Button
-                  className="h-10 w-full"
-                  disabled={
-                    isConnecting ||
-                    !customCommunityName.trim() ||
-                    !customRelayUrl.trim()
-                  }
-                  type="submit"
-                >
-                  {isConnecting ? (
-                    <Spinner
-                      aria-label="Joining community"
-                      className="h-4 w-4 border-2"
-                    />
-                  ) : (
-                    "Join a community"
-                  )}
-                </Button>
-
-                <Button
-                  className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
-                  disabled={isConnecting}
-                  onClick={showWelcomePage}
-                  type="button"
-                  variant="ghost"
-                >
-                  Back
-                </Button>
-
-                {error ? (
-                  <p className="text-center text-sm text-destructive">
-                    {error}
-                  </p>
-                ) : null}
-              </div>
-            </form>
+            <div className="mt-8 w-full">
+              <InviteRedeemForm
+                defaultRelayUrl={
+                  isLocalDevRelayUrl(defaultRelayUrl)
+                    ? undefined
+                    : defaultRelayUrl
+                }
+                error={inviteError}
+                isRedeeming={isRedeeming}
+                onCancel={showWelcomePage}
+                onRedeem={(relayWsUrl, code) => {
+                  void handleWelcomeInviteRedeem(relayWsUrl, code);
+                }}
+              />
+            </div>
           </OnboardingSlideTransition>
         ) : (
           <NostrKeyImportPage

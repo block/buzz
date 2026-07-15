@@ -1,8 +1,10 @@
 import 'dart:collection';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
@@ -27,6 +29,13 @@ part 'compose_bar/suggestions.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
 part 'compose_bar/send_button.dart';
+
+const _pastedImageMimeTypes = <String>[
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+];
 
 /// Rich compose bar with @mention autocomplete, emoji picker, and a markdown
 /// formatting toolbar. Used in both channel and thread views — the caller
@@ -67,6 +76,7 @@ class ComposeBar extends HookConsumerWidget {
     final attachments = useState<List<BlobDescriptor>>([]);
     final uploadError = useState<String?>(null);
     final uploadingCount = useState(0);
+    final clipboardHasImage = useState(false);
     final hasAttachments = attachments.value.isNotEmpty;
     final hasPendingUploads = uploadingCount.value > 0;
     final customEmoji = ref.watch(customEmojiListProvider);
@@ -74,6 +84,35 @@ class ComposeBar extends HookConsumerWidget {
     final resolvedHint =
         hintText ??
         (channelName.isNotEmpty ? 'Message #$channelName' : 'Message\u2026');
+
+    useEffect(() {
+      if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+
+      var disposed = false;
+      Future<void> refreshClipboardAvailability() async {
+        final hasImage = await ref
+            .read(mediaUploadServiceProvider)
+            .clipboardHasImage();
+        if (!disposed && context.mounted) {
+          clipboardHasImage.value = hasImage;
+        }
+      }
+
+      void refreshWhenFocused() {
+        if (focusNode.hasFocus) refreshClipboardAvailability();
+      }
+
+      final lifecycleListener = AppLifecycleListener(
+        onResume: refreshClipboardAvailability,
+      );
+      focusNode.addListener(refreshWhenFocused);
+      refreshClipboardAvailability();
+      return () {
+        disposed = true;
+        focusNode.removeListener(refreshWhenFocused);
+        lifecycleListener.dispose();
+      };
+    }, [focusNode]);
 
     // Mention state --------------------------------------------------------
     final mentionQuery = useState<String?>(null);
@@ -281,13 +320,9 @@ class ComposeBar extends HookConsumerWidget {
       final pubkeys = LinkedHashSet<String>.from(
         selectedMentions.map((candidate) => candidate.pubkey.toLowerCase()),
       ).toList();
-      final selectedAgentPubkeys = LinkedHashSet<String>.from(
-        selectedMentions
-            .where((candidate) => candidate.isAgent)
-            .map((candidate) => candidate.pubkey.toLowerCase()),
-      );
       final nonMemberAgentPubkeys = <String>[];
-      if (selectedAgentPubkeys.isNotEmpty) {
+      final nonMemberHumans = <MentionCandidate>[];
+      if (selectedMentions.isNotEmpty) {
         final currentChannel = (await ref.read(
           channelsProvider.future,
         )).firstWhere((channel) => channel.id == channelId);
@@ -295,11 +330,55 @@ class ComposeBar extends HookConsumerWidget {
           final memberPubkeys = (await ref.read(
             channelMembersProvider(channelId).future,
           )).map((member) => member.pubkey.toLowerCase()).toSet();
-          nonMemberAgentPubkeys.addAll(
-            selectedAgentPubkeys.where(
-              (pubkey) => !memberPubkeys.contains(pubkey),
-            ),
-          );
+          final seenNonMembers = <String>{};
+          for (final candidate in selectedMentions) {
+            final pk = candidate.pubkey.toLowerCase();
+            if (memberPubkeys.contains(pk)) continue;
+            if (!seenNonMembers.add(pk)) continue;
+            if (candidate.isAgent) {
+              nonMemberAgentPubkeys.add(pk);
+            } else {
+              nonMemberHumans.add(candidate);
+            }
+          }
+        }
+      }
+
+      // Mentioning humans outside the channel prompts "Invite" / "Do
+      // nothing" (send without inviting) — mirrors desktop's
+      // NonMemberMentionDialog. Agents keep the existing silent auto-add.
+      var mentionPubkeys = pubkeys;
+      final referenceMentionTags = <List<String>>[];
+      var inviteHumanPubkeys = const <String>[];
+      if (nonMemberHumans.isNotEmpty) {
+        if (!context.mounted) return;
+        final choice = await _promptNonMemberMention(
+          context,
+          names: [for (final candidate in nonMemberHumans) candidate.label],
+        );
+        switch (choice) {
+          case null:
+            return; // Dismissed — keep the draft, send nothing.
+          case _NonMemberMentionChoice.invite:
+            inviteHumanPubkeys = [
+              for (final candidate in nonMemberHumans)
+                candidate.pubkey.toLowerCase(),
+            ];
+          case _NonMemberMentionChoice.sendWithoutInviting:
+            // Strip their p-tags (no channel notification) but keep a
+            // `mention` reference tag so their name still renders —
+            // mirrors desktop's mergeOutgoingTagsWithReferenceMentions.
+            final excluded = {
+              for (final candidate in nonMemberHumans)
+                candidate.pubkey.toLowerCase(),
+            };
+            mentionPubkeys = [
+              for (final pk in pubkeys)
+                if (!excluded.contains(pk)) pk,
+            ];
+            referenceMentionTags.addAll([
+              for (final pk in excluded) ['mention', pk],
+            ]);
         }
       }
 
@@ -320,7 +399,16 @@ class ComposeBar extends HookConsumerWidget {
                 role: 'bot',
               );
         }
-        await onSend(payload.content, pubkeys, mediaTags: payload.mediaTags);
+        if (inviteHumanPubkeys.isNotEmpty) {
+          await ref
+              .read(channelActionsProvider)
+              .addMembers(channelId: channelId, pubkeys: inviteHumanPubkeys);
+        }
+        await onSend(
+          payload.content,
+          mentionPubkeys,
+          mediaTags: [...payload.mediaTags, ...referenceMentionTags],
+        );
         if (context.mounted) {
           clearComposer();
         }
@@ -346,6 +434,60 @@ class ComposeBar extends HookConsumerWidget {
           uploadingCount.value -= 1;
         }
       }
+    }
+
+    Widget buildContextMenu(
+      BuildContext context,
+      EditableTextState editableTextState,
+    ) {
+      void pasteImage() {
+        ContextMenuController.removeAny();
+        pickAndUpload(
+          ref.read(mediaUploadServiceProvider).readAndUploadClipboardImage,
+        );
+      }
+
+      if (defaultTargetPlatform == TargetPlatform.iOS &&
+          SystemContextMenu.isSupportedByField(editableTextState)) {
+        return SystemContextMenu.editableText(
+          editableTextState: editableTextState,
+          items: [
+            if (clipboardHasImage.value)
+              IOSSystemContextMenuItemCustom(
+                title: 'Paste Image',
+                onPressed: pasteImage,
+              ),
+            ...SystemContextMenu.getDefaultItems(editableTextState),
+          ],
+        );
+      }
+
+      final buttonItems = [...editableTextState.contextMenuButtonItems];
+      if (defaultTargetPlatform == TargetPlatform.iOS &&
+          clipboardHasImage.value) {
+        buttonItems.insert(
+          0,
+          ContextMenuButtonItem(label: 'Paste Image', onPressed: pasteImage),
+        );
+      }
+      return AdaptiveTextSelectionToolbar.buttonItems(
+        anchors: editableTextState.contextMenuAnchors,
+        buttonItems: buttonItems,
+      );
+    }
+
+    void uploadPastedImage(KeyboardInsertedContent content) {
+      final bytes = content.data;
+      if (bytes == null || bytes.isEmpty) {
+        uploadError.value = 'Unable to read pasted image';
+        return;
+      }
+
+      pickAndUpload(
+        () => ref
+            .read(mediaUploadServiceProvider)
+            .uploadImage(XFile.fromData(bytes)),
+      );
     }
 
     // Insert an emoji at the cursor.
@@ -479,6 +621,11 @@ class ComposeBar extends HookConsumerWidget {
                 controller: controller,
                 focusNode: focusNode,
                 textInputAction: TextInputAction.send,
+                contextMenuBuilder: buildContextMenu,
+                contentInsertionConfiguration: ContentInsertionConfiguration(
+                  allowedMimeTypes: _pastedImageMimeTypes,
+                  onContentInserted: uploadPastedImage,
+                ),
                 onSubmitted: (_) => send(),
                 minLines: 1,
                 maxLines: 5,

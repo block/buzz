@@ -160,60 +160,56 @@ test.describe("agent readiness gate screenshots", () => {
     });
   });
 
-  // Shot 03: buzz-agent + anthropic + model set, ANTHROPIC_API_KEY missing →
-  // amber required row names the key, submit ENABLED (no longer blocked).
-  test("03-create-missing-credential-row", async ({ page }) => {
+  test("03-create-missing-credential-shows-top-level-required-field", async ({
+    page,
+  }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
     await selectProvider(page, "Anthropic");
     await setCustomModel(page, "claude-opus-4-5");
 
-    // The amber required rows render in the env-vars editor, which lives in
-    // the Advanced section of the unified dialog.
-    await page.getByRole("button", { name: "Advanced", exact: true }).click();
-
-    // Required row should name ANTHROPIC_API_KEY; submit is now ENABLED.
-    await expect(page.getByTestId("env-vars-required-key")).toHaveText(
-      "ANTHROPIC_API_KEY",
-    );
-    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
+    await expect(page.getByLabel("Anthropic API Key")).toBeVisible();
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,
     });
+    await expect(
+      page.getByRole("button", { name: "Advanced", exact: true }),
+    ).toHaveAttribute("aria-expanded", "false");
 
-    // Scroll the required row into view so it is visible in the screenshot.
-    // Use evaluate to avoid detachment races with the motion.div container.
+    const createCountBefore = await page.evaluate(
+      () =>
+        (
+          window as Window & { __BUZZ_E2E_COMMANDS__?: string[] }
+        ).__BUZZ_E2E_COMMANDS__?.filter(
+          (command) => command === "create_persona",
+        ).length ?? 0,
+    );
     await page
-      .getByTestId("env-vars-required-key")
-      .evaluate((el) => el.scrollIntoView({ block: "nearest" }));
-    await settleAnimations(page);
-
-    const dialog = page.getByRole("dialog");
-    await dialog.screenshot({
-      path: `${SHOTS}/03-create-missing-credential-row.png`,
-    });
+      .locator("#persona-dialog-form")
+      .evaluate((form) => (form as HTMLFormElement).requestSubmit());
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () =>
+            (
+              window as Window & { __BUZZ_E2E_COMMANDS__?: string[] }
+            ).__BUZZ_E2E_COMMANDS__?.filter(
+              (command) => command === "create_persona",
+            ).length ?? 0,
+        ),
+      )
+      .toBe(createCountBefore);
   });
 
-  // Shot 04: all required fields satisfied → Create button enabled.
-  test("04-create-all-required-satisfied-enabled", async ({ page }) => {
+  test("04-create-top-level-api-key-enables-submit", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
     await selectProvider(page, "Anthropic");
     await setCustomModel(page, "claude-opus-4-5");
-    // Fill the required ANTHROPIC_API_KEY amber row in the EnvVarsEditor.
-    // Advanced auto-expands when required keys are missing.
-    await page
-      .getByLabel("Value for ANTHROPIC_API_KEY")
-      .fill("sk-test-api-key-for-e2e");
+    await page.getByLabel("Anthropic API Key").fill("sk-test-api-key-for-e2e");
 
-    // All required fields satisfied → submit enabled.
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 5_000,
-    });
-    await settleAnimations(page);
-
-    const dialog = page.getByRole("dialog");
-    await dialog.screenshot({
-      path: `${SHOTS}/04-create-all-required-satisfied-enabled.png`,
     });
   });
 

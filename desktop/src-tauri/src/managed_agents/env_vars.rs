@@ -39,21 +39,6 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
         .any(|k| k.eq_ignore_ascii_case(key))
 }
 
-/// Strip derived provider/model env keys from a pack persona's `runtime_env_vars`
-/// before persisting them in `AgentDefinition.env_vars`.
-///
-/// The structured `AgentDefinition.provider` / `AgentDefinition.model` fields are
-/// the authoritative source of truth. Keeping the derived copies would cause
-/// stale env values to override updated structured fields at spawn/deploy time.
-pub(crate) fn filter_derived_provider_model_env_vars(
-    env_vars: impl IntoIterator<Item = (String, String)>,
-) -> BTreeMap<String, String> {
-    env_vars
-        .into_iter()
-        .filter(|(k, _)| !is_derived_provider_model_key(k))
-        .collect()
-}
-
 /// Env var keys that Buzz sets itself and users must not override from
 /// the persona/agent env_vars UI. Three categories:
 ///

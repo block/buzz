@@ -39,9 +39,10 @@ pub fn spawn_event_sync(app: tauri::AppHandle, owner_keys: nostr::Keys) {
 
 /// Reconcile `personas.json` into the persona-event retention store.
 ///
-/// Must run AFTER `migrate_packs_to_teams` (depends on field renames being
-/// complete) and AFTER the persisted identity is resolved (it signs every
-/// retained event with the owner's keys).
+/// Must run AFTER `fold_personas_into_agent_store` and
+/// `detach_directory_backed_teams` (depends on field renames and store
+/// unification being complete) and AFTER the persisted identity is resolved
+/// (it signs every retained event with the owner's keys).
 ///
 /// Per-record reconcile: for each non-builtin persona it compares the freshly
 /// serialized event content against the retained row at the same coordinate

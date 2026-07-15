@@ -1,5 +1,6 @@
 import * as React from "react";
 import { useQueryClient, type QueryStatus } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import {
   managedAgentsQueryKey,
@@ -30,9 +31,11 @@ import {
 
 const DEFAULT_AUTO_JOIN_CHANNEL_NAME = "general";
 
+export type ChannelInitResult = { ok: true } | { ok: false; reason: string };
+
 async function autoJoinDefaultChannel(
   queryClient: ReturnType<typeof useQueryClient>,
-) {
+): Promise<ChannelInitResult> {
   try {
     const channels = await getChannels();
     const target = channels.find(
@@ -40,13 +43,19 @@ async function autoJoinDefaultChannel(
         channel.name === DEFAULT_AUTO_JOIN_CHANNEL_NAME && !channel.isMember,
     );
     if (!target) {
-      return;
+      return { ok: true };
     }
     await joinChannel(target.id);
     await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
-  } catch {
-    // Silent: auto-join is best-effort. The Welcome channel is created
-    // separately, and users can still join channels manually from the browser.
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      reason:
+        error instanceof Error
+          ? error.message
+          : "Failed to join the general channel",
+    };
   }
 }
 
@@ -61,7 +70,7 @@ async function initializeWelcomeChannel(
     pubkey: string | null;
     communityScope: string | null;
   },
-) {
+): Promise<ChannelInitResult> {
   try {
     const allowedMemberPubkeys = await getWelcomeGuideAgentPubkeys(
       communityScope,
@@ -98,8 +107,16 @@ async function initializeWelcomeChannel(
     if (focus) {
       notifyWelcomeChannelReady(welcomeChannel.id);
     }
+    return { ok: true };
   } catch (error) {
     console.warn("Failed to initialize Welcome channel.", error);
+    return {
+      ok: false,
+      reason:
+        error instanceof Error
+          ? error.message
+          : "Failed to create the Welcome channel",
+    };
   }
 }
 
@@ -404,7 +421,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   const currentPubkey = identity?.pubkey ?? null;
   const welcomeChannelCommunityScope = activeCommunity?.relayUrl ?? null;
   const welcomeChannelInitPromisesRef = React.useRef(
-    new Map<string, Promise<void>>(),
+    new Map<string, Promise<ChannelInitResult>>(),
   );
   const [isCompletingWelcomeSetup, setIsCompletingWelcomeSetup] =
     React.useState(false);
@@ -413,6 +430,9 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   // the session cannot access it. No in-app recovery is possible; the user
   // must unlock the keyring externally and relaunch. Mutually exclusive with lost.
   const identityLocked = identity?.locked === true;
+  // Boot-time Phase 2 reset failed — wipe was attempted but verification failed.
+  // The sentinel is preserved so the next relaunch retries automatically.
+  const identityResetFailed = identity?.resetFailed === true;
 
   // Sticky boot fact: once identity was lost at boot, this remains true for the
   // entire session. Per-component state in OnboardingFlow cannot carry this
@@ -421,6 +441,14 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   React.useEffect(() => {
     if (identityLost) setBootedLost(true);
   }, [identityLost]);
+
+  // Sticky boot fact: once identity was locked at boot, this remains true for
+  // the entire session. After import_identity clears the locked flag, the
+  // relaunchRequired derivation uses this to force the relaunch screen.
+  const [bootedLocked, setBootedLocked] = React.useState(false);
+  React.useEffect(() => {
+    if (identityLocked) setBootedLocked(true);
+  }, [identityLocked]);
 
   const profileQuery = useProfileQuery(
     !identityLost && !identityLocked && identityQuery.status === "success",
@@ -436,10 +464,11 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     profileStatus: profileQuery.status,
   });
   const gateComplete = onboardingGate.complete;
+  const welcomeChannelFocusIntentRef = React.useRef(new Map<string, boolean>());
   const requestWelcomeChannel = React.useCallback(
-    (focus: boolean) => {
+    (focus: boolean): Promise<ChannelInitResult> => {
       if (!currentPubkey || !welcomeChannelCommunityScope) {
-        return Promise.resolve();
+        return Promise.resolve({ ok: true });
       }
 
       const welcomeChannelInitKey = `${welcomeChannelCommunityScope}:${currentPubkey}`;
@@ -447,9 +476,29 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
         welcomeChannelInitKey,
       );
       if (currentPromise) {
+        // A focus=true request must not be swallowed behind an in-flight
+        // focus=false promise. Upgrade the intent: when the background
+        // promise resolves, chain a focus-only follow-up.
+        if (
+          focus &&
+          !welcomeChannelFocusIntentRef.current.get(welcomeChannelInitKey)
+        ) {
+          welcomeChannelFocusIntentRef.current.set(welcomeChannelInitKey, true);
+          return currentPromise.then((result) => {
+            if (!result.ok) return result;
+            return initializeWelcomeChannel(queryClient, {
+              focus: true,
+              pubkey: currentPubkey,
+              communityScope: welcomeChannelCommunityScope,
+            });
+          });
+        }
         return currentPromise;
       }
 
+      if (focus) {
+        welcomeChannelFocusIntentRef.current.set(welcomeChannelInitKey, true);
+      }
       const promise = initializeWelcomeChannel(queryClient, {
         focus,
         pubkey: currentPubkey,
@@ -458,6 +507,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
       welcomeChannelInitPromisesRef.current.set(welcomeChannelInitKey, promise);
       void promise.finally(() => {
         welcomeChannelInitPromisesRef.current.delete(welcomeChannelInitKey);
+        welcomeChannelFocusIntentRef.current.delete(welcomeChannelInitKey);
       });
       return promise;
     },
@@ -483,6 +533,44 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     welcomeChannelCommunityScope,
   ]);
 
+  const showWelcomeRetryToast = React.useCallback(
+    (reason: string) => {
+      toast.error("Couldn't set up the Welcome channel", {
+        action: {
+          label: "Retry",
+          onClick: () => {
+            void requestWelcomeChannel(true).then((result) => {
+              if (!result.ok) {
+                showWelcomeRetryToast(result.reason);
+              }
+            });
+          },
+        },
+        description: reason,
+      });
+    },
+    [requestWelcomeChannel],
+  );
+
+  const showGeneralRetryToast = React.useCallback(
+    (reason: string) => {
+      toast.error("Couldn't join #general", {
+        action: {
+          label: "Retry",
+          onClick: () => {
+            void autoJoinDefaultChannel(queryClient).then((result) => {
+              if (!result.ok) {
+                showGeneralRetryToast(result.reason);
+              }
+            });
+          },
+        },
+        description: reason,
+      });
+    },
+    [queryClient],
+  );
+
   const completeAndShowWelcome = React.useCallback(() => {
     setIsCompletingWelcomeSetup(true);
     gateComplete();
@@ -490,11 +578,25 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
       requestWelcomeChannel(true),
       autoJoinDefaultChannel(queryClient),
     ])
-      .then(() => refreshChannelsCache(queryClient))
+      .then(([welcomeResult, autoJoinResult]) => {
+        if (!welcomeResult.ok) {
+          showWelcomeRetryToast(welcomeResult.reason);
+        }
+        if (!autoJoinResult.ok) {
+          showGeneralRetryToast(autoJoinResult.reason);
+        }
+        return refreshChannelsCache(queryClient);
+      })
       .finally(() => {
         setIsCompletingWelcomeSetup(false);
       });
-  }, [gateComplete, queryClient, requestWelcomeChannel]);
+  }, [
+    gateComplete,
+    queryClient,
+    requestWelcomeChannel,
+    showGeneralRetryToast,
+    showWelcomeRetryToast,
+  ]);
   const flow = {
     actions: {
       complete: completeAndShowWelcome,
@@ -510,21 +612,25 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   // pending-event flush) were skipped for the ephemeral key and cannot restart
   // in-process, so nothing else can proceed until the app restarts.
   const relaunchRequired =
-    bootedLost && !identityLost && identityQuery.status === "success";
+    ((bootedLost && !identityLost) || (bootedLocked && !identityLocked)) &&
+    identityQuery.status === "success";
 
   return {
     currentPubkey,
     flow,
     identityLost,
-    // keyring-locked is the highest-precedence stage: nothing in-session can
-    // clear a locked keyring, so this fully blocks the UI until relaunch.
+    // reset-failed is the highest-precedence stage: a failed boot-time reset
+    // means identity resolution was skipped entirely. Nothing can proceed until
+    // the user relaunches and the wipe retries.
     stage:
-      identityLocked && identityQuery.status === "success"
-        ? ("keyring-locked" as const)
-        : relaunchRequired
-          ? ("relaunch-required" as const)
-          : isCompletingWelcomeSetup
-            ? ("blocking" as const)
-            : onboardingGate.stage,
+      identityResetFailed && identityQuery.status === "success"
+        ? ("reset-failed" as const)
+        : identityLocked && identityQuery.status === "success"
+          ? ("keyring-locked" as const)
+          : relaunchRequired
+            ? ("relaunch-required" as const)
+            : isCompletingWelcomeSetup
+              ? ("blocking" as const)
+              : onboardingGate.stage,
   };
 }

@@ -72,6 +72,17 @@ test("toRows_file_satisfied_key_excluded_from_rows", () => {
   assert.equal(rows[0].key, "USER_VAR");
 });
 
+test("toRows_topLevelApiKey_excludedFromAdvancedRows", () => {
+  const value = { ANTHROPIC_API_KEY: "sk-local", USER_VAR: "hello" };
+  const rows = toRows(value, new Set(["ANTHROPIC_API_KEY"]));
+
+  assert.deepEqual(
+    rows.map((row) => row.key),
+    ["USER_VAR"],
+    "the top-level API key must not duplicate as an Advanced env row",
+  );
+});
+
 // ── Invariant 2: emit preserves required-key values ───────────────────────
 //
 // We test this via the pure helpers: build a row list (normal vars only),

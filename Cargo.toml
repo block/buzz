@@ -24,6 +24,7 @@ members = [
     "crates/git-credential-nostr",
     "crates/git-sign-nostr",
     "crates/buzz-pair-relay",
+    "crates/buzz-relay-mesh",
     "crates/buzz-dev-mcp",
     "examples/countdown-bot",
 ]
@@ -61,6 +62,10 @@ nostr = { version = "0.44", features = ["nip44", "nip98"] }
 
 # Serialization
 serde       = { version = "1", features = ["derive"] }
+postcard    = { version = "1", default-features = false, features = ["use-std"] }
+
+# Inter-relay mesh transport (buzz-relay-mesh)
+iroh = { version = "1.0.0-rc.0", default-features = false, features = ["tls-ring"] }
 serde_json  = "1"
 serde_yaml  = "0.9"
 evalexpr    = "11"
@@ -74,6 +79,7 @@ opentelemetry_sdk           = { version = "0.32", features = ["trace", "rt-tokio
 opentelemetry-otlp          = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "tls-ring"] }
 metrics             = "0.24"
 metrics-exporter-prometheus = "0.18"
+metrics-util        = "0.20"
 
 # Error handling
 thiserror = "2"
@@ -126,6 +132,7 @@ buzz-workflow = { path = "crates/buzz-workflow" }
 buzz-media = { path = "crates/buzz-media" }
 buzz-sdk = { path = "crates/buzz-sdk" }
 buzz-ws-client = { path = "crates/buzz-ws-client" }
+buzz-relay-mesh = { path = "crates/buzz-relay-mesh" }
 
 # CI profile — builds the relay for desktop e2e. Dependencies keep full
 # release optimization (warm from main's cache; they carry the runtime hot

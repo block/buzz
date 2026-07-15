@@ -31,6 +31,7 @@ pub mod pipeline;
 pub mod playout;
 pub mod pocket;
 pub mod preprocessing;
+pub mod reconnect;
 pub mod relay_api;
 pub mod state;
 pub mod stt;

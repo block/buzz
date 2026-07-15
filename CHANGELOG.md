@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.4.5
+
+- test(desktop): remove stale collapsed home chrome check ([#1871](https://github.com/block/buzz/pull/1871)) ([`395a3f149`](https://github.com/block/buzz/commit/395a3f1492807b065f8edbee9bb9c8d51018095a))
+- fix(desktop): hide message action for inaccessible agents ([#1883](https://github.com/block/buzz/pull/1883)) ([`8ce9e7914`](https://github.com/block/buzz/commit/8ce9e791453a262f21e675d3f5d27ace22a09e9b))
+- feat(desktop): add API key field, global default indicators, and collapsed advanced ([#1875](https://github.com/block/buzz/pull/1875)) ([`1742dce7b`](https://github.com/block/buzz/commit/1742dce7b25676e91631ce4056bdd2bbc05944ab))
+- fix(desktop): foreground app for deep links ([#1880](https://github.com/block/buzz/pull/1880)) ([`a26168f55`](https://github.com/block/buzz/commit/a26168f553fd8bfce8b5df88915e76ff2d7004ee))
+- chore(desktop): replace setup ? operators with clean exit ([#1882](https://github.com/block/buzz/pull/1882)) ([`4c106d878`](https://github.com/block/buzz/commit/4c106d878564e3f5b4def92f4667fe95dec015f4))
+- fix(desktop): remediate all onboarding dead paths (D1-D7) ([#1856](https://github.com/block/buzz/pull/1856)) ([`5bb619295`](https://github.com/block/buzz/commit/5bb6192951bd57c535a34cd835aba20714f408b6))
+
+
+## v0.4.4
+
+- fix(desktop): allow staged updater commands ([#1870](https://github.com/block/buzz/pull/1870)) ([`109c2c526`](https://github.com/block/buzz/commit/109c2c52641c5edd50890bffef9a236a10ea6106))
+- feat(teams): unify team model, snapshot sharing, and PNG memory parity ([#1846](https://github.com/block/buzz/pull/1846)) ([`448baeef7`](https://github.com/block/buzz/commit/448baeef770478411678e2f0be1729f04b6800d7))
+- fix(desktop): always start agents and hide unavailable mesh ([#1860](https://github.com/block/buzz/pull/1860)) ([`37bc962cb`](https://github.com/block/buzz/commit/37bc962cb8fb60857337bbfb97eb4d31c359de15))
+- Relay mesh: cross-pod tunnel + huddle transport (buzz-relay-mesh) ([#1670](https://github.com/block/buzz/pull/1670)) ([`ccb021d71`](https://github.com/block/buzz/commit/ccb021d71339009aabedc383c8f3d8e5c23e1e42))
+- feat(desktop): add Sign Out to Settings to reset and relaunch ([#1842](https://github.com/block/buzz/pull/1842)) ([`cf9723796`](https://github.com/block/buzz/commit/cf97237965a5ed9870f1c1f73ce9952e963b418b))
+
+
 ## v0.4.3
 
 - Stabilize persona and stream end-to-end tests ([#1865](https://github.com/block/buzz/pull/1865)) ([`916de4e4d`](https://github.com/block/buzz/commit/916de4e4dbbf9299695a91defa6e3802b1820256))

@@ -117,6 +117,10 @@ export type Identity = {
    *  the user must unlock the keyring externally and relaunch.
    *  Mutually exclusive with `lost`. */
   locked?: boolean;
+  /** True when the boot-time Phase 2 reset attempted a wipe but verification
+   *  failed. Identity resolution was skipped; the sentinel is preserved so
+   *  the next relaunch retries the wipe automatically. */
+  resetFailed?: boolean;
 };
 
 export type Profile = {
@@ -408,6 +412,8 @@ export type RelayMeshConfig = {
 export type CreateManagedAgentInput = {
   name: string;
   personaId?: string;
+  /** Team this instance was deployed from; controls runtime team instructions. */
+  teamId?: string;
   relayUrl?: string;
   acpCommand?: string;
   agentCommand?: string;
@@ -745,6 +751,7 @@ export type AgentTeam = {
   id: string;
   name: string;
   description: string | null;
+  instructions: string | null;
   personaIds: string[];
   isBuiltin: boolean;
   /** Absolute path to the team's backing directory (if directory-backed). */
@@ -762,6 +769,7 @@ export type AgentTeam = {
 export type CreateTeamInput = {
   name: string;
   description?: string;
+  instructions?: string;
   personaIds: string[];
 };
 
@@ -769,6 +777,7 @@ export type UpdateTeamInput = {
   id: string;
   name: string;
   description?: string;
+  instructions?: string;
   personaIds: string[];
 };
 // ── Channel Template types ─────────────────────────────────────────────────────

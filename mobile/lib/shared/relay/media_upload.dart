@@ -16,6 +16,8 @@ const _mediaUploadPlatformChannelName = 'buzz/media_upload';
 const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';
 const _transcodeImageToJpegMethod = 'transcodeImageToJpeg';
+const _readClipboardImageMethod = 'readClipboardImage';
+const _clipboardHasImageMethod = 'clipboardHasImage';
 const _uploadAuthKind = 24242;
 const _uploadAuthLifetimeSeconds = 300;
 const _heicBrands = {
@@ -49,6 +51,7 @@ typedef SanitizeImageBytes =
     Future<Uint8List> Function(Uint8List bytes, String mimeType);
 typedef TranscodeImageToJpeg = Future<Uint8List> Function(Uint8List bytes);
 typedef TranscodeVideoToMp4 = Future<String> Function(String filePath);
+typedef ReadClipboardImage = Future<Uint8List?> Function();
 
 @immutable
 class _PreparedUploadImage {
@@ -122,6 +125,7 @@ class MediaUploadService {
   final SanitizeImageBytes _sanitizeImageBytes;
   final TranscodeImageToJpeg _transcodeImageToJpeg;
   final TranscodeVideoToMp4 _transcodeVideoToMp4;
+  final ReadClipboardImage _readClipboardImage;
   final DateTime Function() _now;
   final http.Client _http;
   final bool _ownsHttpClient;
@@ -134,6 +138,7 @@ class MediaUploadService {
     SanitizeImageBytes? sanitizeImageBytes,
     TranscodeImageToJpeg? transcodeImageToJpeg,
     TranscodeVideoToMp4? transcodeVideoToMp4,
+    ReadClipboardImage? readClipboardImage,
     DateTime Function()? now,
     http.Client? httpClient,
   }) : _baseUrl = baseUrl,
@@ -144,6 +149,7 @@ class MediaUploadService {
        _transcodeImageToJpeg =
            transcodeImageToJpeg ?? _transcodePickedImageToJpeg,
        _transcodeVideoToMp4 = transcodeVideoToMp4 ?? _transcodePickedVideoToMp4,
+       _readClipboardImage = readClipboardImage ?? _readPlatformClipboardImage,
        _now = now ?? DateTime.now,
        _http = httpClient ?? http.Client(),
        _ownsHttpClient = httpClient == null;
@@ -157,8 +163,27 @@ class MediaUploadService {
   Future<BlobDescriptor?> pickAndUploadImage() async {
     final pickedImage = await _pickGalleryImage();
     if (pickedImage == null) return null;
-    final preparedImage = await _prepareUploadImage(pickedImage);
+    return uploadImage(pickedImage);
+  }
+
+  Future<BlobDescriptor> uploadImage(XFile image) async {
+    final preparedImage = await _prepareUploadImage(image);
     return uploadBytes(preparedImage.bytes, mimeType: preparedImage.mimeType);
+  }
+
+  Future<bool> clipboardHasImage() async {
+    return await _mediaUploadPlatformChannel.invokeMethod<bool>(
+          _clipboardHasImageMethod,
+        ) ??
+        false;
+  }
+
+  Future<BlobDescriptor> readAndUploadClipboardImage() async {
+    final bytes = await _readClipboardImage();
+    if (bytes == null || bytes.isEmpty) {
+      throw Exception('Unable to read pasted image');
+    }
+    return uploadImage(XFile.fromData(bytes));
   }
 
   Future<BlobDescriptor?> pickAndUploadVideo() async {
@@ -576,6 +601,12 @@ Future<Uint8List> _readFileHeader(String path, int count) async {
   } finally {
     await raf.close();
   }
+}
+
+Future<Uint8List?> _readPlatformClipboardImage() async {
+  return _mediaUploadPlatformChannel.invokeMethod<Uint8List>(
+    _readClipboardImageMethod,
+  );
 }
 
 Future<String> _transcodePickedVideoToMp4(String filePath) async {

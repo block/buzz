@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -117,6 +118,7 @@ Widget _buildComposeBar({
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
   String? currentPubkey,
+  bool? supportsShowingSystemContextMenu,
 }) {
   return ProviderScope(
     overrides: [
@@ -135,6 +137,15 @@ Widget _buildComposeBar({
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
+      builder: supportsShowingSystemContextMenu == null
+          ? null
+          : (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                supportsShowingSystemContextMenu:
+                    supportsShowingSystemContextMenu,
+              ),
+              child: child!,
+            ),
       home: Scaffold(
         body: SafeArea(
           child: ComposeBar(channelId: 'channel-1', onSend: onSend),
@@ -209,6 +220,8 @@ void main() {
           return arguments['bytes'] as Uint8List;
         case 'transcodeImageToJpeg':
           return _pngBytes;
+        case 'clipboardHasImage':
+          return true;
         default:
           return null;
       }
@@ -283,6 +296,415 @@ void main() {
         contains('url https://relay.example/media/test.png'),
       );
       expect(find.byTooltip('Remove attachment'), findsNothing);
+    });
+
+    testWidgets('pasted image follows the attachment preview and send path', (
+      tester,
+    ) async {
+      final keychain = nostr.Keys.generate();
+      var galleryPickerCalled = false;
+      Uint8List? uploadedBytes;
+      String? uploadedMimeType;
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: keychain.nsec,
+        httpClient: http_testing.MockClient((request) async {
+          uploadedBytes = request.bodyBytes;
+          uploadedMimeType = request.headers['Content-Type'];
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/pasted.png',
+              'sha256':
+                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'size': 16,
+              'type': 'image/png',
+              'uploaded': 1,
+              'thumb': 'https://relay.example/media/pasted.thumb.jpg',
+            }),
+            200,
+          );
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async {
+          galleryPickerCalled = true;
+          return null;
+        },
+      );
+
+      String? sentContent;
+      List<List<String>> sentMediaTags = const [];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+                sentMediaTags = mediaTags;
+              },
+        ),
+      );
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      final insertionConfiguration = textField.contentInsertionConfiguration;
+      expect(insertionConfiguration, isNotNull);
+      expect(
+        insertionConfiguration!.allowedMimeTypes,
+        containsAll(['image/jpeg', 'image/png', 'image/webp']),
+      );
+
+      insertionConfiguration.onContentInserted(
+        KeyboardInsertedContent(
+          mimeType: 'image/png',
+          uri: 'content://clipboard/pasted.png',
+          data: _pngBytes,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(galleryPickerCalled, isFalse);
+      expect(uploadedBytes, _pngBytes);
+      expect(uploadedMimeType, 'image/png');
+      expect(
+        find.byKey(
+          const ValueKey(
+            'compose-attachment:https://relay.example/media/pasted.png',
+          ),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
+
+      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.pumpAndSettle();
+
+      expect(sentContent, '\n![image](https://relay.example/media/pasted.png)');
+      expect(sentMediaTags, hasLength(1));
+      expect(
+        sentMediaTags.single,
+        contains('url https://relay.example/media/pasted.png'),
+      );
+    });
+
+    testWidgets('iOS native context menu preserves defaults and pastes image', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          httpClient: http_testing.MockClient(
+            (request) async => http.Response(
+              jsonEncode({
+                'url': 'https://relay.example/media/ios-native-paste.png',
+                'sha256':
+                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'size': 16,
+                'type': 'image/png',
+                'uploaded': 1,
+              }),
+              200,
+            ),
+          ),
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          readClipboardImage: () async => _pngBytes,
+        );
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            supportsShowingSystemContextMenu: true,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        final editableTextState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final defaultItems = SystemContextMenu.getDefaultItems(
+          editableTextState,
+        );
+        final menu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as SystemContextMenu;
+        final pasteImage = menu.items.first as IOSSystemContextMenuItemCustom;
+
+        expect(pasteImage.title, 'Paste Image');
+        expect(menu.items.skip(1), orderedEquals(defaultItems));
+        pasteImage.onPressed();
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const ValueKey(
+              'compose-attachment:https://relay.example/media/ios-native-paste.png',
+            ),
+          ),
+          findsOneWidget,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('iOS hides Paste Image when clipboard has no image', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      _setMockMediaUploadPlatformHandler((call) async {
+        if (call.method == 'clipboardHasImage') return false;
+        return null;
+      });
+      try {
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+        );
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            supportsShowingSystemContextMenu: true,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await tester.pump();
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        final editableTextState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final menu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as SystemContextMenu;
+
+        expect(menu.items.whereType<IOSSystemContextMenuItemCustom>(), isEmpty);
+      } finally {
+        _setMockMediaUploadPlatformHandler((call) async {
+          switch (call.method) {
+            case 'sanitizeImageForUpload':
+              final arguments = call.arguments as Map<Object?, Object?>;
+              return arguments['bytes'] as Uint8List;
+            case 'transcodeImageToJpeg':
+              return _pngBytes;
+            case 'clipboardHasImage':
+              return true;
+            default:
+              return null;
+          }
+        });
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('iOS adaptive Paste Image reads the clipboard into shared path', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          httpClient: http_testing.MockClient(
+            (request) async => http.Response(
+              jsonEncode({
+                'url': 'https://relay.example/media/ios-paste.png',
+                'sha256':
+                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'size': 16,
+                'type': 'image/png',
+                'uploaded': 1,
+              }),
+              200,
+            ),
+          ),
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          readClipboardImage: () async => _pngBytes,
+        );
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        final editableTextState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final menu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as AdaptiveTextSelectionToolbar;
+        final pasteImage = menu.buttonItems!.singleWhere(
+          (item) => item.label == 'Paste Image',
+        );
+        pasteImage.onPressed!();
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const ValueKey(
+              'compose-attachment:https://relay.example/media/ios-paste.png',
+            ),
+          ),
+          findsOneWidget,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('shows an error when pasted image bytes are unavailable', (
+      tester,
+    ) async {
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      textField.contentInsertionConfiguration!.onContentInserted(
+        const KeyboardInsertedContent(
+          mimeType: 'image/png',
+          uri: 'content://clipboard/unavailable.png',
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Unable to read pasted image'), findsOneWidget);
+      expect(find.byTooltip('Remove attachment'), findsNothing);
+    });
+
+    testWidgets('iOS Paste Image reports an unavailable clipboard image', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          readClipboardImage: () async => null,
+        );
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        final editableTextState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final menu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as AdaptiveTextSelectionToolbar;
+        menu.buttonItems!
+            .singleWhere((item) => item.label == 'Paste Image')
+            .onPressed!();
+        await tester.pumpAndSettle();
+
+        expect(find.text('Unable to read pasted image'), findsOneWidget);
+        expect(find.byTooltip('Remove attachment'), findsNothing);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('does not add Paste Image to non-iOS context menus', (
+      tester,
+    ) async {
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      final editableTextState = tester.state<EditableTextState>(
+        find.byType(EditableText),
+      );
+      final menu =
+          textField.contextMenuBuilder!(
+                tester.element(find.byType(TextField)),
+                editableTextState,
+              )
+              as AdaptiveTextSelectionToolbar;
+
+      expect(
+        menu.buttonItems!.where((item) => item.label == 'Paste Image'),
+        isEmpty,
+      );
     });
 
     testWidgets('keeps the remove button pinned to the attachment corner', (

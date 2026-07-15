@@ -244,12 +244,14 @@ export function formatImetaMediaLine(
 ): string {
   // A PNG snapshot is image/png on the wire, but it is an importable file, not
   // inline media. Keep it on the anchor renderer's snapshot-card path.
-  const isAgentSnapshot = filename?.toLowerCase().endsWith(".agent.png");
+  const lower = filename?.toLowerCase();
+  const isSnapshotPng =
+    lower?.endsWith(".agent.png") || lower?.endsWith(".team.png");
   if (type.startsWith("video/")) {
     const line = `![video](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }
-  if (type.startsWith("image/") && !isAgentSnapshot) {
+  if (type.startsWith("image/") && !isSnapshotPng) {
     const line = `![image](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }

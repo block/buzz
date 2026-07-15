@@ -43,6 +43,7 @@ fn make_agent(
         backend: BackendKind::Local,
         backend_agent_id: None,
         provider_binary_path: None,
+        team_id: None,
         persona_team_dir: None,
         persona_name_in_team: None,
         created_at: "2026-01-01T00:00:00Z".to_string(),

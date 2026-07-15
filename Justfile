@@ -446,6 +446,10 @@ mobile-check:
 mobile-test:
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test
 
+# Compile an unsigned Android debug APK
+mobile-build-android:
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter build apk --debug --no-pub
+
 # Run the mobile app on iOS simulator
 mobile-dev:
     #!/usr/bin/env bash

@@ -72,11 +72,22 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 
 ## Relay configuration
 
-When the follow-up integration lands, each relay will point `BUZZ_PUSH_GATEWAY_DELIVERY_URL` at the same exact public delivery URL. Relays retain lease matching, authorization, coalescing, durable jobs/retries, and generation checks. They receive only opaque capabilities and never APNs tokens or provider credentials.
+Relays default `BUZZ_PUSH_GATEWAY_DELIVERY_URL` to the exact public delivery URL
+`https://push.buzz.xyz/v1/deliveries/apns`. Operators can override it with
+another exact HTTPS `/v1/deliveries/apns` URL, or explicitly disable NIP-PL push
+by setting the variable to an empty string. When enabled, the relay advertises
+its host-scoped NIP-PL descriptor in NIP-11 and starts the matcher and delivery
+worker. Relays retain lease matching, authorization, coalescing, durable
+jobs/retries, and generation checks; they receive only opaque capabilities and
+never APNs tokens or provider credentials.
 
 ## Relay integration status
 
-This PR does **not** enable end-to-end push delivery from a relay. It lands the NIP-PL acceptance and durable lease/outbox primitives plus the independently deployable gateway, but intentionally does not start a relay matcher/worker. The missing client App Attest enrollment/delegation flow must first place a gateway-issued opaque capability—not a raw APNs token—into the encrypted lease. A follow-up must then add per-origin event matching with read-authorization rechecks, durable enqueue, send-time revalidation, and the NIP-98 delivery worker. Operators must leave `BUZZ_PUSH_GATEWAY_DELIVERY_URL` unset until that complete path lands; setting it currently gates lease acceptance only and does not start delivery.
+The operational relay integration is complete: per-origin event matching with
+read-authorization checks, durable enqueue, send-time revalidation, and NIP-98
+delivery run whenever the gateway URL is enabled. End-to-end use still requires
+the client App Attest enrollment/delegation flow to place a gateway-issued opaque
+capability—not a raw APNs token—into the encrypted relay lease.
 
 ## Helm production inputs
 

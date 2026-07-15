@@ -1,14 +1,17 @@
 import * as React from "react";
 import { AlertCircle, Network } from "lucide-react";
 
-import { meshAgentPreset, type MeshServeTarget } from "@/shared/api/tauriMesh";
+import {
+  meshAgentPreset,
+  type MeshAvailability,
+  type MeshServeTarget,
+} from "@/shared/api/tauriMesh";
 import { Switch } from "@/shared/ui/switch";
 
 import {
   detectMeshPresetOverrides,
   meshAgentPresetPatch,
 } from "../applyMeshAgentPreset";
-import { useMeshAvailability } from "../hooks/useMeshAvailability";
 
 /**
  * The "Run on relay mesh" entry in the agent create flow (WhereToRunSection).
@@ -21,6 +24,7 @@ import { useMeshAvailability } from "../hooks/useMeshAvailability";
  * component is purely a controller for the mesh-specific subset.
  */
 export function RelayMeshAgentSection({
+  availability,
   current,
   useMesh,
   targetEndpointAddr,
@@ -28,6 +32,11 @@ export function RelayMeshAgentSection({
   onModelIdChange,
   onTargetChange,
 }: {
+  /**
+   * Parent-owned mesh availability. Sharing this snapshot keeps visibility and
+   * draft reset synchronized when availability changes mid-dialog.
+   */
+  availability: MeshAvailability | null;
   /**
    * Current draft state of the *fields the preset would overwrite*. Used to
    * compute the override warning ("Using Relay mesh — overrides this
@@ -56,27 +65,19 @@ export function RelayMeshAgentSection({
   ) => void;
   onTargetChange: (target: MeshServeTarget | null) => void;
 }) {
-  const { availability, error } = useMeshAvailability();
   const [presetError, setPresetError] = React.useState<string | null>(null);
-
-  const disabled = availability == null || !availability.available;
-  const disabledReason =
-    availability == null
-      ? (error ?? "Checking relay mesh availability…")
-      : (availability.reason ?? "The relay mesh isn't available right now.");
 
   // Compute overrides from the currently-selected model's preset, *not* from
   // an arbitrary one — the warning must reflect what'll actually happen.
   const [overrides, setOverrides] = React.useState<string[]>([]);
 
-  // Null means the first availability fetch hasn't succeeded — either still
-  // loading, or the backend was built without mesh-llm and never will resolve.
-  // Hide the card entirely rather than showing a permanently disabled toggle.
-  if (availability === null) {
+  // Hide the card when availability hasn't resolved (built without mesh-llm,
+  // still loading) or when the mesh is genuinely unavailable (no serve nodes).
+  if (availability === null || !availability.available) {
     return null;
   }
 
-  const targets = availability?.serveTargets ?? [];
+  const targets = availability.serveTargets;
   const selectedValue = targetEndpointAddr;
 
   async function pickTarget(endpointAddr: string) {
@@ -128,15 +129,12 @@ export function RelayMeshAgentSection({
             Run on relay mesh
           </label>
           <p className="text-sm text-muted-foreground">
-            {disabled
-              ? disabledReason
-              : "Use a member's shared compute — no API key needed."}
+            Use a member's shared compute — no API key needed.
           </p>
         </div>
         <Switch
           checked={useMesh}
           data-testid="agent-relay-mesh-toggle"
-          disabled={disabled}
           id="agent-relay-mesh-toggle"
           onCheckedChange={onUseMeshChange}
         />

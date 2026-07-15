@@ -553,6 +553,13 @@ pub struct AppState {
     /// See `crates/buzz-conformance/` and `crate::conformance` for the
     /// schema, emitter helpers, and the independent checker.
     pub tracer: Arc<dyn buzz_conformance::Tracer>,
+
+    /// Inter-relay mesh handle, set once by `main.rs` after `mesh_boot` (never
+    /// a constructor parameter, so `AppState::new` call sites are untouched).
+    /// `None`/unset ⇒ mesh-off / single-instance: consumers must behave
+    /// byte-identically to a relay without the mesh. Access via
+    /// [`AppState::mesh`].
+    pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
 }
 
 impl AppState {
@@ -700,6 +707,7 @@ impl AppState {
             // construction (see test helpers in
             // `crates/buzz-test-client` once those land).
             tracer: Arc::new(crate::conformance::NoopTracer),
+            mesh: Arc::new(std::sync::OnceLock::new()),
         };
         (
             state,
@@ -708,6 +716,12 @@ impl AppState {
                 handle: audit_worker_handle,
             },
         )
+    }
+
+    /// Inter-relay mesh handle. `None` ⇒ mesh-off / single-instance: callers
+    /// must no-op to today's behavior. Set once by `main.rs` after boot.
+    pub fn mesh(&self) -> Option<&crate::mesh_boot::MeshHandle> {
+        self.mesh.get()
     }
 
     /// Record an event ID as locally-published for dedup, scoped to the

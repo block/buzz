@@ -96,6 +96,21 @@ pub struct Config {
     /// service lands.
     pub huddle_audio_available: bool,
 
+    /// Inter-relay mesh configuration (`BUZZ_MESH`, `BUZZ_MESH_BIND_ADDR`).
+    /// Opt-in: mesh forms only when `BUZZ_MESH=on` is explicit. The default
+    /// (absent/off) is exact single-instance behavior — no bind, no Redis
+    /// registry write — so an image upgrade with untouched env is a strict
+    /// no-regression rollout.
+    pub mesh: buzz_relay_mesh::MeshConfig,
+
+    /// Testbed-only reliable-stream echo consumer (`BUZZ_MESH_DEMO_ECHO`).
+    /// When `on`, the owner side of an inbound reliable mesh stream echoes
+    /// every validated `Data` frame back to the sender — a transport/
+    /// session-routing smoke for cross-pod evidence runs, NOT a product flow.
+    /// Same strict opt-in as `BUZZ_MESH`; default off means inbound reliable
+    /// streams are accepted, logged, and closed (no session consumer yet).
+    pub mesh_demo_echo: bool,
+
     /// Optional hex-encoded pubkey of the relay owner.
     /// When set, this pubkey is automatically bootstrapped into `relay_members`
     /// with the `owner` role on first startup.
@@ -154,12 +169,10 @@ pub struct Config {
 
     /// Root directory for the relay's local git scratch. No per-repo bare repos
     /// or persistent git state live here — runtime reads/writes hydrate
-    /// ephemeral repos from object storage per request, and repo-name
-    /// uniqueness now lives in Postgres (`git_repo_names`), not on disk. Retained
-    /// for ephemeral working space and env compatibility; the relay no longer
-    /// depends on this path being persistent or shared across replicas, so it
-    /// needs no ReadWriteMany volume. (Removing the field entirely is a
-    /// follow-up cleanup once the deploy chart drops the git PVC mount.)
+    /// ephemeral repos from object storage per request, and all temporary Git
+    /// workspaces and buffered subprocess output are created beneath this path.
+    /// Repo-name uniqueness lives in Postgres (`git_repo_names`), not on disk,
+    /// so this directory need not be persistent or shared across replicas.
     pub git_repo_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
     pub git_max_pack_bytes: u64,
@@ -215,6 +228,8 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
     }
     Ok(raw.trim_end_matches('/').to_string())
 }
+
+const DEFAULT_PUSH_GATEWAY_DELIVERY_URL: &str = "https://push.buzz.xyz/v1/deliveries/apns";
 
 fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
     let url = url::Url::parse(raw.trim()).map_err(|e| {
@@ -329,6 +344,33 @@ impl Config {
         let huddle_audio_available = std::env::var("BUZZ_HUDDLE_AUDIO_AVAILABLE")
             .map(|v| !(v == "false" || v == "0"))
             .unwrap_or(true);
+
+        // Mesh opt-in: default OFF. Strict rollout no-regression — an image
+        // upgrade with untouched env must not bind a new UDP port or write a
+        // new Redis key. Horizontally-scaled deployments explicitly set
+        // `BUZZ_MESH=on`; anything else (absent, `off`, other values) keeps
+        // exact single-instance behavior.
+        let mesh_enabled = std::env::var("BUZZ_MESH")
+            .map(|v| v.eq_ignore_ascii_case("on") || v == "true" || v == "1")
+            .unwrap_or(false);
+        let mesh_bind_addr = std::env::var("BUZZ_MESH_BIND_ADDR")
+            .map(|raw| {
+                raw.parse::<SocketAddr>().map_err(|e| {
+                    ConfigError::InvalidValue(format!("invalid BUZZ_MESH_BIND_ADDR: {e}"))
+                })
+            })
+            .unwrap_or_else(|_| Ok("0.0.0.0:3478".parse().expect("static default parses")))?;
+        let mesh = buzz_relay_mesh::MeshConfig {
+            enabled: mesh_enabled,
+            bind_addr: mesh_bind_addr,
+            registry_refresh: std::time::Duration::from_secs(15),
+        };
+
+        // Demo echo opt-in: same strict pattern as BUZZ_MESH — explicit
+        // `on`/`true`/`1` only, anything else (absent, `off`, typos) is off.
+        let mesh_demo_echo = std::env::var("BUZZ_MESH_DEMO_ECHO")
+            .map(|v| v.eq_ignore_ascii_case("on") || v == "true" || v == "1")
+            .unwrap_or(false);
 
         let allow_nip_oa_auth = std::env::var("BUZZ_ALLOW_NIP_OA_AUTH")
             .map(|v| v == "true" || v == "1")
@@ -535,11 +577,13 @@ impl Config {
                 "BUZZ_PUSH_EXECUTOR_KEY_ID must contain 1..=64 bytes".to_string(),
             ));
         }
-        let push_gateway_delivery_url = std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL")
-            .ok()
-            .filter(|raw| !raw.trim().is_empty())
-            .map(|raw| parse_push_gateway_delivery_url(&raw))
-            .transpose()?;
+        let push_gateway_delivery_url = match std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL") {
+            Ok(raw) if raw.trim().is_empty() => None,
+            Ok(raw) => Some(parse_push_gateway_delivery_url(&raw)?),
+            Err(_) => Some(parse_push_gateway_delivery_url(
+                DEFAULT_PUSH_GATEWAY_DELIVERY_URL,
+            )?),
+        };
         let push_gateway_timeout_millis = match std::env::var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS") {
             Ok(raw) => raw
                 .parse::<u64>()
@@ -603,6 +647,8 @@ impl Config {
             pubkey_allowlist_enabled,
             require_relay_membership,
             huddle_audio_available,
+            mesh,
+            mesh_demo_echo,
             relay_owner_pubkey,
             relay_operator_api_origin,
             relay_operator_pubkeys,
@@ -737,6 +783,31 @@ mod tests {
             result,
             Err(ConfigError::InvalidValue(ref msg)) if msg.contains("must be an http(s) origin")
         ));
+    }
+
+    #[test]
+    fn push_gateway_defaults_to_buzz_and_can_be_disabled() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        let config = Config::from_env().expect("default config");
+        assert_eq!(
+            config
+                .push_gateway_delivery_url
+                .as_ref()
+                .map(url::Url::as_str),
+            Some(DEFAULT_PUSH_GATEWAY_DELIVERY_URL)
+        );
+
+        std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", "");
+        let config = Config::from_env().expect("disabled push config");
+        assert!(config.push_gateway_delivery_url.is_none());
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", value);
+        } else {
+            std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        }
     }
 
     #[test]

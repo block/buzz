@@ -17,6 +17,11 @@ pub struct IdentityInfo {
     /// shows a "unlock the keyring and relaunch" screen. Mutually exclusive
     /// with `lost`.
     pub locked: bool,
+    /// True when the boot-time Phase 2 reset attempted a wipe but verification
+    /// failed. Identity resolution was skipped; the frontend shows a
+    /// reset-failed recovery screen. The sentinel is preserved so the next
+    /// relaunch retries the wipe automatically.
+    pub reset_failed: bool,
 }
 
 #[derive(Serialize, Deserialize)]

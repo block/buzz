@@ -39,7 +39,11 @@ export type MarkdownRuntime = {
    * Import button is present but falls back to a no-op (the card is still
    * rendered on read-only surfaces such as the forum post renderer).
    */
-  onImportSnapshotFromUrl?: (fileBytes: number[], fileName: string) => void;
+  onImportSnapshotFromUrl?: (
+    fileBytes: number[],
+    fileName: string,
+    snapshotKind: "agent" | "team",
+  ) => void;
 };
 
 export type MarkdownProps = {

@@ -1,5 +1,21 @@
 # Changelog
 
+## mobile-v0.4.4
+
+- fix(mobile): surface non-member people and owned agents in @mention autocomplete ([#1877](https://github.com/block/buzz/pull/1877)) ([`54f41659`](https://github.com/block/buzz/commit/54f4165942ab5b3e2cf1fa1b47bbb907587cd5f4))
+- fix(mobile): open profile sheet when tapping @mentions ([#1876](https://github.com/block/buzz/pull/1876)) ([`7e009a89`](https://github.com/block/buzz/commit/7e009a893748eb660efd6d51d78f172cc913e3da))
+- fix(mobile): handle buzz:// links ([#1826](https://github.com/block/buzz/pull/1826)) ([`37f65c08`](https://github.com/block/buzz/commit/37f65c08dc4fc357e54283b19d6019b18cd2b00e))
+
+
+## mobile-v0.4.3
+
+- fix(mobile): fix agent avatars on mobile ([#1837](https://github.com/block/buzz/pull/1837)) ([`7b6e1265`](https://github.com/block/buzz/commit/7b6e12657d69316614726065db69cc418750a973))
+- refactor(clients): standardize product naming on community ([#1858](https://github.com/block/buzz/pull/1858)) ([`3e76481a`](https://github.com/block/buzz/commit/3e76481a149bb3de459298cc989505c470c2372c))
+- fix(mobile): mirror app bar title padding when actions are empty ([#1832](https://github.com/block/buzz/pull/1832)) ([`f3599f2c`](https://github.com/block/buzz/commit/f3599f2cd4509e9120d8466d0ff2f79ee9dc5803))
+- docs(mobile): backfill mobile changelog ([#1835](https://github.com/block/buzz/pull/1835)) ([`259a1724`](https://github.com/block/buzz/commit/259a1724d31787a8a110e2689b8a813b22d0a382))
+- BOT-1247 Configure Android Play identity and signing ([#1829](https://github.com/block/buzz/pull/1829)) ([`f1706e23`](https://github.com/block/buzz/commit/f1706e23f79020812ef097c3167102a8ee3bfc9a))
+
+
 ## mobile-v0.4.2
 
 - fix(mobile): add mentioned agents to channels ([#1696](https://github.com/block/buzz/pull/1696)) ([`3112e59f`](https://github.com/block/buzz/commit/3112e59fd8141818712b04d55919145f0516846b))
