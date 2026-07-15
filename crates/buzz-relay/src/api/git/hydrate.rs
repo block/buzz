@@ -105,6 +105,7 @@ pub async fn hydrate_for_read(
     ctx: &TenantContext,
     owner: &str,
     repo: &str,
+    scratch_dir: &Path,
     max_pack_bytes: u64,
     max_repo_bytes: u64,
 ) -> Result<Option<HydratedRepo>, HydrateError> {
@@ -112,7 +113,14 @@ pub async fn hydrate_for_read(
         return Ok(None);
     };
     Ok(Some(
-        materialize_manifest(store, &manifest, max_pack_bytes, max_repo_bytes).await?,
+        materialize_manifest(
+            store,
+            &manifest,
+            scratch_dir,
+            max_pack_bytes,
+            max_repo_bytes,
+        )
+        .await?,
     ))
 }
 
@@ -158,13 +166,20 @@ pub async fn hydrate_for_write(
     ctx: &TenantContext,
     owner: &str,
     repo: &str,
+    scratch_dir: &Path,
     max_pack_bytes: u64,
     max_repo_bytes: u64,
 ) -> Result<(HydratedRepo, ParentState), HydrateError> {
     match load_pointer(store, ctx, owner, repo).await? {
         Some((etag, digest, manifest)) => {
-            let repo =
-                materialize_manifest(store, &manifest, max_pack_bytes, max_repo_bytes).await?;
+            let repo = materialize_manifest(
+                store,
+                &manifest,
+                scratch_dir,
+                max_pack_bytes,
+                max_repo_bytes,
+            )
+            .await?;
             let parent = ParentState::from_loaded(etag, digest, manifest);
             Ok((repo, parent))
         }
@@ -172,8 +187,8 @@ pub async fn hydrate_for_write(
             // First push: empty bare repo. No packs to fetch, no refs to
             // install. `receive-pack` will accept whatever the client
             // sends; `cas_publish` will use `If-None-Match: *`.
-            let tempdir =
-                TempDir::new().map_err(|e| HydrateError::Hydrate(format!("tempdir: {e}")))?;
+            let tempdir = TempDir::new_in(scratch_dir)
+                .map_err(|e| HydrateError::Hydrate(format!("tempdir in {scratch_dir:?}: {e}")))?;
             let path = tempdir.path().to_path_buf();
             run_git(&path, &["init", "--bare", "--quiet"]).await?;
             Ok((
@@ -242,11 +257,13 @@ async fn get_verified_limited(
 async fn materialize_manifest(
     store: &GitStore,
     manifest: &Manifest,
+    scratch_dir: &Path,
     max_pack_bytes: u64,
     max_repo_bytes: u64,
 ) -> Result<HydratedRepo, HydrateError> {
     // Init bare repo.
-    let tempdir = TempDir::new().map_err(|e| HydrateError::Hydrate(format!("tempdir: {e}")))?;
+    let tempdir = TempDir::new_in(scratch_dir)
+        .map_err(|e| HydrateError::Hydrate(format!("tempdir in {scratch_dir:?}: {e}")))?;
     let path = tempdir.path().to_path_buf();
     run_git(&path, &["init", "--bare", "--quiet"]).await?;
 
@@ -443,6 +460,26 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn materialized_repo_is_created_under_configured_scratch_dir() {
+        let scratch = TempDir::new().unwrap();
+        let store = GitStore::new("http://localhost:9000", "x", "x", "x", "us-east-1")
+            .expect("construct store");
+        let manifest = Manifest {
+            version: 1,
+            head: "refs/heads/main".into(),
+            refs: BTreeMap::new(),
+            packs: Vec::new(),
+            parent: None,
+        };
+
+        let hydrated = materialize_manifest(&store, &manifest, scratch.path(), u64::MAX, u64::MAX)
+            .await
+            .expect("materialize empty repo");
+
+        assert!(hydrated.path().starts_with(scratch.path()));
+    }
+
     // -------- Live MinIO + real git roundtrip ----------------------------------
     //
     // Run manually:
@@ -557,10 +594,12 @@ mod tests {
         }
 
         // Hydrate.
-        let hydrated = hydrate_for_read(&st, &ctx, &owner, repo, u64::MAX, u64::MAX)
-            .await
-            .expect("hydrate")
-            .expect("hydrate Some");
+        let scratch = TempDir::new().unwrap();
+        let hydrated =
+            hydrate_for_read(&st, &ctx, &owner, repo, scratch.path(), u64::MAX, u64::MAX)
+                .await
+                .expect("hydrate")
+                .expect("hydrate Some");
         eprintln!("hydrated to {}", hydrated.path().display());
 
         // The hydrated repo must list the same ref with the same oid.
@@ -630,9 +669,18 @@ mod tests {
         let st = store();
         let owner = format!("nope-{}", uuid::Uuid::new_v4());
         let ctx = tenant();
-        let result = hydrate_for_read(&st, &ctx, &owner, "ghost", u64::MAX, u64::MAX)
-            .await
-            .expect("ok");
+        let scratch = TempDir::new().unwrap();
+        let result = hydrate_for_read(
+            &st,
+            &ctx,
+            &owner,
+            "ghost",
+            scratch.path(),
+            u64::MAX,
+            u64::MAX,
+        )
+        .await
+        .expect("ok");
         assert!(result.is_none(), "missing pointer must surface as None");
     }
 
@@ -677,10 +725,19 @@ mod tests {
             super::super::store::CasOutcome::LostRace => panic!("first INM* must win"),
         }
 
-        let hydrated = hydrate_for_read(&st, &ctx, &owner, "void", u64::MAX, u64::MAX)
-            .await
-            .expect("hydrate")
-            .expect("hydrate Some");
+        let scratch = TempDir::new().unwrap();
+        let hydrated = hydrate_for_read(
+            &st,
+            &ctx,
+            &owner,
+            "void",
+            scratch.path(),
+            u64::MAX,
+            u64::MAX,
+        )
+        .await
+        .expect("hydrate")
+        .expect("hydrate Some");
 
         // HEAD points where the manifest said.
         let head_file = tokio::fs::read_to_string(hydrated.path().join("HEAD"))

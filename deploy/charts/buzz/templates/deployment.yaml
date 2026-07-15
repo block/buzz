@@ -219,5 +219,6 @@ spec:
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-git" (include "buzz.fullname" .)) .Values.persistence.git.existingClaim }}
         {{- else }}
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.persistence.git.size | quote }}
         {{- end }}

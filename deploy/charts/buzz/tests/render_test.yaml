@@ -130,7 +130,8 @@ tests:
           path: spec.template.spec.volumes
           content:
             name: git-repos
-            emptyDir: {}
+            emptyDir:
+              sizeLimit: 10Gi
         template: templates/deployment.yaml
       # No PVC is rendered at all when persistence is disabled.
       - hasDocuments:

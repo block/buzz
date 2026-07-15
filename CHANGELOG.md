@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.5
+
+- test(desktop): remove stale collapsed home chrome check ([#1871](https://github.com/block/buzz/pull/1871)) ([`395a3f149`](https://github.com/block/buzz/commit/395a3f1492807b065f8edbee9bb9c8d51018095a))
+- fix(desktop): hide message action for inaccessible agents ([#1883](https://github.com/block/buzz/pull/1883)) ([`8ce9e7914`](https://github.com/block/buzz/commit/8ce9e791453a262f21e675d3f5d27ace22a09e9b))
+- feat(desktop): add API key field, global default indicators, and collapsed advanced ([#1875](https://github.com/block/buzz/pull/1875)) ([`1742dce7b`](https://github.com/block/buzz/commit/1742dce7b25676e91631ce4056bdd2bbc05944ab))
+- fix(desktop): foreground app for deep links ([#1880](https://github.com/block/buzz/pull/1880)) ([`a26168f55`](https://github.com/block/buzz/commit/a26168f553fd8bfce8b5df88915e76ff2d7004ee))
+- chore(desktop): replace setup ? operators with clean exit ([#1882](https://github.com/block/buzz/pull/1882)) ([`4c106d878`](https://github.com/block/buzz/commit/4c106d878564e3f5b4def92f4667fe95dec015f4))
+- fix(desktop): remediate all onboarding dead paths (D1-D7) ([#1856](https://github.com/block/buzz/pull/1856)) ([`5bb619295`](https://github.com/block/buzz/commit/5bb6192951bd57c535a34cd835aba20714f408b6))
+
+
 ## v0.4.4
 
 - fix(desktop): allow staged updater commands ([#1870](https://github.com/block/buzz/pull/1870)) ([`109c2c526`](https://github.com/block/buzz/commit/109c2c52641c5edd50890bffef9a236a10ea6106))
