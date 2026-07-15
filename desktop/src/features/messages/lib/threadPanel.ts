@@ -428,6 +428,23 @@ function mergeThreadSummaries(
   };
 }
 
+/**
+ * Whether the thread composer may offer "Also send to #channel" (NIP-CW
+ * broadcast). Only a depth-1 reply — a direct reply to a *root* thread head —
+ * ever surfaces on the channel timeline, so the toggle is limited to that
+ * configuration: replying to the thread head itself (no nested reply target),
+ * where the head opens the thread rather than replying into one.
+ */
+export function canBroadcastThreadReply(
+  threadHead: Pick<TimelineMessage, "id" | "parentId"> | null,
+  replyTargetMessage: Pick<TimelineMessage, "id"> | null,
+): boolean {
+  if (!threadHead || threadHead.parentId != null) {
+    return false;
+  }
+  return replyTargetMessage == null || replyTargetMessage.id === threadHead.id;
+}
+
 export function buildMainTimelineEntries(
   messages: TimelineMessage[],
   unreadReplyIds: ReadonlySet<string> = new Set(),

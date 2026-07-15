@@ -3,6 +3,7 @@ import type { BotActivityAgent } from "@/features/channels/ui/BotActivityBar";
 import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
+import type { ThreadSendContext } from "@/features/messages/lib/threading";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
@@ -105,10 +106,7 @@ export type ChannelPaneProps = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
     channelId?: string | null,
-    threadContext?: {
-      parentEventId: string | null;
-      threadHeadId: string | null;
-    } | null,
+    threadContext?: ThreadSendContext | null,
   ) => Promise<void>;
   onTargetReached?: (messageId: string) => void;
   onToggleReaction?: (

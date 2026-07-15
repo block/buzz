@@ -23,6 +23,7 @@ import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
 import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTextEditor";
 import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
+import type { ThreadSendContext } from "@/features/messages/lib/threading";
 import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
@@ -31,10 +32,7 @@ import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 type PendingNonMemberMentionSend = {
   capturedChannelId: string | null;
   /** Thread context captured at submit time — null for main-timeline sends. */
-  capturedThreadContext: {
-    parentEventId: string | null;
-    threadHeadId: string | null;
-  } | null;
+  capturedThreadContext: ThreadSendContext | null;
   finalContent: string;
   mentionPubkeys: string[];
   nonMemberPubkeys: string[];
@@ -50,10 +48,7 @@ type PendingNonMemberMentionSend = {
 type SendMessageWithMentionFlowInput = {
   capturedChannelId: string | null;
   /** Thread context captured at submit time — null for main-timeline sends. */
-  capturedThreadContext?: {
-    parentEventId: string | null;
-    threadHeadId: string | null;
-  } | null;
+  capturedThreadContext?: ThreadSendContext | null;
   pendingImeta: ImetaMedia[];
   sentDraftKey: string | null | undefined;
   spoileredAttachmentUrls?: ReadonlySet<string>;
@@ -78,10 +73,7 @@ type UseMentionSendFlowOptions = {
       mentionPubkeys: string[],
       mediaTags?: string[][],
       channelId?: string | null,
-      threadContext?: {
-        parentEventId: string | null;
-        threadHeadId: string | null;
-      } | null,
+      threadContext?: ThreadSendContext | null,
     ) => Promise<void>
   >;
   richText: Pick<UseRichTextEditorResult, "clearContent" | "setContent">;

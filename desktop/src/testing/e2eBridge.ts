@@ -3190,14 +3190,21 @@ function buildReplyMessageTags(
   parentEventId: string,
   rootEventId: string,
   mentionPubkeys: string[] | undefined,
+  broadcast = false,
 ) {
   // Preserve the reply tag ordering that the desktop message hooks already
-  // expect locally: author p, h, mention ps, then thread e-tags.
+  // expect locally: author p, h, mention ps, broadcast, then thread e-tags.
   const tags: string[][] = [
     ["p", authorPubkey],
     ["h", channelId],
   ];
   appendMentionTags(tags, mentionPubkeys, authorPubkey);
+
+  // NIP-CW: `["broadcast", "1"]` surfaces the reply on the channel timeline
+  // as well as in its thread — mirrors the real relay's stored event.
+  if (broadcast) {
+    tags.push(["broadcast", "1"]);
+  }
 
   if (parentEventId === rootEventId) {
     tags.push(["e", rootEventId, "", "reply"]);
@@ -7408,6 +7415,7 @@ async function handleSendChannelMessage(
     mentionPubkeys?: string[];
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
+    broadcast?: boolean | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -7499,6 +7507,7 @@ async function handleSendChannelMessage(
           args.parentEventId,
           rootEventId,
           args.mentionPubkeys,
+          args.broadcast === true,
         ),
         ...extraTags,
       ],
@@ -7526,6 +7535,7 @@ async function handleSendChannelMessage(
         args.parentEventId,
         args.parentEventId,
         args.mentionPubkeys,
+        args.broadcast === true,
       )
     : buildTopLevelMessageTags(
         args.channelId,

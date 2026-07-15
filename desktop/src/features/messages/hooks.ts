@@ -13,6 +13,7 @@ import {
   isBroadcastReply,
   normalizeMentionPubkeys,
   resolveReplyRootId,
+  type ThreadSendContext,
 } from "@/features/messages/lib/threading";
 import {
   projectChannelWindowMessages,
@@ -86,6 +87,7 @@ export function createOptimisticMessage(
   mentionPubkeys: string[] = [],
   parentEventId: string | null = null,
   mediaTags: string[][] = [],
+  broadcast = false,
 ): RelayEvent {
   const localKey = `optimistic-${crypto.randomUUID()}`;
   const tags: string[][] = [];
@@ -98,6 +100,7 @@ export function createOptimisticMessage(
         parentEventId,
         resolveReplyRootId(parentEventId, currentMessages),
         mentionPubkeys,
+        broadcast,
       ),
     );
   } else {
@@ -184,10 +187,7 @@ export function resolveSendChannel(
  * Returns null when no parentEventId can be resolved (caller should bail).
  */
 export function resolveThreadReplyTarget(
-  threadContext:
-    | { parentEventId: string | null; threadHeadId: string | null }
-    | null
-    | undefined,
+  threadContext: ThreadSendContext | null | undefined,
   liveReplyTargetId: string | null | undefined,
   liveThreadHeadId: string | null | undefined,
 ): { parentEventId: string; threadHeadId: string | null } | null {
@@ -401,6 +401,8 @@ export function useSendMessageMutation(
       mentionPubkeys?: string[];
       parentEventId?: string | null;
       mediaTags?: string[][];
+      /** NIP-CW: surface a thread reply on the channel timeline too. */
+      broadcast?: boolean;
     },
     MessageQueryContext | undefined
   >({
@@ -411,6 +413,7 @@ export function useSendMessageMutation(
       mentionPubkeys,
       parentEventId,
       mediaTags,
+      broadcast,
     }) => {
       // Prefer a channel captured by the caller at compose time. Otherwise,
       // resolve a captured id from the shared channel cache so navigation
@@ -465,6 +468,7 @@ export function useSendMessageMutation(
           undefined,
           emojiTags,
           mentionTags,
+          parentEventId ? broadcast : undefined,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -477,6 +481,7 @@ export function useSendMessageMutation(
               parentEventId,
               resolveReplyRootId(parentEventId, cachedMessages),
               mentionPubkeys,
+              broadcast ?? false,
             )
           : [];
         const baseTags = parentEventId
@@ -523,6 +528,7 @@ export function useSendMessageMutation(
       mentionPubkeys,
       parentEventId,
       mediaTags,
+      broadcast,
     }) => {
       // Mirror mutationFn's target resolution so the optimistic message lands
       // in the cache for the same channel as the real send. A caller-supplied
@@ -558,6 +564,7 @@ export function useSendMessageMutation(
         mentionPubkeys ?? [],
         parentEventId ?? null,
         mediaTags ?? [],
+        broadcast ?? false,
       );
 
       const nextWindow = mergeLiveChannelWindowEvent(

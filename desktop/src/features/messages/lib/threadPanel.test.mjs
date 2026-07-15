@@ -8,6 +8,7 @@ import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
   buildThreadSummaryFromVisibleEntries,
+  canBroadcastThreadReply,
   hasNestedThreadBranches,
   shouldRenderUnreadDivider,
 } from "./threadPanel.ts";
@@ -700,4 +701,40 @@ test("buildMainTimelineEntries merges local knowledge over the relay floor", () 
     entry.summary?.participants.map((participant) => participant.id),
     ["relay", "local"],
   );
+});
+
+test("canBroadcastThreadReply allows direct replies to a top-level thread head", () => {
+  const threadHead = message({ id: "root" });
+
+  // No explicit reply target — composer defaults to replying to the head.
+  assert.equal(canBroadcastThreadReply(threadHead, null), true);
+
+  // Explicit reply target that is the thread head itself.
+  assert.equal(canBroadcastThreadReply(threadHead, { id: "root" }), true);
+});
+
+test("canBroadcastThreadReply rejects nested reply targets", () => {
+  const threadHead = message({ id: "root" });
+
+  assert.equal(
+    canBroadcastThreadReply(threadHead, { id: "nested-reply" }),
+    false,
+  );
+});
+
+test("canBroadcastThreadReply rejects thread heads that are themselves replies", () => {
+  const nestedHead = message({
+    id: "branch",
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+  });
+
+  assert.equal(canBroadcastThreadReply(nestedHead, null), false);
+  assert.equal(canBroadcastThreadReply(nestedHead, { id: "branch" }), false);
+});
+
+test("canBroadcastThreadReply rejects a missing thread head", () => {
+  assert.equal(canBroadcastThreadReply(null, null), false);
+  assert.equal(canBroadcastThreadReply(null, { id: "root" }), false);
 });

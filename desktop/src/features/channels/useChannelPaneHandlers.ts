@@ -7,6 +7,7 @@ import type {
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
 import { resolveThreadReplyTarget } from "@/features/messages/hooks";
+import type { ThreadSendContext } from "@/features/messages/lib/threading";
 
 /**
  * Stable callback references for ChannelPane so that keystroke-driven
@@ -261,10 +262,7 @@ export function useChannelPaneHandlers({
       mentionPubkeys: string[],
       mediaTags?: string[][],
       channelId?: string | null,
-      threadContext?: {
-        parentEventId: string | null;
-        threadHeadId: string | null;
-      } | null,
+      threadContext?: ThreadSendContext | null,
     ) => {
       // Resolve target using captured submit-time context (race-free) or live
       // refs (legacy path). When threadContext is supplied, no live-ref reads
@@ -297,6 +295,9 @@ export function useChannelPaneHandlers({
         parentEventId,
         mediaTags,
         channelId: channelId ?? undefined,
+        // Broadcast rides the captured submit-time context only — the legacy
+        // live-ref path has no checkbox state to honor.
+        broadcast: threadContext?.broadcast === true,
       });
 
       // Only update thread UI state if the user is still viewing the same

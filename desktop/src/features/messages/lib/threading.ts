@@ -5,6 +5,17 @@ export type ThreadReference = {
   rootId: string | null;
 };
 
+/**
+ * Submit-time thread-reply context, captured synchronously by the thread
+ * panel before any async sends. `broadcast` opts the reply into the channel
+ * timeline (NIP-CW `["broadcast", "1"]`) — Slack's "Also send to #channel".
+ */
+export type ThreadSendContext = {
+  parentEventId: string | null;
+  threadHeadId: string | null;
+  broadcast?: boolean;
+};
+
 function getEventTags(tags: string[][]) {
   return tags.filter((tag) => tag[0] === "e" && typeof tag[1] === "string");
 }
@@ -80,6 +91,7 @@ export function buildReplyTags(
   parentEventId: string,
   rootEventId: string,
   mentionPubkeys: string[] = [],
+  broadcast = false,
 ) {
   const tags: string[][] = [
     ["p", authorPubkey],
@@ -91,6 +103,12 @@ export function buildReplyTags(
   // Best-effort normalization — relay performs authoritative validation.
   for (const pubkey of normalizeMentionPubkeys(mentionPubkeys, authorPubkey)) {
     tags.push(["p", pubkey]);
+  }
+
+  // NIP-CW: `["broadcast", "1"]` surfaces the reply on the channel timeline
+  // as well as in its thread ("Also send to #channel").
+  if (broadcast) {
+    tags.push(["broadcast", "1"]);
   }
 
   if (parentEventId === rootEventId) {
