@@ -13,6 +13,7 @@ import { AgentSnapshotExportDialog } from "./AgentSnapshotExportDialog";
 import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
 import { TeamSnapshotExportDialog } from "./TeamSnapshotExportDialog";
 import { TeamSnapshotImportDialog } from "./TeamSnapshotImportDialog";
+import { TeamShareDialog } from "./TeamShareDialog";
 import { RelayDirectorySection } from "./RelayDirectorySection";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
@@ -146,7 +147,6 @@ export function AgentsView() {
               onDuplicatePersona={personas.openDuplicate}
               onEditPersona={personas.openEdit}
               onSharePersona={personas.openShare}
-              onExportPersonaSnapshot={personas.openExportSnapshot}
               onDeactivatePersona={(persona) => {
                 void personas.handleSetActive(persona, false, "library");
               }}
@@ -173,7 +173,7 @@ export function AgentsView() {
               onDuplicate={teamActions.openDuplicateDialog}
               onEdit={teamActions.openEditDialog}
               onAddToChannel={teamActions.setTeamToAddToChannel}
-              onExport={teamActions.openExportSnapshot}
+              onShare={teamActions.openShare}
               onImport={() => {
                 teamImportInputRef.current?.click();
               }}
@@ -289,23 +289,13 @@ export function AgentsView() {
       ) : null}
       {personas.personaToShare ? (
         <PersonaShareDialog
-          isCatalogVisible={
-            personas.personaToShare.isBuiltIn ||
-            personas.sharedCatalogPersonaIdSet.has(personas.personaToShare.id)
-          }
           isPending={personas.isPending}
-          onCatalogVisibilityChange={(visible) => {
-            if (personas.personaToShare) {
-              personas.setPersonaCatalogVisibility(
-                personas.personaToShare,
-                visible,
-              );
-            }
-          }}
+          linkedAgentPubkey={personas.personaToShare.linkedAgentPubkey}
           onExport={() => {
-            if (personas.personaToShare) {
-              personas.openShareExportSnapshot(personas.personaToShare);
-            }
+            const shareTarget = personas.personaToShare;
+            if (!shareTarget) return;
+            personas.setPersonaToShare(null);
+            personas.setPersonaToExportSnapshot(shareTarget);
           }}
           onOpenChange={(open) => {
             if (!open) {
@@ -313,14 +303,14 @@ export function AgentsView() {
             }
           }}
           open={personas.personaToShare !== null}
-          persona={personas.personaToShare}
+          persona={personas.personaToShare.persona}
         />
       ) : null}
       {personas.personaToExportSnapshot ? (
         <AgentSnapshotExportDialog
+          agentName={personas.personaToExportSnapshot.persona.displayName}
           isSavePending={personas.isPending}
           open={personas.personaToExportSnapshot !== null}
-          persona={personas.personaToExportSnapshot.persona}
           linkedAgentPubkey={personas.personaToExportSnapshot.linkedAgentPubkey}
           onSaveFile={(memoryLevel, format) => {
             if (personas.personaToExportSnapshot) {
@@ -439,6 +429,29 @@ export function AgentsView() {
           open={teamActions.teamToAddToChannel !== null}
           personas={personas.libraryPersonas}
           team={teamActions.teamToAddToChannel}
+        />
+      ) : null}
+      {teamActions.teamToShare ? (
+        <TeamShareDialog
+          isPending={
+            teamActions.createTeamMutation.isPending ||
+            teamActions.updateTeamMutation.isPending ||
+            teamActions.deleteTeamMutation.isPending
+          }
+          onExport={() => {
+            if (teamActions.teamToShare) {
+              const team = teamActions.teamToShare;
+              teamActions.setTeamToShare(null);
+              teamActions.openExportSnapshot(team);
+            }
+          }}
+          onOpenChange={(open) => {
+            if (!open) {
+              teamActions.setTeamToShare(null);
+            }
+          }}
+          open={teamActions.teamToShare !== null}
+          team={teamActions.teamToShare}
         />
       ) : null}
       {teamActions.teamToExport ? (

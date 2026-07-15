@@ -1,9 +1,9 @@
 import {
   CopyPlus,
-  Download,
-  Ellipsis,
+  EllipsisVertical,
   Pencil,
   Rocket,
+  Share2,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -35,7 +35,7 @@ type TeamsSectionProps = {
   onEdit: (team: AgentTeam) => void;
   onDelete: (team: AgentTeam) => void;
   onAddToChannel: (team: AgentTeam) => void;
-  onExport: (team: AgentTeam) => void;
+  onShare: (team: AgentTeam) => void;
   onImport: () => void;
 };
 
@@ -50,7 +50,7 @@ export function TeamsSection({
   onEdit,
   onDelete,
   onAddToChannel,
-  onExport,
+  onShare,
   onImport,
 }: TeamsSectionProps) {
   return (
@@ -100,10 +100,10 @@ export function TeamsSection({
                     <DropdownMenuTrigger asChild>
                       <button
                         aria-label={`${team.name} team actions`}
-                        className="flex h-7 w-7 items-center justify-center rounded-md bg-transparent text-muted-foreground/80 transition-colors hover:bg-background/85 hover:text-foreground data-[state=open]:bg-background/90 data-[state=open]:text-foreground"
+                        className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                         type="button"
                       >
-                        <Ellipsis className="h-4 w-4" />
+                        <EllipsisVertical className="h-4 w-4" />
                       </button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent
@@ -119,13 +119,6 @@ export function TeamsSection({
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
-                        disabled={isPending || hasMissingPersonas}
-                        onClick={() => onExport(team)}
-                      >
-                        <Download className="h-4 w-4" />
-                        Export snapshot
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
                         disabled={isPending}
                         onClick={() => onEdit(team)}
                       >
@@ -138,6 +131,13 @@ export function TeamsSection({
                       >
                         <CopyPlus className="h-4 w-4" />
                         Duplicate
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        disabled={isPending || hasMissingPersonas}
+                        onClick={() => onShare(team)}
+                      >
+                        <Share2 className="h-4 w-4" />
+                        Share
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
@@ -168,7 +168,7 @@ export function TeamsSection({
                     {missingPersonaCount === 1 ? "" : "s"} in this team{" "}
                     {missingPersonaCount === 1 ? "is" : "are"} no longer in your
                     My Agents. Edit the team to repair it before deploying or
-                    exporting.
+                    sharing.
                   </p>
                 ) : null}
               </TeamIdentityCard>

@@ -27,6 +27,14 @@ export async function fetchMediaBytes(
   return new Uint8Array(bytes);
 }
 
+/** Write text through the native clipboard after an asynchronous workflow. */
+export async function copyTextToSystemClipboard(
+  text: string,
+  html?: string,
+): Promise<void> {
+  await invokeTauri("copy_text_to_clipboard", { html, text });
+}
+
 /**
  * Fetch an agent snapshot attachment in memory, verifying size, SHA-256, and
  * snapshot decode before returning the bytes.

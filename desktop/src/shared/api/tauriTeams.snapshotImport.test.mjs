@@ -5,12 +5,11 @@ import {
   deriveImportPhase,
   getProfileSyncFailures,
   deriveImportToast,
-  buildTeamSnapshotSendArgs,
 } from "../../features/agents/ui/teamSnapshotImport.lib.ts";
 
-// Behavior tests for the team snapshot import dialog flow and the send-encode
-// contract. These import and exercise the actual production functions used by
-// TeamSnapshotImportDialog, useTeamActions, and TeamSnapshotSendDialog.
+// Behavior tests for the team snapshot import dialog flow. These import and
+// exercise the actual production functions used by TeamSnapshotImportDialog
+// and useTeamActions.
 
 // ── Factories ────────────────────────────────────────────────────────────────
 
@@ -235,21 +234,4 @@ test("mixed_member_outcomes_memory_errors_and_profile_sync", () => {
   assert.equal(toast.type, "error");
   assert.match(toast.message, /2 memory entr/);
   assert.match(toast.message, /1 member failed to sync profile/);
-});
-
-// ── buildTeamSnapshotSendArgs ────────────────────────────────────────────────
-
-test("buildTeamSnapshotSendArgs_always_uses_png_format", () => {
-  const args = buildTeamSnapshotSendArgs("team-123", "core");
-  assert.equal(args.id, "team-123");
-  assert.equal(args.memoryLevel, "core");
-  assert.equal(args.format, "png");
-});
-
-test("buildTeamSnapshotSendArgs_passes_through_memory_level", () => {
-  for (const level of ["none", "core", "everything"]) {
-    const args = buildTeamSnapshotSendArgs("t", level);
-    assert.equal(args.memoryLevel, level);
-    assert.equal(args.format, "png", `format must be png for level "${level}"`);
-  }
 });

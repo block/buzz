@@ -821,6 +821,7 @@ pub fn run() {
             download_file,
             fetch_media_bytes,
             copy_image_to_clipboard,
+            copy_text_to_clipboard,
             fetch_snapshot_bytes,
             list_relay_members,
             get_my_relay_membership,

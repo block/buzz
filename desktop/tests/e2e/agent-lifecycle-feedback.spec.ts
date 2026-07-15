@@ -17,7 +17,7 @@ import { installMockBridge } from "../helpers/bridge";
 const SHOTS = "test-results/screenshots-lifecycle";
 
 // Persona ID used across the cascade-delete test. Must be a custom (non-builtin)
-// persona so the actions menu renders the "Remove from My Agents" / delete path.
+// persona so the actions menu renders the Delete path.
 const CASCADE_PERSONA_ID = "custom:test-cascade";
 
 // Stable fake pubkeys for the two seeded managed agents. 64 lowercase hex chars
@@ -96,9 +96,8 @@ test.describe("agent lifecycle feedback screenshots", () => {
       .getByRole("button", { name: "Open actions for Cascade Test Agent" })
       .click();
 
-    // For a custom (non-builtin) persona, the menu item is "Remove from My Agents"
-    // and it calls openDelete() → PersonaDeleteDialog opens.
-    await page.getByRole("menuitem", { name: "Remove from My Agents" }).click();
+    // For a custom (non-builtin) persona, Delete opens PersonaDeleteDialog.
+    await page.getByRole("menuitem", { name: "Delete" }).click();
 
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toBeVisible({ timeout: 5_000 });
@@ -212,7 +211,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
     await page
       .getByRole("button", { name: "Open actions for Cascade Test Agent" })
       .click();
-    await page.getByRole("menuitem", { name: "Remove from My Agents" }).click();
+    await page.getByRole("menuitem", { name: "Delete" }).click();
 
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toBeVisible({ timeout: 5_000 });
@@ -250,7 +249,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
     await page
       .getByRole("button", { name: "Open actions for Cascade Test Agent" })
       .click();
-    await page.getByRole("menuitem", { name: "Remove from My Agents" }).click();
+    await page.getByRole("menuitem", { name: "Delete" }).click();
 
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toBeVisible({ timeout: 5_000 });

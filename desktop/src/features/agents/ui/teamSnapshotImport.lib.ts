@@ -1,8 +1,6 @@
 import type {
   TeamSnapshotImportMemberResult,
   TeamSnapshotImportResult,
-  SnapshotMemoryLevel,
-  SnapshotFormat,
 } from "@/shared/api/tauriTeams";
 
 // ── Import phase derivation ──────────────────────────────────────────────────
@@ -62,20 +60,4 @@ export function deriveImportToast(
     type: "notice",
     message: `Imported ${result.team.name} with ${memberCount} member${memberCount === 1 ? "" : "s"}.`,
   };
-}
-
-// ── Send-encode argument builder ─────────────────────────────────────────────
-
-export type TeamSnapshotSendArgs = {
-  id: string;
-  memoryLevel: SnapshotMemoryLevel;
-  format: SnapshotFormat;
-};
-
-/** Build the args for `encodeTeamSnapshotForSend`. In-Buzz sends always use PNG. */
-export function buildTeamSnapshotSendArgs(
-  teamId: string,
-  memoryLevel: SnapshotMemoryLevel,
-): TeamSnapshotSendArgs {
-  return { id: teamId, memoryLevel, format: "png" };
 }

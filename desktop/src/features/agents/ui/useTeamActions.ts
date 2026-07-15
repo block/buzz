@@ -66,6 +66,7 @@ export function useTeamActions(
   const [teamToExport, setTeamToExport] = React.useState<AgentTeam | null>(
     null,
   );
+  const [teamToShare, setTeamToShare] = React.useState<AgentTeam | null>(null);
   const [teamSnapshotImportState, setTeamSnapshotImportState] = React.useState<{
     fileBytes: number[];
     fileName: string;
@@ -225,6 +226,12 @@ export function useTeamActions(
     setTeamToExport(team);
   }
 
+  function openShare(team: AgentTeam) {
+    actions.setActionNoticeMessage(null);
+    actions.setActionErrorMessage(null);
+    setTeamToShare(team);
+  }
+
   function handleExportTeamSnapshot(
     team: AgentTeam,
     memoryLevel: SnapshotMemoryLevel,
@@ -320,6 +327,8 @@ export function useTeamActions(
     setTeamToAddToChannel,
     teamToExport,
     setTeamToExport,
+    teamToShare,
+    setTeamToShare,
     teamSnapshotImportState,
     teamSnapshotImportResult,
     teamSnapshotImportConfirmError,
@@ -333,6 +342,7 @@ export function useTeamActions(
     openDuplicateDialog,
     openEditDialog,
     openExportSnapshot,
+    openShare,
     handleExportTeamSnapshot,
     handleImportTeamSnapshotFile,
     handleConfirmTeamSnapshotImport,

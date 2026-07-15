@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-// Tests for the snapshot send controller helpers and dialog behavior.
+// Tests for the active snapshot send controller used by PersonaShareDialog.
 
 import {
   isSendableDestination,
@@ -95,92 +95,6 @@ test("isSendableDestination_archived_dm_is_excluded", () => {
   assert.equal(isSendableDestination(ch), false);
 });
 
-// ── AgentSnapshotSendDialog memory gate rendering ─────────────────────────────
-//
-// MemoryGateStep is a pure function; we call it directly and walk the element
-// tree to verify the two required disclosures appear for each memory level.
-
-import { MemoryGateStep } from "./AgentSnapshotSendDialog.tsx";
-
-function collectText(element) {
-  const texts = [];
-  const queue = [element];
-  while (queue.length > 0) {
-    const node = queue.shift();
-    if (typeof node === "string") {
-      texts.push(node);
-      continue;
-    }
-    if (!node || typeof node !== "object") continue;
-    const children = node.props?.children;
-    if (Array.isArray(children)) {
-      queue.push(...children.flat(Infinity).filter(Boolean));
-    } else if (typeof children === "string") {
-      texts.push(children);
-    } else if (children && typeof children === "object") {
-      queue.push(children);
-    }
-  }
-  return texts;
-}
-
-function makeDestination(overrides = {}) {
-  return makeChannel({
-    id: "ch-1",
-    name: "team-alpha",
-    channelType: "stream",
-    ...overrides,
-  });
-}
-
-// makeDestination is kept for potential future use.
-void makeDestination; // suppress "unused" lint
-
-test("memory_gate_step_shows_plaintext_core_memory_label", () => {
-  const el = MemoryGateStep({
-    destinationLabel: "#team-alpha",
-    memoryLevel: "core",
-  });
-  const text = collectText(el).join(" ");
-  assert.match(text, /plaintext\s+core\s+memory/i, `got: ${text}`);
-});
-
-test("memory_gate_step_shows_plaintext_all_memory_label", () => {
-  const el = MemoryGateStep({
-    destinationLabel: "#team-alpha",
-    memoryLevel: "everything",
-  });
-  const text = collectText(el).join(" ");
-  assert.match(text, /plaintext\s+all\s+memory/i, `got: ${text}`);
-});
-
-test("memory_gate_step_names_channel_destination", () => {
-  const el = MemoryGateStep({
-    destinationLabel: "#team-alpha",
-    memoryLevel: "core",
-  });
-  const text = collectText(el).join(" ");
-  assert.match(text, /#team-alpha/i, `got: ${text}`);
-});
-
-test("memory_gate_step_names_dm_destination", () => {
-  const el = MemoryGateStep({
-    destinationLabel: "the DM with Alice",
-    memoryLevel: "core",
-  });
-  const text = collectText(el).join(" ");
-  assert.match(text, /the DM with Alice/i, `got: ${text}`);
-});
-
-test("memory_gate_step_discloses_media_link_access", () => {
-  const el = MemoryGateStep({
-    destinationLabel: "#team-alpha",
-    memoryLevel: "core",
-  });
-  const text = collectText(el).join(" ");
-  assert.match(text, /media link/i, `got: ${text}`);
-});
-
 // ── createSendGuard: production concurrency guard ─────────────────────────────
 //
 // The UI hides the confirm button the moment handleSend transitions to the
@@ -249,13 +163,19 @@ test("createSendGuard_sequential_calls_both_run", async () => {
 
 test("runGuardedSend_concurrent_calls_one_encodes_one_blocked", async () => {
   const guard = createSendGuard();
+  let destinationCount = 0;
   let encodeCount = 0;
   let uploadCount = 0;
   let sendCount = 0;
   const states = [];
 
-  const makeDeps = () => ({
-    channelId: "ch-1",
+  const resolveChannelId = async () => {
+    destinationCount++;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return "ch-1";
+  };
+  const makeDeps = (channelId) => ({
+    channelId,
     checkEligibilityFn: () => null,
     encodeFn: async () => {
       encodeCount++;
@@ -283,11 +203,20 @@ test("runGuardedSend_concurrent_calls_one_encodes_one_blocked", async () => {
 
   // Fire both concurrently using the same guard.
   const [r1, r2] = await Promise.all([
-    runGuardedSend(guard, makeDeps()),
-    runGuardedSend(guard, makeDeps()),
+    runGuardedSend(guard, resolveChannelId, makeDeps, (s) =>
+      states.push(s.phase),
+    ),
+    runGuardedSend(guard, resolveChannelId, makeDeps, (s) =>
+      states.push(s.phase),
+    ),
   ]);
 
-  // Exactly one encode, upload, and send ran.
+  // Exactly one destination open, encode, upload, and send ran.
+  assert.equal(
+    destinationCount,
+    1,
+    `expected destinationCount=1, got ${destinationCount}`,
+  );
   assert.equal(encodeCount, 1, `expected encodeCount=1, got ${encodeCount}`);
   assert.equal(uploadCount, 1, `expected uploadCount=1, got ${uploadCount}`);
   assert.equal(sendCount, 1, `expected sendCount=1, got ${sendCount}`);
