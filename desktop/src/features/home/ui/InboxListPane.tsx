@@ -338,7 +338,11 @@ export function InboxListPane({
     );
 
     return (
-      <ContextMenu>
+      // modal={false}: "Remind me later" opens a modal Dialog from this menu.
+      // A modal ContextMenu would leave `pointer-events: none` stuck on
+      // <body> after that dialog closes, freezing the whole app. Non-modal
+      // avoids installing that body guard entirely.
+      <ContextMenu modal={false}>
         <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
         <ContextMenuContent>
           {isDone ? (

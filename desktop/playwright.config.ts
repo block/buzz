@@ -72,6 +72,7 @@ export default defineConfig({
         "**/threadpane-ultrawide.spec.ts",
         "**/animated-avatar.spec.ts",
         "**/reminders.spec.ts",
+        "**/reminder-click-repro.spec.ts",
         "**/virtualization.spec.ts",
         "**/scroll-history.spec.ts",
         "**/channel-dense-second-reach.spec.ts",
