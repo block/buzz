@@ -20,7 +20,6 @@ import {
 import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
-  mintDefinitionWithPreflight,
   type BackendIntent,
 } from "./lib/instanceInputForDefinition";
 import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
@@ -33,7 +32,6 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
-import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 
 function updateInputFromRequest(
   request: Extract<AgentManagementRequest, { action: "update" }>,
@@ -201,15 +199,10 @@ export function useAgentManagement() {
         undefined,
         runtime.avatarUrl,
       );
-      const persona = await mintDefinitionWithPreflight(
-        intent === "definition_start" ? backendIntent : null,
-        meshPrepareRelayMeshClient,
-        () =>
-          createPersonaMutation.mutateAsync({
-            ...input,
-            avatarUrl,
-          }),
-      );
+      const persona = await createPersonaMutation.mutateAsync({
+        ...input,
+        avatarUrl,
+      });
 
       if (intent === "definition_start") {
         const created = await createAgentMutation.mutateAsync(
