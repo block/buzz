@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { getForumPosts, getForumThread } from "@/shared/api/forum";
+import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type {
   Channel,
@@ -19,11 +20,13 @@ export function forumThreadQueryKey(channelId: string, eventId: string) {
 
 export function useForumPostsQuery(channel: Channel | null) {
   const channelId = channel?.id ?? "";
+  const enabled = channel !== null && channel.channelType === "forum";
+  const relaySelfPubkey = useRelaySelfQuery(enabled).data;
 
   return useQuery<ForumPostsResponse>({
-    enabled: channel !== null && channel.channelType === "forum",
-    queryKey: forumPostsQueryKey(channelId),
-    queryFn: () => getForumPosts(channelId, 50),
+    enabled,
+    queryKey: [...forumPostsQueryKey(channelId), relaySelfPubkey ?? null],
+    queryFn: () => getForumPosts(channelId, 50, undefined, relaySelfPubkey),
     staleTime: 15_000,
     refetchInterval: 15_000,
   });
@@ -33,10 +36,23 @@ export function useForumThreadQuery(
   channelId: string | null,
   eventId: string | null,
 ) {
+  const enabled = channelId !== null && eventId !== null;
+  const relaySelfPubkey = useRelaySelfQuery(enabled).data;
+
   return useQuery<ForumThreadResponse>({
-    enabled: channelId !== null && eventId !== null,
-    queryKey: forumThreadQueryKey(channelId ?? "", eventId ?? ""),
-    queryFn: () => getForumThread(channelId ?? "", eventId ?? ""),
+    enabled,
+    queryKey: [
+      ...forumThreadQueryKey(channelId ?? "", eventId ?? ""),
+      relaySelfPubkey ?? null,
+    ],
+    queryFn: () =>
+      getForumThread(
+        channelId ?? "",
+        eventId ?? "",
+        undefined,
+        undefined,
+        relaySelfPubkey,
+      ),
     staleTime: 10_000,
     refetchInterval: 10_000,
   });
