@@ -60,10 +60,17 @@ const SINCE_SKEW_SECS: u64 = 5;
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout for the TCP + WebSocket handshake in `do_connect`.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Backoff delays shared by the initial-connect retry in `HarnessRelay::connect()`
-/// and `try_autonomous_reconnect`'s post-start reconnect loop — a spotty link
-/// should get consistent retry pacing whether the failure happens at agent
-/// startup or later. Bounded so a dead relay can't hang either path forever.
+/// Backoff delay values shared by the initial-connect retry in
+/// `HarnessRelay::connect()` and `try_autonomous_reconnect`'s post-start
+/// reconnect loop — a spotty link should get consistent retry pacing whether
+/// the failure happens at agent startup or later. Bounded so a dead relay
+/// can't hang either path forever.
+///
+/// The two callers consume this differently: `retry_initial_connect` sleeps
+/// before every entry (1 immediate attempt + up to 5 delayed retries, all 5
+/// values used), while `try_autonomous_reconnect` skips the sleep after its
+/// final attempt (5 attempts total, only the first 4 values used) — so
+/// "shared values," not "identical schedule."
 const STARTUP_CONNECT_BACKOFFS: [Duration; 5] = [
     Duration::from_secs(1),
     Duration::from_secs(2),
@@ -2143,8 +2150,10 @@ async fn try_autonomous_reconnect(
     observer_control_tx: &mpsc::Sender<Event>,
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
-    // Finding #42: 5 attempts, up to 16s base backoff. Same schedule as the
-    // initial-connect retry in `HarnessRelay::connect()` (STARTUP_CONNECT_BACKOFFS).
+    // Finding #42: 5 attempts, up to 16s base backoff. Shares delay values
+    // with the initial-connect retry in `HarnessRelay::connect()`
+    // (STARTUP_CONNECT_BACKOFFS) — see its doc comment for how the two
+    // loops consume the array differently.
     let backoffs = STARTUP_CONNECT_BACKOFFS;
 
     for (attempt, delay) in backoffs.iter().enumerate() {
@@ -2730,14 +2739,44 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
 /// than transient (the network dropping bytes on a spotty link).
 ///
 /// `Http` covers the local URL/tag parsing failures `do_connect` can produce
-/// (never actual network I/O — see its callers), and `AuthFailed` covers
-/// both a bad signing key and an explicit relay rejection. Both are
-/// deterministic: retrying without changing configuration just fails the
-/// same way again. Everything else (closed connection, timeout, garbled
-/// message) is exactly the class of failure a bad link produces, so it is
-/// retried.
+/// (never actual network I/O — see its callers). `WebSocket(Error::Url(_))`
+/// is a malformed/unsupported `relay_url` (bad scheme, missing host) that
+/// `connect_async` rejects before any network I/O, so it is just as
+/// deterministic as `Http`. `Json`/`UnexpectedMessage` mean the relay sent a
+/// frame `parse_relay_message` can't understand; TCP/WebSocket framing
+/// guarantees byte-for-byte delivery of complete messages, so a malformed or
+/// unrecognized frame reflects a protocol mismatch or server defect — not
+/// link noise — and retrying would very likely reproduce it. `AuthFailed` is
+/// split by [`is_terminal_auth_failure`] — see there for why a relay-side
+/// denial isn't uniformly terminal. Everything else (closed connection,
+/// timeout, I/O error) is exactly the class of failure a bad link produces,
+/// so it is retried.
 fn is_terminal_connect_error(err: &RelayError) -> bool {
-    matches!(err, RelayError::Http(_) | RelayError::AuthFailed(_))
+    match err {
+        RelayError::Http(_) | RelayError::Json(_) | RelayError::UnexpectedMessage(_) => true,
+        RelayError::WebSocket(e) => {
+            matches!(e.as_ref(), tokio_tungstenite::tungstenite::Error::Url(_))
+        }
+        RelayError::AuthFailed(message) => is_terminal_auth_failure(message),
+        _ => false,
+    }
+}
+
+/// Whether a relay's `OK false <message>` denial during NIP-42 auth is
+/// terminal, per the NIP-01 machine-readable prefixes the relay actually
+/// sends (`crates/buzz-relay/src/handlers/auth.rs`).
+///
+/// `error:` marks the relay's own dependency failures (e.g. a ban-state DB
+/// lookup that couldn't run) — the relay is failing closed on itself, not
+/// rejecting the caller, and a later attempt can succeed once the
+/// dependency recovers. `invalid:`, `auth-required:`, `restricted:`, and
+/// `blocked:` are explicit rejections of this identity/config (bad
+/// signature, ban, non-member, allowlist denial) that retrying without
+/// changing anything cannot fix. An unrecognized prefix is treated as
+/// terminal — failing fast on an unknown denial is safer than retrying one
+/// that might be a real rejection.
+fn is_terminal_auth_failure(message: &str) -> bool {
+    !message.trim_start().starts_with("error:")
 }
 
 /// Retry `op` with bounded jittered backoff, stopping immediately on a
@@ -3790,21 +3829,88 @@ mod tests {
 
     // ── startup connect retry ────────────────────────────────────────────
 
+    /// Table-driven coverage of every `RelayError` variant's terminal/transient
+    /// classification, including the two cases the initial classifier got
+    /// wrong: a syntactically valid but unsupported-scheme URL (`WebSocket`
+    /// wrapping `tungstenite::Error::Url`) must be terminal like `Http`, not
+    /// transient like a dropped connection.
     #[test]
-    fn terminal_connect_errors_are_http_and_auth_failed() {
-        assert!(is_terminal_connect_error(&RelayError::Http(
-            "bad url".into()
-        )));
-        assert!(is_terminal_connect_error(&RelayError::AuthFailed(
-            "rejected".into()
-        )));
-    }
+    fn connect_error_classification_matches_every_relay_error_variant() {
+        use tokio_tungstenite::tungstenite::error::{Error as WsError, UrlError};
 
-    #[test]
-    fn transient_connect_errors_are_not_terminal() {
-        assert!(!is_terminal_connect_error(&RelayError::ConnectionClosed));
-        assert!(!is_terminal_connect_error(&RelayError::Timeout));
-        assert!(!is_terminal_connect_error(&RelayError::NoAuthChallenge));
+        let cases: Vec<(&str, RelayError, bool)> = vec![
+            ("Http: bad URL", RelayError::Http("bad url".into()), true),
+            (
+                "Json: malformed relay frame",
+                RelayError::Json(serde_json::from_str::<()>("not json").unwrap_err()),
+                true,
+            ),
+            (
+                "UnexpectedMessage: unknown frame type",
+                RelayError::UnexpectedMessage("unknown message type: WAT".into()),
+                true,
+            ),
+            (
+                "WebSocket(Url): unsupported scheme — deterministic, never touches the network",
+                RelayError::WebSocket(Box::new(WsError::Url(UrlError::UnsupportedUrlScheme))),
+                true,
+            ),
+            (
+                "WebSocket(Url): missing host",
+                RelayError::WebSocket(Box::new(WsError::Url(UrlError::NoHostName))),
+                true,
+            ),
+            (
+                "WebSocket(Io): dropped connection is link noise, not config",
+                RelayError::WebSocket(Box::new(WsError::Io(std::io::Error::other("reset")))),
+                false,
+            ),
+            (
+                "AuthFailed: relay dependency fault (NIP-01 `error:` prefix)",
+                RelayError::AuthFailed("error: internal error checking restriction state".into()),
+                false,
+            ),
+            (
+                "AuthFailed: bad signature (`invalid:` prefix)",
+                RelayError::AuthFailed("invalid: bad signature".into()),
+                true,
+            ),
+            (
+                "AuthFailed: banned (`blocked:` prefix)",
+                RelayError::AuthFailed("blocked: you are banned from this community".into()),
+                true,
+            ),
+            (
+                "AuthFailed: not a member (`restricted:` prefix)",
+                RelayError::AuthFailed("restricted: not a relay member".into()),
+                true,
+            ),
+            (
+                "AuthFailed: allowlist denial (`auth-required:` prefix)",
+                RelayError::AuthFailed("auth-required: verification failed".into()),
+                true,
+            ),
+            (
+                "AuthFailed: unrecognized prefix fails safe as terminal",
+                RelayError::AuthFailed("some new denial reason".into()),
+                true,
+            ),
+            (
+                "NoAuthChallenge: relay silence is link/relay-timing noise",
+                RelayError::NoAuthChallenge,
+                false,
+            ),
+            ("ConnectionClosed", RelayError::ConnectionClosed, false),
+            ("Timeout", RelayError::Timeout, false),
+        ];
+
+        for (label, err, want_terminal) in cases {
+            assert_eq!(
+                is_terminal_connect_error(&err),
+                want_terminal,
+                "{label}: expected terminal={want_terminal}"
+            );
+        }
     }
 
     /// A transient failure (e.g. connection dropped mid-handshake on a spotty
@@ -3844,7 +3950,7 @@ mod tests {
         let attempts = AtomicUsize::new(0);
         let result: Result<(), RelayError> = retry_initial_connect(|| {
             attempts.fetch_add(1, Ordering::SeqCst);
-            async { Err(RelayError::AuthFailed("bad signature".into())) }
+            async { Err(RelayError::AuthFailed("invalid: bad signature".into())) }
         })
         .await;
 
@@ -3853,6 +3959,37 @@ mod tests {
             attempts.load(Ordering::SeqCst),
             1,
             "a terminal error must fail on the first attempt with no retries"
+        );
+    }
+
+    /// A relay-side dependency fault (NIP-01 `error:` prefix) is transient —
+    /// the relay is failing closed on itself, not rejecting this identity —
+    /// so it must be retried rather than surfaced immediately like a real
+    /// auth rejection.
+    #[tokio::test(start_paused = true)]
+    async fn retry_initial_connect_retries_relay_dependency_fault() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: Result<&'static str, RelayError> = retry_initial_connect(|| {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 1 {
+                    Err(RelayError::AuthFailed(
+                        "error: internal error checking restriction state".into(),
+                    ))
+                } else {
+                    Ok("connected")
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), "connected");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "a relay dependency fault must be retried, not surfaced immediately"
         );
     }
 
