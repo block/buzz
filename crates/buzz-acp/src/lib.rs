@@ -2725,7 +2725,10 @@ fn handle_prompt_result(
         // Don't requeue batches for channels the agent was removed from —
         // those events are stale and should be silently dropped.
         if !removed_channels.contains(&batch.channel_id) {
-            if matches!(result.outcome, PromptOutcome::Cancelled) {
+            if matches!(
+                result.outcome,
+                PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
+            ) {
                 // Cancel re-prompt: store as cancelled events so flush_next()
                 // merges them into the next FlushBatch.cancelled_events,
                 // enabling the annotated merged-prompt format. The batch's
@@ -2734,6 +2737,12 @@ fn handle_prompt_result(
                 // path; if somehow unset, fall back to the gentler Steer framing
                 // — consistent with MergeFraming::for_reason(None) and the
                 // system default — rather than telling the agent to supersede.
+                //
+                // CancelDrainTimeout shares this path with Cancelled: a failed
+                // 5s drain after a control-signal cancel is a cleanup-deadline
+                // problem, not the deterministic hard-cap death below — the
+                // original batch must survive with no retry/dead-letter
+                // accounting, same as a clean cancel.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
             } else if matches!(result.outcome, PromptOutcome::Timeout(TimeoutKind::Hard)) {
@@ -2801,6 +2810,7 @@ fn handle_prompt_result(
         PromptOutcome::Timeout(TimeoutKind::Hard) => "hard_timeout",
         PromptOutcome::AgentExited => "exited",
         PromptOutcome::Cancelled => "cancelled",
+        PromptOutcome::CancelDrainTimeout(_) => "cancel_drain_timeout",
     };
     let agent_index = result.agent.index;
     // Capture the spawn-time configured model and our PID before the agent is
@@ -2866,6 +2876,46 @@ fn handle_prompt_result(
                 ),
                 _ => "Agent session timed out due to inactivity".to_string(),
             };
+            emit_turn_error(&death_message, None);
+
+            let index = result.agent.index;
+            let slot_history = &mut crash_history[index];
+            if !spawn_respawn_task(
+                result.agent,
+                config,
+                slot_history,
+                respawn_tx,
+                respawn_tasks,
+                observer.clone(),
+            ) {
+                // Circuit open — slot stays empty until maintenance refill.
+                if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
+                    tracing::error!("all agents dead — exiting");
+                    return LoopAction::Exit;
+                }
+            }
+        }
+        // Cancel-drain expiry: a control-signal cancel (steer fallback,
+        // interrupt, or explicit stop) did not drain within its bounded
+        // grace window. The process is poisoned/uncertain like a hard
+        // timeout — respawn it — but this is NOT the configured max-turn
+        // cap, so the message must name the actual grace, not
+        // `max_turn_duration_secs`. The triggering batch's fate (preserved
+        // for Steer/Interrupt, dropped for explicit Cancel/Rotate or a
+        // removed channel) is decided above — the message stays fate-neutral
+        // since it must be true in every case.
+        PromptOutcome::CancelDrainTimeout(grace) => {
+            tracing::warn!(
+                agent = agent_index,
+                outcome = outcome_label,
+                configured_model = %harness_configured_model,
+                pid = harness_pid,
+                grace = ?grace,
+                "agent_returned — respawning (cancel-drain timeout)"
+            );
+            let death_message = format!(
+                "Agent did not stop within {grace:?} after cancellation; the agent process is being replaced."
+            );
             emit_turn_error(&death_message, None);
 
             let index = result.agent.index;
@@ -4179,6 +4229,17 @@ mod error_outcome_emission_tests {
         );
     }
 
+    #[tokio::test]
+    async fn cancel_drain_timeout_emits_exactly_one_feed_event() {
+        assert_eq!(
+            turn_errors_emitted_for(PromptOutcome::CancelDrainTimeout(
+                std::time::Duration::from_secs(5)
+            ))
+            .await,
+            1
+        );
+    }
+
     /// idle_timeout outcome_label is "idle_timeout"; hard_timeout is "hard_timeout".
     #[tokio::test]
     async fn timeout_outcome_labels_differ() {
@@ -4236,6 +4297,11 @@ mod error_outcome_emission_tests {
         };
         check_label(PromptOutcome::Timeout(TimeoutKind::Idle), "idle_timeout").await;
         check_label(PromptOutcome::Timeout(TimeoutKind::Hard), "hard_timeout").await;
+        check_label(
+            PromptOutcome::CancelDrainTimeout(std::time::Duration::from_secs(5)),
+            "cancel_drain_timeout",
+        )
+        .await;
     }
 
     /// hard-cap timeout dead-letters immediately (no requeue); idle timeout is requeued.
@@ -4331,6 +4397,272 @@ mod error_outcome_emission_tests {
         assert_eq!(
             idle_events, 1,
             "idle timeout must preserve the event for retry"
+        );
+    }
+
+    /// Cancel-drain-timeout batches are requeued as cancelled (merge into the
+    /// next flush, `CancelReason` preserved) — never dead-lettered like a real
+    /// hard-cap. The agent itself is NOT returned to the idle pool: it is
+    /// handed to `spawn_respawn_task` instead, mirroring a fatal `Timeout`.
+    ///
+    /// This reproduces the full steer-fallback incident, not just the
+    /// original batch in isolation: the steer ack handler already released
+    /// the new triggering event back to `queue` (`lib.rs`'s
+    /// `ExpectedRunIdMissing` path) before the cancel-drain expiry fires. The
+    /// next `flush_next()` must merge the surviving original event (via
+    /// `cancelled_events`) with that already-queued new event (via `events`)
+    /// exactly once each — proving no loss and no duplication.
+    #[tokio::test]
+    async fn cancel_drain_timeout_requeues_batch_and_does_not_return_agent() {
+        let keys = Keys::generate();
+        let original_event = EventBuilder::new(Kind::Custom(9), "original")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let new_event = EventBuilder::new(Kind::Custom(9), "new")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_ne!(
+            original_event.id, new_event.id,
+            "test fixture must use two distinct events"
+        );
+        let channel_id = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: original_event.clone(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: Some(CancelReason::Steer),
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        // The steer ack handler releases the new event to the queue BEFORE
+        // signaling the fallback ControlSignal::Steer that ultimately times
+        // out on drain — so it is already queued by the time
+        // handle_prompt_result runs.
+        queue.push(QueuedEvent {
+            channel_id,
+            event: new_event.clone(),
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        });
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+        let grace = std::time::Duration::from_secs(5);
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            outcome: PromptOutcome::CancelDrainTimeout(grace),
+            batch: Some(batch),
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+        );
+
+        // Batch preserved as a cancelled merge, not dead-lettered — same
+        // treatment as a normal `Cancelled` outcome. `handle_prompt_result`
+        // already called `mark_complete` internally, releasing the channel.
+        // `flush_next()` must merge the already-queued new event with the
+        // preserved original: each exactly once, in the correct bucket.
+        let requeued = queue.flush_next().expect("batch must be requeued");
+        assert_eq!(
+            requeued.events.len(),
+            1,
+            "exactly one new event must be in the regular events bucket"
+        );
+        assert_eq!(
+            requeued.events[0].event.id, new_event.id,
+            "the regular events bucket must hold the new (already-queued) event"
+        );
+        assert_eq!(
+            requeued.cancelled_events.len(),
+            1,
+            "exactly one original event must be in the cancelled_events bucket"
+        );
+        assert_eq!(
+            requeued.cancelled_events[0].event.id, original_event.id,
+            "the cancelled_events bucket must hold the original (interrupted) event"
+        );
+        assert_ne!(
+            requeued.events[0].event.id, requeued.cancelled_events[0].event.id,
+            "the new and original events must not be the same event"
+        );
+        assert_eq!(
+            requeued.cancel_reason,
+            Some(CancelReason::Steer),
+            "CancelReason must ride through to the requeued batch"
+        );
+
+        // Agent must NOT be back in the idle pool — it was handed to respawn.
+        assert_eq!(
+            pool.live_count(),
+            0,
+            "agent must not be returned to the pool after a cancel-drain timeout"
+        );
+        assert_eq!(
+            respawn_tasks.len(),
+            1,
+            "a respawn task must be spawned for the poisoned agent"
+        );
+
+        // The observer payload must be fate-neutral: it names the grace and
+        // the process replacement, and must NOT claim the batch was
+        // preserved — that claim is false for explicit Stop/removed-channel
+        // drops (see the sibling dropped-Stop test below), so the same
+        // wording is used regardless of fate.
+        let events = observer.snapshot();
+        let turn_error = events
+            .iter()
+            .find(|e| e.kind == "turn_error")
+            .expect("exactly one turn_error event must be emitted");
+        assert_eq!(
+            turn_error.payload["outcome"].as_str().unwrap(),
+            "cancel_drain_timeout"
+        );
+        assert_eq!(
+            turn_error.payload["error"].as_str().unwrap(),
+            format!("Agent did not stop within {grace:?} after cancellation; the agent process is being replaced."),
+            "observer message must name the actual grace and must not claim preservation"
+        );
+        assert_eq!(
+            events.iter().filter(|e| e.kind == "turn_error").count(),
+            1,
+            "exactly one turn_error event must be emitted"
+        );
+    }
+
+    /// Explicit Stop (`ControlSignal::Cancel`) on cancel-drain expiry drops
+    /// the triggering batch — `requeue_cancelled_batch` returns `None` for
+    /// `Cancel`/`Rotate`. The observer payload must be the SAME fate-neutral
+    /// text as the preserved-Steer case above: it must never claim work was
+    /// preserved when it was intentionally discarded. The poisoned agent is
+    /// still respawned exactly as in the preserved case.
+    #[tokio::test]
+    async fn cancel_drain_timeout_dropped_stop_batch_none_same_neutral_payload() {
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+        let grace = std::time::Duration::from_secs(5);
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(Uuid::new_v4()),
+            outcome: PromptOutcome::CancelDrainTimeout(grace),
+            // Explicit Stop already dropped the batch upstream in
+            // `classify_control_cancel_failure` — `handle_prompt_result`
+            // never sees one to requeue.
+            batch: None,
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+        );
+
+        // No batch to merge — the queue has nothing pending for any channel.
+        assert_eq!(
+            queue.pending_channels(),
+            0,
+            "a dropped Stop batch must not leave anything queued"
+        );
+
+        // Same respawn treatment as the preserved case: never returned idle.
+        assert_eq!(
+            pool.live_count(),
+            0,
+            "agent must not be returned to the pool after a cancel-drain timeout"
+        );
+        assert_eq!(
+            respawn_tasks.len(),
+            1,
+            "a respawn task must be spawned for the poisoned agent"
+        );
+
+        // The observer payload is byte-identical to the preserved-Steer case:
+        // fate-neutral, naming the grace, with no preservation claim.
+        let events = observer.snapshot();
+        let turn_error = events
+            .iter()
+            .find(|e| e.kind == "turn_error")
+            .expect("exactly one turn_error event must be emitted");
+        assert_eq!(
+            turn_error.payload["outcome"].as_str().unwrap(),
+            "cancel_drain_timeout"
+        );
+        assert_eq!(
+            turn_error.payload["error"].as_str().unwrap(),
+            format!("Agent did not stop within {grace:?} after cancellation; the agent process is being replaced."),
+            "observer message must be fate-neutral even though the batch was dropped"
+        );
+        assert_eq!(
+            events.iter().filter(|e| e.kind == "turn_error").count(),
+            1,
+            "exactly one turn_error event must be emitted"
         );
     }
 

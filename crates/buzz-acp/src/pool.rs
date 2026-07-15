@@ -362,6 +362,16 @@ pub enum PromptOutcome {
     /// Intentional cancel via `!cancel` command or interrupt mode.
     /// Agent is healthy — no respawn, no retry penalty.
     Cancelled,
+    /// The agent did not stop within `grace` after `session/cancel` was sent
+    /// for a control-signal cancellation (steer fallback, interrupt, or
+    /// explicit stop). Distinct from [`TimeoutKind::Hard`]: this is a bounded
+    /// cleanup deadline, not the turn's configured max-turn wall clock, so it
+    /// must never be reported or dead-lettered as a hard-cap breach. The
+    /// agent process is uncertain — treated as poisoned and respawned, same
+    /// as a hard timeout, but the triggering batch's fate follows the
+    /// `CancelReason` on the batch (steer/interrupt requeue, explicit cancel
+    /// drops) rather than the hard-cap's unconditional dead-letter.
+    CancelDrainTimeout(Duration),
 }
 
 /// Immutable config subset shared (via `Arc`) by all spawned prompt tasks.
@@ -669,6 +679,13 @@ const CONTEXT_FETCH_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 /// Timeout for model-switch requests (`session/set_config_option`, `session/set_model`).
 const MODEL_SWITCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bounded grace window for the post-cancel drain after a control-signal
+/// cancellation (steer fallback, interrupt, or explicit stop). This is a
+/// cleanup deadline, not the turn's configured max-turn wall clock — see
+/// [`AcpClient::cancel_with_cleanup_grace`] and
+/// [`classify_control_cancel_failure`].
+const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 /// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
 const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1672,10 +1689,7 @@ pub async fn run_prompt_task(
                         // Prompt is genuinely in-flight — cancel it.
                         match agent
                             .acp
-                            .cancel_with_cleanup_grace(
-                                &session_id,
-                                std::time::Duration::from_secs(5),
-                            )
+                            .cancel_with_cleanup_grace(&session_id, CONTROL_CANCEL_GRACE)
                             .await
                         {
                             Ok(stop_reason) => {
@@ -1703,35 +1717,21 @@ pub async fn run_prompt_task(
                                 );
                                 return;
                             }
-                            Err(AcpError::AgentExited) => {
-                                agent.state.invalidate_all();
-                                let retry_batch =
-                                    requeue_cancelled_batch(&ctx, control_signal, batch);
-
-                                let usage = agent.acp.take_turn_usage();
-                                publish_agent_turn_metric(
+                            Err(error) => {
+                                // Single production arm: classify the error→outcome
+                                // and outcome→batch-fate boundary once via the seam
+                                // shared with tests, then invalidate/publish/send once.
+                                let failure = classify_control_cancel_failure(
                                     &ctx,
-                                    usage,
-                                    observer_channel_id,
-                                    &session_id,
-                                    &turn_id,
-                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
-                                )
-                                .await;
-                                send_prompt_result(
-                                    &result_tx,
-                                    agent,
-                                    source,
-                                    PromptOutcome::AgentExited,
-                                    retry_batch,
+                                    error,
+                                    control_signal,
+                                    batch,
                                 );
-                                return;
-                            }
-                            Err(AcpError::IdleTimeout(_)) => {
-                                // Cancel drain idle timed out — agent state uncertain.
-                                agent.state.invalidate(&source);
-                                let retry_batch =
-                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+                                if failure.invalidate_all {
+                                    agent.state.invalidate_all();
+                                } else {
+                                    agent.state.invalidate(&source);
+                                }
 
                                 let usage = agent.acp.take_turn_usage();
                                 publish_agent_turn_metric(
@@ -1747,57 +1747,8 @@ pub async fn run_prompt_task(
                                     &result_tx,
                                     agent,
                                     source,
-                                    PromptOutcome::Timeout(TimeoutKind::Idle),
-                                    retry_batch,
-                                );
-                                return;
-                            }
-                            Err(AcpError::HardTimeout) => {
-                                // Cancel drain hard timed out — agent state uncertain.
-                                agent.state.invalidate(&source);
-                                let retry_batch =
-                                    requeue_cancelled_batch(&ctx, control_signal, batch);
-
-                                let usage = agent.acp.take_turn_usage();
-                                publish_agent_turn_metric(
-                                    &ctx,
-                                    usage,
-                                    observer_channel_id,
-                                    &session_id,
-                                    &turn_id,
-                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
-                                )
-                                .await;
-                                send_prompt_result(
-                                    &result_tx,
-                                    agent,
-                                    source,
-                                    PromptOutcome::Timeout(TimeoutKind::Hard),
-                                    retry_batch,
-                                );
-                                return;
-                            }
-                            Err(e) => {
-                                agent.state.invalidate(&source);
-                                let retry_batch =
-                                    requeue_cancelled_batch(&ctx, control_signal, batch);
-
-                                let usage = agent.acp.take_turn_usage();
-                                publish_agent_turn_metric(
-                                    &ctx,
-                                    usage,
-                                    observer_channel_id,
-                                    &session_id,
-                                    &turn_id,
-                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
-                                )
-                                .await;
-                                send_prompt_result(
-                                    &result_tx,
-                                    agent,
-                                    source,
-                                    PromptOutcome::Error(e),
-                                    retry_batch,
+                                    failure.outcome,
+                                    failure.retry_batch,
                                 );
                                 return;
                             }
@@ -2871,6 +2822,60 @@ fn requeue_cancelled_batch(
         b.cancel_reason = Some(reason);
         b
     })
+}
+
+/// Result of classifying a failed [`AcpClient::cancel_with_cleanup_grace`]
+/// call: the [`PromptOutcome`] to report and the triggering batch's fate,
+/// decided together so tests cross the exact error→outcome→batch-fate
+/// boundary the production `Err(error)` arm uses.
+struct ControlCancelFailure {
+    outcome: PromptOutcome,
+    retry_batch: Option<FlushBatch>,
+    /// `AgentExited` invalidates every session on the agent; every other
+    /// failure invalidates only the source that triggered this turn.
+    invalidate_all: bool,
+}
+
+/// Classify a failed control-signal cancellation (steer fallback, interrupt,
+/// or explicit stop) into the [`PromptOutcome`] to report and the triggering
+/// batch's fate. This is the single production seam used by the `Err(error)`
+/// arm of the control-cancel branch in [`run_prompt_task`] — the boundary
+/// this exists to keep singular, so regressions there are regression-tested.
+///
+/// [`AcpError::CancelDrainTimeout`] is the expected, common case: the agent
+/// didn't stop within its bounded grace window. [`AcpError::HardTimeout`] is
+/// not expected here — [`AcpClient::cancel_with_cleanup_grace`] translates its
+/// own drain-deadline `HardTimeout` into `CancelDrainTimeout` before
+/// returning — but for defense in depth an unexpected `HardTimeout` at this
+/// bounded cancellation boundary must never regain real hard-cap/dead-letter
+/// classification, so it maps to `CancelDrainTimeout(CONTROL_CANCEL_GRACE)`
+/// rather than `Timeout(Hard)`.
+fn classify_control_cancel_failure(
+    ctx: &PromptContext,
+    error: AcpError,
+    signal: ControlSignal,
+    batch: Option<FlushBatch>,
+) -> ControlCancelFailure {
+    let (outcome, invalidate_all) = match error {
+        AcpError::AgentExited => (PromptOutcome::AgentExited, true),
+        AcpError::IdleTimeout(_) => (PromptOutcome::Timeout(TimeoutKind::Idle), false),
+        AcpError::CancelDrainTimeout(grace) => (PromptOutcome::CancelDrainTimeout(grace), false),
+        // Defense in depth: this bounded cancellation API is documented to
+        // translate its own HardTimeout into CancelDrainTimeout, so this arm
+        // should be unreachable in practice. If it ever fires anyway, still
+        // report the truthful non-hard outcome rather than the real hard-cap
+        // (which would dead-letter the batch and claim the configured cap).
+        AcpError::HardTimeout => (
+            PromptOutcome::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+            false,
+        ),
+        other => (PromptOutcome::Error(other), false),
+    };
+    ControlCancelFailure {
+        outcome,
+        retry_batch: requeue_cancelled_batch(ctx, signal, batch),
+        invalidate_all,
+    }
 }
 
 /// Log a stop reason at the appropriate tracing level.
@@ -4149,6 +4154,240 @@ mod tests {
         // ch_b untouched — the switch is channel-scoped.
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+    }
+
+    // ── requeue_cancelled_batch ────────────────────────────────────────────
+    // Table-driven pin of the `ControlSignal` → `CancelReason` ownership that
+    // decides whether a cancel-drain-expiry batch is merged into the next
+    // flush or dropped outright. `Cancel`/`Rotate` must return `None` — a
+    // regression here would silently fall through to
+    // `unwrap_or(CancelReason::Steer)` at the requeue site and preserve a
+    // batch that should have been discarded.
+
+    fn one_event_batch(channel_id: Uuid) -> FlushBatch {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn test_requeue_cancelled_batch_maps_control_signal_to_cancel_reason() {
+        let cases = [
+            (ControlSignal::Steer, Some(CancelReason::Steer)),
+            (ControlSignal::Interrupt, Some(CancelReason::Interrupt)),
+            (
+                ControlSignal::SwitchModel("gpt-5".into()),
+                Some(CancelReason::Interrupt),
+            ),
+            (ControlSignal::Cancel, None),
+            (ControlSignal::Rotate, None),
+        ];
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.dedup_mode = DedupMode::Queue;
+
+        for (signal, expected_reason) in cases {
+            let channel_id = Uuid::new_v4();
+            let batch = one_event_batch(channel_id);
+            let result = requeue_cancelled_batch(&ctx, signal.clone(), Some(batch));
+            match expected_reason {
+                Some(reason) => {
+                    let batch = result
+                        .unwrap_or_else(|| panic!("{signal:?} must preserve the batch, got None"));
+                    assert_eq!(
+                        batch.cancel_reason,
+                        Some(reason),
+                        "{signal:?} must stamp {reason:?}"
+                    );
+                }
+                None => assert!(
+                    result.is_none(),
+                    "{signal:?} must drop the batch, got {result:?}"
+                ),
+            }
+        }
+    }
+
+    // ── classify_control_cancel_failure ─────────────────────────────────────
+    // Table-driven pin of the single production seam used by the
+    // `Err(error)` arm in `run_prompt_task`'s control-cancel branch. Crosses
+    // the exact error→outcome AND outcome→batch-fate boundary in one call,
+    // so a regression to the old per-arm duplication (or to routing an
+    // unexpected HardTimeout back through the real hard-cap path) fails
+    // here rather than only in independently-manufactured unit tests.
+
+    /// Assert `outcome` is the expected `PromptOutcome` variant. `PromptOutcome`
+    /// has no `PartialEq` (it wraps `AcpError`, which isn't `PartialEq`), so
+    /// this matches by shape instead of deriving equality onto the whole enum.
+    fn assert_outcome_matches(outcome: &PromptOutcome, expected: &str) {
+        let label = match outcome {
+            PromptOutcome::AgentExited => "AgentExited",
+            PromptOutcome::Timeout(TimeoutKind::Idle) => "Timeout(Idle)",
+            PromptOutcome::Timeout(TimeoutKind::Hard) => "Timeout(Hard)",
+            PromptOutcome::CancelDrainTimeout(_) => "CancelDrainTimeout",
+            PromptOutcome::Error(_) => "Error",
+            PromptOutcome::Cancelled => "Cancelled",
+            PromptOutcome::Ok(_) => "Ok",
+        };
+        assert_eq!(
+            label, expected,
+            "got outcome shape {label}, want {expected}"
+        );
+    }
+
+    #[test]
+    fn test_classify_control_cancel_failure_crosses_error_outcome_and_batch_fate() {
+        let ctx = {
+            let mut ctx = make_prompt_context_no_owner();
+            ctx.dedup_mode = DedupMode::Queue;
+            ctx
+        };
+
+        struct Case {
+            name: &'static str,
+            error: fn() -> AcpError,
+            signal: ControlSignal,
+            expected_outcome: &'static str,
+            batch_preserved: bool,
+            expected_reason: Option<CancelReason>,
+            invalidate_all: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "CancelDrainTimeout + Steer preserves batch with Steer reason",
+                error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                signal: ControlSignal::Steer,
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Steer),
+                invalidate_all: false,
+            },
+            Case {
+                name: "CancelDrainTimeout + Cancel drops the batch",
+                error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                signal: ControlSignal::Cancel,
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: false,
+                expected_reason: None,
+                invalidate_all: false,
+            },
+            Case {
+                name: "CancelDrainTimeout + Interrupt preserves batch with Interrupt reason",
+                error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                signal: ControlSignal::Interrupt,
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Interrupt),
+                invalidate_all: false,
+            },
+            Case {
+                name: "CancelDrainTimeout + Rotate drops the batch",
+                error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                signal: ControlSignal::Rotate,
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: false,
+                expected_reason: None,
+                invalidate_all: false,
+            },
+            Case {
+                name: "CancelDrainTimeout + SwitchModel preserves batch with Interrupt reason",
+                error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                signal: ControlSignal::SwitchModel("gpt-5".to_string()),
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Interrupt),
+                invalidate_all: false,
+            },
+            Case {
+                name: "unexpected HardTimeout cannot become Timeout(Hard)",
+                error: || AcpError::HardTimeout,
+                signal: ControlSignal::Steer,
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Steer),
+                invalidate_all: false,
+            },
+            Case {
+                name: "AgentExited requests all-session invalidation and preserves via Steer",
+                error: || AcpError::AgentExited,
+                signal: ControlSignal::Steer,
+                expected_outcome: "AgentExited",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Steer),
+                invalidate_all: true,
+            },
+            Case {
+                name: "AgentExited + Cancel still drops the batch",
+                error: || AcpError::AgentExited,
+                signal: ControlSignal::Cancel,
+                expected_outcome: "AgentExited",
+                batch_preserved: false,
+                expected_reason: None,
+                invalidate_all: true,
+            },
+            Case {
+                name: "IdleTimeout maps to Timeout(Idle)",
+                error: || AcpError::IdleTimeout(Duration::from_secs(30)),
+                signal: ControlSignal::Steer,
+                expected_outcome: "Timeout(Idle)",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Steer),
+                invalidate_all: false,
+            },
+        ];
+
+        for case in cases {
+            let channel_id = Uuid::new_v4();
+            let batch = one_event_batch(channel_id);
+            let failure = classify_control_cancel_failure(
+                &ctx,
+                (case.error)(),
+                case.signal.clone(),
+                Some(batch),
+            );
+            assert_outcome_matches(&failure.outcome, case.expected_outcome);
+            assert_eq!(
+                failure.invalidate_all, case.invalidate_all,
+                "{}: invalidate_all mismatch",
+                case.name
+            );
+            match case.expected_reason {
+                Some(reason) => {
+                    let batch = failure
+                        .retry_batch
+                        .unwrap_or_else(|| panic!("{}: batch must be preserved", case.name));
+                    assert_eq!(
+                        batch.cancel_reason,
+                        Some(reason),
+                        "{}: cancel_reason mismatch",
+                        case.name
+                    );
+                }
+                None => assert!(
+                    failure.retry_batch.is_none(),
+                    "{}: batch must be dropped, got {:?}",
+                    case.name,
+                    failure.retry_batch
+                ),
+            }
+            assert_eq!(
+                case.batch_preserved,
+                case.expected_reason.is_some(),
+                "{}: test table internally inconsistent",
+                case.name
+            );
+        }
     }
 
     // ── turn liveness emission ───────────────────────────────────────────────
