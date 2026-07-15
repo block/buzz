@@ -26,6 +26,7 @@ import {
   useMediaUpload,
 } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
+import { usePersistentAgentAudience } from "@/features/messages/lib/persistentAgentAudience";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
   hasMentionClipboardHtml,
@@ -53,6 +54,7 @@ import {
 } from "./MentionAutocomplete";
 import { MessageComposerToolbar } from "./MessageComposerToolbar";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
+import { PersistentAgentAudienceChips } from "./PersistentAgentAudienceChips";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
@@ -187,6 +189,9 @@ function MessageComposerImpl({
 
   const drafts = useDrafts();
   const effectiveDraftKey = draftKey ?? channelId;
+  const audienceScope =
+    channelId && effectiveDraftKey ? `${channelId}:${effectiveDraftKey}` : null;
+  const persistentAudience = usePersistentAgentAudience(audienceScope);
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
   // Snapshot composer state before edit mode so cancel can restore it.
@@ -354,6 +359,9 @@ function MessageComposerImpl({
     setIsEmojiPickerOpen,
     setPendingImeta: media.setPendingImeta,
     setSpoileredAttachmentUrls,
+    onSuccessfulExplicitAgentAudience: persistentAudience.enabled
+      ? persistentAudience.setPubkeys
+      : undefined,
   });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger
@@ -628,6 +636,9 @@ function MessageComposerImpl({
         ),
         spoileredAttachmentUrls,
         trimmed,
+        persistentAgentPubkeys: persistentAudience.enabled
+          ? persistentAudience.pubkeys
+          : [],
       });
     } finally {
       onPreparingMentionSendChange?.(false);
@@ -650,6 +661,8 @@ function MessageComposerImpl({
     syncComposerContentFromEditor,
     onCaptureSendContext,
     onPreparingMentionSendChange,
+    persistentAudience.enabled,
+    persistentAudience.pubkeys,
   ]);
   submitMessageRef.current = submitMessage;
 
@@ -951,6 +964,13 @@ function MessageComposerImpl({
               selectedIndex={mentions.mentionSelectedIndex}
               suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
             />
+            {persistentAudience.enabled ? (
+              <PersistentAgentAudienceChips
+                getDisplayName={mentions.getMentionDisplayName}
+                onRemove={persistentAudience.removePubkey}
+                pubkeys={persistentAudience.pubkeys}
+              />
+            ) : null}
             {media.uploadState.status === "error" ? (
               <div className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
                 Upload failed: {media.uploadState.message}
