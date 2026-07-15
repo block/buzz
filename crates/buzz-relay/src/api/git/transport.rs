@@ -1361,7 +1361,6 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         &ctx.owner,
         &ctx.repo,
         &ctx.parent_state,
-        &state.config.git_repo_path,
         PublishLimits {
             parent_hydrated_bytes: ctx.repo_handle.hydrated_bytes(),
             max_pack_bytes: state.config.git_max_pack_bytes,

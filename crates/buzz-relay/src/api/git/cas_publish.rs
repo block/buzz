@@ -558,10 +558,16 @@ pub async fn cas_publish(
     owner: &str,
     repo: &str,
     parent_state: &ParentState,
-    scratch_dir: &Path,
     limits: PublishLimits,
 ) -> Result<CasSuccess, CasError> {
     let pkey = pointer_key(ctx.community(), owner, repo);
+
+    // Hydrated repositories are direct children of the configured Git scratch
+    // root. Reuse that parent for publication tempfiles so they remain on the
+    // mounted scratch volume without adding another independent path argument.
+    let scratch_dir = repo_path
+        .parent()
+        .ok_or_else(|| CasError::PackCapture("repository path has no scratch parent".into()))?;
 
     // Snapshot post-receive-pack state from disk. `parent_state.parent.refs`
     // are the refs the workspace was hydrated from — `pack-objects --revs`
