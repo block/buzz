@@ -31,6 +31,9 @@ pub struct UserSearchProfile {
     pub avatar_url: Option<String>,
     /// NIP-05 identifier (user@domain).
     pub nip05_handle: Option<String>,
+    /// Whether this user has ever published a kind:0 metadata event, including
+    /// one that has since been soft-deleted.
+    pub has_metadata_history: bool,
 }
 
 /// Ensure a user record exists for the given pubkey (upsert).
@@ -243,25 +246,50 @@ pub async fn search_users(
     let limit = limit.clamp(1, 500) as i64;
     let offset = offset.min(100_000) as i64;
 
-    let rows = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Vec<u8>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            bool,
+        ),
+    >(
         r#"
-        SELECT pubkey, display_name, avatar_url, nip05_handle
-        FROM users
-        WHERE community_id = $1
-          AND (LOWER(COALESCE(display_name, '')) LIKE $2 ESCAPE '\'
-           OR LOWER(COALESCE(nip05_handle, '')) LIKE $2 ESCAPE '\'
-           OR LOWER(encode(pubkey, 'hex')) LIKE $2 ESCAPE '\')
+        SELECT
+            u.pubkey,
+            u.display_name,
+            u.avatar_url,
+            u.nip05_handle,
+            EXISTS (
+                SELECT 1
+                FROM events e
+                WHERE e.community_id = u.community_id
+                  AND e.pubkey = u.pubkey
+                  AND e.kind = 0
+            ) AS has_metadata_history
+        FROM users u
+        WHERE u.community_id = $1
+          AND (LOWER(COALESCE(u.display_name, '')) LIKE $2 ESCAPE '\'
+           OR LOWER(COALESCE(u.nip05_handle, '')) LIKE $2 ESCAPE '\'
+           OR LOWER(encode(u.pubkey, 'hex')) LIKE $2 ESCAPE '\')
         ORDER BY
             CASE
-                WHEN LOWER(COALESCE(display_name, '')) = $3 THEN 0
-                WHEN LOWER(COALESCE(nip05_handle, '')) = $3 THEN 1
-                WHEN LOWER(encode(pubkey, 'hex')) = $3 THEN 2
-                WHEN LOWER(COALESCE(display_name, '')) LIKE $4 ESCAPE '\' THEN 3
-                WHEN LOWER(COALESCE(nip05_handle, '')) LIKE $4 ESCAPE '\' THEN 4
-                WHEN LOWER(encode(pubkey, 'hex')) LIKE $4 ESCAPE '\' THEN 5
+                WHEN LOWER(COALESCE(u.display_name, '')) = $3 THEN 0
+                WHEN LOWER(COALESCE(u.nip05_handle, '')) = $3 THEN 1
+                WHEN LOWER(encode(u.pubkey, 'hex')) = $3 THEN 2
+                WHEN LOWER(COALESCE(u.display_name, '')) LIKE $4 ESCAPE '\' THEN 3
+                WHEN LOWER(COALESCE(u.nip05_handle, '')) LIKE $4 ESCAPE '\' THEN 4
+                WHEN LOWER(encode(u.pubkey, 'hex')) LIKE $4 ESCAPE '\' THEN 5
                 ELSE 6
             END,
-            COALESCE(NULLIF(display_name, ''), NULLIF(nip05_handle, ''), LOWER(encode(pubkey, 'hex')))
+            COALESCE(
+                NULLIF(u.display_name, ''),
+                NULLIF(u.nip05_handle, ''),
+                LOWER(encode(u.pubkey, 'hex'))
+            ),
+            LOWER(encode(u.pubkey, 'hex'))
         LIMIT $5 OFFSET $6
         "#,
     )
@@ -277,11 +305,14 @@ pub async fn search_users(
     Ok(rows
         .into_iter()
         .map(
-            |(pubkey, display_name, avatar_url, nip05_handle)| UserSearchProfile {
-                pubkey,
-                display_name,
-                avatar_url,
-                nip05_handle,
+            |(pubkey, display_name, avatar_url, nip05_handle, has_metadata_history)| {
+                UserSearchProfile {
+                    pubkey,
+                    display_name,
+                    avatar_url,
+                    nip05_handle,
+                    has_metadata_history,
+                }
             },
         )
         .collect())
@@ -651,6 +682,51 @@ mod tests {
         assert_eq!(escape_like("alice"), "alice");
         assert_eq!(escape_like("bob@example.com"), "bob@example.com");
         assert_eq!(escape_like(""), "");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn search_users_pages_tied_rows_by_pubkey() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let pubkeys = vec![
+            vec![0x30; 32],
+            vec![0x10; 32],
+            vec![0x40; 32],
+            vec![0x20; 32],
+        ];
+
+        for pubkey in &pubkeys {
+            ensure_user(&db.pool, community, pubkey)
+                .await
+                .expect("ensure tied user");
+            update_user_profile(&db.pool, community, pubkey, Some("Alex"), None, None, None)
+                .await
+                .expect("set tied display name");
+        }
+
+        let first_page = search_users(&db.pool, community, "alex", 2, 0)
+            .await
+            .expect("query first page");
+        let second_page = search_users(&db.pool, community, "alex", 2, 2)
+            .await
+            .expect("query second page");
+        let actual: Vec<Vec<u8>> = first_page
+            .into_iter()
+            .chain(second_page)
+            .map(|user| user.pubkey)
+            .collect();
+
+        assert_eq!(
+            actual,
+            vec![
+                vec![0x10; 32],
+                vec![0x20; 32],
+                vec![0x30; 32],
+                vec![0x40; 32],
+            ],
+            "tied users must cross page boundaries in deterministic pubkey order"
+        );
     }
 
     /// A user with "owner_only" policy but no agent_owner_pubkey set should

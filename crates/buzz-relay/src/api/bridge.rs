@@ -1339,10 +1339,7 @@ fn synthetic_kind0_from_user(user: &buzz_db::user::UserSearchProfile) -> Option<
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        content.insert(
-            "display_name".to_string(),
-            Value::String(name.to_string()),
-        );
+        content.insert("display_name".to_string(), Value::String(name.to_string()));
         content.insert("name".to_string(), Value::String(name.to_string()));
     }
     if let Some(picture) = user
@@ -1444,6 +1441,13 @@ async fn handle_people_directory_search(
             if let Ok(v) = serde_json::to_value(&se.event) {
                 events.push(v);
             }
+            continue;
+        }
+
+        // A user with kind:0 history but no live stored profile deleted it.
+        // Do not resurrect the soft-deleted fields still cached in `users`.
+        // Users who never published kind:0 remain eligible for synthesis.
+        if user.has_metadata_history {
             continue;
         }
 
@@ -3082,9 +3086,7 @@ mod tests {
             .search("alice");
         assert!(!is_people_directory_search(&with_author));
 
-        let messages = nostr::Filter::new()
-            .kind(Kind::Custom(9))
-            .search("alice");
+        let messages = nostr::Filter::new().kind(Kind::Custom(9)).search("alice");
         assert!(!is_people_directory_search(&messages));
     }
 
@@ -3096,6 +3098,7 @@ mod tests {
             display_name: Some("Alice".into()),
             avatar_url: Some("https://example.com/a.png".into()),
             nip05_handle: Some("alice@example.com".into()),
+            has_metadata_history: false,
         };
         let event = synthetic_kind0_from_user(&user).expect("synthetic event");
         assert_eq!(event.kind, Kind::Metadata);
