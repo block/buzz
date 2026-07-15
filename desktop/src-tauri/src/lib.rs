@@ -18,6 +18,7 @@ pub mod nostr_convert;
 mod prevent_sleep;
 mod ptt_shortcut;
 mod relay;
+mod reset;
 mod secret_store;
 mod shutdown;
 mod templates;
@@ -34,15 +35,14 @@ use deep_link::handle_deep_link_url;
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
 };
+use huddle::reconnect::reconnect_huddle_audio;
 use huddle::{
     add_agent_to_huddle, check_pipeline_hotstart, confirm_huddle_active, download_voice_models,
     end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status, get_voice_input_mode,
     join_huddle, leave_huddle, push_audio_pcm, set_huddle_transcription_enabled, set_tts_enabled,
     set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
-use managed_agents::{
-    backfill_persona_snapshots, ensure_nest, restore_managed_agents_on_launch, try_regenerate_nest,
-};
+use managed_agents::{backfill_persona_snapshots, ensure_nest, try_regenerate_nest};
 use shutdown::shutdown_managed_agents;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -404,8 +404,6 @@ pub fn run() {
     #[cfg(not(buzz_updater_enabled))]
     let builder = builder;
 
-    let shutdown_started = Arc::new(AtomicBool::new(false));
-    let restore_shutdown_started = Arc::clone(&shutdown_started);
     let app = builder
         .register_asynchronous_uri_scheme_protocol("buzz-media", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -418,18 +416,52 @@ pub fn run() {
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
-            let shutdown_started = Arc::clone(&restore_shutdown_started);
+
+            // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
+            // Must run before migrations and identity resolution so the wipe
+            // completes atomically on crash recovery.
+            //
+            // init_nest_dir is called early here (normally it runs inside
+            // run_boot_migrations) so reset::run_boot_reset can call nest_dir().
+            let reset_outcome = if let Ok(data_dir) = app_handle.path().app_data_dir() {
+                let is_dev_for_reset = data_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(crate::migration::is_dev_data_dir_name)
+                    .unwrap_or(false);
+                crate::managed_agents::init_nest_dir(is_dev_for_reset);
+                crate::reset::run_boot_reset(&data_dir)
+            } else {
+                crate::reset::ResetOutcome::default()
+            };
+
+            if reset_outcome.failed {
+                // Surface reset-failed state — skip identity resolution and
+                // all side-effecting setup. The webview still loads so the
+                // frontend can show the recovery screen via get_identity.
+                let state = app_handle.state::<AppState>();
+                state
+                    .reset_failed
+                    .store(true, std::sync::atomic::Ordering::Release);
+                return Ok(());
+            }
 
             // Run all pre-identity data migrations before state loads from disk.
-            migration::run_boot_migrations(&app_handle);
+            if reset_outcome.completed {
+                migration::run_boot_migrations_after_reset(&app_handle);
+            } else {
+                migration::run_boot_migrations(&app_handle);
+            }
 
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity
             // that will be lost on restart, as that silently breaks channel
             // memberships, DMs, and relay identity.
             let state = app_handle.state::<AppState>();
-            resolve_persisted_identity(&app_handle, &state)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            if let Err(e) = resolve_persisted_identity(&app_handle, &state) {
+                eprintln!("buzz-desktop: fatal: identity resolution failed: {e}");
+                std::process::exit(1);
+            }
 
             // When the identity is in recovery mode (lost = keyring empty after
             // migration, or keyring-locked = keyring unreachable but marker
@@ -446,11 +478,13 @@ pub fn run() {
 
             // Snapshot owner keys after identity resolution; the best-effort
             // event reconcile itself runs off the synchronous setup path below.
-            let owner_keys = state
-                .keys
-                .lock()
-                .map(|k| k.clone())
-                .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            let owner_keys = match state.keys.lock() {
+                Ok(k) => k.clone(),
+                Err(e) => {
+                    eprintln!("buzz-desktop: fatal: owner keys lock poisoned: {e}");
+                    std::process::exit(1);
+                }
+            };
 
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
@@ -522,7 +556,9 @@ pub fn run() {
             // destination is present. Non-fatal.
             // On a real migration, emit a one-time hint so the user can delete
             // the now-inert ~/.sprout; the frontend dedupes the toast.
-            if migration::migrate_legacy_nest() {
+            // Suppressed when a reset completed this boot: the nest was wiped and
+            // a fresh ~/.sprout-less state is exactly what we want.
+            if !reset_outcome.completed && migration::migrate_legacy_nest() {
                 let _ = app_handle.emit("legacy-nest-migrated", ());
             }
 
@@ -530,10 +566,12 @@ pub fn run() {
             // from the shared ~/.buzz nest into the new dedicated ~/.buzz-dev
             // nest so no work is lost when the nest is first namespaced.
             // Runs only when nest_dir() resolved to ~/.buzz-dev (dev instance).
+            // Suppressed after a reset so re-importing ~/.buzz into ~/.buzz-dev
+            // doesn't re-populate what was just wiped.
             let is_dev_nest = managed_agents::nest_dir()
                 .and_then(|p| p.file_name().map(|n| n.to_os_string()))
                 .is_some_and(|n| n == ".buzz-dev");
-            if is_dev_nest {
+            if !reset_outcome.completed && is_dev_nest {
                 migration::migrate_dev_nest();
             }
 
@@ -577,22 +615,16 @@ pub fn run() {
                 });
             }
 
-            // Keep launch-time agent restoration off the synchronous setup path
-            // so the frontend can mount and reveal the window promptly. Gated on
-            // the boot-time repos symlink result (see restore_agents above):
-            // skip when a configured repos_dir could not be resolved, so no
-            // agent clones into a REPOS that isn't the user's target.
-            // Also skipped in recovery mode — agents must not be spawned
-            // under an ephemeral owner key.
+            // Defer launch-time agent restoration until `apply_workspace` has
+            // installed the active workspace relay and identity. Starting here
+            // would race React initialization and send agents whose saved record
+            // has no relay override to the localhost fallback. Preserve the
+            // boot-time repos and identity recovery safety gates by only marking
+            // restoration pending when both allow it.
             if restore_agents && !recovery_mode {
-                tauri::async_runtime::spawn(async move {
-                    if let Err(error) =
-                        restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref())
-                            .await
-                    {
-                        eprintln!("buzz-desktop: failed to restore managed agents: {error}");
-                    }
-                });
+                state
+                    .managed_agent_restore_pending
+                    .store(true, Ordering::Release);
             }
 
             // Periodic sweep: reap orphaned agents from dead instances every 60s.
@@ -697,10 +729,12 @@ pub fn run() {
             get_media_proxy_port,
             fetch_link_preview_title,
             discover_acp_providers,
+            discover_git_bash_prerequisite,
             install_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,
             sign_nostr_identity_binding,
+            sign_out,
             decrypt_observer_event,
             build_observer_control_event,
             create_auth_event,
@@ -804,11 +838,6 @@ pub fn run() {
             create_team,
             update_team,
             delete_team,
-            install_team_from_directory,
-            sync_team_directory,
-            pick_team_directory,
-            export_team_to_json,
-            parse_team_file,
             export_agent_snapshot,
             preview_agent_snapshot_import,
             confirm_agent_snapshot_import,
@@ -842,6 +871,7 @@ pub fn run() {
             end_huddle,
             get_huddle_state,
             push_audio_pcm,
+            reconnect_huddle_audio,
             start_stt_pipeline,
             set_huddle_transcription_enabled,
             download_voice_models,
@@ -899,9 +929,11 @@ pub fn run() {
     {
         let signal_app = app.handle().clone();
         let signal_shutdown_done = Arc::clone(&shutdown_done);
-        let signal_shutdown_started = Arc::clone(&shutdown_started);
         if let Err(e) = ctrlc::set_handler(move || {
-            signal_shutdown_started.store(true, Ordering::SeqCst);
+            signal_app
+                .state::<AppState>()
+                .shutdown_started
+                .store(true, Ordering::SeqCst);
             if !signal_shutdown_done.swap(true, Ordering::SeqCst) {
                 let _ = shutdown_managed_agents(&signal_app);
             }
@@ -914,7 +946,10 @@ pub fn run() {
     let run_shutdown_done = Arc::clone(&shutdown_done);
     app.run(move |app_handle, event| match event {
         RunEvent::ExitRequested { .. } | RunEvent::Exit => {
-            shutdown_started.store(true, Ordering::SeqCst);
+            app_handle
+                .state::<AppState>()
+                .shutdown_started
+                .store(true, Ordering::SeqCst);
             if !run_shutdown_done.swap(true, Ordering::SeqCst) {
                 prevent_sleep::release(&app_handle.state::<AppState>().prevent_sleep);
                 if let Err(error) = shutdown_managed_agents(app_handle) {

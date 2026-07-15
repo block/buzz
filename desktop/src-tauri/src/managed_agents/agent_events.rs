@@ -188,6 +188,7 @@ mod tests {
             },
             backend_agent_id: Some("remote-id".to_string()),
             provider_binary_path: Some("/path/to/binary".to_string()),
+            team_id: None,
             persona_team_dir: None,
             persona_name_in_team: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),

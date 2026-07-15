@@ -5,7 +5,7 @@ use crate::{
     events,
     models::{ChannelDetailInfo, ChannelInfo, ChannelMembersResponse},
     nostr_convert,
-    relay::{query_relay, submit_event},
+    relay::{query_relay, submit_event, submit_event_with_keys},
 };
 
 // ── Reads (pure-nostr via /query) ────────────────────────────────────────────
@@ -45,6 +45,16 @@ async fn query_relay_all(
     }
 }
 
+/// Whether an open channel not yet in the real member set should still be
+/// classified `is_member=true` via the pending-owner overlay. Pulled out of
+/// `get_channels`'s open-channel branch so the exact `(d_tag, my_pubkey,
+/// overlay) -> is_member` decision — including the identity binding that
+/// keeps one identity's pending entry from covering another's — is directly
+/// unit-testable without going through the async relay-backed command.
+fn classify_pending_owner(state: &AppState, my_pubkey: &str, d_tag: Option<&str>) -> bool {
+    d_tag.is_some_and(|d| state.is_pending_owned_channel(my_pubkey, d))
+}
+
 #[tauri::command]
 pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>, String> {
     let _profile_start = std::time::Instant::now();
@@ -79,6 +89,15 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
         .collect();
     channel_ids.sort();
     channel_ids.dedup();
+
+    // The real kind:39002 membership has now resolved for these channels —
+    // drop them from the pending-owner overlay (see `AppState::pending_owned_channels`)
+    // so a channel this identity created no longer speaks through the overlay
+    // once genuine membership is observable, and a later leave correctly
+    // flips it back to `is_member=false`.
+    for id in &channel_ids {
+        state.clear_pending_owned_channel(&my_pubkey, id);
+    }
 
     // Step 2: fetch channel metadata events (kind:39000) for member channels.
     // kind:39000 is addressable: exactly one event per `d` tag, so a limit
@@ -146,7 +165,18 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
                 continue;
             }
         }
-        if let Ok(info) = nostr_convert::channel_info_from_event(ev, None, Some(false)) {
+        // The overlay (`AppState::pending_owned_channels`) marks channels this
+        // identity just created via `create_channel` whose kind:39002 owner
+        // membership hasn't propagated yet (#1761) — a fresh channel has no
+        // member event and would otherwise fall through to `is_member=false`
+        // here, disabling the owner's own composer until that snapshot lands.
+        // The overlay can only be populated by this process's own
+        // `create_channel` call (never by relay data) and is keyed by
+        // `(my_pubkey, d_tag)`, so it adds no trust-boundary risk and can
+        // never speak for a channel a different identity created; `channel_ids`
+        // above clears it once real membership is observed for `my_pubkey`.
+        let is_pending_owner = classify_pending_owner(&state, &my_pubkey, d_tag.as_deref());
+        if let Ok(info) = nostr_convert::channel_info_from_event(ev, None, Some(is_pending_owner)) {
             channels.push(info);
         }
     }
@@ -443,10 +473,26 @@ pub async fn create_channel(
         description.as_deref(),
         ttl_seconds,
     )?;
-    submit_event(builder, &state).await?;
+
+    // Capture the signing identity before submission so the pending-owner
+    // mark below is bound to whoever actually signed this create — not
+    // whoever `state.keys` holds once the network round-trip completes. An
+    // in-process identity swap while the request is in flight must not be
+    // able to retarget the mark onto the new identity.
+    let creator_keys = state.signing_keys()?;
+    let creator_pubkey = creator_keys.public_key().to_hex();
+    submit_event_with_keys(builder, &state, &creator_keys, None).await?;
+
+    // Mark this channel pending-owner: we just created it, so we know we're
+    // the owner, but the relay's kind:39002 membership entry (#1761) is
+    // provisioned asynchronously. `get_channels` consults this overlay to
+    // classify us as `is_member=true` until that entry is observable. Bound
+    // to the identity that signed the create above, so an in-process
+    // identity swap can neither inherit nor retarget this entry.
+    let channel_uuid_string = channel_uuid.to_string();
+    state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
 
     // Re-fetch the canonical metadata event to return ChannelInfo.
-    let channel_uuid_string = channel_uuid.to_string();
     let events = query_relay(
         &state,
         &[serde_json::json!({

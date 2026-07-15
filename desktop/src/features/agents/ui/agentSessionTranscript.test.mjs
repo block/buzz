@@ -467,6 +467,82 @@ test("buildTranscript promotes ACP plan updates to first-class plan items", () =
   assert.match(items[0].text, /Build registry/);
 });
 
+test("buildTranscript parses standard ACP plan entries[] into a checklist", () => {
+  const items = buildTranscript([
+    sessionUpdate(90, {
+      sessionUpdate: "plan",
+      entries: [
+        { status: "completed", content: "Read the ticket", priority: "medium" },
+        { status: "in_progress", content: "Write the fix", priority: "medium" },
+        { status: "pending", content: "Open the PR", priority: "medium" },
+      ],
+    }),
+  ]);
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].type, "plan");
+  assert.equal(items[0].renderClass, "plan");
+  assert.equal(
+    items[0].text,
+    [
+      "- [x] Read the ticket",
+      "- [ ] Write the fix (in progress)",
+      "- [ ] Open the PR",
+    ].join("\n"),
+  );
+});
+
+test("buildTranscript summarizes plan entries[] updates with correct N/M complete", () => {
+  const items = buildTranscript([
+    sessionUpdate(90, {
+      sessionUpdate: "plan",
+      entries: [
+        { status: "pending", content: "Read the ticket" },
+        { status: "pending", content: "Write the fix" },
+      ],
+    }),
+    sessionUpdate(91, {
+      sessionUpdate: "plan",
+      entries: [
+        { status: "completed", content: "Read the ticket" },
+        { status: "in_progress", content: "Write the fix" },
+      ],
+    }),
+  ]);
+
+  const updateMarker = items.find(
+    (item) => item.type === "plan" && item.isUpdate,
+  );
+  assert.ok(updateMarker, "expected a plan update marker item");
+  assert.equal(updateMarker.title, "Plan updated");
+  assert.equal(updateMarker.text, "1/2 complete");
+});
+
+test("buildTranscript treats an empty plan entries[] as an empty checklist, not a JSON fallback", () => {
+  const items = buildTranscript([
+    sessionUpdate(90, {
+      sessionUpdate: "plan",
+      entries: [],
+    }),
+  ]);
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].type, "plan");
+  assert.equal(items[0].text, "");
+});
+
+test("buildTranscript falls back to raw JSON when a plan update has neither entries nor content", () => {
+  const items = buildTranscript([
+    sessionUpdate(90, {
+      sessionUpdate: "plan",
+    }),
+  ]);
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].type, "plan");
+  assert.match(items[0].text, /"sessionUpdate":\s*"plan"/);
+});
+
 test("buildTranscript stores first-class render class descriptors for tool items", () => {
   const [item] = toolItems([
     acpToolUpdate(91, {

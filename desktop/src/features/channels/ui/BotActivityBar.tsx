@@ -255,6 +255,9 @@ export function BotActivityComposerAction({
                   size="sm"
                 />
                 <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+                <span className="shrink-0 whitespace-nowrap text-xs font-medium opacity-80">
+                  View activity
+                </span>
                 <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground/70" />
               </button>
             );

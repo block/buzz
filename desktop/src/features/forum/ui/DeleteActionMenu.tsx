@@ -22,7 +22,7 @@ export function DeleteActionMenu({ label, onConfirm }: DeleteActionMenuProps) {
 
   return (
     <div className="ml-auto opacity-0 transition-opacity group-hover:opacity-100">
-      <DropdownMenu>
+      <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <button
             className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"

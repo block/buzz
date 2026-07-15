@@ -18,7 +18,7 @@ type SelectionAnchorResult = {
    *  1. Direct match in feedItems for the current anchor ID.
    *  2. Committed same-anchor latch (survives anchor disappearing from feed).
    *  3. Cold-recovered synthetic FeedItem from getEventById (anchor absent from
-   *     feed; validated against the active workspace channel set).
+   *     feed; validated against the active community channel set).
    */
   activeLatchedItem: FeedItem | null;
   /**
@@ -59,7 +59,7 @@ type ColdAttemptStatus =
  *
  *  Layer 3 — cold recovery: when the anchor is absent from feedItems (e.g. a
  *  cold ?item= navigation or back/forward to a stale URL), fetches the event
- *  by ID, validates its `h` channel against the active workspace, and returns
+ *  by ID, validates its `h` channel against the active community, and returns
  *  a synthetic FeedItem for context seeding.  The recovered event is never
  *  injected into the live feed snapshot.
  */
@@ -284,7 +284,7 @@ export function useInboxSelectionAnchor({
         }
         const hTag = event.tags.find((t) => t[0] === "h")?.[1] ?? null;
         if (!hTag || !latestAvailableChannelIdsRef.current.has(hTag)) {
-          // Event found but not in the current workspace — record membership
+          // Event found but not in the current community — record membership
           // snapshot so a channel-set change triggers exactly one retry.
           const failedKey = [...latestAvailableChannelIdsRef.current]
             .sort()
@@ -346,7 +346,7 @@ export function useInboxSelectionAnchor({
   // ── Active latch derivation ───────────────────────────────────────────────
   // Synchronous direct match wins; then committed latch (survives eviction from
   // feed); then cold recovery (absent-from-feed path). Non-direct cached layers
-  // are gated by workspace membership so a shrinking availableChannelIds does
+  // are gated by community membership so a shrinking availableChannelIds does
   // not serve a stale context seed.
   const directSelectedFeedItem = React.useMemo(
     () =>

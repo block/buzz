@@ -109,3 +109,134 @@ fn empty_input_yields_empty_map() {
     let membership = collect_members_by_channel(&[]);
     assert!(membership.is_empty());
 }
+
+#[test]
+fn pending_overlay_marks_relay_signed_channel_as_member() {
+    // The real production shape: kind:39000 is relay-signed (#1761), so the
+    // event's author is never the creator. A fresh channel's owner is
+    // classified via the pending-owner overlay (populated by `create_channel`
+    // in this same process), not via the event's pubkey.
+    let relay_keys = Keys::generate();
+    let e = EventBuilder::new(Kind::from_u16(39000), "")
+        .tags(vec![
+            Tag::parse(["d", "chan-1"]).expect("parse tag"),
+            Tag::parse(["name", "n"]).expect("parse tag"),
+        ])
+        .sign_with_keys(&relay_keys)
+        .expect("sign");
+
+    let state = crate::app_state::build_app_state();
+    state.mark_pending_owned_channel(PK_A, "chan-1");
+
+    let info = crate::nostr_convert::channel_info_from_event(
+        &e,
+        None,
+        Some(classify_pending_owner(&state, PK_A, Some("chan-1"))),
+    )
+    .unwrap();
+    assert!(info.is_member);
+}
+
+#[test]
+fn pending_overlay_leaves_unrelated_channel_as_non_member() {
+    // A relay-signed channel this identity never created (not in the
+    // overlay) must stay `is_member=false` — no over-broad match.
+    let relay_keys = Keys::generate();
+    let e = EventBuilder::new(Kind::from_u16(39000), "")
+        .tags(vec![
+            Tag::parse(["d", "chan-1"]).expect("parse tag"),
+            Tag::parse(["name", "n"]).expect("parse tag"),
+        ])
+        .sign_with_keys(&relay_keys)
+        .expect("sign");
+
+    let state = crate::app_state::build_app_state();
+    // Overlay has a different channel pending for the same identity, not
+    // this one.
+    state.mark_pending_owned_channel(PK_A, "chan-other");
+
+    let info = crate::nostr_convert::channel_info_from_event(
+        &e,
+        None,
+        Some(classify_pending_owner(&state, PK_A, Some("chan-1"))),
+    )
+    .unwrap();
+    assert!(!info.is_member);
+}
+
+#[test]
+fn pending_overlay_cleared_once_real_membership_observed() {
+    // Once the real kind:39002 lands (modeled here as `get_channels`'s
+    // cleanup step: clearing every channel id it just found real membership
+    // for), the overlay must stop speaking for that channel — otherwise a
+    // later leave would never flip `is_member` back to false.
+    let state = crate::app_state::build_app_state();
+    state.mark_pending_owned_channel(PK_A, "chan-1");
+    assert!(state.is_pending_owned_channel(PK_A, "chan-1"));
+
+    // Mirrors the `for id in &channel_ids { state.clear_pending_owned_channel(&my_pubkey, id) }`
+    // step in `get_channels` once "chan-1" appears in PK_A's real member set.
+    state.clear_pending_owned_channel(PK_A, "chan-1");
+    assert!(!state.is_pending_owned_channel(PK_A, "chan-1"));
+}
+
+#[test]
+fn pending_overlay_does_not_leak_across_identity_swap() {
+    // Regression for the IMPORTANT Thufir flagged on the bare-channel-id
+    // overlay: `import_identity`/workspace-apply can replace `state.keys` in
+    // process without clearing the overlay. Identity A creates a channel and
+    // is recorded pending-owner; if the process then switches to identity B
+    // (same `AppState`, same channel id), B must NOT inherit A's entry.
+    let state = crate::app_state::build_app_state();
+    state.mark_pending_owned_channel(PK_A, "chan-1");
+
+    assert!(state.is_pending_owned_channel(PK_A, "chan-1"));
+    assert!(!state.is_pending_owned_channel(PK_B, "chan-1"));
+}
+
+#[test]
+fn classify_pending_owner_matches_only_the_owning_identity() {
+    // Exercises the exact branch-level decision `get_channels`'s open-channel
+    // fallthrough makes, not just the underlying `AppState` helpers in
+    // isolation.
+    let state = crate::app_state::build_app_state();
+    state.mark_pending_owned_channel(PK_A, "chan-1");
+
+    assert!(classify_pending_owner(&state, PK_A, Some("chan-1")));
+    // Different identity, same channel id: must not match.
+    assert!(!classify_pending_owner(&state, PK_B, Some("chan-1")));
+    // Same identity, different channel id: must not match.
+    assert!(!classify_pending_owner(&state, PK_A, Some("chan-other")));
+    // No `d` tag on the event at all: must not match.
+    assert!(!classify_pending_owner(&state, PK_A, None));
+}
+
+#[test]
+fn pending_owner_mark_uses_signer_captured_before_identity_swap() {
+    // Regression for the write-side IMPORTANT Thufir flagged in pass 3:
+    // `create_channel` used to re-read `state.keys` *after* the submit
+    // await, so an identity swap that lands during the in-flight request
+    // could mark the overlay under the new identity instead of the one that
+    // actually signed the create. The fix captures the signer up front and
+    // marks with that captured identity, so a swap that happens afterward
+    // (i.e. during what would be the submit await) can't retarget the mark.
+    let state = crate::app_state::build_app_state();
+
+    // Mirrors `create_channel`'s new capture-before-submit step: read the
+    // signer identity once, before anything that could race with a swap.
+    let creator_keys = state.signing_keys().expect("signable");
+    let creator_pubkey = creator_keys.public_key().to_hex();
+
+    // Simulate an in-process identity swap landing during the (here,
+    // implicit) submit await — e.g. `import_identity` replacing
+    // `state.keys` while the create request is in flight.
+    *state.keys.lock().expect("lock keys") = Keys::generate();
+
+    // The mark must use the captured signer, not whatever `state.keys`
+    // holds now.
+    state.mark_pending_owned_channel(&creator_pubkey, "chan-1");
+
+    assert!(state.is_pending_owned_channel(&creator_pubkey, "chan-1"));
+    let post_swap_pubkey = state.keys.lock().expect("lock keys").public_key().to_hex();
+    assert!(!state.is_pending_owned_channel(&post_swap_pubkey, "chan-1"));
+}

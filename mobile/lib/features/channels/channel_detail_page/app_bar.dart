@@ -168,21 +168,17 @@ class _DmAppBarTitle extends ConsumerWidget {
           child: Stack(
             clipBehavior: Clip.none,
             children: [
-              CircleAvatar(
+              AvatarImage(
+                imageUrl: avatarUrl,
                 radius: 14,
                 backgroundColor: context.colors.primaryContainer,
-                backgroundImage: avatarUrl != null
-                    ? NetworkImage(avatarUrl)
-                    : null,
-                child: avatarUrl == null
-                    ? Text(
-                        initial,
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: context.colors.onPrimaryContainer,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      )
-                    : null,
+                fallback: Text(
+                  initial,
+                  style: context.textTheme.labelSmall?.copyWith(
+                    color: context.colors.onPrimaryContainer,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ),
               Positioned(
                 right: -1,

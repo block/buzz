@@ -8,7 +8,7 @@ import { getRelayHttpUrl, signRelayEvent } from "@/shared/api/tauri";
 // - POST /api/invites        — mint a code (relay checks owner/admin role)
 // - POST /api/invites/claim  — claim a code, signed by the *joining* key.
 //   This one targets an arbitrary relay (the invite's relay, not necessarily
-//   the active workspace), so the claim helper takes an explicit ws URL.
+//   the active community), so the claim helper takes an explicit ws URL.
 
 const NIP98_KIND = 27235;
 
@@ -84,7 +84,7 @@ async function invitePost<T>(
   return json as T;
 }
 
-/** Mint an invite code on the active workspace's relay (owner/admin only). */
+/** Mint an invite code on the active community's relay (owner/admin only). */
 export async function mintInvite(ttlSecs?: number): Promise<MintedInvite> {
   const base = await getRelayHttpUrl();
   const body = JSON.stringify(ttlSecs ? { ttl_secs: ttlSecs } : {});
@@ -98,7 +98,7 @@ export async function mintInvite(ttlSecs?: number): Promise<MintedInvite> {
 
 /**
  * Claim an invite code against `relayWsUrl` (the invite's relay — not
- * necessarily the active workspace), signed by this app's identity key.
+ * necessarily the active community), signed by this app's identity key.
  */
 export async function claimInvite(
   relayWsUrl: string,

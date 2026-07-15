@@ -27,7 +27,7 @@ use nostr::{EventBuilder, Kind, Tag};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use buzz_auth::generate_challenge;
@@ -38,7 +38,7 @@ use buzz_core::StoredEvent;
 use buzz_pubsub::EventTopic;
 
 use crate::audio::room::PeerCtrl;
-use crate::state::AppState;
+use crate::state::{run_registered_community_connection, AppState};
 
 /// Maximum binary frame size: 4 KB is generous for a single Opus packet.
 const MAX_AUDIO_FRAME_BYTES: usize = 4096;
@@ -113,6 +113,29 @@ async fn handle_audio_connection(
     tenant: TenantContext,
     channel_id: Uuid,
 ) {
+    let cancel = CancellationToken::new();
+    let community_id = tenant.community();
+    let registry = Arc::clone(&state.community_connections);
+    let check_state = Arc::clone(&state);
+    let run_state = Arc::clone(&state);
+    run_registered_community_connection(
+        &registry,
+        Uuid::new_v4(),
+        community_id,
+        cancel.clone(),
+        move || async move { check_state.db.is_community_active(community_id).await },
+        move || handle_active_audio_connection(socket, run_state, tenant, channel_id, cancel),
+    )
+    .await;
+}
+
+async fn handle_active_audio_connection(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    tenant: TenantContext,
+    channel_id: Uuid,
+    cancel: CancellationToken,
+) {
     let (mut ws_send, mut ws_recv) = socket.split();
 
     let challenge = generate_challenge();
@@ -126,23 +149,26 @@ async fn handle_audio_connection(
         return;
     }
 
-    let auth_result = tokio::time::timeout(AUTH_TIMEOUT, async {
-        while let Some(Ok(msg)) = ws_recv.next().await {
-            if let WsMessage::Text(text) = msg {
-                if text.len() > MAX_TEXT_FRAME_BYTES {
-                    warn!(channel_id = %channel_id, "auth text frame too large — dropping");
-                    continue;
-                }
-                if let Ok(auth) = serde_json::from_str::<AuthMsg>(&text) {
-                    if auth.msg_type == "auth" {
-                        return Some(auth);
+    let auth_result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return,
+        result = tokio::time::timeout(AUTH_TIMEOUT, async {
+            while let Some(Ok(msg)) = ws_recv.next().await {
+                if let WsMessage::Text(text) = msg {
+                    if text.len() > MAX_TEXT_FRAME_BYTES {
+                        warn!(channel_id = %channel_id, "auth text frame too large — dropping");
+                        continue;
+                    }
+                    if let Ok(auth) = serde_json::from_str::<AuthMsg>(&text) {
+                        if auth.msg_type == "auth" {
+                            return Some(auth);
+                        }
                     }
                 }
             }
-        }
-        None
-    })
-    .await;
+            None
+        }) => result,
+    };
 
     let auth_msg = match auth_result {
         Ok(Some(a)) => a,
@@ -224,33 +250,95 @@ async fn handle_audio_connection(
         }
     };
 
-    // Huddle audio guardrail (plan §5b). Audio frames are relayed only within
-    // a single pod; under horizontal scaling (any-pod-any-connection) two peers
-    // in one huddle can land on different pods and never hear each other. A
-    // multi-pod deployment sets `huddle_audio_available = false`, and we surface
-    // a clear, client-handleable "unavailable" signal here — BEFORE joining a
-    // room — rather than shipping a silent split-room. Single-pod deployments
-    // leave the flag at its `true` default and keep today's behavior. The fix
-    // is an out-of-relay media/SFU service (Tyler's long-term target), not
-    // sticky-routing huddles into this rewrite.
-    if !state.config.huddle_audio_available {
-        debug!(
-            channel_id = %channel_id,
-            pubkey = %pubkey_hex,
-            "huddle audio unavailable under horizontal scaling — rejecting join"
-        );
-        let _ = ws_send
-            .send(WsMessage::Text(
-                serde_json::json!({
-                    "type": "error",
-                    "code": "huddle_audio_unavailable",
-                    "message": "huddle audio unavailable in this deployment"
-                })
-                .to_string()
-                .into(),
-            ))
-            .await;
-        return;
+    // Huddle cross-pod routing (mesh) OR single-pod guardrail.
+    //
+    // When the mesh is live (`state.mesh()` is `Some`), a huddle can span pods:
+    // Redis arbitrates ownership and this pod either owns the room locally or
+    // forwards the client to the owner over a `HuddleControl` stream. When the
+    // mesh is off, we keep today's behavior exactly — including the
+    // `huddle_audio_available=false` rejection under a non-mesh horizontal
+    // deployment (two peers on different pods would never hear each other).
+    //
+    // `remote_owner` is `Some` only on the non-owner path; it carries the
+    // registration to the owner and, once the client is admitted locally, is
+    // opened so its media forwards to the owner instead of fanning out locally.
+    let mut pending_remote: Option<crate::audio::join::JoinOutcome> = None;
+    // The freshly-acquired owner lease, if this connection won the CAS. Held
+    // until `add_peer` succeeds, then installed in the owner registry so the
+    // renewer's lifetime matches the room's, not this connection's failure
+    // paths (archived channel, version reject, room full) which return early.
+    let mut acquired_lease: Option<crate::audio::join::HuddleLease> = None;
+    match state.mesh() {
+        Some(mesh) => {
+            if mesh.owners.is_draining() {
+                let _ = ws_send
+                    .send(WsMessage::Text(
+                        serde_json::json!({
+                            "type": "error",
+                            "code": "huddle_relay_draining",
+                            "message": "relay is draining; reconnect"
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await;
+                return;
+            }
+            match crate::audio::join::resolve_join_owner_ready(
+                &mesh.directory,
+                tenant.community(),
+                channel_id,
+                mesh.local_runtime_id,
+                &mesh.owners,
+            )
+            .await
+            {
+                Ok(resolved) => {
+                    acquired_lease = resolved.acquired;
+                    pending_remote = Some(resolved.outcome);
+                }
+                Err(e) => {
+                    warn!(
+                        channel_id = %channel_id,
+                        pubkey = %pubkey_hex,
+                        "huddle join rejected by fence: {e}"
+                    );
+                    let _ = ws_send
+                        .send(WsMessage::Text(
+                            serde_json::json!({
+                                "type": "error",
+                                "code": "join_rejected",
+                                "message": "huddle join rejected"
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await;
+                    return;
+                }
+            }
+        }
+        None => {
+            if !state.config.huddle_audio_available {
+                debug!(
+                    channel_id = %channel_id,
+                    pubkey = %pubkey_hex,
+                    "huddle audio unavailable under horizontal scaling — rejecting join"
+                );
+                let _ = ws_send
+                    .send(WsMessage::Text(
+                        serde_json::json!({
+                            "type": "error",
+                            "code": "huddle_audio_unavailable",
+                            "message": "huddle audio unavailable in this deployment"
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await;
+                return;
+            }
+        }
     }
 
     let room = state.audio_rooms.get_or_create(channel_id);
@@ -310,53 +398,107 @@ async fn handle_audio_connection(
         return;
     }
 
-    let (peer_id, peer_index, audio_rx, peer_ctrl_rx) = match room
-        .add_peer(pubkey_hex.clone(), requested_version)
+    // Remote registration happens before ingress admission. The owner-assigned
+    // index is therefore the only index this client ever has; no frame or
+    // `joined` message can escape with an ingress-local placeholder.
+    let mut remote_session: Option<crate::audio::join::RemoteHuddleSession> = None;
+    let mut remote_stream: Option<buzz_relay_mesh::MeshStream> = None;
+    let mut remote_fence: Option<Arc<crate::audio::mesh::GenerationFloor>> = None;
+    if let (Some(mesh), Some(crate::audio::join::JoinOutcome::RemoteOwner { .. })) =
+        (state.mesh(), pending_remote)
     {
-        Ok(v) => v,
-        Err(crate::audio::room::AdmissionError::Full) => {
-            warn!(channel_id = %channel_id, "audio room full (255 peers exhausted)");
-            let _ = ws_send
+        let outcome = pending_remote.expect("RemoteOwner matched above");
+        let fenced = outcome.fenced_header(channel_id, mesh.local_runtime_id);
+        let crate::audio::join::JoinOutcome::RemoteOwner {
+            owner_runtime_id, ..
+        } = outcome
+        else {
+            unreachable!("matched RemoteOwner above");
+        };
+        match crate::audio::join::dial_remote_owner(
+            Arc::clone(&mesh.transport),
+            mesh.local_runtime_id,
+            owner_runtime_id,
+            fenced,
+            tenant.community(),
+            pubkey_hex.clone(),
+            requested_version,
+        )
+        .await
+        {
+            Ok((session, stream)) => {
+                remote_session = Some(session);
+                remote_stream = Some(stream);
+                remote_fence = Some(Arc::clone(&mesh.audio_fence));
+            }
+            Err(crate::audio::join::DialError::Rejected(reason)) => {
+                warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "huddle owner rejected registration: {reason:?}");
+                let _ = ws_send
                     .send(WsMessage::Text(
-                        serde_json::json!({"type":"error","code":"room_full","message":"peer index space exhausted"})
-                            .to_string().into(),
+                        remote_rejection_ws_error(&reason).to_string().into(),
                     ))
                     .await;
-            return;
-        }
-        Err(crate::audio::room::AdmissionError::Ended) => {
-            debug!(channel_id = %channel_id, "room ended before admission");
-            let _ = ws_send
-                    .send(WsMessage::Text(
-                        serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"})
-                            .to_string().into(),
-                    ))
-                    .await;
-            return;
-        }
-        Err(crate::audio::room::AdmissionError::VersionMismatch { pinned, requested }) => {
-            info!(
-                channel_id = %channel_id,
-                pubkey = %pubkey_hex,
-                pinned,
-                requested,
-                "audio: protocol version mismatch — upgrade required"
-            );
-            let _ = ws_send
+                state.audio_rooms.cleanup_if_empty(channel_id);
+                return;
+            }
+            Err(crate::audio::join::DialError::Mesh(e)) => {
+                warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "huddle owner registration failed: {e}");
+                let _ = ws_send
                     .send(WsMessage::Text(
                         serde_json::json!({
-                            "type": "error",
-                            "code": "upgrade_required",
-                            "message": format!(
-                                "this huddle is using audio protocol v{pinned}; your client requested v{requested}"
-                            ),
-                            "pinned_version": pinned,
-                            "requested_version": requested,
+                            "type": "error", "code": "huddle_owner_unreachable",
+                            "message": "could not reach the huddle owner"
                         })
                         .to_string()
                         .into(),
                     ))
                     .await;
+                state.audio_rooms.cleanup_if_empty(channel_id);
+                return;
+            }
+        }
+    }
+
+    let admission = if let Some(session) = remote_session.as_ref() {
+        room.add_peer_at_index(pubkey_hex.clone(), requested_version, session.peer_index())
+            .map(|(id, audio, ctrl)| (id, session.peer_index(), audio, ctrl))
+    } else {
+        room.add_peer(pubkey_hex.clone(), requested_version)
+    };
+    let (peer_id, peer_index, audio_rx, peer_ctrl_rx) = match admission {
+        Ok(v) => v,
+        Err(crate::audio::room::AdmissionError::Full) => {
+            warn!(channel_id = %channel_id, "audio room full (255 peers exhausted)");
+            let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_full","message":"peer index space exhausted"}).to_string().into())).await;
+            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
+            {
+                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+                    .await;
+            }
+            return;
+        }
+        Err(crate::audio::room::AdmissionError::Ended) => {
+            debug!(channel_id = %channel_id, "room ended before admission");
+            let _ = ws_send.send(WsMessage::Text(serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"}).to_string().into())).await;
+            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
+            {
+                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+                    .await;
+            }
+            return;
+        }
+        Err(crate::audio::room::AdmissionError::VersionMismatch { pinned, requested }) => {
+            info!(channel_id = %channel_id, pubkey = %pubkey_hex, pinned, requested, "audio: protocol version mismatch — upgrade required");
+            let _ = ws_send.send(WsMessage::Text(serde_json::json!({
+                "type": "error", "code": "upgrade_required",
+                "message": format!("this huddle is using audio protocol v{pinned}; your client requested v{requested}"),
+                "pinned_version": pinned, "requested_version": requested,
+            }).to_string().into())).await;
+            if let (Some(session), Some(stream)) = (remote_session.as_ref(), remote_stream.as_mut())
+            {
+                crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey())
+                    .await;
+            }
             return;
         }
     };
@@ -368,11 +510,67 @@ async fn handle_audio_connection(
         "audio peer joined"
     );
 
-    let peers_snapshot: Vec<serde_json::Value> = room
-        .peer_pubkeys()
-        .into_iter()
-        .map(|(pk, idx)| serde_json::json!({"pubkey": pk, "peer_index": idx}))
-        .collect();
+    // Owner path: install (or reuse) this room's single lease renewer now that
+    // a peer is admitted, and capture its owner-loss signal. The connection
+    // that won the CAS holds `acquired_lease`; it installs the renewer. A
+    // steady-state owner (an earlier joiner installed it) reuses the room's
+    // existing signal. `owner_lost` drives this connection's own teardown
+    // below; `owner_generation` fences the release on room-empty so a stale
+    // teardown cannot release a newer epoch a re-acquire installed.
+    //
+    // The reuse arm's live entry is guaranteed by `resolve_join_owner_ready`:
+    // it re-resolves until the CAS winner has installed (reuse) or a fresh CAS
+    // wins (acquire), never returning a `LocalOwner` snapshot with a missing
+    // registry entry. So a local owner peer here always gets a real `lost`
+    // watcher — the ownerless split-brain (an owner peer fanning stale media
+    // with no way to observe lease loss, since local WS peers have no per-frame
+    // fence) cannot occur. A `None` on the reuse arm is therefore an invariant
+    // violation, not a benign race; log it loudly rather than proceed silently.
+    let mut owner_lost: Option<CancellationToken> = None;
+    let mut owner_draining: Option<CancellationToken> = None;
+    let mut owner_generation: Option<u64> = None;
+    if let Some(mesh) = state.mesh() {
+        match (pending_remote, acquired_lease.take()) {
+            (Some(crate::audio::join::JoinOutcome::LocalOwner { generation }), Some(lease)) => {
+                let signals =
+                    mesh.owners
+                        .attach_signals(channel_id, Arc::new(mesh.directory.clone()), lease);
+                owner_lost = Some(signals.lost);
+                owner_draining = Some(signals.draining);
+                owner_generation = Some(generation);
+            }
+            (Some(crate::audio::join::JoinOutcome::LocalOwner { generation }), None) => {
+                owner_lost = mesh.owners.lost_for(channel_id);
+                owner_draining = mesh.owners.drain_for(channel_id);
+                owner_generation = Some(generation);
+                if owner_lost.is_none() {
+                    error!(
+                        channel_id = %channel_id,
+                        "huddle owner-ready invariant violated: LocalOwner reuse with no live \
+                         registry entry after resolve_join_owner_ready — owner peer has no \
+                         lease-loss watcher"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Remote registration and owner-assigned ingress admission completed above.
+
+    let peers_snapshot: Vec<serde_json::Value> = if let Some(session) = remote_session.as_ref() {
+        session
+            .roster()
+            .peers
+            .iter()
+            .map(|peer| serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index}))
+            .collect()
+    } else {
+        room.peer_pubkeys()
+            .into_iter()
+            .map(|(pk, idx)| serde_json::json!({"pubkey": pk, "peer_index": idx}))
+            .collect()
+    };
 
     let joined_msg = serde_json::json!({
         "type": "joined",
@@ -382,7 +580,19 @@ async fn handle_audio_connection(
     })
     .to_string();
 
-    room.broadcast_control(joined_msg);
+    if remote_session.is_some() {
+        if ws_send
+            .send(WsMessage::Text(joined_msg.into()))
+            .await
+            .is_err()
+        {
+            room.remove_peer(peer_id);
+            state.audio_rooms.cleanup_if_empty(channel_id);
+            return;
+        }
+    } else {
+        room.broadcast_control(joined_msg);
+    }
 
     // ── Step 6: emit kind:48101 (PARTICIPANT_JOINED) ──────────────────────────
     emit_participant_event(
@@ -395,7 +605,6 @@ async fn handle_audio_connection(
     )
     .await;
 
-    let cancel = CancellationToken::new();
     let missed_pongs = Arc::new(AtomicU8::new(0));
 
     // Dual-channel pattern (matches connection.rs): data channel for audio,
@@ -419,6 +628,100 @@ async fn handle_audio_connection(
         fwd_cancel,
     ));
 
+    // Non-owner path: own the owner's `HuddleControl` stream in a reader task.
+    // It races the owner's teardown signal against our own cancellation:
+    //   * owner speaks first (`Goodbye` / stream close) → tear the client down
+    //     and close its WS so it rejoins (against a fresh owner/generation),
+    //     and forget the local generation floor so the rejoin isn't fenced by
+    //     the dead session. Redis remains the ownership arbiter; forgetting the
+    //     floor only clears local stale-frame suppression.
+    //   * we cancel first (client left / heartbeat death) → send the clean
+    //     `UnregisterPeer` + `Goodbye(SessionEnded)` so the owner drops us.
+    let reader_task = remote_stream.map(|mut stream| {
+        let reader_cancel = cancel.clone();
+        let fence = remote_fence.expect("remote_fence set whenever remote_stream is");
+        let fenced = remote_session
+            .as_ref()
+            .expect("remote_session set whenever remote_stream is")
+            .fenced();
+        let pubkey = remote_session
+            .as_ref()
+            .expect("remote_session set whenever remote_stream is")
+            .pubkey()
+            .to_string();
+        let roster_revision = remote_session
+            .as_ref()
+            .expect("remote_session set whenever remote_stream is")
+            .roster()
+            .revision;
+        let roster_ctrl_tx = ctrl_tx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                cause = crate::audio::join::read_owner_control(
+                    &mut stream,
+                    fenced,
+                    roster_revision,
+                    &roster_ctrl_tx,
+                ) => {
+                    teardown_remote_huddle(cause, channel_id, &reader_cancel, &fence);
+                }
+                _ = reader_cancel.cancelled() => {
+                    crate::audio::join::send_clean_close(&mut stream, fenced, &pubkey).await;
+                }
+            }
+        })
+    });
+
+    // Owner path: watch the room's owner-loss / owner-drain signals. Fenced loss
+    // and intentional drain both close local owner clients for rejoin and forget
+    // the local generation floor so the fresh generation is accepted. The cause
+    // distinction is carried on the remote control streams; locally the action
+    // is the same WS teardown. Silent on ordinary client leave.
+    let owner_teardown_task = if owner_lost.is_some() || owner_draining.is_some() {
+        let fence = Arc::clone(
+            &state
+                .mesh()
+                .expect("owner teardown watcher only exists when mesh owner state exists")
+                .audio_fence,
+        );
+        let owner_cancel = cancel.clone();
+        Some(tokio::spawn(async move {
+            let lost_fired = async {
+                match &owner_lost {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            };
+            let drain_fired = async {
+                match &owner_draining {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                _ = drain_fired => {
+                    info!(
+                        channel_id = %channel_id,
+                        "huddle owner is draining — closing local client for rejoin"
+                    );
+                    owner_cancel.cancel();
+                    fence.forget(channel_id);
+                }
+                _ = lost_fired => {
+                    info!(
+                        channel_id = %channel_id,
+                        "huddle owner lost its lease — closing local client for rejoin"
+                    );
+                    owner_cancel.cancel();
+                    fence.forget(channel_id);
+                }
+                _ = owner_cancel.cancelled() => {}
+            }
+        }))
+    } else {
+        None
+    };
+
     recv_loop(
         ws_recv,
         Arc::clone(&room),
@@ -427,6 +730,7 @@ async fn handle_audio_connection(
         ctrl_tx,
         Arc::clone(&missed_pongs),
         cancel.clone(),
+        remote_session.as_mut(),
     )
     .await;
 
@@ -434,15 +738,29 @@ async fn handle_audio_connection(
     let _ = send_task.await;
     let _ = heartbeat_task.await;
     let _ = forward_task.await;
+    // The reader task owns the owner control stream; joining it here guarantees
+    // its clean-close (or teardown) completes before connection cleanup returns.
+    if let Some(reader_task) = reader_task {
+        let _ = reader_task.await;
+    }
+    // The owner teardown watcher is cancelled by `cancel.cancel()` above (or has
+    // already fired); join it so it settles before cleanup.
+    if let Some(owner_teardown_task) = owner_teardown_task {
+        let _ = owner_teardown_task.await;
+    }
 
-    // Atomic remove + end check: remove_peer_and_check_ended holds the
+    // Atomic owner remove + end check: remove_peer_and_check_ended holds the
     // AdmissionGuard lock across index recycling AND the is_empty + ended=true
-    // check. This is the SAME lock that add_peer holds across its ended check
-    // + insert. So they are mutually exclusive — no concurrent add_peer can
-    // succeed between the removal and the ended flag being set.
-    let (_, should_auto_end) = room
-        .remove_peer_and_check_ended(peer_id)
-        .unwrap_or((peer_index, false));
+    // check. Ingress mirrors never archive authoritative huddle state; they
+    // remove locally and let the owner decide room lifetime.
+    let should_auto_end = if remote_session.is_some() {
+        room.remove_peer(peer_id);
+        false
+    } else {
+        room.remove_peer_and_check_ended(peer_id)
+            .map(|(_, ended)| ended)
+            .unwrap_or(false)
+    };
 
     let left_msg = serde_json::json!({
         "type": "left",
@@ -450,7 +768,9 @@ async fn handle_audio_connection(
         "peer_index": peer_index,
     })
     .to_string();
-    room.broadcast_control(left_msg);
+    if remote_session.is_none() {
+        room.broadcast_control(left_msg);
+    }
 
     emit_participant_event(
         &state,
@@ -462,6 +782,7 @@ async fn handle_audio_connection(
     )
     .await;
 
+    let room_emptied;
     if should_auto_end {
         info!(channel_id = %channel_id, "audio room empty — auto-ending huddle");
 
@@ -473,9 +794,10 @@ async fn handle_audio_connection(
             Err(e) => {
                 warn!(channel_id = %channel_id, "auto-archive failed, huddle stays alive: {e}");
                 room.clear_ended();
+                room_emptied = false;
             }
             Ok(()) => {
-                state.audio_rooms.cleanup_if_empty(channel_id);
+                room_emptied = state.audio_rooms.cleanup_if_empty(channel_id);
 
                 emit_participant_event(
                     &state,
@@ -489,7 +811,19 @@ async fn handle_audio_connection(
             }
         }
     } else {
-        state.audio_rooms.cleanup_if_empty(channel_id);
+        room_emptied = state.audio_rooms.cleanup_if_empty(channel_id);
+    }
+
+    // Owner path: release this room's lease when the room empties, so a new
+    // owner can acquire and the renewer stops cleanly (silent, not owner-loss).
+    // Fenced on the generation this connection saw as owner: if the room
+    // emptied and a re-acquire installed a newer epoch in the gap, `release`
+    // is a no-op for the stale generation and leaves the live renewer running.
+    // Only the last leaver empties the room, so exactly one release fires.
+    if room_emptied {
+        if let (Some(mesh), Some(generation)) = (state.mesh(), owner_generation) {
+            mesh.owners.release(channel_id, generation);
+        }
     }
 
     info!(
@@ -499,6 +833,66 @@ async fn handle_audio_connection(
     );
 }
 
+/// React to a non-owner huddle teardown signal read off the owner's control
+/// stream: cancel the connection (which drives the client's WS to close so it
+/// rejoins) and forget the local generation floor for this session.
+///
+/// The `cause` is logged for observability but does not change behaviour —
+/// every cause is recoverable by a rejoin, whether against a fresh owner
+/// (`OwnerLost`/`StreamClosed`), a draining owner (`OwnerDraining`), or a room
+/// that simply ended (`SessionEnded`). `forget` clears local stale-frame
+/// suppression so the rejoin's fresh generation is accepted; it never
+/// authorizes ownership — Redis fenced CAS remains the arbiter.
+fn teardown_remote_huddle(
+    cause: crate::audio::join::HuddleTeardownCause,
+    channel_id: Uuid,
+    cancel: &CancellationToken,
+    fence: &crate::audio::mesh::GenerationFloor,
+) {
+    info!(
+        channel_id = %channel_id,
+        ?cause,
+        "owner tore down cross-pod huddle session — closing client for rejoin"
+    );
+    cancel.cancel();
+    fence.forget(channel_id);
+}
+
+/// Map an owner's registration rejection to the client-facing WS error, using
+/// the same `code`s a same-pod join produces so a cross-pod client handles them
+/// identically. Fence rejections carry their taxonomy code for observability.
+fn remote_rejection_ws_error(reason: &crate::audio::join::RegisterRejection) -> serde_json::Value {
+    use crate::audio::join::RegisterRejection;
+    match reason {
+        RegisterRejection::RoomFull => serde_json::json!({
+            "type": "error", "code": "room_full",
+            "message": "peer index space exhausted"
+        }),
+        RegisterRejection::RoomEnded => serde_json::json!({
+            "type": "error", "code": "room_ended", "message": "huddle has ended"
+        }),
+        RegisterRejection::VersionMismatch { pinned, requested } => serde_json::json!({
+            "type": "error", "code": "upgrade_required",
+            "message": format!(
+                "this huddle is using audio protocol v{pinned}; your client requested v{requested}"
+            ),
+            "pinned_version": pinned,
+            "requested_version": requested,
+        }),
+        RegisterRejection::Fenced(f) => serde_json::json!({
+            "type": "error", "code": "join_rejected",
+            "message": "huddle join rejected",
+            "fence_reason": f.code(),
+        }),
+    }
+}
+
+/// Receive loop: reads client frames and routes them. Local/owner joins fan
+/// out through the local room; a non-owner join forwards to the huddle owner
+/// via `remote_session`. Argument count reflects the pre-existing connection
+/// wiring plus the one mesh session; a param struct would obscure more than it
+/// clarifies at this single call site.
+#[allow(clippy::too_many_arguments)]
 async fn recv_loop(
     mut ws_recv: futures_util::stream::SplitStream<WebSocket>,
     room: Arc<crate::audio::room::Room>,
@@ -507,6 +901,7 @@ async fn recv_loop(
     ctrl_tx: mpsc::Sender<WsMessage>,
     missed_pongs: Arc<AtomicU8>,
     cancel: CancellationToken,
+    mut remote_session: Option<&mut crate::audio::join::RemoteHuddleSession>,
 ) {
     use crate::audio::wire::{FrameHeader, V2_HEADER_LEN};
 
@@ -567,7 +962,15 @@ async fn recv_loop(
                             }
                         }
 
-                        room.broadcast_frame(peer_id, data);
+                        // Non-owner path forwards the client's Opus to the
+                        // huddle owner as a datagram (the owner is the sole
+                        // fan-out authority); the owner-side room fans it back
+                        // to every participant, including our co-located peers.
+                        // Owner/local path fans out through the local room.
+                        match remote_session.as_deref_mut() {
+                            Some(session) => session.forward_media(&data),
+                            None => room.broadcast_frame(peer_id, data),
+                        }
                     }
                     Some(Ok(WsMessage::Text(text))) => {
                         if text.len() > MAX_TEXT_FRAME_BYTES {

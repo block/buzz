@@ -13,6 +13,11 @@ type E2eWindow = Window & {
   __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
   __TAURI_INTERNALS__?: { invoke?: unknown };
   __BUZZ_E2E_COMMANDS__?: string[];
+  __BUZZ_E2E_MESH_AVAILABILITY_RESULTS__?: Array<{
+    admitted: boolean;
+    available: boolean;
+    reason: string | null;
+  }>;
   __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
     content: string;
     kind: number;
@@ -57,7 +62,11 @@ async function signedEvents(page: import("@playwright/test").Page) {
 
 async function setMesh(
   page: import("@playwright/test").Page,
-  mesh: { admitted?: boolean; denyReason?: string },
+  mesh: {
+    admitted?: boolean;
+    models?: Array<{ id: string; name: string | null }>;
+    denyReason?: string;
+  },
 ) {
   await page.evaluate((m) => {
     (window as E2eWindow).__BUZZ_E2E_SET_MESH__?.(m);
@@ -285,15 +294,91 @@ test("a non-member cannot enable relay-mesh — membership is the gate", async (
   await openNewAgentMenu(page);
   await page.getByRole("menuitem", { name: /^New agent$/ }).click();
 
-  // The relay-mesh toggle stays disabled — a non-member cannot even opt into
-  // running on the mesh, let alone spawn an agent against it.
+  // Wait for the denied result, not just command invocation, so the hidden
+  // assertion cannot pass while availability is still loading.
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          (window as E2eWindow).__BUZZ_E2E_MESH_AVAILABILITY_RESULTS__?.some(
+            (result) => !result.admitted && !result.available,
+          ) ?? false,
+      ),
+    )
+    .toBe(true);
+
+  // The relay-mesh section is hidden entirely for non-members — availability
+  // controls visibility, not just the enabled state of the toggle.
   const toggle = page.getByTestId("agent-relay-mesh-toggle");
-  await expect(toggle).toBeDisabled();
+  await expect(toggle).toHaveCount(0);
 
   // The flow never reaches an ensure-or-spawn, because membership gates the
   // entry point itself. Sanity-check we never created an agent on the mesh.
   const seq = await commands(page);
   expect(seq).not.toContain("create_managed_agent");
+});
+
+test("mesh availability flip mid-dialog resets the draft — no stale mesh intent on submit", async ({
+  page,
+}) => {
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await openNewAgentMenu(page);
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.locator("#persona-display-name").fill("Mesh flip agent");
+
+  // Select a mesh target while availability is good.
+  const toggle = page.getByTestId("agent-relay-mesh-toggle");
+  await expect(toggle).toBeEnabled({ timeout: 10_000 });
+  await toggle.click();
+  await page
+    .getByTestId("agent-relay-mesh-model")
+    .selectOption({ label: "SmolLM2 135M — Mock desktop" });
+
+  // Wait for the asynchronous preset lookup to complete, proving the selected
+  // mesh target would otherwise supply a submit-ready mesh BackendIntent.
+  const submit = page.getByTestId("persona-dialog-submit");
+  await expect(submit).toBeEnabled();
+
+  // Flip availability to unavailable mid-dialog (simulates discovery losing
+  // every serve target after the user already selected one). The parent must
+  // synchronously turn the selected mesh draft into a local draft for submit;
+  // the passive cleanup is only allowed to persist that already-safe state.
+  await setMesh(page, { models: [] });
+
+  // The mesh section hides and the local gate applies again; a name alone
+  // cannot create an unrunnable local agent.
+  await expect(toggle).toHaveCount(0, { timeout: 10_000 });
+  await expect(submit).toBeDisabled();
+
+  // Explicitly configure the local fallback. Databricks v2 has no typed API
+  // key; its required host is an endpoint, not a secret credential.
+  await page.locator("#persona-llm-provider").click();
+  await page
+    .getByRole("menuitemradio", { name: "Databricks v2", exact: true })
+    .click();
+  await page.locator("#persona-model").click();
+  await page
+    .getByRole("button", { name: "Custom model...", exact: true })
+    .click();
+  await page.getByLabel("Custom model ID").fill("mock-local-model");
+  await page
+    .getByLabel("Value for DATABRICKS_HOST")
+    .fill("https://example.cloud.databricks.com");
+  await expect(submit).toBeEnabled();
+
+  // Submit the explicitly-configured local agent. It must not retain mesh
+  // intent after availability disappeared.
+  const before = (await commands(page)).length;
+  await submit.click();
+  await expect
+    .poll(async () => (await commands(page)).slice(before))
+    .toContain("create_managed_agent");
+
+  // The local create must not prepare a relay-mesh client.
+  expect((await commands(page)).slice(before)).not.toContain(
+    "mesh_prepare_relay_mesh_client",
+  );
 });
 
 test("saved relay-mesh agents restart via the backend serve-target preflight", async ({

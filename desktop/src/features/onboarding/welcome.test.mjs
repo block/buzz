@@ -97,7 +97,7 @@ test("ensureWelcomeChannel creates a private Welcome channel when one is missing
 test("ensureWelcomeChannel clears ttl on an existing ephemeral Welcome channel", async () => {
   const existingChannel = makeChannel({
     description:
-      "A private ephemeral channel for getting oriented in this workspace.",
+      "A private ephemeral channel for getting oriented in this community.",
     id: "existing-welcome",
     ttlDeadline: "2026-06-11T00:00:00.000Z",
     ttlSeconds: 86400,
@@ -227,26 +227,26 @@ test("pending Welcome channel is consumed only after it appears in the channel l
   }
 });
 
-test("Welcome ensured marker is scoped to the current identity and workspace", () => {
+test("Welcome ensured marker is scoped to the current identity and community", () => {
   const { restore } = installWindowSessionStorage();
   try {
-    markWelcomeChannelEnsured("pubkey-a", "wss://workspace-a.example");
+    markWelcomeChannelEnsured("pubkey-a", "wss://community-a.example");
 
     assert.equal(
-      hasEnsuredWelcomeChannel("pubkey-a", "wss://workspace-a.example"),
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://community-a.example"),
       true,
     );
     assert.equal(
-      hasEnsuredWelcomeChannel("pubkey-a", "wss://workspace-b.example"),
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://community-b.example"),
       false,
     );
     assert.equal(
-      hasEnsuredWelcomeChannel("pubkey-b", "wss://workspace-a.example"),
+      hasEnsuredWelcomeChannel("pubkey-b", "wss://community-a.example"),
       false,
     );
     assert.equal(hasEnsuredWelcomeChannel("pubkey-a", null), false);
     assert.equal(
-      hasEnsuredWelcomeChannel(null, "wss://workspace-a.example"),
+      hasEnsuredWelcomeChannel(null, "wss://community-a.example"),
       false,
     );
   } finally {

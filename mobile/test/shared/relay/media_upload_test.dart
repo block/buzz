@@ -307,6 +307,135 @@ void main() {
       );
     });
 
+    test(
+      'checks clipboard image availability through the platform channel',
+      () async {
+        final invokedMethods = <String>[];
+        _setMockMediaUploadPlatformHandler((call) async {
+          invokedMethods.add(call.method);
+          if (call.method == 'clipboardHasImage') return true;
+          return null;
+        });
+        addTearDown(() {
+          _setMockMediaUploadPlatformHandler((call) async {
+            switch (call.method) {
+              case 'sanitizeImageForUpload':
+                final arguments = call.arguments as Map<Object?, Object?>;
+                return arguments['bytes'] as Uint8List;
+              case 'transcodeImageToJpeg':
+                return _jpegBytes;
+              default:
+                return null;
+            }
+          });
+        });
+        final service = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: null,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+        );
+
+        expect(await service.clipboardHasImage(), isTrue);
+        expect(invokedMethods, ['clipboardHasImage']);
+      },
+    );
+
+    test('reads clipboard image through the platform channel', () async {
+      final invokedMethods = <String>[];
+      _setMockMediaUploadPlatformHandler((call) async {
+        invokedMethods.add(call.method);
+        if (call.method == 'readClipboardImage') return _pngBytes;
+        if (call.method == 'sanitizeImageForUpload') {
+          final arguments = call.arguments as Map<Object?, Object?>;
+          return arguments['bytes'] as Uint8List;
+        }
+        return null;
+      });
+      addTearDown(() {
+        _setMockMediaUploadPlatformHandler((call) async {
+          switch (call.method) {
+            case 'sanitizeImageForUpload':
+              final arguments = call.arguments as Map<Object?, Object?>;
+              return arguments['bytes'] as Uint8List;
+            case 'transcodeImageToJpeg':
+              return _jpegBytes;
+            default:
+              return null;
+          }
+        });
+      });
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient(
+          (request) async => http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/clipboard.png',
+              'sha256':
+                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'size': 16,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            200,
+          ),
+        ),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+      );
+
+      final descriptor = await service.readAndUploadClipboardImage();
+
+      expect(invokedMethods.first, 'readClipboardImage');
+      expect(descriptor.type, 'image/png');
+    });
+
+    test(
+      'rejects GIF clipboard bytes through the shared validation path',
+      () async {
+        final service = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: null,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          readClipboardImage: () async => _gifBytes,
+        );
+
+        expect(
+          service.readAndUploadClipboardImage,
+          throwsA(
+            isA<Exception>().having(
+              (error) => error.toString(),
+              'message',
+              contains('GIF uploads are not supported on mobile yet'),
+            ),
+          ),
+        );
+      },
+    );
+
+    test('rejects empty clipboard image bytes', () async {
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: null,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        readClipboardImage: () async => Uint8List(0),
+      );
+
+      expect(
+        service.readAndUploadClipboardImage,
+        throwsA(
+          isA<Exception>().having(
+            (error) => error.toString(),
+            'message',
+            contains('Unable to read pasted image'),
+          ),
+        ),
+      );
+    });
+
     test('returns null when the gallery picker is cancelled', () async {
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',

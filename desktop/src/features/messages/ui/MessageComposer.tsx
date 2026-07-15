@@ -103,16 +103,14 @@ type MessageComposerProps = {
    */
   onEditLastOwnMessage?: () => boolean;
   onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
-  /**
-   * Called synchronously at the start of `submitMessage`, before any awaits,
-   * to capture context that must be stable throughout the async send pipeline.
-   * Used by the thread-reply composer to capture the current reply target before
-   * the mention-flow awaits can change navigation state.
-   */
+  /** Captures send context synchronously before awaits can change navigation. */
   onCaptureSendContext?: () => {
     parentEventId: string | null;
     threadHeadId: string | null;
   } | null;
+  /** Resolves the channel required to prepare mentions before sending. */
+  onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
+  onPreparingMentionSendChange?: (isPreparing: boolean) => void;
   onSend: (
     content: string,
     mentionPubkeys: string[],
@@ -152,6 +150,8 @@ function MessageComposerImpl({
   onCaptureSendContext,
   onEditLastOwnMessage,
   onEditSave,
+  onPrepareSendChannel,
+  onPreparingMentionSendChange,
   onSend,
   placeholder,
   profiles,
@@ -345,6 +345,7 @@ function MessageComposerImpl({
     drafts,
     emojiAutocomplete,
     mentions,
+    onPrepareSendChannel,
     onSendRef,
     richText,
     setContent: setComposerContent,
@@ -608,8 +609,6 @@ function MessageComposerImpl({
     }
 
     const capturedThreadContext = onCaptureSendContext?.() ?? null;
-    // If a thread-reply composer reported no reply target at submit time,
-    // bail here rather than discovering the null later after async awaits.
     if (
       capturedThreadContext !== null &&
       !capturedThreadContext.parentEventId
@@ -617,22 +616,22 @@ function MessageComposerImpl({
       return;
     }
 
-    await mentionSendFlow.sendMessageWithMentionFlow({
-      capturedChannelId: channelId,
-      capturedThreadContext,
-      pendingImeta: currentPendingImeta,
-      // resolveSentDraftKey checks at submit time (synchronously, before any
-      // await) whether a draft was actually persisted. If not — fast/
-      // never-persisted send — it returns null so the active draft is not
-      // cleared (nothing to clear). The function is exported and tested directly
-      // in MessageComposerDraftPredicate.test.mjs.
-      sentDraftKey: resolveSentDraftKey(
-        effectiveDraftKeyRef.current,
-        drafts.loadDraft,
-      ),
-      spoileredAttachmentUrls,
-      trimmed,
-    });
+    onPreparingMentionSendChange?.(true);
+    try {
+      await mentionSendFlow.sendMessageWithMentionFlow({
+        capturedChannelId: channelId,
+        capturedThreadContext,
+        pendingImeta: currentPendingImeta,
+        sentDraftKey: resolveSentDraftKey(
+          effectiveDraftKeyRef.current,
+          drafts.loadDraft,
+        ),
+        spoileredAttachmentUrls,
+        trimmed,
+      });
+    } finally {
+      onPreparingMentionSendChange?.(false);
+    }
   }, [
     channelId,
     channelLinks.clearChannels,
@@ -650,6 +649,7 @@ function MessageComposerImpl({
     spoileredAttachmentUrls,
     syncComposerContentFromEditor,
     onCaptureSendContext,
+    onPreparingMentionSendChange,
   ]);
   submitMessageRef.current = submitMessage;
 

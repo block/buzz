@@ -740,6 +740,163 @@ impl SecretStore {
         }
     }
 
+    /// Delete the entire keychain blob for this service, plus all legacy per-key
+    /// entries that could resurrect an identity on next boot.
+    ///
+    /// Order of operations:
+    /// 1. Read the blob to collect every key name (e.g. `identity`, agent keys).
+    /// 2. Delete legacy per-key DPK entries for every key + the DPK blob itself.
+    /// 3. Delete legacy per-key keyring entries for every key.
+    /// 4. Delete the blob entry.
+    /// 5. Clear the in-memory cache.
+    ///
+    /// This is the correct wipe path for sign-out: the old `delete_all` skipped
+    /// step 1–3 so stale per-key entries could be re-imported on the next launch
+    /// via `migrate_legacy_key`. This method prevents that resurrection.
+    pub fn delete_all_with_legacy_cleanup(&self) -> Result<(), String> {
+        #[cfg(feature = "system-keyring")]
+        {
+            let _lock = acquire_blob_lock(&self.service)?;
+
+            // Step 1: read current blob keys (best-effort; no entry = empty set).
+            let blob_keys: Vec<String> = match self.read_blob_raw() {
+                Ok(Some(bytes)) => {
+                    let json = String::from_utf8(bytes).unwrap_or_default();
+                    serde_json::from_str::<std::collections::HashMap<String, String>>(&json)
+                        .map(|m| m.into_keys().collect())
+                        .unwrap_or_default()
+                }
+                _ => vec![],
+            };
+
+            // Always include "identity" even if the blob is empty or absent —
+            // it may exist only as a legacy per-key entry.
+            let mut all_keys = blob_keys;
+            if !all_keys.contains(&"identity".to_string()) {
+                all_keys.push("identity".to_string());
+            }
+
+            // Steps 2 & 3: delete legacy per-key entries for every key.
+            for key in &all_keys {
+                #[cfg(target_os = "macos")]
+                {
+                    match delete_generic_password_options(dpk_opts(&self.service, key)) {
+                        Ok(()) => {}
+                        Err(ref e) if is_not_found(e) => {}
+                        Err(ref e) if is_dpk_unavailable(e) => {}
+                        Err(e) => return Err(format!("dpk per-key delete {key}: {e}")),
+                    }
+                }
+                {
+                    let entry = keyring_entry(&self.service, key)
+                        .map_err(|e| format!("keyring entry constructor {key}: {e}"))?;
+                    match entry.delete_credential() {
+                        Ok(()) | Err(keyring::Error::NoEntry) => {}
+                        Err(e) if is_keyring_availability_error(&e.to_string()) => {
+                            return Err(format!("keyring unavailable deleting {key}: {e}"));
+                        }
+                        Err(e) => {
+                            return Err(format!("keyring per-key delete {key}: {e}"));
+                        }
+                    }
+                }
+            }
+            // Step 2 (cont.): also delete the legacy DPK blob written by #1267.
+            #[cfg(target_os = "macos")]
+            {
+                match delete_generic_password_options(dpk_opts(&self.service, BLOB_KEY)) {
+                    Ok(()) => {}
+                    Err(ref e) if is_not_found(e) => {}
+                    Err(ref e) if is_dpk_unavailable(e) => {}
+                    Err(e) => return Err(format!("dpk blob delete: {e}")),
+                }
+            }
+
+            // Step 4: delete the main blob entry.
+            {
+                let entry = keyring_entry(&self.service, BLOB_KEY)
+                    .map_err(|e| format!("keyring entry constructor blob: {e}"))?;
+                match entry.delete_credential() {
+                    Ok(()) | Err(keyring::Error::NoEntry) => {}
+                    Err(e) if is_keyring_availability_error(&e.to_string()) => {
+                        return Err(format!("keyring unavailable: {e}"));
+                    }
+                    Err(e) => {
+                        return Err(format!("keyring blob delete: {e}"));
+                    }
+                }
+            }
+
+            // Step 5: clear the in-memory cache.
+            let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = None;
+            Ok(())
+        }
+        #[cfg(not(feature = "system-keyring"))]
+        {
+            Ok(()) // No-op: no keyring, nothing to delete.
+        }
+    }
+
+    /// Verify no identity-bearing keychain entry survives in any shape
+    /// that `load("identity")` → `migrate_legacy_key` can consume:
+    /// main blob, DPK blob (`BLOB_KEY`), and per-key `"identity"`.
+    ///
+    /// Returns `true` when all three shapes are absent (or inaccessible in an
+    /// expected way), `false` when any entry is found or the keychain is
+    /// unavailable (fail-closed).
+    pub fn verify_fully_wiped(&self) -> bool {
+        #[cfg(feature = "system-keyring")]
+        {
+            // 1. Main blob must be absent.
+            match self.read_blob_raw() {
+                Ok(None) => {}
+                Ok(Some(_)) => return false,
+                Err(_) => return false,
+            }
+            // 2. Per-key "identity" via legacy keyring must be absent.
+            match keyring_entry(&self.service, "identity") {
+                Ok(entry) => match entry.get_password() {
+                    Err(keyring::Error::NoEntry) => {}
+                    Ok(_) => return false,
+                    // Any other error (availability, unknown, transient) → fail closed.
+                    // Only explicit NoEntry is proof of absence.
+                    Err(_) => return false,
+                },
+                // Constructor failure → cannot verify → fail closed.
+                Err(_) => return false,
+            }
+            // 3. DPK blob (macOS only).
+            #[cfg(target_os = "macos")]
+            {
+                match generic_password(dpk_opts(&self.service, BLOB_KEY)) {
+                    Err(ref e) if is_not_found(e) => {}
+                    // dpk-unavailable is symmetric with load(): if load() can't
+                    // consume DPK in this state, a surviving entry is harmless.
+                    Err(ref e) if is_dpk_unavailable(e) => {}
+                    Ok(_) => return false,
+                    // Any other error → fail closed (not proof of absence).
+                    Err(_) => return false,
+                }
+                // 4. Per-key DPK "identity" (macOS only).
+                match generic_password(dpk_opts(&self.service, "identity")) {
+                    Err(ref e) if is_not_found(e) => {}
+                    // dpk-unavailable: symmetric with load() — if load() can't
+                    // read DPK, a surviving entry can't resurrect identity.
+                    Err(ref e) if is_dpk_unavailable(e) => {}
+                    Ok(_) => return false,
+                    // Any other error → fail closed.
+                    Err(_) => return false,
+                }
+            }
+            true
+        }
+        #[cfg(not(feature = "system-keyring"))]
+        {
+            true // No keyring = nothing to verify.
+        }
+    }
+
     /// Delete the secret for `key`. A missing entry is not an error.
     pub fn delete(&self, key: &str) -> Result<(), String> {
         #[cfg(feature = "system-keyring")]
@@ -1107,5 +1264,43 @@ mod tests {
 
         // Cleanup.
         let _ = store2.delete(key);
+    }
+
+    #[ignore = "requires real OS keychain (run locally)"]
+    #[test]
+    fn delete_all_with_legacy_cleanup_removes_per_key_identity() {
+        let svc = "buzz-test-delete-all-legacy";
+        let key = "identity";
+        let value = "nsec1legacytest";
+
+        // Seed a legacy per-key entry (old format, pre-blob migration).
+        let entry = keyring_entry(svc, key).unwrap();
+        entry.set_password(value).unwrap();
+
+        // Also seed a blob with a different key to exercise the full path.
+        let store = SecretStore::keyring(svc);
+        store.store("agent:abc123", "nsec1agent").unwrap();
+
+        // Legacy per-key identity should be discoverable via probe.
+        let store2 = SecretStore::keyring(svc);
+        assert_eq!(store2.probe(key), KeyringProbe::Present);
+
+        // Wipe everything via the sign-out path.
+        store2.delete_all_with_legacy_cleanup().unwrap();
+
+        // Fresh store — neither the blob nor the per-key entry should remain.
+        let store3 = SecretStore::keyring(svc);
+        assert_eq!(
+            store3.probe(key),
+            KeyringProbe::ReachableButEmpty,
+            "per-key identity must not survive delete_all_with_legacy_cleanup"
+        );
+        assert_eq!(
+            store3.load(key).unwrap(),
+            None,
+            "load must not resurrect the legacy per-key identity"
+        );
+        // Agent key should also be gone.
+        assert_eq!(store3.load("agent:abc123").unwrap(), None);
     }
 }

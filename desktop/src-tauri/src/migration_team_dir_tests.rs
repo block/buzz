@@ -1,435 +1,329 @@
 use super::test_support::*;
-use super::*;
 
-// ── reconcile_team_dirs_in_file tests ────────────────────────────────
+// ── detach_directory_backed_teams_in_dir tests ──────────────────────────
 
-#[test]
-fn team_dir_reconcile_rewrites_worktree_path() {
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
-    // Team must exist on disk for the reconcile to proceed past the existence gate.
-    std::fs::create_dir_all(canonical.join("agents/teams/com.wpfleger.sietch-tabr")).unwrap();
+fn write_teams_json(base: &std::path::Path, records: &serde_json::Value) {
+    std::fs::create_dir_all(base.join("agents")).unwrap();
+    std::fs::write(
+        base.join("agents/teams.json"),
+        serde_json::to_vec_pretty(records).unwrap(),
+    )
+    .unwrap();
+}
 
-    let worktree_pack_path = pack_dir(
-        &parent
-            .path()
-            .join("xyz.block.buzz.app.dev.worktree-my-branch"),
-        "com.wpfleger.sietch-tabr",
-    );
-    let expected_path = team_dir(&canonical, "com.wpfleger.sietch-tabr");
-
-    write_agents_json(
-        &canonical,
-        &serde_json::json!([{
-            "name": "Paul",
-            "persona_pack_path": worktree_pack_path
-        }]),
-    );
-
-    reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
-
-    let records = read_agents_json(&canonical);
-    assert_eq!(records[0]["persona_team_dir"], expected_path);
-    // Old field name should be removed
-    assert!(records[0].get("persona_pack_path").is_none());
+fn read_teams_json(base: &std::path::Path) -> Vec<serde_json::Value> {
+    let content = std::fs::read_to_string(base.join("agents/teams.json")).unwrap();
+    serde_json::from_str(&content).unwrap()
 }
 
 #[test]
-fn team_dir_reconcile_rewrites_new_field_name() {
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
-    // Team must exist on disk for the reconcile to proceed past the existence gate.
-    std::fs::create_dir_all(canonical.join("agents/teams/com.wpfleger.sietch-tabr")).unwrap();
+fn detach_lifts_instructions_from_instructions_md() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
 
-    let worktree_team_path = team_dir(
-        &parent
-            .path()
-            .join("xyz.block.buzz.app.dev.worktree-my-branch"),
-        "com.wpfleger.sietch-tabr",
-    );
-    let expected_path = team_dir(&canonical, "com.wpfleger.sietch-tabr");
+    // Create a team directory with instructions.md
+    let team_dir = base.join("teams/com.example.myteam");
+    std::fs::create_dir_all(&team_dir).unwrap();
+    std::fs::write(team_dir.join("instructions.md"), "Always be helpful.").unwrap();
 
-    write_agents_json(
-        &canonical,
+    // Write teams.json with a directory-backed team
+    write_teams_json(
+        base,
         &serde_json::json!([{
-            "name": "Paul",
-            "persona_team_dir": worktree_team_path
+            "id": "team-uuid-1",
+            "name": "My Team",
+            "persona_ids": [],
+            "is_builtin": false,
+            "source_dir": team_dir.to_str().unwrap(),
+            "is_symlink": false,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
         }]),
     );
 
-    reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
+    let n = super::detach::detach_directory_backed_teams_in_dir(&base.join("agents")).unwrap();
+    assert_eq!(n, 1);
 
-    let records = read_agents_json(&canonical);
-    assert_eq!(records[0]["persona_team_dir"], expected_path);
+    let teams = read_teams_json(base);
+    assert_eq!(teams[0]["instructions"], "Always be helpful.");
+    assert!(teams[0].get("source_dir").is_none_or(|v| v.is_null()));
+    assert_eq!(teams[0]["is_symlink"], false);
 }
 
 #[test]
-fn team_dir_reconcile_leaves_canonical_path_unchanged() {
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
+fn detach_skips_lift_if_instructions_already_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
 
-    let canonical_path = team_dir(&canonical, "com.wpfleger.sietch-tabr");
+    let team_dir = base.join("teams/com.example.myteam");
+    std::fs::create_dir_all(&team_dir).unwrap();
+    std::fs::write(team_dir.join("instructions.md"), "From disk.").unwrap();
 
-    write_agents_json(
-        &canonical,
+    write_teams_json(
+        base,
         &serde_json::json!([{
-            "name": "Duncan",
-            "persona_team_dir": canonical_path
+            "id": "team-uuid-1",
+            "name": "My Team",
+            "instructions": "Already set.",
+            "persona_ids": [],
+            "is_builtin": false,
+            "source_dir": team_dir.to_str().unwrap(),
+            "is_symlink": false,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
         }]),
     );
 
-    let before = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
-    reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
-    let after = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
+    super::detach::detach_directory_backed_teams_in_dir(&base.join("agents")).unwrap();
 
-    assert_eq!(before, after);
+    let teams = read_teams_json(base);
+    // Should keep the pre-existing instructions, not overwrite with disk content
+    assert_eq!(teams[0]["instructions"], "Already set.");
 }
 
 #[test]
-fn team_dir_reconcile_skips_records_without_team_dir() {
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
+fn detach_clears_is_symlink_and_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
 
-    write_agents_json(
-        &canonical,
+    let team_dir = base.join("teams/com.example.myteam");
+    std::fs::create_dir_all(&team_dir).unwrap();
+
+    write_teams_json(
+        base,
         &serde_json::json!([{
-            "name": "Test Agent",
-            "agent_command": "buzz-agent"
+            "id": "team-uuid-1",
+            "name": "My Team",
+            "persona_ids": [],
+            "is_builtin": false,
+            "source_dir": team_dir.to_str().unwrap(),
+            "is_symlink": true,
+            "symlink_target": "/some/external/path",
+            "version": "1.2.3",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
         }]),
     );
 
-    let before = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
-    reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
-    let after = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
+    super::detach::detach_directory_backed_teams_in_dir(&base.join("agents")).unwrap();
 
-    assert_eq!(before, after);
+    let teams = read_teams_json(base);
+    assert_eq!(teams[0]["is_symlink"], false);
+    assert!(teams[0].get("symlink_target").is_none_or(|v| v.is_null()));
+    assert!(teams[0].get("version").is_none_or(|v| v.is_null()));
+    assert!(teams[0].get("source_dir").is_none_or(|v| v.is_null()));
 }
 
 #[test]
-fn team_dir_reconcile_is_idempotent() {
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
-    // Team must exist on disk for the reconcile to proceed past the existence gate.
-    std::fs::create_dir_all(canonical.join("agents/teams/com.wpfleger.sietch-tabr")).unwrap();
+fn detach_backfills_team_id_on_agents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
 
-    let worktree_pack_path = pack_dir(
-        &parent
-            .path()
-            .join("xyz.block.buzz.app.dev.worktree-my-branch"),
-        "com.wpfleger.sietch-tabr",
-    );
+    let team_dir = base.join("teams/com.example.myteam");
+    std::fs::create_dir_all(&team_dir).unwrap();
 
-    write_agents_json(
-        &canonical,
+    write_teams_json(
+        base,
         &serde_json::json!([{
-            "name": "Paul",
-            "persona_pack_path": worktree_pack_path
+            "id": "team-uuid-1",
+            "name": "My Team",
+            "persona_ids": ["persona-1"],
+            "is_builtin": false,
+            "source_dir": team_dir.to_str().unwrap(),
+            "is_symlink": false,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
         }]),
     );
 
-    let path = canonical.join("agents/managed-agents.json");
-    reconcile_team_dirs_in_file(&path, &canonical);
-    let after_first = std::fs::read_to_string(&path).unwrap();
-    reconcile_team_dirs_in_file(&path, &canonical);
-    let after_second = std::fs::read_to_string(&path).unwrap();
+    // Agent with source_team = directory name, no team_id, has persona_team_dir
+    write_agents_json(
+        base,
+        &serde_json::json!([{
+            "pubkey": "aaaa",
+            "name": "agent-1",
+            "persona_id": "persona-1",
+            "source_team": "com.example.myteam",
+            "persona_team_dir": team_dir.to_str().unwrap(),
+            "persona_name_in_team": "agent-slug",
+            "relay_url": "wss://relay.example.com",
+            "acp_command": "claude",
+            "agent_command": "claude",
+            "mcp_command": "claude",
+            "agent_args": [],
+            "turn_timeout_seconds": 60,
+            "parallelism": 1,
+            "start_on_app_launch": false,
+            "auto_restart_on_config_change": true,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }]),
+    );
 
-    assert_eq!(after_first, after_second);
+    super::detach::detach_directory_backed_teams_in_dir(&base.join("agents")).unwrap();
+
+    let agents = read_agents_json(base);
+    assert_eq!(agents[0]["team_id"], "team-uuid-1");
+    assert!(agents[0]
+        .get("persona_team_dir")
+        .is_none_or(|v| v.is_null()));
+    assert!(agents[0]
+        .get("persona_name_in_team")
+        .is_none_or(|v| v.is_null()));
 }
 
 #[test]
-fn team_dir_reconcile_heals_legacy_release_path() {
-    // Record stored under the old bundle id and old packs segment should be
-    // rewritten to the new bundle id and teams segment.
-    let parent = tempfile::tempdir().unwrap();
-    let release_dir = parent.path().join("xyz.block.buzz.app");
-    std::fs::create_dir_all(release_dir.join("agents/teams/com.example.team")).unwrap();
+fn detach_is_idempotent_on_second_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
 
-    let legacy_path = pack_dir(
-        &parent.path().join("xyz.block.sprout.app"),
-        "com.example.team",
-    );
-    let expected_path = team_dir(&release_dir, "com.example.team");
+    let team_dir = base.join("teams/com.example.myteam");
+    std::fs::create_dir_all(&team_dir).unwrap();
+    std::fs::write(team_dir.join("instructions.md"), "Team rules.").unwrap();
 
-    write_agents_json(
-        &release_dir,
+    write_teams_json(
+        base,
         &serde_json::json!([{
-            "name": "Stilgar",
-            "persona_team_dir": legacy_path
+            "id": "team-uuid-1",
+            "name": "My Team",
+            "persona_ids": [],
+            "is_builtin": false,
+            "source_dir": team_dir.to_str().unwrap(),
+            "is_symlink": false,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
         }]),
     );
 
-    reconcile_team_dirs_in_file(
-        &release_dir.join("agents/managed-agents.json"),
-        &release_dir,
-    );
+    // First run
+    let n1 = super::detach::detach_directory_backed_teams_in_dir(&base.join("agents")).unwrap();
+    assert_eq!(n1, 1);
 
-    let records = read_agents_json(&release_dir);
-    assert_eq!(records[0]["persona_team_dir"], expected_path);
+    // Second run — should be a no-op
+    let n2 = super::detach::detach_directory_backed_teams_in_dir(&base.join("agents")).unwrap();
+    assert_eq!(n2, 0);
+
+    // Instructions should still be set from first run
+    let teams = read_teams_json(base);
+    assert_eq!(teams[0]["instructions"], "Team rules.");
 }
 
 #[test]
-fn team_dir_reconcile_leaves_record_when_team_missing() {
-    // When the expected target does not exist, the record must be left untouched
-    // and the file must not be rewritten at all (no churn).
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
-    // Intentionally do NOT create agents/teams/com.example.missing.
+fn detach_skips_non_directory_backed_teams() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
 
-    let stale_path = pack_dir(
-        &parent.path().join("xyz.block.buzz.app.dev.worktree-old"),
-        "com.example.missing",
-    );
-
-    write_agents_json(
-        &canonical,
+    write_teams_json(
+        base,
         &serde_json::json!([{
-            "name": "Jessica",
-            "persona_pack_path": stale_path
+            "id": "team-uuid-1",
+            "name": "Pure JSON Team",
+            "instructions": "Existing instructions.",
+            "persona_ids": [],
+            "is_builtin": false,
+            "is_symlink": false,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
         }]),
     );
 
-    let path = canonical.join("agents/managed-agents.json");
-    let before = std::fs::read_to_string(&path).unwrap();
-    reconcile_team_dirs_in_file(&path, &canonical);
-    let after = std::fs::read_to_string(&path).unwrap();
+    let n = super::detach::detach_directory_backed_teams_in_dir(&base.join("agents")).unwrap();
+    assert_eq!(n, 0);
 
-    // File must be byte-identical — no churn.
-    assert_eq!(before, after);
-    // Record still has the old field and value.
-    let records = read_agents_json(&canonical);
-    assert_eq!(records[0]["persona_pack_path"], stale_path);
-    assert!(records[0].get("persona_team_dir").is_none());
+    // File should not have been modified
+    let teams = read_teams_json(base);
+    assert_eq!(teams[0]["instructions"], "Existing instructions.");
 }
 
 #[cfg(unix)]
 #[test]
-fn team_dir_reconcile_heals_to_symlinked_team_dir() {
-    // When agents/teams/<id> is a symlink to a real directory elsewhere,
-    // Path::exists follows the symlink, so the rewrite should proceed.
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
+fn detach_retries_after_teams_write_failure() {
+    // Write-seam interruption: make the agents/ directory read-only so the
+    // teams.json atomic write fails mid-detach. The agents.json write uses
+    // atomic_write_json_restricted (tmp+rename in the same dir), which also
+    // fails under a read-only parent. On retry (directory made writable),
+    // the still-open source_dir gate lets the migration complete.
+    use std::os::unix::fs::PermissionsExt;
 
-    // Real team lives outside the canonical dir; a symlink points to it.
-    let real_team = parent.path().join("real-team-store/com.example.team");
-    std::fs::create_dir_all(&real_team).unwrap();
-    let symlink_target = canonical.join("agents/teams/com.example.team");
-    std::fs::create_dir_all(canonical.join("agents/teams")).unwrap();
-    std::os::unix::fs::symlink(&real_team, &symlink_target).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
 
-    let stale_path = pack_dir(
-        &parent.path().join("xyz.block.buzz.app.dev.worktree-old"),
-        "com.example.team",
-    );
-    let expected_path = team_dir(&canonical, "com.example.team");
+    let team_dir = base.join("teams/com.example.myteam");
+    std::fs::create_dir_all(&team_dir).unwrap();
+    std::fs::write(team_dir.join("instructions.md"), "Team rules.").unwrap();
 
-    write_agents_json(
-        &canonical,
+    write_teams_json(
+        base,
         &serde_json::json!([{
-            "name": "Chani",
-            "persona_pack_path": stale_path
+            "id": "team-uuid-1",
+            "name": "My Team",
+            "persona_ids": ["persona-1"],
+            "is_builtin": false,
+            "source_dir": team_dir.to_str().unwrap(),
+            "is_symlink": false,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }]),
+    );
+    write_agents_json(
+        base,
+        &serde_json::json!([{
+            "pubkey": "aaaa",
+            "name": "agent-1",
+            "persona_id": "persona-1",
+            "source_team": "com.example.myteam",
+            "persona_team_dir": team_dir.to_str().unwrap(),
+            "persona_name_in_team": "agent-slug",
+            "relay_url": "wss://relay.example.com",
+            "acp_command": "claude",
+            "agent_command": "claude",
+            "mcp_command": "claude",
+            "agent_args": [],
+            "turn_timeout_seconds": 60,
+            "parallelism": 1,
+            "start_on_app_launch": false,
+            "auto_restart_on_config_change": true,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
         }]),
     );
 
-    reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
+    // Make agents/ read-only so the atomic write (tmp file creation) fails.
+    let agents_dir = base.join("agents");
+    std::fs::set_permissions(&agents_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-    let records = read_agents_json(&canonical);
-    assert_eq!(records[0]["persona_team_dir"], expected_path);
-}
-
-#[cfg(unix)]
-#[test]
-fn team_dir_reconcile_skips_dangling_candidate_symlink() {
-    // When agents/teams/<id> is a symlink whose target does not exist,
-    // Path::exists returns false, so the record must be left unchanged.
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents/teams")).unwrap();
-
-    // Create a dangling symlink at the expected location.
-    let dangling_target = parent.path().join("nonexistent-dir");
-    let symlink_path = canonical.join("agents/teams/com.example.gone");
-    std::os::unix::fs::symlink(&dangling_target, &symlink_path).unwrap();
-
-    let stale_path = pack_dir(
-        &parent.path().join("xyz.block.buzz.app.dev.worktree-old"),
-        "com.example.gone",
+    // Boot 1: detach fails because neither file can be written.
+    let result = super::detach::detach_directory_backed_teams_in_dir(&agents_dir);
+    assert!(
+        result.is_err(),
+        "detach must fail when directory is read-only"
     );
 
-    write_agents_json(
-        &canonical,
-        &serde_json::json!([{
-            "name": "Gurney",
-            "persona_pack_path": stale_path
-        }]),
+    // source_dir gate is still open — teams.json is unchanged.
+    // Restore permissions to read the file.
+    std::fs::set_permissions(&agents_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let teams_after_fail = read_teams_json(base);
+    assert!(
+        teams_after_fail[0]
+            .get("source_dir")
+            .is_some_and(|v| !v.is_null()),
+        "source_dir must remain set after failed detach"
     );
 
-    let path = canonical.join("agents/managed-agents.json");
-    let before = std::fs::read_to_string(&path).unwrap();
-    reconcile_team_dirs_in_file(&path, &canonical);
-    let after = std::fs::read_to_string(&path).unwrap();
+    // Boot 2: retry with writable directory — should succeed.
+    let n2 = super::detach::detach_directory_backed_teams_in_dir(&agents_dir).unwrap();
+    assert_eq!(n2, 1, "retry detach must succeed");
 
-    assert_eq!(before, after);
-    let records = read_agents_json(&canonical);
-    assert_eq!(records[0]["persona_pack_path"], stale_path);
-}
-
-#[cfg(unix)]
-#[test]
-fn team_dir_reconcile_through_symlink_preserves_symlink() {
-    // Dev worktree instances reach the canonical store through a symlinked
-    // managed-agents.json — the patched write must land in the canonical
-    // file and leave the symlink in place.
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    let worktree = parent
-        .path()
-        .join("xyz.block.buzz.app.dev.worktree-my-branch");
-    std::fs::create_dir_all(canonical.join("agents/teams/com.example.team")).unwrap();
-    std::fs::create_dir_all(worktree.join("agents")).unwrap();
-
-    let stale_path = pack_dir(&worktree, "com.example.team");
-    let expected_path = team_dir(&canonical, "com.example.team");
-
-    write_agents_json(
-        &canonical,
-        &serde_json::json!([{
-            "name": "Paul",
-            "persona_pack_path": stale_path
-        }]),
+    let teams_after_retry = read_teams_json(base);
+    assert!(
+        teams_after_retry[0]
+            .get("source_dir")
+            .is_none_or(|v| v.is_null()),
+        "source_dir cleared after successful retry"
     );
-    let canonical_store = canonical.join("agents/managed-agents.json");
-    let worktree_store = worktree.join("agents/managed-agents.json");
-    std::os::unix::fs::symlink(&canonical_store, &worktree_store).unwrap();
-
-    reconcile_team_dirs_in_file(&worktree_store, &canonical);
-
-    assert!(worktree_store.is_symlink());
-    let records = read_agents_json(&canonical);
-    assert_eq!(records[0]["persona_team_dir"], expected_path);
-}
-
-// ── reconcile_target_dir tests ───────────────────────────────────────
-
-#[test]
-fn reconcile_target_dir_release_with_existing_dev_sibling_returns_self() {
-    // Release build must reconcile its OWN dir, even when a dev sibling exists.
-    let parent = tempfile::tempdir().unwrap();
-    let release_dir = parent.path().join("xyz.block.buzz.app");
-    let dev_dir = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(&release_dir).unwrap();
-    std::fs::create_dir_all(&dev_dir).unwrap();
-
-    assert_eq!(reconcile_target_dir(&release_dir), release_dir);
-}
-
-#[test]
-fn reconcile_target_dir_worktree_dev_with_canonical_sibling_returns_canonical() {
-    // A worktree dev instance defers to the canonical dev dir when it exists.
-    let parent = tempfile::tempdir().unwrap();
-    let worktree_dir = parent.path().join("xyz.block.buzz.app.dev.mybranch");
-    let canonical_dir = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(&worktree_dir).unwrap();
-    std::fs::create_dir_all(&canonical_dir).unwrap();
-
-    assert_eq!(reconcile_target_dir(&worktree_dir), canonical_dir);
-}
-
-#[test]
-fn reconcile_target_dir_canonical_dev_returns_self() {
-    // The canonical dev dir is itself a dev instance; it should return itself
-    // (canonical_dev_data_dir points at the same path, and that path exists).
-    let parent = tempfile::tempdir().unwrap();
-    let canonical_dir = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(&canonical_dir).unwrap();
-
-    assert_eq!(reconcile_target_dir(&canonical_dir), canonical_dir);
-}
-
-#[test]
-fn reconcile_target_dir_release_without_dev_sibling_returns_self() {
-    // Release build with no dev sibling present — stays on its own dir.
-    let parent = tempfile::tempdir().unwrap();
-    let release_dir = parent.path().join("xyz.block.buzz.app");
-    std::fs::create_dir_all(&release_dir).unwrap();
-
-    assert_eq!(reconcile_target_dir(&release_dir), release_dir);
-}
-
-#[test]
-fn reconcile_target_dir_worktree_dev_without_canonical_sibling_returns_self() {
-    // Worktree dev instance with no canonical sibling present — stays on itself.
-    let parent = tempfile::tempdir().unwrap();
-    let worktree_dir = parent.path().join("xyz.block.buzz.app.dev.mybranch");
-    std::fs::create_dir_all(&worktree_dir).unwrap();
-
-    assert_eq!(reconcile_target_dir(&worktree_dir), worktree_dir);
-}
-
-#[test]
-fn reconcile_target_dir_ignores_non_prefix_dev_identifier() {
-    // Dev detection is prefix-only — a dir merely *containing* the dev
-    // identifier later in its name is not a dev instance.
-    let parent = tempfile::tempdir().unwrap();
-    let odd_dir = parent.path().join("com.example.xyz.block.buzz.app.dev");
-    let canonical_dir = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(&odd_dir).unwrap();
-    std::fs::create_dir_all(&canonical_dir).unwrap();
-
-    assert_eq!(reconcile_target_dir(&odd_dir), odd_dir);
-}
-
-#[test]
-fn team_dir_reconcile_skips_path_without_teams_or_packs_component() {
-    // A path with no teams/packs component yields no team id — record is
-    // silently skipped and the file is not rewritten.
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
-
-    write_agents_json(
-        &canonical,
-        &serde_json::json!([{
-            "name": "Leto",
-            "persona_team_dir": "/some/random/path"
-        }]),
+    assert_eq!(
+        teams_after_retry[0]["instructions"], "Team rules.",
+        "instructions lifted on retry"
     );
-
-    let path = canonical.join("agents/managed-agents.json");
-    let before = std::fs::read_to_string(&path).unwrap();
-    reconcile_team_dirs_in_file(&path, &canonical);
-    let after = std::fs::read_to_string(&path).unwrap();
-
-    assert_eq!(before, after);
-}
-
-#[test]
-fn team_dir_reconcile_renames_legacy_field_when_value_already_canonical() {
-    // Value already points at the target — only the legacy field name is
-    // normalized; the value is untouched.
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents/teams/com.example.team")).unwrap();
-
-    let correct_path = team_dir(&canonical, "com.example.team");
-
-    write_agents_json(
-        &canonical,
-        &serde_json::json!([{
-            "name": "Thufir",
-            "persona_pack_path": correct_path
-        }]),
-    );
-
-    reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
-
-    let records = read_agents_json(&canonical);
-    assert_eq!(records[0]["persona_team_dir"], correct_path);
-    assert!(records[0].get("persona_pack_path").is_none());
 }

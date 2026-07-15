@@ -5,7 +5,7 @@ import { Button } from "@/shared/ui/button";
 const DOWNLOAD_URL = "https://github.com/block/buzz/releases/latest";
 
 /**
- * Landing page for a relay invite link (`/invite/<code>`).
+ * Landing page for a community invite link (`/invite/<code>`).
  *
  * The code is not validated here — validation happens in the desktop app when
  * the invite is claimed against `POST /api/invites/claim`, signed by the

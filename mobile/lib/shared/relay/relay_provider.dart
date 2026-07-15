@@ -1,7 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
-import '../workspace/workspace_provider.dart';
+import '../community/community_provider.dart';
 import 'relay_client.dart';
 
 /// Relay connection configuration.
@@ -41,9 +41,9 @@ class Env {
 class RelayConfigNotifier extends Notifier<RelayConfig> {
   @override
   RelayConfig build() {
-    // Watch the active workspace so that when it changes (workspace switch),
+    // Watch the active community so that when it changes (community switch),
     // the config rebuilds, triggering the full provider cascade.
-    final activeAsync = ref.watch(activeWorkspaceProvider);
+    final activeAsync = ref.watch(activeCommunityProvider);
     final active = activeAsync.value;
     if (active != null) {
       return RelayConfig(baseUrl: active.relayUrl, nsec: active.nsec);
@@ -74,7 +74,7 @@ String? pubkeyFromNsec(String? nsec) {
   }
 }
 
-/// The current user's hex pubkey, derived from the active workspace nsec.
+/// The current user's hex pubkey, derived from the active community nsec.
 final myPubkeyProvider = Provider<String?>((ref) {
   final config = ref.watch(relayConfigProvider);
   return pubkeyFromNsec(config.nsec);

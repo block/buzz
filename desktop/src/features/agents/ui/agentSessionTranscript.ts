@@ -18,6 +18,7 @@ import {
   describeSessionResolved,
   extractBlockText,
   extractContentText,
+  extractPlanText,
   extractPromptText,
   extractTriggeringEventIds,
   extractToolArgs,
@@ -1018,7 +1019,7 @@ export function processTranscriptEvent(
           d,
           `plan:${ch}:${turnKey}`,
           "Plan",
-          extractContentText(update.content) || JSON.stringify(update, null, 2),
+          extractPlanText(update),
           event.timestamp,
           ctx,
           updateType,
@@ -1155,7 +1156,9 @@ export function processTranscriptEvent(
   };
 }
 
-export function buildTranscriptState(events: ObserverEvent[]): TranscriptState {
+export function buildTranscriptState(
+  events: readonly ObserverEvent[],
+): TranscriptState {
   let state = createEmptyTranscriptState();
   for (const event of events) {
     state = processTranscriptEvent(state, event);
@@ -1163,6 +1166,8 @@ export function buildTranscriptState(events: ObserverEvent[]): TranscriptState {
   return state;
 }
 
-export function buildTranscript(events: ObserverEvent[]): TranscriptItem[] {
+export function buildTranscript(
+  events: readonly ObserverEvent[],
+): TranscriptItem[] {
   return buildTranscriptState(events).items;
 }

@@ -1,0 +1,14 @@
+{{- if .Values.httpRoute.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "push.name" . }}
+spec:
+  parentRefs: {{- toYaml .Values.httpRoute.parentRefs | nindent 4 }}
+  hostnames: {{- toYaml .Values.httpRoute.hostnames | nindent 4 }}
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      backendRefs:
+        - { name: {{ include "push.name" . }}, port: {{ .Values.service.port }} }
+{{- end }}

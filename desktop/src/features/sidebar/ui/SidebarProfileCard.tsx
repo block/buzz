@@ -10,48 +10,48 @@ import {
 } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfilePopover } from "@/features/profile/ui/ProfilePopover";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
-import type { Workspace } from "@/features/workspaces/types";
-import { WorkspaceSwitcher } from "@/features/workspaces/ui/WorkspaceSwitcher";
+import type { Community } from "@/features/communities/types";
+import { CommunitySwitcher } from "@/features/communities/ui/CommunitySwitcher";
 import type { PresenceStatus, Profile, UserStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
 type SidebarProfileCardProps = {
-  activeWorkspace: Workspace | null;
+  activeCommunity: Community | null;
   isPresencePending?: boolean;
-  onOpenAddWorkspace: () => void;
+  onOpenAddCommunity: () => void;
   onOpenSettings: (section?: "profile" | "appearance") => void;
-  onRemoveWorkspace: (id: string) => void;
+  onRemoveCommunity: (id: string) => void;
   onSetPresenceStatus?: (status: PresenceStatus) => void;
   onSetUserStatus: (text: string, emoji: string) => void;
   onClearUserStatus: () => void;
-  onSwitchWorkspace: (id: string) => void;
-  onUpdateWorkspace: (
+  onSwitchCommunity: (id: string) => void;
+  onUpdateCommunity: (
     id: string,
-    updates: Partial<Pick<Workspace, "name" | "relayUrl" | "token">>,
+    updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
   profile?: Profile;
   resolvedDisplayName: string;
   selfPresenceStatus: PresenceStatus;
   selfUserStatus?: UserStatus;
-  workspaces: Workspace[];
+  communities: Community[];
 };
 
 export function SidebarProfileCard({
-  activeWorkspace,
+  activeCommunity,
   isPresencePending,
-  onOpenAddWorkspace,
+  onOpenAddCommunity,
   onOpenSettings,
-  onRemoveWorkspace,
+  onRemoveCommunity,
   onSetPresenceStatus,
   onSetUserStatus,
   onClearUserStatus,
-  onSwitchWorkspace,
-  onUpdateWorkspace,
+  onSwitchCommunity,
+  onUpdateCommunity,
   profile,
   resolvedDisplayName,
   selfPresenceStatus,
   selfUserStatus,
-  workspaces,
+  communities,
 }: SidebarProfileCardProps) {
   const selfProfileCache = useSelfProfileCache();
   const [profilePopoverOpen, setProfilePopoverOpen] = React.useState(false);
@@ -74,8 +74,8 @@ export function SidebarProfileCard({
     [toggleProfilePopover],
   );
   const hasStatus = Boolean(selfUserStatus?.text || selfUserStatus?.emoji);
-  const workspaceLabel = activeWorkspace?.name ?? "No workspace";
-  const readonlyWorkspaceLabel = (
+  const communityLabel = activeCommunity?.name ?? "No community";
+  const readonlyCommunityLabel = (
     <span className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70">
       <span
         aria-hidden="true"
@@ -83,7 +83,7 @@ export function SidebarProfileCard({
       >
         <span className="-translate-y-px leading-normal">🐝</span>
       </span>
-      <span className="truncate">{workspaceLabel}</span>
+      <span className="truncate">{communityLabel}</span>
     </span>
   );
 
@@ -150,15 +150,15 @@ export function SidebarProfileCard({
             triggerContainerRef={profileCardRef}
             userStatusEmoji={selfUserStatus?.emoji}
             userStatusText={selfUserStatus?.text}
-            workspaceSwitcherSlot={
-              <WorkspaceSwitcher
-                activeWorkspace={activeWorkspace}
-                onAddWorkspace={onOpenAddWorkspace}
-                onRemoveWorkspace={onRemoveWorkspace}
-                onSwitchWorkspace={onSwitchWorkspace}
-                onUpdateWorkspace={onUpdateWorkspace}
+            communitySwitcherSlot={
+              <CommunitySwitcher
+                activeCommunity={activeCommunity}
+                onAddCommunity={onOpenAddCommunity}
+                onRemoveCommunity={onRemoveCommunity}
+                onSwitchCommunity={onSwitchCommunity}
+                onUpdateCommunity={onUpdateCommunity}
                 variant="profile-menu"
-                workspaces={workspaces}
+                communities={communities}
               />
             }
           >
@@ -209,11 +209,11 @@ export function SidebarProfileCard({
                   profilePopoverOpen && "opacity-0",
                 )}
               >
-                {readonlyWorkspaceLabel}
+                {readonlyCommunityLabel}
               </div>
             </div>
           ) : (
-            <div className="relative mt-0.5">{readonlyWorkspaceLabel}</div>
+            <div className="relative mt-0.5">{readonlyCommunityLabel}</div>
           )}
         </div>
       </div>

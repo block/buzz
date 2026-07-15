@@ -1,5 +1,6 @@
 import type { ObserverEvent } from "./agentSessionTypes";
 import { describeRawEvent } from "./agentSessionTranscript";
+import { observerEventScrollId } from "./agentSessionPanelLayout";
 import { TranscriptTimestamp } from "./activityRenderClasses/TranscriptTimestamp";
 import { useTranscriptTimestampsEnabled } from "./transcriptTimestampPreference";
 
@@ -18,7 +19,8 @@ export function RawEventRail({ events }: { events: ObserverEvent[] }) {
             {events.map((event) => (
               <details
                 className="group rounded-md border border-border/55 bg-muted/25 px-2.5 py-1.5 transition-colors open:bg-muted/35"
-                key={event.seq}
+                data-message-id={observerEventScrollId(event)}
+                key={observerEventScrollId(event)}
               >
                 <summary className="cursor-pointer select-none text-xs text-muted-foreground transition-colors group-open:text-foreground">
                   <span className="font-mono text-muted-foreground/70">

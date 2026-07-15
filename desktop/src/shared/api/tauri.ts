@@ -40,6 +40,7 @@ import type {
   AuthStatus,
   CommandAvailability,
   InstallRuntimeResult,
+  GitBashPrerequisite,
   OpenDmInput,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
@@ -249,6 +250,13 @@ export type RawInstallRuntimeResult = {
   steps: RawInstallStepResult[];
   restarted_count: number;
   failed_restart_count: number;
+};
+
+type RawGitBashPrerequisite = {
+  available: boolean;
+  path: string | null;
+  install_instructions_url: string;
+  install_hint: string;
 };
 
 type RawCommandAvailability = {
@@ -1008,6 +1016,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
       input: {
         name: input.name,
         personaId: input.personaId,
+        teamId: input.teamId,
         relayUrl: input.relayUrl,
         acpCommand: input.acpCommand,
         agentCommand: input.agentCommand,
@@ -1062,6 +1071,20 @@ export async function getManagedAgentLog(pubkey: string, lineCount?: number) {
     content: response.content,
     logPath: response.log_path,
   };
+}
+
+export async function discoverGitBashPrerequisite(): Promise<GitBashPrerequisite | null> {
+  const prerequisite = await invokeTauri<RawGitBashPrerequisite | null>(
+    "discover_git_bash_prerequisite",
+  );
+  return (
+    prerequisite && {
+      available: prerequisite.available,
+      path: prerequisite.path,
+      installInstructionsUrl: prerequisite.install_instructions_url,
+      installHint: prerequisite.install_hint,
+    }
+  );
 }
 
 export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
@@ -1250,7 +1273,7 @@ export async function cancelPairing(): Promise<void> {
   await invokeTauri("cancel_pairing");
 }
 
-export async function applyWorkspace(
+export async function applyCommunity(
   relayUrl: string,
   nsec?: string,
   token?: string,

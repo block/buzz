@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -218,6 +219,9 @@ class RelaySocket {
       _failAuth(e);
     }
   }
+
+  @visibleForTesting
+  void debugHandleOkForTest(List<dynamic> data) => _onMessage(data);
 
   /// Handle OK frames. During auth, complete the auth flow.
   void _handleOk(List<dynamic> data) {

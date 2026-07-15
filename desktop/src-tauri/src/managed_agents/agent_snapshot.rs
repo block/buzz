@@ -28,8 +28,8 @@
 //!   - `mcp_command` (machine-local)
 //!   - runtime state: `runtime_pid`, `backend_agent_id`, `backend` blob,
 //!     `provider_binary_path`, `last_*`
-//!   - lineage ids: `persona_id`, `source_team`, `source_team_persona_slug`,
-//!     `persona_team_dir`, `persona_name_in_team`, `persona_source_version`
+//!   - lineage ids: `persona_id`, `team_id`, `source_team`, `source_team_persona_slug`,
+//!     `persona_source_version`
 //!   - internal bookkeeping: `start_on_app_launch`,
 //!     `auto_restart_on_config_change`, `is_builtin`
 //!
@@ -477,6 +477,7 @@ mod tests {
             name: "Test Agent".to_string(),
             display_name: Some("Test Agent Display".to_string()),
             persona_id: Some("SENTINEL_PERSONA_ID".to_string()), // MUST NOT appear in snapshot
+            team_id: Some("SENTINEL_TEAM_ID".to_string()),       // MUST NOT appear in snapshot
             private_key_nsec: "nsec1secret".to_string(),         // MUST NOT appear in snapshot
             auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear in snapshot
             relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear in snapshot
@@ -874,6 +875,15 @@ mod tests {
         assert!(
             !json.contains("SENTINEL_PERSONA_ID"),
             "personaId value must not appear"
+        );
+        // teamId
+        assert!(
+            !json.contains("teamId") && !json.contains("team_id"),
+            "teamId field must not appear"
+        );
+        assert!(
+            !json.contains("SENTINEL_TEAM_ID"),
+            "teamId value must not appear"
         );
         // personaTeamDir
         assert!(

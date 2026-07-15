@@ -1,22 +1,35 @@
 {{- /*
-Creates the media bucket in the bundled MinIO after install/upgrade. Mirrors
-the docker-compose `minio-init` step. Hook-managed so it re-runs on upgrade
-and is garbage-collected. Quickstart-only.
+Creates the media bucket in the bundled MinIO. Mirrors the docker-compose
+`minio-init` step (which depends_on minio and runs concurrently, not as a
+lifecycle hook).
+
+This is a NORMAL resource, deliberately NOT a helm hook. The relay's A3
+object-store conformance probe is startup-fatal and does not create the bucket
+itself, so the bucket must exist for a relay Pod to pass readiness. A
+`post-install` hook cannot satisfy that: `helm install --wait` blocks on the
+main resources (the relay Deployment) becoming Ready *before* post-install
+hooks run, but the relay can never become Ready without the bucket — a
+deadlock (relays CrashLoopBackOff forever). A `pre-install` hook deadlocks the
+other way: it would run to completion before MinIO (a normal resource) is
+created. Running the Job as a normal resource lets helm create MinIO, this Job,
+and the relay Deployment together; the Job's `until` loop waits for MinIO, and
+`--wait` waits for the Job to complete alongside the Deployment.
+
+The name carries the release revision so `helm upgrade` creates a fresh Job
+(a completed Job's spec is immutable); `ttlSecondsAfterFinished` GCs it.
+Quickstart-only.
 */ -}}
 {{- if .Values.minio.enabled -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "buzz.minioFullname" . }}-init
+  name: {{ include "buzz.minioFullname" . }}-init-{{ .Release.Revision }}
   labels:
     {{- include "buzz.labels" . | nindent 4 }}
     app.kubernetes.io/component: minio-init
-  annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "0"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 10
+  ttlSecondsAfterFinished: 120
   template:
     metadata:
       labels:

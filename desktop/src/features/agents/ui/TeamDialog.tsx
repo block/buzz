@@ -1,5 +1,4 @@
 import * as React from "react";
-import { RefreshCw, Upload } from "lucide-react";
 
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type {
@@ -7,8 +6,6 @@ import type {
   CreateTeamInput,
   UpdateTeamInput,
 } from "@/shared/api/types";
-import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
-import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
@@ -23,12 +20,6 @@ import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { personaCatalogCopy } from "./personaLibraryCopy";
 import { RemoveMembersConfirmDialog } from "./RemoveMembersConfirmDialog";
-import {
-  getImportButtonLabel,
-  getImportButtonTone,
-  getImportErrorLabel,
-  IMPORT_ERROR_VISIBILITY_MS,
-} from "./teamDialogImportState";
 import {
   copySelectedPersonaIds,
   countMissingPersonaIds,
@@ -45,15 +36,9 @@ type TeamDialogProps = {
   personas: AgentPersona[];
   error: Error | null;
   isPending: boolean;
-  isImportPending?: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (input: CreateTeamInput | UpdateTeamInput) => Promise<void>;
   onDeleteRemovedPersonas?: (personaIds: string[]) => Promise<void>;
-  onImportUpdateFile?: (
-    teamId: string,
-    fileBytes: number[],
-    fileName: string,
-  ) => Promise<void>;
 };
 
 export function TeamDialog({
@@ -65,14 +50,13 @@ export function TeamDialog({
   personas,
   error,
   isPending,
-  isImportPending = false,
   onOpenChange,
   onSubmit,
   onDeleteRemovedPersonas,
-  onImportUpdateFile,
 }: TeamDialogProps) {
   const [name, setName] = React.useState("");
   const [teamDescription, setTeamDescription] = React.useState("");
+  const [instructions, setInstructions] = React.useState("");
   const [selectedPersonaIds, setSelectedPersonaIds] = React.useState<string[]>(
     [],
   );
@@ -80,18 +64,8 @@ export function TeamDialog({
     initialSelectedPersonaIdsForSort,
     setInitialSelectedPersonaIdsForSort,
   ] = React.useState<string[]>([]);
-  const [isImportingUpdate, setIsImportingUpdate] = React.useState(false);
-  const [importErrorMessage, setImportErrorMessage] = React.useState<
-    string | null
-  >(null);
   const [confirmRemovalOpen, setConfirmRemovalOpen] = React.useState(false);
   const isEditMode = Boolean(initialValues && "id" in initialValues);
-  const editTeamId =
-    isEditMode && initialValues && "id" in initialValues
-      ? initialValues.id
-      : null;
-  const canImportTeamUpdate = isEditMode && Boolean(onImportUpdateFile);
-  const [isWindowFileDragOver, setIsWindowFileDragOver] = React.useState(false);
   const missingInitialPersonaCount = React.useMemo(() => {
     if (!initialValues) {
       return 0;
@@ -107,131 +81,20 @@ export function TeamDialog({
 
     setName(initialValues.name);
     setTeamDescription(initialValues.description ?? "");
+    setInstructions(initialValues.instructions ?? "");
     setSelectedPersonaIds(copySelectedPersonaIds(initialValues.personaIds));
     setInitialSelectedPersonaIdsForSort(
       copySelectedPersonaIds(initialValues.personaIds),
     );
-    setImportErrorMessage(null);
-    setIsImportingUpdate(false);
   }, [initialValues, open]);
-
-  React.useEffect(() => {
-    if (!open || !canImportTeamUpdate) {
-      setIsWindowFileDragOver(false);
-      return;
-    }
-
-    let dragDepth = 0;
-
-    function isFileDrag(event: DragEvent): boolean {
-      return Array.from(event.dataTransfer?.types ?? []).includes("Files");
-    }
-
-    function handleWindowDragEnter(event: DragEvent) {
-      if (!isFileDrag(event)) {
-        return;
-      }
-      dragDepth += 1;
-      setIsWindowFileDragOver(true);
-    }
-
-    function handleWindowDragOver(event: DragEvent) {
-      if (!isFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      if (event.dataTransfer) {
-        event.dataTransfer.dropEffect = "copy";
-      }
-      setIsWindowFileDragOver(true);
-    }
-
-    function handleWindowDragLeave(event: DragEvent) {
-      if (!isFileDrag(event)) {
-        return;
-      }
-      dragDepth = Math.max(0, dragDepth - 1);
-      if (dragDepth === 0) {
-        setIsWindowFileDragOver(false);
-      }
-    }
-
-    function handleWindowDrop(event: DragEvent) {
-      if (!isFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      dragDepth = 0;
-      setIsWindowFileDragOver(false);
-    }
-
-    window.addEventListener("dragenter", handleWindowDragEnter);
-    window.addEventListener("dragover", handleWindowDragOver);
-    window.addEventListener("dragleave", handleWindowDragLeave);
-    window.addEventListener("drop", handleWindowDrop);
-
-    return () => {
-      window.removeEventListener("dragenter", handleWindowDragEnter);
-      window.removeEventListener("dragover", handleWindowDragOver);
-      window.removeEventListener("dragleave", handleWindowDragLeave);
-      window.removeEventListener("drop", handleWindowDrop);
-    };
-  }, [canImportTeamUpdate, open]);
-
-  React.useEffect(() => {
-    if (!open || !importErrorMessage) {
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      setImportErrorMessage(null);
-    }, IMPORT_ERROR_VISIBILITY_MS);
-    return () => {
-      window.clearTimeout(timeout);
-    };
-  }, [importErrorMessage, open]);
-
-  async function handleImportUpdateSelection(
-    fileBytes: number[],
-    fileName: string,
-  ) {
-    if (!editTeamId || !onImportUpdateFile) {
-      return;
-    }
-
-    setImportErrorMessage(null);
-    setIsImportingUpdate(true);
-    try {
-      await onImportUpdateFile(editTeamId, fileBytes, fileName);
-    } catch (error) {
-      setImportErrorMessage(
-        getImportErrorLabel(error instanceof Error ? error.message : null),
-      );
-    } finally {
-      setIsImportingUpdate(false);
-    }
-  }
-
-  const {
-    fileInputRef: importFileInputRef,
-    isDragOver: isImportDragOver,
-    dropHandlers: importDropHandlers,
-    handleFileChange: handleImportFileChange,
-    openFilePicker: openImportFilePicker,
-  } = useFileImportZone({
-    onImportFile: (fileBytes, fileName) => {
-      void handleImportUpdateSelection(fileBytes, fileName);
-    },
-  });
 
   function handleOpenChange(next: boolean) {
     if (!next) {
       setName("");
       setTeamDescription("");
+      setInstructions("");
       setSelectedPersonaIds([]);
       setInitialSelectedPersonaIdsForSort([]);
-      setImportErrorMessage(null);
-      setIsImportingUpdate(false);
-      setIsWindowFileDragOver(false);
       setConfirmRemovalOpen(false);
     }
 
@@ -266,6 +129,7 @@ export function TeamDialog({
     const baseInput = {
       name,
       description: teamDescription.trim() || undefined,
+      instructions: instructions.trim() || undefined,
       personaIds: filterAvailablePersonaIds(selectedPersonaIds, personas),
     };
 
@@ -299,16 +163,6 @@ export function TeamDialog({
     }
   }
 
-  const importButtonTone = getImportButtonTone({
-    isWindowFileDragOver,
-    isImportDragOver,
-    importErrorMessage,
-  });
-  const importButtonLabel = getImportButtonLabel({
-    isWindowFileDragOver,
-    isImportDragOver,
-    importErrorMessage,
-  });
   const orderedPersonas = React.useMemo(
     () =>
       orderPersonasByInitiallySelected(
@@ -359,6 +213,23 @@ export function TeamDialog({
                   onChange={(event) => setTeamDescription(event.target.value)}
                   placeholder="Optional description for this team."
                   value={teamDescription}
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="team-instructions"
+                >
+                  Team Instructions
+                </label>
+                <Textarea
+                  className="min-h-24"
+                  disabled={isPending}
+                  id="team-instructions"
+                  onChange={(event) => setInstructions(event.target.value)}
+                  placeholder="Optional instructions applied to every deployed team member."
+                  value={instructions}
                 />
               </div>
 
@@ -443,50 +314,7 @@ export function TeamDialog({
               ) : null}
             </div>
 
-            <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border/60 px-6 py-4">
-              <div className="flex min-h-8 items-center">
-                {canImportTeamUpdate ? (
-                  <>
-                    <input
-                      accept=".json,.zip"
-                      className="hidden"
-                      onChange={handleImportFileChange}
-                      ref={importFileInputRef}
-                      type="file"
-                    />
-                    <button
-                      className={cn(
-                        "inline-flex h-8 items-center gap-2 rounded-md border px-3 text-xs font-medium transition-colors",
-                        importButtonTone === "drag"
-                          ? "border-dashed border-primary/70 bg-primary/10 text-primary"
-                          : importButtonTone === "error"
-                            ? "border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/15"
-                            : "border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
-                      )}
-                      disabled={
-                        isPending || isImportPending || isImportingUpdate
-                      }
-                      type="button"
-                      {...importDropHandlers}
-                      onClick={openImportFilePicker}
-                      title={
-                        importButtonTone === "error"
-                          ? importButtonLabel
-                          : undefined
-                      }
-                    >
-                      <Upload className="h-4 w-4" />
-                      <span className="max-w-[16rem] truncate">
-                        {importButtonLabel}
-                      </span>
-                      {isImportingUpdate ? (
-                        <RefreshCw className="h-4 w-4 animate-spin" />
-                      ) : null}
-                    </button>
-                  </>
-                ) : null}
-              </div>
-
+            <div className="flex shrink-0 items-center justify-end gap-3 border-t border-border/60 px-6 py-4">
               <div className="flex items-center gap-2">
                 <Button
                   onClick={() => handleOpenChange(false)}

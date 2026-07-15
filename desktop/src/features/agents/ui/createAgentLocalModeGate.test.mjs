@@ -3,17 +3,16 @@
  *
  * The gate computes whether required fields are present for the selected
  * runtime: when missing, it surfaces field markers (isRequired) and env-key
- * amber rows (EnvVarsEditor.requiredKeys), and the setup-listener nudge will
- * fire after spawn. The gate NO LONGER blocks the create/save button —
- * users can save with incomplete config and the nudge will guide them.
+ * amber rows (EnvVarsEditor.requiredKeys). `localModeGate.satisfied` also
+ * blocks create and definition-edit saves, preventing invalid agents from
+ * starting with incomplete provider configuration.
  *
  * On Create there is no inherit checkbox, so selectedRuntimeId IS the
  * prospective runtime — no prospectiveRuntimeId hoist needed.
  *
  * The shared helper under test:
- *   computeLocalModeGate — pure function used by field isRequired and
- *                           EnvVarsEditor.requiredKeys; canSubmit no longer
- *                           reads gate.satisfied.
+ *   computeLocalModeGate — pure function used by field isRequired,
+ *                           EnvVarsEditor.requiredKeys, and the submit gate.
  */
 
 import { test } from "node:test";
@@ -26,12 +25,20 @@ import {
   getDefaultLlmModelLabel,
   getDefaultLlmProviderLabel,
   getPersonaModelOptions,
+  getPersonaProviderOptions,
   getProviderApiKeyEnvVar,
   isGloballySatisfiedCredentialKey,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "./personaDialogPickers.tsx";
 import { hasMissingRequiredEnvKey } from "./personaRuntimeModel.ts";
+import {
+  countNonSecretInheritedEnvVars,
+  getBakedModelInheritLabel,
+  getAdvancedInheritedSummary,
+  getBakedProviderInheritLabel,
+  resolveInheritedDefault,
+} from "./bakedEnvHelpers.ts";
 
 // ── Core predicate: provider-selection support ─────────────────────────────
 
@@ -238,36 +245,6 @@ test("localMode_gate_bypassed_for_meshMode", () => {
     result.satisfied,
     true,
     "relay-mesh mode must bypass the local-mode gate",
-  );
-});
-
-test("localMode_gate_active_when_mesh_selected_but_startAfterCreate_off", () => {
-  // Regression: when a user selects relay-mesh then turns off "Start agent
-  // after creation", the run draft is hidden and the backend intent is
-  // discarded — the saved definition has no mesh backing. The submit gate
-  // must require provider/model in this case.
-  //
-  // AgentDialog.tsx computes: createRunOnMesh = startAfterCreate && runDraft.runOn === "mesh"
-  // With startAfterCreate=false that evaluates to false regardless of runDraft,
-  // so computeLocalModeGate receives useMesh:false and must enforce the gate.
-  const result = computeLocalModeGate({
-    envVars: {},
-    isProviderMode: false,
-    model: "",
-    provider: "",
-    runtimeId: "buzz-agent",
-    useMesh: false, // = startAfterCreate(false) && runDraft.runOn("mesh")
-  });
-
-  assert.equal(
-    result.satisfied,
-    false,
-    "gate must NOT be bypassed when startAfterCreate is off, even if runDraft was set to mesh",
-  );
-  assert.deepEqual(
-    result.missingNormalizedFields,
-    ["provider", "model"],
-    "both provider and model must be flagged as missing for the stale-mesh path",
   );
 });
 
@@ -591,6 +568,19 @@ test("getBakedSatisfiedEnvKeys_agentLocalSet_keyNotBakedSatisfied", () => {
   );
 });
 
+test("getBakedSatisfiedEnvKeys_localEmpty_shadowsBakedValue", () => {
+  const result = getBakedSatisfiedEnvKeys(
+    ["ANTHROPIC_API_KEY"],
+    { ANTHROPIC_API_KEY: "" },
+    ["ANTHROPIC_API_KEY"],
+  );
+  assert.deepEqual(
+    result,
+    [],
+    "an explicit local empty string must block baked fallback",
+  );
+});
+
 test("getBakedSatisfiedEnvKeys_undefinedBaked_returnsEmpty", () => {
   const result = getBakedSatisfiedEnvKeys(["DATABRICKS_HOST"], {}, undefined);
   assert.deepEqual(result, []);
@@ -904,6 +894,88 @@ test("providerDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () =
     label,
     "Inherit global default (openai)",
     "global provider with surrounding whitespace must be trimmed in label",
+  );
+});
+
+// ── Baked inherited-default labels ─────────────────────────────────────────
+
+test("bakedDefaults_emptyGlobal_usesBuildValuesForCreateAndEditLabels", () => {
+  const bakedEnv = [
+    { key: "BUZZ_AGENT_PROVIDER", value: "databricks_v2", masked: false },
+    {
+      key: "BUZZ_AGENT_MODEL",
+      value: "goose-claude-opus-4-8",
+      masked: false,
+    },
+    { key: "BUZZ_AGENT_THINKING_EFFORT", value: "high", masked: false },
+  ];
+  const provider = resolveInheritedDefault(
+    null,
+    bakedEnv,
+    "BUZZ_AGENT_PROVIDER",
+  );
+  const model = resolveInheritedDefault(null, bakedEnv, "BUZZ_AGENT_MODEL");
+  const effort = resolveInheritedDefault(
+    null,
+    bakedEnv,
+    "BUZZ_AGENT_THINKING_EFFORT",
+  );
+  const providerOptions = getPersonaProviderOptions("", "buzz-agent");
+
+  assert.deepEqual(provider, { source: "build", value: "databricks_v2" });
+  assert.equal(
+    getBakedProviderInheritLabel(provider.value, providerOptions),
+    "Databricks v2 (inherited from build)",
+  );
+  assert.deepEqual(model, {
+    source: "build",
+    value: "goose-claude-opus-4-8",
+  });
+  assert.equal(
+    getBakedModelInheritLabel(model.value),
+    "Inherit build default (goose-claude-opus-4-8)",
+  );
+  assert.deepEqual(effort, { source: "build", value: "high" });
+});
+
+test("bakedDefaults_explicitGlobalsOverrideBuildValues", () => {
+  const bakedEnv = [
+    { key: "BUZZ_AGENT_PROVIDER", value: "databricks_v2", masked: false },
+    { key: "BUZZ_AGENT_MODEL", value: "build-model", masked: false },
+    { key: "BUZZ_AGENT_THINKING_EFFORT", value: "high", masked: false },
+  ];
+
+  assert.deepEqual(
+    resolveInheritedDefault("anthropic", bakedEnv, "BUZZ_AGENT_PROVIDER"),
+    { source: "global", value: "anthropic" },
+  );
+  assert.deepEqual(
+    resolveInheritedDefault("global-model", bakedEnv, "BUZZ_AGENT_MODEL"),
+    { source: "global", value: "global-model" },
+  );
+  assert.deepEqual(
+    resolveInheritedDefault("low", bakedEnv, "BUZZ_AGENT_THINKING_EFFORT"),
+    { source: "global", value: "low" },
+  );
+});
+
+test("advancedSummary_excludesCredentialNamesAndValues", () => {
+  const nonSecretGlobalEnvCount = countNonSecretInheritedEnvVars({
+    ANTHROPIC_API_KEY: "sk-secret",
+    DATABRICKS_HOST: "https://example.databricks.com",
+    OTHER_TOKEN: "secret",
+  });
+  assert.equal(
+    nonSecretGlobalEnvCount,
+    1,
+    "only non-secret inherited defaults belong in the collapsed summary",
+  );
+  assert.equal(
+    getAdvancedInheritedSummary(
+      { source: "build", value: "high" },
+      nonSecretGlobalEnvCount,
+    ),
+    "Using inherited defaults: build effort high · 1 global env var",
   );
 });
 

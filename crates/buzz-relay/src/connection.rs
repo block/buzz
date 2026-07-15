@@ -20,7 +20,7 @@ use nostr::Filter;
 
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
-use crate::state::AppState;
+use crate::state::{run_registered_community_connection, AppState};
 use buzz_pubsub::EventTopic;
 
 /// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
@@ -121,6 +121,31 @@ pub async fn handle_connection(
     addr: SocketAddr,
     tenant: TenantContext,
 ) {
+    let conn_id = Uuid::new_v4();
+    let cancel = CancellationToken::new();
+    let community_id = tenant.community();
+    let registry = Arc::clone(&state.community_connections);
+    let check_state = Arc::clone(&state);
+    let run_state = Arc::clone(&state);
+    run_registered_community_connection(
+        &registry,
+        conn_id,
+        community_id,
+        cancel.clone(),
+        move || async move { check_state.db.is_community_active(community_id).await },
+        move || handle_active_connection(socket, run_state, addr, tenant, conn_id, cancel),
+    )
+    .await;
+}
+
+async fn handle_active_connection(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    addr: SocketAddr,
+    tenant: TenantContext,
+    conn_id: Uuid,
+    cancel: CancellationToken,
+) {
     let permit = match state.conn_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -129,9 +154,7 @@ pub async fn handle_connection(
         }
     };
 
-    let conn_id = Uuid::new_v4();
     let challenge = generate_challenge();
-    let cancel = CancellationToken::new();
 
     let (tx, rx) = mpsc::channel::<WsMessage>(state.config.send_buffer_size);
     // Control channel for Pong/Close — small capacity, guaranteed delivery

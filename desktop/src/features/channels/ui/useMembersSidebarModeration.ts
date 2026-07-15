@@ -8,7 +8,7 @@ import {
   useUnbanMemberMutation,
   useUntimeoutMemberMutation,
 } from "@/features/moderation/hooks";
-import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
+import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
 import { isTimedOut } from "@/features/moderation/lib/restrictionState";
 import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";

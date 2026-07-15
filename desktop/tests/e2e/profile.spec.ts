@@ -1007,7 +1007,7 @@ test("renders settings in the app shell with a back button", async ({
     "aria-pressed",
     "true",
   );
-  await expect(page.getByText("Workspaces", { exact: true })).toBeVisible();
+  await expect(page.getByText("Communities", { exact: true })).toBeVisible();
   await expect(
     page.getByTestId("settings-nav-channel-templates"),
   ).toBeVisible();

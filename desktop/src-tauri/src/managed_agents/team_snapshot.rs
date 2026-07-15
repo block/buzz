@@ -5,13 +5,11 @@
 //! reuses the existing `AgentSnapshot` type from `agent_snapshot.rs`.
 //!
 //! Two encodings:
-//!   - `.team.json` — canonical; memory inclusion is a P4.2 product decision.
+//!   - `.team.json` — canonical; supports memory when selected.
 //!   - `.team.png` — 1×1 placeholder PNG with manifest in a `buzz_team_snapshot`
-//!     tEXt chunk; **all members MUST have `memory.level == None` and empty
-//!     `memory.entries`**. PNG files are casually shared — plaintext memory must
-//!     never appear in them. Since `TeamRecord` has no team-level avatar, the
-//!     image body is always the 1×1 placeholder; member avatars are carried in
-//!     each `AgentSnapshot.profile.avatar_data_url`.
+//!     tEXt chunk; supports memory when selected. Since `TeamRecord` has no
+//!     team-level avatar, the image body is always the 1×1 placeholder; member
+//!     avatars are carried in each `AgentSnapshot.profile.avatar_data_url`.
 //!
 //! **Old `.team.json` files** (flat `{version:1, type:"team", …}` schema) carry
 //! no `format` discriminator. The caller's legacy-reject path handles them; this
@@ -28,9 +26,9 @@
 //! # Memory-consistency invariant
 //!
 //! Any member with `memory.level == None` and non-empty `memory.entries` is
-//! malformed. `validate_member_memory_consistency` enforces this on both the
-//! JSON decode path (via `validate_team_snapshot`) and the PNG encode path (via
-//! `encode_team_snapshot_png`) so the rule is single-sourced.
+//! malformed. `validate_member_memory_consistency` enforces this on both
+//! decode paths (JSON via `validate_team_snapshot`, PNG via
+//! `decode_team_snapshot_png` → JSON round-trip) so the rule is single-sourced.
 
 // Items are `pub(crate)` for P4.2 callers; suppress dead-code lint until then.
 #![allow(dead_code)]
@@ -65,6 +63,8 @@ pub struct TeamSnapshotMeta {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 // ── Top-level manifest ────────────────────────────────────────────────────────
@@ -100,6 +100,7 @@ pub fn build_team_snapshot(team: &TeamRecord, members: Vec<AgentSnapshot>) -> Te
         team: TeamSnapshotMeta {
             name: team.name.clone(),
             description: team.description.clone(),
+            instructions: team.instructions.clone(),
         },
         members,
     }
@@ -129,12 +130,11 @@ pub fn decode_team_snapshot_json(bytes: &[u8]) -> Result<TeamSnapshot, String> {
 /// team-level avatar; each member's avatar lives in their own
 /// `AgentSnapshot.profile.avatar_data_url`. The manifest is embedded in the
 /// `buzz_team_snapshot` tEXt chunk (base64-encoded JSON).
-///
-/// **Rejects** any snapshot where ANY member carries memory — either via a
-/// non-`None` `memory.level` or a non-empty `memory.entries`. PNG images are
-/// casually shared and would expose plaintext memory.
 pub fn encode_team_snapshot_png(snapshot: &TeamSnapshot) -> Result<Vec<u8>, String> {
-    validate_team_png_has_no_member_memory(snapshot)?;
+    // Memory-consistency: reject level=None + non-empty entries (malformed).
+    for (i, member) in snapshot.members.iter().enumerate() {
+        validate_member_memory_consistency(i, member)?;
+    }
 
     let json_bytes = encode_team_snapshot_json(snapshot)?;
     let chunk_text = STANDARD.encode(&json_bytes);
@@ -164,30 +164,10 @@ pub fn decode_team_snapshot_png(png_bytes: &[u8]) -> Result<TeamSnapshot, String
         .map_err(|e| format!("Invalid base64 in PNG chunk: {e}"))?;
 
     let snapshot = decode_team_snapshot_json(&json_bytes)?;
-    validate_team_png_has_no_member_memory(&snapshot)?;
     Ok(snapshot)
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
-
-/// Enforce the PNG no-member-memory invariant on both the encode and decode paths.
-///
-/// PNG files are casually shared — any member carrying memory (level != `None`
-/// or non-empty entries) would expose plaintext memory. This is a hard format
-/// invariant: our encoder never produces such a PNG, so any that passes this
-/// check on decode is malformed or malicious.
-fn validate_team_png_has_no_member_memory(snapshot: &TeamSnapshot) -> Result<(), String> {
-    for (i, member) in snapshot.members.iter().enumerate() {
-        if member.memory.level != MemoryLevel::None || !member.memory.entries.is_empty() {
-            return Err(format!(
-                "Cannot write memory to a .team.png file — member {i} ({:?}) has memory. \
-                 PNG images are casually shared and would expose memory as plaintext.",
-                member.definition.name
-            ));
-        }
-    }
-    Ok(())
-}
 
 /// Assert that a member's memory section is internally consistent.
 ///
@@ -257,6 +237,7 @@ mod tests {
             id: format!("{name}-id"),
             name: name.to_string(),
             description: Some(format!("{name} description")),
+            instructions: None,
             persona_ids: vec![],
             is_builtin: false,
             source_dir: None,
@@ -303,6 +284,7 @@ mod tests {
             backend: BackendKind::Local,
             backend_agent_id: None,
             provider_binary_path: None,
+            team_id: None,
             persona_team_dir: None,
             persona_name_in_team: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
@@ -360,8 +342,7 @@ mod tests {
     // ── PNG memory guard ──────────────────────────────────────────────────────
 
     #[test]
-    fn png_export_rejected_when_any_member_has_memory() {
-        // 2-member team: member[0] has no memory, member[1] has Everything.
+    fn png_round_trip_with_member_memory() {
         let alice = build_snapshot(&agent_record("Alice"), MemoryLevel::None, vec![], None);
         let entries = vec![AgentSnapshotMemoryEntry {
             slug: "mem/notes".to_string(),
@@ -370,17 +351,13 @@ mod tests {
         let bob = build_snapshot(&agent_record("Bob"), MemoryLevel::Everything, entries, None);
         let snapshot = build_team_snapshot(&team_record("Team"), vec![alice, bob]);
 
-        let result = encode_team_snapshot_png(&snapshot);
-        assert!(
-            result.is_err(),
-            "PNG export must fail when any member has memory"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("Cannot write memory to a .team.png"),
-            "Error must explain the PNG memory restriction, got: {err}"
-        );
-        assert!(err.contains("Bob"), "Error must name the offending member");
+        let png_bytes = encode_team_snapshot_png(&snapshot).unwrap();
+        assert!(png_bytes.starts_with(b"\x89PNG"), "output must be a PNG");
+        let parsed = decode_team_snapshot_png(&png_bytes).unwrap();
+        assert_eq!(parsed.members.len(), 2);
+        assert_eq!(parsed.members[1].memory.level, MemoryLevel::Everything);
+        assert_eq!(parsed.members[1].memory.entries.len(), 1);
+        assert_eq!(parsed.members[1].memory.entries[0].slug, "mem/notes");
     }
 
     #[test]
@@ -409,12 +386,6 @@ mod tests {
             result.is_err(),
             "JSON decoder must also reject member with level=None + non-empty entries"
         );
-    }
-
-    #[test]
-    fn png_export_succeeds_when_all_members_have_no_memory() {
-        let snapshot = two_member_team();
-        assert!(encode_team_snapshot_png(&snapshot).is_ok());
     }
 
     // ── Validation tests ──────────────────────────────────────────────────────
@@ -595,13 +566,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_team_png_rejects_member_memory() {
-        // Craft a memory-bearing .team.png by bypassing the encoder guard:
-        // build the manifest with a memory-bearing member, serialize JSON,
-        // base64, and write it into a PNG tEXt chunk directly.
-        // decode_team_snapshot_png must reject it — defense-in-depth, since
-        // the encoder refuses to produce this and any such PNG is malformed
-        // or malicious.
+    fn decode_team_png_with_member_memory_succeeds() {
+        // Build a memory-bearing .team.png by bypassing the encoder
+        // (pre-guard-lift this was rejected; now it round-trips cleanly).
         let alice = build_snapshot(&agent_record("Alice"), MemoryLevel::None, vec![], None);
         let entries = vec![AgentSnapshotMemoryEntry {
             slug: "mem/notes".to_string(),
@@ -610,18 +577,12 @@ mod tests {
         let bob = build_snapshot(&agent_record("Bob"), MemoryLevel::Everything, entries, None);
         let snapshot = build_team_snapshot(&team_record("Team"), vec![alice, bob]);
 
-        // Bypass encode_team_snapshot_png's guard — write the chunk directly.
-        let json = encode_team_snapshot_json(&snapshot).unwrap();
-        let b64 = STANDARD.encode(&json);
-        let png = make_png_with_text(PNG_CHUNK_KEYWORD, &b64).unwrap();
+        // Now that the guard is lifted, encode directly.
+        let png = encode_team_snapshot_png(&snapshot).unwrap();
 
-        let result = decode_team_snapshot_png(&png);
-        assert!(
-            result.is_err(),
-            "decode must reject a memory-bearing .team.png"
-        );
-        assert!(result
-            .unwrap_err()
-            .contains("Cannot write memory to a .team.png"));
+        let decoded = decode_team_snapshot_png(&png).unwrap();
+        assert_eq!(decoded.members.len(), 2);
+        assert_eq!(decoded.members[1].memory.level, MemoryLevel::Everything);
+        assert_eq!(decoded.members[1].memory.entries.len(), 1);
     }
 }

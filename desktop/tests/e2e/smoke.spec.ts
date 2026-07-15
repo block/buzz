@@ -140,23 +140,13 @@ test("create agent supports parallelism and system prompt overrides", async ({
     .getByRole("button", { name: "Custom model...", exact: true })
     .click();
   await page.getByLabel("Custom model ID").fill("claude-opus-4-5");
-  // Supply a credential so the agent can actually run (create is no longer
-  // blocked by a missing key, but we include it for a realistic test).
-  // The required ANTHROPIC_API_KEY amber row appears in the EnvVarsEditor
-  // (Advanced auto-expands when required keys are present).
-  await page
-    .getByLabel("Value for ANTHROPIC_API_KEY")
-    .fill("sk-test-api-key-for-e2e");
+  await page.getByLabel("Anthropic API Key").fill("sk-test-api-key-for-e2e");
 
-  // Fix 3 (auto-open Advanced when required keys appear) may have already
-  // opened the section; only click to open if it is currently collapsed.
   const advancedToggle = page.getByRole("button", {
     name: "Advanced",
     exact: true,
   });
-  if ((await advancedToggle.getAttribute("aria-expanded")) === "false") {
-    await advancedToggle.click();
-  }
+  await advancedToggle.click();
   // Parallelism is above the env-vars editor in the Advanced section; filling
   // the required API-key row may have scrolled the dialog past it. Scroll back.
   await page
@@ -165,8 +155,8 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await expect(page.locator("#persona-parallelism")).toBeVisible();
   await page.locator("#persona-parallelism").fill("3");
 
-  // The start-after-create toggle defaults ON, so submitting mints a running
-  // instance whose behavioral quad resolves from the definition.
+  // Submitting mints a running instance whose behavioral quad resolves from
+  // the definition (agents always start after creation).
   await page.getByTestId("persona-dialog-submit").click();
 
   await expect(
@@ -234,7 +224,9 @@ test("inbox feed shows channel and agent activity sections", async ({
   );
 });
 
-test("inbox agent hover only exposes message action", async ({ page }) => {
+test("inbox agent hover hides actions without agent access", async ({
+  page,
+}) => {
   await page.goto("/");
 
   await selectHomeInboxFilter(page, "Agents");
@@ -252,7 +244,7 @@ test("inbox agent hover only exposes message action", async ({ page }) => {
     profilePopover.getByTestId(
       `user-profile-popover-message-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
     ),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(
     profilePopover.getByTestId(
       `user-profile-popover-wave-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,

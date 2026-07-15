@@ -19,6 +19,7 @@ export function EditAgentAdvancedFields({
   disabled,
   envVars,
   fileSatisfiedEnvKeys,
+  hiddenEnvKeys = [],
   focusKey,
   inheritedEnvVars,
   inheritHarness,
@@ -48,6 +49,7 @@ export function EditAgentAdvancedFields({
   disabled: boolean;
   envVars: EnvVarsValue;
   fileSatisfiedEnvKeys: readonly string[];
+  hiddenEnvKeys?: readonly string[];
   /** When set, EnvVarsEditor scrolls and focuses this key's input on mount. */
   focusKey?: string;
   inheritedEnvVars: Record<string, string>;
@@ -241,7 +243,7 @@ export function EditAgentAdvancedFields({
             disabled={disabled}
             id="edit-agent-relay-url"
             onChange={(event) => onRelayUrlChange(event.target.value)}
-            placeholder="Leave blank to use the workspace relay"
+            placeholder="Leave blank to use the community relay"
             value={relayUrl}
           />
         </div>
@@ -303,6 +305,7 @@ export function EditAgentAdvancedFields({
       <EnvVarsEditor
         disabled={disabled}
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
+        hiddenKeys={hiddenEnvKeys}
         focusKey={focusKey}
         helperText="Per-agent env vars. Override the template's vars on collision."
         inheritedFrom={inheritedEnvVars}

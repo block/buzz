@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../profile/user_profile.dart';
 
 /// 20px circle avatar used in thread summary rows and other compact lists.
@@ -24,20 +25,18 @@ class SmallAvatar extends StatelessWidget {
         shape: BoxShape.circle,
         border: Border.all(color: context.colors.surface, width: 1.5),
       ),
-      child: CircleAvatar(
+      child: AvatarImage(
+        imageUrl: avatarUrl,
         radius: 9,
         backgroundColor: context.colors.primaryContainer,
-        backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-        child: avatarUrl == null
-            ? Text(
-                initial,
-                style: TextStyle(
-                  fontSize: 8,
-                  fontWeight: FontWeight.w600,
-                  color: context.colors.onPrimaryContainer,
-                ),
-              )
-            : null,
+        fallback: Text(
+          initial,
+          style: TextStyle(
+            fontSize: 8,
+            fontWeight: FontWeight.w600,
+            color: context.colors.onPrimaryContainer,
+          ),
+        ),
       ),
     );
   }

@@ -61,7 +61,7 @@ import {
   projectTerminalLabel,
   useOpenProjectTerminal,
 } from "@/features/projects/ui/useOpenProjectTerminal";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
@@ -617,7 +617,7 @@ function ProjectListRow({
 
 export function ProjectsView() {
   const { goProject } = useAppNavigation();
-  const { activeWorkspace } = useWorkspaces();
+  const { activeCommunity } = useCommunities();
   const mainInsetRef = useMainInsetRef();
   const projectsHeaderChromeRef = useMeasuredCssVariable({
     targetRef: mainInsetRef,
@@ -628,7 +628,7 @@ export function ProjectsView() {
   const projects = projectsQuery.data ?? [];
   const activitySummariesQuery = useProjectActivitySummariesQuery(projects);
   const localRepositoriesQuery = useProjectLocalRepositoriesQuery(
-    activeWorkspace?.reposDir,
+    activeCommunity?.reposDir,
   );
   const projectPullRequestsQuery = useProjectsPullRequestsQuery(projects);
   const [filter, setFilter] = React.useState<ProjectsFilter>(() =>
@@ -645,7 +645,7 @@ export function ProjectsView() {
   );
   const repoSnapshotsQuery = useProjectsRepoSnapshotsQuery(
     snapshotProjects,
-    activeWorkspace?.reposDir,
+    activeCommunity?.reposDir,
   );
   const [storedViewMode, setStoredViewMode] =
     React.useState<ProjectsViewMode | null>(() => readStoredViewMode());
@@ -815,7 +815,7 @@ export function ProjectsView() {
     [goProject],
   );
 
-  const openTerminal = useOpenProjectTerminal(activeWorkspace?.reposDir);
+  const openTerminal = useOpenProjectTerminal(activeCommunity?.reposDir);
   const handleOpenTerminal = React.useCallback(
     (project: Project) =>
       openTerminal(project, {
@@ -882,7 +882,7 @@ export function ProjectsView() {
               onSelectSection={handleFilterChange}
               profiles={profiles}
               projects={projects}
-              relayName={activeWorkspace?.name || "Relay"}
+              relayName={activeCommunity?.name || "Relay"}
               snapshots={repoSnapshotsQuery.data}
               snapshotsLoading={repoSnapshotsQuery.isLoading}
               summaries={activitySummariesQuery.data}

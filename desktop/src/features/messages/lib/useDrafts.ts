@@ -83,7 +83,7 @@ function storageKey(): string {
 
 /**
  * Initialise (or re-initialise) the draft store for a given identity.
- * Called from `useWorkspaceInit` alongside the other singleton resets.
+ * Called from `useCommunityInit` alongside the other singleton resets.
  * Resets the in-memory cache whenever the pubkey changes so a direct
  * identity switch (without a prior `clearAllDrafts`) never serves the
  * wrong identity's drafts.
@@ -99,7 +99,7 @@ export function initDraftStore(pubkey: string): void {
 }
 
 /**
- * Reset the in-memory draft store on workspace switch.
+ * Reset the in-memory draft store on community switch.
  * Replaces the old `clearAllDrafts()`.
  */
 export function clearAllDrafts(): void {

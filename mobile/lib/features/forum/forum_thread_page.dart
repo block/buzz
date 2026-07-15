@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../channels/compose_bar.dart';
@@ -362,6 +363,7 @@ class _OriginalPost extends ConsumerWidget {
             content: post.content,
             mentionNames: mentionNames,
             tags: post.tags,
+            onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
           ),
         ],
       ),
@@ -456,6 +458,7 @@ class _ReplyRow extends ConsumerWidget {
               content: reply.content,
               mentionNames: mentionNames,
               tags: reply.tags,
+              onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
             ),
           ),
         ],
@@ -561,20 +564,18 @@ class _Avatar extends StatelessWidget {
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
     final avatarUrl = profile?.avatarUrl;
 
-    return CircleAvatar(
+    return AvatarImage(
+      imageUrl: avatarUrl,
       radius: radius,
       backgroundColor: context.colors.primaryContainer,
-      backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-      child: avatarUrl == null
-          ? Text(
-              initial,
-              style: TextStyle(
-                fontSize: radius * 0.75,
-                fontWeight: FontWeight.w600,
-                color: context.colors.onPrimaryContainer,
-              ),
-            )
-          : null,
+      fallback: Text(
+        initial,
+        style: TextStyle(
+          fontSize: radius * 0.75,
+          fontWeight: FontWeight.w600,
+          color: context.colors.onPrimaryContainer,
+        ),
+      ),
     );
   }
 }

@@ -297,13 +297,12 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                     children: [
                       for (final user in availableResults)
                         ListTile(
-                          leading: CircleAvatar(
-                            backgroundImage: user.avatarUrl != null
-                                ? NetworkImage(user.avatarUrl!)
-                                : null,
-                            child: user.avatarUrl == null
-                                ? Text(user.label.substring(0, 1).toUpperCase())
-                                : null,
+                          leading: AvatarImage(
+                            imageUrl: user.avatarUrl,
+                            radius: 20,
+                            fallback: Text(
+                              user.label.substring(0, 1).toUpperCase(),
+                            ),
                           ),
                           title: Text(user.label),
                           subtitle: Text(user.secondaryLabel),

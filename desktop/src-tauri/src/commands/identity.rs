@@ -36,12 +36,16 @@ pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> 
     let locked = state
         .keyring_locked
         .load(std::sync::atomic::Ordering::Acquire);
+    let reset_failed = state
+        .reset_failed
+        .load(std::sync::atomic::Ordering::Acquire);
 
     Ok(IdentityInfo {
         pubkey: pubkey_hex,
         display_name,
         lost,
         locked,
+        reset_failed,
     })
 }
 
@@ -220,6 +224,7 @@ pub async fn import_identity(
             display_name,
             lost: false,
             locked: false,
+            reset_failed: false,
         })
     })
     .await
@@ -287,10 +292,51 @@ pub async fn persist_current_identity(
             display_name,
             lost: false,
             locked: false,
+            reset_failed: false,
         })
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+/// Write a reset-intent sentinel and request a graceful restart into Phase 2
+/// (boot-time wipe).
+///
+/// The actual data destruction is deferred to the next boot: `setup()` in
+/// `lib.rs` checks for the sentinel and performs the wipe before any migration
+/// or identity resolution. This two-phase design means a crash before the
+/// restart is safe — the sentinel persists and the wipe completes on the next
+/// open.
+///
+/// Not available in shared-identity mode (`BUZZ_SHARE_IDENTITY=1`): the key
+/// comes from an env var, not the keychain, so wiping would have no effect and
+/// would be confusing.
+#[tauri::command]
+pub async fn sign_out(app: tauri::AppHandle) -> Result<(), String> {
+    if is_shared_identity() {
+        return Err(
+            "Sign out isn't available while BUZZ_SHARE_IDENTITY provides your identity. Unset BUZZ_SHARE_IDENTITY and BUZZ_PRIVATE_KEY, then relaunch to sign out."
+                .to_string(),
+        );
+    }
+
+    // Stop all managed agents before restart so they don't race the wipe.
+    if let Err(e) = crate::shutdown::shutdown_managed_agents(&app) {
+        eprintln!("buzz-desktop sign-out: agent shutdown: {e}");
+    }
+
+    // Write the reset sentinel — destruction happens on next boot.
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    crate::reset::write_sentinel(&data_dir)?;
+
+    // Tauri restarts only after normal shutdown, avoiding a single-instance
+    // race. If restarting does not complete, the sentinel makes a manual open
+    // finish the reset.
+    app.request_restart();
+    Ok(())
 }
 
 fn nostr_bind_tag(name: &str, value: &str) -> Result<Tag, String> {

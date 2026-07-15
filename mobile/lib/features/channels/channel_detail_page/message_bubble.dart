@@ -122,6 +122,8 @@ class _MessageBubble extends ConsumerWidget {
                         currentChannelId: currentChannelId,
                       );
                     },
+                    onMentionTap: (pubkey) =>
+                        showUserProfileSheet(context, pubkey),
                   ),
                   if (message.reactions.isNotEmpty)
                     ReactionRow(
@@ -150,19 +152,17 @@ class _UserAvatar extends StatelessWidget {
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
     final avatarUrl = profile?.avatarUrl;
 
-    return CircleAvatar(
+    return AvatarImage(
+      imageUrl: avatarUrl,
       radius: 14,
       backgroundColor: context.colors.primaryContainer,
-      backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-      child: avatarUrl == null
-          ? Text(
-              initial,
-              style: context.textTheme.labelSmall?.copyWith(
-                color: context.colors.onPrimaryContainer,
-                fontWeight: FontWeight.w600,
-              ),
-            )
-          : null,
+      fallback: Text(
+        initial,
+        style: context.textTheme.labelSmall?.copyWith(
+          color: context.colors.onPrimaryContainer,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
     );
   }
 }

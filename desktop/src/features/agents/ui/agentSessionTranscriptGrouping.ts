@@ -1,4 +1,5 @@
-import type { TranscriptItem } from "./agentSessionTypes";
+import { buildTranscriptState } from "./agentSessionTranscript";
+import type { ObserverEvent, TranscriptItem } from "./agentSessionTypes";
 import { classifyToolItem } from "./agentSessionToolClassifier";
 
 export type TranscriptTurnSegment =
@@ -740,6 +741,46 @@ export function flattenDisplayBlocks(
   }
 
   return result;
+}
+
+/**
+ * Stable display key for a transcript block — used as the React list key and
+ * as the `data-message-id` attribute that `useAnchoredScroll` anchors on.
+ *
+ * Must be kept in sync with the `data-message-id` rendered by
+ * `AgentSessionTranscriptList` so outer scroll-anchor ids and inner DOM ids
+ * always agree 1:1.
+ */
+export function getDisplayBlockKey(block: TranscriptDisplayBlock): string {
+  if (block.kind === "single") {
+    return block.item.id;
+  }
+  if (block.kind === "session-boundary") {
+    // Use firstItemId (stable across prepend) rather than runIndex (shifts when
+    // older sessions are prepended, causing unnecessary boundary remounts).
+    return `session-boundary:${block.sessionId}:${block.firstItemId}`;
+  }
+  return `turn:${block.turnId}`;
+}
+
+/**
+ * Derive the ordered display-block key sequence from raw observer events.
+ *
+ * Pure function: `buildTranscriptState(events).items` →
+ * `buildTranscriptDisplayBlocks` → `getDisplayBlockKey`. This is the exact
+ * chain `AgentSessionThreadPanel` uses to produce the id list fed to
+ * `useAnchoredScroll` — extracted so both production and tests share one
+ * code path.
+ *
+ * `latestLiveSessionId` is intentionally omitted: it only affects boundary
+ * `labelState`, never keys.
+ */
+export function deriveTranscriptBlockIds(
+  events: readonly ObserverEvent[],
+): string[] {
+  const items = buildTranscriptState(events).items;
+  const blocks = buildTranscriptDisplayBlocks(items);
+  return blocks.map(getDisplayBlockKey);
 }
 
 /** Human-readable labels for a collapsed turn setup row. */

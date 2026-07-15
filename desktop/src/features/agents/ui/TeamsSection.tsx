@@ -2,16 +2,14 @@ import {
   CopyPlus,
   Download,
   Ellipsis,
-  FolderOpen,
-  FolderSync,
   Pencil,
   Rocket,
   Trash2,
+  Upload,
 } from "lucide-react";
 
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import type { AgentPersona, AgentTeam } from "@/shared/api/types";
-import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -35,13 +33,10 @@ type TeamsSectionProps = {
   onCreate: () => void;
   onDuplicate: (team: AgentTeam) => void;
   onEdit: (team: AgentTeam) => void;
-  onExport: (team: AgentTeam) => void;
   onDelete: (team: AgentTeam) => void;
   onAddToChannel: (team: AgentTeam) => void;
-  onSync: (team: AgentTeam) => void;
-  onRevealInFinder: (team: AgentTeam) => void;
-  onImportFile: (fileBytes: number[], fileName: string) => void;
-  onInstallFromDirectory?: () => void;
+  onExport: (team: AgentTeam) => void;
+  onImport: () => void;
 };
 
 export function TeamsSection({
@@ -53,43 +48,13 @@ export function TeamsSection({
   onCreate,
   onDuplicate,
   onEdit,
-  onExport,
   onDelete,
   onAddToChannel,
-  onSync,
-  onRevealInFinder,
-  onImportFile,
-  onInstallFromDirectory,
+  onExport,
+  onImport,
 }: TeamsSectionProps) {
-  const {
-    fileInputRef,
-    isDragOver,
-    dropHandlers,
-    handleFileChange,
-    openFilePicker,
-  } = useFileImportZone({ onImportFile });
-
   return (
-    <section
-      className="relative space-y-4"
-      data-testid="agents-library-teams"
-      {...dropHandlers}
-    >
-      {isDragOver ? (
-        <div className="pointer-events-none absolute -inset-1 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/50 bg-background/80 backdrop-blur-sm">
-          <p className="text-sm font-medium text-primary">
-            Drop .team.json or .zip to import
-          </p>
-        </div>
-      ) : null}
-      <input
-        accept=".json,.zip"
-        className="hidden"
-        onChange={handleFileChange}
-        ref={fileInputRef}
-        type="file"
-      />
-
+    <section className="relative space-y-4" data-testid="agents-library-teams">
       <div
         className={`${TEAM_CARD_COLUMN_CLASS} flex items-center justify-between gap-3`}
       >
@@ -154,6 +119,13 @@ export function TeamsSection({
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
+                        disabled={isPending || hasMissingPersonas}
+                        onClick={() => onExport(team)}
+                      >
+                        <Download className="h-4 w-4" />
+                        Export snapshot
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
                         disabled={isPending}
                         onClick={() => onEdit(team)}
                       >
@@ -167,31 +139,6 @@ export function TeamsSection({
                         <CopyPlus className="h-4 w-4" />
                         Duplicate
                       </DropdownMenuItem>
-                      <DropdownMenuItem
-                        disabled={isPending || hasMissingPersonas}
-                        onClick={() => onExport(team)}
-                      >
-                        <Download className="h-4 w-4" />
-                        Export
-                      </DropdownMenuItem>
-                      {team.sourceDir ? (
-                        <>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem
-                            disabled={isPending}
-                            onClick={() => onSync(team)}
-                          >
-                            <FolderSync className="h-4 w-4" />
-                            Sync from directory
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() => onRevealInFinder(team)}
-                          >
-                            <FolderOpen className="h-4 w-4" />
-                            Reveal in Finder
-                          </DropdownMenuItem>
-                        </>
-                      ) : null}
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
                         className="text-destructive focus:text-destructive"
@@ -230,8 +177,7 @@ export function TeamsSection({
           <NewTeamCard
             isPending={isPending}
             onCreate={onCreate}
-            onImport={openFilePicker}
-            onInstallFromDirectory={onInstallFromDirectory}
+            onImport={onImport}
           />
         </div>
       ) : null}
@@ -251,12 +197,10 @@ function NewTeamCard({
   isPending,
   onCreate,
   onImport,
-  onInstallFromDirectory,
 }: {
   isPending: boolean;
   onCreate: () => void;
   onImport: () => void;
-  onInstallFromDirectory?: () => void;
 }) {
   return (
     <DropdownMenu modal={false}>
@@ -274,16 +218,9 @@ function NewTeamCard({
         <DropdownMenuItem disabled={isPending} onClick={onCreate}>
           Create team
         </DropdownMenuItem>
-        {onInstallFromDirectory ? (
-          <DropdownMenuItem
-            disabled={isPending}
-            onClick={onInstallFromDirectory}
-          >
-            Install from directory
-          </DropdownMenuItem>
-        ) : null}
         <DropdownMenuItem disabled={isPending} onClick={onImport}>
-          Import team file
+          <Upload className="h-4 w-4" />
+          Import team snapshot
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

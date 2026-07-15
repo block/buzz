@@ -152,7 +152,7 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     // preflight and classifier to this loop.
     if let Some(cli) = runtime.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
-            for cmd in runtime.cli_install_commands {
+            for cmd in runtime.cli_install_commands_for_os() {
                 let result = run_install_command("cli", cmd);
                 let success = result.success;
                 steps.push(result);
@@ -541,14 +541,14 @@ fn persist_last_error_on_install(
 /// the shell selection and environment cleanup shared by `run_install_command`
 /// and `resolve_npm_prefix` — keeping them in sync so the hermit-strip list
 /// can't drift between the two paths.
-fn install_shell_command(command: &str) -> std::process::Command {
-    let shell = if std::path::Path::new("/bin/zsh").exists() {
-        "/bin/zsh"
-    } else {
-        "/bin/bash"
-    };
+///
+/// On Windows, resolves Git Bash via `resolve_bash_path` (skips `BUZZ_SHELL`
+/// since install commands require bash syntax). Returns `Err` when no shell
+/// can be found.
+fn install_shell_command(command: &str) -> Result<std::process::Command, String> {
+    let shell: std::path::PathBuf = resolve_install_shell()?;
 
-    let mut cmd = std::process::Command::new(shell);
+    let mut cmd = std::process::Command::new(&shell);
     cmd.args(["-l", "-c", command]);
 
     // Strip hermit env vars so npm/node use the user's normal registry and
@@ -575,11 +575,62 @@ fn install_shell_command(command: &str) -> std::process::Command {
         }
     }
 
-    cmd
+    // Suppress the console window on Windows.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    Ok(cmd)
+}
+
+/// Resolve the shell binary for install commands.
+///
+/// Unix: `/bin/zsh` if present, else `/bin/bash`.
+/// Windows: Git Bash via `resolve_bash_path` — skips `BUZZ_SHELL` because install
+/// commands use bash-only `-l -c` syntax. A `BUZZ_SHELL=pwsh` user gets a green
+/// Doctor prereq (their agents work) but installs use the Git Bash fallback chain.
+fn resolve_install_shell() -> Result<std::path::PathBuf, String> {
+    #[cfg(not(windows))]
+    {
+        if std::path::Path::new("/bin/zsh").exists() {
+            return Ok(std::path::PathBuf::from("/bin/zsh"));
+        }
+        Ok(std::path::PathBuf::from("/bin/bash"))
+    }
+
+    #[cfg(windows)]
+    {
+        install_shell_from(crate::managed_agents::git_bash::resolve_bash_path())
+    }
+}
+
+/// Pure mapping from a resolved bash path to the install-shell result.
+/// `None` → `Err(GIT_BASH_INSTALL_HINT)`, `Some(path)` → `Ok(path)`.
+#[cfg(windows)]
+pub(crate) fn install_shell_from(
+    resolved: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, String> {
+    resolved.ok_or_else(|| crate::managed_agents::git_bash::GIT_BASH_INSTALL_HINT.to_string())
 }
 
 fn run_install_command(step: &str, command: &str) -> InstallStepResult {
-    let mut cmd = install_shell_command(command);
+    let mut cmd = match install_shell_command(command) {
+        Ok(cmd) => cmd,
+        Err(hint) => {
+            return InstallStepResult {
+                step: step.to_string(),
+                command: command.to_string(),
+                success: false,
+                stdout: String::new(),
+                stderr: "no suitable shell found for install commands".to_string(),
+                exit_code: None,
+                hint: Some(hint),
+            };
+        }
+    };
 
     let mut child = match cmd
         .stdin(std::process::Stdio::null())
@@ -640,6 +691,10 @@ fn run_install_command(step: &str, command: &str) -> InstallStepResult {
             #[cfg(unix)]
             unsafe {
                 libc::kill(child_pid as i32, libc::SIGTERM);
+            }
+            #[cfg(windows)]
+            {
+                let _ = crate::managed_agents::taskkill_tree(child_pid);
             }
             drop(rx);
             let _ = wait_thread.join();
@@ -776,7 +831,10 @@ enum NpmPrefix {
 /// `npm prefix -g` to discover where npm would install global packages.
 #[cfg(unix)]
 fn resolve_npm_prefix() -> NpmPrefix {
-    let mut cmd = install_shell_command("npm prefix -g");
+    let mut cmd = match install_shell_command("npm prefix -g") {
+        Ok(cmd) => cmd,
+        Err(_) => return NpmPrefix::Unavailable,
+    };
     let mut child = match cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1343,4 +1401,122 @@ mod tests {
             "non-codex agent (None stamp) must never trigger drift badge"
         );
     }
+
+    // ── Phase A: install shell selection ─────────────────────────────────────
+
+    /// On Unix, resolve_install_shell always succeeds (returns zsh or bash).
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_install_shell_succeeds_on_unix() {
+        let result = super::resolve_install_shell();
+        assert!(result.is_ok(), "Unix must always resolve a shell");
+        let shell = result.unwrap();
+        assert!(
+            shell == std::path::Path::new("/bin/zsh") || shell == std::path::Path::new("/bin/bash"),
+            "expected /bin/zsh or /bin/bash, got {shell:?}"
+        );
+    }
+
+    /// install_shell_command returns a valid Command on Unix.
+    #[cfg(unix)]
+    #[test]
+    fn test_install_shell_command_returns_ok_on_unix() {
+        let result = super::install_shell_command("echo test");
+        assert!(result.is_ok(), "install_shell_command must succeed on Unix");
+    }
+
+    // ── Phase A: Windows install shell selection ───────────────────────────────
+
+    /// On Windows (CI runner has Git pre-installed), resolve_install_shell succeeds.
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_install_shell_succeeds_on_windows_with_git() {
+        let result = super::resolve_install_shell();
+        assert!(
+            result.is_ok(),
+            "Windows CI runner has Git — resolve_install_shell must succeed; got: {:?}",
+            result.err()
+        );
+        let shell = result.unwrap();
+        // The resolved path must end with bash.exe (Git Bash).
+        let fname = shell.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert!(
+            fname.eq_ignore_ascii_case("bash.exe"),
+            "Windows install shell must be bash.exe, got: {shell:?}"
+        );
+    }
+
+    /// On Windows, when no Git Bash is found, the error carries the Doctor hint.
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_install_shell_error_contains_doctor_hint() {
+        // We can't force resolve_install_shell to fail on CI (Git is installed),
+        // but we can verify the error string it would use matches the hint.
+        let hint = crate::managed_agents::git_bash::GIT_BASH_INSTALL_HINT;
+        assert!(
+            hint.contains("Git for Windows"),
+            "GIT_BASH_INSTALL_HINT must mention Git for Windows; got: {hint}"
+        );
+        assert!(
+            hint.contains("PATH"),
+            "GIT_BASH_INSTALL_HINT must mention PATH option; got: {hint}"
+        );
+    }
+
+    /// install_shell_command returns a valid Command on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn test_install_shell_command_returns_ok_on_windows() {
+        let result = super::install_shell_command("echo test");
+        assert!(
+            result.is_ok(),
+            "install_shell_command must succeed on Windows with Git; got: {:?}",
+            result.err()
+        );
+    }
+
+    // ── Phase B: per-OS install commands ──────────────────────────────────────
+
+    /// On non-Windows, cli_install_commands_for_os returns the default commands.
+    #[cfg(not(windows))]
+    #[test]
+    fn test_cli_install_commands_for_os_returns_default_on_unix() {
+        let claude = crate::managed_agents::known_acp_runtime_exact("claude").unwrap();
+        assert_eq!(
+            claude.cli_install_commands_for_os(),
+            claude.cli_install_commands,
+            "on Unix, cli_install_commands_for_os must return the default install.sh commands"
+        );
+    }
+
+    /// Goose install commands are the same on all platforms (script is Windows-aware).
+    #[test]
+    fn test_goose_install_commands_same_on_all_platforms() {
+        let goose = crate::managed_agents::known_acp_runtime_exact("goose").unwrap();
+        assert_eq!(
+            goose.cli_install_commands_for_os(),
+            goose.cli_install_commands,
+            "goose install commands must be identical across platforms"
+        );
+    }
+
+    /// buzz-agent has no install commands on any platform.
+    #[test]
+    fn test_buzz_agent_has_no_install_commands() {
+        let buzz = crate::managed_agents::known_acp_runtime_exact("buzz-agent").unwrap();
+        assert!(
+            buzz.cli_install_commands_for_os().is_empty(),
+            "buzz-agent ships with the app — must never have install commands"
+        );
+    }
+}
+
+/// Returns the Windows-only Git Bash prerequisite used by buzz-agent's shell MCP.
+/// `None` on other platforms keeps the shared Doctor surfaces platform-neutral.
+#[tauri::command]
+pub async fn discover_git_bash_prerequisite(
+) -> Result<Option<crate::managed_agents::GitBashPrerequisite>, String> {
+    tokio::task::spawn_blocking(crate::managed_agents::discover_git_bash)
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))
 }

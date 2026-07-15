@@ -13,6 +13,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   useAcpRuntimesQuery,
   useInstallAcpRuntimeMutation,
+  useGitBashPrerequisiteQuery,
 } from "@/features/agents/hooks";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import type { AcpRuntimeCatalogEntry, AuthStatus } from "@/shared/api/types";
@@ -293,7 +294,7 @@ function RuntimeRow({
                 codex-acp
               </code>{" "}
               adapter. Older Buzz releases using the legacy adapter contract may
-              lose relay access until{" "}
+              lose community access until{" "}
               <code className="rounded bg-muted px-1 py-0.5 text-2xs">
                 @zed-industries/codex-acp@0.16.0
               </code>{" "}
@@ -360,8 +361,56 @@ function RuntimeRow({
   );
 }
 
+function GitBashRow({
+  prerequisite,
+}: {
+  prerequisite: NonNullable<
+    ReturnType<typeof useGitBashPrerequisiteQuery>["data"]
+  >;
+}) {
+  return (
+    <div
+      className="flex min-h-16 items-start gap-3 bg-amber-500/5 px-4 py-3 text-sm"
+      data-testid="doctor-git-bash"
+    >
+      <div className="mt-0.5 shrink-0">
+        {prerequisite.available ? (
+          <CheckCircle2 className="h-4 w-4 text-status-added" />
+        ) : (
+          <AlertTriangle className="h-4 w-4 text-warning" />
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium">Git Bash</p>
+        {prerequisite.available ? (
+          <p className="mt-1 break-all font-mono text-2xs text-muted-foreground/80">
+            {prerequisite.path}
+          </p>
+        ) : (
+          <>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Required for buzz-agent shell tools on Windows.
+            </p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {prerequisite.installHint}
+            </p>
+            <button
+              className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+              onClick={() => void openUrl(prerequisite.installInstructionsUrl)}
+              type="button"
+            >
+              <ExternalLink className="h-4 w-4" /> Install Git for Windows
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function DoctorSettingsPanel() {
   const runtimesQuery = useAcpRuntimesQuery();
+  const gitBashQuery = useGitBashPrerequisiteQuery();
   const runtimes = runtimesQuery.data ?? [];
   const isRefreshing = runtimesQuery.isFetching;
   const installMutation = useInstallAcpRuntimeMutation();
@@ -429,6 +478,7 @@ export function DoctorSettingsPanel() {
             onClick={() => {
               setInstallResults({});
               void runtimesQuery.refetch();
+              void gitBashQuery.refetch();
             }}
             size="sm"
             type="button"
@@ -444,6 +494,17 @@ export function DoctorSettingsPanel() {
 
       <div className="space-y-5">
         <SettingsOptionGroup>
+          {gitBashQuery.data ? (
+            <>
+              <div className="px-4 py-3 text-sm">
+                <h3 className="text-sm font-medium">System prerequisites</h3>
+                <p className="mt-1 text-sm font-normal text-muted-foreground">
+                  Windows tools required by supported agents.
+                </p>
+              </div>
+              <GitBashRow prerequisite={gitBashQuery.data} />
+            </>
+          ) : null}
           <div className="px-4 py-3 text-sm">
             <h3 className="text-sm font-medium">Agent CLIs and ACP runtimes</h3>
             <p className="mt-1 text-sm font-normal text-muted-foreground">

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { eventToProjectPullRequest } from "./projectPullRequests.mjs";
+import {
+  eventToProjectPullRequest,
+  nextProjectPullRequestStatusCreatedAt,
+} from "./projectPullRequests.mjs";
 
 const OWNER = "a".repeat(64);
 const AUTHOR = "b".repeat(64);
@@ -186,6 +189,15 @@ test("draft/ready toggles via status kinds 1633 and 1630", () => {
     [draft],
   );
   assert.equal(draftPullRequest.status, "Draft");
+  assert.equal(draftPullRequest.statusCreatedAt, 300);
+  assert.equal(
+    nextProjectPullRequestStatusCreatedAt(draftPullRequest, 300),
+    301,
+  );
+  assert.equal(
+    nextProjectPullRequestStatusCreatedAt(draftPullRequest, 400),
+    400,
+  );
 
   const reopened = statusEvent({ kind: 1630, pubkey: AUTHOR, createdAt: 400 });
   const openPullRequest = eventToProjectPullRequest(

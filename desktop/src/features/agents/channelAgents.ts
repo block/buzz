@@ -58,6 +58,8 @@ export type CreateChannelManagedAgentInput = {
   systemPrompt?: string;
   avatarUrl?: string;
   personaId?: string | null;
+  /** Team this instance is deployed from; prevents cross-team reuse. */
+  teamId?: string | null;
   /**
    * True when `runtime` is a runtime the user deliberately picked to override
    * the persona (a deploy-dialog runtime selector), as opposed to a
@@ -83,6 +85,12 @@ export type CreateChannelManagedAgentResult =
     created: boolean;
     runtimeId: string;
   };
+
+export type ProvisionChannelManagedAgentResult = {
+  agent: ManagedAgent;
+  created: boolean;
+  runtimeId: string;
+};
 
 export type CreateChannelManagedAgentBatchFailure = {
   kind: "generic" | "persona";
@@ -238,16 +246,13 @@ export async function ensureChannelAgentPresetInChannel(
   };
 }
 
-export async function createChannelManagedAgent(
-  channelId: string,
+export async function provisionChannelManagedAgent(
   input: CreateChannelManagedAgentInput,
   context?: {
     managedAgents?: ManagedAgent[];
     channelMemberPubkeys?: ReadonlySet<string>;
   },
-): Promise<CreateChannelManagedAgentResult> {
-  const role = input.role ?? "bot";
-  const ensureRunning = input.ensureRunning ?? true;
+): Promise<ProvisionChannelManagedAgentResult> {
   const trimmedName = input.name.trim();
 
   if (trimmedName.length === 0) {
@@ -285,13 +290,8 @@ export async function createChannelManagedAgent(
           ).agent
         : reusable;
 
-      const attached = await attachManagedAgentToChannel(channelId, {
-        agent: updatedAgent,
-        role,
-        ensureRunning,
-      });
       return {
-        ...attached,
+        agent: updatedAgent,
         created: false,
         runtimeId: input.runtime.id,
       };
@@ -328,13 +328,8 @@ export async function createChannelManagedAgent(
           ).agent
         : reusable;
 
-      const attached = await attachManagedAgentToChannel(channelId, {
-        agent: updatedAgent,
-        role,
-        ensureRunning,
-      });
       return {
-        ...attached,
+        agent: updatedAgent,
         created: false,
         runtimeId: input.runtime.id,
       };
@@ -358,6 +353,7 @@ export async function createChannelManagedAgent(
     agentArgs: input.runtime.defaultArgs,
     mcpCommand: input.runtime.mcpCommand ?? "",
     personaId: input.personaId ?? undefined,
+    teamId: input.teamId ?? undefined,
     systemPrompt: input.systemPrompt?.trim() || undefined,
     avatarUrl: resolvedAvatarUrl,
     model: input.model?.trim() || undefined,
@@ -373,16 +369,32 @@ export async function createChannelManagedAgent(
     throw new Error(created.spawnError);
   }
 
-  const attached = await attachManagedAgentToChannel(channelId, {
+  return {
     agent: created.agent,
-    role,
-    ensureRunning,
+    created: true,
+    runtimeId: input.runtime.id,
+  };
+}
+
+export async function createChannelManagedAgent(
+  channelId: string,
+  input: CreateChannelManagedAgentInput,
+  context?: {
+    managedAgents?: ManagedAgent[];
+    channelMemberPubkeys?: ReadonlySet<string>;
+  },
+): Promise<CreateChannelManagedAgentResult> {
+  const provisioned = await provisionChannelManagedAgent(input, context);
+  const attached = await attachManagedAgentToChannel(channelId, {
+    agent: provisioned.agent,
+    role: input.role ?? "bot",
+    ensureRunning: input.ensureRunning ?? true,
   });
 
   return {
     ...attached,
-    created: true,
-    runtimeId: input.runtime.id,
+    created: provisioned.created,
+    runtimeId: provisioned.runtimeId,
   };
 }
 

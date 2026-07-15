@@ -117,6 +117,31 @@ test("locked boot shows the keyring-locked screen without the onboarding gate or
   ).toHaveCount(0);
 });
 
+test("locked boot can re-import a key and requires relaunch", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { identityLocked: true },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await expect(page.getByTestId("keyring-locked")).toBeVisible();
+  page.on("dialog", (dialog) => dialog.accept());
+  await page
+    .getByRole("button", { name: "Re-import your key instead" })
+    .click();
+
+  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
+  await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
+  await expect(page.getByTestId("nostr-import-npub-preview")).toBeVisible();
+  await page.getByTestId("nostr-import-submit").click();
+
+  await expect(page.getByTestId("relaunch-required")).toBeVisible();
+  await expect(page.getByTestId("keyring-locked")).toHaveCount(0);
+});
+
 test("locked screen relaunch button records the process-restart invoke", async ({
   page,
 }) => {

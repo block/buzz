@@ -54,6 +54,8 @@ type MockManagedAgentSeed = {
     | { type: "provider"; id: string; config: Record<string, unknown> };
   lastError?: string | null;
   lastErrorCode?: number | null;
+  needsRestart?: boolean;
+  autoRestartOnConfigChange?: boolean;
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
 };
@@ -152,15 +154,24 @@ type MockBridgeOptions = {
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
   addChannelMembersDelayMs?: number;
+  channelMembersReadDelayMs?: number;
   channelsReadError?: string;
+  /** Reject successive mock `create_channel` calls, then resume. */
+  createChannelErrors?: string[];
+  /** Reject successive mock `join_channel` calls, then resume. */
+  joinChannelErrors?: string[];
   /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
   deepHistoryMessageCount?: number;
   feedReadError?: string;
   canvasReadError?: string;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
-  applyWorkspaceDelayMs?: number;
+  applyCommunityDelayMs?: number;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Reject successive kind-9 sends with these messages, then resume. */
+  sendMessageErrors?: string[];
+  /** Reject successive managed-agent starts, then resume. */
+  startManagedAgentErrors?: string[];
   /** Delay (ms) after snapshotting a thread-replies page so E2E tests can
    * deliver live reply/aux events while an older response is in flight. */
   threadRepliesDelayMs?: number;
@@ -219,6 +230,18 @@ type MockBridgeOptions = {
    *  fail-closed race: DMs are withheld while classification is unresolved. */
   relaySelfDelayMs?: number;
   /**
+   * Sequenced results for `confirm_team_snapshot_import`. String = throw
+   * with that message; null = succeed. Call N uses results[N]; last entry
+   * repeats when exhausted. Follows the `nsecErrors` precedent.
+   */
+  teamSnapshotConfirmErrors?: (string | null)[];
+  /**
+   * When true, `preview_team_snapshot_import` returns a preview with
+   * `hasSourceAllowlist: true` so the allowlist section renders in the
+   * import dialog.
+   */
+  teamSnapshotPreviewHasSourceAllowlist?: boolean;
+  /**
    * When set to a non-empty string, `fetch_snapshot_bytes` throws with this
    * message — lets specs prove malformed/hash/size-mismatch error paths.
    */
@@ -272,6 +295,11 @@ type MockBridgeOptions = {
     provider: string | null;
     model: string | null;
   };
+  bakedBuildEnv?: Array<{
+    key: string;
+    masked: boolean;
+    value: string;
+  }>;
   /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
    *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
   setGlobalAgentConfigDelayMs?: number;
@@ -311,7 +339,7 @@ type BridgeOptions = {
   relayHttpUrl?: string;
   relayWsUrl?: string;
   skipOnboardingSeed?: boolean;
-  skipWorkspaceSeed?: boolean;
+  skipCommunitySeed?: boolean;
   /**
    * When true (default), seed every preview feature in preview-features.json as
    * enabled in localStorage so E2E tests can interact with gated UI without
@@ -470,21 +498,21 @@ async function seedOnboardingCompletionForKnownIdentities(
   );
 }
 
-async function seedDefaultWorkspace(page: Page, relayWsUrl?: string) {
+async function seedDefaultCommunity(page: Page, relayWsUrl?: string) {
   await page.addInitScript(
     ({ relayUrl }) => {
-      const workspaceId = "e2e-default-workspace";
-      const workspace = {
-        id: workspaceId,
+      const communityId = "e2e-default-community";
+      const community = {
+        id: communityId,
         name: "E2E Test",
         relayUrl,
         addedAt: new Date().toISOString(),
       };
       window.localStorage.setItem(
-        "buzz-workspaces",
-        JSON.stringify([workspace]),
+        "buzz-communities",
+        JSON.stringify([community]),
       );
-      window.localStorage.setItem("buzz-active-workspace-id", workspaceId);
+      window.localStorage.setItem("buzz-active-community-id", communityId);
     },
     { relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL },
   );
@@ -507,10 +535,10 @@ export async function installBridge(page: Page, options: BridgeOptions) {
       ? TEST_IDENTITIES[options.user ?? "tyler"]
       : undefined;
 
-  // Most specs seed a workspace so useWorkspaceInit doesn't show WelcomeSetup.
+  // Most specs seed a community so useCommunityInit doesn't show WelcomeSetup.
   // skipOnboardingSeed only controls the onboarding-completion flag.
-  if (!options.skipWorkspaceSeed) {
-    await seedDefaultWorkspace(page, options.relayWsUrl);
+  if (!options.skipCommunitySeed) {
+    await seedDefaultCommunity(page, options.relayWsUrl);
   }
   if (!options.skipOnboardingSeed) {
     await seedOnboardingCompletionForKnownIdentities(page, options.relayWsUrl);
@@ -611,7 +639,7 @@ export async function installMockBridge(
   options?: {
     relayWsUrl?: string;
     skipOnboardingSeed?: boolean;
-    skipWorkspaceSeed?: boolean;
+    skipCommunitySeed?: boolean;
     seedPreviewFeatures?: boolean;
   },
 ) {
@@ -620,7 +648,7 @@ export async function installMockBridge(
     mock,
     relayWsUrl: options?.relayWsUrl,
     skipOnboardingSeed: options?.skipOnboardingSeed,
-    skipWorkspaceSeed: options?.skipWorkspaceSeed,
+    skipCommunitySeed: options?.skipCommunitySeed,
     seedPreviewFeatures: options?.seedPreviewFeatures,
   });
 }
@@ -677,7 +705,8 @@ export async function openCreateChannelDialog(page: Page) {
   await page.getByRole("menuitem", { name: "New channel" }).click();
 }
 
-export async function openNewDirectMessageDialog(page: Page) {
+export async function openNewMessagePage(page: Page) {
   await openSectionMenu(page, "section-actions-dms");
   await page.getByRole("menuitem", { name: "New message" }).click();
+  await page.getByTestId("new-message-page").waitFor({ state: "visible" });
 }

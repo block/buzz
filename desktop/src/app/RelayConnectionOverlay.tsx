@@ -11,7 +11,7 @@ import { useSidebar } from "@/shared/ui/sidebar";
 type RelayConnectionOverlayProps = {
   card: ReturnType<typeof useSidebarRelayConnectionCard>;
   errorMessage?: string;
-  hasWorkspaceRail?: boolean;
+  hasCommunityRail?: boolean;
   isHuddleDrawerOpen?: boolean;
 };
 
@@ -19,7 +19,7 @@ type RelayConnectionOverlayProps = {
  * Fixed bottom-left overlay that shows the relay reconnect card when the
  * sidebar is collapsed. When the sidebar is open, the card lives in the
  * sidebar footer instead (and this overlay is hidden). Offsets itself for
- * the workspace rail (48px) and huddle drawer when present.
+ * the community rail (48px) and huddle drawer when present.
  *
  * Also surfaces non-unreachable disconnect errors (e.g. auth rejections)
  * when the sidebar is hidden, since those errors are only rendered inside
@@ -28,7 +28,7 @@ type RelayConnectionOverlayProps = {
 export function RelayConnectionOverlay({
   card,
   errorMessage,
-  hasWorkspaceRail,
+  hasCommunityRail,
   isHuddleDrawerOpen,
 }: RelayConnectionOverlayProps) {
   const { open: sidebarOpen, openMobile } = useSidebar();
@@ -60,7 +60,7 @@ export function RelayConnectionOverlay({
           animate={{ opacity: 1, y: 0 }}
           className={cn(
             "pointer-events-none fixed z-50 w-[284px]",
-            hasWorkspaceRail ? "left-[60px]" : "left-3",
+            hasCommunityRail ? "left-[60px]" : "left-3",
             isHuddleDrawerOpen
               ? "bottom-[calc(var(--buzz-huddle-drawer-height,0px)+12px)]"
               : "bottom-3",
@@ -86,7 +86,7 @@ export function RelayConnectionOverlay({
           animate={{ opacity: 1, y: 0 }}
           className={cn(
             "pointer-events-none fixed z-50 w-[284px]",
-            hasWorkspaceRail ? "left-[60px]" : "left-3",
+            hasCommunityRail ? "left-[60px]" : "left-3",
             isHuddleDrawerOpen
               ? "bottom-[calc(var(--buzz-huddle-drawer-height,0px)+12px)]"
               : "bottom-3",

@@ -12,6 +12,7 @@ import {
 import {
   useAcpRuntimesQuery,
   useInstallAcpRuntimeMutation,
+  useGitBashPrerequisiteQuery,
 } from "@/features/agents/hooks";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import {
@@ -362,7 +363,7 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
           This updates the machine-global{" "}
           <code className="rounded bg-muted px-0.5 text-2xs">codex-acp</code>{" "}
           adapter. Older Buzz releases using the legacy adapter contract may
-          lose relay access until{" "}
+          lose community access until{" "}
           <code className="rounded bg-muted px-0.5 text-2xs">
             @zed-industries/codex-acp@0.16.0
           </code>{" "}
@@ -470,6 +471,64 @@ function RuntimeCard({
   );
 }
 
+function GitBashPrerequisiteCard() {
+  const query = useGitBashPrerequisiteQuery();
+  const prerequisite = query.data;
+  if (!prerequisite) return null;
+
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-3 text-left sm:p-4",
+        prerequisite.available
+          ? "border-primary/25 bg-primary/[0.055]"
+          : "border-amber-500/30 bg-amber-500/5",
+      )}
+      data-testid="onboarding-git-bash"
+    >
+      <div className="flex items-center gap-2">
+        {prerequisite.available ? (
+          <Check className="h-4 w-4 text-primary" />
+        ) : (
+          <AlertTriangle className="h-4 w-4 text-warning" />
+        )}
+        <h2 className="text-base font-medium">Git Bash</h2>
+        {prerequisite.available ? (
+          <Badge
+            className="border border-primary/20 bg-primary/10 text-primary"
+            variant="outline"
+          >
+            Installed
+          </Badge>
+        ) : null}
+      </div>
+      {prerequisite.available ? (
+        <p className="mt-2 break-all font-mono text-xs text-muted-foreground">
+          {prerequisite.path}
+        </p>
+      ) : (
+        <>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Required for buzz-agent shell tools on Windows.
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground/80">
+            {prerequisite.installHint}
+          </p>
+          <Button
+            className="mt-3"
+            onClick={() => void openUrl(prerequisite.installInstructionsUrl)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <ExternalLink className="h-4 w-4" /> Install Git for Windows
+          </Button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function RuntimeProvidersSection({
   runtimeProviders,
 }: {
@@ -521,6 +580,8 @@ function RuntimeProvidersSection({
           </p>
         </div>
       </div>
+
+      <GitBashPrerequisiteCard />
 
       {items.length > 0 ? (
         <div className="grid gap-3 lg:grid-cols-2">

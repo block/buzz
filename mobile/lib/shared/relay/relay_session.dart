@@ -294,6 +294,17 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   @visibleForTesting
   void debugPauseNow() => _pauseNow();
 
+  @visibleForTesting
+  void debugHandleSocketMessageForTest(List<dynamic> data) =>
+      _handleMessage(data);
+
+  @visibleForTesting
+  void debugAttachSocketForTest(RelaySocket socket) {
+    _socket?.dispose();
+    _socket = socket;
+    state = const SessionState(status: SessionStatus.connected);
+  }
+
   /// Force a reconnect (e.g., returning from background).
   Future<void> reconnect() async {
     await _socket?.disconnect();

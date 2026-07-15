@@ -2,11 +2,30 @@
 //! `reader.rs` stays under the 1000-line budget; `#[path]`-included from
 //! there).
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path, sync::Mutex};
 
 use super::*;
 use crate::managed_agents::discovery::KnownAcpRuntime;
 use crate::managed_agents::types::ManagedAgentRecord;
+
+static GOOSE_PATH_ROOT_LOCK: Mutex<()> = Mutex::new(());
+
+fn with_goose_path_root<T>(value: Option<&str>, body: impl FnOnce() -> T) -> T {
+    let _guard = GOOSE_PATH_ROOT_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let prior = std::env::var_os("GOOSE_PATH_ROOT");
+    match value {
+        Some(value) => std::env::set_var("GOOSE_PATH_ROOT", value),
+        None => std::env::remove_var("GOOSE_PATH_ROOT"),
+    }
+    let output = body();
+    match prior {
+        Some(value) => std::env::set_var("GOOSE_PATH_ROOT", value),
+        None => std::env::remove_var("GOOSE_PATH_ROOT"),
+    }
+    output
+}
 
 fn test_runtime() -> &'static KnownAcpRuntime {
     &KnownAcpRuntime {
@@ -19,6 +38,7 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         mcp_hooks: false,
         underlying_cli: None,
         cli_install_commands: &[],
+        cli_install_commands_windows: &[],
         adapter_install_commands: &[],
         install_instructions_url: "",
         cli_install_hint: "",
@@ -67,6 +87,7 @@ fn test_record() -> ManagedAgentRecord {
         backend: crate::managed_agents::types::BackendKind::Local,
         backend_agent_id: None,
         provider_binary_path: None,
+        team_id: None,
         persona_team_dir: None,
         persona_name_in_team: None,
         created_at: "".to_string(),
@@ -109,6 +130,68 @@ fn pre_spawn_surface_reports_pending_acp_tiers() {
         ConfigTierStatus::Pending
     );
     assert_eq!(surface.sources.env_vars, ConfigTierStatus::Available);
+}
+
+#[test]
+fn surface_reports_mcp_specific_config_path() {
+    let record = test_record();
+    let runtime = test_runtime();
+    let surface = with_goose_path_root(None, || {
+        read_config_surface(&record, Some(runtime), None, None)
+    });
+
+    let path = surface
+        .sources
+        .mcp_config_file_path
+        .expect("mcp config path");
+    let expected_suffix = Path::new(".config").join("goose").join("config.yaml");
+    assert!(
+        Path::new(&path).ends_with(&expected_suffix),
+        "unexpected MCP config path: {path}"
+    );
+}
+
+#[test]
+fn goose_mcp_config_path_follows_path_root_override() {
+    let record = test_record();
+    let runtime = test_runtime();
+    let surface = with_goose_path_root(Some("/tmp/buzz-goose-root"), || {
+        read_config_surface(&record, Some(runtime), None, None)
+    });
+
+    let expected_path = Path::new("/tmp/buzz-goose-root")
+        .join("config")
+        .join("config.yaml");
+    assert_eq!(
+        surface
+            .sources
+            .mcp_config_file_path
+            .as_deref()
+            .map(Path::new),
+        Some(expected_path.as_path())
+    );
+}
+
+#[test]
+fn claude_surface_uses_mcp_config_path_not_settings_path() {
+    let record = test_record();
+    let runtime = &KnownAcpRuntime {
+        id: "claude",
+        config_file_path: Some("~/.claude/settings.json"),
+        ..*test_runtime()
+    };
+    let surface = read_config_surface(&record, Some(runtime), None, None);
+
+    assert!(surface
+        .sources
+        .config_file_path
+        .as_deref()
+        .is_some_and(|path| path.ends_with(".claude/settings.json")));
+    assert!(surface
+        .sources
+        .mcp_config_file_path
+        .as_deref()
+        .is_some_and(|path| path.ends_with(".claude.json")));
 }
 
 #[test]
@@ -530,6 +613,7 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         mcp_hooks: false,
         underlying_cli: None,
         cli_install_commands: &[],
+        cli_install_commands_windows: &[],
         adapter_install_commands: &[],
         install_instructions_url: "",
         cli_install_hint: "",
