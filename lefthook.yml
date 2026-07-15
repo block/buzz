@@ -21,10 +21,10 @@ pre-push:
   parallel: true
   commands:
     rust-tests:
-      run: just test-unit
+      run: bin/just test-unit
     desktop-test:
-      run: just desktop-test
+      run: bin/just desktop-test
     desktop-tauri-test:
-      run: just desktop-tauri-test
+      run: bin/just desktop-tauri-test
     mobile-test:
-      run: just mobile-test
+      run: bin/just mobile-test
