@@ -233,6 +233,54 @@ fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
         .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
 }
 
+fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| ConfigError::InvalidValue(format!("{name} must be a positive integer"))),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidValue(format!(
+            "{name} must be valid Unicode"
+        ))),
+    }
+}
+
+fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigError> {
+    let defaults = buzz_auth::RateLimitConfig::default();
+    Ok(buzz_auth::RateLimitConfig {
+        human_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN",
+            defaults.human_messages_per_min,
+        )?,
+        human_api_calls_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN",
+            defaults.human_api_calls_per_min,
+        )?,
+        human_ws_events_per_sec: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC",
+            defaults.human_ws_events_per_sec,
+        )?,
+        agent_standard_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN",
+            defaults.agent_standard_messages_per_min,
+        )?,
+        agent_standard_api_calls_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_STANDARD_API_CALLS_PER_MIN",
+            defaults.agent_standard_api_calls_per_min,
+        )?,
+        agent_elevated_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_ELEVATED_MESSAGES_PER_MIN",
+            defaults.agent_elevated_messages_per_min,
+        )?,
+        agent_platform_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_PLATFORM_MESSAGES_PER_MIN",
+            defaults.agent_platform_messages_per_min,
+        )?,
+    })
+}
+
 fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
     let raw = raw.trim();
     let url = url::Url::parse(raw).map_err(|e| {
@@ -477,7 +525,9 @@ impl Config {
             ));
         }
 
-        let auth = buzz_auth::AuthConfig::default();
+        let auth = buzz_auth::AuthConfig {
+            rate_limits: rate_limit_config_from_env()?,
+        };
 
         if !require_auth_token {
             warn!(
@@ -839,6 +889,37 @@ mod tests {
             result,
             Err(ConfigError::InvalidValue(ref message))
                 if message.contains("BUZZ_AGE_ATTESTATION_REQUIRED")
+        ));
+    }
+
+    #[test]
+    fn rate_limits_can_be_overridden() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN", "1001");
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN", "1002");
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "1003");
+
+        let config = Config::from_env().expect("config");
+
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN");
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN");
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
+        assert_eq!(config.auth.rate_limits.human_messages_per_min, 1001);
+        assert_eq!(config.auth.rate_limits.human_api_calls_per_min, 1002);
+        assert_eq!(config.auth.rate_limits.human_ws_events_per_sec, 1003);
+    }
+
+    #[test]
+    fn rate_limit_overrides_reject_zero() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "0");
+        let result = Config::from_env();
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC")
         ));
     }
 

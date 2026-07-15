@@ -2,6 +2,12 @@ use buzz_auth::{LimitType, RateLimiter};
 use buzz_core::TenantContext;
 use nostr::PublicKey;
 
+// Desktop startup establishes several independent live subscriptions at once.
+// Preserve the configured average rate while allowing that bounded burst. This
+// is still a fixed-window limiter, so a Redis-backed token bucket would be a
+// better long-term fit for smoother refill behavior.
+const WS_BURST_WINDOW_SECS: u64 = 5;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdmissionError {
     Exceeded { reset_in_secs: u64 },
@@ -29,6 +35,13 @@ pub(crate) async fn check_principal<L: RateLimiter>(
             Err(AdmissionError::Unavailable)
         }
     }
+}
+
+pub(crate) fn ws_admission_budget(per_second_limit: u64) -> (u64, u64) {
+    (
+        WS_BURST_WINDOW_SECS,
+        per_second_limit.saturating_mul(WS_BURST_WINDOW_SECS),
+    )
 }
 
 #[cfg(test)]
@@ -87,6 +100,16 @@ mod tests {
             CommunityId::from_uuid(Uuid::from_u128(1)),
             "relay.example.com",
         )
+    }
+
+    #[test]
+    fn websocket_budget_preserves_rate_with_a_bounded_burst() {
+        assert_eq!(ws_admission_budget(10), (5, 50));
+    }
+
+    #[test]
+    fn websocket_budget_saturates_on_overflow() {
+        assert_eq!(ws_admission_budget(u64::MAX), (5, u64::MAX));
     }
 
     #[tokio::test]

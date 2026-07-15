@@ -602,13 +602,15 @@ async fn enforce_ws_admission(
     };
 
     let limits = &state.auth.config().rate_limits;
+    let (ws_window_secs, ws_limit) =
+        crate::admission::ws_admission_budget(limits.human_ws_events_per_sec);
     let ws_result = crate::admission::check_principal(
         state.admission_rate_limiter.as_ref(),
         &conn.tenant,
         &pubkey,
         LimitType::WsEvents,
-        1,
-        limits.human_ws_events_per_sec,
+        ws_window_secs,
+        ws_limit,
     )
     .await;
     if !send_admission_result(conn, ws_result) {
