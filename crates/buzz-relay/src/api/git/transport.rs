@@ -107,6 +107,10 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid base64").into_response())?;
         let event_json = String::from_utf8(event_bytes)
             .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid utf-8").into_response())?;
+        let signed_auth_created_at = serde_json::from_str::<nostr::Event>(&event_json)
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid NIP-98 event").into_response())?
+            .created_at
+            .as_secs();
 
         // Row zero for Git HTTP: bind the request Host to a server-resolved
         // tenant before URL verification. We still do not trust forwarded
@@ -206,6 +210,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             tenant.community(),
             pubkey.as_bytes(),
             auth_tag,
+            Some(signed_auth_created_at),
         )
         .await
         .is_err()

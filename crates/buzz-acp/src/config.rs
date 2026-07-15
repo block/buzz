@@ -70,8 +70,8 @@ pub enum MultipleEventHandling {
     /// the new events as a **steering message** — one that arrived while the
     /// agent was working, to be woven into the in-progress task rather than
     /// treated as a replacement. Fires for any author the inbound author gate
-    /// admits (owner ∪ allowlist ∪ siblings). This is the default mid-turn
-    /// delivery path. Requires DedupMode::Queue.
+    /// admits under the configured `respond-to` mode. This is the default
+    /// mid-turn delivery path. Requires DedupMode::Queue.
     Steer,
     /// Cancel the in-flight turn and re-dispatch a merged prompt combining
     /// the original events with the new ones, framed as a **supersede** (the
