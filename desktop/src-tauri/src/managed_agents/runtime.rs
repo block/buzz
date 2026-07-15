@@ -1465,6 +1465,56 @@ pub(crate) fn build_respond_to_env(
     Ok((set, remove))
 }
 
+/// Resource files that must exist under the bundled `shims/` resource
+/// directory for MCP toolchain shims (uv/uvx/npx/node). Mirrors
+/// `bundle.resources` in `tauri.conf.json` and `SHIMMED_COMMANDS` in
+/// `crates/buzz-agent/src/mcp.rs`.
+#[cfg(unix)]
+const SHIM_RESOURCE_FILES: &[&str] = &["setup-common.sh", "uv", "uvx", "npx", "node"];
+
+/// Validates that every file in `SHIM_RESOURCE_FILES` exists under `dir` as
+/// a regular, executable file, attempting a `chmod +x` fixup for a file
+/// that merely lost its execute bit. Returns the first actionable failure
+/// rather than proceeding — a caller that sets `BUZZ_MCP_SHIM_DIR` despite a
+/// broken resource would let `mcp.rs` silently fall through to hostile
+/// system `uv`/`npx` with no diagnostic.
+#[cfg(unix)]
+fn validate_shim_resources(dir: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    for name in SHIM_RESOURCE_FILES {
+        let path = dir.join(name);
+        let meta = std::fs::metadata(&path).map_err(|error| {
+            format!(
+                "MCP shim setup failed: resource `{name}` missing or unreadable at {}: {error}",
+                path.display()
+            )
+        })?;
+        if !meta.is_file() {
+            return Err(format!(
+                "MCP shim setup failed: resource `{name}` at {} is not a regular file",
+                path.display()
+            ));
+        }
+        if meta.permissions().mode() & 0o111 != 0 {
+            continue;
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(meta.permissions().mode() | 0o755)).map_err(|error| {
+            format!("MCP shim setup failed: resource `{name}` at {} is not executable and chmod failed: {error}", path.display())
+        })?;
+        let fixed_meta = std::fs::metadata(&path).map_err(|error| {
+            format!("MCP shim setup failed: resource `{name}` at {} became unreadable after chmod: {error}", path.display())
+        })?;
+        if fixed_meta.permissions().mode() & 0o111 == 0 {
+            return Err(format!(
+                "MCP shim setup failed: resource `{name}` at {} is still not executable after chmod attempt",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -1581,6 +1631,59 @@ pub fn spawn_agent_child(
             command.env("BUZZ_ACP_MCP_COMMAND", "");
         }
     }
+    // MCP toolchain shims: point buzz-agent at the bundled shim scripts so
+    // bare uv/uvx/npx/node commands resolve to hermit-managed, config-isolated
+    // toolchains. In a Tauri bundle, resources are in Contents/Resources/ (macOS)
+    // or alongside the binary (Linux). In dev mode, resolve from the source tree.
+    //
+    // Both `BUZZ_MCP_SHIM_DIR` and `BUZZ_MCP_HERMIT_DIR` are set only after
+    // validation succeeds — mcp.rs's resolver checks only file existence, so
+    // an unvalidated dir pointing at broken/non-executable resources would
+    // silently fall through to hostile system `uv`/`npx` (mcp.rs's
+    // resolve_shim_command falls back to the bare command when the shim path
+    // doesn't exist, and a non-executable shim fails opaquely at spawn time).
+    // A missing resource directory itself is not an error: it means this
+    // build wasn't packaged with shims (e.g. an old bundle), which is
+    // reported once via eprintln, not fatal to spawning the agent.
+    #[cfg(unix)]
+    {
+        use tauri::Manager;
+        let resource_shim_dir = app.path().resource_dir().ok().map(|d| d.join("shims"));
+        match resource_shim_dir {
+            Some(ref dir) if dir.is_dir() => {
+                validate_shim_resources(dir).map_err(|error| {
+                    format!("{error}. MCP servers that rely on uv/uvx/npx/node will not work.")
+                })?;
+                command.env("BUZZ_MCP_SHIM_DIR", dir);
+
+                let hermit_dir = app
+                    .path()
+                    .app_data_dir()
+                    .map_err(|error| {
+                        format!("MCP shim setup failed: could not resolve app data dir: {error}")
+                    })?
+                    .join("mcp-hermit");
+                std::fs::create_dir_all(&hermit_dir).map_err(|error| {
+                    format!(
+                        "MCP shim setup failed: could not create Hermit state dir at {}: {error}",
+                        hermit_dir.display()
+                    )
+                })?;
+                command.env("BUZZ_MCP_HERMIT_DIR", &hermit_dir);
+            }
+            _ => {
+                eprintln!(
+                    "buzz-desktop: no shims resource dir found — MCP servers will use bare uv/uvx/npx/node from PATH"
+                );
+            }
+        }
+    }
+    if let Some(log_dir) = dirs::data_local_dir().map(|d| d.join("xyz.block.buzz.app").join("logs"))
+    {
+        let _ = std::fs::create_dir_all(&log_dir);
+        command.env("BUZZ_MCP_LOG_DIR", &log_dir);
+    }
+
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(&effective_command);

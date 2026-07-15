@@ -61,6 +61,13 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",
     "BUZZ_AUTH_TAG",
+    // MCP toolchain shims — desktop sets these for hermit-managed shims.
+    // BUZZ_MCP_SHIM_DIR: read-only bundled shim scripts (resolver source)
+    // BUZZ_MCP_HERMIT_DIR: writable hermit state/cache directory
+    // BUZZ_MCP_LOG_DIR: shim log output directory
+    "BUZZ_MCP_SHIM_DIR",
+    "BUZZ_MCP_HERMIT_DIR",
+    "BUZZ_MCP_LOG_DIR",
 ];
 
 // Windows has no $TMPDIR/$HOME. TMP/TEMP/USERPROFILE are what
@@ -168,6 +175,23 @@ pub struct McpRegistry {
     hook_timeouts: std::sync::Mutex<HashMap<String, u32>>,
 }
 
+#[cfg(unix)]
+const SHIMMED_COMMANDS: &[&str] = &["uv", "uvx", "npx", "node"];
+
+#[cfg(unix)]
+fn resolve_shim_command(command: &str, shim_dir: Option<&std::path::Path>) -> String {
+    if !SHIMMED_COMMANDS.contains(&command) {
+        return command.to_owned();
+    }
+    if let Some(dir) = shim_dir {
+        let shim_path = dir.join(command);
+        if shim_path.exists() {
+            return shim_path.to_string_lossy().into_owned();
+        }
+    }
+    command.to_owned()
+}
+
 impl McpRegistry {
     pub async fn spawn_all(
         cfg: &Config,
@@ -192,6 +216,11 @@ impl McpRegistry {
             hook_timeouts: std::sync::Mutex::new(HashMap::new()),
         };
 
+        #[cfg(unix)]
+        let shim_dir = std::env::var("BUZZ_MCP_SHIM_DIR")
+            .ok()
+            .map(std::path::PathBuf::from);
+
         let mut seen_names = HashSet::new();
         for s in servers {
             if !valid_name(&s.name) || s.name.contains("__") {
@@ -203,9 +232,19 @@ impl McpRegistry {
                     s.name
                 )));
             }
+            let resolved_command = {
+                #[cfg(unix)]
+                {
+                    resolve_shim_command(&s.command, shim_dir.as_deref())
+                }
+                #[cfg(not(unix))]
+                {
+                    s.command.clone()
+                }
+            };
             let spec = ServerSpec {
                 name: s.name.clone(),
-                command: s.command.clone(),
+                command: resolved_command,
                 args: s.args.clone(),
                 env: s
                     .env
@@ -705,6 +744,28 @@ impl McpRegistry {
     }
 }
 
+#[cfg(unix)]
+fn build_child_env_with<F>(spec: &ServerSpec, lookup: F) -> Vec<(String, String)>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut env = Vec::new();
+    for k in PASSTHROUGH_ENV {
+        if let Some(v) = lookup(k) {
+            env.push((k.to_string(), v));
+        }
+    }
+    for (k, v) in &spec.env {
+        env.push((k.clone(), v.clone()));
+    }
+    env
+}
+
+#[cfg(unix)]
+fn build_child_env(spec: &ServerSpec) -> Vec<(String, String)> {
+    build_child_env_with(spec, |k| std::env::var(k).ok())
+}
+
 async fn spawn_one(
     spec: &ServerSpec,
     timeout: Duration,
@@ -712,19 +773,25 @@ async fn spawn_one(
     let mut cmd = Command::new(&spec.command);
     cmd.args(&spec.args);
     cmd.env_clear();
-    for k in PASSTHROUGH_ENV {
-        if let Ok(v) = std::env::var(k) {
-            cmd.env(k, v);
-        }
+    #[cfg(unix)]
+    for (k, v) in build_child_env(spec) {
+        cmd.env(k, v);
     }
     #[cfg(windows)]
-    for k in windows_child_passthrough_env() {
-        if let Ok(v) = std::env::var(k) {
+    {
+        for k in PASSTHROUGH_ENV {
+            if let Ok(v) = std::env::var(k) {
+                cmd.env(k, v);
+            }
+        }
+        for k in windows_child_passthrough_env() {
+            if let Ok(v) = std::env::var(k) {
+                cmd.env(k, v);
+            }
+        }
+        for (k, v) in &spec.env {
             cmd.env(k, v);
         }
-    }
-    for (k, v) in &spec.env {
-        cmd.env(k, v);
     }
     cmd.current_dir(&spec.cwd);
     cmd.stderr(std::process::Stdio::inherit());
@@ -1097,5 +1164,121 @@ mod content_tests {
             assert!(std::str::from_utf8(out.as_bytes()).is_ok());
         }
         assert_eq!(super::truncate_middle("ok", 1024), "ok");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod shim_resolver_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn make_shim_dir(commands: &[&str]) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        for cmd in commands {
+            let path = dir.path().join(cmd);
+            fs::write(&path, "#!/bin/bash\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        dir
+    }
+
+    #[test]
+    fn bare_uv_resolves_to_shim() {
+        let dir = make_shim_dir(&["uv"]);
+        let result = resolve_shim_command("uv", Some(dir.path()));
+        assert_eq!(result, dir.path().join("uv").to_string_lossy());
+    }
+
+    #[test]
+    fn bare_npx_resolves_to_shim() {
+        let dir = make_shim_dir(&["npx"]);
+        let result = resolve_shim_command("npx", Some(dir.path()));
+        assert_eq!(result, dir.path().join("npx").to_string_lossy());
+    }
+
+    #[test]
+    fn bare_uvx_resolves_to_shim() {
+        let dir = make_shim_dir(&["uvx"]);
+        let result = resolve_shim_command("uvx", Some(dir.path()));
+        assert_eq!(result, dir.path().join("uvx").to_string_lossy());
+    }
+
+    #[test]
+    fn bare_node_resolves_to_shim() {
+        let dir = make_shim_dir(&["node"]);
+        let result = resolve_shim_command("node", Some(dir.path()));
+        assert_eq!(result, dir.path().join("node").to_string_lossy());
+    }
+
+    #[test]
+    fn absolute_path_never_rewritten() {
+        let dir = make_shim_dir(&["uv"]);
+        let result = resolve_shim_command("/usr/bin/uv", Some(dir.path()));
+        assert_eq!(result, "/usr/bin/uv");
+    }
+
+    #[test]
+    fn unknown_command_passes_through() {
+        let dir = make_shim_dir(&["uv", "npx"]);
+        let result = resolve_shim_command("foo", Some(dir.path()));
+        assert_eq!(result, "foo");
+    }
+
+    #[test]
+    fn none_shim_dir_passes_through() {
+        let result = resolve_shim_command("uv", None);
+        assert_eq!(result, "uv");
+    }
+
+    #[test]
+    fn missing_shim_file_passes_through() {
+        let dir = TempDir::new().unwrap();
+        let result = resolve_shim_command("uv", Some(dir.path()));
+        assert_eq!(result, "uv");
+    }
+
+    #[test]
+    fn build_child_env_propagates_shim_vars_and_spec_overrides() {
+        let fake_env: std::collections::HashMap<&str, &str> = [
+            ("BUZZ_MCP_SHIM_DIR", "/test/shims"),
+            ("BUZZ_MCP_HERMIT_DIR", "/test/hermit"),
+            ("BUZZ_MCP_LOG_DIR", "/test/logs"),
+            ("PATH", "/usr/bin"),
+            ("HOME", "/home/test"),
+        ]
+        .into_iter()
+        .collect();
+
+        let spec = ServerSpec {
+            name: "test".to_string(),
+            command: "echo".to_string(),
+            args: vec![],
+            env: vec![
+                (
+                    "UV_INDEX_URL".to_string(),
+                    "https://custom.example.com".to_string(),
+                ),
+                ("BUZZ_MCP_LOG_DIR".to_string(), "/override/logs".to_string()),
+            ],
+            cwd: "/tmp".into(),
+        };
+
+        let env = build_child_env_with(&spec, |k| fake_env.get(k).map(|v| v.to_string()));
+        let env_map: std::collections::HashMap<_, _> = env.into_iter().collect();
+
+        assert_eq!(env_map.get("BUZZ_MCP_SHIM_DIR").unwrap(), "/test/shims");
+        assert_eq!(env_map.get("BUZZ_MCP_HERMIT_DIR").unwrap(), "/test/hermit");
+        assert_eq!(env_map.get("BUZZ_MCP_LOG_DIR").unwrap(), "/override/logs");
+        assert_eq!(
+            env_map.get("UV_INDEX_URL").unwrap(),
+            "https://custom.example.com"
+        );
+        assert_eq!(env_map.get("PATH").unwrap(), "/usr/bin");
+        assert_eq!(env_map.get("HOME").unwrap(), "/home/test");
     }
 }

@@ -253,6 +253,10 @@ test-unit:
         # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
         # contract/race tests run in the dedicated CI job below.
         cargo nextest run -p buzz-push-gateway
+        # MCP shim hostile-config suite: infra-free (real wrapper scripts +
+        # stubbed curl/openssl). Contains the Linux-only hostile-path regression
+        # for the CRITICAL temp-execution fix — this is its only CI execution path.
+        cargo nextest run -p buzz-agent --test shim_hostile_config
     else
         ./scripts/run-tests.sh unit
     fi

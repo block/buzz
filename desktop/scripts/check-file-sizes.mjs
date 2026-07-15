@@ -121,7 +121,9 @@ const overrides = new Map([
   // record_provider param + applies persona_field_with_record_fallback. +5 lines.
   // global-agent-config: spawn_agent_child loads global config and merges as
   // lowest env layer (+8 lines). Queued to split.
-  ["src-tauri/src/managed_agents/runtime.rs", 2216],
+  // mcp-toolchain-shims: validate_shim_resources + hardened shim env setup.
+  // mesh-llm: relay mesh env derivation at spawn time (+12 lines from main).
+  ["src-tauri/src/managed_agents/runtime.rs", 2228],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],

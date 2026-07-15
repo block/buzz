@@ -100,6 +100,12 @@ run_unit_tests() {
 
   run_test_step "buzz-push-gateway tests" \
     cargo test -p buzz-push-gateway -- --nocapture
+
+  # MCP shim hostile-config suite: infra-free (real wrapper scripts +
+  # stubbed curl/openssl). Contains the Linux-only hostile-path regression
+  # for the CRITICAL temp-execution fix — this is its only CI execution path.
+  run_test_step "buzz-agent shim hostile-config tests" \
+    cargo test -p buzz-agent --test shim_hostile_config -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------
