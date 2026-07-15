@@ -125,6 +125,32 @@ test("invalid copied snapshot metadata falls through to normal paste", () => {
   }
 });
 
+test("malformed copied snapshot field types fall through to normal paste", () => {
+  const validPayload = {
+    version: 1,
+    displayName: "Animation Auditor",
+    filename: "animation-auditor.agent.png",
+    sha256: SHA256,
+    size: 1234,
+    type: "image/png",
+    url: URL,
+  };
+
+  for (const override of [
+    { displayName: 5 },
+    { filename: { value: "animation-auditor.agent.png" } },
+    { sha256: [SHA256] },
+  ]) {
+    const encodedPayload = encodeURIComponent(
+      JSON.stringify({ ...validPayload, ...override }),
+    );
+    const html = `<a data-buzz-agent-snapshot="${encodedPayload}">Snapshot</a>`;
+
+    assert.doesNotThrow(() => parseAgentSnapshotClipboardHtml(html));
+    assert.equal(parseAgentSnapshotClipboardHtml(html), null);
+  }
+});
+
 test("ordinary clipboard HTML is ignored", () => {
   assert.equal(
     parseAgentSnapshotClipboardHtml('<a href="https://example.com">link</a>'),

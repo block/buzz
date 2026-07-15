@@ -99,9 +99,18 @@ export function parseSnapshotClipboardHtml(html: string): ImetaMedia | null {
 
   if (!payload || typeof payload !== "object") return null;
   const candidate = payload as Partial<SnapshotClipboardPayload>;
-  const displayName = candidate.displayName?.trim();
-  const filename = candidate.filename?.trim();
-  const sha256 = candidate.sha256?.trim().toLowerCase();
+  const displayName =
+    typeof candidate.displayName === "string"
+      ? candidate.displayName.trim()
+      : undefined;
+  const filename =
+    typeof candidate.filename === "string"
+      ? candidate.filename.trim()
+      : undefined;
+  const sha256 =
+    typeof candidate.sha256 === "string"
+      ? candidate.sha256.trim().toLowerCase()
+      : undefined;
   const maxSnapshotBytes = filename?.toLowerCase().endsWith(".team.png")
     ? MAX_TEAM_SNAPSHOT_BYTES
     : MAX_AGENT_SNAPSHOT_BYTES;
