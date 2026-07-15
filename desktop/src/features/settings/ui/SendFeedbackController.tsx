@@ -12,6 +12,7 @@ export function SendFeedbackController({
   return (
     <SendFeedbackDialog
       attachedImageUrl={sendFeedback.attachedImage?.url ?? null}
+      isAttaching={sendFeedback.isAttaching}
       isPending={sendFeedback.isPending}
       onAttachImage={sendFeedback.attachImage}
       onOpenChange={(nextOpen) => {

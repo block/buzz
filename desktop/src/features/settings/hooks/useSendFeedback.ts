@@ -50,15 +50,40 @@ export function useSendFeedback() {
   const [attachedImage, setAttachedImage] = React.useState<ImetaMedia | null>(
     null,
   );
+  const [isAttaching, setIsAttaching] = React.useState(false);
   const sessionRef = React.useRef(0);
+  const attachmentAttemptRef = React.useRef(0);
 
   const attachImage = React.useCallback(async () => {
     const session = sessionRef.current;
-    const descriptor = await pickAndUploadImage();
-    if (!descriptor || sessionRef.current !== session) {
-      return;
+    const attempt = attachmentAttemptRef.current + 1;
+    attachmentAttemptRef.current = attempt;
+    setIsAttaching(true);
+    try {
+      const descriptor = await pickAndUploadImage();
+      if (
+        !descriptor ||
+        sessionRef.current !== session ||
+        attachmentAttemptRef.current !== attempt
+      ) {
+        return;
+      }
+      setAttachedImage(descriptor);
+    } catch (error) {
+      if (
+        sessionRef.current === session &&
+        attachmentAttemptRef.current === attempt
+      ) {
+        throw error;
+      }
+    } finally {
+      if (
+        sessionRef.current === session &&
+        attachmentAttemptRef.current === attempt
+      ) {
+        setIsAttaching(false);
+      }
     }
-    setAttachedImage(descriptor);
   }, []);
 
   const removeImage = React.useCallback(() => {
@@ -67,7 +92,9 @@ export function useSendFeedback() {
 
   const reset = React.useCallback(() => {
     sessionRef.current += 1;
+    attachmentAttemptRef.current += 1;
     setAttachedImage(null);
+    setIsAttaching(false);
   }, []);
 
   const submitMutation = useMutation({
@@ -105,6 +132,7 @@ export function useSendFeedback() {
   return {
     attachImage,
     attachedImage,
+    isAttaching,
     isPending: submitMutation.isPending,
     removeImage,
     reset,

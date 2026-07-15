@@ -62,6 +62,7 @@ export type SendFeedbackInput = {
  */
 export function SendFeedbackDialog({
   attachedImageUrl,
+  isAttaching,
   isPending,
   onAttachImage,
   onOpenChange,
@@ -71,6 +72,7 @@ export function SendFeedbackDialog({
 }: {
   /** Preview URL of the currently-attached image, or null when none. */
   attachedImageUrl: string | null;
+  isAttaching: boolean;
   isPending: boolean;
   /** Opens a file picker and uploads; the parent owns the resulting URL. */
   onAttachImage: () => Promise<void>;
@@ -85,7 +87,6 @@ export function SendFeedbackDialog({
   );
   const [message, setMessage] = React.useState("");
   const [includeLogs, setIncludeLogs] = React.useState(false);
-  const [isAttaching, setIsAttaching] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
 
@@ -94,7 +95,6 @@ export function SendFeedbackDialog({
       setCategory(null);
       setMessage("");
       setIncludeLogs(false);
-      setIsAttaching(false);
       setPreviewOpen(false);
       setErrorMessage(null);
     }
@@ -117,15 +117,12 @@ export function SendFeedbackDialog({
       return;
     }
     setErrorMessage(null);
-    setIsAttaching(true);
     try {
       await onAttachImage();
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : "Failed to attach image.",
       );
-    } finally {
-      setIsAttaching(false);
     }
   }
 

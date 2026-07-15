@@ -633,6 +633,50 @@ test("opens Send feedback from the profile menu", async ({ page }) => {
   );
 });
 
+test("keeps Send disabled when a stale attachment attempt finishes", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    uploadDelayMs: 1_200,
+    uploadDescriptors: [
+      {
+        url: `https://mock.relay/media/${"b".repeat(64)}.png`,
+        sha256: "b".repeat(64),
+        size: 42,
+        type: "image/png",
+        uploaded: 42,
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await openProfileMenu(page);
+  await page.getByTestId("profile-popover-send-feedback").click();
+  await page.getByTestId("feedback-message").fill("Attachment race");
+  await page.getByTestId("feedback-attach-image").click();
+  await expect(page.getByTestId("feedback-attach-image")).toContainText(
+    "Attaching…",
+  );
+
+  await page.waitForTimeout(450);
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await openProfileMenu(page);
+  await page.getByTestId("profile-popover-send-feedback").click();
+  await page.getByTestId("feedback-message").fill("Second attachment");
+  await page.getByTestId("feedback-attach-image").click();
+
+  const submit = page.getByTestId("feedback-submit");
+  await expect(submit).toBeDisabled();
+  await page.waitForTimeout(900);
+  await expect(page.getByTestId("feedback-attach-image")).toContainText(
+    "Attaching…",
+  );
+  await expect(submit).toBeDisabled();
+
+  await expect(page.getByTestId("feedback-attachment-thumb")).toBeVisible();
+  await expect(submit).toBeEnabled();
+});
+
 test("updates presence from the profile menu", async ({ page }) => {
   await page.goto("/");
 

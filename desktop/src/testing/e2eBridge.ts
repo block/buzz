@@ -9466,6 +9466,8 @@ export function maybeInstallE2eTauriMocks() {
         return MOCK_MEDIA_PROXY_PORT;
       case "pick_and_upload_media":
         return await resolveMockUploadDescriptors(activeConfig);
+      case "pick_and_upload_image":
+        return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
       case "upload_media_bytes":
         return (await resolveMockUploadDescriptors(activeConfig))[0];
       case "fetch_media_bytes": {
