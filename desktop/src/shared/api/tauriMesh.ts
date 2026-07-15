@@ -9,27 +9,6 @@ export type MeshModelOption = {
   name: string | null;
 };
 
-export type MeshServeTarget = {
-  modelId: string;
-  modelName: string | null;
-  endpointAddr: string;
-  nodeName: string | null;
-  capacity: { vramGb: number | null } | null;
-  reporterPubkey?: string | null;
-  endpointId?: string | null;
-  deviceId?: string | null;
-  deviceName?: string | null;
-};
-
-export type MeshAvailability = {
-  capable: boolean;
-  admitted: boolean;
-  available: boolean;
-  reason: string | null;
-  models: MeshModelOption[];
-  serveTargets: MeshServeTarget[];
-};
-
 export type MeshNodeState =
   | "off"
   | "starting"
@@ -59,54 +38,10 @@ export type MeshNodeStatus = {
   deviceName?: string | null;
 };
 
-export type MeshCallMeNow = {
-  v: 1;
-  type: "buzz-iroh-call-me-now";
-  peer_endpoint_addr: string;
-  peer_endpoint_id?: string;
-  attempt_id: string;
-  expires_at: number;
-};
-
-export async function meshAvailability(): Promise<MeshAvailability> {
-  return await invokeTauri<MeshAvailability>("mesh_availability");
-}
-
 export async function meshStartNode(
   request: StartMeshNodeRequest,
 ): Promise<MeshNodeStatus> {
   return await invokeTauri<MeshNodeStatus>("mesh_start_node", { request });
-}
-
-export async function meshEnsureClientNode(
-  modelId: string,
-  target?: MeshServeTarget | null,
-): Promise<MeshNodeStatus> {
-  return await invokeTauri<MeshNodeStatus>("mesh_ensure_client_node", {
-    request: {
-      modelId,
-      endpointAddr: target?.endpointAddr,
-      reporterPubkey: target?.reporterPubkey,
-      peerEndpointId: target?.endpointId,
-    },
-  });
-}
-
-export async function meshDialEndpointAddr(
-  endpointAddr: string,
-): Promise<MeshNodeStatus> {
-  return await invokeTauri<MeshNodeStatus>("mesh_dial_endpoint_addr", {
-    request: { endpointAddr },
-  });
-}
-
-export async function meshStatusReportPayload(): Promise<Record<
-  string,
-  unknown
-> | null> {
-  return await invokeTauri<Record<string, unknown> | null>(
-    "mesh_status_report_payload",
-  );
 }
 
 export async function meshStopNode(): Promise<MeshNodeStatus> {

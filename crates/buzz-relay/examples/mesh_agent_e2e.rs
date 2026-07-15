@@ -98,7 +98,7 @@ async fn run() -> anyhow::Result<()> {
     let r = agent_chat(
         &base,
         &served_id,
-        "1024",
+        None,
         "Reply with exactly one word: PONG",
         &[],
     )
@@ -116,7 +116,7 @@ async fn run() -> anyhow::Result<()> {
     let r = agent_chat(
         &base,
         "auto",
-        "1024",
+        None,
         "Reply with exactly one word: PONG",
         &[],
     )
@@ -140,7 +140,7 @@ async fn run() -> anyhow::Result<()> {
     let r = agent_chat(
         &base,
         &served_id,
-        "150000",
+        Some("150000"),
         "Reply with exactly one word: PONG",
         &[],
     )
@@ -169,7 +169,7 @@ async fn run() -> anyhow::Result<()> {
     );
     let mcp = vec![("dev".to_string(), repo_bin("buzz-dev-mcp")?)];
     let (r, marker) =
-        agent_chat_with_marker(&base, &served_id, "1024", &prompt, &mcp, &marker_name).await;
+        agent_chat_with_marker(&base, &served_id, None, &prompt, &mcp, &marker_name).await;
     let file_ok = std::fs::read_to_string(&marker)
         .map(|c| c.contains("BUZZ_OK"))
         .unwrap_or(false);
@@ -189,11 +189,25 @@ async fn run() -> anyhow::Result<()> {
 
     eprintln!("[e2e] {pass} passed, {fail} failed");
     if fail > 0 {
-        anyhow::bail!("{fail} permutation(s) failed");
+        eprintln!("[e2e] FAIL: {fail} permutation(s) failed");
+        exit_without_native_destructors(1);
     }
     eprintln!("[e2e] PASS: share-compute → agent → inference proven end to end");
-    // ggml teardown aborts in C++ static destructors; skip them (issue #8).
-    std::process::exit(0);
+    exit_without_native_destructors(0);
+}
+
+/// Replace the process image so libc does not run llama.cpp's crashing Metal
+/// `atexit` handlers (mesh-console issue #8). `std::process::exit` is not enough:
+/// it skips Rust drops but still runs native C/C++ finalizers.
+fn exit_without_native_destructors(code: i32) -> ! {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let program = if code == 0 { "true" } else { "false" };
+        let error = std::process::Command::new(program).exec();
+        eprintln!("[e2e] failed to exec {program}: {error}");
+    }
+    std::process::exit(code)
 }
 
 fn repo_bin(name: &str) -> anyhow::Result<String> {
@@ -212,7 +226,7 @@ fn repo_bin(name: &str) -> anyhow::Result<String> {
 async fn agent_chat(
     base: &str,
     model: &str,
-    max_output_tokens: &str,
+    max_output_tokens: Option<&str>,
     prompt: &str,
     mcp_servers: &[(String, String)],
 ) -> anyhow::Result<String> {
@@ -224,7 +238,7 @@ async fn agent_chat(
 async fn agent_chat_with_marker(
     base: &str,
     model: &str,
-    max_output_tokens: &str,
+    max_output_tokens: Option<&str>,
     prompt: &str,
     mcp_servers: &[(String, String)],
     marker_name: &str,
@@ -237,7 +251,7 @@ async fn agent_chat_with_marker(
 async fn agent_chat_in_isolated_home(
     base: &str,
     model: &str,
-    max_output_tokens: &str,
+    max_output_tokens: Option<&str>,
     prompt: &str,
     mcp_servers: &[(String, String)],
 ) -> (anyhow::Result<String>, std::path::PathBuf) {
@@ -251,23 +265,30 @@ async fn agent_chat_in_isolated_home(
         return (Err(error.into()), home);
     }
 
-    let mut child = match Command::new(&agent)
+    let mut command = Command::new(&agent);
+    command
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", &home)
-        // Exactly the relay-mesh preset env (preset.rs).
+        // Exactly the environment apply_relay_mesh_env() supplies.
         .env("BUZZ_AGENT_PROVIDER", "openai")
         .env("BUZZ_AGENT_MODEL", model)
         .env("OPENAI_COMPAT_BASE_URL", base)
         .env("OPENAI_COMPAT_MODEL", model)
         .env("OPENAI_COMPAT_API_KEY", "buzz-mesh-local")
         .env("OPENAI_COMPAT_API", "chat")
-        .env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", max_output_tokens)
+        .env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "4096")
+        .env("BUZZ_AGENT_THINKING_EFFORT", "none")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+        .stderr(Stdio::null());
+    // P3 deliberately overrides the production default to exercise the
+    // router's context-fit rejection. Normal and tool turns leave it unset,
+    // matching the desktop provider path.
+    if let Some(value) = max_output_tokens {
+        command.env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", value);
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return (Err(error.into()), home),
     };

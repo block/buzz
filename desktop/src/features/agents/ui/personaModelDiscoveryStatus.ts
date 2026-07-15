@@ -48,6 +48,14 @@ export function formatModelDiscoveryErrorStatus(
   const message = errorMessage(error);
 
   if (provider.trim() === "relay-mesh") {
+    if (message.includes("waiting for the current member roster")) {
+      return {
+        message:
+          "Buzz is waiting for the relay's member roster. Try again shortly; if this persists, check the relay's membership configuration.",
+        tone: "warning",
+      };
+    }
+
     if (isEmptySharedComputeError(message)) {
       return {
         message:

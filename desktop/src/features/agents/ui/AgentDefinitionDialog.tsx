@@ -90,11 +90,6 @@ type AgentDefinitionDialogProps = {
   createRunSection?: React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
-  /**
-   * When true, the agent is being created to run on the relay mesh — the
-   * local-mode provider/model gate does not apply and must be bypassed.
-   */
-  createRunOnMesh?: boolean;
 };
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -116,7 +111,6 @@ export function AgentDefinitionDialog({
   onSubmit,
   createRunSection,
   createSubmitBlocked = false,
-  createRunOnMesh = false,
 }: AgentDefinitionDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
@@ -338,11 +332,9 @@ export function AgentDefinitionDialog({
         provider: trimmedProvider,
         runtimeId: runtime,
         runtimeFileConfig,
-        useMesh: createRunOnMesh,
       }),
     [
       bakedEnvKeys,
-      createRunOnMesh,
       envVars,
       globalConfig.env_vars,
       globalConfig.provider,

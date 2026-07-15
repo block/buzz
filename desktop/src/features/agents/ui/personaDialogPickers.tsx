@@ -518,8 +518,8 @@ export function getBakedSatisfiedEnvKeys(
  *   1. Normalized fields: provider + model (empty string = NotReady)
  *   2. Credential env keys: provider-specific (e.g. ANTHROPIC_API_KEY)
  *
- * isProviderMode / useMesh modes are NOT subject to this gate — they have
- * their own gates. Pass isProviderMode=true or useMesh=true to bypass.
+ * Provider mode is not subject to this gate because it has its own readiness
+ * checks. Pass `isProviderMode=true` to bypass.
  */
 export function computeLocalModeGate({
   bakedEnvKeys,
@@ -532,7 +532,6 @@ export function computeLocalModeGate({
   provider,
   runtimeId,
   runtimeFileConfig,
-  useMesh,
 }: {
   /** Optional baked build env key names (Block-internal builds only).
    *  When provided, requirements already covered by the baked env are silenced,
@@ -562,7 +561,6 @@ export function computeLocalModeGate({
   /** Optional file-layer config for the runtime (e.g. goose config.yaml).
    *  When provided, requirements already satisfied there are silenced. */
   runtimeFileConfig?: RuntimeFileConfigSubset | null;
-  useMesh: boolean;
 }): {
   /** Normalized field names that are required but empty ("provider", "model"). */
   missingNormalizedFields: string[];
@@ -587,7 +585,7 @@ export function computeLocalModeGate({
   /** True when the create button may be enabled (from this gate's perspective). */
   satisfied: boolean;
 } {
-  if (isProviderMode || useMesh) {
+  if (isProviderMode) {
     return {
       missingNormalizedFields: [],
       missingEnvKeys: [],

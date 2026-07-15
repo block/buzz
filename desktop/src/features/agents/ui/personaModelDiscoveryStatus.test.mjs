@@ -47,6 +47,18 @@ test("Buzz shared compute distinguishes relay lookup failures", () => {
   assert.match(status?.message ?? "", /relay connection/);
 });
 
+test("Buzz shared compute names a missing relay member roster", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("Buzz shared compute is waiting for the current member roster"),
+    "relay-mesh",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /waiting for the relay's member roster/);
+  assert.match(status?.message ?? "", /membership configuration/);
+  assert.doesNotMatch(status?.message ?? "", /relay connection/);
+});
+
 test("model discovery status stays quiet for missing Databricks defaults", () => {
   const status = formatModelDiscoveryErrorStatus(
     new Error("config: DATABRICKS_HOST required"),

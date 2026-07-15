@@ -10,6 +10,33 @@ It does not use a substitute agent harness.
 
 Run from the `block/buzz` repository root on the mesh-enabled branch.
 
+For a completely fresh, deterministic local state, use:
+
+```bash
+. ./bin/activate-hermit
+just mesh-dev-fresh
+```
+
+This removes development app data, the development keyring entry,
+`~/.buzz-dev`, and local Docker volumes; it preserves the installed Buzz app's
+data, production keyring, and `~/.buzz`. The first dev page load also clears
+only that dev server origin's WebKit storage, so saved fields from an earlier
+run cannot leak into the fresh state. It then seeds local channels and starts
+the mesh-enabled desktop with the repository's public Tyler test identity.
+That identity is a fixture and must never be pointed at staging or production.
+
+If using `mesh-dev-fresh`, the clean window opens at **Welcome to Buzz**. Join
+the seeded local community before continuing:
+
+1. Click **Join a community**.
+2. Use any local name, such as **Local Buzz**.
+3. Set **Community URL** to `ws://localhost:3000` and join.
+4. Complete the short profile setup if it appears.
+
+The recipe already supplied the repository's public test identity and seeded
+the local channels. Do not import or generate another key. Continue at **Share
+this machine** below.
+
 Free the development ports if a previous run was interrupted:
 
 ```bash
@@ -42,6 +69,9 @@ runtime are behind the `mesh-llm` feature.
    - On a 16 GB Apple Silicon machine, use a suggested Qwen3.5 4B quantized
      model when available.
    - `unsloth/Qwen3.5-4B-GGUF:Q4_K_M` is the model used by the hardware proof.
+   - Do not use a sub-1B model for the channel-reply proof. It can prove that
+     inference is reachable while still failing the agent's long prompt and
+     required message-send tool call.
 4. Turn on **Share this machine**.
 5. Wait until the card says it is sharing/running. Do not start Fizz while the
    card says downloading, preparing, or starting.

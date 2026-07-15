@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 mod coordinator;
 pub(crate) use coordinator::{publish_current_status_once, publish_stopped_status_once};
-pub use coordinator::{spawn_listener, MeshCoordinator, KIND_BUZZ_MESH_MEMBER_STATUS};
+pub use coordinator::{start_coordinator, MeshCoordinator, KIND_BUZZ_MESH_MEMBER_STATUS};
 
 mod discovery;
 pub use discovery::{
@@ -61,8 +61,6 @@ pub struct MeshServeTarget {
     pub node_name: Option<String>,
     pub capacity: Option<MeshTargetCapacity>,
     #[serde(default)]
-    pub reporter_pubkey: Option<String>,
-    #[serde(default)]
     pub endpoint_id: Option<String>,
     #[serde(default)]
     pub device_id: Option<String>,
@@ -118,9 +116,6 @@ impl MeshHealth {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshAvailability {
-    pub capable: bool,
-    pub admitted: bool,
-    pub available: bool,
     pub reason: Option<String>,
     pub models: Vec<MeshModelOption>,
     pub serve_targets: Vec<MeshServeTarget>,
@@ -129,9 +124,6 @@ pub struct MeshAvailability {
 impl MeshAvailability {
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self {
-            capable: false,
-            admitted: false,
-            available: false,
             reason: Some(reason.into()),
             models: Vec::new(),
             serve_targets: Vec::new(),
@@ -174,14 +166,6 @@ pub struct StartMeshNodeRequest {
     /// included by the caller).
     #[serde(default)]
     pub trusted_owner_ids: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct EnsureMeshClientRequest {
-    pub model_id: String,
-    #[serde(default)]
-    pub endpoint_addr: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -414,7 +398,6 @@ impl DesktopMeshRuntime {
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_string),
                     capacity: None,
-                    reporter_pubkey: None,
                     endpoint_id: endpoint_id_from_status(&payload, Some(&endpoint_addr)),
                     device_id: None,
                     device_name: None,
@@ -441,15 +424,12 @@ impl DesktopMeshRuntime {
         status: mesh_llm_sdk::EmbeddedNodeStatus,
     ) -> anyhow::Result<MeshNodeStatus> {
         let health = health_from_payload(&status.payload);
+        let state = node_state_from_payload(self.mode, &health, &status.payload);
         let endpoint_id = endpoint_id_from_status(&status.payload, status.invite_token.as_deref());
         let device_name = device_name_from_status(&status.payload, endpoint_id.as_deref());
         let device_id = endpoint_id.clone();
         Ok(MeshNodeStatus {
-            state: if matches!(health.status, MeshHealthStatus::Failed) {
-                MeshNodeState::Failed
-            } else {
-                MeshNodeState::Running
-            },
+            state,
             mode: Some(self.mode),
             health,
             api_base_url: Some(status.api_base_url),
@@ -580,10 +560,43 @@ fn find_progressish_reason(value: &serde_json::Value) -> Option<String> {
     None
 }
 
+fn node_state_from_payload(
+    mode: MeshNodeMode,
+    health: &MeshHealth,
+    payload: &serde_json::Value,
+) -> MeshNodeState {
+    if matches!(health.status, MeshHealthStatus::Failed) {
+        return MeshNodeState::Failed;
+    }
+    if mode == MeshNodeMode::Serve && models_from_status_payload(Some(payload)).is_empty() {
+        return MeshNodeState::Starting;
+    }
+    MeshNodeState::Running
+}
+
 pub fn models_from_status_payload(payload: Option<&serde_json::Value>) -> Vec<MeshModelOption> {
     let mut out = Vec::new();
     if let Some(payload) = payload {
-        collect_model_options(payload, &mut out);
+        // The SDK's raw status uses `hosted_models` plus ready entries under
+        // `runtime.models`. Buzz-authored status reports use `models`. Do not
+        // use `serving_models`: MeshLLM fills it with the requested model while
+        // the runtime is still in standby, before inference is available.
+        for key in ["models", "hosted_models"] {
+            if let Some(value) = payload.get(key) {
+                collect_model_options(value, &mut out);
+            }
+        }
+        if let Some(runtime_models) = payload
+            .get("runtime")
+            .and_then(|runtime| runtime.get("models"))
+            .and_then(serde_json::Value::as_array)
+        {
+            for model in runtime_models {
+                if model.get("status").and_then(serde_json::Value::as_str) == Some("ready") {
+                    collect_model_options(model, &mut out);
+                }
+            }
+        }
     }
     dedupe_models(out)
 }
@@ -597,18 +610,24 @@ fn collect_model_options(value: &serde_json::Value, out: &mut Vec<MeshModelOptio
                 .or_else(|| map.get("model_ref"))
                 .or_else(|| map.get("modelRef"))
                 .or_else(|| map.get("id"))
+                .or_else(|| map.get("name"))
                 .and_then(serde_json::Value::as_str)
             {
                 let name = map
-                    .get("name")
-                    .or_else(|| map.get("display_name"))
+                    .get("display_name")
                     .or_else(|| map.get("displayName"))
                     .and_then(serde_json::Value::as_str)
                     .map(ToString::to_string);
                 push_model(out, id, name);
-            }
-            for child in map.values() {
-                collect_model_options(child, out);
+            } else {
+                for child in map.values().filter(|child| {
+                    matches!(
+                        child,
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                    )
+                }) {
+                    collect_model_options(child, out);
+                }
             }
         }
         serde_json::Value::Array(values) => {
@@ -616,18 +635,11 @@ fn collect_model_options(value: &serde_json::Value, out: &mut Vec<MeshModelOptio
                 collect_model_options(child, out);
             }
         }
-        serde_json::Value::String(value) if looks_like_model_ref(value) => {
+        serde_json::Value::String(value) => {
             push_model(out, value, None);
         }
         _ => {}
     }
-}
-
-fn looks_like_model_ref(value: &str) -> bool {
-    // Family-agnostic: a bare string is a ref only via URI scheme or .gguf ext.
-    let trimmed = value.trim();
-    !trimmed.is_empty()
-        && (trimmed.starts_with("hf://") || trimmed.to_ascii_lowercase().ends_with(".gguf"))
 }
 
 fn push_model(out: &mut Vec<MeshModelOption>, id: &str, name: Option<String>) {

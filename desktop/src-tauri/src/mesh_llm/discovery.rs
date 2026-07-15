@@ -11,14 +11,6 @@ use super::{dedupe_models, MeshAvailability, MeshModelOption, MeshServeTarget, M
 /// identities without requiring a relay-side cleanup job.
 const STATUS_FRESHNESS_SECS: u64 = 120;
 
-fn newest_event_timestamp(events: &[nostr::Event]) -> u64 {
-    events
-        .iter()
-        .map(|event| event.created_at.as_secs())
-        .max()
-        .unwrap_or_default()
-}
-
 fn status_is_fresh(event: &nostr::Event, now: u64) -> bool {
     event
         .created_at
@@ -28,13 +20,13 @@ fn status_is_fresh(event: &nostr::Event, now: u64) -> bool {
 }
 
 fn dedupe_targets(targets: Vec<MeshServeTarget>) -> Vec<MeshServeTarget> {
-    let mut by_endpoint = BTreeMap::<String, MeshServeTarget>::new();
+    let mut by_endpoint_and_model = BTreeMap::<(String, String), MeshServeTarget>::new();
     for target in targets {
-        by_endpoint
-            .entry(target.endpoint_addr.clone())
+        by_endpoint_and_model
+            .entry((target.endpoint_addr.clone(), target.model_id.clone()))
             .or_insert(target);
     }
-    by_endpoint.into_values().collect()
+    by_endpoint_and_model.into_values().collect()
 }
 
 /// Resolve the mesh admission roster from relay status and membership events.
@@ -47,7 +39,7 @@ pub fn owner_ids_from_events(events: &[nostr::Event]) -> Vec<String> {
     let Some(members) = latest_membership_list(events) else {
         return Vec::new();
     };
-    let now = newest_event_timestamp(events);
+    let now = nostr::Timestamp::now().as_secs();
     let mut ids: Vec<String> = events
         .iter()
         .filter(|event| {
@@ -133,7 +125,7 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
     let mut all_models = Vec::<MeshModelOption>::new();
     let mut saw_valid_status = false;
 
-    let now = newest_event_timestamp(&events);
+    let now = nostr::Timestamp::now().as_secs();
     for event in events {
         if event.kind.as_u16() as u64 != MESH_STATUS_KIND
             || !status_is_fresh(&event, now)
@@ -144,8 +136,10 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
         let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) else {
             continue;
         };
+        if owner_id_from_status_event(&event).is_none() {
+            continue;
+        }
         saw_valid_status = true;
-        let reporter_pubkey = reporter_pubkey_from_status_event(&event);
         let mut serve_targets = content
             .get("serveTargets")
             .or_else(|| content.get("serve_targets"))
@@ -154,9 +148,6 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
             .unwrap_or_default()
             .into_iter()
             .map(|mut target| {
-                if target.reporter_pubkey.is_none() {
-                    target.reporter_pubkey = reporter_pubkey.clone();
-                }
                 if target.endpoint_id.is_none() {
                     target.endpoint_id = endpoint_id_from_invite_token(&target.endpoint_addr);
                 }
@@ -200,9 +191,6 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
     let models = dedupe_models(all_models);
     let available = !serve_targets.is_empty();
     MeshAvailability {
-        capable: true,
-        admitted: true,
-        available,
         reason: if available {
             None
         } else {

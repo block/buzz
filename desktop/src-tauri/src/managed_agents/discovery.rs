@@ -329,9 +329,9 @@ pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRunti
 }
 
 /// The agent command a freshly-created agent defaults to when the create
-/// request supplies none. Resolves the bundled `buzz-agent` from the catalog —
-/// the same shape `mesh_llm::preset` uses — so the default can't drift from the
-/// provider definition. Falls back to the id if the catalog entry is missing.
+/// request supplies none. Resolves the bundled `buzz-agent` from the catalog so
+/// the default cannot drift from the provider definition. Falls back to the id
+/// if the catalog entry is missing.
 ///
 /// The previous default was the bare global `goose`, which is not on PATH on a
 /// stock Windows install: every worker failed with `program not found`. The

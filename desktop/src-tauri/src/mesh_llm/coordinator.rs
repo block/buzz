@@ -28,8 +28,7 @@ pub struct MeshCoordinator {
 }
 
 /// Start the runtime-owned status publisher and admission-roster watcher.
-/// Kept under the historical name to avoid a broad startup API churn.
-pub async fn spawn_listener(app: AppHandle) {
+pub async fn start_coordinator(app: AppHandle) {
     {
         let state = app.state::<AppState>();
         if state.mesh_coordinator.lock().await.is_some() {

@@ -23,8 +23,6 @@ pub mod handlers;
 pub mod invite_token;
 /// Inter-relay mesh startup wiring (`BUZZ_MESH` seam).
 pub mod mesh_boot;
-/// Relay-signed mesh-LLM status publisher.
-pub mod mesh_status_publisher;
 /// Prometheus metrics: recorder, upkeep, HTTP middleware.
 pub mod metrics;
 /// NIP-11 relay information document.

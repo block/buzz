@@ -1,6 +1,6 @@
 //! Unit tests for `mesh_llm/mod.rs` private helpers (kept in a sibling file so
 //! `mod.rs` stays under the 500-line budget; `#[path]`-included from there).
-use super::{find_progressish_reason, looks_like_model_ref};
+use super::find_progressish_reason;
 use serde_json::json;
 
 #[test]
@@ -22,15 +22,56 @@ fn progressish_reads_typed_phase_not_whole_tree() {
 }
 
 #[test]
-fn model_ref_is_family_agnostic() {
-    assert!(looks_like_model_ref("hf://org/model"));
-    assert!(looks_like_model_ref("some-model.gguf"));
-    assert!(looks_like_model_ref("Some-Model.GGUF"));
-    // Families that used to be hardcoded must route via the structured path,
-    // not a name allowlist here (Sami N2):
-    assert!(!looks_like_model_ref("Mistral-7B"));
-    assert!(!looks_like_model_ref("Qwen3-35B"));
-    assert!(!looks_like_model_ref(""));
+fn sdk_ready_models_are_parsed_from_real_status_shape() {
+    let payload = json!({
+        "node_state": "serving",
+        "llama_ready": true,
+        "hosted_models": ["Qwen/Qwen3-0.6B-GGUF:Q8_0"],
+        "serving_models": ["Qwen/Qwen3-0.6B-GGUF:Q8_0"],
+        "runtime": {
+            "models": [{
+                "name": "Qwen/Qwen3-0.6B-GGUF:Q8_0",
+                "status": "ready"
+            }]
+        }
+    });
+
+    assert_eq!(
+        super::models_from_status_payload(Some(&payload)),
+        vec![super::MeshModelOption {
+            id: "Qwen/Qwen3-0.6B-GGUF:Q8_0".to_string(),
+            name: None,
+        }]
+    );
+    assert_eq!(
+        super::node_state_from_payload(
+            super::MeshNodeMode::Serve,
+            &super::MeshHealth::ok(),
+            &payload,
+        ),
+        super::MeshNodeState::Running
+    );
+}
+
+#[test]
+fn requested_model_is_not_ready_while_sdk_is_in_standby() {
+    let payload = json!({
+        "node_state": "standby",
+        "llama_ready": false,
+        "hosted_models": [],
+        "serving_models": ["Qwen/Qwen3-0.6B-GGUF:Q8_0"],
+        "runtime": {"models": []}
+    });
+
+    assert!(super::models_from_status_payload(Some(&payload)).is_empty());
+    assert_eq!(
+        super::node_state_from_payload(
+            super::MeshNodeMode::Serve,
+            &super::MeshHealth::ok(),
+            &payload,
+        ),
+        super::MeshNodeState::Starting
+    );
 }
 
 #[test]
@@ -205,7 +246,13 @@ fn owner_roster_rejects_spoofed_owner_id_and_cross_member_binding() {
             "ownerBindingSig": hex::encode(owner.sign_bytes(
                 &super::identity::member_binding_bytes(binding_pubkey)
             )),
-            "serveTargets": []
+            "serveTargets": [{
+                "modelId": "spoofed-model",
+                "modelName": null,
+                "endpointAddr": "spoofed-addr",
+                "nodeName": null,
+                "capacity": null
+            }]
         }))
         .unwrap()
         .sign_with_keys(&member_keys)
@@ -216,9 +263,16 @@ fn owner_roster_rejects_spoofed_owner_id_and_cross_member_binding() {
     let cross_member_binding = sign_status(owner.owner_id(), &other_keys.public_key().to_hex());
     let membership = signed_membership_event(std::slice::from_ref(&member_pubkey));
 
+    let events = vec![spoofed_owner, cross_member_binding, membership];
     assert!(
-        super::owner_ids_from_events(&[spoofed_owner, cross_member_binding, membership]).is_empty(),
+        super::owner_ids_from_events(&events).is_empty(),
         "a Buzz member must not be able to advertise an unproven MeshLLM owner identity"
+    );
+    assert!(
+        super::availability_from_events(events)
+            .serve_targets
+            .is_empty(),
+        "an unproven owner identity must not contribute a selectable target"
     );
 }
 
@@ -274,13 +328,35 @@ fn stale_status_is_excluded_from_admission_and_availability() {
     let secret = "8".repeat(64);
     let member = nostr::Keys::parse(&secret).unwrap().public_key().to_hex();
     let stale = signed_reporter_target_at(&secret, "stale-model", "stale-addr", 1_000);
-    let membership = signed_membership_event_at(std::slice::from_ref(&member), 1_121);
+    // No newer event is required to age this status out. Freshness is measured
+    // against wall clock, so an entirely offline mesh cannot remain live forever.
+    let membership = signed_membership_event_at(std::slice::from_ref(&member), 900);
     let events = vec![stale, membership];
 
     assert!(super::owner_ids_from_events(&events).is_empty());
     let availability = super::availability_from_events(events);
-    assert!(!availability.available);
     assert!(availability.serve_targets.is_empty());
+}
+
+#[test]
+fn one_endpoint_can_advertise_multiple_models() {
+    let secret = "a".repeat(64);
+    let member = nostr::Keys::parse(&secret).unwrap().public_key().to_hex();
+    let availability = super::availability_from_events(vec![
+        signed_reporter_target(&secret, "model-a", "shared-addr"),
+        signed_reporter_target(&secret, "model-b", "shared-addr"),
+        signed_membership_event(std::slice::from_ref(&member)),
+    ]);
+
+    assert_eq!(availability.serve_targets.len(), 2);
+    assert!(availability
+        .serve_targets
+        .iter()
+        .any(|target| target.model_id == "model-a"));
+    assert!(availability
+        .serve_targets
+        .iter()
+        .any(|target| target.model_id == "model-b"));
 }
 
 #[test]

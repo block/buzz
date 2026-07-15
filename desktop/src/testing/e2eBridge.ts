@@ -184,7 +184,6 @@ type E2eConfig = {
     // `upload_media_bytes` commands. Lets a spec drive the attachment flow
     // (e.g. a generic PDF) without a real upload pipeline. See
     // tests/helpers/bridge.ts:MockBridgeOptions.uploadDescriptors.
-    meshReporterPubkey?: string;
     uploadDelayMs?: number;
     /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
      *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
@@ -776,12 +775,6 @@ declare global {
     __BUZZ_E2E_COMMAND_LOG__?: Array<{
       command: string;
       payload: unknown;
-    }>;
-    /** Results emitted only after a mocked mesh-availability request resolves. */
-    __BUZZ_E2E_MESH_AVAILABILITY_RESULTS__?: Array<{
-      admitted: boolean;
-      available: boolean;
-      reason: string | null;
     }>;
     __BUZZ_E2E_WEBVIEW_ZOOM__?: number;
     __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
@@ -8102,28 +8095,6 @@ function sendToMockSocket(args: {
       return;
     }
 
-    // Mesh control events (24620 status report, 24621 connect request) are not
-    // channel messages — they carry a `p` tag, not an `h` tag. The real relay
-    // accepts them after membership/shape checks; the mock just ACKs so legacy
-    // direct-TS mesh helpers can proceed. Current create/start flows publish
-    // these from the Rust coordinator instead.
-    if (event.kind === 24620 || event.kind === 24621) {
-      if (
-        event.kind === 24621 &&
-        !event.tags.some((tag) => tag[0] === "p" && typeof tag[1] === "string")
-      ) {
-        sendWsText(socket.handler, [
-          "OK",
-          event.id,
-          false,
-          "invalid: mesh connect request missing #p target",
-        ]);
-        return;
-      }
-      sendWsText(socket.handler, ["OK", event.id, true, ""]);
-      return;
-    }
-
     if (event.kind === 30078) {
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
@@ -8239,7 +8210,6 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_COMMANDS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
-  window.__BUZZ_E2E_MESH_AVAILABILITY_RESULTS__ = [];
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
   window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
   window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ = ({
@@ -8419,9 +8389,8 @@ export function maybeInstallE2eTauriMocks() {
     for (const socketId of socketIds) disconnectMockSocket(socketId);
     return socketIds.length;
   };
-  // Tests flip `admitted` to exercise the denial path: mesh_ensure_client_node
-  // rejects when not admitted, which proves relay membership is the gate and
-  // that the create flow surfaces denial copy without spawning the agent.
+  // Tests vary mesh admission and models to exercise provider discovery and
+  // the managed-agent start preflight.
   window.__BUZZ_E2E_SET_MESH__ = (mesh) => {
     if (mesh.admitted !== undefined) mockMeshState.admitted = mesh.admitted;
     if (mesh.models !== undefined) mockMeshState.models = mesh.models;
@@ -8486,43 +8455,6 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
-      case "mesh_availability": {
-        const result = {
-          capable: true,
-          admitted: mockMeshState.admitted,
-          available: mockMeshState.admitted && mockMeshState.models.length > 0,
-          reason: !mockMeshState.admitted
-            ? mockMeshState.denyReason
-            : mockMeshState.models.length === 0
-              ? "no relay mesh serve targets are available"
-              : null,
-          models: mockMeshState.models,
-          serveTargets: mockMeshState.models.map((model) => ({
-            modelId: model.id,
-            modelName: model.name,
-            endpointAddr: "mock-endpoint-addr",
-            nodeName: "Mock desktop",
-            capacity: { vramGb: null },
-            reporterPubkey:
-              activeConfig?.mock?.meshReporterPubkey ??
-              identity?.pubkey ??
-              DEFAULT_MOCK_IDENTITY.pubkey,
-            endpointId: "mock-endpoint-id",
-            deviceId: "mock-endpoint-id",
-            deviceName: "Mock desktop",
-          })),
-        };
-        return Promise.resolve(result).then((resolved) => {
-          // Unlike the command log above, record this only after the mocked
-          // result has resolved so E2E can distinguish it from loading.
-          window.__BUZZ_E2E_MESH_AVAILABILITY_RESULTS__?.push({
-            admitted: resolved.admitted,
-            available: resolved.available,
-            reason: resolved.reason,
-          });
-          return resolved;
-        });
-      }
       case "mesh_installed_models":
         return mockMeshState.models;
       case "mesh_node_status":
@@ -8539,29 +8471,6 @@ export function maybeInstallE2eTauriMocks() {
         mockMeshState.nodeState = "off";
         mockMeshState.nodeMode = null;
         return meshNodeStatus("off", null);
-      case "mesh_ensure_client_node":
-        // The invariant under test: membership is the only factor. A
-        // non-admitted (non-member) caller cannot bring up the client node,
-        // and no extra manual auth step exists — admission alone decides.
-        if (!mockMeshState.admitted) {
-          throw new Error(mockMeshState.denyReason);
-        }
-        mockMeshState.nodeState = "running";
-        mockMeshState.nodeMode = "client";
-        return meshNodeStatus("running", "client");
-      case "mesh_dial_endpoint_addr":
-        return meshNodeStatus("running", mockMeshState.nodeMode ?? "client");
-      case "mesh_status_report_payload":
-        return mockMeshState.nodeState === "running"
-          ? {
-              token: "mock-endpoint-addr",
-              node_id: "mock-endpoint-id",
-              endpointId: "mock-endpoint-id",
-              deviceId: "mock-endpoint-id",
-              deviceName: "Mock desktop",
-              hosted_models: mockMeshState.models.map((model) => model.id),
-            }
-          : null;
       case "get_identity": {
         const isLost =
           !mockIdentityLostCleared && activeConfig?.mock?.identityLost === true;

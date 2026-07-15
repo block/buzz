@@ -48,10 +48,9 @@ const RELAY_MESH_RUNTIME_NO_TARGET: &str =
 pub type CmdResult<T> = Result<T, String>;
 
 /// Resolve the admission roster by intersecting member-signed mesh status
-/// reporters with the current NIP-43 direct-member list. Relays that publish no
-/// membership list retain status-only backcompat. Returns `None` when the
-/// combined query fails, so a transient outage does not lock out a working
-/// mesh.
+/// reporters with the current NIP-43 direct-member list. Missing membership or
+/// a failed query returns an empty roster, which the runtime normalizes to
+/// self-only admission.
 pub(crate) async fn resolve_trusted_owner_ids(state: &AppState) -> Vec<String> {
     let filters = [
         mesh_llm::mesh_status_filter(),
@@ -94,24 +93,6 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
 }
 
 #[tauri::command]
-pub async fn mesh_availability(
-    state: State<'_, AppState>,
-) -> CmdResult<mesh_llm::MeshAvailability> {
-    match relay::query_relay(
-        &state,
-        &[
-            mesh_llm::mesh_status_filter(),
-            mesh_llm::relay_membership_filter(),
-        ],
-    )
-    .await
-    {
-        Ok(events) => Ok(mesh_llm::availability_from_events(events)),
-        Err(error) => Ok(mesh_llm::MeshAvailability::unavailable(error)),
-    }
-}
-
-#[tauri::command]
 pub async fn mesh_start_node(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -151,14 +132,6 @@ pub async fn mesh_start_node(
     }
     mesh_llm::publish_current_status_once(&app, "start").await;
     Ok(status)
-}
-
-#[tauri::command]
-pub async fn mesh_ensure_client_node(
-    state: State<'_, AppState>,
-    request: mesh_llm::EnsureMeshClientRequest,
-) -> CmdResult<mesh_llm::MeshNodeStatus> {
-    ensure_client_node_for_model(&state, request.model_id, request.endpoint_addr).await
 }
 
 /// Mesh can bind its HTTP ingress and advertise a model shortly before the
@@ -314,10 +287,8 @@ pub(crate) async fn resolve_mesh_bootstrap_target(
 }
 
 /// Pure target-selection used by `resolve_mesh_bootstrap_target`: the first
-/// gossiped serve target that hosts `model_id`. Returns the full target so the
-/// caller has the reporter pubkey (to address the paired connect-request) as
-/// well as the dial pointer. Split out so the matching rule is unit-testable
-/// without a relay round-trip.
+/// gossiped serve target that hosts `model_id`. Split out so the matching rule
+/// is unit-testable without a relay round-trip.
 fn pick_serve_target_for_model(
     targets: Vec<mesh_llm::MeshServeTarget>,
     model_id: &str,
@@ -380,47 +351,6 @@ pub(crate) async fn ensure_relay_mesh_for_record(
 
     ensure_client_node_for_model(&state, &model_id, Some(target.endpoint_addr)).await?;
     wait_for_mesh_inference(&model_id).await
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MeshDialEndpointRequest {
-    pub endpoint_addr: String,
-}
-
-#[tauri::command]
-pub async fn mesh_dial_endpoint_addr(
-    state: State<'_, AppState>,
-    request: MeshDialEndpointRequest,
-) -> CmdResult<mesh_llm::MeshNodeStatus> {
-    let endpoint_addr = request.endpoint_addr.trim();
-    if endpoint_addr.is_empty() {
-        return Err("endpointAddr is required".to_string());
-    }
-    let runtime = state.mesh_llm_runtime.lock().await;
-    let Some(runtime) = runtime.as_ref() else {
-        return Err("mesh node is not running".to_string());
-    };
-    runtime
-        .dial_endpoint_addr(endpoint_addr)
-        .await
-        .map_err(|error| format!("mesh dial failed: {error}"))?;
-    runtime.status().await.map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub async fn mesh_status_report_payload(
-    state: State<'_, AppState>,
-) -> CmdResult<Option<serde_json::Value>> {
-    let runtime = state.mesh_llm_runtime.lock().await;
-    match runtime.as_ref() {
-        Some(runtime) => runtime
-            .status_report_payload()
-            .await
-            .map(Some)
-            .map_err(|error| error.to_string()),
-        None => Ok(None),
-    }
 }
 
 #[tauri::command]
@@ -490,7 +420,6 @@ mod tests {
             endpoint_addr: endpoint_addr.to_string(),
             node_name: None,
             capacity: None,
-            reporter_pubkey: None,
             endpoint_id: None,
             device_id: None,
             device_name: None,
@@ -504,8 +433,7 @@ mod tests {
             target("model-b", "addr-b1"),
             target("model-b", "addr-b2"),
         ];
-        // Matches by model id, returns the first such target (full struct, so
-        // the caller has the reporter pubkey as well as the dial pointer).
+        // Matches by model id and returns the first such target.
         assert_eq!(
             pick_serve_target_for_model(targets, "model-b").map(|t| t.endpoint_addr),
             Some("addr-b1".to_string())

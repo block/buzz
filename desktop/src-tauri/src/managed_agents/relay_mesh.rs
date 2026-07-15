@@ -35,6 +35,15 @@ pub fn apply_relay_mesh_env(
         RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
     );
     env.insert("OPENAI_COMPAT_API".to_string(), "chat".to_string());
+    // Keep the requested response inside smaller local-model context windows,
+    // and spend that budget on an answer/tool call instead of hidden reasoning.
+    // Without both settings Qwen3 either fails the router's fit check at the
+    // agent default (32K) or can consume a tight cap before serializing a tool.
+    env.insert(
+        "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
+        "4096".to_string(),
+    );
+    env.insert("BUZZ_AGENT_THINKING_EFFORT".to_string(), "none".to_string());
 }
 
 /// Resolve a record's relay-mesh config, typed field first.
@@ -176,6 +185,25 @@ mod tests {
         ]);
 
         assert_eq!(relay_mesh_model_id(&rec).as_deref(), Some("Qwen3"));
+    }
+
+    #[test]
+    fn native_provider_uses_context_safe_non_reasoning_budget() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_MAX_OUTPUT_TOKENS").map(String::as_str),
+            Some("4096")
+        );
+        assert_eq!(
+            env.get("BUZZ_AGENT_THINKING_EFFORT").map(String::as_str),
+            Some("none")
+        );
     }
 
     #[test]

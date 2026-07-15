@@ -546,7 +546,7 @@ pub fn run() {
                 crate::mesh_llm::install_progress_sink(&app_handle);
                 let mesh_app = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    crate::mesh_llm::spawn_listener(mesh_app).await;
+                    crate::mesh_llm::start_coordinator(mesh_app).await;
                 });
             }
 
@@ -845,11 +845,7 @@ pub fn run() {
             put_agent_session_config,
             get_global_agent_config,
             set_global_agent_config,
-            mesh_availability,
             mesh_start_node,
-            mesh_ensure_client_node,
-            mesh_dial_endpoint_addr,
-            mesh_status_report_payload,
             mesh_stop_node,
             mesh_node_status,
             mesh_installed_models,

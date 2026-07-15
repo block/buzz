@@ -55,8 +55,8 @@ hooks:
     git config --local core.hooksPath "$HOOKS_DIR"
     lefthook install --force
 
-# ⚠️  Wipe ALL data and recreate a clean environment
-[confirm("This will DELETE all local data. Continue? (y/N)")]
+# Wipe development state and recreate a clean environment. Installed Buzz is preserved.
+[confirm("This will DELETE all development data and preserve installed Buzz. Continue? (y/N)")]
 reset:
     ./scripts/dev-reset.sh --yes
 
@@ -261,10 +261,29 @@ test-unit:
 test-integration:
     ./scripts/run-tests.sh integration
 
-# Buzz shared compute e2e: CI-safe signaling invariants + Playwright UI
+# Buzz shared compute e2e: current desktop discovery/admission logic and
+# Playwright UI coverage.
 mesh-e2e:
-    cargo test -p buzz-relay mesh_signaling
+    cargo test --manifest-path {{desktop_dir}}/src-tauri/Cargo.toml --features mesh-llm mesh_llm --lib
     cd {{desktop_dir}} && pnpm test:e2e:smoke -- mesh-compute.spec.ts
+
+# Reset only development state, seed deterministic local channels, and launch
+# the mesh-enabled desktop with the repository's public Tyler test identity.
+# This is for local verification only; never point this identity at staging/prod.
+[confirm("This will reset development data, preserve installed Buzz, then launch a seeded mesh dev app. Continue? (y/N)")]
+mesh-dev-fresh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/dev-reset.sh --yes
+    ./scripts/setup-desktop-test-data.sh
+    export BUZZ_PRIVATE_KEY="3dbaebadb5dfd777ff25149ee230d907a15a9e1294b40b830661e65bb42f6c03"
+    export BUZZ_REQUIRE_RELAY_MEMBERSHIP=true
+    export BUZZ_ALLOW_NIP_OA_AUTH=true
+    export RELAY_OWNER_PUBKEY="e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34"
+    export BUZZ_RELAY_PRIVATE_KEY="0000000000000000000000000000000000000000000000000000000000000001"
+    export BUZZ_RECONCILE_CHANNELS=true
+    export BUZZ_RESET_WEBVIEW_STATE=1
+    exec just mesh=1 dev
 
 # Real serve->client->inference on this machine (not CI).
 mesh-e2e-hardware:
@@ -286,6 +305,7 @@ mesh-e2e-confidence:
     #!/usr/bin/env bash
     set -euo pipefail
     export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
+    cargo build --release -p buzz-agent -p buzz-dev-mcp
     cargo run -p buzz-relay --example mesh_serve_client_smoke
     cargo run -p buzz-relay --example mesh_admission_smoke
     cargo run -p buzz-relay --example mesh_agent_e2e
@@ -350,19 +370,35 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     if [[ -n "{{mesh}}" ]]; then
         export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
+    # Docker Desktop's forwarded MinIO port can stall under the deployment
+    # probe's 32 concurrent writers. Keep the gate enabled in local dev, using
+    # the bounded profile already used by the relay test launcher.
+    export BUZZ_GIT_PROBE_WRITERS="${BUZZ_GIT_PROBE_WRITERS:-8}"
+    export BUZZ_GIT_PROBE_ROUNDS="${BUZZ_GIT_PROBE_ROUNDS:-2}"
     ./target/debug/buzz-relay &
     RELAY_PID=$!
-    sleep 1
-    if ! kill -0 "$RELAY_PID" 2>/dev/null; then
-        echo "Error: buzz-relay exited during startup; refusing to launch desktop against a stale relay." >&2
-        wait "$RELAY_PID" || true
-        exit 1
-    fi
     cleanup() {
         [[ -n "${INSTANCE_ID:-}" ]] && ../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true
         kill "$RELAY_PID" 2>/dev/null || true
     }
     trap cleanup EXIT
+    relay_ready=false
+    for _ in $(seq 1 120); do
+        if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+            echo "Error: buzz-relay exited during startup; refusing to launch desktop." >&2
+            wait "$RELAY_PID" || true
+            exit 1
+        fi
+        if curl --silent --fail --max-time 1 "http://127.0.0.1:${health_port}/_readiness" >/dev/null; then
+            relay_ready=true
+            break
+        fi
+        sleep 0.5
+    done
+    if [[ "$relay_ready" != true ]]; then
+        echo "Error: buzz-relay did not become healthy within 60 seconds; refusing to launch desktop." >&2
+        exit 1
+    fi
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     source ../scripts/instance-env.sh

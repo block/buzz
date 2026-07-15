@@ -48,23 +48,32 @@ run_sql "SELECT 1" >/dev/null
 # tenant per-connection from the durable communities host map (WHERE host = $1
 # against the *normalized* host). normalize_host() keeps non-default ports, so
 # the host must be 'localhost:3000' verbatim to match RELAY_URL=ws://localhost:3000.
-# The relay does not auto-seed communities (ensure_configured_community has no
-# callers); this seed is the only writer of the dev community row. Insert it
-# first so the channel/member INSERTs below satisfy their community_id FKs, and
-# so the channel reconciler (BUZZ_RECONCILE_CHANNELS, which binds localhost:3000
-# fail-closed and retries every 5s for 2min) can resolve the tenant.
-COMMUNITY_ID="00000000-0000-4000-8000-00000000c0de"
+# Insert the host if another setup step has not already done so, then resolve
+# its real id. `just setup` seeds local host aliases with generated ids, so a
+# fixture-owned id would point channel rows at a community that does not exist.
 # Host must match the relay's normalized bind host verbatim (non-default ports
 # are kept by normalize_host). Overridable so an isolated relay on an alternate
 # port can seed the same channels/members against its own tenant.
 COMMUNITY_HOST="${BUZZ_COMMUNITY_HOST:-localhost:3000}"
+COMMUNITY_HOST_SQL="${COMMUNITY_HOST//\'/\'\'}"
 
 run_sql "
-INSERT INTO communities (id, host)
-VALUES ('${COMMUNITY_ID}', '${COMMUNITY_HOST}')
+INSERT INTO communities (host)
+VALUES ('${COMMUNITY_HOST_SQL}')
 ON CONFLICT (lower(host)) DO NOTHING
 ;
 "
+COMMUNITY_ID="$(run_sql "
+SELECT id
+FROM communities
+WHERE lower(host) = lower('${COMMUNITY_HOST_SQL}')
+LIMIT 1
+;
+")"
+if [[ ! "${COMMUNITY_ID}" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+  echo "Could not resolve community id for host ${COMMUNITY_HOST}." >&2
+  exit 1
+fi
 
 UUID_GENERAL=$(uuid5_hex "buzz.channel.general")
 UUID_RANDOM=$(uuid5_hex "buzz.channel.random")

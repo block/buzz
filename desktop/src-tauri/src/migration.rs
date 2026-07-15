@@ -283,6 +283,14 @@ fn migrate_legacy_nest_at(legacy: &Path, current: &Path) -> bool {
     if !legacy.exists() {
         return false;
     }
+    // A deliberate dev reset pre-creates this marker to opt out of every
+    // production/legacy nest import. Normal first-run migration still copies
+    // `.sprout` before `migrate_dev_nest()` writes the marker later in boot.
+    if current.file_name().is_some_and(|name| name == ".buzz-dev")
+        && current.join(DEV_NEST_MIGRATED_SENTINEL).exists()
+    {
+        return false;
+    }
     for name in LEGACY_NEST_KNOWLEDGE {
         let src = legacy.join(name);
         if !src.exists() {
@@ -338,6 +346,12 @@ pub(crate) fn should_migrate_dev_repos_dir(is_dev: bool, reset_completed: bool) 
 pub(crate) fn migrate_dev_repos_dir_at(home: &Path, dev_nest: &Path) {
     let src = home.join(".buzz").join(".repos-dir");
     if !src.exists() {
+        return;
+    }
+    // This is a one-time migration. The full dev-nest migration writes the
+    // same sentinel, and a deliberate dev reset pre-creates it to keep the
+    // next launch from importing production workspace state again.
+    if dev_nest.join(DEV_NEST_MIGRATED_SENTINEL).exists() {
         return;
     }
     let dst = dev_nest.join(".repos-dir");

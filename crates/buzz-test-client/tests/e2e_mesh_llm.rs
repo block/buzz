@@ -1,28 +1,26 @@
-//! End-to-end acceptance tests for the relay-hosted mesh-LLM feature.
+//! End-to-end acceptance tests for Buzz shared compute.
 //!
-//! These tests require a running buzz-relay with mesh embedded
-//! (`BUZZ_MESH_ENABLED=true`, `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`) and,
-//! for the live-inference rows, two desktop mesh nodes (serve + client).
+//! These tests require a membership-gated buzz-relay and a mesh-enabled desktop
+//! publishing its client-signed discovery note. Live-inference rows additionally
+//! require two desktop mesh nodes (serve + client).
 //! All tests are `#[ignore]` by default — they need infra CI does not host
 //! (native llama, multi-node, model download). The deterministic trust
-//! invariants are unit-tested in `buzz-relay` (`mesh_status_publisher`,
-//! `mesh_signaling`); this file is the opt-in full-stack acceptance layer.
+//! invariants are unit-tested in the desktop mesh module; this file is the
+//! opt-in full-stack acceptance layer.
 //!
 //! # Running (manual / runbook)
 //!
 //! ```text
 //! # 1. prepare the matching native runtime with `scripts/ensure-mesh-native-runtime.sh`
-//! # 2. start a mesh-enabled relay
-//! BUZZ_MESH_ENABLED=true BUZZ_REQUIRE_RELAY_MEMBERSHIP=true \
-//!   cargo run -p buzz-relay
-//! # 3. run the trust assertions (no GPU needed):
+//! # 2. start the normal membership-gated relay and a mesh-enabled desktop
+//! # 3. have that desktop publish status, then run the trust assertions:
 //! RELAY_URL=ws://localhost:3000 \
 //!   cargo test --test e2e_mesh_llm trust -- --ignored --nocapture
 //! # 4. run the live A->B inference row (needs 2 mesh nodes + a small model):
 //! #    point at B's local OpenAI endpoint; without it the test SKIPS (no silent pass):
 //! MESH_OPENAI_BASE=http://127.0.0.1:9337/v1 \
 //!   cargo test --test e2e_mesh_llm live_agent_completes -- --ignored --nocapture
-//! # trust rows need real relay identities, not generated keys:
+//! # MEMBER_NSEC is the publishing desktop identity; STRANGER_NSEC is not a member:
 //! MEMBER_NSEC=nsec1... STRANGER_NSEC=nsec1... \
 //!   cargo test --test e2e_mesh_llm trust -- --ignored --nocapture
 //! ```
@@ -30,9 +28,9 @@
 //! ## Acceptance matrix (= the demo, as a test)
 //! | # | Assertion | This file | Also covered by |
 //! |---|-----------|-----------|-----------------|
-//! | 1 | member reads kind:30621 status w/ dial pointer, no secrets | `trust_member_reads_mesh_status` | relay `mesh_status_publisher` units |
-//! | 2 | non-member REQ for kind:30621 returns nothing | `trust_nonmember_read_denied` | — |
-//! | 3 | non-member iroh dial denied (NIP-98→membership) | runbook (needs iroh dial) | relay `mesh_signaling` admission units |
+//! | 1 | member reads its kind:30003 owner-bound status, no secrets | `trust_member_reads_mesh_status` | desktop discovery units |
+//! | 2 | non-member REQ for kind:30003 returns nothing | `trust_nonmember_read_denied` | relay membership tests |
+//! | 3 | untrusted Mesh owner cannot infer with a leaked join token | hardware harness | `mesh_admission_smoke` |
 //! | 4 | B's agent completes a chat against A's model over mesh | `live_agent_completes_chat_over_mesh` | runbook |
 //! | 5 | dropped member → typed auth failure reaches lastError | runbook (desktop harness) | buzz-agent `-32001` unit |
 //! | 6 | split: model too big → 2 serve nodes → chat completes | `live_split_model_completes` | runbook |
@@ -40,11 +38,11 @@
 use std::time::Duration;
 
 use buzz_test_client::BuzzTestClient;
-use nostr::{Filter, Keys, Kind};
+use nostr::{Alphabet, Filter, Keys, Kind, SingleLetterTag};
 
-/// Buzz's relay-owned mesh status kind (must match `buzz_core::kind`).
-const KIND_MESH_LLM_RELAY_STATUS: u16 = 30621;
-const MESH_STATUS_D_TAG: &str = "buzz-relay-mesh";
+/// NIP-51 bookmark set used for client-owned Mesh discovery notes.
+const KIND_BUZZ_MESH_MEMBER_STATUS: u16 = 30003;
+const MESH_STATUS_D_TAG_PREFIX: &str = "buzz-mesh-member-status:";
 const MESH_STATUS_TYPE: &str = "buzz-mesh-status";
 
 fn relay_url() -> String {
@@ -81,14 +79,13 @@ fn sub_id(name: &str) -> String {
 
 fn mesh_status_filter() -> Filter {
     Filter::new()
-        .kind(Kind::Custom(KIND_MESH_LLM_RELAY_STATUS))
-        .identifier(MESH_STATUS_D_TAG)
+        .kind(Kind::Custom(KIND_BUZZ_MESH_MEMBER_STATUS))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::K), MESH_STATUS_TYPE)
 }
 
-/// Assertion 1: an authenticated relay member can REQ the relay-signed
-/// kind:30621 status event; its content carries the sanitized projection
-/// (mesh/models/serveTargets with EndpointAddr dial pointers) and NO secrets
-/// (no invite-secret, no local paths, no raw runtime object).
+/// Assertion 1: an authenticated relay member can read its own client-signed
+/// kind:30003 status. The content carries an owner binding and EndpointAddr dial
+/// pointers, but no secret keys or local paths.
 ///
 /// Requires a mesh-enabled relay that has published at least one status event.
 #[tokio::test]
@@ -114,19 +111,34 @@ async fn trust_member_reads_mesh_status() {
 
     let status = events
         .iter()
-        .find(|e| e.kind == Kind::Custom(KIND_MESH_LLM_RELAY_STATUS))
-        .expect("a member must see at least one kind:30621 status event");
+        .find(|e| {
+            e.kind == Kind::Custom(KIND_BUZZ_MESH_MEMBER_STATUS) && e.pubkey == member.public_key()
+        })
+        .expect("the publishing member must see its kind:30003 mesh status event");
 
-    // Relay-signed (the relay keypair, not this member).
-    assert_ne!(
+    assert_eq!(
         status.pubkey,
         member.public_key(),
-        "status must be relay-signed, not member-signed"
+        "status must be signed by the desktop member, not the relay"
     );
+    assert!(status.tags.iter().any(|tag| {
+        let values = tag.as_slice();
+        values.first().map(String::as_str) == Some("d")
+            && values
+                .get(1)
+                .is_some_and(|value| value.starts_with(MESH_STATUS_D_TAG_PREFIX))
+    }));
 
     let content: serde_json::Value =
         serde_json::from_str(&status.content).expect("content is JSON");
-    assert_eq!(content["type"], MESH_STATUS_TYPE, "type discriminator");
+    for field in ["ownerId", "ownerVerifyingKey", "ownerBindingSig"] {
+        assert!(
+            content[field]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "status carries {field}"
+        );
+    }
 
     // Dial pointer present (EndpointAddr is connectivity, not a secret).
     let targets = content["serveTargets"]
@@ -159,7 +171,7 @@ async fn trust_member_reads_mesh_status() {
 }
 
 /// Assertion 2: a valid Nostr identity that is NOT a relay member gets nothing
-/// back for a kind:30621 REQ — membership gates the read.
+/// back for a kind:30003 mesh-status REQ — membership gates the read.
 ///
 /// Requires a relay with `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true` and a published
 /// status event that members can see (paired with assertion 1).
@@ -189,10 +201,10 @@ async fn trust_nonmember_read_denied() {
 
     let leaked = events
         .iter()
-        .any(|e| e.kind == Kind::Custom(KIND_MESH_LLM_RELAY_STATUS));
+        .any(|e| e.kind == Kind::Custom(KIND_BUZZ_MESH_MEMBER_STATUS));
     assert!(
         !leaked,
-        "non-member must NOT receive kind:30621 mesh status"
+        "non-member must NOT receive kind:30003 mesh status"
     );
 
     client.disconnect().await.ok();
