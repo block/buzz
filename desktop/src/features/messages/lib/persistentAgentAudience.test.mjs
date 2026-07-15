@@ -25,6 +25,80 @@ test("audiences remain independently scoped and removable", async () => {
   assert.deepEqual(saved, { "thread:root": [agentB] });
 });
 
+test("adding an explicit agent merges with the active audience", async () => {
+  globalThis.window = { localStorage: createStorage() };
+  const store = await import(
+    `./persistentAgentAudience.ts?test=${Date.now() + 1}`
+  );
+  const agentA = "a".repeat(64);
+  const agentB = "b".repeat(64);
+
+  store.setPersistentAgentAudienceEnabled(true);
+  store.setPersistentAgentAudience("channel:one", [agentA]);
+  store.addPersistentAgentAudienceMembers("channel:one", [agentB]);
+
+  const saved = JSON.parse(
+    window.localStorage.getItem("buzz:persistent-agent-audiences:v1"),
+  );
+  assert.deepEqual(saved, { "channel:one": [agentA, agentB] });
+});
+
+test("draft completion updates its captured scope after navigation", async () => {
+  globalThis.window = { localStorage: createStorage() };
+  const store = await import(
+    `./persistentAgentAudience.ts?test=${Date.now() + 2}`
+  );
+  const originatingAgent = "a".repeat(64);
+  const viewedAgent = "b".repeat(64);
+
+  store.setPersistentAgentAudienceEnabled(true);
+  store.addPersistentAgentAudienceMembersForDraft({
+    capturedChannelId: "originating-channel",
+    explicitAgentPubkeys: [originatingAgent],
+    sentDraftKey: "thread:originating-root",
+  });
+  store.setPersistentAgentAudience(
+    store.getPersistentAgentAudienceScope(
+      "newly-viewed-channel",
+      "thread:newly-viewed-root",
+    ),
+    [viewedAgent],
+  );
+
+  const saved = JSON.parse(
+    window.localStorage.getItem("buzz:persistent-agent-audiences:v1"),
+  );
+  assert.deepEqual(saved, {
+    "originating-channel:thread:originating-root": [originatingAgent],
+    "newly-viewed-channel:thread:newly-viewed-root": [viewedAgent],
+  });
+});
+
+test("completion after disabling cannot repopulate a cleared audience", async () => {
+  globalThis.window = { localStorage: createStorage() };
+  const store = await import(
+    `./persistentAgentAudience.ts?test=${Date.now() + 3}`
+  );
+  const agent = "a".repeat(64);
+
+  store.setPersistentAgentAudienceEnabled(true);
+  store.setPersistentAgentAudience("channel:one", [agent]);
+  store.setPersistentAgentAudienceEnabled(false);
+  store.addPersistentAgentAudienceMembersForDraft({
+    capturedChannelId: "channel",
+    explicitAgentPubkeys: [agent],
+    sentDraftKey: "one",
+  });
+  store.setPersistentAgentAudienceEnabled(true);
+
+  assert.deepEqual(
+    JSON.parse(
+      window.localStorage.getItem("buzz:persistent-agent-audiences:v1"),
+    ),
+    {},
+  );
+});
+
 test("invalid, duplicate, and differently-cased pubkeys are normalized", async () => {
   globalThis.window = { localStorage: createStorage() };
   const store = await import(

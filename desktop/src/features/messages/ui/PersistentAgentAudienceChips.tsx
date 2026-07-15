@@ -21,7 +21,7 @@ export function PersistentAgentAudienceChips({
       data-testid="persistent-agent-audience"
     >
       <legend className="float-left mr-0.5 text-xs text-muted-foreground">
-        To
+        Talking to
       </legend>
       {pubkeys.map((pubkey) => {
         const displayName = getDisplayName(pubkey) ?? truncatePubkey(pubkey);
@@ -33,7 +33,7 @@ export function PersistentAgentAudienceChips({
             <span className="truncate">{displayName}</span>
             <button
               aria-label={`Remove ${displayName} from active audience`}
-              className="rounded-full p-0.5 text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="inline-flex size-6 items-center justify-center rounded-full text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               onClick={() => onRemove(pubkey)}
               type="button"
             >

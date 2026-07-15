@@ -360,7 +360,7 @@ function MessageComposerImpl({
     setPendingImeta: media.setPendingImeta,
     setSpoileredAttachmentUrls,
     onSuccessfulExplicitAgentAudience: persistentAudience.enabled
-      ? persistentAudience.setPubkeys
+      ? persistentAudience.addDraftPubkeys
       : undefined,
   });
 

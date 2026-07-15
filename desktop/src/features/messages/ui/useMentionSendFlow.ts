@@ -94,7 +94,11 @@ type UseMentionSendFlowOptions = {
   setSpoileredAttachmentUrls?: React.Dispatch<
     React.SetStateAction<Set<string>>
   >;
-  onSuccessfulExplicitAgentAudience?: (pubkeys: string[]) => void;
+  onSuccessfulExplicitAgentAudience?: (audience: {
+    capturedChannelId: string | null;
+    explicitAgentPubkeys: string[];
+    sentDraftKey: string | null | undefined;
+  }) => void;
 };
 
 function mergeOutgoingTagsWithReferenceMentions(
@@ -493,10 +497,14 @@ export function useMentionSendFlow({
             draft.capturedThreadContext,
           );
           if (draft.explicitAgentPubkeys.length > 0) {
-            // Preserve the already-active audience and add agents explicitly
-            // authored in this successful send. Responders/delegates never
-            // enter this set because they are absent from the human draft.
-            onSuccessfulExplicitAgentAudience?.(agentMentionPubkeys);
+            // Promote only agents explicitly authored in this successful send,
+            // into the channel/draft scope captured at submit time. The store
+            // merges them with any audience already active in that scope.
+            onSuccessfulExplicitAgentAudience?.({
+              capturedChannelId: draft.capturedChannelId,
+              explicitAgentPubkeys: draft.explicitAgentPubkeys,
+              sentDraftKey: draft.sentDraftKey,
+            });
           }
           if (draft.sentDraftKey) {
             drafts.markDraftSent(

@@ -87,6 +87,13 @@ export function setPersistentAgentAudienceEnabled(nextEnabled: boolean): void {
   emit();
 }
 
+export function getPersistentAgentAudienceScope(
+  channelId: string,
+  draftKey: string,
+): string {
+  return `${channelId}:${draftKey}`;
+}
+
 export function setPersistentAgentAudience(
   scope: string,
   pubkeys: Iterable<string>,
@@ -107,6 +114,30 @@ export function setPersistentAgentAudience(
   audiences = next;
   persistAudiences();
   emit();
+}
+
+export function addPersistentAgentAudienceMembers(
+  scope: string,
+  pubkeys: Iterable<string>,
+): void {
+  if (!enabled || !scope) return;
+  setPersistentAgentAudience(scope, [...(audiences[scope] ?? []), ...pubkeys]);
+}
+
+export function addPersistentAgentAudienceMembersForDraft({
+  capturedChannelId,
+  explicitAgentPubkeys,
+  sentDraftKey,
+}: {
+  capturedChannelId: string | null;
+  explicitAgentPubkeys: string[];
+  sentDraftKey: string | null | undefined;
+}): void {
+  if (!enabled || !capturedChannelId || !sentDraftKey) return;
+  addPersistentAgentAudienceMembers(
+    getPersistentAgentAudienceScope(capturedChannelId, sentDraftKey),
+    explicitAgentPubkeys,
+  );
 }
 
 export function removePersistentAgentAudienceMember(
@@ -139,7 +170,7 @@ export function usePersistentAgentAudience(scope: string | null): {
   enabled: boolean;
   pubkeys: readonly string[];
   setEnabled: (enabled: boolean) => void;
-  setPubkeys: (pubkeys: Iterable<string>) => void;
+  addDraftPubkeys: typeof addPersistentAgentAudienceMembersForDraft;
   removePubkey: (pubkey: string) => void;
 } {
   const state = React.useSyncExternalStore(
@@ -152,10 +183,7 @@ export function usePersistentAgentAudience(scope: string | null): {
     enabled: state.enabled,
     pubkeys: resolvedScope ? (state.audiences[resolvedScope] ?? []) : [],
     setEnabled: setPersistentAgentAudienceEnabled,
-    setPubkeys: React.useCallback(
-      (pubkeys) => setPersistentAgentAudience(resolvedScope, pubkeys),
-      [resolvedScope],
-    ),
+    addDraftPubkeys: addPersistentAgentAudienceMembersForDraft,
     removePubkey: React.useCallback(
       (pubkey) => removePersistentAgentAudienceMember(resolvedScope, pubkey),
       [resolvedScope],
