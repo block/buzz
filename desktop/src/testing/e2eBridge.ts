@@ -6691,10 +6691,6 @@ async function handleUpdatePersona(args: {
   if (!persona) {
     throw new Error(`agent ${args.input.id} not found`);
   }
-  if (persona.is_builtin) {
-    throw new Error("Built-in agents cannot be edited.");
-  }
-
   persona.display_name = args.input.displayName.trim();
   persona.avatar_url = args.input.avatarUrl?.trim() || null;
   persona.system_prompt = args.input.systemPrompt.trim();

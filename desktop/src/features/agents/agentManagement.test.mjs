@@ -97,7 +97,7 @@ test("allows agents to update only personal, editable profiles", () => {
   );
   assert.equal(
     requestTargetsEditablePersona({ isBuiltIn: true, sourceTeam: null }),
-    false,
+    true,
   );
   assert.equal(
     requestTargetsEditablePersona({ isBuiltIn: false, sourceTeam: "team" }),

@@ -159,27 +159,8 @@ fn merge_personas(mut stored: Vec<AgentDefinition>, now: &str) -> (Vec<AgentDefi
 
     for built_in in built_in_persona_records(now) {
         if let Some(existing) = stored.iter_mut().find(|record| record.id == built_in.id) {
-            let created_at = existing.created_at.clone();
-            let updated_at = existing.updated_at.clone();
-            let is_active = existing.is_active;
-            // Built-in fields are canonical — user overrides on runtime/model are
-            // intentionally not preserved across restarts. Users who want a custom
-            // model or runtime should clone the built-in as a custom persona.
-            if existing.display_name != built_in.display_name
-                || existing.avatar_url != built_in.avatar_url
-                || existing.system_prompt != built_in.system_prompt
-                || existing.name_pool != built_in.name_pool
-                || existing.env_vars != built_in.env_vars
-                || existing.runtime != built_in.runtime
-                || existing.model != built_in.model
-                || !existing.is_builtin
-            {
-                *existing = AgentDefinition {
-                    created_at,
-                    updated_at,
-                    is_active,
-                    ..built_in
-                };
+            if !existing.is_builtin {
+                existing.is_builtin = true;
                 changed = true;
             }
         } else {

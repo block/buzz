@@ -175,10 +175,6 @@ pub async fn update_persona(
                 .find(|record| record.id == input.id)
                 .ok_or_else(|| format!("agent {} not found", input.id))?;
 
-            if persona.is_builtin {
-                return Err("Built-in agents cannot be edited.".to_string());
-            }
-
             // Track what changed so we can propagate to linked agent records.
             let avatar_changed = persona.avatar_url != avatar_url;
             let name_changed = persona.display_name != display_name;
