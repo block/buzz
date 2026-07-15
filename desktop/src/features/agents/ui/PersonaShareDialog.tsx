@@ -341,12 +341,8 @@ export function SnapshotShareDialog({
       setRecipientShareLevel("none");
       onReset?.();
       snapshotSendController.reset();
-      // Encoding is local and carries no memory at this level. Starting it in
-      // the background removes most of the preparation delay from the common
-      // Copy link and Send paths without uploading anything before intent.
-      void getEncodedSnapshot("none").catch(() => undefined);
     }
-  }, [getEncodedSnapshot, open, onReset, snapshotSendController.reset]);
+  }, [open, onReset, snapshotSendController.reset]);
 
   React.useEffect(() => {
     if (copyStatus !== "copied") return;
@@ -454,7 +450,7 @@ export function SnapshotShareDialog({
   }
 
   function handleDialogOpenChange(nextOpen: boolean) {
-    if (!nextOpen && isInterfacePending) return;
+    if (!nextOpen && isActionPending) return;
     onOpenChange(nextOpen);
   }
 
@@ -476,8 +472,8 @@ export function SnapshotShareDialog({
             </DialogTitle>
           </DialogHeader>
           <DialogClose
-            className="absolute right-4 top-4 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
-            disabled={isInterfacePending}
+            className="absolute right-4 top-4 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-100"
+            disabled={isActionPending}
           >
             <X className="h-4 w-4" />
             <span className="sr-only">Close</span>
@@ -696,9 +692,9 @@ export function SnapshotShareDialog({
           </div>
         </div>
         <button
-          className="relative flex min-h-14 w-full items-center gap-3 rounded-2xl bg-background px-5 py-4 text-left text-sm font-medium shadow-2xl outline-hidden transition-colors hover:bg-muted focus-visible:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+          className="relative flex min-h-14 w-full items-center gap-3 rounded-2xl bg-background px-5 py-4 text-left text-sm font-medium shadow-2xl outline-hidden transition-colors hover:bg-muted focus-visible:bg-muted disabled:cursor-default disabled:opacity-100"
           data-testid={`${testIdPrefix}-export`}
-          disabled={isPending || isSending}
+          disabled={isActionPending}
           onClick={onExport}
           type="button"
         >

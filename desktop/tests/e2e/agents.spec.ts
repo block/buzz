@@ -1152,8 +1152,7 @@ test("share access controls include the selected memories", async ({
       .filter((entry) => entry.command === "encode_agent_snapshot_for_send")
       .map((entry) => entry.payload.memoryLevel),
   );
-  expect(encodeLevelsBeforeLinkConfirmation).toContain("none");
-  expect(encodeLevelsBeforeLinkConfirmation).not.toContain("core");
+  expect(encodeLevelsBeforeLinkConfirmation).toEqual([]);
   await memoryConfirmation.getByTestId("persona-share-memory-confirm").click();
   await expect(page.getByTestId("persona-share-copy-link")).toContainText(
     "Copied",
@@ -1227,14 +1226,16 @@ test("share access controls include the selected memories", async ({
   await expect(recipientAccess).toHaveText("Agent + all memories");
   await expect(inlineMemoryWarning).toBeVisible();
   await waitForAnimations(page);
-  const expandedRecipientAccessBox = await recipientAccess.boundingBox();
-  expect(
-    Math.abs(
-      (expandedRecipientAccessBox?.x ?? 0) +
-        (expandedRecipientAccessBox?.width ?? 0) -
-        recipientAccessRightEdge,
-    ),
-  ).toBeLessThanOrEqual(1);
+  await expect
+    .poll(async () => {
+      const expandedRecipientAccessBox = await recipientAccess.boundingBox();
+      return Math.abs(
+        (expandedRecipientAccessBox?.x ?? 0) +
+          (expandedRecipientAccessBox?.width ?? 0) -
+          recipientAccessRightEdge,
+      );
+    })
+    .toBeLessThanOrEqual(1);
   expect(
     await recipientAccess
       .locator("span")
@@ -1260,7 +1261,7 @@ test("share access controls include the selected memories", async ({
       .filter((entry) => entry.command === "encode_agent_snapshot_for_send")
       .map((entry) => entry.payload.memoryLevel),
   );
-  expect(encodeLevelsBeforeSendConfirmation).toContain("none");
+  expect(encodeLevelsBeforeSendConfirmation).not.toContain("none");
   expect(encodeLevelsBeforeSendConfirmation).toContain("core");
   expect(encodeLevelsBeforeSendConfirmation).not.toContain("everything");
   await memoryConfirmation.getByTestId("persona-share-memory-confirm").click();
@@ -1286,7 +1287,7 @@ test("share access controls include the selected memories", async ({
     encodePayloads.filter(
       (payload) => (payload as { memoryLevel?: string }).memoryLevel === "none",
     ),
-  ).toHaveLength(1);
+  ).toHaveLength(0);
   expect(encodePayloads).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
