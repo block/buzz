@@ -237,7 +237,9 @@ export function getProjectUpdatedAt(
   project: Project,
   summary: ProjectActivitySummary | undefined,
 ) {
-  return summary?.updatedAt ?? project.createdAt;
+  // A summary with no recorded activity has `updatedAt: 0` — fall back to
+  // the announcement's creation time rather than rendering the Unix epoch.
+  return summary?.updatedAt || project.createdAt;
 }
 
 export function isProjectMine(

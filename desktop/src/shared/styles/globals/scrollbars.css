@@ -47,13 +47,21 @@
   background: transparent;
 }
 
+/* The native thumb stays permanently transparent (but grabbable — the hit
+ * area is real). Visibility while scrolling is handled by a separate overlay
+ * indicator element positioned over the gutter, because WebKit does not
+ * re-resolve `::-webkit-scrollbar` styles when classes/attributes on the
+ * scroller change dynamically. */
 .buzz-content-scrollbar::-webkit-scrollbar-thumb {
   background-clip: content-box;
-  background-color: hsl(var(--border) / 0.6);
+  background-color: transparent;
   border: 3px solid transparent;
   border-radius: 999px;
 }
 
-.buzz-content-scrollbar:hover::-webkit-scrollbar-thumb {
+/* Scrollbar-part pseudo-classes are resolved by the scrollbar itself, so
+ * these DO update dynamically — keep the thumb visible under the pointer. */
+.buzz-content-scrollbar::-webkit-scrollbar-thumb:hover,
+.buzz-content-scrollbar::-webkit-scrollbar-thumb:active {
   background-color: hsl(var(--border) / 0.9);
 }

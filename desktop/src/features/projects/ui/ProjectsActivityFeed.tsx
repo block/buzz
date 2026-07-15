@@ -383,7 +383,7 @@ function ActivityCard({
             {item.body ? (
               <p
                 className={cn(
-                  "mt-1.5 text-sm leading-6 text-muted-foreground",
+                  "mt-0.5 text-sm leading-6 text-muted-foreground",
                   compact ? "line-clamp-1" : "line-clamp-2",
                 )}
               >

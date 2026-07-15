@@ -713,20 +713,20 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                           </a>
                         </Button>
                       ) : null}
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <span className="inline-flex shrink-0">
-                            <CopyTextButton
-                              ariaLabel="Copy repo address"
-                              className="h-6 w-6"
-                              text={project.repoAddress}
-                            />
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent>Copy repo address</TooltipContent>
-                      </Tooltip>
                     </div>
                   </div>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="inline-flex shrink-0">
+                        <CopyTextButton
+                          ariaLabel="Copy repo address"
+                          className="h-6 w-6"
+                          text={project.repoAddress}
+                        />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>Copy repo address</TooltipContent>
+                  </Tooltip>
                 </div>
               </section>
 

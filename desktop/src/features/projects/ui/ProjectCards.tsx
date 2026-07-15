@@ -13,6 +13,7 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import type {
   Project,
   ProjectActivitySummary,
@@ -101,12 +102,17 @@ function ProjectPeopleStack({
         const profile = profiles?.[normalizePubkey(pubkey)];
         const label = resolveUserLabel({ pubkey, profiles });
         return (
-          <Tooltip key={pubkey}>
-            <TooltipTrigger asChild>
-              {/* First avatar sits on the top layer, cascading down rightward. */}
-              <span
-                className="relative inline-flex"
-                style={{ zIndex: visible.length - index }}
+          // First avatar sits on the top layer, cascading down rightward.
+          <span
+            className="relative inline-flex"
+            key={pubkey}
+            style={{ zIndex: visible.length - index }}
+          >
+            <UserProfilePopover pubkey={pubkey} triggerElement="span">
+              <button
+                aria-label={`View ${label}'s profile`}
+                className="inline-flex rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                type="button"
               >
                 <UserAvatar
                   accent={
@@ -117,10 +123,9 @@ function ProjectPeopleStack({
                   displayName={label}
                   size="xs"
                 />
-              </span>
-            </TooltipTrigger>
-            <TooltipContent>{label}</TooltipContent>
-          </Tooltip>
+              </button>
+            </UserProfilePopover>
+          </span>
         );
       })}
       {remaining > 0 ? (

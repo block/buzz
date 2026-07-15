@@ -74,6 +74,45 @@ const MANY_PROJECTS_THRESHOLD = 12;
 export function ProjectsView() {
   const { goProject } = useAppNavigation();
   const { activeCommunity } = useCommunities();
+  const scrollIdleTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const scrollIndicatorRef = React.useRef<HTMLDivElement | null>(null);
+  // The native scrollbar thumb is permanently transparent (WebKit won't
+  // re-resolve ::-webkit-scrollbar styles dynamically), so we paint our own
+  // indicator over the gutter and show it only while the area is scrolling.
+  const handleContentScroll = React.useCallback(
+    (event: React.UIEvent<HTMLDivElement>) => {
+      const element = event.currentTarget;
+      const indicator = scrollIndicatorRef.current;
+      if (!indicator) return;
+
+      const { clientHeight, scrollHeight, scrollTop } = element;
+      if (scrollHeight <= clientHeight) {
+        indicator.style.opacity = "0";
+        return;
+      }
+
+      const thumbHeight = Math.max(
+        24,
+        (clientHeight / scrollHeight) * clientHeight,
+      );
+      const maxOffset = clientHeight - thumbHeight;
+      const offset = (scrollTop / (scrollHeight - clientHeight)) * maxOffset;
+      indicator.style.height = `${thumbHeight}px`;
+      indicator.style.transform = `translateY(${offset}px)`;
+      indicator.style.opacity = "1";
+
+      if (scrollIdleTimerRef.current !== null) {
+        globalThis.clearTimeout(scrollIdleTimerRef.current);
+      }
+      scrollIdleTimerRef.current = globalThis.setTimeout(() => {
+        indicator.style.opacity = "0";
+        scrollIdleTimerRef.current = null;
+      }, 700);
+    },
+    [],
+  );
   const mainInsetRef = useMainInsetRef();
   const projectsHeaderChromeRef = useMeasuredCssVariable({
     targetRef: mainInsetRef,
@@ -401,9 +440,11 @@ export function ProjectsView() {
       const activityDifference =
         (rightSummary?.activityCount ?? 0) - (leftSummary?.activityCount ?? 0);
       if (activityDifference !== 0) return activityDifference;
+      // `updatedAt: 0` means a summary exists but recorded no activity —
+      // treat it like a missing summary and use the announcement time.
       return (
-        (rightSummary?.updatedAt ?? right.createdAt) -
-        (leftSummary?.updatedAt ?? left.createdAt)
+        (rightSummary?.updatedAt || right.createdAt) -
+        (leftSummary?.updatedAt || left.createdAt)
       );
     })
     .slice(0, 3);
@@ -503,6 +544,13 @@ export function ProjectsView() {
         topChromeInset.divider,
       )}
     >
+      {/* Scroll indicator painted over the scrollbar gutter; only visible
+          while scrolling (native thumb is transparent). */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute right-[3px] top-0 z-50 w-1 rounded-full bg-border/80 opacity-0 transition-opacity duration-200"
+        ref={scrollIndicatorRef}
+      />
       {/* Pinned above the scroll container so it stays put while scrolling. */}
       <div className="absolute right-4 top-4 z-40">
         <Button
@@ -551,7 +599,10 @@ export function ProjectsView() {
           />
         </>
       ) : (
-        <div className="buzz-content-scrollbar flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto">
+        <div
+          className="buzz-content-scrollbar flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto"
+          onScroll={handleContentScroll}
+        >
           {projectsHeader}
           {filter === "all" ? null : (
             <div className="sticky top-0 z-30 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55">
@@ -589,7 +640,7 @@ export function ProjectsView() {
             ) : (
               <section className="space-y-3">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <h3 className="text-sm font-semibold text-foreground">
+                  <h3 className="text-base font-semibold text-foreground">
                     {filter === "prs"
                       ? "Pull requests"
                       : filter === "issues"

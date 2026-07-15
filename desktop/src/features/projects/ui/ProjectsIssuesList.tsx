@@ -9,6 +9,7 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 
@@ -78,7 +79,14 @@ function IssueHeader({
       </div>
       <p className="truncate text-xs text-muted-foreground">
         {project.name} · created {formatRelativeTime(issue.createdAt)} by{" "}
-        {authorLabel}
+        <UserProfilePopover pubkey={issue.author} triggerElement="span">
+          <button
+            className="relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+            type="button"
+          >
+            {authorLabel}
+          </button>
+        </UserProfilePopover>
       </p>
     </div>
   );
@@ -115,7 +123,7 @@ function IssueGridCard({
             }}
             size="xs"
             type="button"
-            variant="default"
+            variant="outline"
           >
             {nextStepLabel(issue.status)}
           </Button>
@@ -176,7 +184,7 @@ function IssueListRow({
             }}
             size="xs"
             type="button"
-            variant="default"
+            variant="outline"
           >
             {nextStepLabel(issue.status)}
           </Button>

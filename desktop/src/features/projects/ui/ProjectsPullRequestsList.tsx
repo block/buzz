@@ -9,11 +9,31 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+
+/** Author name that opens the user profile popover. */
+function AuthorNameButton({
+  label,
+  pubkey,
+}: {
+  label: string;
+  pubkey: string;
+}) {
+  return (
+    <UserProfilePopover pubkey={pubkey} triggerElement="span">
+      <button
+        className="relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+        type="button"
+      >
+        {label}
+      </button>
+    </UserProfilePopover>
+  );
+}
 
 type ProjectsPullRequestsListProps = {
   isLoading: boolean;
@@ -88,19 +108,20 @@ function PullRequestGridCard({
       </button>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex min-w-0 items-start gap-3">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="relative z-10 inline-flex shrink-0">
-                <UserAvatar
-                  accent={authorProfile?.isAgent === true}
-                  avatarUrl={authorProfile?.avatarUrl ?? null}
-                  displayName={authorLabel}
-                  size="md"
-                />
-              </span>
-            </TooltipTrigger>
-            <TooltipContent>{authorLabel}</TooltipContent>
-          </Tooltip>
+          <UserProfilePopover pubkey={pullRequest.author} triggerElement="span">
+            <button
+              aria-label={`View ${authorLabel}'s profile`}
+              className="relative z-10 inline-flex shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              type="button"
+            >
+              <UserAvatar
+                accent={authorProfile?.isAgent === true}
+                avatarUrl={authorProfile?.avatarUrl ?? null}
+                displayName={authorLabel}
+                size="md"
+              />
+            </button>
+          </UserProfilePopover>
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex min-w-0 items-center gap-1.5">
               <p className="truncate text-sm font-semibold text-foreground">
@@ -124,7 +145,7 @@ function PullRequestGridCard({
             }}
             size="xs"
             type="button"
-            variant="default"
+            variant="outline"
           >
             {nextStepLabel(pullRequest.status)}
           </Button>
@@ -145,7 +166,13 @@ function PullRequestGridCard({
               {pullRequest.status}
             </span>
             <span>created {formatRelativeTime(pullRequest.createdAt)}</span>
-            <span>by {authorLabel}</span>
+            <span>
+              by{" "}
+              <AuthorNameButton
+                label={authorLabel}
+                pubkey={pullRequest.author}
+              />
+            </span>
             {pullRequest.comments.length > 0 ? (
               <span className="flex items-center gap-1">
                 <MessageSquare className="h-3.5 w-3.5" />
@@ -190,19 +217,20 @@ function PullRequestListRow({
         <span className="sr-only">View {pullRequest.title}</span>
       </button>
       <div className="flex min-w-0 items-start gap-3">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="relative z-10 inline-flex shrink-0">
-              <UserAvatar
-                accent={authorProfile?.isAgent === true}
-                avatarUrl={authorProfile?.avatarUrl ?? null}
-                displayName={authorLabel}
-                size="md"
-              />
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>{authorLabel}</TooltipContent>
-        </Tooltip>
+        <UserProfilePopover pubkey={pullRequest.author} triggerElement="span">
+          <button
+            aria-label={`View ${authorLabel}'s profile`}
+            className="relative z-10 inline-flex shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            type="button"
+          >
+            <UserAvatar
+              accent={authorProfile?.isAgent === true}
+              avatarUrl={authorProfile?.avatarUrl ?? null}
+              displayName={authorLabel}
+              size="md"
+            />
+          </button>
+        </UserProfilePopover>
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex min-w-0 items-center gap-1.5">
             <p className="truncate text-sm font-semibold text-foreground">
@@ -221,7 +249,13 @@ function PullRequestListRow({
               #{pullRequest.id.slice(0, 8)}
             </span>
             <span>created {formatRelativeTime(pullRequest.createdAt)}</span>
-            <span>by {authorLabel}</span>
+            <span>
+              by{" "}
+              <AuthorNameButton
+                label={authorLabel}
+                pubkey={pullRequest.author}
+              />
+            </span>
             <span>·</span>
             <span>{pullRequest.status}</span>
           </div>
@@ -241,7 +275,7 @@ function PullRequestListRow({
             }}
             size="xs"
             type="button"
-            variant="default"
+            variant="outline"
           >
             {nextStepLabel(pullRequest.status)}
           </Button>
