@@ -261,6 +261,43 @@ pub async fn archive_community(
     })))
 }
 
+/// Idempotently restore an archived community owned by the asserted end-user identity.
+pub async fn unarchive_community(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    const PATH: &str = "/operator/communities/unarchive";
+    authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+    let request: ArchiveCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid unarchive-community JSON: {e}"),
+        )
+    })?;
+    let normalized_host = normalize_candidate_host(&request.host)
+        .map_err(|msg| api_error(StatusCode::BAD_REQUEST, &msg))?;
+    let owner = validate_pubkey_hex(&request.owner_pubkey).ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid owner_pubkey: expected 64-char hex pubkey",
+        )
+    })?;
+    let record = state
+        .db
+        .unarchive_community_owned_by(&normalized_host, &owner)
+        .await
+        .map_err(|e| internal_error(&format!("unarchive community: {e}")))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
+    tracing::info!(community = %record.id, host = %record.host, "community unarchived");
+    Ok(Json(serde_json::json!({
+        "community_id": record.id.to_string(),
+        "host": record.host,
+        "archived_at": null,
+        "status": "active",
+    })))
+}
+
 /// List communities where a pubkey currently holds the `owner` role.
 pub async fn list_owned_communities(
     State(state): State<Arc<AppState>>,
@@ -796,6 +833,97 @@ mod tests {
             json.get("owner_pubkey").and_then(Value::as_str),
             Some(owner_hex.as_str())
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unarchive_restores_admission_and_is_idempotent_without_changing_ownership() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let outsider = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let owner_hex = owner.public_key().to_hex();
+        let archived = state
+            .db
+            .archive_community_owned_by(&host, &owner_hex, "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        assert!(state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("archived admission lookup")
+            .is_none());
+
+        let request = |host: &str, owner_pubkey: String| {
+            serde_json::json!({
+                "host": host,
+                "owner_pubkey": owner_pubkey,
+            })
+            .to_string()
+        };
+        let wrong_owner = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/unarchive",
+            Some(request(&host, outsider.public_key().to_hex())),
+        )
+        .await;
+        assert_eq!(wrong_owner.status(), StatusCode::NOT_FOUND);
+        assert_eq!(read_json(wrong_owner).await["error"], "community not found");
+        let unknown = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/unarchive",
+            Some(request("missing.example", owner_hex.clone())),
+        )
+        .await;
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        assert_eq!(read_json(unknown).await["error"], "community not found");
+
+        for attempt in 0..2 {
+            let response = signed_operator_request(
+                Arc::clone(&state),
+                &operator,
+                "POST",
+                "/operator/communities/unarchive",
+                Some(request(&host, owner_hex.clone())),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "attempt {attempt}");
+            let json = read_json(response).await;
+            assert_eq!(json["community_id"], archived.id.to_string());
+            assert_eq!(json["host"], host);
+            assert!(json["archived_at"].is_null());
+            assert_eq!(json["status"], "active");
+        }
+
+        let active = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("restored admission lookup")
+            .expect("active community");
+        assert_eq!(active.id, archived.id);
+        let owner_member = state
+            .db
+            .get_relay_member(active.id, &owner_hex)
+            .await
+            .expect("owner lookup")
+            .expect("owner remains");
+        assert_eq!(owner_member.role, "owner");
     }
 
     #[tokio::test]

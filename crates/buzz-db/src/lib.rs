@@ -299,6 +299,15 @@ pub struct ArchivedCommunityRecord {
     pub archived_at: DateTime<Utc>,
 }
 
+/// Community row returned by an owner-authorized unarchive operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnarchivedCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Reserved canonical host restored to active admission.
+    pub host: String,
+}
+
 /// Token summary returned by [`Db::list_active_tokens`].
 #[derive(Debug, Clone)]
 pub struct TokenSummary {
@@ -776,6 +785,35 @@ impl Db {
                 id: CommunityId::from_uuid(row.try_get("id")?),
                 host: row.try_get("host")?,
                 archived_at: row.try_get("archived_at")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Idempotently restores a community when the asserted pubkey is its current owner.
+    pub async fn unarchive_community_owned_by(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+    ) -> Result<Option<UnarchivedCommunityRecord>> {
+        let row = sqlx::query(
+            r#"UPDATE communities c
+               SET archived_at = NULL
+               FROM relay_members rm
+               WHERE lower(c.host) = lower($1)
+                 AND rm.community_id = c.id
+                 AND lower(rm.pubkey) = lower($2)
+                 AND rm.role = 'owner'
+               RETURNING c.id, c.host"#,
+        )
+        .bind(normalized_host)
+        .bind(owner_pubkey)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(UnarchivedCommunityRecord {
+                id: CommunityId::from_uuid(row.try_get("id")?),
+                host: row.try_get("host")?,
             })
         })
         .transpose()
@@ -4419,6 +4457,77 @@ mod tests {
             post_rotation_retry,
             CreateCommunityWithOwnerResult::HostExists
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unarchive_community_owned_by_restores_admission_idempotently() {
+        let db = setup_db().await;
+        let host = format!("unarchive-{}.example", Uuid::new_v4().simple());
+        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let outsider = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let created = db
+            .create_community_with_owner(&host, &owner)
+            .await
+            .expect("create community");
+        let CreateCommunityWithOwnerResult::Created(created) = created else {
+            panic!("expected new community");
+        };
+
+        let archived = db
+            .archive_community_owned_by(&host, &owner, "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        assert_eq!(archived.id, created.id);
+        assert!(
+            db.lookup_community_by_host(&host)
+                .await
+                .expect("active lookup")
+                .is_none(),
+            "archived communities must fail admission"
+        );
+        assert!(db
+            .unarchive_community_owned_by(&host, &outsider)
+            .await
+            .expect("wrong-owner unarchive")
+            .is_none());
+        assert!(db
+            .unarchive_community_owned_by("missing.example", &owner)
+            .await
+            .expect("unknown-host unarchive")
+            .is_none());
+
+        let restored = db
+            .unarchive_community_owned_by(&host.to_ascii_uppercase(), &owner)
+            .await
+            .expect("unarchive community")
+            .expect("owned community");
+        assert_eq!(restored.id, created.id);
+        assert_eq!(restored.host, host);
+        assert_eq!(
+            db.lookup_community_by_host(&host)
+                .await
+                .expect("restored lookup")
+                .expect("active community")
+                .id,
+            created.id
+        );
+        assert_eq!(
+            db.get_relay_member(created.id, &owner)
+                .await
+                .expect("owner lookup")
+                .expect("owner remains")
+                .role,
+            "owner"
+        );
+
+        let retry = db
+            .unarchive_community_owned_by(&host, &owner)
+            .await
+            .expect("idempotent retry")
+            .expect("owned community");
+        assert_eq!(retry, restored);
     }
 
     #[tokio::test]
