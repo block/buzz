@@ -6,23 +6,25 @@ import { installMockBridge } from "../helpers/bridge";
 /**
  * Regression suite for the "app freezes after setting a reminder" bug.
  *
- * The app bundles two copies of @radix-ui/react-dismissable-layer:
- * react-menu (the engine under ContextMenu/DropdownMenu) resolves 1.1.11
- * while react-dialog resolves 1.1.15. Each copy keeps its own module-level
- * `originalBodyPointerEvents`, so when a *modal* menu opens a *modal* dialog
- * in the same React commit, the dialog's copy saves the menu's
- * `pointer-events: none` as the "original" body style and restores it when
- * the dialog closes — leaving `pointer-events: none` stuck on <body> and
- * deadening the whole app to the mouse.
+ * The app used to bundle two copies of @radix-ui/react-dismissable-layer
+ * (react-menu resolved 1.1.11 while react-dialog resolved 1.1.15). Each copy
+ * keeps its own module-level `originalBodyPointerEvents`, so when a *modal*
+ * menu opened a *modal* dialog in the same React commit, the dialog's copy
+ * saved the menu's `pointer-events: none` as the "original" body style and
+ * restored it when the dialog closed — leaving `pointer-events: none` stuck
+ * on <body> and deadening the whole app to the mouse.
  *
  * The inbox row context menu hit this: its "Remind me later" item opens
- * RemindMeLaterDialog synchronously. Fixed with modal={false} on that
- * ContextMenu (same pattern as PR #1482 for the sidebar channel menus).
+ * RemindMeLaterDialog synchronously. Fixed by deduplicating the layer via
+ * the pnpm override in pnpm-workspace.yaml — a single copy coordinates
+ * nested modal layers correctly, so the menu keeps its default modal
+ * behavior.
  *
  * Each test drives one reminder entry point through a full set-reminder
  * cycle, then asserts <body> pointer-events is not stuck and that a real
- * click still lands. The inbox right-click test fails without the
- * modal={false} fix; the message-menu tests pin the already-safe paths.
+ * click still lands. The inbox right-click test fails if the dismissable
+ * layer ever duplicates again; the message-menu tests pin the already-safe
+ * paths.
  */
 
 const GENERAL_MESSAGE_ROW = "message-row";
@@ -114,10 +116,10 @@ test.describe("reminder set → app stays clickable", () => {
     await expectAppAliveAfterDialogClose(page);
   });
 
-  // The regression path: only the inbox right-click stacks a ContextMenu
-  // under the modal dialog. Fails without modal={false} on that menu
-  // (InboxListPane) — body pointer-events stays "none" after the dialog
-  // closes and the sidebar click below times out.
+  // The regression path: only the inbox right-click stacks a modal
+  // ContextMenu under the modal dialog. Fails if two copies of the
+  // dismissable layer are ever bundled again — body pointer-events stays
+  // "none" after the dialog closes and the sidebar click below times out.
   test("03 — inbox row right-click → Remind me later", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByTestId("home-inbox")).toBeVisible();

@@ -3,6 +3,14 @@ packages:
   - "web"
 allowBuilds:
   esbuild: true
+overrides:
+  # Force a single copy of the dismissable-layer. Radix packages otherwise
+  # resolve different versions (react-menu pulled 1.1.11, react-dialog 1.1.15),
+  # and each copy keeps its own module-level saved <body> pointer-events style —
+  # so a modal menu opening a modal dialog left `pointer-events: none` stuck on
+  # <body> when the dialog closed, freezing the app (#1482, reminder dialog).
+  # Removable once every @radix-ui dep converges on one version naturally.
+  "@radix-ui/react-dismissable-layer": 1.1.15
 patchedDependencies:
   isomorphic-git: patches/isomorphic-git.patch
   virtua@0.49.3: patches/virtua@0.49.3.patch
