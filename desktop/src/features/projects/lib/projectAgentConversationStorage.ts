@@ -1,7 +1,11 @@
 const CONVERSATION_STORAGE_PREFIX = "buzz.projects.agentConversation";
-const CLEARED_AT_STORAGE_PREFIX = "buzz.projects.agentConversationClearedAt";
 
-/** Minimal workspace-scoped pointer to the last inline Projects conversation. */
+/**
+ * Minimal workspace-scoped pointer to the last inline Projects conversation.
+ * `visibleAfter` (epoch seconds) anchors the thread to the first Projects
+ * prompt — messages the reused DM channel held before that instant must
+ * never render on the Projects page.
+ */
 export type StoredProjectsAgentConversation = {
   agentPubkey: string;
   channelId: string;
@@ -30,7 +34,9 @@ export function readStoredProjectsAgentConversation(
       value.channelId.length === 0 ||
       typeof value.visibleAfter !== "number" ||
       !Number.isFinite(value.visibleAfter) ||
-      value.visibleAfter < 0
+      // A zero/negative cutoff would restore the DM's full history
+      // (pointers written before the cutoff was prompt-anchored).
+      value.visibleAfter <= 0
     ) {
       return null;
     }
@@ -60,36 +66,14 @@ export function writeStoredProjectsAgentConversation(
   }
 }
 
-/** Reads the cutoff used to prevent cleared history from being restored. */
-export function readProjectsAgentConversationClearedAt(
+/** Deletes the saved pointer so no prior conversation is restored. */
+export function clearStoredProjectsAgentConversation(
   workspaceId: string | null,
-) {
-  if (!workspaceId) return 0;
-  try {
-    const value = Number(
-      globalThis.localStorage?.getItem(
-        scopedKey(CLEARED_AT_STORAGE_PREFIX, workspaceId),
-      ),
-    );
-    return Number.isFinite(value) && value > 0 ? value : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/** Clears the saved pointer and records when prior history was dismissed. */
-export function markProjectsAgentConversationCleared(
-  workspaceId: string | null,
-  clearedAt: number,
 ) {
   if (!workspaceId) return;
   try {
     globalThis.localStorage?.removeItem(
       scopedKey(CONVERSATION_STORAGE_PREFIX, workspaceId),
-    );
-    globalThis.localStorage?.setItem(
-      scopedKey(CLEARED_AT_STORAGE_PREFIX, workspaceId),
-      String(clearedAt),
     );
   } catch {
     // Persistence is best-effort; the current page still clears immediately.

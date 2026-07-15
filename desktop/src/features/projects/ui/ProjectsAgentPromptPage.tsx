@@ -34,8 +34,11 @@ import { FormattingToolbar } from "@/features/messages/ui/FormattingToolbar";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Project } from "@/features/projects/hooks";
 import {
-  markProjectsAgentConversationCleared,
-  readProjectsAgentConversationClearedAt,
+  restoreProjectsAgentConversation,
+  visibleConversationMessages,
+} from "@/features/projects/lib/projectAgentConversation";
+import {
+  clearStoredProjectsAgentConversation,
   readStoredProjectsAgentConversation,
   type StoredProjectsAgentConversation,
   writeStoredProjectsAgentConversation,
@@ -43,10 +46,6 @@ import {
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel } from "@/shared/api/types";
-import {
-  KIND_STREAM_MESSAGE,
-  KIND_STREAM_MESSAGE_V2,
-} from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
@@ -76,59 +75,6 @@ type ProjectAgentConversation = {
 
 const MAX_CONTEXT_REPOS = 8;
 const REPO_CONTEXT_MARKER = "Workspace repositories:";
-
-function latestAgentConversation({
-  candidates,
-  channels,
-  clearedAt,
-  currentPubkey,
-}: {
-  candidates: readonly AgentCandidate[];
-  channels: readonly Channel[];
-  clearedAt: number;
-  currentPubkey: string | null;
-}): ProjectAgentConversation | null {
-  if (!currentPubkey) return null;
-  const normalizedCurrent = normalizePubkey(currentPubkey);
-  const candidatesByPubkey = new Map(
-    candidates.map((candidate) => [candidate.pubkey, candidate]),
-  );
-
-  let latest: {
-    conversation: ProjectAgentConversation;
-    timestamp: number;
-  } | null = null;
-  for (const channel of channels) {
-    if (channel.channelType !== "dm" || !channel.lastMessageAt) continue;
-    const participantPubkeys = [
-      ...new Set(channel.participantPubkeys.map(normalizePubkey)),
-    ];
-    if (!participantPubkeys.includes(normalizedCurrent)) continue;
-    const otherPubkeys = participantPubkeys.filter(
-      (pubkey) => pubkey !== normalizedCurrent,
-    );
-    if (otherPubkeys.length !== 1) continue;
-    const agent = candidatesByPubkey.get(otherPubkeys[0]);
-    if (!agent) continue;
-    const timestamp = Date.parse(channel.lastMessageAt);
-    if (
-      !Number.isFinite(timestamp) ||
-      timestamp <= clearedAt ||
-      (latest && timestamp <= latest.timestamp)
-    ) {
-      continue;
-    }
-    latest = {
-      conversation: {
-        agent,
-        channel,
-        visibleAfter: Math.floor(clearedAt / 1_000),
-      },
-      timestamp,
-    };
-  }
-  return latest?.conversation ?? null;
-}
 
 /** Compact machine-readable footer so the agent can scope git queries
  * (repo announcements are addressable by these coordinates). Only sent
@@ -251,15 +197,7 @@ function ConversationThread({
   const bottomRef = React.useRef<HTMLDivElement>(null);
 
   const messages = React.useMemo(
-    () =>
-      (messagesQuery.data ?? [])
-        .filter(
-          (event) =>
-            (event.kind === KIND_STREAM_MESSAGE ||
-              event.kind === KIND_STREAM_MESSAGE_V2) &&
-            event.created_at >= visibleAfter,
-        )
-        .sort((left, right) => left.created_at - right.created_at),
+    () => visibleConversationMessages(messagesQuery.data ?? [], visibleAfter),
     [messagesQuery.data, visibleAfter],
   );
 
@@ -328,9 +266,6 @@ export function ProjectsAgentPromptPage({
     React.useState<StoredProjectsAgentConversation | null>(() =>
       readStoredProjectsAgentConversation(workspaceId),
     );
-  const [clearedAt, setClearedAt] = React.useState(() =>
-    readProjectsAgentConversationClearedAt(workspaceId),
-  );
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     () => storedConversation?.agentPubkey ?? null,
   );
@@ -366,49 +301,23 @@ export function ProjectsAgentPromptPage({
     [candidateProfilesQuery.data],
   );
 
-  const restorableConversation = React.useMemo(() => {
-    if (storedConversation) {
-      const channel = channelsQuery.data?.find(
-        (candidate) => candidate.id === storedConversation.channelId,
-      );
-      const agent = candidates.find(
-        (candidate) =>
-          candidate.pubkey === normalizePubkey(storedConversation.agentPubkey),
-      );
-      return channel && agent
-        ? {
-            agent,
-            channel,
-            visibleAfter: storedConversation.visibleAfter,
-          }
-        : null;
-    }
-    return latestAgentConversation({
-      candidates,
-      channels: channelsQuery.data ?? [],
-      clearedAt,
-      currentPubkey: identityQuery.data?.pubkey ?? null,
-    });
-  }, [
-    candidates,
-    channelsQuery.data,
-    clearedAt,
-    identityQuery.data?.pubkey,
-    storedConversation,
-  ]);
+  // Restore strictly from the pointer this feature persisted — never infer
+  // a conversation from existing agent DMs (their history is unrelated).
+  const restorableConversation = React.useMemo(
+    () =>
+      restoreProjectsAgentConversation({
+        candidates,
+        channels: channelsQuery.data ?? [],
+        stored: storedConversation,
+      }),
+    [candidates, channelsQuery.data, storedConversation],
+  );
 
   React.useEffect(() => {
     if (conversation || !restorableConversation) return;
     setConversation(restorableConversation);
     setSelectedPubkey(restorableConversation.agent.pubkey);
-    const stored = {
-      agentPubkey: restorableConversation.agent.pubkey,
-      channelId: restorableConversation.channel.id,
-      visibleAfter: restorableConversation.visibleAfter,
-    };
-    setStoredConversation(stored);
-    writeStoredProjectsAgentConversation(workspaceId, stored);
-  }, [conversation, restorableConversation, workspaceId]);
+  }, [conversation, restorableConversation]);
 
   const selectedAgent =
     conversation?.agent ??
@@ -448,6 +357,11 @@ export function ProjectsAgentPromptPage({
     if (!trimmed || !selectedAgent || isSending) return;
 
     setIsSending(true);
+    // Cutoff captured before sending: the opening prompt lands at or after
+    // this instant, while everything a reused DM channel already held stays
+    // hidden from the Projects page.
+    const visibleAfter =
+      conversation?.visibleAfter ?? Math.floor(Date.now() / 1_000);
     try {
       if (selectedAgent.isManaged && !selectedAgent.isActive) {
         await startAgentMutation.mutateAsync(selectedAgent.pubkey);
@@ -468,12 +382,12 @@ export function ProjectsAgentPromptPage({
         const nextConversation = {
           channel,
           agent: selectedAgent,
-          visibleAfter: Math.floor(clearedAt / 1_000),
+          visibleAfter,
         };
         const stored = {
           agentPubkey: selectedAgent.pubkey,
           channelId: channel.id,
-          visibleAfter: nextConversation.visibleAfter,
+          visibleAfter,
         };
         setConversation(nextConversation);
         setStoredConversation(stored);
@@ -489,7 +403,6 @@ export function ProjectsAgentPromptPage({
       setIsSending(false);
     }
   }, [
-    clearedAt,
     conversation,
     isSending,
     openDmMutation,
@@ -505,9 +418,7 @@ export function ProjectsAgentPromptPage({
   };
 
   const handleClearConversation = React.useCallback(() => {
-    const nextClearedAt = Date.now();
-    markProjectsAgentConversationCleared(workspaceId, nextClearedAt);
-    setClearedAt(nextClearedAt);
+    clearStoredProjectsAgentConversation(workspaceId);
     setStoredConversation(null);
     setConversation(null);
     setSelectedPubkey(null);
