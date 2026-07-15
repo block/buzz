@@ -234,6 +234,8 @@ type E2eConfig = {
     // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
     // snake_case wire shape the Rust backend returns so tests can drive the
     // LocalArchiveSettingsCard without a real SQLite database.
+    observerArchiveDefaultEnabled?: boolean;
+    agentMetricArchiveDefaultEnabled?: boolean;
     saveSubscriptions?: Array<{
       scope_type: string;
       scope_value: string;
@@ -9696,6 +9698,16 @@ export function maybeInstallE2eTauriMocks() {
       // seeds the initial list; create/delete return success shapes so the
       // component's reload path behaves correctly.
       case "list_save_subscriptions": {
+        const win = window as unknown as Record<string, unknown>;
+        if (!win.__BUZZ_E2E_IPC_COUNTERS__) {
+          win.__BUZZ_E2E_IPC_COUNTERS__ = {};
+        }
+        const ipcCounters = win.__BUZZ_E2E_IPC_COUNTERS__ as Record<
+          string,
+          number
+        >;
+        ipcCounters.list_save_subscriptions =
+          (ipcCounters.list_save_subscriptions ?? 0) + 1;
         const ident = activeConfig?.identity ?? DEFAULT_MOCK_IDENTITY;
         return (activeConfig?.mock?.saveSubscriptions ?? []).map((s) => ({
           identity_pubkey: ident.pubkey,
@@ -9716,6 +9728,14 @@ export function maybeInstallE2eTauriMocks() {
       case "archive_events":
         // Returns the ArchiveBatchResult shape the UI expects.
         return { persisted: 0, dropped: 0 };
+      case "observer_archive_default_enabled":
+        return activeConfig?.mock?.observerArchiveDefaultEnabled ?? false;
+      case "agent_metric_archive_default_enabled":
+        return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;
+      case "merge_save_subscription_kinds":
+        return null;
+      case "remove_save_subscription_kind":
+        return null;
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }

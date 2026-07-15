@@ -54,7 +54,7 @@ import {
 } from "@/features/user-status/hooks";
 import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
 import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
-import { useObserverArchiveSeed } from "@/features/local-archive/useObserverArchiveSeed";
+import { useObserverArchiveReconciliation } from "@/features/local-archive/useObserverArchiveSeed";
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { SendFeedbackController } from "@/features/settings/ui/SendFeedbackController";
@@ -186,15 +186,18 @@ export function AppShell() {
   // relay-owned agents join automatically once identity arrives. Adding a
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
-  useArchiveSync();
-  // Defer the archive *seeds* until startup is idle: they're first-run catch-up
-  // config (a one-shot mergeSaveSubscriptionKinds), not live-ingest — that's
-  // useArchiveSync's job, which stays eager above. Passing deferredPubkey makes
-  // each seed hook wait on its own `if (!pubkey) return` guard until the shell
-  // is interactive, so their IPC + sqlite archive open doesn't compete with
-  // first paint. The explicit-choice guard inside each hook is unchanged.
+  // Kind 24200 is relay-ephemeral, so reconciliation runs eagerly (not
+  // deferred) and unconditionally repairs the DB subscription on internal
+  // builds — otherwise frames emitted before the listener opens are lost.
+  const observerReconciled = useObserverArchiveReconciliation(
+    identityQuery.data?.pubkey,
+  );
+  // useArchiveSync must wait for reconciliation, or listeners could open
+  // before kind 24200 is guaranteed present in the subscription.
+  useArchiveSync(observerReconciled);
+  // Kind 44200 is relay-persisted (durable) and stays deferred: missed
+  // startup frames can be replayed, so there's no ordering constraint.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
-  useObserverArchiveSeed(deferredPubkey);
   useAgentMetricArchiveSeed(deferredPubkey);
   const profileQuery = useProfileQuery();
   useRelayAutoHeal();
