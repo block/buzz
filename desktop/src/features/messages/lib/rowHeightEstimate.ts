@@ -165,18 +165,20 @@ const SYSTEM_GROUP_HEIGHT = 80;
  * near its true height instead of snapping the scroll position. `auto` keeps
  * refining once the row paints.
  */
+export function estimateTimelineItemHeight(item: TimelineItem): number {
+  return item.kind === "message"
+    ? estimateRowHeight(item.entry.message, {
+        isContinuation: item.isContinuation,
+      }) + (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
+    : item.kind === "system"
+      ? estimateRowHeight(item.entry.message)
+      : item.kind === "system-group"
+        ? SYSTEM_GROUP_HEIGHT
+        : DIVIDER_HEIGHT;
+}
+
 export function timelineRowReserveStyle(
   item: TimelineItem,
 ): React.CSSProperties {
-  const height =
-    item.kind === "message"
-      ? estimateRowHeight(item.entry.message, {
-          isContinuation: item.isContinuation,
-        }) + (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
-      : item.kind === "system"
-        ? estimateRowHeight(item.entry.message)
-        : item.kind === "system-group"
-          ? SYSTEM_GROUP_HEIGHT
-          : DIVIDER_HEIGHT;
-  return { containIntrinsicSize: `auto ${height}px` };
+  return { containIntrinsicSize: `auto ${estimateTimelineItemHeight(item)}px` };
 }

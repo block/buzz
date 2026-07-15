@@ -202,6 +202,56 @@ function expectAnchorOrderUnchanged(
   expect(after.rowsFromAnchor).toEqual(before.rowsFromAnchor);
 }
 
+test("timeline does not recompute row estimates during ordinary scroll", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await waitForMockTimelineBridge(page);
+  await page.evaluate(() => {
+    for (let index = 0; index < 120; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `estimate memo row ${index}\nsecond line ${index}`,
+        createdAt: 1_700_500_000 + index,
+      });
+    }
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText("estimate memo row 119");
+  await page.waitForFunction(() => {
+    const element = document.querySelector<HTMLDivElement>(
+      '[data-testid="message-timeline"]',
+    );
+    return element && element.scrollHeight > element.clientHeight * 3;
+  });
+
+  const estimateCallsBefore = await timeline.evaluate((element) =>
+    Number((element as HTMLDivElement).dataset.virtuaEstimateCallCount ?? "0"),
+  );
+  expect(estimateCallsBefore).toBeGreaterThan(0);
+
+  await timeline.evaluate(async (element) => {
+    const scroller = element as HTMLDivElement;
+    const maxOffset = scroller.scrollHeight - scroller.clientHeight;
+    for (const fraction of [0.75, 0.5, 0.25, 0.6, 0.4]) {
+      scroller.scrollTop = maxOffset * fraction;
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+    }
+  });
+
+  const estimateCallsAfter = await timeline.evaluate((element) =>
+    Number((element as HTMLDivElement).dataset.virtuaEstimateCallCount ?? "0"),
+  );
+  expect(estimateCallsAfter).toBe(estimateCallsBefore);
+});
+
 test("timeline reserves mixed-media rows before fast scrollback", async ({
   page,
 }, testInfo) => {
@@ -450,6 +500,15 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
   const before = await snapshotAnchor(timeline);
   expect(before.anchorId).not.toBe("");
   expect(before.oldestOlderIndex).not.toBeNull();
+  await timeline.evaluate((element, anchorId) => {
+    const anchor = element.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(anchorId)}"]`,
+    );
+    if (!anchor) throw new Error("prepend mount-identity anchor missing");
+    (
+      window as typeof window & { __PREPEND_MOUNT_IDENTITY__?: HTMLElement }
+    ).__PREPEND_MOUNT_IDENTITY__ = anchor;
+  }, before.anchorId);
   await startAnchorDriftSampler(timeline, before.anchorId, before.anchorTop);
 
   await expect
@@ -469,6 +528,22 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
 
   const afterPrepend = await snapshotAnchor(timeline);
   expect(afterPrepend.anchorId).toBe(before.anchorId);
+  expect(
+    await timeline.evaluate((element, anchorId) => {
+      const anchor = element.querySelector<HTMLElement>(
+        `[data-message-id="${CSS.escape(anchorId)}"]`,
+      );
+      return (
+        anchor ===
+        (
+          window as typeof window & {
+            __PREPEND_MOUNT_IDENTITY__?: HTMLElement;
+          }
+        ).__PREPEND_MOUNT_IDENTITY__
+      );
+    }, before.anchorId),
+    "prepend must preserve the mounted anchor DOM node",
+  ).toBe(true);
   expect(
     Math.abs(afterPrepend.anchorTop - before.anchorTop),
     // First-pass prepended rows realize from content-visibility estimates to
