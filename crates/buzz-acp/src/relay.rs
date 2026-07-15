@@ -7,6 +7,10 @@
 //!
 //! ## Architecture
 //!
+//! `HarnessRelay::connect()` retries a transient initial connect/auth failure
+//! (e.g. a dropped handshake on a spotty link) with bounded jittered backoff
+//! before giving up; a terminal configuration/auth error fails immediately.
+//!
 //! A background tokio task owns the WebSocket stream. It:
 //! - Responds to Ping frames with Pong (preventing relay disconnect on long turns)
 //! - Forwards `BuzzEvent`s through an `mpsc` channel
@@ -56,6 +60,17 @@ const SINCE_SKEW_SECS: u64 = 5;
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout for the TCP + WebSocket handshake in `do_connect`.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Backoff delays shared by the initial-connect retry in `HarnessRelay::connect()`
+/// and `try_autonomous_reconnect`'s post-start reconnect loop — a spotty link
+/// should get consistent retry pacing whether the failure happens at agent
+/// startup or later. Bounded so a dead relay can't hang either path forever.
+const STARTUP_CONNECT_BACKOFFS: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
 
 use std::time::Instant;
 
@@ -517,10 +532,15 @@ impl HarnessRelay {
         agent_pubkey_hex: &str,
         auth_tag: Option<nostr::Tag>,
     ) -> Result<Self, RelayError> {
-        // Perform the initial connection and auth handshake.
+        // Perform the initial connection and auth handshake, retrying
+        // transient failures (dropped handshake, timeout) with bounded
+        // jittered backoff. A terminal error (bad URL, bad auth tag,
+        // rejected/invalid signing key) fails immediately — see
+        // `is_terminal_connect_error`.
         // Finding #8: capture the handshake buffer and pass it to the background
         // task so buffered messages aren't silently discarded.
-        let (ws, handshake_buffer) = do_connect(relay_url, keys, auth_tag.as_ref()).await?;
+        let (ws, handshake_buffer) =
+            retry_initial_connect(|| do_connect(relay_url, keys, auth_tag.as_ref())).await?;
 
         let (event_tx, event_rx) = mpsc::channel::<Option<BuzzEvent>>(event_channel_capacity());
         let (observer_control_tx, observer_control_rx) =
@@ -2123,14 +2143,9 @@ async fn try_autonomous_reconnect(
     observer_control_tx: &mpsc::Sender<Event>,
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
-    // Finding #42: 5 attempts, up to 16s base backoff.
-    let backoffs = [
-        Duration::from_secs(1),
-        Duration::from_secs(2),
-        Duration::from_secs(4),
-        Duration::from_secs(8),
-        Duration::from_secs(16),
-    ];
+    // Finding #42: 5 attempts, up to 16s base backoff. Same schedule as the
+    // initial-connect retry in `HarnessRelay::connect()` (STARTUP_CONNECT_BACKOFFS).
+    let backoffs = STARTUP_CONNECT_BACKOFFS;
 
     for (attempt, delay) in backoffs.iter().enumerate() {
         info!(
@@ -2708,6 +2723,66 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
             "unknown message type: {other}"
         ))),
     }
+}
+
+/// Whether an initial connect/auth-handshake error is terminal — retrying
+/// with the same `relay_url`/`keys`/`auth_tag` would reproduce it — rather
+/// than transient (the network dropping bytes on a spotty link).
+///
+/// `Http` covers the local URL/tag parsing failures `do_connect` can produce
+/// (never actual network I/O — see its callers), and `AuthFailed` covers
+/// both a bad signing key and an explicit relay rejection. Both are
+/// deterministic: retrying without changing configuration just fails the
+/// same way again. Everything else (closed connection, timeout, garbled
+/// message) is exactly the class of failure a bad link produces, so it is
+/// retried.
+fn is_terminal_connect_error(err: &RelayError) -> bool {
+    matches!(err, RelayError::Http(_) | RelayError::AuthFailed(_))
+}
+
+/// Retry `op` with bounded jittered backoff, stopping immediately on a
+/// terminal error (see [`is_terminal_connect_error`]). Used by
+/// `HarnessRelay::connect()` so a transient failure during the initial
+/// WebSocket/NIP-42 handshake — e.g. a dropped connection on a spotty link —
+/// doesn't fail agent startup outright.
+///
+/// Generic over the success type so the backoff/classification logic can be
+/// exercised in tests without a real socket. Returns the last transient
+/// error if all attempts are exhausted.
+async fn retry_initial_connect<F, Fut, T>(mut op: F) -> Result<T, RelayError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, RelayError>>,
+{
+    let mut last_err = None;
+
+    for (attempt, delay) in std::iter::once(None)
+        .chain(STARTUP_CONNECT_BACKOFFS.iter().map(|d| Some(*d)))
+        .enumerate()
+    {
+        if let Some(base) = delay {
+            let jittered = jittered_duration(base);
+            info!(
+                "retrying initial relay connect (attempt {attempt}) in {:.1}s",
+                jittered.as_secs_f64()
+            );
+            tokio::time::sleep(jittered).await;
+        }
+
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) if is_terminal_connect_error(&e) => {
+                warn!("initial relay connect failed with terminal error: {e}");
+                return Err(e);
+            }
+            Err(e) => {
+                warn!("initial relay connect attempt {attempt} failed: {e}");
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or(RelayError::ConnectionClosed))
 }
 
 /// Perform a single WebSocket connect + NIP-42 auth handshake.
@@ -3711,5 +3786,133 @@ mod tests {
             !resubscribed.contains(&channel_id),
             "the dropped channel must not be resubscribed — the loop cannot re-form"
         );
+    }
+
+    // ── startup connect retry ────────────────────────────────────────────
+
+    #[test]
+    fn terminal_connect_errors_are_http_and_auth_failed() {
+        assert!(is_terminal_connect_error(&RelayError::Http(
+            "bad url".into()
+        )));
+        assert!(is_terminal_connect_error(&RelayError::AuthFailed(
+            "rejected".into()
+        )));
+    }
+
+    #[test]
+    fn transient_connect_errors_are_not_terminal() {
+        assert!(!is_terminal_connect_error(&RelayError::ConnectionClosed));
+        assert!(!is_terminal_connect_error(&RelayError::Timeout));
+        assert!(!is_terminal_connect_error(&RelayError::NoAuthChallenge));
+    }
+
+    /// A transient failure (e.g. connection dropped mid-handshake on a spotty
+    /// link) must be retried and can still succeed once the link recovers.
+    #[tokio::test(start_paused = true)]
+    async fn retry_initial_connect_retries_transient_failure_then_succeeds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: Result<&'static str, RelayError> = retry_initial_connect(|| {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    Err(RelayError::ConnectionClosed)
+                } else {
+                    Ok("connected")
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), "connected");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "should succeed on the 3rd attempt (2 transient failures + 1 success)"
+        );
+    }
+
+    /// A terminal error (bad auth, bad config) must not be retried — the
+    /// same call would fail identically every time, so retrying just delays
+    /// surfacing a real problem to the caller.
+    #[tokio::test(start_paused = true)]
+    async fn retry_initial_connect_does_not_retry_terminal_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: Result<(), RelayError> = retry_initial_connect(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Err(RelayError::AuthFailed("bad signature".into())) }
+        })
+        .await;
+
+        assert!(matches!(result, Err(RelayError::AuthFailed(_))));
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "a terminal error must fail on the first attempt with no retries"
+        );
+    }
+
+    /// Once every attempt (1 initial + N backoff retries) is exhausted, the
+    /// last transient error is returned rather than retrying forever — a
+    /// dead relay must not hang agent startup indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn retry_initial_connect_exhausts_and_returns_last_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: Result<(), RelayError> = retry_initial_connect(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Err(RelayError::Timeout) }
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(RelayError::Timeout)),
+            "must surface the last attempt's error, not a generic one"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            STARTUP_CONNECT_BACKOFFS.len() + 1,
+            "must attempt exactly once plus one retry per backoff entry"
+        );
+    }
+
+    /// Backoff sleeps must actually elapse (not be skipped) — this pins the
+    /// bounded-but-real-delay contract using `tokio::time::pause` so the
+    /// test itself stays fast (virtual time, not wall-clock sleeps).
+    #[tokio::test(start_paused = true)]
+    async fn retry_initial_connect_sleeps_between_attempts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let call = retry_initial_connect(|| {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 1 {
+                    Err(RelayError::ConnectionClosed)
+                } else {
+                    Ok(())
+                }
+            }
+        });
+        tokio::pin!(call);
+
+        // Before the first backoff elapses, the retry must still be pending
+        // (i.e. it actually slept rather than immediately retrying).
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+            _ = &mut call => panic!("must not resolve before the backoff sleep elapses"),
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        // Advancing past the (jittered, ≤1.2x) first backoff lets it proceed.
+        let result = call.await;
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }
