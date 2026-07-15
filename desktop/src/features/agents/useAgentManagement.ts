@@ -24,7 +24,7 @@ import {
   type BackendIntent,
 } from "./lib/instanceInputForDefinition";
 import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
-import { classifyAgentManagementSender } from "./agentManagementBuffer";
+import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
@@ -77,6 +77,7 @@ export function useAgentManagement() {
   const pendingRequestId = React.useRef<string | null>(null);
   const sourceAgentPubkey = React.useRef<string | null>(null);
   const managedAgentsRef = React.useRef(managedAgentsQuery.data);
+  const channelsRef = React.useRef(channelsQuery.data);
   const bufferedRequestsRef = React.useRef<
     Array<{ agentPubkey: string; request: AgentManagementRequest }>
   >([]);
@@ -84,8 +85,12 @@ export function useAgentManagement() {
   const acceptOwnedRequest = React.useEffectEvent(
     (agentPubkey: string, next: AgentManagementRequest) => {
       if (
-        classifyAgentManagementSender(managedAgentsRef.current, agentPubkey) !==
-          "accept" ||
+        classifyAgentManagementOrigin(
+          managedAgentsRef.current,
+          channelsRef.current,
+          agentPubkey,
+          next.request.channelId,
+        ) !== "accept" ||
         seenRequestIds.current.has(next.requestId)
       ) {
         return;
@@ -102,13 +107,14 @@ export function useAgentManagement() {
 
   React.useEffect(() => {
     managedAgentsRef.current = managedAgentsQuery.data;
-    if (managedAgentsQuery.data) {
+    channelsRef.current = channelsQuery.data;
+    if (managedAgentsQuery.data && channelsQuery.data) {
       const buffered = bufferedRequestsRef.current.splice(0);
       for (const candidate of buffered) {
         acceptOwnedRequest(candidate.agentPubkey, candidate.request);
       }
     }
-  }, [managedAgentsQuery.data]);
+  }, [channelsQuery.data, managedAgentsQuery.data]);
 
   React.useEffect(
     () =>
@@ -118,9 +124,11 @@ export function useAgentManagement() {
         // until the managed-agent query has initialized so ephemeral requests
         // cannot disappear during startup.
         if (
-          classifyAgentManagementSender(
+          classifyAgentManagementOrigin(
             managedAgentsRef.current,
+            channelsRef.current,
             agentPubkey,
+            next.request.channelId,
           ) === "buffer"
         ) {
           bufferedRequestsRef.current.push({ agentPubkey, request: next });
