@@ -19,12 +19,32 @@ pre-commit:
 
 pre-push:
   parallel: true
+  # Compare the commit being pushed with its configured push ref. This two-endpoint
+  # diff may over-select after divergence, which is safer; CI remains authoritative.
+  # On detection failure (including a new branch without an upstream), lefthook.yml
+  # is the sentinel that runs every suite. Every command glob must keep this path.
+  files: |
+    sh -c '
+      push_ref=$(git rev-parse --verify "@{push}" 2>/dev/null) || {
+        echo "warning: cannot resolve @{push}; running all pre-push test suites" >&2
+        printf "%s\n" lefthook.yml
+        exit 0
+      }
+      git -c core.quotePath=false diff --name-only "$push_ref" HEAD || {
+        echo "warning: cannot detect pushed files; running all pre-push test suites" >&2
+        printf "%s\n" lefthook.yml
+      }
+    '
   commands:
     rust-tests:
-      run: just test-unit
+      glob: "{crates/**,migrations/**,schema/**,Cargo.toml,Cargo.lock,rust-toolchain.toml,deny.toml,.github/workflows/ci.yml,scripts/run-tests.sh,justfile,lefthook.yml}"
+      run: 'just test-unit && : {files}'
     desktop-test:
-      run: just desktop-test
+      glob: "{desktop/**,pnpm-lock.yaml,crates/**,migrations/**,schema/**,Cargo.toml,Cargo.lock,rust-toolchain.toml,deny.toml,.github/workflows/ci.yml,scripts/run-tests.sh,justfile,lefthook.yml}"
+      run: 'just desktop-test && : {files}'
     desktop-tauri-test:
-      run: just desktop-tauri-test
+      glob: "{desktop/**,pnpm-lock.yaml,crates/**,migrations/**,schema/**,Cargo.toml,Cargo.lock,rust-toolchain.toml,deny.toml,.github/workflows/ci.yml,scripts/run-tests.sh,justfile,lefthook.yml}"
+      run: 'just desktop-tauri-test && : {files}'
     mobile-test:
-      run: just mobile-test
+      glob: "{mobile/**,.github/workflows/ci.yml,lefthook.yml}"
+      run: 'just mobile-test && : {files}'
