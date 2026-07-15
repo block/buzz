@@ -372,6 +372,33 @@ type VirtualizedTimelineRowsProps = {
   renderItem: (item: TimelineNonDayItem) => React.ReactNode;
 };
 
+type VirtualizedTimelineItemShellProps = {
+  children: React.ReactNode;
+  index: number;
+  ref?: React.LegacyRef<HTMLDivElement>;
+  style: React.CSSProperties;
+};
+
+const PreserveVirtualizedItemVisibilityContext = React.createContext(false);
+
+function VirtualizedTimelineItemShell({
+  children,
+  ref,
+  style,
+}: VirtualizedTimelineItemShellProps) {
+  const preserveVisibility = React.useContext(
+    PreserveVirtualizedItemVisibilityContext,
+  );
+  return (
+    <div
+      ref={ref}
+      style={preserveVisibility ? style : { ...style, visibility: undefined }}
+    >
+      {children}
+    </div>
+  );
+}
+
 function VirtualizedTimelineRows({
   dayGroups,
   historyExhausted,
@@ -656,63 +683,66 @@ function VirtualizedTimelineRows({
 
   return (
     <div className="h-full min-h-0 w-full" ref={hostRef}>
-      <VList
-        ref={listRef}
-        className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-[var(--channel-top-chrome-height,4.5rem)]"
-        data={items}
-        itemSize={estimateItemSize}
-        bufferSize={offscreenBufferSize}
-        keepMounted={retainedIndices}
-        style={{ overflowAnchor: "none" }}
-        shift={isPrepend}
-        onScroll={handleScroll}
-        onScrollEnd={handleScrollEnd}
-      >
-        {(item) => {
-          if (item.kind === "bottom-spacer") {
+      <PreserveVirtualizedItemVisibilityContext value={isPrepend}>
+        <VList
+          ref={listRef}
+          className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-[var(--channel-top-chrome-height,4.5rem)]"
+          data={items}
+          item={VirtualizedTimelineItemShell}
+          itemSize={estimateItemSize}
+          bufferSize={offscreenBufferSize}
+          keepMounted={retainedIndices}
+          style={{ overflowAnchor: "none" }}
+          shift={isPrepend}
+          onScroll={handleScroll}
+          onScrollEnd={handleScrollEnd}
+        >
+          {(item) => {
+            if (item.kind === "bottom-spacer") {
+              return (
+                <div
+                  aria-hidden
+                  className="h-[var(--composer-overlay-height,6rem)]"
+                  key={virtualizedItemKey(item)}
+                />
+              );
+            }
+            if (item.kind === "leading-content") {
+              return <div key={virtualizedItemKey(item)}>{item.content}</div>;
+            }
+            if (item.kind === "day-divider") {
+              const dayLabel = formatDayHeading(item.headingTimestamp);
+              return (
+                <div
+                  // The sticky pill needs travel room, but its containing block
+                  // is this item wrapper. The trailing spacer extends the content
+                  // box by 4rem while the matching negative margin keeps the
+                  // measured layout height at exactly the divider's height, so
+                  // row spacing and Virtua's size cache are unaffected. Both the
+                  // spacer and the pill are pointer-events-none, and the later
+                  // (absolutely positioned) row siblings paint above the spacer.
+                  className="relative -mb-16 flex flex-col before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']"
+                  data-day-label={dayLabel}
+                  data-testid="message-timeline-day-group"
+                  key={virtualizedItemKey(item)}
+                >
+                  <DayDivider label={dayLabel} />
+                  <div aria-hidden className="pointer-events-none h-16" />
+                </div>
+              );
+            }
             return (
-              <div
-                aria-hidden
-                className="h-[var(--composer-overlay-height,6rem)]"
+              <TimelineRowShell
+                item={item.item}
                 key={virtualizedItemKey(item)}
-              />
-            );
-          }
-          if (item.kind === "leading-content") {
-            return <div key={virtualizedItemKey(item)}>{item.content}</div>;
-          }
-          if (item.kind === "day-divider") {
-            const dayLabel = formatDayHeading(item.headingTimestamp);
-            return (
-              <div
-                // The sticky pill needs travel room, but its containing block
-                // is this item wrapper. The trailing spacer extends the content
-                // box by 4rem while the matching negative margin keeps the
-                // measured layout height at exactly the divider's height, so
-                // row spacing and Virtua's size cache are unaffected. Both the
-                // spacer and the pill are pointer-events-none, and the later
-                // (absolutely positioned) row siblings paint above the spacer.
-                className="relative -mb-16 flex flex-col before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']"
-                data-day-label={dayLabel}
-                data-testid="message-timeline-day-group"
-                key={virtualizedItemKey(item)}
+                useContentVisibility={false}
               >
-                <DayDivider label={dayLabel} />
-                <div aria-hidden className="pointer-events-none h-16" />
-              </div>
+                {renderItem(item.item)}
+              </TimelineRowShell>
             );
-          }
-          return (
-            <TimelineRowShell
-              item={item.item}
-              key={virtualizedItemKey(item)}
-              useContentVisibility={false}
-            >
-              {renderItem(item.item)}
-            </TimelineRowShell>
-          );
-        }}
-      </VList>
+          }}
+        </VList>
+      </PreserveVirtualizedItemVisibilityContext>
     </div>
   );
 }

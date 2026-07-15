@@ -500,6 +500,15 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
   const before = await snapshotAnchor(timeline);
   expect(before.anchorId).not.toBe("");
   expect(before.oldestOlderIndex).not.toBeNull();
+  await timeline.evaluate((element, anchorId) => {
+    const anchor = element.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(anchorId)}"]`,
+    );
+    if (!anchor) throw new Error("prepend mount-identity anchor missing");
+    (
+      window as typeof window & { __PREPEND_MOUNT_IDENTITY__?: HTMLElement }
+    ).__PREPEND_MOUNT_IDENTITY__ = anchor;
+  }, before.anchorId);
   await startAnchorDriftSampler(timeline, before.anchorId, before.anchorTop);
 
   await expect
@@ -519,6 +528,22 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
 
   const afterPrepend = await snapshotAnchor(timeline);
   expect(afterPrepend.anchorId).toBe(before.anchorId);
+  expect(
+    await timeline.evaluate((element, anchorId) => {
+      const anchor = element.querySelector<HTMLElement>(
+        `[data-message-id="${CSS.escape(anchorId)}"]`,
+      );
+      return (
+        anchor ===
+        (
+          window as typeof window & {
+            __PREPEND_MOUNT_IDENTITY__?: HTMLElement;
+          }
+        ).__PREPEND_MOUNT_IDENTITY__
+      );
+    }, before.anchorId),
+    "prepend must preserve the mounted anchor DOM node",
+  ).toBe(true);
   expect(
     Math.abs(afterPrepend.anchorTop - before.anchorTop),
     // First-pass prepended rows realize from content-visibility estimates to
