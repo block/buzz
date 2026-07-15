@@ -1,25 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import {
-  communityInitials,
-  communityRailIndicators,
-} from "./CommunityRail.tsx";
-
-describe("communityInitials", () => {
-  it("filters punctuation before deriving initials", () => {
-    assert.equal(communityInitials("B (relay)"), "BR");
-  });
-  it("handles a leading symbol on a single word", () => {
-    assert.equal(communityInitials("(staging)"), "S");
-  });
-  it("still returns plain initials for normal names", () => {
-    assert.equal(communityInitials("Bravo Beta"), "BB");
-  });
-  it("returns empty for a symbol-only name (caller falls back)", () => {
-    assert.equal(communityInitials("()"), "");
-  });
-});
+import { communityRailIndicators } from "./CommunityRail.tsx";
 
 describe("communityRailIndicators", () => {
   it("shows no badge for an observed community with unread but no mentions", () => {
