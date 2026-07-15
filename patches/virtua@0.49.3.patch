@@ -1,8 +1,108 @@
+diff --git a/lib/index.cjs b/lib/index.cjs
+index e02dfd0b3db60faff2cc705d7ce0aa51cb958f5a..c3bbc7f4d8dd396f5329a40a2701f4f752e3c5cc 100644
+--- a/lib/index.cjs
++++ b/lib/index.cjs
+@@ -35,10 +35,18 @@ const r = null, {min: n, max: s, abs: i, floor: l} = Math, c = (e, t, o) => n(o,
+         v(e, s) <= t ? (n = s, o = s + 1) : r = s - 1;
+     }
+     return c(n, 0, e.l - 1);
+-}, w = (e, t, o) => {
+-    const r = t - e.l;
+-    return e.i = o ? -1 : n(t - 1, e.i), e.l = t, r > 0 ? (h(e.u, r), h(e.t, r, o),
+-    e.o * r) : (e.u.splice(r), (o ? e.t.splice(0, -r) : e.t.splice(r)).reduce((t, o) => t - (-1 === o ? e.o : o), 0));
++}, w = (e, t, o, r) => {
++    const s = t - e.l;
++    if (e.i = o ? -1 : n(t - 1, e.i), e.l = t, s > 0) {
++        h(e.u, s);
++        if (r) {
++            const t = o ? r.slice(0, s) : r.slice(r.length - s);
++            e.t[o ? "unshift" : "push"](...t);
++            return t.reduce((e, t) => e + t, 0);
++        }
++        return h(e.t, s, o), e.o * s;
++    }
++    return e.u.splice(s), (o ? e.t.splice(0, -s) : e.t.splice(s)).reduce((t, o) => t - (-1 === o ? e.o : o), 0);
+ }, S = "undefined" != typeof window, m = e => e.documentElement, $ = e => e.ownerDocument, z = e => e.defaultView, b = /*#__PURE__*/ a(() => !!/iP(hone|od|ad)/.test(navigator.userAgent) || "MacIntel" === navigator.platform && navigator.maxTouchPoints > 0), y = /*#__PURE__*/ a(() => "scrollBehavior" in m(document).style), x = e => s(e.h(), e.p()), I = (e, t = 40, o = 0, l, c = !1) => {
+     let u = !!o, d = 1, a = 0, S = 0, m = 0, $ = 0, z = 0, y = 0, x = 0, I = 0, k = r, R = [ 0, u ? s(o - 1, 0) : -1 ], T = 0, C = !1;
+     const M = ((e, t, o) => ({
+@@ -47,7 +55,7 @@ const r = null, {min: n, max: s, abs: i, floor: l} = Math, c = (e, t, o) => n(o,
+         l: e,
+         i: -1,
+         u: h([], e + 1)
+-    }))(e, l ? l[1] : t, l && l[0]), O = new Set, E = () => m - S, H = () => E() + z + $, W = (e, t) => ((e, t, o, r) => {
++    }))(e, l ? l[1] : Array.isArray(t) ? t.reduce((e, t) => e + t, 0) / (t.length || 1) : t, l ? l[0] : Array.isArray(t) ? t : void 0), O = new Set, E = () => m - S, H = () => E() + z + $, W = (e, t) => ((e, t, o, r) => {
+         if (r = n(r, e.l - 1), v(e, r) <= t) {
+             const n = _(e, o, r);
+             return [ _(e, t, r, n), n ];
+@@ -147,7 +155,7 @@ const r = null, {min: n, max: s, abs: i, floor: l} = Math, c = (e, t, o) => n(o,
+                 break;
+
+               case 5:
+-                t[1] ? (L(w(M, t[0], !0)), I = 2, l = 1) : (w(M, t[0]), l = 1);
++                t[1] ? (L(w(M, t[0], !0, t[2])), I = 2, l = 1) : (w(M, t[0], !1, t[2]), l = 1);
+                 break;
+
+               case 6:
+@@ -519,11 +527,11 @@ const r = null, {min: n, max: s, abs: i, floor: l} = Math, c = (e, t, o) => n(o,
+     })(e);
+     return [ e => t[e], t.length ];
+ }, [ e, o ]), j = /*#__PURE__*/ t.forwardRef(({children: r, data: n, bufferSize: s, itemSize: i, shift: l, horizontal: c, keepMounted: d, cache: a, startMargin: h = 0, ssrCount: g, as: p = "div", item: v = "div", scrollRef: _, onScroll: w, onScrollEnd: S}, m) => {
+-    const [$, z] = V(r, n), b = t.useRef(null), y = t.useRef(!!g), k = X(w), R = X(S), [T, C, O, E] = P(() => {
+-        const e = !!c, t = I(z, i, g, a, !i);
++    const [$, z] = V(r, n), A = t.useMemo(() => "function" == typeof i ? Array.from({length: z}, (e, t) => i(n[t], t)) : i, [ i, n, z ]), b = t.useRef(null), y = t.useRef(!!g), k = X(w), R = X(S), [T, C, O, E] = P(() => {
++        const e = !!c, t = I(z, A, g, a, !A);
+         return [ t, W(t, e), M(t, e), e ];
+     });
+-    z !== T.T() && T.q(5, [ z, l ]), h !== T.O() && T.q(6, h);
++    z !== T.T() && T.q(5, [ z, l, A ]), h !== T.O() && T.q(6, h);
+     const [H, q] = t.useReducer(T._, void 0, T._), B = T.M(), L = T.h(), j = O.N(), D = [], U = t => {
+         const o = $(t);
+         return e.jsx(Y, {
 diff --git a/lib/index.js b/lib/index.js
-index 110ac3858a002a6cdb698da2b56350bc1bf609d2..41330c4c310a44fd964b1f68de6b99046d2efae7 100644
+index 110ac3858a002a6cdb698da2b56350bc1bf609d2..81d239dad48d4453efd5ce7f8397555c66c99d56 100644
 --- a/lib/index.js
 +++ b/lib/index.js
-@@ -124,7 +124,7 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
+@@ -1,7 +1,7 @@
+ "use client";
+ import { jsx as e } from "react/jsx-runtime";
+
+-import { useLayoutEffect as t, useEffect as o, useRef as n, memo as r, useMemo as s, forwardRef as i, useReducer as l, useImperativeHandle as c } from "react";
++import { useLayoutEffect as t, useEffect as o, useRef as n, memo as r, useMemo as s, useMemo as aa, forwardRef as i, useReducer as l, useImperativeHandle as c } from "react";
+
+ import { flushSync as f } from "react-dom";
+
+@@ -39,10 +39,18 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
+         b(e, s) <= t ? (r = s, o = s + 1) : n = s - 1;
+     }
+     return p(r, 0, e.l - 1);
+-}, x = (e, t, o) => {
++}, x = (e, t, o, r) => {
+     const n = t - e.l;
+-    return e.i = o ? -1 : d(t - 1, e.i), e.l = t, n > 0 ? (S(e.u, n), S(e.t, n, o),
+-    e.o * n) : (e.u.splice(n), (o ? e.t.splice(0, -n) : e.t.splice(n)).reduce((t, o) => t - (-1 === o ? e.o : o), 0));
++    if (e.i = o ? -1 : d(t - 1, e.i), e.l = t, n > 0) {
++        S(e.u, n);
++        if (r) {
++            const t = o ? r.slice(0, n) : r.slice(r.length - n);
++            e.t[o ? "unshift" : "push"](...t);
++            return t.reduce((e, t) => e + t, 0);
++        }
++        return S(e.t, n, o), e.o * n;
++    }
++    return e.u.splice(n), (o ? e.t.splice(0, -n) : e.t.splice(n)).reduce((t, o) => t - (-1 === o ? e.o : o), 0);
+ }, I = "undefined" != typeof window, k = e => e.documentElement, R = e => e.ownerDocument, T = e => e.defaultView, C = /*#__PURE__*/ w(() => !!/iP(hone|od|ad)/.test(navigator.userAgent) || "MacIntel" === navigator.platform && navigator.maxTouchPoints > 0), M = /*#__PURE__*/ w(() => "scrollBehavior" in k(document).style), O = e => a(e.h(), e.p()), E = (e, t = 40, o = 0, n, r = !1) => {
+     let s = !!o, i = 1, l = 0, c = 0, f = 0, g = 0, p = 0, m = 0, _ = 0, w = 0, I = u, k = [ 0, s ? a(o - 1, 0) : -1 ], R = 0, T = !1;
+     const M = ((e, t, o) => ({
+@@ -51,7 +59,7 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
+         l: e,
+         i: -1,
+         u: S([], e + 1)
+-    }))(e, n ? n[1] : t, n && n[0]), O = new Set, E = () => f - c, H = () => E() + p + g, W = (e, t) => ((e, t, o, n) => {
++    }))(e, n ? n[1] : Array.isArray(t) ? t.reduce((e, t) => e + t, 0) / (t.length || 1) : t, n ? n[0] : Array.isArray(t) ? t : void 0), O = new Set, E = () => f - c, H = () => E() + p + g, W = (e, t) => ((e, t, o, n) => {
+         if (n = d(n, e.l - 1), b(e, n) <= t) {
+             const r = y(e, o, n);
+             return [ y(e, t, n, r), r ];
+@@ -124,7 +132,7 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
                      if (!e.length) break;
                      N(e.reduce((e, [t, o]) => {
                          let n;
@@ -11,3 +111,40 @@ index 110ac3858a002a6cdb698da2b56350bc1bf609d2..41330c4c310a44fd964b1f68de6b9904
                              const e = E(), o = J(t), r = A(t);
                              n = 1 !== _ && 0 === w ? o + r <= e : o < e && o + r < e + l;
                          }
+@@ -151,7 +159,7 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
+                 break;
+
+               case 5:
+-                t[1] ? (N(x(M, t[0], !0)), w = 2, d = 1) : (x(M, t[0]), d = 1);
++                t[1] ? (N(x(M, t[0], !0, t[2])), w = 2, d = 1) : (x(M, t[0], !1, t[2]), d = 1);
+                 break;
+
+               case 6:
+@@ -523,11 +531,11 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
+     })(e);
+     return [ e => o[e], o.length ];
+ }, [ e, t ]), Z = /*#__PURE__*/ i(({children: t, data: o, bufferSize: r, itemSize: s, shift: i, horizontal: u, keepMounted: d, cache: a, startMargin: h = 0, ssrCount: g, as: p = "div", item: _ = "div", scrollRef: w, onScroll: S, onScrollEnd: $}, z) => {
+-    const [b, y] = Q(t, o), x = n(null), I = n(!!g), k = F(S), R = F($), [T, C, M, H] = U(() => {
+-        const e = !!u, t = E(y, s, g, a, !s);
++    const [b, y] = Q(t, o), bb = aa(() => "function" == typeof s ? Array.from({length: y}, (e, t) => s(o[t], t)) : s, [ s, o, y ]), x = n(null), I = n(!!g), k = F(S), R = F($), [T, C, M, H] = U(() => {
++        const e = !!u, t = E(y, bb, g, a, !bb);
+         return [ t, V(t, e), A(t, e), e ];
+     });
+-    y !== T.T() && T.B(5, [ y, i ]), h !== T.O() && T.B(6, h);
++    y !== T.T() && T.B(5, [ y, i, bb ]), h !== T.O() && T.B(6, h);
+     const [W, B] = l(T.m, void 0, T.m), J = T.M(), L = T.h(), N = M.P(), P = [], X = t => {
+         const o = b(t);
+         return e(K, {
+diff --git a/lib/react/Virtualizer.d.ts b/lib/react/Virtualizer.d.ts
+index 46c5d0765641bb1b4afeb9782b64e5fd71e6a1c8..e82091f3514fdccf064bf28c0a1b22c8615fbdf2 100644
+--- a/lib/react/Virtualizer.d.ts
++++ b/lib/react/Virtualizer.d.ts
+@@ -78,7 +78,7 @@ export interface VirtualizerProps<T = unknown> {
+      * - If not set, initial item sizes will be automatically estimated from measured sizes. This is recommended for most cases.
+      * - If set, you can opt out estimation and use the value as initial item size.
+      */
+-    itemSize?: number;
++    itemSize?: number | ((data: T, index: number) => number);
+     /**
+      * While true is set, scroll position will be maintained from the end not usual start when items are added to/removed from start. It's recommended to set false if you add to/remove from mid/end of the list because it can cause unexpected behavior. This prop is useful for reverse infinite scrolling.
+      */
