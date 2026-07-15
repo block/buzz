@@ -11,7 +11,6 @@ export function InvitePage({ code }: { code: string }) {
   const relay = relayWsUrl();
   const host = relay.replace(/^wss?:\/\//, "");
   const [terms, setTerms] = React.useState<Terms | null | undefined>(undefined);
-  const [accepted, setAccepted] = React.useState(false);
   const [opening, setOpening] = React.useState(false);
 
   React.useEffect(() => {
@@ -25,7 +24,6 @@ export function InvitePage({ code }: { code: string }) {
   }, []);
 
   const openInvite = async () => {
-    if (terms && !accepted) return;
     setOpening(true);
     try {
       let receipt: string | undefined;
@@ -50,8 +48,7 @@ export function InvitePage({ code }: { code: string }) {
     }
   };
 
-  const disabled =
-    terms === undefined || opening || (terms !== null && !accepted);
+  const disabled = terms === undefined || opening;
   return (
     <div
       className="flex flex-1 flex-col items-center justify-center px-4 py-16 text-center"
@@ -59,36 +56,48 @@ export function InvitePage({ code }: { code: string }) {
         backgroundImage: "linear-gradient(180deg, #D7D72E 0%, #D7E7F6 100%)",
       }}
     >
-      <div
-        className="flex w-full max-w-xl flex-col items-center rounded-3xl bg-white px-6 py-10 sm:px-12 sm:py-12"
-        style={{
-          boxShadow:
-            "0 0 0 1px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.04)",
-        }}
-      >
-        <div
-          className="h-16 w-16 overflow-hidden bg-black"
-          style={{ borderRadius: "22.37%" }}
-        >
-          <img alt="Buzz" className="h-full w-full" src={buzzAppIcon} />
-        </div>
-        <h1 className="mt-6 text-2xl font-semibold tracking-tight text-black">
-          You&apos;re invited to join
-        </h1>
-        <p className="mt-1 font-mono text-lg text-black/70">{host}</p>
+      <div className="w-full max-w-xl space-y-4">
+        <div className="flex w-full flex-col items-center rounded-3xl bg-white px-6 py-10 sm:px-12 sm:py-12">
+          <div
+            className="h-12 w-12 overflow-hidden bg-black"
+            style={{ borderRadius: "22.37%" }}
+          >
+            <img alt="Buzz" className="h-full w-full" src={buzzAppIcon} />
+          </div>
+          <h1 className="mt-4 text-2xl font-semibold tracking-tight text-black">
+            You&apos;re invited to
+          </h1>
+          <p className="mt-9 font-mono text-lg text-black/70">{host}</p>
 
-        {terms && (
-          <label className="mt-8 flex max-w-md cursor-pointer items-start gap-3 text-left text-sm text-black/70">
-            <input
-              className="mt-0.5 h-4 w-4 accent-black"
-              type="checkbox"
-              checked={accepted}
-              onChange={(event) => setAccepted(event.target.checked)}
-            />
-            <span>
-              I agree to this relay operator&apos;s{" "}
+          <div className="mt-9">
+            {terms === null ? (
+              <Button
+                asChild
+                className="bg-black text-white hover:bg-black/90 focus-visible:ring-black"
+                size="lg"
+              >
+                <a
+                  href={`buzz://join?relay=${encodeURIComponent(relay)}&code=${encodeURIComponent(code)}`}
+                >
+                  Accept invite in Buzz
+                </a>
+              </Button>
+            ) : (
+              <Button
+                className="bg-black text-white hover:bg-black/90 focus-visible:ring-black disabled:cursor-not-allowed disabled:bg-black/30 disabled:text-white/70"
+                size="lg"
+                disabled={disabled}
+                onClick={openInvite}
+              >
+                Accept invite in Buzz
+              </Button>
+            )}
+          </div>
+          {terms && (
+            <p className="mt-4 max-w-md text-xs text-black/60">
+              By accepting this invite, you agree to the{" "}
               <a
-                className="font-medium text-black underline"
+                className="text-black underline-offset-4 hover:text-black/70 hover:decoration-current hover:underline focus-visible:underline"
                 href={terms.url}
                 target="_blank"
                 rel="noreferrer"
@@ -96,38 +105,13 @@ export function InvitePage({ code }: { code: string }) {
                 Terms of Service
               </a>
               .
-            </span>
-          </label>
-        )}
-
-        <div className={terms ? "mt-6" : "mt-8"}>
-          {terms === null ? (
-            <Button
-              asChild
-              className="bg-black text-white hover:bg-black/90 focus-visible:ring-black"
-              size="lg"
-            >
-              <a
-                href={`buzz://join?relay=${encodeURIComponent(relay)}&code=${encodeURIComponent(code)}`}
-              >
-                Accept invite in Buzz
-              </a>
-            </Button>
-          ) : (
-            <Button
-              className="bg-black text-white hover:bg-black/90 focus-visible:ring-black disabled:cursor-not-allowed disabled:bg-black/30 disabled:text-white/70"
-              size="lg"
-              disabled={disabled}
-              onClick={openInvite}
-            >
-              Accept invite in Buzz
-            </Button>
+            </p>
           )}
         </div>
-        <p className="mt-6 text-sm text-black/60">
+        <p className="flex h-[3.125rem] items-center justify-center rounded-2xl bg-white text-sm text-black/60">
           Don&apos;t have the app?{" "}
           <a
-            className="font-medium text-black underline-offset-4 hover:text-black/70 hover:decoration-current hover:underline focus-visible:underline"
+            className="ml-1 font-medium text-black underline-offset-4 hover:text-black/70 hover:decoration-current hover:underline focus-visible:underline"
             href={DOWNLOAD_URL}
             rel="noreferrer"
             target="_blank"
