@@ -19,14 +19,15 @@ const rules = [
   },
 ];
 
-// Decorative / chrome exceptions: `relativePath:lineNumber`. The avatar emoji
-// glyphs are fixed display sizes sized to their avatar box (not readable
-// message text), so they are exempted from the readable-text px rule.
+// Decorative / chrome exceptions: `relativePath:matchedLiteral`. The avatar
+// emoji glyphs are fixed display sizes sized to their avatar box (not readable
+// message text), so they are exempted from the readable-text px rule. Matching
+// the literal keeps these exceptions stable when unrelated edits move lines.
 const overrides = new Set([
-  "src/features/settings/ui/ProfileSettingsCard.tsx:712",
-  "src/features/onboarding/ui/AvatarStep.tsx:95",
-  "src/features/agents/ui/AgentCreationPreview.tsx:666",
-  "src/features/agents/ui/AgentCreationPreview.tsx:747",
+  "src/features/settings/ui/ProfileSettingsCard.tsx:text-[6rem]",
+  "src/features/onboarding/ui/AvatarStep.tsx:text-[6rem]",
+  "src/features/agents/ui/AgentCreationPreview.tsx:text-[4rem]",
+  "src/features/agents/ui/AgentCreationPreview.tsx:text-[6rem]",
 ]);
 
 await runPxTextCheck({
