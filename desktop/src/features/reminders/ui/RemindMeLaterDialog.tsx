@@ -1,4 +1,4 @@
-import { CalendarClock, Clock } from "lucide-react";
+import { CalendarClock, Clock, Loader2 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -102,17 +102,6 @@ export function RemindMeLaterDialog({
               value={customTime}
             />
           </div>
-          <Button
-            className="w-full"
-            disabled={create.isPending || customTimestamp === null}
-            onClick={() => {
-              if (customTimestamp === null) return;
-              submit(customTimestamp);
-            }}
-            variant="default"
-          >
-            Set reminder
-          </Button>
         </div>
 
         <div className="space-y-2">
@@ -132,13 +121,27 @@ export function RemindMeLaterDialog({
           />
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="sm:justify-between">
           <Button
             variant="ghost"
             onClick={() => onOpenChange(false)}
             disabled={create.isPending}
           >
             Cancel
+          </Button>
+          <Button
+            disabled={create.isPending || customTimestamp === null}
+            onClick={() => {
+              if (customTimestamp === null) return;
+              submit(customTimestamp);
+            }}
+            variant="default"
+          >
+            {create.isPending ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              "Set reminder"
+            )}
           </Button>
         </DialogFooter>
       </DialogContent>
