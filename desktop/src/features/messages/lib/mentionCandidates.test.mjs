@@ -126,3 +126,47 @@ test("only complete, owned teams with mentionable members are suggested", () => 
     ["owned"],
   );
 });
+
+test("teams with duplicate identity display names are not suggested", () => {
+  const personas = [
+    persona("builder-one", "First"),
+    persona("builder-two", "Second"),
+  ];
+  const candidates = [
+    identity("builder-one", "Builder", { pubkey: "1".repeat(64) }),
+    identity("builder-two", "Builder", { pubkey: "2".repeat(64) }),
+  ];
+
+  assert.deepEqual(
+    buildTeamMentionCandidates(
+      [team("duplicate-identities", ["builder-one", "builder-two"])],
+      personas,
+      candidates,
+    ),
+    [],
+  );
+});
+
+test("teams with identity and persona display-name collisions are not suggested", () => {
+  const personas = [
+    persona("managed-builder", "Managed Builder"),
+    persona("persona-builder", "builder"),
+  ];
+  const candidates = [
+    identity("managed-builder", "Builder", { pubkey: "1".repeat(64) }),
+  ];
+
+  assert.deepEqual(
+    buildTeamMentionCandidates(
+      [
+        team("identity-persona-collision", [
+          "managed-builder",
+          "persona-builder",
+        ]),
+      ],
+      personas,
+      candidates,
+    ),
+    [],
+  );
+});

@@ -104,6 +104,13 @@ export function buildTeamMentionCandidates(
       .filter((member): member is TeamMentionMember => member !== null);
     if (teamMembers.length !== resolution.resolvedPersonas.length) return [];
 
+    const mentionNames = new Set<string>();
+    for (const member of teamMembers) {
+      const mentionName = member.displayName.trim().toLowerCase();
+      if (mentionNames.has(mentionName)) return [];
+      mentionNames.add(mentionName);
+    }
+
     return [
       {
         kind: "team" as const,
