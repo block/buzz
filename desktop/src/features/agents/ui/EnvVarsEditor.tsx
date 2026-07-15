@@ -140,6 +140,11 @@ type EnvVarsEditorProps = {
    */
   fileSatisfiedKeys?: readonly string[];
   /**
+   * Keys owned by a first-class field outside this editor. They remain in the
+   * emitted map but never render as generic rows here.
+   */
+  hiddenKeys?: readonly string[];
+  /**
    * When set, scroll the matching required-key row into view and focus its
    * value input on mount. One-shot: ignored after the first render in which
    * it is set. Only acts on keys that appear in `requiredKeys`.
@@ -182,6 +187,7 @@ export function EnvVarsEditor({
   disabled = false,
   requiredKeys = [],
   fileSatisfiedKeys = [],
+  hiddenKeys = [],
   focusKey,
   inheritedRows = [],
   inheritedRowsLabel = "build",
@@ -192,8 +198,8 @@ export function EnvVarsEditor({
   // Keeping them out of rows is the invariant that prevents a pre-saved
   // required key from appearing as a duplicate normal editable row.
   const skipKeys = React.useMemo(
-    () => new Set([...requiredKeys, ...fileSatisfiedKeys]),
-    [requiredKeys, fileSatisfiedKeys],
+    () => new Set([...requiredKeys, ...fileSatisfiedKeys, ...hiddenKeys]),
+    [requiredKeys, fileSatisfiedKeys, hiddenKeys],
   );
 
   // Local ordered row state — normal (non-special) keys only. Synced from
@@ -232,7 +238,7 @@ export function EnvVarsEditor({
   // merge them back explicitly.
   function buildRecord(nextRows: Row[]): EnvVarsValue {
     const base: EnvVarsValue = {};
-    for (const key of requiredKeys) {
+    for (const key of [...requiredKeys, ...hiddenKeys]) {
       if (key in value) base[key] = value[key];
     }
     return { ...base, ...toRecord(nextRows) };

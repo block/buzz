@@ -304,20 +304,17 @@ export function getDefaultLlmModelLabel(globalModel?: string) {
  */
 export function buildTemplateModelDropdownOptions(
   modelOptions: readonly PersonaModelOption[],
-  globalModel: string,
+  inheritedModel: string,
+  inheritedModelLabel = getDefaultLlmModelLabel(inheritedModel),
 ): PersonaDropdownOption[] {
-  const trimmedGlobal = globalModel.trim();
+  const trimmedInheritedModel = inheritedModel.trim();
   const hasZeroValue = modelOptions.some((o) => o.id === "");
   const base: readonly PersonaModelOption[] =
-    !hasZeroValue && trimmedGlobal.length > 0
-      ? [
-          { id: "", label: getDefaultLlmModelLabel(trimmedGlobal) },
-          ...modelOptions,
-        ]
+    !hasZeroValue && trimmedInheritedModel.length > 0
+      ? [{ id: "", label: inheritedModelLabel }, ...modelOptions]
       : modelOptions;
   return base.map((option) => ({
-    label:
-      option.id === "" ? getDefaultLlmModelLabel(trimmedGlobal) : option.label,
+    label: option.id === "" ? inheritedModelLabel : option.label,
     value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
   }));
 }
@@ -493,7 +490,9 @@ export function isGloballySatisfiedCredentialKey(
  * render an info row ("Set in goose config"). Baked env is invisible
  * infrastructure; surfacing it would be noise for users.
  *
- * **Precedence:** agent-local > baked > global > file for satisfaction.
+ * **Precedence:** agent-local > baked > global > file for satisfaction. An
+ * explicit local empty string is still an agent-local override, so it must NOT
+ * fall through to the baked layer.
  */
 export function getBakedSatisfiedEnvKeys(
   requiredKeys: readonly string[],
@@ -502,9 +501,7 @@ export function getBakedSatisfiedEnvKeys(
 ): string[] {
   if (!bakedEnvKeys || bakedEnvKeys.length === 0) return [];
   const bakedSet = new Set(bakedEnvKeys);
-  return requiredKeys.filter(
-    (key) => (envVars[key] ?? "").length === 0 && bakedSet.has(key),
-  );
+  return requiredKeys.filter((key) => !(key in envVars) && bakedSet.has(key));
 }
 
 /**
@@ -644,8 +641,8 @@ export function computeLocalModeGate({
     } else if (bakedSatisfiedSet.has(key)) {
       // Not in global env but covered by the baked build env — silenced.
       // Don't add to fileSatisfiedEnvKeys; baked keys produce no info row.
-    } else if (fileSatisfiedKeys.has(key)) {
-      // Not in Buzz env or global but present in the runtime config file.
+    } else if (!(key in envVars) && fileSatisfiedKeys.has(key)) {
+      // No higher-priority local override and present in the runtime config file.
       fileSatisfiedEnvKeys.push(key);
     } else {
       // Key needs a locked amber row in EnvVarsEditor (whether or not the

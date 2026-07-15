@@ -21,11 +21,12 @@ export interface RequiredCredentialState {
   fileSatisfiedEnvKeys: string[];
   /** Whether any required env key is still missing (blocks Save). */
   requiredEnvKeyMissing: boolean;
+  /** True once all async satisfaction sources (baked, file config) have resolved. */
+  settled: boolean;
 }
 
 /**
- * Compute the runtime/provider-required credential state and keep the Advanced
- * section's required-credential row visible when a key is newly missing.
+ * Compute runtime/provider-required credential state for the Edit Agent dialog.
  *
  * All keys are derived from the PROSPECTIVE post-submit runtime (not the
  * current dropdown). On an inherit transition (claude→buzz-agent or the
@@ -33,12 +34,8 @@ export interface RequiredCredentialState {
  * unblock Save; using the prospective id keeps the gate honest about what will
  * actually be saved.
  *
- * The `EnvVarsEditor` (and its amber required-key row) lives inside the
- * collapsed-by-default Advanced section, so a provider change that newly
- * requires a key would otherwise leave the row unmounted while Save is disabled
- * with no on-screen reason. This hook auto-expands Advanced on the
- * missing→present-requirement transition, so the user can still collapse it
- * again once the key is filled.
+ * The caller owns the visibility policy: top-level API-key fields are already
+ * visible, while non-secret Advanced-only keys can open that section.
  *
  * `globalProvider` is used as the fallback when the per-agent provider is
  * empty — without it, a global-provider-only config produces no required keys
@@ -60,7 +57,10 @@ export function useRequiredCredentialState(params: {
   /** Global config env vars; keys satisfied here are excluded from required
    *  rows and do not block Save — mirrors the agent→global→file precedence. */
   globalEnvVars?: Record<string, string>;
-  setShowAdvancedFields: React.Dispatch<React.SetStateAction<boolean>>;
+  /** Persona env vars; keys satisfied here are excluded from required rows
+   *  (mirrors backend readiness.rs which layers live_persona_env under record
+   *  env). An explicit local empty shadows the persona value. */
+  personaEnvVars?: Record<string, string>;
 }): RequiredCredentialState {
   const {
     open,
@@ -69,7 +69,7 @@ export function useRequiredCredentialState(params: {
     globalProvider = "",
     envVars,
     globalEnvVars = {},
-    setShowAdvancedFields,
+    personaEnvVars = {},
   } = params;
 
   const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
@@ -78,13 +78,13 @@ export function useRequiredCredentialState(params: {
     ? provider.trim() || globalProvider.trim()
     : "";
 
-  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
-    prospectiveRuntimeId,
-    { enabled: open },
-  );
+  const { data: runtimeFileConfig, isLoading: fileConfigLoading } =
+    useRuntimeFileConfigQuery(prospectiveRuntimeId, { enabled: open });
 
-  const { data: bakedEnvKeys, isFetched: bakedEnvKeysFetched } =
+  const { data: bakedEnvKeys, isLoading: bakedLoading } =
     useBakedBuildEnvKeysQuery({ enabled: open });
+
+  const settled = !fileConfigLoading && !bakedLoading;
 
   // All required keys for this runtime + provider combination.
   const allRequiredKeys = React.useMemo(
@@ -103,7 +103,7 @@ export function useRequiredCredentialState(params: {
     if (!runtimeFileConfig) return [] as string[];
     return allRequiredKeys.filter(
       (key) =>
-        (envVars[key] ?? "").length === 0 &&
+        !(key in envVars) &&
         !bakedSatisfiedKeys.includes(key) &&
         runtimeFileConfig.satisfiedEnvKeys.includes(key),
     );
@@ -115,16 +115,15 @@ export function useRequiredCredentialState(params: {
         (key) =>
           !bakedSatisfiedKeys.includes(key) &&
           !fileSatisfiedEnvKeys.includes(key) &&
-          // isGloballySatisfiedCredentialKey returns true when global has the key
-          // AND agent-local has NOT explicitly shadowed it with "" — same semantics
-          // as computeLocalModeGate, preventing create/edit gate drift.
-          !isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars),
+          !isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars) &&
+          !isGloballySatisfiedCredentialKey(key, personaEnvVars, envVars),
       ),
     [
       allRequiredKeys,
       bakedSatisfiedKeys,
       fileSatisfiedEnvKeys,
       globalEnvVars,
+      personaEnvVars,
       envVars,
     ],
   );
@@ -134,26 +133,10 @@ export function useRequiredCredentialState(params: {
     [requiredEnvKeys, envVars],
   );
 
-  // Auto-expand Advanced on the missing→present-requirement transition only.
-  // Wait for the baked-keys query to settle before firing: on first dialog open
-  // the query is still in-flight so bakedEnvKeys is undefined, which transiently
-  // marks baked-covered keys as missing. An errored query still counts as settled
-  // (fail-closed for badge/save purposes, but no premature expand).
-  const previousMissing = React.useRef(false);
-  React.useEffect(() => {
-    if (!open) {
-      previousMissing.current = false;
-      return;
-    }
-    if (
-      requiredEnvKeyMissing &&
-      !previousMissing.current &&
-      bakedEnvKeysFetched
-    ) {
-      setShowAdvancedFields(true);
-    }
-    previousMissing.current = requiredEnvKeyMissing;
-  }, [open, requiredEnvKeyMissing, bakedEnvKeysFetched, setShowAdvancedFields]);
-
-  return { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing };
+  return {
+    requiredEnvKeys,
+    fileSatisfiedEnvKeys,
+    requiredEnvKeyMissing,
+    settled,
+  };
 }

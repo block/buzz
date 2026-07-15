@@ -50,6 +50,8 @@ import {
 } from "./relayMeshModelPicker";
 import {
   computeEditAgentFormValidity,
+  envVarsEqual,
+  isEditAgentProviderSaveValid,
   resolveAgentCommandUpdate,
   resolveInheritedRuntimeSubmission,
   resolveRuntimeProviderCapability,
@@ -69,8 +71,14 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
-import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
-import { isBuzzAgentRuntime } from "./buzzAgentConfig";
+import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
+import {
+  getBakedModelInheritLabel,
+  getBakedProviderInheritLabel,
+} from "./bakedEnvHelpers";
+import { getProviderApiKeyEnvVar } from "./personaDialogPickers";
+import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
+import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
@@ -236,10 +244,6 @@ export function AgentInstanceEditDialog({
     return options;
   }, [sortedRuntimes, selectedRuntimeId]);
 
-  const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection(
-    selectedRuntime?.id ?? selectedRuntimeId,
-  );
-
   // Resolve the dialog-opening command as the catalog loads. Edit-state runtime
   // ids mutate during selection changes and cannot identify the original state.
   const originalRuntimeSupportsProvider = React.useMemo(() => {
@@ -249,60 +253,6 @@ export function AgentInstanceEditDialog({
       runtimes.find((r) => r.id === originalCommand);
     return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
   }, [runtimes, originalAgentCommand]);
-
-  // One-shot focus: when the dialog opens from a card deep-link, scroll and
-  // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
-  // changes so a provider-field focus request fires once the field materializes
-  // (the runtime catalog may still be loading at click time). A one-shot fired
-  // ref prevents re-focusing on unrelated re-renders after the target is ready.
-  const normalizedFieldFocusFiredRef = React.useRef(false);
-  // Reset the fired guard whenever the focus request changes (new open, new
-  // focus target, or dialog switched to a different agent).
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — reset guard on these three; llmProviderFieldVisible drives the focus attempt below
-  React.useEffect(() => {
-    normalizedFieldFocusFiredRef.current = false;
-  }, [open, initialFocus, agent.pubkey]);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — llmProviderFieldVisible is the availability signal that re-triggers the focus attempt; agent.pubkey handles agent-switch
-  React.useEffect(() => {
-    if (!open || !initialFocus) return;
-    if (initialFocus.type !== "normalized_field") return;
-    if (normalizedFieldFocusFiredRef.current) return;
-
-    // For "provider" focus: the provider dropdown is only rendered when
-    // llmProviderFieldVisible is true (runtime catalog resolved). Bail until
-    // it materializes — this effect re-runs when llmProviderFieldVisible flips.
-    const targetId =
-      initialFocus.field === "provider"
-        ? "edit-agent-llm-provider"
-        : "edit-agent-model";
-    const el = document.getElementById(targetId);
-    // PersonaDropdownField renders a <button> (DropdownMenuTrigger), not a
-    // native <select> — guard against HTMLElement (focus + scrollIntoView
-    // both exist on HTMLElement).
-    if (!(el instanceof HTMLElement)) return;
-
-    normalizedFieldFocusFiredRef.current = true;
-
-    const id = requestAnimationFrame(() => {
-      el.scrollIntoView({ block: "nearest" });
-      el.focus();
-    });
-
-    return () => cancelAnimationFrame(id);
-  }, [open, initialFocus, agent.pubkey, llmProviderFieldVisible]);
-  // env_key is handled by EnvVarsEditor via focusKey prop below.
-
-  const providerForDiscovery = llmProviderFieldVisible ? provider : "";
-  const normalizedConfig = configSurfaceQuery.data?.normalized;
-  const modelRequired = isMissingRequiredDropdownField(
-    normalizedConfig?.model,
-    model,
-  );
-  const providerRequired = isMissingRequiredDropdownField(
-    normalizedConfig?.provider,
-    provider,
-  );
 
   // The runtime id that will actually be active after submit. When inheriting,
   // resolve from the LINKED PERSONA's runtime — that is what will run once the
@@ -342,6 +292,41 @@ export function AgentInstanceEditDialog({
     selectedRuntimeId,
   ]);
 
+  const llmProviderFieldVisible =
+    runtimeSupportsLlmProviderSelection(prospectiveRuntimeId);
+
+  // One-shot focus: when the dialog opens from a card deep-link, scroll and
+  // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
+  // changes so a provider-field focus request fires once the field materializes.
+  const normalizedFieldFocusFiredRef = React.useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — reset guard on these three; llmProviderFieldVisible drives the focus attempt below
+  React.useEffect(() => {
+    normalizedFieldFocusFiredRef.current = false;
+  }, [open, initialFocus, agent.pubkey]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — llmProviderFieldVisible is the availability signal that re-triggers the focus attempt; agent.pubkey handles agent-switch
+  React.useEffect(() => {
+    if (!open || !initialFocus) return;
+    if (initialFocus.type !== "normalized_field") return;
+    if (normalizedFieldFocusFiredRef.current) return;
+
+    const targetId =
+      initialFocus.field === "provider"
+        ? "edit-agent-llm-provider"
+        : "edit-agent-model";
+    const el = document.getElementById(targetId);
+    if (!(el instanceof HTMLElement)) return;
+
+    normalizedFieldFocusFiredRef.current = true;
+
+    const id = requestAnimationFrame(() => {
+      el.scrollIntoView({ block: "nearest" });
+      el.focus();
+    });
+
+    return () => cancelAnimationFrame(id);
+  }, [open, initialFocus, agent.pubkey, llmProviderFieldVisible]);
+
   // Provider + env to PERSIST on submit — also fed to the credential gate so
   // gate, saved record, and spawn snapshot all agree on one resolved value.
   // See resolveInheritedRuntimeSubmission for the inherit/transition contract.
@@ -370,7 +355,15 @@ export function AgentInstanceEditDialog({
     ],
   );
 
-  const { globalConfig } = useGlobalAgentConfig();
+  const {
+    advancedInheritedSummary,
+    globalConfig,
+    inheritedDefaults: {
+      provider: inheritedProviderDefault,
+      model: inheritedModelDefault,
+    },
+    inheritedEnvVars: inheritedEnvVarsForAdvanced,
+  } = useAgentDialogDefaults({ inheritedEnvVars, open });
 
   // Runtime/provider-required credential state, derived from the PROSPECTIVE
   // post-submit runtime — see the hook for the inherit-transition and
@@ -379,16 +372,20 @@ export function AgentInstanceEditDialog({
   // provider is empty (global-provider-only configs must surface required keys).
   // Pass globalEnvVars so keys satisfied by global config are excluded from
   // requiredEnvKeys and do not block Save (display and gate agree).
-  const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
-    useRequiredCredentialState({
-      open,
-      prospectiveRuntimeId,
-      provider: inheritedSubmission.provider ?? "",
-      globalProvider: globalConfig.provider ?? "",
-      envVars: inheritedSubmission.envVars,
-      globalEnvVars: globalConfig.env_vars,
-      setShowAdvancedFields,
-    });
+  const {
+    requiredEnvKeys,
+    fileSatisfiedEnvKeys,
+    requiredEnvKeyMissing,
+    settled: credentialSettled,
+  } = useRequiredCredentialState({
+    open,
+    prospectiveRuntimeId,
+    provider: inheritedSubmission.provider ?? "",
+    globalProvider: inheritedProviderDefault.value,
+    envVars: inheritedSubmission.envVars,
+    globalEnvVars: globalConfig.env_vars,
+    personaEnvVars: inheritHarness ? inheritedEnvVars : undefined,
+  });
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
 
@@ -402,6 +399,10 @@ export function AgentInstanceEditDialog({
     () => ({ ...globalConfig.env_vars, ...inheritedSubmission.envVars }),
     [globalConfig.env_vars, inheritedSubmission.envVars],
   );
+  const effectiveProvider =
+    (inheritedSubmission.provider ?? "").trim() ||
+    inheritedProviderDefault.value;
+  const providerForDiscovery = llmProviderFieldVisible ? effectiveProvider : "";
 
   const {
     discoveredModelOptions,
@@ -416,31 +417,37 @@ export function AgentInstanceEditDialog({
     selectedRuntime,
   });
 
-  // Merge global + persona env for the inherited display hint in EnvVarsEditor
-  // (inside EditAgentAdvancedFields). Persona wins over global on collision
-  // (higher precedence), so persona keys shadow global for display consistency.
-  const inheritedWithGlobal = React.useMemo(() => {
-    return { ...globalConfig.env_vars, ...inheritedEnvVars };
-  }, [globalConfig.env_vars, inheritedEnvVars]);
-
-  // Auto-expand Advanced whenever the prospective runtime is buzz-agent so the
-  // model-tuning knobs are reachable even when no required key is missing.
-  // Fires once per dialog-open cycle; does not re-open if the user manually
-  // collapses the section afterward.
-  const hasAutoOpenedForBuzzAgentRef = React.useRef(false);
-  React.useEffect(() => {
-    if (!open) {
-      hasAutoOpenedForBuzzAgentRef.current = false;
-      return;
-    }
-    if (
-      isBuzzAgentRuntime(prospectiveRuntimeId) &&
-      !hasAutoOpenedForBuzzAgentRef.current
-    ) {
-      hasAutoOpenedForBuzzAgentRef.current = true;
-      setShowAdvancedFields(true);
-    }
-  }, [open, prospectiveRuntimeId]);
+  // D2: derive advancedRequiredEnvKeys for EnvVarsEditor display + auto-open.
+  // The full requiredEnvKeys/requiredEnvKeyMissing continue driving Save gating.
+  // D2/D3: the top-level API key owns display, while the readiness gate keeps
+  // the complete required-key list. The effective snapshot covers persona
+  // inheritance during an instance inherit transition.
+  const providerApiKeyEnvVar = getProviderApiKeyEnvVar(effectiveProvider);
+  const personaSatisfied =
+    providerApiKeyEnvVar != null &&
+    !(providerApiKeyEnvVar in envVars) &&
+    (inheritedEnvVars[providerApiKeyEnvVar] ?? "").length > 0;
+  const apiKeyFieldState = useProviderApiKeyFieldState({
+    bakedEnvKeys,
+    effectiveEnvVars: inheritedSubmission.envVars,
+    envVars,
+    fileSatisfiedEnvKeys,
+    globalEnvVars: globalConfig.env_vars,
+    open,
+    personaSatisfied,
+    provider: effectiveProvider,
+    requiredEnvKeys,
+    satisfactionSettled: credentialSettled,
+    setShowAdvancedFields,
+  });
+  const {
+    advancedRequiredEnvKeys,
+    inheritedLabel: apiKeyInheritedLabel,
+    isInherited: apiKeyIsInherited,
+    isRequired: apiKeyIsRequired,
+    secretEnvVar: topLevelSecretEnvVar,
+    value: apiKeyValue,
+  } = apiKeyFieldState;
 
   // Clear model when provider scope changes and current model is no longer valid.
   React.useEffect(() => {
@@ -581,7 +588,7 @@ export function AgentInstanceEditDialog({
     llmProviderFieldVisible,
     currentProvider: provider,
     originalProvider: agent.provider,
-    globalProvider: globalConfig.provider,
+    globalProvider: inheritedProviderDefault.value,
     originalRuntimeSupportsProvider,
   });
 
@@ -690,9 +697,9 @@ export function AgentInstanceEditDialog({
                 ? null
                 : undefined
               : undefined, // "unknown" → omit always
-        envVars: envVarsChanged(submitEnvVars, agent.envVars)
-          ? submitEnvVars
-          : undefined,
+        envVars: envVarsEqual(submitEnvVars, agent.envVars)
+          ? undefined
+          : submitEnvVars,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
         // The allowlist is preserved across mode toggles in local UI state
         // (so a user can flip away from allowlist and back without losing
@@ -749,7 +756,20 @@ export function AgentInstanceEditDialog({
     }
   }
 
-  // Model field derived state
+  // Model and provider field derived state
+  const normalizedConfig = configSurfaceQuery.data?.normalized;
+  const modelRequired = isMissingRequiredDropdownField(
+    normalizedConfig?.model,
+    model,
+  );
+  const providerRequired = isMissingRequiredDropdownField(
+    normalizedConfig?.provider,
+    provider,
+  );
+  const inheritedModelLabel =
+    inheritedModelDefault.source === "build"
+      ? getBakedModelInheritLabel(inheritedModelDefault.value)
+      : getDefaultLlmModelLabel(inheritedModelDefault.value);
   const {
     isRelayMesh,
     options: effectiveModelOptions,
@@ -757,15 +777,15 @@ export function AgentInstanceEditDialog({
     showCustomInput: showCustomModelInput,
   } = relayMeshModelPickerState({
     discoveredOptions: discoveredModelOptions,
-    fallbackOptions: [
-      { id: "", label: getDefaultLlmModelLabel(globalConfig.model ?? "") },
-    ],
+    fallbackOptions: [{ id: "", label: inheritedModelLabel }],
     isCustomEditing: isCustomModelEditing,
     model,
     provider: providerForDiscovery,
   });
   const modelDropdownOptions = buildModelDropdownOptions({
     allowCustom: !isRelayMesh,
+    globalModel: isRelayMesh ? undefined : inheritedModelDefault.value,
+    globalModelLabel: isRelayMesh ? undefined : inheritedModelLabel,
     loading: modelDiscoveryLoading && discoveredModelOptions === null,
     loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
     options: effectiveModelOptions,
@@ -783,7 +803,9 @@ export function AgentInstanceEditDialog({
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
     selectedRuntime?.id ?? "",
-    globalConfig.provider ?? "",
+    inheritedProviderDefault.source === "global"
+      ? inheritedProviderDefault.value
+      : "",
     hideProviderIds,
   );
   const providerSelectValue = isCustomProviderEditing
@@ -791,7 +813,13 @@ export function AgentInstanceEditDialog({
     : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
   const providerDropdownOptions: PersonaDropdownOption[] = [
     ...providerOptions.map((option) => ({
-      label: option.label,
+      label:
+        option.id === "" && inheritedProviderDefault.source === "build"
+          ? getBakedProviderInheritLabel(
+              inheritedProviderDefault.value,
+              providerOptions,
+            )
+          : option.label,
       value: option.id || AUTO_PROVIDER_DROPDOWN_VALUE,
     })),
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
@@ -982,6 +1010,27 @@ export function AgentInstanceEditDialog({
               </div>
             ) : null}
 
+            {llmProviderFieldVisible && topLevelSecretEnvVar ? (
+              <PersonaProviderApiKeyField
+                disabled={updateMutation.isPending}
+                isInherited={apiKeyIsInherited}
+                inheritedLabel={apiKeyInheritedLabel}
+                isRequired={apiKeyIsRequired}
+                label={
+                  effectiveProvider === "anthropic"
+                    ? "Anthropic API Key"
+                    : "OpenAI API Key"
+                }
+                onValueChange={(next) => {
+                  setEnvVars((prev) => ({
+                    ...prev,
+                    [topLevelSecretEnvVar]: next,
+                  }));
+                }}
+                value={apiKeyValue}
+              />
+            ) : null}
+
             {/* Model */}
             <div className="space-y-1.5">
               <label
@@ -1054,6 +1103,11 @@ export function AgentInstanceEditDialog({
                   )}
                 />
               </button>
+              {!showAdvancedFields && advancedInheritedSummary ? (
+                <p className="text-xs text-muted-foreground">
+                  {advancedInheritedSummary}
+                </p>
+              ) : null}
 
               <AnimatePresence initial={false}>
                 {showAdvancedFields ? (
@@ -1073,20 +1127,23 @@ export function AgentInstanceEditDialog({
                       disabled={updateMutation.isPending}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
+                      hiddenEnvKeys={
+                        topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
+                      }
                       focusKey={
                         initialFocus?.type === "env_key"
                           ? initialFocus.key
                           : undefined
                       }
-                      inheritedEnvVars={inheritedWithGlobal}
+                      inheritedEnvVars={inheritedEnvVarsForAdvanced}
                       inheritHarness={inheritHarness}
                       linkedPersona={linkedPersona}
-                      model={model}
+                      model={inheritedSubmission.model ?? ""}
                       modelTuningRuntimeId={prospectiveRuntimeId}
                       parallelism={parallelism}
-                      provider={provider}
+                      provider={effectiveProvider}
                       relayUrl={relayUrl}
-                      requiredEnvKeys={requiredEnvKeys}
+                      requiredEnvKeys={advancedRequiredEnvKeys}
                       selectedRuntimeId={selectedRuntimeId}
                       systemPrompt={systemPrompt}
                       onAcpCommandChange={setAcpCommand}
@@ -1115,55 +1172,4 @@ export function AgentInstanceEditDialog({
       </ChooserDialogContent>
     </Dialog>
   );
-}
-
-/**
- * Determines whether the Save button should be enabled with respect to the
- * provider field in the instance-edit dialog.
- *
- * Rules (b): Legacy agents that were already on a provider-capable runtime
- * without a provider stay editable for unrelated fields. A no-provider agent
- * that switches into a provider-capable runtime must choose a provider or rely
- * on a global fallback.
- *
- * Save is allowed when:
- * 1. Provider field is hidden — not a provider-requiring runtime, always OK.
- * 2. An effective provider resolves (per-agent or global fallback) — OK.
- * 3. The agent never had a provider AND was already on a provider-capable
- *    runtime — legacy state, don't suddenly block name/timeout edits.
- */
-export function isEditAgentProviderSaveValid({
-  llmProviderFieldVisible,
-  currentProvider,
-  originalProvider,
-  globalProvider,
-  originalRuntimeSupportsProvider,
-}: {
-  llmProviderFieldVisible: boolean;
-  currentProvider: string;
-  originalProvider: string | null | undefined;
-  globalProvider: string | null | undefined;
-  originalRuntimeSupportsProvider: boolean;
-}): boolean {
-  if (!llmProviderFieldVisible) return true;
-  const effectiveProvider =
-    currentProvider.trim() || (globalProvider ?? "").trim();
-  if (effectiveProvider.length > 0) return true;
-  // No effective provider. Allow only legacy no-provider agents that were
-  // already on a provider-capable runtime when the dialog opened.
-  const hadProvider = (originalProvider ?? "").trim().length > 0;
-  return !hadProvider && originalRuntimeSupportsProvider;
-}
-
-function envVarsChanged(
-  a: Record<string, string>,
-  b: Record<string, string>,
-): boolean {
-  const aKeys = Object.keys(a);
-  const bKeys = Object.keys(b);
-  if (aKeys.length !== bKeys.length) return true;
-  for (const k of aKeys) {
-    if (a[k] !== b[k]) return true;
-  }
-  return false;
 }

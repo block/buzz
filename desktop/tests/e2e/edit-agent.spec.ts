@@ -2,6 +2,17 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
+const BAKED_DEFAULTS = [
+  { key: "BUZZ_AGENT_PROVIDER", value: "anthropic", masked: false },
+  {
+    key: "BUZZ_AGENT_MODEL",
+    value: "claude-opus-4-8",
+    masked: false,
+  },
+  { key: "BUZZ_AGENT_THINKING_EFFORT", value: "high", masked: false },
+  { key: "ANTHROPIC_API_KEY", value: "sk-ant-baked-test", masked: true },
+];
+
 // Edit-agent dialog coverage (Phase 1B.3b-pre). Written against TODAY'S
 // EditAgentDialog, before the B3b re-host, so the re-host is guarded by a
 // pre-existing spec rather than one written alongside it.
@@ -123,9 +134,7 @@ test.describe("edit agent dialog", () => {
     await pickDropdownOption(page, "edit-agent-model", "Custom model...");
     await page.locator("#edit-agent-custom-model").fill("claude-opus-4-5");
     // Anthropic requires a credential before save unlocks.
-    await page
-      .getByTestId("env-vars-required-value")
-      .fill("sk-test-edit-agent-e2e");
+    await page.getByLabel("Anthropic API Key").fill("sk-test-edit-agent-e2e");
 
     const submit = page.getByTestId("edit-agent-dialog-submit");
     await expect(submit).toBeEnabled({ timeout: 10_000 });
@@ -142,6 +151,65 @@ test.describe("edit agent dialog", () => {
       "claude-opus-4-5",
       { timeout: 10_000 },
     );
+  });
+
+  test("shows baked defaults in the instance editor", async ({ page }) => {
+    await installMockBridge(page, {
+      bakedBuildEnv: BAKED_DEFAULTS,
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+
+    await expect(page.locator("#edit-agent-llm-provider")).toHaveText(
+      "Anthropic (inherited from build)",
+    );
+    await expect(page.locator("#edit-agent-model")).toHaveText(
+      "Inherit build default (claude-opus-4-8)",
+    );
+    await expect(
+      page.getByText("Using build defaults: effort high"),
+    ).toBeVisible();
+  });
+
+  test("explicit global defaults override baked labels in the instance editor", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      bakedBuildEnv: BAKED_DEFAULTS,
+      globalAgentConfig: {
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: { BUZZ_AGENT_THINKING_EFFORT: "low" },
+      },
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+
+    await expect(page.locator("#edit-agent-llm-provider")).toHaveText(
+      "Inherit global default (anthropic)",
+    );
+    await expect(page.locator("#edit-agent-model")).toHaveText(
+      "Inherit global default (claude-opus-4-5)",
+    );
+    await expect(
+      page.getByText("Using global defaults: effort low"),
+    ).toBeVisible();
   });
 
   test("profile Edit routes persona-linked agents to the definition editor", async ({

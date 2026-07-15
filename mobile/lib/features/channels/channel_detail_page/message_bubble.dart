@@ -122,6 +122,8 @@ class _MessageBubble extends ConsumerWidget {
                         currentChannelId: currentChannelId,
                       );
                     },
+                    onMentionTap: (pubkey) =>
+                        showUserProfileSheet(context, pubkey),
                   ),
                   if (message.reactions.isNotEmpty)
                     ReactionRow(

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
@@ -47,6 +48,21 @@ part 'channel_detail_page/message_bubble.dart';
 part 'channel_detail_page/banners.dart';
 part 'channel_detail_page/app_bar.dart';
 
+/// Fetch deep-link targets that may be outside the loaded channel window.
+Future<void> _loadDeepLinkEvents(
+  WidgetRef ref,
+  String channelId,
+  Set<String> eventIds,
+) async {
+  try {
+    await ref
+        .read(channelMessagesProvider(channelId).notifier)
+        .loadEventsById(eventIds);
+  } catch (error) {
+    debugPrint('deep-link: failed to load target messages: $error');
+  }
+}
+
 /// Fetch channel members and preload their profiles into the user cache.
 Future<void> _preloadMembers(WidgetRef ref, String channelId) async {
   // Capture references before async gap to avoid using disposed ref.
@@ -89,8 +105,15 @@ int? _channelReadTimestamp({
 
 class ChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
+  final String? initialMessageId;
+  final String? initialThreadRootId;
 
-  const ChannelDetailPage({super.key, required this.channel});
+  const ChannelDetailPage({
+    super.key,
+    required this.channel,
+    this.initialMessageId,
+    this.initialThreadRootId,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -134,6 +157,15 @@ class ChannelDetailPage extends HookConsumerWidget {
       _preloadMembers(ref, channel.id);
       return null;
     }, [channel.id]);
+
+    useEffect(() {
+      final messageId = initialMessageId;
+      if (messageId == null || channel.isForum) return null;
+      final eventIds = {messageId, ?initialThreadRootId};
+      final notifier = ref.read(channelMessagesProvider(channel.id).notifier);
+      unawaited(_loadDeepLinkEvents(ref, channel.id, eventIds));
+      return () => notifier.releaseDeepLinkEvents(eventIds);
+    }, [channel.id, initialMessageId, initialThreadRootId]);
 
     useEffect(() {
       if (!readState.isReady || readTimestamp == null) {
@@ -274,6 +306,8 @@ class ChannelDetailPage extends HookConsumerWidget {
                       return _MessageList(
                         entries: entries,
                         allMessages: messages,
+                        initialMessageId: initialMessageId,
+                        initialThreadRootId: initialThreadRootId,
                         channelId: channel.id,
                         currentPubkey: currentPubkey,
                         isMember: resolvedChannel.isMember,

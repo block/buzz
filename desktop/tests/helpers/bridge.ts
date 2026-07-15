@@ -156,6 +156,10 @@ type MockBridgeOptions = {
   addChannelMembersDelayMs?: number;
   channelMembersReadDelayMs?: number;
   channelsReadError?: string;
+  /** Reject successive mock `create_channel` calls, then resume. */
+  createChannelErrors?: string[];
+  /** Reject successive mock `join_channel` calls, then resume. */
+  joinChannelErrors?: string[];
   /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
   deepHistoryMessageCount?: number;
   feedReadError?: string;
@@ -286,6 +290,11 @@ type MockBridgeOptions = {
     provider: string | null;
     model: string | null;
   };
+  bakedBuildEnv?: Array<{
+    key: string;
+    masked: boolean;
+    value: string;
+  }>;
   /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
    *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
   setGlobalAgentConfigDelayMs?: number;

@@ -479,7 +479,9 @@ const overrides = new Map([
   // +2 provider-aware effort: model/provider props threaded to BuzzAgentModelTuningFields.
   // +15 provider/model dropdown fixes: useBakedBuildEnvKeysQuery + hideProviderIds
   // for Databricks v1 gate; prospectiveRuntimeId default fallback for builtins.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1180],
+  // PR-B moves default/API-key derivation into shared hooks; the explicit
+  // hidden-key projection keeps the top-level secret out of Advanced rows.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1195],
   // AgentDefinitionDialog grew past 1000 with the following load-bearing fixes:
   // isRuntimeAutoSeededRef tracking for edit-mode seeding (Fizz shows models);
   // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);

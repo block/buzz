@@ -320,13 +320,9 @@ class ComposeBar extends HookConsumerWidget {
       final pubkeys = LinkedHashSet<String>.from(
         selectedMentions.map((candidate) => candidate.pubkey.toLowerCase()),
       ).toList();
-      final selectedAgentPubkeys = LinkedHashSet<String>.from(
-        selectedMentions
-            .where((candidate) => candidate.isAgent)
-            .map((candidate) => candidate.pubkey.toLowerCase()),
-      );
       final nonMemberAgentPubkeys = <String>[];
-      if (selectedAgentPubkeys.isNotEmpty) {
+      final nonMemberHumans = <MentionCandidate>[];
+      if (selectedMentions.isNotEmpty) {
         final currentChannel = (await ref.read(
           channelsProvider.future,
         )).firstWhere((channel) => channel.id == channelId);
@@ -334,11 +330,55 @@ class ComposeBar extends HookConsumerWidget {
           final memberPubkeys = (await ref.read(
             channelMembersProvider(channelId).future,
           )).map((member) => member.pubkey.toLowerCase()).toSet();
-          nonMemberAgentPubkeys.addAll(
-            selectedAgentPubkeys.where(
-              (pubkey) => !memberPubkeys.contains(pubkey),
-            ),
-          );
+          final seenNonMembers = <String>{};
+          for (final candidate in selectedMentions) {
+            final pk = candidate.pubkey.toLowerCase();
+            if (memberPubkeys.contains(pk)) continue;
+            if (!seenNonMembers.add(pk)) continue;
+            if (candidate.isAgent) {
+              nonMemberAgentPubkeys.add(pk);
+            } else {
+              nonMemberHumans.add(candidate);
+            }
+          }
+        }
+      }
+
+      // Mentioning humans outside the channel prompts "Invite" / "Do
+      // nothing" (send without inviting) — mirrors desktop's
+      // NonMemberMentionDialog. Agents keep the existing silent auto-add.
+      var mentionPubkeys = pubkeys;
+      final referenceMentionTags = <List<String>>[];
+      var inviteHumanPubkeys = const <String>[];
+      if (nonMemberHumans.isNotEmpty) {
+        if (!context.mounted) return;
+        final choice = await _promptNonMemberMention(
+          context,
+          names: [for (final candidate in nonMemberHumans) candidate.label],
+        );
+        switch (choice) {
+          case null:
+            return; // Dismissed — keep the draft, send nothing.
+          case _NonMemberMentionChoice.invite:
+            inviteHumanPubkeys = [
+              for (final candidate in nonMemberHumans)
+                candidate.pubkey.toLowerCase(),
+            ];
+          case _NonMemberMentionChoice.sendWithoutInviting:
+            // Strip their p-tags (no channel notification) but keep a
+            // `mention` reference tag so their name still renders —
+            // mirrors desktop's mergeOutgoingTagsWithReferenceMentions.
+            final excluded = {
+              for (final candidate in nonMemberHumans)
+                candidate.pubkey.toLowerCase(),
+            };
+            mentionPubkeys = [
+              for (final pk in pubkeys)
+                if (!excluded.contains(pk)) pk,
+            ];
+            referenceMentionTags.addAll([
+              for (final pk in excluded) ['mention', pk],
+            ]);
         }
       }
 
@@ -359,7 +399,16 @@ class ComposeBar extends HookConsumerWidget {
                 role: 'bot',
               );
         }
-        await onSend(payload.content, pubkeys, mediaTags: payload.mediaTags);
+        if (inviteHumanPubkeys.isNotEmpty) {
+          await ref
+              .read(channelActionsProvider)
+              .addMembers(channelId: channelId, pubkeys: inviteHumanPubkeys);
+        }
+        await onSend(
+          payload.content,
+          mentionPubkeys,
+          mediaTags: [...payload.mediaTags, ...referenceMentionTags],
+        );
         if (context.mounted) {
           clearComposer();
         }

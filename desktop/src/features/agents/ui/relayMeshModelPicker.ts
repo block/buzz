@@ -64,12 +64,14 @@ export function modelDropdownOptions({
   loadingValue,
   allowCustom,
   globalModel,
+  globalModelLabel,
 }: {
   options: readonly PersonaModelOption[];
   loading: boolean;
   loadingValue: string;
   allowCustom: boolean;
   globalModel?: string;
+  globalModelLabel?: string;
 }): PersonaDropdownOption[] {
   const modelOptions =
     globalModel === undefined
@@ -77,7 +79,11 @@ export function modelDropdownOptions({
           label: option.label,
           value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
         }))
-      : buildTemplateModelDropdownOptions(options, globalModel);
+      : buildTemplateModelDropdownOptions(
+          options,
+          globalModel,
+          globalModelLabel,
+        );
   return [
     ...modelOptions,
     ...(loading

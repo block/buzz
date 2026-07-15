@@ -1,5 +1,12 @@
 # Changelog
 
+## mobile-v0.4.4
+
+- fix(mobile): surface non-member people and owned agents in @mention autocomplete ([#1877](https://github.com/block/buzz/pull/1877)) ([`54f41659`](https://github.com/block/buzz/commit/54f4165942ab5b3e2cf1fa1b47bbb907587cd5f4))
+- fix(mobile): open profile sheet when tapping @mentions ([#1876](https://github.com/block/buzz/pull/1876)) ([`7e009a89`](https://github.com/block/buzz/commit/7e009a893748eb660efd6d51d78f172cc913e3da))
+- fix(mobile): handle buzz:// links ([#1826](https://github.com/block/buzz/pull/1826)) ([`37f65c08`](https://github.com/block/buzz/commit/37f65c08dc4fc357e54283b19d6019b18cd2b00e))
+
+
 ## mobile-v0.4.3
 
 - fix(mobile): fix agent avatars on mobile ([#1837](https://github.com/block/buzz/pull/1837)) ([`7b6e1265`](https://github.com/block/buzz/commit/7b6e12657d69316614726065db69cc418750a973))

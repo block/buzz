@@ -39,6 +39,10 @@ class MessageContent extends HookConsumerWidget {
   /// Called when a #channel link is tapped.
   final void Function(String channelId)? onChannelTap;
 
+  /// Called when an @mention of a known user is tapped, with the
+  /// mentioned user's pubkey.
+  final void Function(String pubkey)? onMentionTap;
+
   final TextStyle? baseStyle;
 
   final int? maxLines;
@@ -50,6 +54,7 @@ class MessageContent extends HookConsumerWidget {
     this.channelNames = const {},
     this.tags = const [],
     this.onChannelTap,
+    this.onMentionTap,
     this.baseStyle,
     this.maxLines,
   });
@@ -145,7 +150,7 @@ class MessageContent extends HookConsumerWidget {
           _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
       maxLines: maxLines,
       inlineComponents: [
-        _MentionMd(mentionNames: mentionNames),
+        _MentionMd(mentionNames: mentionNames, onMentionTap: onMentionTap),
         CustomEmojiMd(customEmoji),
         _ChannelLinkMd(channelNames: channelNames, onChannelTap: onChannelTap),
         ...MarkdownComponent.inlineComponents,
@@ -572,13 +577,14 @@ class _MessageCodeBlock extends HookWidget {
 
 class _MentionMd extends InlineMd {
   final Map<String, String> mentionNames;
+  final void Function(String pubkey)? onMentionTap;
   late final RegExp _exp = _buildPrefixPattern(
     prefix: '@',
     knownNames: _mentionAliases(mentionNames.values),
     genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_\u00A0-]*',
   );
 
-  _MentionMd({required this.mentionNames});
+  _MentionMd({required this.mentionNames, this.onMentionTap});
 
   @override
   RegExp get exp => _exp;
@@ -596,22 +602,28 @@ class _MentionMd extends InlineMd {
 
     final name = raw.substring(1).replaceAll('\u00A0', ' ').toLowerCase();
     String? displayName;
+    String? pubkey;
     for (final entry in mentionNames.entries) {
       final entryName = entry.value.toLowerCase();
       final firstName = entryName.split(RegExp(r'\s+')).first;
       if (entryName == name || firstName == name) {
         displayName = entry.value;
+        pubkey = entry.key;
         break;
       }
     }
 
+    final pill = _TokenPill(
+      text: '@${displayName ?? raw.substring(1)}',
+      textStyle: config.style,
+    );
+
     return WidgetSpan(
       alignment: PlaceholderAlignment.baseline,
       baseline: TextBaseline.alphabetic,
-      child: _TokenPill(
-        text: '@${displayName ?? raw.substring(1)}',
-        textStyle: config.style,
-      ),
+      child: pubkey != null && onMentionTap != null
+          ? GestureDetector(onTap: () => onMentionTap!(pubkey!), child: pill)
+          : pill,
     );
   }
 }

@@ -76,6 +76,7 @@ url             = { workspace = true }
 moka            = { workspace = true }
 metrics         = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+metrics-util    = { workspace = true }
 
 [features]
 dev = ["buzz-auth/dev"]

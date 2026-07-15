@@ -95,6 +95,41 @@ void main() {
     },
   );
 
+  test(
+    'waits for initial history before publishing and preserves deep-link target',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+
+      final targetLoad = notifier.loadEventsById(const ['target']);
+      relaySession.completeTargetHistory([_event(id: 'target', createdAt: 5)]);
+      await targetLoad;
+
+      expect(
+        container.read(channelMessagesProvider(_channelId)).isLoading,
+        isTrue,
+      );
+
+      relaySession.completeHistory([_event(id: 'history', createdAt: 10)]);
+      await _pumpEventQueue();
+
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['target', 'history'],
+      );
+    },
+  );
+
   test('window pagination failures return false without exhausting', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
@@ -196,6 +231,7 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final List<void Function(NostrEvent)> _listeners = [];
   final Completer<void> _subscribed = Completer<void>();
   final Completer<List<NostrEvent>> _history = Completer<List<NostrEvent>>();
+  final Queue<Completer<List<NostrEvent>>> _targetHistories = Queue();
 
   _RecordingRelaySessionNotifier({
     this.failSubscribe = false,
@@ -227,6 +263,11 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   }) {
     operations.add('fetch');
     historyFilters.add(filter);
+    if (filter.ids != null) {
+      final completer = Completer<List<NostrEvent>>();
+      _targetHistories.add(completer);
+      return completer.future;
+    }
     return _history.future;
   }
 
@@ -254,6 +295,10 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     for (final listener in List.of(_listeners)) {
       listener(event);
     }
+  }
+
+  void completeTargetHistory(List<NostrEvent> events) {
+    _targetHistories.removeFirst().complete(events);
   }
 
   void completeHistory(List<NostrEvent> events) {

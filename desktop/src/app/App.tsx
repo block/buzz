@@ -27,6 +27,8 @@ import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
+import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
+import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { listenForDeepLinks } from "@/shared/deep-link";
@@ -274,19 +276,15 @@ function CommunityQueryProvider({ children }: { children: ReactNode }) {
 }
 
 function AppReady({
-  canBackToCommunitySetup,
   isCompletingFirstRunCommunity,
   isSharedIdentity,
   isCommunitySwitch,
   onFirstRunCommunitySettled,
-  onBackToCommunitySetup,
 }: {
-  canBackToCommunitySetup: boolean;
   isCompletingFirstRunCommunity: boolean;
   isSharedIdentity: boolean;
   isCommunitySwitch: boolean;
   onFirstRunCommunitySettled: () => void;
-  onBackToCommunitySetup: () => void;
 }) {
   const onboarding = useAppOnboardingState(isSharedIdentity);
 
@@ -316,11 +314,9 @@ function AppReady({
     return (
       <OnboardingFlow
         actions={onboarding.flow.actions}
-        canBackToCommunitySetup={canBackToCommunitySetup}
         identityLost={onboarding.identityLost}
         initialProfile={onboarding.flow.initialProfile}
         key={onboarding.currentPubkey ?? "anonymous"}
-        onBackToCommunitySetup={onBackToCommunitySetup}
       />
     );
   }
@@ -360,16 +356,12 @@ export function App() {
     activeCommunity,
     reinitKey,
     addCommunity,
-    clearCommunities,
     switchCommunity,
     reconnectCommunity,
   } = useCommunities();
   const [isCompletingFirstRunCommunity, setIsCompletingFirstRunCommunity] =
     useState(false);
-  const [canBackToCommunitySetup, setCanBackToCommunitySetup] = useState(false);
-  const [welcomeTransitionMode, setWelcomeTransitionMode] = useState<
-    "initial" | "backward"
-  >("initial");
+  const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
 
   useEffect(() => {
     const unlisten = listenForDeepLinks({
@@ -408,21 +400,12 @@ export function App() {
 
   const handleSetupComplete = useCallback(
     (community: Community) => {
-      setWelcomeTransitionMode("initial");
       setIsCompletingFirstRunCommunity(true);
-      setCanBackToCommunitySetup(true);
       const communityId = addCommunity(community);
       switchCommunity(communityId);
     },
     [addCommunity, switchCommunity],
   );
-
-  const handleBackToCommunitySetup = useCallback(() => {
-    setWelcomeTransitionMode("backward");
-    setIsCompletingFirstRunCommunity(false);
-    setCanBackToCommunitySetup(false);
-    clearCommunities();
-  }, [clearCommunities]);
 
   const handleFirstRunCommunitySettled = useCallback(() => {
     setIsCompletingFirstRunCommunity(false);
@@ -442,9 +425,26 @@ export function App() {
     return (
       <WelcomeSetup
         defaultRelayUrl={community.defaultRelayUrl}
-        initialTransitionMode={welcomeTransitionMode}
         onComplete={handleSetupComplete}
       />
+    );
+  }
+
+  // Surface apply failures so the user can retry or change community.
+  if ("error" in community && community.error) {
+    return (
+      <>
+        <CommunityApplyErrorScreen
+          error={community.error}
+          onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+          onRetry={reconnectCommunity}
+        />
+        {isCommunityChangeOpen ? (
+          <CommunityChangeOverlay
+            onClose={() => setIsCommunityChangeOpen(false)}
+          />
+        ) : null}
+      </>
     );
   }
 
@@ -471,13 +471,11 @@ export function App() {
   return (
     <CommunityQueryProvider key={communityKey}>
       <AppReady
-        canBackToCommunitySetup={canBackToCommunitySetup}
         isCompletingFirstRunCommunity={isCompletingFirstRunCommunity}
         isCommunitySwitch={isCommunitySwitch}
         key={communityKey}
         isSharedIdentity={sharedIdentity}
         onFirstRunCommunitySettled={handleFirstRunCommunitySettled}
-        onBackToCommunitySetup={handleBackToCommunitySetup}
       />
       {showBootSplashOverlay ? (
         <div

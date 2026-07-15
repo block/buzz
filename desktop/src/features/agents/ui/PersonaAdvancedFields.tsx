@@ -25,6 +25,7 @@ export function PersonaAdvancedFields({
   provider,
   requiredEnvKeys = [],
   fileSatisfiedEnvKeys = [],
+  hiddenEnvKeys = [],
 }: {
   behaviorDraft: PersonaBehaviorDraft;
   disabled: boolean;
@@ -44,6 +45,7 @@ export function PersonaAdvancedFields({
   provider?: string;
   requiredEnvKeys?: readonly string[];
   fileSatisfiedEnvKeys?: readonly string[];
+  hiddenEnvKeys?: readonly string[];
 }) {
   return (
     <div className="space-y-5 pt-2">
@@ -139,6 +141,7 @@ export function PersonaAdvancedFields({
       <EnvVarsEditor
         disabled={disabled}
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
+        hiddenKeys={hiddenEnvKeys}
         onChange={onEnvVarsChange}
         requiredKeys={requiredEnvKeys}
         value={envVars}
