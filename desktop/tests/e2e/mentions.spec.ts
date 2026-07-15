@@ -168,6 +168,21 @@ async function expectAgentProfileMessageOnly(
   ).toHaveCount(0);
 }
 
+async function expectAgentProfileActionsHidden(
+  profilePopover: import("@playwright/test").Locator,
+  pubkey: string,
+) {
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-message-${pubkey}`),
+  ).toHaveCount(0);
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-wave-${pubkey}`),
+  ).toHaveCount(0);
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-huddle-${pubkey}`),
+  ).toHaveCount(0);
+}
+
 test("@ trigger prioritizes channel members before runnable personas and other agents", async ({
   page,
 }) => {
@@ -1273,7 +1288,7 @@ test("system agent avatar only exposes message action", async ({ page }) => {
   );
 });
 
-test("profile-only agent author popover only exposes message action", async ({
+test("profile-only agent author hides actions without agent access", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -1305,7 +1320,7 @@ test("profile-only agent author popover only exposes message action", async ({
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await expectAgentProfileMessageOnly(
+  await expectAgentProfileActionsHidden(
     profilePopover,
     PROFILE_ONLY_AGENT_PUBKEY,
   );

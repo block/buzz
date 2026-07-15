@@ -234,7 +234,9 @@ test("inbox feed shows channel and agent activity sections", async ({
   );
 });
 
-test("inbox agent hover hides actions without agent access", async ({ page }) => {
+test("inbox agent hover hides actions without agent access", async ({
+  page,
+}) => {
   await page.goto("/");
 
   await selectHomeInboxFilter(page, "Agents");
