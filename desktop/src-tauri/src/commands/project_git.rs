@@ -497,8 +497,12 @@ fn compare_local_remote_status(
     let local_branch = run_git(&["branch", "--show-current"], Some(repo_dir), auth)
         .ok()
         .and_then(|output| first_output_line(&output));
+    // The local checkout's branch name is attacker-influencable (a hostile
+    // remote can point HEAD at a flag-shaped refname), so it must pass the
+    // same `clean_branch` validation as relay-supplied names before it is
+    // ever handed to git as an argument.
     let branch = normalize_branch_option(branch_name)
-        .or_else(|| local_branch.clone())
+        .or_else(|| normalize_branch_option(local_branch.as_deref()))
         .unwrap_or_else(|| "main".to_string());
 
     // Only rewrite the checkout's origin when it actually differs from the
@@ -515,7 +519,14 @@ fn compare_local_remote_status(
         );
     }
     let _ = run_git(
-        &["fetch", "--quiet", "origin", branch.as_str(), "--depth=100"],
+        &[
+            "fetch",
+            "--quiet",
+            "--depth=100",
+            "--end-of-options",
+            "origin",
+            branch.as_str(),
+        ],
         Some(repo_dir),
         auth,
     );
@@ -853,7 +864,12 @@ pub async fn push_project_local_repository(
             .as_deref()
             .ok_or_else(|| "No branch selected for push.".to_string())?;
         run_git(
-            &["push", "origin", format!("HEAD:{branch}").as_str()],
+            &[
+                "push",
+                "--end-of-options",
+                "origin",
+                format!("HEAD:{branch}").as_str(),
+            ],
             Some(&repo_dir),
             &auth,
         )?;
@@ -898,7 +914,7 @@ pub async fn pull_project_local_repository(
             .as_deref()
             .ok_or_else(|| "No branch selected for pull.".to_string())?;
         run_git(
-            &["pull", "--ff-only", "origin", branch],
+            &["pull", "--ff-only", "--end-of-options", "origin", branch],
             Some(&repo_dir),
             &auth,
         )?;
