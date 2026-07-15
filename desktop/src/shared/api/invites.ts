@@ -103,9 +103,10 @@ export async function mintInvite(ttlSecs?: number): Promise<MintedInvite> {
 export async function claimInvite(
   relayWsUrl: string,
   code: string,
+  termsReceipt?: string,
 ): Promise<ClaimResult> {
   const base = relayHttpFromWs(relayWsUrl);
-  const body = JSON.stringify({ code });
+  const body = JSON.stringify({ code, terms_receipt: termsReceipt });
   const raw = await invitePost<{
     status: "joined" | "already_member";
     community_id: string;

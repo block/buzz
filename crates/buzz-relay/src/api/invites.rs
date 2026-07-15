@@ -54,6 +54,58 @@ pub struct MintInviteRequest {
 pub struct ClaimInviteRequest {
     /// The invite code to redeem.
     pub code: String,
+    /// Relay-issued proof of accepting the configured terms, when required.
+    #[serde(default)]
+    pub terms_receipt: Option<String>,
+}
+
+/// Body for `POST /api/invites/accept-terms`.
+#[derive(Debug, Deserialize)]
+pub struct AcceptTermsRequest {
+    /// Invite code the acceptance receipt will be bound to.
+    pub code: String,
+    /// Policy revision displayed by the browser.
+    pub policy_version: String,
+    /// Explicit checkbox acceptance; false is always rejected.
+    pub accepted: bool,
+}
+
+/// Public invite-page configuration. Empty when the operator has no policy.
+pub async fn invite_config(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match &state.config.invite_terms {
+        Some(policy) => Json(serde_json::json!({
+            "terms": { "url": policy.url, "version": policy.version }
+        })),
+        None => Json(serde_json::json!({})),
+    }
+}
+
+/// Exchange an explicit browser acceptance for a short-lived, invite-bound receipt.
+pub async fn accept_terms(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(policy) = &state.config.invite_terms else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "invite_terms_not_configured",
+        ));
+    };
+    let request: AcceptTermsRequest = serde_json::from_slice(&body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid acceptance JSON: {e}"),
+        )
+    })?;
+    if !request.accepted || request.policy_version != policy.version {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "invite_terms_not_accepted",
+        ));
+    }
+    let key = invite_token::derive_invite_key(&state.relay_keypair);
+    let receipt = invite_token::mint_terms_acceptance(&key, &request.code, &policy.version);
+    Ok(Json(serde_json::json!({ "receipt": receipt })))
 }
 
 /// Shared prelude: bind the tenant from the Host header and verify the NIP-98
@@ -186,6 +238,37 @@ pub async fn claim_invite(
     )?;
 
     let claimer_hex = pubkey.to_hex();
+    let terms_acceptance = if let Some(policy) = &state.config.invite_terms {
+        let receipt = request
+            .terms_receipt
+            .as_deref()
+            .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "invite_terms_required"))?;
+        Some(
+            invite_token::verify_terms_acceptance(&key, receipt, &request.code, &policy.version)
+                .map_err(|_| api_error(StatusCode::FORBIDDEN, "invite_terms_required"))?,
+        )
+    } else {
+        None
+    };
+
+    if let Some(acceptance) = &terms_acceptance {
+        let receipt_id = uuid::Uuid::parse_str(&acceptance.j)
+            .map_err(|_| api_error(StatusCode::FORBIDDEN, "invite_terms_required"))?;
+        let accepted_at = chrono::DateTime::from_timestamp(acceptance.a as i64, 0)
+            .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "invite_terms_required"))?;
+        state
+            .db
+            .record_invite_terms_acceptance(
+                receipt_id,
+                tenant.community(),
+                &claimer_hex,
+                &acceptance.v,
+                accepted_at,
+            )
+            .await
+            .map_err(|e| internal_error(&format!("invite terms acceptance insert: {e}")))?;
+    }
+
     let was_inserted = state
         .db
         .add_relay_member(tenant.community(), &claimer_hex, &payload.r, Some("invite"))

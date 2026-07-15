@@ -492,6 +492,44 @@ pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> R
     Ok(result.rows_affected())
 }
 
+/// Durably records which invite policy revision a joining pubkey accepted.
+pub async fn record_invite_terms_acceptance(
+    pool: &PgPool,
+    receipt_id: uuid::Uuid,
+    community: CommunityId,
+    pubkey: &str,
+    policy_version: &str,
+    accepted_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let recorded_for_pubkey: Option<bool> = sqlx::query_scalar(
+        "WITH inserted AS (
+             INSERT INTO invite_terms_acceptances
+                 (receipt_id, community_id, pubkey, policy_version, accepted_at)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (community_id, receipt_id) DO NOTHING
+             RETURNING true AS matches
+         )
+         SELECT matches FROM inserted
+         UNION ALL
+         SELECT community_id = $2 AND pubkey = $3 AND policy_version = $4
+         FROM invite_terms_acceptances WHERE community_id = $2 AND receipt_id = $1
+         LIMIT 1",
+    )
+    .bind(receipt_id)
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(policy_version)
+    .bind(accepted_at)
+    .fetch_optional(pool)
+    .await?;
+    if recorded_for_pubkey != Some(true) {
+        return Err(crate::error::DbError::AccessDenied(
+            "invite terms receipt was already claimed by another member".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
