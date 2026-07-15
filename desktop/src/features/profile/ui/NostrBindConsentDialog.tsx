@@ -512,14 +512,14 @@ export function NostrBindConsentDialog() {
                   transitionKey="nostr-bind-finish"
                 >
                   <DialogPrimitive.Title className="mt-6 text-3xl font-semibold tracking-tight">
-                    Finish verification
+                    Finish on the Buzz website
                   </DialogPrimitive.Title>
                   <DialogPrimitive.Description
                     className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground"
                     id="nostr-bind-description"
                   >
-                    Copy and paste the response below into the Buzz admin
-                    console to finish.
+                    Copy the response below, then paste it into the Buzz website
+                    to finish verification.
                   </DialogPrimitive.Description>
 
                   <pre
