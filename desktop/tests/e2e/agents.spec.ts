@@ -247,7 +247,9 @@ test("built-in persona edits persist", async ({ page }) => {
   await dialog.getByLabel("Agent name").fill("My Fizz");
   await dialog.getByLabel("Agent instruction").fill("User-edited instructions");
   await dialog.getByRole("button", { name: "LLM provider" }).click();
-  await page.getByRole("menuitemradio", { name: "Anthropic", exact: true }).click();
+  await page
+    .getByRole("menuitemradio", { name: "Anthropic", exact: true })
+    .click();
   await dialog.getByRole("button", { name: "Save changes" }).click();
 
   await expect(dialog).toHaveCount(0);
@@ -257,7 +259,9 @@ test("built-in persona edits persist", async ({ page }) => {
   const personas = await invokeTauri<
     Array<{ id: string; display_name: string; system_prompt: string }>
   >(page, "list_personas");
-  expect(personas.find((persona) => persona.id === "builtin:fizz")).toMatchObject({
+  expect(
+    personas.find((persona) => persona.id === "builtin:fizz"),
+  ).toMatchObject({
     display_name: "My Fizz",
     system_prompt: "User-edited instructions",
   });

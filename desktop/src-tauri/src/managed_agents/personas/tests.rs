@@ -74,8 +74,7 @@ fn merge_personas_preserves_builtin_edits() {
     edited_builtin.env_vars =
         std::collections::BTreeMap::from([("USER_SETTING".to_string(), "value".to_string())]);
 
-    let (records, changed) =
-        merge_personas(vec![edited_builtin.clone()], "2026-03-19T00:00:00Z");
+    let (records, changed) = merge_personas(vec![edited_builtin.clone()], "2026-03-19T00:00:00Z");
 
     assert!(changed); // The remaining seeded built-ins are added.
     let fizz = records
