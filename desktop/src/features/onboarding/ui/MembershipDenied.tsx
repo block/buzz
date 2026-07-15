@@ -89,11 +89,11 @@ export function MembershipDenied({
   }, [onImportKey, previewNpub, trimmedNsec]);
 
   const handleInviteRedeem = React.useCallback(
-    async (relayWsUrl: string, code: string) => {
+    async (relayWsUrl: string, code: string, policyReceipt?: string) => {
       setIsRedeeming(true);
       setInviteError(null);
       try {
-        await claimInvite(relayWsUrl, code);
+        await claimInvite(relayWsUrl, code, policyReceipt);
         onInviteRedeemed(relayWsUrl);
       } catch (error) {
         setInviteError(inviteErrorMessage(error));
@@ -170,8 +170,8 @@ export function MembershipDenied({
                 setInviteError(null);
                 setIsInviteFormOpen(false);
               }}
-              onRedeem={(relayWsUrl, code) => {
-                void handleInviteRedeem(relayWsUrl, code);
+              onRedeem={(relayWsUrl, code, policyReceipt) => {
+                void handleInviteRedeem(relayWsUrl, code, policyReceipt);
               }}
             />
           ) : isImportFormOpen ? (

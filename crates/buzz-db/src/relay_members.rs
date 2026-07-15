@@ -114,6 +114,67 @@ pub async fn add_relay_member(
     Ok(result.rows_affected() > 0)
 }
 
+/// Claims relay membership via an invite and atomically persists policy evidence.
+///
+/// Returns `true` when membership was inserted, or `false` when the pubkey was
+/// already a member. A configured `policy_version` is recorded in the same
+/// transaction, so membership cannot be granted without its acceptance record.
+pub async fn claim_relay_membership(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+    role: &str,
+    policy_version: Option<&str>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let inserted = sqlx::query(
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+         VALUES ($1, $2, $3, 'invite') \
+         ON CONFLICT (community_id, pubkey) DO NOTHING",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(role)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+
+    if let Some(version) = policy_version {
+        sqlx::query(
+            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .bind(version)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(inserted)
+}
+
+/// Returns whether a member has persisted acceptance evidence for a policy version.
+pub async fn has_join_policy_acceptance(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+    policy_version: &str,
+) -> Result<bool> {
+    let row = sqlx::query(
+        "SELECT 1 FROM join_policy_acceptances \
+         WHERE community_id = $1 AND pubkey = $2 AND policy_version = $3",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(policy_version)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
 /// The result of a relay member removal attempt.
 #[derive(Debug, PartialEq)]
 pub enum RemoveResult {
@@ -542,6 +603,38 @@ mod tests {
             .await
             .expect("bootstrap owner");
         (community, owner)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn invite_claim_persists_policy_version_and_legacy_claim_does_not() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let policy_member = test_pubkey();
+        let legacy_member = test_pubkey();
+        let version = "a".repeat(64);
+
+        assert!(
+            claim_relay_membership(&pool, community, &policy_member, "member", Some(&version),)
+                .await
+                .expect("claim membership with policy")
+        );
+        assert!(
+            has_join_policy_acceptance(&pool, community, &policy_member, &version)
+                .await
+                .expect("policy acceptance lookup")
+        );
+
+        assert!(
+            claim_relay_membership(&pool, community, &legacy_member, "member", None)
+                .await
+                .expect("legacy claim membership")
+        );
+        assert!(
+            !has_join_policy_acceptance(&pool, community, &legacy_member, &version)
+                .await
+                .expect("legacy acceptance lookup")
+        );
     }
 
     /// NIP-43 admission confinement: a pubkey admitted to community A is *not*

@@ -568,6 +568,16 @@ test("first-run default community handoff gives immediate stepper feedback", asy
       skipCommunitySeed: true,
     },
   );
+  await page.route(
+    "https://default.example.com/api/join-policy",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "{}",
+      });
+    },
+  );
   await page.goto("/");
 
   await expect(page.getByText("Welcome to Buzz")).toBeVisible();
@@ -609,6 +619,16 @@ test("welcome can continue using an existing Nostr key", async ({ page }) => {
     skipOnboardingSeed: true,
     skipCommunitySeed: true,
   });
+  await page.route(
+    "https://default.example.com/api/join-policy",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "{}",
+      });
+    },
+  );
   await page.goto("/");
 
   await page.getByTestId("welcome-continue-nostr").click();
@@ -1824,7 +1844,41 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
   // Intercept the claimInvite POST to relay B so it succeeds.
   const relayBUrl = "wss://relay-b.example.com";
   const relayBHttpUrl = "https://relay-b.example.com";
+  const policyReceipt = "relay-signed-policy-receipt";
+  await page.route(`${relayBHttpUrl}/api/join-policy`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        policy: {
+          terms_markdown: "# Terms",
+          privacy_markdown: "# Privacy",
+          age_attestation_required: true,
+          version: "policy-v1",
+        },
+      }),
+    });
+  });
+  await page.route(
+    `${relayBHttpUrl}/api/invites/accept-policy`,
+    async (route) => {
+      expect(route.request().postDataJSON()).toEqual({
+        code: "test-invite-code",
+        policy_version: "policy-v1",
+        age_confirmed: true,
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ receipt: policyReceipt }),
+      });
+    },
+  );
   await page.route(`${relayBHttpUrl}/api/invites/claim`, async (route) => {
+    expect(route.request().postDataJSON()).toMatchObject({
+      code: "test-invite-code",
+      policy_receipt: policyReceipt,
+    });
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1842,6 +1896,9 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
   await page
     .getByTestId("invite-redeem-input")
     .fill(`${relayBHttpUrl}/invite/test-invite-code`);
+  await page.getByTestId("invite-redeem-submit").click();
+  await expect(page.getByText("I am 18 years of age or older.")).toBeVisible();
+  await page.getByLabel("I am 18 years of age or older.").check();
   await page.getByTestId("invite-redeem-submit").click();
 
   // After successful claim, the community should switch to relay B's URL.

@@ -54,6 +54,66 @@ pub struct MintInviteRequest {
 pub struct ClaimInviteRequest {
     /// The invite code to redeem.
     pub code: String,
+    /// Relay-issued proof of accepting the configured terms, when required.
+    #[serde(default)]
+    pub policy_receipt: Option<String>,
+}
+
+/// Body for `POST /api/invites/accept-policy`.
+#[derive(Debug, Deserialize)]
+pub struct AcceptPolicyRequest {
+    /// Invite code the acceptance receipt will be bound to.
+    pub code: String,
+    /// Policy revision displayed by the client.
+    pub policy_version: String,
+    /// Minimum-age assertion, required only when configured by the operator.
+    #[serde(default)]
+    pub age_confirmed: bool,
+}
+
+/// Public join policy shared by every client-side join surface.
+pub async fn join_policy(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match &state.config.join_policy {
+        Some(policy) => Json(serde_json::json!({
+            "policy": {
+                "terms_markdown": policy.terms_markdown,
+                "privacy_markdown": policy.privacy_markdown,
+                "age_attestation_required": policy.age_attestation_required,
+                "version": policy.version
+            }
+        })),
+        None => Json(serde_json::json!({})),
+    }
+}
+
+/// Exchange explicit policy acceptance for a short-lived, invite-bound receipt.
+pub async fn accept_policy(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(policy) = &state.config.join_policy else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "join_policy_not_configured",
+        ));
+    };
+    let request: AcceptPolicyRequest = serde_json::from_slice(&body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid policy acceptance JSON: {e}"),
+        )
+    })?;
+    if request.policy_version != policy.version
+        || (policy.age_attestation_required && !request.age_confirmed)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "join_policy_not_accepted",
+        ));
+    }
+    let key = invite_token::derive_invite_key(&state.relay_keypair);
+    let receipt = invite_token::mint_policy_acceptance(&key, &request.code, &policy.version);
+    Ok(Json(serde_json::json!({ "receipt": receipt })))
 }
 
 /// Shared prelude: bind the tenant from the Host header and verify the NIP-98
@@ -186,9 +246,27 @@ pub async fn claim_invite(
     )?;
 
     let claimer_hex = pubkey.to_hex();
+    if let Some(policy) = &state.config.join_policy {
+        let receipt = request
+            .policy_receipt
+            .as_deref()
+            .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+        invite_token::verify_policy_acceptance(&key, receipt, &request.code, &policy.version)
+            .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+    }
+
     let was_inserted = state
         .db
-        .add_relay_member(tenant.community(), &claimer_hex, &payload.r, Some("invite"))
+        .claim_relay_membership(
+            tenant.community(),
+            &claimer_hex,
+            &payload.r,
+            state
+                .config
+                .join_policy
+                .as_ref()
+                .map(|policy| policy.version.as_str()),
+        )
         .await
         .map_err(|e| internal_error(&format!("invite claim insert: {e}")))?;
 
@@ -361,14 +439,17 @@ mod tests {
     /// a fresh community on `host`; returns `None` when Postgres is unavailable.
     async fn invite_test_state(host: &str) -> Option<Arc<AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
-        config.database_url = TEST_DB_URL.to_string();
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        config.database_url = database_url.clone();
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.relay_url = format!("wss://{host}");
         // The claim route must work on relays where membership is enforced —
         // that is the entire point of an invite.
         config.require_relay_membership = true;
 
-        let pool = sqlx::PgPool::connect(TEST_DB_URL).await.ok()?;
+        let pool = sqlx::PgPool::connect(&database_url).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
         db.ensure_configured_community(host).await.ok()?;
 
@@ -502,6 +583,215 @@ mod tests {
         assert_eq!(
             json.get("status").and_then(Value::as_str),
             Some("already_member")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn join_policy_gate_end_to_end() {
+        let host = format!("invites-policy-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let Some(state) = invite_test_state(&host).await else {
+            return;
+        };
+        // Force the join policy on regardless of env.
+        let mut state_inner = (*state).clone();
+        let mut config = state_inner.config.as_ref().clone();
+        config.join_policy = Some(crate::config::JoinPolicyConfig {
+            terms_markdown: Some("# Terms".to_string()),
+            privacy_markdown: Some("# Privacy".to_string()),
+            age_attestation_required: true,
+            version: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        });
+        state_inner.config = Arc::new(config);
+        let state = Arc::new(state_inner);
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        // Mint an invite.
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites",
+            &owner,
+            "{}".to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = read_json(response).await;
+        let code = json
+            .get("code")
+            .and_then(Value::as_str)
+            .expect("code")
+            .to_string();
+
+        // 1. Claim WITHOUT receipt -> 403 (checkbox bypass).
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "no-receipt claim must fail"
+        );
+
+        // 2. Forged receipt (wrong key) -> 403.
+        let forged = crate::invite_token::mint_policy_acceptance(
+            &[9u8; 32],
+            &code,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_receipt": forged }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "forged receipt must fail"
+        );
+
+        // 3. Receipt bound to a DIFFERENT invite code -> 403.
+        let key = crate::invite_token::derive_invite_key(&state.relay_keypair);
+        let other = crate::invite_token::mint_policy_acceptance(
+            &key,
+            "some-other-code",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_receipt": other }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "cross-invite receipt must fail"
+        );
+
+        // 4. Receipt for a STALE policy version -> 403.
+        let stale = crate::invite_token::mint_policy_acceptance(
+            &key,
+            &code,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_receipt": stale }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "stale-version receipt must fail"
+        );
+
+        // 5. accept-policy without age confirmation -> 400.
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/accept-policy",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "age_confirmed": false })
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "age not confirmed must be rejected when required"
+        );
+
+        // 5b. accept-policy with stale version -> 400.
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/accept-policy",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_version": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "age_confirmed": true })
+                .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // 6. Legit flow: accept-policy -> receipt -> claim OK.
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/accept-policy",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "age_confirmed": true })
+                .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let receipt = read_json(response)
+            .await
+            .get("receipt")
+            .and_then(Value::as_str)
+            .expect("receipt")
+            .to_string();
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_receipt": receipt }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "legit receipt claim must succeed"
+        );
+        let json = read_json(response).await;
+        assert_eq!(json.get("status").and_then(Value::as_str), Some("joined"));
+
+        let member = state
+            .db
+            .get_relay_member(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("member lookup")
+            .expect("joiner is now a member");
+        assert_eq!(member.role, "member");
+        assert!(
+            state
+                .db
+                .has_join_policy_acceptance(
+                    community.id,
+                    &joiner.public_key().to_hex(),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .await
+                .expect("policy acceptance lookup"),
+            "accepted policy version must be persisted",
         );
     }
 
