@@ -2,6 +2,14 @@ export const KIND_DELETION = 5;
 export const KIND_REACTION = 7;
 export const KIND_TEXT_NOTE = 1;
 export const KIND_STREAM_MESSAGE = 9;
+/** Sonar per-user installed sticker-pack list (replaceable). */
+export const KIND_USER_STICKER_PACKS = 10031;
+/** Sonar sticker pack (parameterized replaceable). */
+export const KIND_STICKER_PACK = 30031;
+/** Buzz relay-signed curated sticker catalog. */
+export const KIND_STICKER_CATALOG = 13536;
+/** Buzz relay-admin catalog mutation command. */
+export const KIND_STICKER_CATALOG_COMMAND = 9034;
 // Buzz-native deletion. The relay soft-deletes the target and emits a
 // kind:40099 system message. Treated as a deletion marker alongside kind:5.
 export const KIND_NIP29_DELETE_EVENT = 9005;

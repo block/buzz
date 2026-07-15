@@ -30,6 +30,7 @@ import { Skeleton } from "@/shared/ui/skeleton";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageComposer } from "./MessageComposer";
 import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
+import { parseStickerReference } from "@/shared/api/stickers";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { UnreadDivider } from "./UnreadDivider";
@@ -635,6 +636,7 @@ export function MessageThreadPanel({
               }
               onEdit={
                 onEdit &&
+                !parseStickerReference(threadHead.tags) &&
                 canManageMessageForCurrentUser(
                   threadHead,
                   currentPubkey,
@@ -787,6 +789,7 @@ export function MessageThreadPanel({
                         }
                         onEdit={
                           onEdit &&
+                          !parseStickerReference(entry.message.tags) &&
                           canManageMessageForCurrentUser(
                             entry.message,
                             currentPubkey,

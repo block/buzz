@@ -15,6 +15,7 @@ import {
   Moon,
   ShieldAlert,
   Smartphone,
+  Sticker,
   Smile,
   Stethoscope,
   Sun,
@@ -30,6 +31,7 @@ import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
 import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
+import { StickerSettingsCard } from "@/features/stickers/ui/StickerSettingsCard";
 import { cn } from "@/shared/lib/cn";
 import {
   ACCENT_COLORS,
@@ -79,6 +81,7 @@ export type SettingsSection =
   | "community-members"
   | "moderation"
   | "custom-emoji"
+  | "stickers"
   | "local-archive"
   | "mobile"
   | "updates"
@@ -98,6 +101,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "community-members",
   "moderation",
   "custom-emoji",
+  "stickers",
   "local-archive",
   "mobile",
   "updates",
@@ -192,6 +196,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     label: "Custom emoji",
     icon: Smile,
     featureGate: "custom-emoji",
+  },
+  {
+    value: "stickers",
+    label: "Stickers",
+    icon: Sticker,
   },
   {
     value: "local-archive",
@@ -729,6 +738,8 @@ export function renderSettingsSection(
       return <ModerationQueueCard />;
     case "custom-emoji":
       return <CustomEmojiSettingsCard />;
+    case "stickers":
+      return <StickerSettingsCard />;
     case "local-archive":
       return <LocalArchiveSettingsCard />;
     case "mobile":

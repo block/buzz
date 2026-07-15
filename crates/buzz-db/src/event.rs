@@ -733,6 +733,17 @@ pub async fn soft_delete_by_coordinate(
     pubkey: &[u8],
     d_tag: &str,
 ) -> Result<bool> {
+    // Serialize with `replace_parameterized_event`. Without this lock, a
+    // deletion can race a replacement after either operation has selected the
+    // live head, leaving the wrong revision live or deleting the new one.
+    let lock_key =
+        super::event_replacement_lock_key(community_id, kind, pubkey, Some(d_tag.as_bytes()));
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await?;
+
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() \
          WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
@@ -741,8 +752,10 @@ pub async fn soft_delete_by_coordinate(
     .bind(kind)
     .bind(pubkey)
     .bind(d_tag)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }

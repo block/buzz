@@ -11,14 +11,19 @@ use buzz_core::{
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
         KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
-        KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_PRESENCE_UPDATE, KIND_STICKER_PACK, KIND_USER_STICKER_PACKS, KIND_WORKFLOW_DEF,
+        KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
         OBSERVER_FRAME_TELEMETRY,
     },
 };
-use nostr::{EventBuilder, Kind, Tag};
+use nostr::{EventBuilder, Kind, PublicKey, Tag};
+use sonar_stickers::{
+    build_installed_packs_tags, build_pack_tags, build_sticker_ref_tag, InstalledPackList,
+    PackAddress, StickerPack, StickerRef,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -234,6 +239,162 @@ pub fn build_message(
     }
     imeta_tags(media_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
+}
+
+/// Build a Sonar sticker message as an ordinary Buzz stream message (kind 9).
+///
+/// The sticker reference is carried in the exact interoperable
+/// `["sticker", coordinate, shortcode, plaintext_sha256]` tag. `content`
+/// must remain non-empty so clients without sticker support have a textual
+/// fallback, normally `:shortcode:` or the sticker alt text.
+#[allow(clippy::too_many_arguments)]
+pub fn build_sticker_message(
+    channel_id: Uuid,
+    content: &str,
+    thread_ref: Option<&ThreadRef>,
+    mentions: &[&str],
+    broadcast: bool,
+    media_tags: &[Vec<String>],
+    sticker_ref: &StickerRef,
+) -> Result<EventBuilder, SdkError> {
+    if content.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "sticker message content must contain a textual fallback".into(),
+        ));
+    }
+    check_content(content, 64 * 1024)?;
+    let sticker_ref = canonical_sticker_ref(sticker_ref)?;
+
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    if let Some(thread_ref) = thread_ref {
+        thread_tags(thread_ref, &mut tags)?;
+    }
+    mention_tags(mentions, &mut tags)?;
+    if broadcast {
+        tags.push(tag(&["broadcast", "1"])?);
+    }
+    imeta_tags(media_tags, &mut tags)?;
+    tags.push(build_sticker_ref_tag(&sticker_ref));
+    Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
+}
+
+/// Build a Sonar sticker-pack event (kind 30031).
+///
+/// `signer` must be the public key that will sign the returned builder. Passing
+/// it explicitly prevents callers from accidentally publishing a pack whose
+/// coordinate names a different author.
+pub fn build_sticker_pack(
+    pack: &StickerPack,
+    signer: &PublicKey,
+) -> Result<EventBuilder, SdkError> {
+    canonical_pack_address(&pack.address)?;
+    if pack.address.author_pubkey_hex != signer.to_hex() {
+        return Err(SdkError::InvalidInput(
+            "sticker pack address author must match the signing public key".into(),
+        ));
+    }
+    pack.validate()
+        .map_err(|error| SdkError::InvalidInput(format!("invalid sticker pack: {error}")))?;
+    if pack
+        .license
+        .as_ref()
+        .is_some_and(|license| license.chars().count() > 160)
+    {
+        return Err(SdkError::InvalidInput(
+            "sticker pack license must be at most 160 characters".into(),
+        ));
+    }
+    if pack
+        .cover
+        .as_ref()
+        .is_some_and(|cover| cover.mime != "image/webp")
+    {
+        return Err(SdkError::InvalidInput(
+            "sticker pack cover must be WebP because the Sonar image tag has no MIME field".into(),
+        ));
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_STICKER_PACK as u16), "").tags(build_pack_tags(pack)))
+}
+
+/// Build a user's ordered installed-sticker-pack list (kind 10031).
+pub fn build_installed_sticker_packs(
+    installed: &InstalledPackList,
+) -> Result<EventBuilder, SdkError> {
+    let mut seen = std::collections::HashSet::with_capacity(installed.packs.len());
+    for address in &installed.packs {
+        canonical_pack_address(address)?;
+        if !seen.insert(address.coordinate()) {
+            return Err(SdkError::InvalidInput(
+                "installed sticker list contains a duplicate coordinate".into(),
+            ));
+        }
+    }
+    if installed.packs.len() > 200 {
+        return Err(SdkError::InvalidInput(
+            "installed sticker list exceeds 200 packs".into(),
+        ));
+    }
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_USER_STICKER_PACKS as u16), "")
+            .tags(build_installed_packs_tags(installed)),
+    )
+}
+
+/// Build an admin command approving an exact sticker-pack event revision.
+pub fn build_approve_sticker_pack(
+    address: &PackAddress,
+    approved_event_id: nostr::EventId,
+) -> Result<EventBuilder, SdkError> {
+    let coordinate = canonical_pack_address(address)?.coordinate();
+    let event_id = approved_event_id.to_hex();
+    Ok(EventBuilder::new(
+        Kind::Custom(buzz_core::kind::RELAY_ADMIN_CURATE_STICKER_PACK as u16),
+        "",
+    )
+    .tags([
+        tag(&["action", "approve"])?,
+        tag(&["a", &coordinate, &event_id])?,
+    ]))
+}
+
+/// Build an admin command removing a sticker pack from the workspace catalog.
+pub fn build_remove_sticker_pack(address: &PackAddress) -> Result<EventBuilder, SdkError> {
+    let coordinate = canonical_pack_address(address)?.coordinate();
+    Ok(EventBuilder::new(
+        Kind::Custom(buzz_core::kind::RELAY_ADMIN_CURATE_STICKER_PACK as u16),
+        "",
+    )
+    .tags([tag(&["action", "remove"])?, tag(&["a", &coordinate])?]))
+}
+
+fn canonical_pack_address(address: &PackAddress) -> Result<PackAddress, SdkError> {
+    let canonical = PackAddress::new(
+        address.author_pubkey_hex.clone(),
+        address.identifier.clone(),
+    )
+    .map_err(|error| SdkError::InvalidInput(format!("invalid sticker pack address: {error}")))?;
+    if canonical != *address {
+        return Err(SdkError::InvalidInput(
+            "sticker pack address must use canonical lowercase hex".into(),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn canonical_sticker_ref(sticker_ref: &StickerRef) -> Result<StickerRef, SdkError> {
+    let pack = canonical_pack_address(&sticker_ref.pack)?;
+    let canonical = StickerRef::new(
+        pack,
+        sticker_ref.shortcode.clone(),
+        sticker_ref.plaintext_sha256.clone(),
+    )
+    .map_err(|error| SdkError::InvalidInput(format!("invalid sticker reference: {error}")))?;
+    if canonical != *sticker_ref {
+        return Err(SdkError::InvalidInput(
+            "sticker reference must use canonical lowercase hex".into(),
+        ));
+    }
+    Ok(canonical)
 }
 
 /// Build an encrypted agent observer frame (kind 24200).
@@ -1702,6 +1863,80 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 9);
         assert_eq!(ev.content, "hello");
         assert!(has_tag(&ev, "h", &cid.to_string()));
+    }
+
+    #[test]
+    fn sticker_message_uses_exact_reference_tag_and_fallback() {
+        let author = keys();
+        let address = PackAddress::new(author.public_key().to_hex(), "waves").unwrap();
+        let sticker_ref = StickerRef::new(address.clone(), "wave", "b".repeat(64)).unwrap();
+        let ev = sign(
+            build_sticker_message(uuid(), ":wave:", None, &[], false, &[], &sticker_ref).unwrap(),
+        );
+        let tag = ev
+            .tags
+            .iter()
+            .find(|tag| tag.as_slice().first().map(String::as_str) == Some("sticker"))
+            .expect("sticker tag");
+        assert_eq!(
+            tag.as_slice(),
+            &[
+                "sticker".to_owned(),
+                address.coordinate(),
+                "wave".to_owned(),
+                "b".repeat(64),
+            ]
+        );
+        assert!(build_sticker_message(uuid(), " ", None, &[], false, &[], &sticker_ref).is_err());
+    }
+
+    #[test]
+    fn sticker_state_builders_emit_sonar_kinds() {
+        let author = keys();
+        let address = PackAddress::new(author.public_key().to_hex(), "waves").unwrap();
+        let sticker = sonar_stickers::Sticker::new(
+            "wave",
+            format!("https://cdn.example/{}.webp", "b".repeat(64)),
+            "b".repeat(64),
+            "image/webp",
+            Some(256),
+            Some(256),
+            Some("Wave".into()),
+            Some("👋".into()),
+        )
+        .unwrap();
+        let pack = StickerPack::new(
+            address.clone(),
+            "Waves",
+            None,
+            Some(sticker.clone()),
+            vec![sticker],
+            Some("CC0".into()),
+        )
+        .unwrap();
+        let pack_event = build_sticker_pack(&pack, &author.public_key())
+            .unwrap()
+            .sign_with_keys(&author)
+            .unwrap();
+        assert_eq!(pack_event.kind.as_u16(), KIND_STICKER_PACK as u16);
+        assert!(build_sticker_pack(&pack, &keys().public_key()).is_err());
+
+        let installed = InstalledPackList::new(vec![address.clone()]);
+        let installed_event = sign(build_installed_sticker_packs(&installed).unwrap());
+        assert_eq!(
+            installed_event.kind.as_u16(),
+            KIND_USER_STICKER_PACKS as u16
+        );
+        assert!(has_tag(&installed_event, "a", &address.coordinate()));
+
+        let approve = sign(build_approve_sticker_pack(&address, pack_event.id).unwrap());
+        assert_eq!(
+            approve.kind.as_u16(),
+            buzz_core::kind::RELAY_ADMIN_CURATE_STICKER_PACK as u16
+        );
+        assert!(has_tag(&approve, "action", "approve"));
+        let remove = sign(build_remove_sticker_pack(&address).unwrap());
+        assert!(has_tag(&remove, "action", "remove"));
     }
 
     #[test]

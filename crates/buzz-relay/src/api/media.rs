@@ -5,7 +5,7 @@
 //!   GET  /media/{sha256_ext}    — BUD-01 serve blob
 //!   HEAD /media/{sha256_ext}    — BUD-01 existence check
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use axum::http::header;
@@ -18,9 +18,50 @@ use axum::{
 use base64::Engine;
 use buzz_audit::{AuditAction, NewAuditEntry};
 use buzz_core::tenant::TenantContext;
+use buzz_db::EventQuery;
 use buzz_media::{BlobDescriptor, MediaError, UploadAttribution, UploadNetworkInfo};
+use dashmap::DashMap;
+use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
+
+const MAX_STICKER_BYTES: usize = 4 * 1024 * 1024;
+static STICKER_FETCH_LIMIT: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(8));
+static STICKER_FETCH_LOCKS: LazyLock<DashMap<String, Arc<tokio::sync::Mutex<()>>>> =
+    LazyLock::new(DashMap::new);
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StickerAssetError {
+    #[error("sticker not found")]
+    NotFound,
+    #[error("sticker origin unavailable")]
+    Upstream,
+    #[error("invalid sticker asset")]
+    InvalidAsset,
+    #[error("internal error")]
+    Internal,
+}
+
+impl IntoResponse for StickerAssetError {
+    fn into_response(self) -> Response {
+        let status = match self {
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Upstream => StatusCode::BAD_GATEWAY,
+            Self::InvalidAsset => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, Json(serde_json::json!({"error": self.to_string()}))).into_response()
+    }
+}
+
+struct ResolvedStickerAsset {
+    approved_event_id: String,
+    url: String,
+    mime: String,
+    width: Option<u32>,
+    height: Option<u32>,
+}
 
 /// Axum extractor that validates Blossom auth, the BUD-11 hash binding, and
 /// relay membership (NIP-43, when enabled) from headers BEFORE the request
@@ -353,7 +394,7 @@ pub async fn upload_blob(
 
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
-        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4" => {
+        "image/jpeg" | "image/png" | "image/apng" | "image/gif" | "image/webp" | "video/mp4" => {
             &descriptor.mime_type
         }
         _ => "other",
@@ -429,6 +470,283 @@ async fn bind_media_read_tenant(
     crate::tenant::bind_community(&state.db, raw_host)
         .await
         .map_err(|_| MediaError::NotFound)
+}
+
+/// GET `/media/sticker/{author}/{identifier}/{shortcode}/{sha256}`.
+///
+/// The route never accepts an origin URL. It resolves an exact admin-approved
+/// pack revision, checks the shortcode and plaintext hash against that stored
+/// event, then serves a content-addressed cached copy or securely materializes
+/// one from the pack's HTTPS URL.
+pub(crate) async fn get_verified_sticker(
+    State(state): State<Arc<AppState>>,
+    Path((author, identifier, shortcode, sha256)): Path<(String, String, String, String)>,
+    req_headers: HeaderMap,
+) -> Result<Response, StickerAssetError> {
+    let tenant = bind_media_read_tenant(&state, &req_headers)
+        .await
+        .map_err(|_| StickerAssetError::NotFound)?;
+    let pack = sonar_stickers::PackAddress::new(author, identifier)
+        .map_err(|_| StickerAssetError::NotFound)?;
+    let sticker_ref = sonar_stickers::StickerRef::new(pack, shortcode, sha256)
+        .map_err(|_| StickerAssetError::NotFound)?;
+
+    let resolved = resolve_approved_sticker(&state, &tenant, &sticker_ref).await?;
+    let extension = sticker_extension(&resolved.mime).ok_or(StickerAssetError::InvalidAsset)?;
+    let object_key = format!("{}.{}", sticker_ref.plaintext_sha256, extension);
+
+    let fetch_lock = STICKER_FETCH_LOCKS
+        .entry(object_key.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _fetch_guard = fetch_lock.lock().await;
+
+    let bytes = if state
+        .media_storage
+        .head(&object_key)
+        .await
+        .map_err(|_| StickerAssetError::Internal)?
+    {
+        state
+            .media_storage
+            .get(&object_key)
+            .await
+            .map_err(|_| StickerAssetError::Internal)?
+    } else {
+        let _network_permit = STICKER_FETCH_LIMIT
+            .acquire()
+            .await
+            .map_err(|_| StickerAssetError::Internal)?;
+        let bytes = fetch_sticker_bytes(&resolved.url).await?;
+        verify_sticker_bytes(&bytes, &sticker_ref.plaintext_sha256, &resolved)?;
+
+        // Approval or the current pack head may have changed while the network
+        // request was in flight. Re-resolve before publishing cache bytes.
+        let current = resolve_approved_sticker(&state, &tenant, &sticker_ref).await?;
+        if current.approved_event_id != resolved.approved_event_id || current.url != resolved.url {
+            return Err(StickerAssetError::NotFound);
+        }
+        state
+            .media_storage
+            .put(&object_key, &bytes, &resolved.mime)
+            .await
+            .map_err(|_| StickerAssetError::Internal)?;
+        bytes
+    };
+
+    // A CAS hit is still checked: object-store corruption or an incorrect key
+    // must not bypass the same hash/MIME/dimension guarantees as an origin miss.
+    verify_sticker_bytes(&bytes, &sticker_ref.plaintext_sha256, &resolved)?;
+
+    let content_length = bytes.len();
+    let mut response = Response::new(axum::body::Body::from(bytes));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_str(&resolved.mime).map_err(|_| StickerAssetError::Internal)?,
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("private, max-age=0, must-revalidate"),
+    );
+    headers.insert(
+        header::CONTENT_LENGTH,
+        header::HeaderValue::from_str(&content_length.to_string())
+            .map_err(|_| StickerAssetError::Internal)?,
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::from_static("inline"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static("default-src 'none'"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
+
+async fn resolve_approved_sticker(
+    state: &AppState,
+    tenant: &TenantContext,
+    sticker_ref: &sonar_stickers::StickerRef,
+) -> Result<ResolvedStickerAsset, StickerAssetError> {
+    let catalog = state
+        .db
+        .get_latest_global_replaceable(
+            tenant.community(),
+            buzz_core::kind::KIND_STICKER_CATALOG as i32,
+            &state.relay_keypair.public_key().to_bytes(),
+        )
+        .await
+        .map_err(|_| StickerAssetError::Internal)?
+        .ok_or(StickerAssetError::NotFound)?;
+    let coordinate = sticker_ref.pack.coordinate();
+    let approved_event_id = catalog
+        .event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let fields = tag.as_slice();
+            (fields.len() == 3
+                && fields.first().map(String::as_str) == Some("a")
+                && fields.get(1).map(String::as_str) == Some(coordinate.as_str()))
+            .then(|| fields.get(2).cloned())
+            .flatten()
+        })
+        .ok_or(StickerAssetError::NotFound)?;
+    let approved_id_bytes = decode_lower_hex_32(&approved_event_id)?;
+    let approved = state
+        .db
+        .get_event_by_id(tenant.community(), &approved_id_bytes)
+        .await
+        .map_err(|_| StickerAssetError::Internal)?
+        .ok_or(StickerAssetError::NotFound)?;
+    if approved.event.id.to_hex() != approved_event_id
+        || approved.event.pubkey.to_hex() != sticker_ref.pack.author_pubkey_hex
+        || u32::from(approved.event.kind.as_u16()) != buzz_core::kind::KIND_STICKER_PACK
+    {
+        return Err(StickerAssetError::NotFound);
+    }
+    let pack = buzz_core::stickers::validate_sticker_pack_event(&approved.event)
+        .map_err(|_| StickerAssetError::NotFound)?;
+    if pack.address != sticker_ref.pack {
+        return Err(StickerAssetError::NotFound);
+    }
+
+    // An edit immediately becomes pending review: the approved event must
+    // still be the canonical live head for its coordinate.
+    let mut query = EventQuery::for_community(tenant.community());
+    query.kinds = Some(vec![buzz_core::kind::KIND_STICKER_PACK as i32]);
+    query.pubkey = Some(approved.event.pubkey.to_bytes().to_vec());
+    query.d_tag = Some(sticker_ref.pack.identifier.clone());
+    query.global_only = true;
+    query.limit = Some(1);
+    let current_head = state
+        .db
+        .query_events(&query)
+        .await
+        .map_err(|_| StickerAssetError::Internal)?
+        .into_iter()
+        .next()
+        .ok_or(StickerAssetError::NotFound)?;
+    if current_head.event.id != approved.event.id {
+        return Err(StickerAssetError::NotFound);
+    }
+
+    let sticker = pack
+        .sticker(&sticker_ref.shortcode)
+        .filter(|sticker| sticker.sha256 == sticker_ref.plaintext_sha256)
+        .ok_or(StickerAssetError::NotFound)?;
+    Ok(ResolvedStickerAsset {
+        approved_event_id,
+        url: sticker.url.clone(),
+        mime: sticker.mime.clone(),
+        width: sticker.width,
+        height: sticker.height,
+    })
+}
+
+async fn fetch_sticker_bytes(url: &str) -> Result<Vec<u8>, StickerAssetError> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| StickerAssetError::InvalidAsset)?;
+    let host = parsed.host_str().ok_or(StickerAssetError::InvalidAsset)?;
+    if parsed.scheme() != "https"
+        || parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.port().is_some_and(|port| port != 443)
+    {
+        return Err(StickerAssetError::InvalidAsset);
+    }
+
+    let addresses: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, 443))
+        .await
+        .map_err(|_| StickerAssetError::Upstream)?
+        .collect();
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|address| buzz_core::network::is_private_ip(&address.ip()))
+    {
+        return Err(StickerAssetError::InvalidAsset);
+    }
+    let pinned = addresses[0];
+    let client = reqwest::Client::builder()
+        // Environment-configured HTTP(S) proxies would bypass the DNS pin and
+        // let the proxy resolve a different (possibly private) destination.
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve(host, pinned)
+        .build()
+        .map_err(|_| StickerAssetError::Internal)?;
+    let mut response = client
+        .get(parsed)
+        .send()
+        .await
+        .map_err(|_| StickerAssetError::Upstream)?;
+    if !response.status().is_success() {
+        return Err(StickerAssetError::Upstream);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_STICKER_BYTES as u64)
+    {
+        return Err(StickerAssetError::InvalidAsset);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| StickerAssetError::Upstream)?
+    {
+        if bytes.len() + chunk.len() > MAX_STICKER_BYTES {
+            return Err(StickerAssetError::InvalidAsset);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn verify_sticker_bytes(
+    bytes: &[u8],
+    expected_hash: &str,
+    resolved: &ResolvedStickerAsset,
+) -> Result<(), StickerAssetError> {
+    if hex::encode(Sha256::digest(bytes)) != expected_hash {
+        return Err(StickerAssetError::InvalidAsset);
+    }
+    let meta = buzz_media::validate_sticker_content(bytes, &resolved.mime)
+        .map_err(|_| StickerAssetError::InvalidAsset)?;
+    if resolved.width.is_some_and(|width| width != meta.width)
+        || resolved.height.is_some_and(|height| height != meta.height)
+    {
+        return Err(StickerAssetError::InvalidAsset);
+    }
+    Ok(())
+}
+
+fn sticker_extension(mime: &str) -> Option<&'static str> {
+    match mime {
+        "image/webp" => Some("webp"),
+        "image/png" | "image/apng" => Some("png"),
+        "image/gif" => Some("gif"),
+        _ => None,
+    }
+}
+
+fn decode_lower_hex_32(value: &str) -> Result<Vec<u8>, StickerAssetError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(StickerAssetError::NotFound);
+    }
+    hex::decode(value).map_err(|_| StickerAssetError::NotFound)
 }
 
 /// Whether a path-segment extension is a safe token.
@@ -890,6 +1208,19 @@ mod tests {
     #[test]
     fn test_validate_media_path_bare_hash() {
         assert!(validate_media_path(VALID_HASH).is_ok());
+    }
+
+    #[test]
+    fn sticker_asset_path_helpers_are_fail_closed() {
+        assert_eq!(sticker_extension("image/webp"), Some("webp"));
+        assert_eq!(sticker_extension("image/apng"), Some("png"));
+        assert_eq!(sticker_extension("image/jpeg"), None);
+        assert_eq!(
+            decode_lower_hex_32(VALID_HASH).expect("valid hash").len(),
+            32
+        );
+        assert!(decode_lower_hex_32(&VALID_HASH.to_ascii_uppercase()).is_err());
+        assert!(decode_lower_hex_32("abc").is_err());
     }
 
     #[test]

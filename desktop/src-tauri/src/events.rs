@@ -126,6 +126,34 @@ fn emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Str
     Ok(())
 }
 
+/// Validate and append exactly one Sonar message sticker reference. Keeping
+/// this as a dedicated lane prevents renderer-controlled arbitrary tag
+/// injection through the media/emoji inputs.
+fn sticker_tags(sticker_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
+    if sticker_tags.len() > 1 {
+        return Err("a message may reference at most one sticker".into());
+    }
+    for sticker in sticker_tags {
+        if sticker.len() != 4 || sticker.first().map(String::as_str) != Some("sticker") {
+            return Err("sticker tag must contain coordinate, shortcode, and sha256".into());
+        }
+        let pack = sonar_stickers::PackAddress::parse(&sticker[1])
+            .map_err(|_| "invalid sticker pack coordinate".to_string())?;
+        let reference =
+            sonar_stickers::StickerRef::new(pack, sticker[2].clone(), sticker[3].clone())
+                .map_err(|_| "invalid sticker reference".to_string())?;
+        if reference.pack.coordinate() != sticker[1]
+            || reference.shortcode != sticker[2]
+            || reference.plaintext_sha256 != sticker[3]
+        {
+            return Err("sticker reference must use canonical lowercase hex".to_string());
+        }
+        let parts: Vec<&str> = sticker.iter().map(String::as_str).collect();
+        tags.push(Tag::parse(parts).map_err(|e| format!("invalid sticker tag: {e}"))?);
+    }
+    Ok(())
+}
+
 /// Validate a hex pubkey is exactly 64 hex characters.
 fn check_pubkey(pubkey: &str) -> Result<(), String> {
     if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -287,6 +315,7 @@ pub fn build_remove_member(channel_id: Uuid, target_pubkey: &str) -> Result<Even
 // ── Messages ─────────────────────────────────────────────────────────────────
 
 /// Kind 9 — stream message.
+#[allow(clippy::too_many_arguments)]
 pub fn build_message(
     channel_id: Uuid,
     content: &str,
@@ -295,6 +324,7 @@ pub fn build_message(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    sticker_ref_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     build_message_with_client_tags(
         channel_id,
@@ -304,6 +334,7 @@ pub fn build_message(
         media_tags,
         custom_emoji_tags,
         mention_ref_tags,
+        sticker_ref_tags,
         &[],
     )
 }
@@ -322,6 +353,7 @@ pub fn build_message_with_client_tags(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    sticker_ref_tags: &[Vec<String>],
     client_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
@@ -333,6 +365,7 @@ pub fn build_message_with_client_tags(
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
+    sticker_tags(sticker_ref_tags, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }

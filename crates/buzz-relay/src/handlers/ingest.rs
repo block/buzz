@@ -29,11 +29,12 @@ use buzz_core::kind::{
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
     KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
     KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
-    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
-    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
-    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_STICKER_PACK, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
+    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
+    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
+    KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_USER_STICKER_PACKS, KIND_WORKFLOW_DEF,
+    KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_CURATE_STICKER_PACK, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -206,6 +207,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // palette is the client-side union of every member's own set.
         | KIND_EMOJI_SET
         | KIND_EMOJI_LIST
+        | KIND_STICKER_PACK
+        | KIND_USER_STICKER_PACKS
         | KIND_AGENT_PROFILE => Ok(Scope::UsersWrite),
         KIND_DELETION
         | KIND_REACTION
@@ -230,7 +233,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         k if k == RELAY_ADMIN_ADD_MEMBER
             || k == RELAY_ADMIN_REMOVE_MEMBER
             || k == RELAY_ADMIN_CHANGE_ROLE
-            || k == RELAY_ADMIN_SET_WORKSPACE_PROFILE =>
+            || k == RELAY_ADMIN_SET_WORKSPACE_PROFILE
+            || k == RELAY_ADMIN_CURATE_STICKER_PACK =>
         {
             Ok(Scope::AdminUsers)
         }
@@ -377,6 +381,10 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // keyed by (pubkey, kind[, d_tag]). A stray `h` tag must not channel-scope them.
             | KIND_EMOJI_SET
             | KIND_EMOJI_LIST
+            // Sonar sticker packs (30031) and personal installed lists
+            // (10031) are user-owned global replaceable state.
+            | KIND_STICKER_PACK
+            | KIND_USER_STICKER_PACKS
             // NIP-AE agent engrams are addressed by (pubkey_a, kind, d_tag); never channel-scoped.
             | KIND_AGENT_ENGRAM
             // NIP-ER event reminders are addressed by (pubkey, kind, d_tag); never channel-scoped.
@@ -416,6 +424,7 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | RELAY_ADMIN_REMOVE_MEMBER
             | RELAY_ADMIN_CHANGE_ROLE
             | RELAY_ADMIN_SET_WORKSPACE_PROFILE
+            | RELAY_ADMIN_CURATE_STICKER_PACK
             | KIND_NIP43_LEAVE_REQUEST
             // NIP-IA: identity archive/unarchive requests drive relay-global
             // archive state (8002/8003/13535) and are audited as global request
@@ -1947,6 +1956,23 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    // Sonar events must be fully validated before the generic replace path.
+    // Otherwise a malformed newer event could eclipse a valid pack/list head.
+    if kind_u32 == KIND_STICKER_PACK {
+        buzz_core::stickers::validate_sticker_pack_event(&event)
+            .map_err(|error| IngestError::Rejected(format!("invalid: sticker pack: {error}")))?;
+    }
+    if kind_u32 == KIND_USER_STICKER_PACKS {
+        buzz_core::stickers::validate_installed_pack_list_event(&event).map_err(|error| {
+            IngestError::Rejected(format!("invalid: installed sticker packs: {error}"))
+        })?;
+    }
+    if matches!(kind_u32, KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2) {
+        buzz_core::stickers::validate_message_sticker_ref(&event).map_err(|error| {
+            IngestError::Rejected(format!("invalid: sticker reference: {error}"))
+        })?;
+    }
+
     // Track pre-created channel UUID for compensation on insert failure.
     let mut pre_created_channel: Option<Uuid> = None;
 
@@ -2803,6 +2829,29 @@ mod tests {
                 "kind {kind} must not require an h-tag channel scope"
             );
         }
+    }
+
+    #[test]
+    fn sonar_sticker_state_is_global_and_requires_users_write() {
+        let dummy = make_dummy_event();
+        for kind in [KIND_STICKER_PACK, KIND_USER_STICKER_PACKS] {
+            assert!(is_global_only_kind(kind));
+            assert!(!requires_h_channel_scope(kind));
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).ok(),
+                Some(Scope::UsersWrite)
+            );
+        }
+    }
+
+    #[test]
+    fn sticker_catalog_command_requires_admin_users() {
+        let dummy = make_dummy_event();
+        assert!(is_global_only_kind(RELAY_ADMIN_CURATE_STICKER_PACK));
+        assert_eq!(
+            required_scope_for_kind(RELAY_ADMIN_CURATE_STICKER_PACK, &dummy).ok(),
+            Some(Scope::AdminUsers)
+        );
     }
 
     #[test]

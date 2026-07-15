@@ -342,9 +342,11 @@ export function buildOutgoingMessage(
 export function mergeOutgoingTags(
   mediaTags: string[][] | undefined,
   emojiTags: string[][],
+  stickerTags: string[][] = [],
 ): string[][] | undefined {
-  if (!mediaTags && emojiTags.length === 0) return undefined;
-  return [...(mediaTags ?? []), ...emojiTags];
+  if (!mediaTags && emojiTags.length === 0 && stickerTags.length === 0)
+    return undefined;
+  return [...(mediaTags ?? []), ...emojiTags, ...stickerTags];
 }
 
 /**
@@ -359,18 +361,22 @@ export function splitOutgoingTags(tags: string[][] | undefined): {
   mediaTags: string[][];
   emojiTags: string[][];
   mentionTags: string[][];
+  stickerTags: string[][];
 } {
   const mediaTags: string[][] = [];
   const emojiTags: string[][] = [];
   const mentionTags: string[][] = [];
+  const stickerTags: string[][] = [];
   for (const tag of tags ?? []) {
     if (tag[0] === "emoji") {
       emojiTags.push(tag);
     } else if (tag[0] === "mention") {
       mentionTags.push(tag);
+    } else if (tag[0] === "sticker") {
+      stickerTags.push(tag);
     } else {
       mediaTags.push(tag);
     }
   }
-  return { mediaTags, emojiTags, mentionTags };
+  return { mediaTags, emojiTags, mentionTags, stickerTags };
 }

@@ -12,7 +12,13 @@ use crate::error::MediaError;
 /// (`process_video_upload`) with its own magic-byte check. If an MP4 is uploaded
 /// through the image path (Content-Type spoofing), `infer::get()` detects
 /// `video/mp4` and `validate_content()` rejects it here.
-const ALLOWED_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
+const ALLOWED_MIME_TYPES: &[&str] = &[
+    "image/jpeg",
+    "image/png",
+    "image/apng",
+    "image/gif",
+    "image/webp",
+];
 
 /// MIME types blocked from the generic file-upload path.
 ///
@@ -164,6 +170,180 @@ pub struct VideoMeta {
     pub has_audio: bool,
 }
 
+/// Validated metadata for a Sonar sticker asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StickerContentMeta {
+    /// Sniffed, canonical MIME type.
+    pub mime: String,
+    /// Canonical content-addressed object extension.
+    pub extension: String,
+    /// Parsed image width in pixels.
+    pub width: u32,
+    /// Parsed image height in pixels.
+    pub height: u32,
+}
+
+const MAX_STICKER_ANIMATION_FRAMES: u32 = 200;
+const MAX_STICKER_ANIMATION_PIXELS: u64 = 100_000_000;
+
+fn skip_gif_sub_blocks(bytes: &[u8], mut offset: usize) -> Option<usize> {
+    loop {
+        let length = *bytes.get(offset)? as usize;
+        offset = offset.checked_add(1)?;
+        if length == 0 {
+            return Some(offset);
+        }
+        offset = offset.checked_add(length)?;
+        if offset > bytes.len() {
+            return None;
+        }
+    }
+}
+
+/// Count GIF image descriptors without decompressing their pixel data.
+fn gif_frame_count(bytes: &[u8]) -> Option<u32> {
+    if bytes.get(..6)? != b"GIF87a" && bytes.get(..6)? != b"GIF89a" {
+        return None;
+    }
+    let packed = *bytes.get(10)?;
+    let mut offset = 13usize;
+    if packed & 0x80 != 0 {
+        let color_table_len = 3usize.checked_mul(1usize << ((packed & 0x07) + 1))?;
+        offset = offset.checked_add(color_table_len)?;
+    }
+    let mut frames = 0u32;
+    loop {
+        match *bytes.get(offset)? {
+            0x2c => {
+                let packed = *bytes.get(offset.checked_add(9)?)?;
+                offset = offset.checked_add(10)?;
+                if packed & 0x80 != 0 {
+                    let color_table_len = 3usize.checked_mul(1usize << ((packed & 0x07) + 1))?;
+                    offset = offset.checked_add(color_table_len)?;
+                }
+                // LZW minimum code size, followed by image data sub-blocks.
+                offset = offset.checked_add(1)?;
+                frames = frames.checked_add(1)?;
+                offset = skip_gif_sub_blocks(bytes, offset)?;
+            }
+            0x21 => {
+                // Extension introducer and label, followed by sub-blocks.
+                offset = offset.checked_add(2)?;
+                offset = skip_gif_sub_blocks(bytes, offset)?;
+            }
+            0x3b => return (frames > 0).then_some(frames),
+            _ => return None,
+        }
+    }
+}
+
+/// Count animated WebP frame chunks without decoding their contents.
+fn webp_frame_count(bytes: &[u8]) -> Option<u32> {
+    if bytes.get(..4)? != b"RIFF" || bytes.get(8..12)? != b"WEBP" {
+        return None;
+    }
+    let riff_size = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?) as usize;
+    if riff_size.checked_add(8)? != bytes.len() {
+        return None;
+    }
+    let mut offset = 12usize;
+    let mut frames = 0u32;
+    let mut animated = false;
+    while offset < bytes.len() {
+        let header_end = offset.checked_add(8)?;
+        let chunk_type = bytes.get(offset..offset + 4)?;
+        let chunk_len =
+            u32::from_le_bytes(bytes.get(offset + 4..header_end)?.try_into().ok()?) as usize;
+        let data_end = header_end.checked_add(chunk_len)?;
+        let chunk_end = data_end.checked_add(chunk_len & 1)?;
+        if chunk_end > bytes.len() {
+            return None;
+        }
+        match chunk_type {
+            b"ANIM" => animated = true,
+            b"ANMF" => frames = frames.checked_add(1)?,
+            _ => {}
+        }
+        offset = chunk_end;
+    }
+    if animated {
+        (frames > 0).then_some(frames)
+    } else if frames == 0 {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+fn sticker_frame_count(bytes: &[u8], mime: &str) -> Option<u32> {
+    match mime {
+        "image/apng" => buzz_core::stickers::apng_frame_count(bytes),
+        "image/gif" => gif_frame_count(bytes),
+        "image/webp" => webp_frame_count(bytes),
+        "image/png" => Some(1),
+        _ => None,
+    }
+}
+
+/// Validate externally fetched Sonar sticker bytes against their declared MIME.
+///
+/// This is stricter than general media uploads: Sonar excludes JPEG, caps each
+/// plaintext asset at 4 MiB and each dimension at 4096 pixels, and distinguishes
+/// animated PNG from ordinary PNG when `image/apng` is declared.
+pub fn validate_sticker_content(
+    bytes: &[u8],
+    declared_mime: &str,
+) -> Result<StickerContentMeta, MediaError> {
+    const MAX_STICKER_BYTES: usize = 4 * 1024 * 1024;
+    const MAX_STICKER_DIMENSION: usize = 4_096;
+
+    if bytes.len() > MAX_STICKER_BYTES {
+        return Err(MediaError::FileTooLarge {
+            size: bytes.len() as u64,
+            max: MAX_STICKER_BYTES as u64,
+        });
+    }
+
+    let sniffed = infer::get(bytes)
+        .map(|kind| kind.mime_type())
+        .ok_or(MediaError::UnknownContentType)?;
+    let is_apng = sniffed == "image/png" && buzz_core::stickers::apng_frame_count(bytes).is_some();
+    let (mime, extension, mime_matches) = match declared_mime {
+        "image/webp" => ("image/webp", "webp", sniffed == "image/webp"),
+        "image/png" => ("image/png", "png", sniffed == "image/png" && !is_apng),
+        "image/apng" => ("image/apng", "png", is_apng),
+        "image/gif" => ("image/gif", "gif", sniffed == "image/gif"),
+        other => return Err(MediaError::DisallowedContentType(other.to_owned())),
+    };
+    if !mime_matches {
+        return Err(MediaError::DisallowedContentType(sniffed.to_owned()));
+    }
+
+    let size = imagesize::blob_size(bytes).map_err(|_| MediaError::InvalidImage)?;
+    if size.width == 0
+        || size.height == 0
+        || size.width > MAX_STICKER_DIMENSION
+        || size.height > MAX_STICKER_DIMENSION
+    {
+        return Err(MediaError::ImageTooLarge);
+    }
+    let frames = sticker_frame_count(bytes, mime).ok_or(MediaError::InvalidImage)?;
+    let animation_pixels = (size.width as u64)
+        .checked_mul(size.height as u64)
+        .and_then(|pixels| pixels.checked_mul(u64::from(frames)))
+        .ok_or(MediaError::ImageTooLarge)?;
+    if frames > MAX_STICKER_ANIMATION_FRAMES || animation_pixels > MAX_STICKER_ANIMATION_PIXELS {
+        return Err(MediaError::ImageTooLarge);
+    }
+
+    Ok(StickerContentMeta {
+        mime: mime.to_owned(),
+        extension: extension.to_owned(),
+        width: size.width as u32,
+        height: size.height as u32,
+    })
+}
+
 /// Validate uploaded bytes for the **image** upload path.
 ///
 /// Checks magic bytes, MIME allowlist (images only), size, and pixel dimensions.
@@ -172,7 +352,15 @@ pub struct VideoMeta {
 pub fn validate_content(bytes: &[u8], config: &MediaConfig) -> Result<String, MediaError> {
     // 1. Magic bytes — never trust Content-Type header
     let mime = infer::get(bytes)
-        .map(|t| t.mime_type().to_string())
+        .map(|kind| {
+            if kind.mime_type() == "image/png"
+                && buzz_core::stickers::apng_frame_count(bytes).is_some()
+            {
+                "image/apng".to_owned()
+            } else {
+                kind.mime_type().to_owned()
+            }
+        })
         .ok_or(MediaError::UnknownContentType)?;
 
     // 2. Allowlist (SVG, PDF, executables all rejected)
@@ -398,7 +586,7 @@ fn check_moov_before_mdat(path: &Path) -> Result<(), MediaError> {
 pub fn mime_to_ext(mime: &str) -> &'static str {
     match mime {
         "image/jpeg" => "jpg",
-        "image/png" => "png",
+        "image/png" | "image/apng" => "png",
         "image/gif" => "gif",
         "image/webp" => "webp",
         "video/mp4" => "mp4",
@@ -461,6 +649,94 @@ mod tests {
         let result = validate_content(TINY_PNG, &config);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "image/png");
+    }
+
+    #[test]
+    fn sticker_validation_accepts_matching_png() {
+        let meta = validate_sticker_content(TINY_PNG, "image/png").expect("valid sticker");
+        assert_eq!(meta.mime, "image/png");
+        assert_eq!(meta.extension, "png");
+        assert_eq!((meta.width, meta.height), (1, 1));
+    }
+
+    #[test]
+    fn sticker_validation_rejects_jpeg_and_mime_confusion() {
+        assert!(matches!(
+            validate_sticker_content(TINY_JPEG, "image/jpeg"),
+            Err(MediaError::DisallowedContentType(_))
+        ));
+        assert!(matches!(
+            validate_sticker_content(TINY_PNG, "image/webp"),
+            Err(MediaError::DisallowedContentType(_))
+        ));
+    }
+
+    #[test]
+    fn sticker_validation_requires_animation_marker_for_apng() {
+        assert!(matches!(
+            validate_sticker_content(TINY_PNG, "image/apng"),
+            Err(MediaError::DisallowedContentType(_))
+        ));
+    }
+
+    #[test]
+    fn sticker_validation_distinguishes_structural_apng_from_png() {
+        fn append_chunk(bytes: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
+            bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(chunk_type);
+            bytes.extend_from_slice(data);
+            // Chunk CRC integrity is outside this metadata-only detector. The
+            // browser/image decoder remains responsible for complete decoding.
+            bytes.extend_from_slice(&[0; 4]);
+        }
+
+        let mut apng = TINY_PNG.to_vec();
+        let mut animation_control = Vec::new();
+        animation_control.extend_from_slice(&1u32.to_be_bytes());
+        animation_control.extend_from_slice(&0u32.to_be_bytes());
+        append_chunk(&mut apng, b"acTL", &animation_control);
+        append_chunk(&mut apng, b"fcTL", &[0; 26]);
+        append_chunk(&mut apng, b"IDAT", &[]);
+        append_chunk(&mut apng, b"IEND", &[]);
+
+        assert_eq!(buzz_core::stickers::apng_frame_count(&apng), Some(1));
+        assert!(validate_sticker_content(&apng, "image/apng").is_ok());
+        assert!(matches!(
+            validate_sticker_content(&apng, "image/png"),
+            Err(MediaError::DisallowedContentType(_))
+        ));
+
+        let mut false_positive = TINY_PNG.to_vec();
+        append_chunk(&mut false_positive, b"tEXt", b"contains acTL bytes");
+        append_chunk(&mut false_positive, b"IDAT", &[]);
+        append_chunk(&mut false_positive, b"IEND", &[]);
+        assert_eq!(buzz_core::stickers::apng_frame_count(&false_positive), None);
+    }
+
+    #[test]
+    fn sticker_validation_bounds_animation_work() {
+        fn append_chunk(bytes: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
+            bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(chunk_type);
+            bytes.extend_from_slice(data);
+            bytes.extend_from_slice(&[0; 4]);
+        }
+
+        let mut apng = TINY_PNG.to_vec();
+        let mut animation_control = Vec::new();
+        animation_control.extend_from_slice(&201u32.to_be_bytes());
+        animation_control.extend_from_slice(&0u32.to_be_bytes());
+        append_chunk(&mut apng, b"acTL", &animation_control);
+        for _ in 0..201 {
+            append_chunk(&mut apng, b"fcTL", &[0; 26]);
+        }
+        append_chunk(&mut apng, b"IDAT", &[]);
+        append_chunk(&mut apng, b"IEND", &[]);
+
+        assert!(matches!(
+            validate_sticker_content(&apng, "image/apng"),
+            Err(MediaError::ImageTooLarge)
+        ));
     }
 
     #[test]

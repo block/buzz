@@ -8,6 +8,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
 import { FormattingToolbar } from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
+import {
+  ComposerStickerPicker,
+  type StickerSelection,
+} from "@/features/stickers/ui/ComposerStickerPicker";
 
 /** Spring for enter/exit of button groups — all fire simultaneously. */
 const presenceSpring = {
@@ -33,6 +37,7 @@ export const MessageComposerToolbar = React.memo(
     onLinkButton,
     onOpenMentionPicker,
     onPaperclip,
+    onStickerSelect,
     sendDisabled,
   }: {
     composerDisabled: boolean;
@@ -50,6 +55,7 @@ export const MessageComposerToolbar = React.memo(
     onLinkButton: () => void;
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
+    onStickerSelect?: (selection: StickerSelection) => void;
     sendDisabled: boolean;
   }) {
     return (
@@ -200,6 +206,12 @@ export const MessageComposerToolbar = React.memo(
                   onTriggerMouseDown={onCaptureSelection}
                   open={isEmojiPickerOpen}
                 />
+                {onStickerSelect ? (
+                  <ComposerStickerPicker
+                    disabled={composerDisabled}
+                    onSelect={onStickerSelect}
+                  />
+                ) : null}
                 <motion.div
                   initial={{ x: -8, opacity: 0 }}
                   animate={{ x: 0, opacity: 1 }}

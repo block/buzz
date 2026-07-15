@@ -38,6 +38,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let media_router = Router::new()
         .route("/media/upload", put(api::media::upload_blob))
         .route(
+            "/media/sticker/{author}/{identifier}/{shortcode}/{sha256}",
+            get(api::media::get_verified_sticker),
+        )
+        .route(
             "/media/{sha256_ext}",
             get(api::media::get_blob).head(api::media::head_blob),
         )

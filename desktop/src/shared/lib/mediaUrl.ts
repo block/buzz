@@ -21,6 +21,10 @@ import { invoke } from "@tauri-apps/api/core";
 // Also matches thumbnails: /media/{64-hex}.thumb.jpg
 const RELAY_MEDIA_RE =
   /^(?:https?:\/\/[^/]+)\/media\/([\da-f]{64}(?:\.thumb)?\.(?:jpg|png|gif|webp|mp4)(?:\?.*)?)$/;
+// Narrow Sonar cache route. Every segment is a validated identifier/hash, so
+// this cannot turn the local proxy into an arbitrary URL fetcher.
+const RELAY_STICKER_RE =
+  /^(?:(?:https?:\/\/[^/]+))?(\/media\/sticker\/[0-9a-f]{64}\/[A-Za-z0-9._-]{1,80}\/[A-Za-z0-9_+%-]{1,192}\/[0-9a-f]{64})$/;
 
 /** Cached proxy port — fetched once from the Tauri backend. */
 let cachedPort: number | null = null;
@@ -98,23 +102,31 @@ export function mediaProxyUrl(port: number, mediaPath: string): string {
  */
 export function rewriteRelayUrl(url: string): string {
   const m = RELAY_MEDIA_RE.exec(url);
-  if (!m) return url;
+  const sticker = RELAY_STICKER_RE.exec(url);
+  if (!m && !sticker) return url;
 
   // Only proxy URLs that belong to our relay. External Blossom URLs
   // (different origin) pass through unchanged — they work fine via WKWebView.
   // If the relay origin isn't cached yet, fall through to the rewrite path
   // as a safe default (relay URLs need the proxy to avoid Cloudflare 403s).
-  if (cachedRelayOrigin && !url.startsWith(`${cachedRelayOrigin}/`)) {
+  if (
+    !sticker?.[1] &&
+    cachedRelayOrigin &&
+    !url.startsWith(`${cachedRelayOrigin}/`)
+  ) {
     return url;
   }
 
+  const mediaPath = sticker?.[1] ? sticker[1].slice("/media/".length) : m?.[1];
+  if (!mediaPath) return url;
+
   if (cachedPort && cachedPort > 0) {
-    return mediaProxyUrl(cachedPort, m[1]);
+    return mediaProxyUrl(cachedPort, mediaPath);
   }
 
   if (!portPromise && typeof window !== "undefined") {
     portPromise = fetchProxyPort();
   }
 
-  return `buzz-media://localhost/media/${m[1]}`;
+  return `buzz-media://localhost/media/${mediaPath}`;
 }

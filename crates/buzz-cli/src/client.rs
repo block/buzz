@@ -63,6 +63,7 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
 const ALLOWED_MIMES: &[&str] = &[
     "image/jpeg",
     "image/png",
+    "image/apng",
     "image/gif",
     "image/webp",
     "video/mp4",
@@ -325,6 +326,22 @@ impl BuzzClient {
             return Err(CliError::Usage(format!("unsupported file type: {mime}")));
         }
 
+        self.upload_bytes(bytes, &mime).await
+    }
+
+    /// Upload already-buffered media bytes to the relay's Blossom endpoint.
+    ///
+    /// Callers that accept a narrower media set (for example Sonar stickers)
+    /// must validate that policy before calling this shared transport helper.
+    pub async fn upload_bytes(
+        &self,
+        bytes: Vec<u8>,
+        mime: &str,
+    ) -> Result<BlobDescriptor, CliError> {
+        if !ALLOWED_MIMES.contains(&mime) {
+            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+        }
+
         // 3. Size check
         let max = if mime.starts_with("video/") {
             MAX_VIDEO_BYTES
@@ -394,7 +411,7 @@ impl BuzzClient {
             .put(&url)
             .timeout(upload_timeout)
             .header("Authorization", &auth_header)
-            .header("Content-Type", &mime)
+            .header("Content-Type", mime)
             .header("X-SHA-256", &sha256);
 
         let resp = self.with_auth_tag(req).body(bytes).send().await?;

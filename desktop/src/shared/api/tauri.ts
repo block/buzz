@@ -1,4 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import type { BlobDescriptor } from "@/shared/api/mediaTypes";
+export type { BlobDescriptor } from "@/shared/api/mediaTypes";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -712,6 +714,7 @@ export async function sendChannelMessage(
   kind?: number,
   emojiTags?: string[][],
   mentionTags?: string[][],
+  stickerTags?: string[][],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -722,6 +725,7 @@ export async function sendChannelMessage(
       mediaTags: mediaTags ?? null,
       emojiTags: emojiTags ?? null,
       mentionTags: mentionTags ?? null,
+      stickerTags: stickerTags ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
     },
@@ -735,21 +739,6 @@ export async function sendChannelMessage(
     createdAt: response.created_at,
   };
 }
-
-export type BlobDescriptor = {
-  url: string;
-  sha256: string;
-  size: number;
-  type: string;
-  uploaded: number;
-  dim?: string;
-  blurhash?: string;
-  thumb?: string;
-  duration?: number;
-  image?: string;
-  /** Original filename captured client-side. */
-  filename?: string;
-};
 
 export async function uploadMedia(
   filePath: string,
