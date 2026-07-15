@@ -20,6 +20,8 @@ const REUSABLE_PERSONA_AGENT_PUBKEY =
   "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const ALLOWLIST_RELAY_AGENT_PUBKEY =
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const PADDED_NAME_AGENT_PUBKEY =
+  "abababababababababababababababababababababababababababababababab";
 const DELAYED_RELAY_AGENT_PUBKEY =
   "9999999999999999999999999999999999999999999999999999999999999999";
 const CASEY_PROFILE_PUBKEY =
@@ -801,6 +803,102 @@ test("non-allowlisted relay agents stay hidden from channel mentions", async ({
   await input.fill("@quinn");
 
   await expect(autocomplete(page)).toHaveCount(0);
+});
+
+test("mentioning a non-member agent with a padded name preserves its pubkey", async ({
+  page,
+}) => {
+  // The profile label is normalized, but locally managed-agent metadata can
+  // retain trailing whitespace. Coalescing prefers that managed candidate.
+  // Selection and extraction must use the same canonical name.
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: PADDED_NAME_AGENT_PUBKEY,
+        name: "astro ",
+        status: "running",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: PADDED_NAME_AGENT_PUBKEY,
+        displayName: "astro",
+        ownerPubkey: TEST_IDENTITIES.tyler.pubkey,
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@astro");
+
+  const dropdown = autocomplete(page);
+  const astroRow = dropdown.locator("button", { hasText: "astro" });
+  await expect(astroRow).toBeVisible();
+  await expect(astroRow.getByTestId("mention-agent-icon")).toBeVisible();
+  await expect(astroRow.getByText("not in channel")).toBeVisible();
+
+  // Match the reported path: Enter selects Astro, then Enter sends.
+  await input.press("Enter");
+  await expect(input).toHaveText("@astro ");
+  await expect(
+    input.locator(".agent-mention-highlight", { hasText: "astro" }),
+  ).toBeVisible();
+
+  const baselineCommands = await readCommandLog(page);
+  await input.press("Enter");
+
+  // Managed non-members skip the confirmation but must still be readied as a
+  // bot before the message is published.
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "add_channel_members"),
+    )
+    .toBeGreaterThan(commandCount(baselineCommands, "add_channel_members"));
+
+  const newCommands = (await readCommandPayloadLog(page)).slice(
+    baselineCommands.length,
+  );
+  expect(newCommands).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        command: "add_channel_members",
+        payload: expect.objectContaining({
+          pubkeys: [PADDED_NAME_AGENT_PUBKEY],
+          role: "bot",
+        }),
+      }),
+    ]),
+  );
+
+  const signedEvents = await page.evaluate(() => {
+    return (
+      (
+        window as Window & {
+          __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+            content: string;
+            kind: number;
+            tags: string[][];
+          }>;
+        }
+      ).__BUZZ_E2E_SIGNED_EVENTS__ ?? []
+    );
+  });
+  const sentMessage = signedEvents.findLast(
+    (event) => event.kind === 9 && event.content === "@astro",
+  );
+  expect(sentMessage?.tags).toEqual(
+    expect.arrayContaining([["p", PADDED_NAME_AGENT_PUBKEY]]),
+  );
+
+  const mentionChip = page
+    .getByTestId("message-row")
+    .last()
+    .locator("[data-mention].agent-mention-highlight", { hasText: "astro" });
+  await expect(mentionChip).toBeVisible();
 });
 
 test("mentioning an in-channel stopped managed agent starts it before sending", async ({

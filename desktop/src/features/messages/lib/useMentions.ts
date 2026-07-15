@@ -638,7 +638,11 @@ export function useMentions(
         debounceTimerRef.current = null;
       }
 
-      const displayName = suggestion.displayName;
+      // Suggestion labels can originate from relay-managed agent metadata, which
+      // is not guaranteed to be whitespace-normalized. Keep the inserted text
+      // and mention-map key canonical so submit-time `.trim()` cannot remove a
+      // character that `extractMentionPubkeys()` expects to match.
+      const displayName = suggestion.displayName.trim();
       const insertText = `@${displayName} `;
 
       const mentions = mentionMapRef.current;
