@@ -15,6 +15,9 @@
 /// - IPv4 broadcast      255.255.255.255
 /// - IPv4 CGNAT          100.64.0.0/10 (RFC 6598) — cloud metadata risk
 /// - IPv4 benchmarking   198.18.0.0/15 (RFC 2544)
+/// - IPv4 documentation  192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+/// - IPv4 multicast      224.0.0.0/4
+/// - IPv4 reserved       192.0.0.0/24, 192.88.99.0/24, 240.0.0.0/4
 /// - IPv6 loopback       ::1
 /// - IPv6 unspecified    ::
 /// - IPv6 ULA            fc00::/7
@@ -36,6 +39,14 @@ pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
                 // Benchmarking (RFC 2544) — 198.18.0.0/15
                 || (octets[0] == 198 && (octets[1] & 0xFE) == 18)
+                // IETF protocol assignments + documentation (RFC 6890 / RFC 5737)
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] <= 2)
+                // Deprecated 6to4 relay anycast (RFC 7526)
+                || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                // Multicast and future/reserved space.
+                || octets[0] >= 224
         }
         std::net::IpAddr::V6(v6) => {
             // Check IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) against IPv4 rules.
@@ -46,7 +57,20 @@ pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || v6.is_unspecified()
                 || v6.segments()[0] & 0xfe00 == 0xfc00 // fc00::/7 ULA
                 || v6.segments()[0] & 0xffc0 == 0xfe80 // fe80::/10 link-local
+                || v6.segments()[0] & 0xffc0 == 0xfec0 // fec0::/10 deprecated site-local
                 || v6.segments()[0] & 0xff00 == 0xff00 // ff00::/8 multicast
+                // 100::/64 discard-only (RFC 6666)
+                || (v6.segments()[0] == 0x0100
+                    && v6.segments()[1] == 0
+                    && v6.segments()[2] == 0
+                    && v6.segments()[3] == 0)
+                // 2001::/23 IETF protocol-assignment space (Teredo, benchmarking,
+                // ORCHID and documentation subranges). Sticker fetches fail closed.
+                || (v6.segments()[0] == 0x2001 && v6.segments()[1] <= 0x01ff)
+                // 6to4 and documentation/special-purpose ranges.
+                || v6.segments()[0] == 0x2002
+                || v6.segments()[0] == 0x3fff
+                || v6.segments()[0] == 0x5f00
                 // RFC 3849 — documentation range, should never appear in production
                 || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
         }
@@ -194,7 +218,30 @@ mod tests {
     }
     #[test]
     fn test_ipv6_not_multicast() {
-        // fe00:: — just below ff00::/8 (not multicast, not link-local, not ULA)
-        assert!(!is_private_ip(&"fe00::1".parse::<IpAddr>().unwrap()));
+        // 2606:4700::/32 is public Cloudflare address space.
+        assert!(!is_private_ip(&"2606:4700::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn blocks_ipv4_documentation_multicast_and_reserved_ranges() {
+        for value in [
+            "192.0.2.1",
+            "198.51.100.8",
+            "203.0.113.9",
+            "224.0.0.1",
+            "239.255.255.250",
+            "240.0.0.1",
+        ] {
+            assert!(is_private_ip(&value.parse::<IpAddr>().unwrap()), "{value}");
+        }
+    }
+
+    #[test]
+    fn blocks_ipv6_special_purpose_ranges() {
+        for value in [
+            "100::1", "2001::1", "2002::1", "3fff::1", "5f00::1", "fec0::1",
+        ] {
+            assert!(is_private_ip(&value.parse::<IpAddr>().unwrap()), "{value}");
+        }
     }
 }

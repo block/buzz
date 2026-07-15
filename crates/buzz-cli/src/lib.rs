@@ -179,6 +179,9 @@ enum Cmd {
     /// Manage your custom emoji set (workspace palette is the union of all members' sets)
     #[command(subcommand)]
     Emoji(EmojiCmd),
+    /// Discover, install, import, and author Sonar sticker packs
+    #[command(subcommand)]
+    Stickers(StickersCmd),
     /// List, open, and manage direct messages
     #[command(subcommand)]
     Dms(DmsCmd),
@@ -690,6 +693,57 @@ pub enum EmojiCmd {
         /// Print what would be published without writing
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum StickersCmd {
+    /// List available workspace packs and whether each is installed
+    List,
+    /// Show a pack by its `30031:<author>:<identifier>` coordinate
+    Show {
+        /// Exact Sonar pack coordinate
+        #[arg(long)]
+        address: String,
+    },
+    /// Add a pack to your ordered installed list (kind 10031)
+    Install {
+        /// Exact Sonar pack coordinate
+        #[arg(long)]
+        address: String,
+    },
+    /// Remove a pack from your ordered installed list (kind 10031)
+    Uninstall {
+        /// Exact Sonar pack coordinate
+        #[arg(long)]
+        address: String,
+    },
+    /// Import a Signal pack, upload all assets, and publish it
+    Import {
+        /// Read the private Signal link from a file, or `-` for stdin (default)
+        #[arg(long, default_value = "-")]
+        signal_link_file: String,
+        /// Override the generated `signal-<pack-id>` identifier
+        #[arg(long)]
+        identifier: Option<String>,
+        /// Override the title from the Signal manifest
+        #[arg(long)]
+        title: Option<String>,
+        /// Skip Signal sticker assets that cannot be downloaded
+        #[arg(long, default_value_t = false)]
+        skip_missing_signal_stickers: bool,
+    },
+    /// Create a pack from a JSON manifest containing local asset paths
+    Create {
+        /// Path to the JSON manifest
+        #[arg(long)]
+        file: String,
+    },
+    /// Replace one of your packs from a JSON manifest
+    Update {
+        /// Path to the JSON manifest
+        #[arg(long)]
+        file: String,
     },
 }
 
@@ -1630,6 +1684,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
+        Cmd::Stickers(sub) => commands::stickers::dispatch(sub, &client).await,
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
@@ -1678,6 +1733,7 @@ mod tests {
             "reactions",
             "repos",
             "social",
+            "stickers",
             "upload",
             "users",
             "workflows",
@@ -1764,6 +1820,18 @@ mod tests {
             vec!["export", "import", "list", "rm", "set"]
         );
         assert_eq!(
+            names(&cmd, "stickers"),
+            vec![
+                "create",
+                "import",
+                "install",
+                "list",
+                "show",
+                "uninstall",
+                "update"
+            ]
+        );
+        assert_eq!(
             names(&cmd, "dms"),
             vec!["add-member", "hide", "list", "open"]
         );
@@ -1835,6 +1903,7 @@ mod tests {
             ("reactions", 3),
             ("repos", 3),
             ("social", 7),
+            ("stickers", 7),
             ("upload", 1),
             ("users", 4),
             ("workflows", 8),

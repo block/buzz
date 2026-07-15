@@ -36,9 +36,9 @@ fn bounded_kind_label(kind: u32) -> String {
     match kind {
         0..=9 | 1059 | 1063 => kind.to_string(),
         8000..=8003 | 9000..=9022 | 9030..=9036 => kind.to_string(),
-        13534..=13535 => kind.to_string(),
+        13534..=13536 => kind.to_string(),
         20000..=29999 => kind.to_string(),
-        30023 | 30315 | 39000..=39003 => kind.to_string(),
+        10031 | 30023 | 30031 | 30315 | 39000..=39003 => kind.to_string(),
         40002..=40100 => kind.to_string(),
         41001 | 41010..=41012 => kind.to_string(),
         43001..=43006 => kind.to_string(),

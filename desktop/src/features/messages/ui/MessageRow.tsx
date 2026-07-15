@@ -44,6 +44,8 @@ import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { parseStickerReference } from "@/shared/api/stickers";
+import { StickerMessage } from "@/features/stickers/ui/StickerMessage";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
@@ -285,8 +287,17 @@ export const MessageRow = React.memo(
     }, [collapseDepthGuideActions]);
     const getTag = (name: string) =>
       message.tags?.find((tag) => tag[0] === name)?.[1];
+    const stickerReference = parseStickerReference(message.tags);
 
     const renderBody = () => {
+      if (stickerReference) {
+        return (
+          <StickerMessage
+            fallback={message.body}
+            reference={stickerReference}
+          />
+        );
+      }
       switch (message.kind) {
         case KIND_STREAM_MESSAGE_DIFF:
           return (
@@ -460,7 +471,7 @@ export const MessageRow = React.memo(
           isUnread={isUnread}
           message={message}
           onDelete={onDelete}
-          onEdit={onEdit}
+          onEdit={stickerReference ? undefined : onEdit}
           onFollowThread={onFollowThread}
           onMarkUnread={onMarkUnread}
           onMarkRead={onMarkRead}

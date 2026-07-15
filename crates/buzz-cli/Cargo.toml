@@ -44,6 +44,7 @@ chrono = { workspace = true }
 # Typed event builders for all write operations
 buzz-sdk = { workspace = true }
 buzz-core = { workspace = true }
+sonar-stickers = { workspace = true, features = ["signal-import"] }
 
 # Base64 encoding — NIP-98 event serialization for Authorization header
 base64 = "0.22"
@@ -59,6 +60,8 @@ hex = { workspace = true }
 
 # MIME type detection via magic bytes — file upload validation
 infer = "0.19"
+imagesize = "0.14"
+zeroize = "1"
 
 # URL parsing — extract server domain for Blossom auth tag
 url = { workspace = true }

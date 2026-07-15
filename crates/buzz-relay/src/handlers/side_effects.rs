@@ -11,10 +11,11 @@ use buzz_core::kind::{
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
     KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    KIND_STICKER_CATALOG, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
+use buzz_db::sticker_catalog::StickerCatalogAction;
 
 use super::event::dispatch_persistent_event;
 use crate::protocol::RelayMessage;
@@ -2791,6 +2792,59 @@ pub async fn publish_nip43_membership_list(
 
     info!(member_count, "NIP-43 membership list published");
     Ok(())
+}
+
+/// Apply a revision-pinned workspace sticker catalog mutation and fan out the
+/// resulting relay-signed kind:13536 snapshot.
+///
+/// The DB serializes pack-head verification, approval-row mutation, and
+/// snapshot replacement in one transaction. The admin command itself is not
+/// persisted; only this normalized relay-authored snapshot is observable.
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_sticker_catalog_mutation(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    coordinate: &str,
+    pack_author: &[u8],
+    identifier: &str,
+    approved_event_id: Option<&[u8]>,
+    actor: &[u8],
+) -> anyhow::Result<(bool, usize)> {
+    let action = approved_event_id.map_or(StickerCatalogAction::Remove, |event_id| {
+        StickerCatalogAction::Approve { event_id }
+    });
+    let mutation = state
+        .db
+        .mutate_sticker_catalog_locked(
+            tenant.community(),
+            coordinate,
+            pack_author,
+            identifier,
+            action,
+            actor,
+            &state.relay_keypair,
+        )
+        .await?;
+
+    if mutation.was_inserted {
+        dispatch_persistent_event(
+            tenant,
+            state,
+            &mutation.snapshot,
+            KIND_STICKER_CATALOG,
+            &state.relay_keypair.public_key().to_hex(),
+            None,
+        )
+        .await;
+    }
+
+    info!(
+        coordinate,
+        changed = mutation.changed,
+        approval_count = mutation.approval_count,
+        "workspace sticker catalog published"
+    );
+    Ok((mutation.changed, mutation.approval_count))
 }
 
 /// Shared helper: publish a NIP-43 membership delta event (kind 8000 or 8001).

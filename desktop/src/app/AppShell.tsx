@@ -53,6 +53,7 @@ import {
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
 import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
+import { useStickerLiveUpdates } from "@/features/stickers/hooks";
 import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
 import { useObserverArchiveSeed } from "@/features/local-archive/useObserverArchiveSeed";
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
@@ -201,6 +202,7 @@ export function AppShell() {
   usePresenceSubscription();
   useUserStatusSubscription();
   useCommunityEmojiLiveUpdates();
+  useStickerLiveUpdates();
   useMembershipNotifications(identityQuery.data?.pubkey);
   const presenceSession = usePresenceSession(deferredPubkey);
   const selfStatusQuery = useUserStatusQuery(

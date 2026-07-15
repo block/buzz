@@ -106,6 +106,7 @@ uuid = { version = "1", features = ["v4"] }
 png = "0.18"
 arboard = "3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+sonar-stickers = { git = "https://github.com/hedwig-corp/bitchat-to-sonar", rev = "eea8ada304517d6a3ea6c81d6ffa57ce00504bcd", package = "sonar-stickers", features = ["signal-import"] }
 zip = "8"
 sherpa-onnx = "1.12"
 regex = "1"

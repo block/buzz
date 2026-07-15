@@ -891,16 +891,19 @@ dependencies = [
  "clap",
  "diffy",
  "hex",
+ "imagesize",
  "infer",
  "nostr",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sonar-stickers",
  "thiserror 2.0.18",
  "tokio",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -927,6 +930,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sonar-stickers",
  "subtle",
  "thiserror 2.0.18",
  "url",
@@ -949,6 +953,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -1156,6 +1161,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.11.0",
+ "sonar-stickers",
  "sqlx",
  "subtle",
  "tempfile",
@@ -1202,6 +1208,7 @@ dependencies = [
  "nostr",
  "serde",
  "serde_json",
+ "sonar-stickers",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -4544,7 +4551,7 @@ dependencies = [
  "mesh-llm-types",
  "model-artifact",
  "nostr-sdk",
- "prost",
+ "prost 0.14.3",
  "rand 0.10.1",
  "rustls",
  "serde",
@@ -4683,7 +4690,7 @@ dependencies = [
  "opentelemetry 0.31.0",
  "opentelemetry-otlp 0.31.1",
  "opentelemetry_sdk 0.31.0",
- "prost",
+ "prost 0.14.3",
  "rand 0.10.1",
  "regex-lite",
  "reqwest 0.12.28",
@@ -4771,7 +4778,7 @@ source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.73.1#43103c5c40292
 dependencies = [
  "anyhow",
  "async-trait",
- "prost",
+ "prost 0.14.3",
  "prost-build",
  "protoc-bin-vendored",
  "rmcp",
@@ -4807,7 +4814,7 @@ dependencies = [
  "anyhow",
  "hex",
  "iroh",
- "prost",
+ "prost 0.14.3",
  "serde_json",
  "sha2 0.10.9",
 ]
@@ -5934,7 +5941,7 @@ dependencies = [
  "opentelemetry-http",
  "opentelemetry-proto 0.31.0",
  "opentelemetry_sdk 0.31.0",
- "prost",
+ "prost 0.14.3",
  "reqwest 0.12.28",
  "thiserror 2.0.18",
 ]
@@ -5949,7 +5956,7 @@ dependencies = [
  "opentelemetry 0.32.0",
  "opentelemetry-proto 0.32.0",
  "opentelemetry_sdk 0.32.1",
- "prost",
+ "prost 0.14.3",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
@@ -5966,7 +5973,7 @@ dependencies = [
  "const-hex",
  "opentelemetry 0.31.0",
  "opentelemetry_sdk 0.31.0",
- "prost",
+ "prost 0.14.3",
  "serde",
  "serde_json",
  "tonic",
@@ -5981,7 +5988,7 @@ checksum = "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638"
 dependencies = [
  "opentelemetry 0.32.0",
  "opentelemetry_sdk 0.32.1",
- "prost",
+ "prost 0.14.3",
  "tonic",
  "tonic-prost",
 ]
@@ -6620,12 +6627,22 @@ dependencies = [
 
 [[package]]
 name = "prost"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
+dependencies = [
+ "bytes",
+ "prost-derive 0.13.5",
+]
+
+[[package]]
+name = "prost"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2ea70524a2f82d518bce41317d0fae74151505651af45faf1ffbd6fd33f0568"
 dependencies = [
  "bytes",
- "prost-derive",
+ "prost-derive 0.14.3",
 ]
 
 [[package]]
@@ -6640,11 +6657,24 @@ dependencies = [
  "multimap",
  "petgraph",
  "prettyplease",
- "prost",
+ "prost 0.14.3",
  "prost-types",
  "regex",
  "syn 2.0.117",
  "tempfile",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
+dependencies = [
+ "anyhow",
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6666,7 +6696,7 @@ version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
 dependencies = [
- "prost",
+ "prost 0.14.3",
 ]
 
 [[package]]
@@ -7237,6 +7267,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -8167,7 +8198,7 @@ name = "skippy-protocol"
 version = "0.73.1"
 source = "git+https://github.com/Mesh-LLM/mesh-llm.git?tag=v0.73.1#43103c5c40292be688ac0261129bcbab0e7b9132"
 dependencies = [
- "prost",
+ "prost 0.14.3",
  "prost-build",
  "protoc-bin-vendored",
  "serde",
@@ -8258,6 +8289,26 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sonar-stickers"
+version = "0.1.0"
+source = "git+https://github.com/hedwig-corp/bitchat-to-sonar?rev=eea8ada304517d6a3ea6c81d6ffa57ce00504bcd#eea8ada304517d6a3ea6c81d6ffa57ce00504bcd"
+dependencies = [
+ "aes",
+ "base64",
+ "cbc",
+ "hex",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
+ "nostr",
+ "prost 0.13.5",
+ "reqwest 0.12.28",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
@@ -9165,7 +9216,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
 dependencies = [
  "bytes",
- "prost",
+ "prost 0.14.3",
  "tonic",
 ]
 
@@ -9175,7 +9226,7 @@ version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73ab1b02061f83d519bba3caa167f88f261ef05720ab8ebc954ade70de3348e8"
 dependencies = [
- "prost",
+ "prost 0.14.3",
  "prost-types",
  "tonic",
 ]

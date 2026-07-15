@@ -549,7 +549,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 19);
+        assert_eq!(migrations.len(), 20);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -812,6 +812,18 @@ mod tests {
             .sql
             .as_str()
             .contains("purge_soft_deleted_buzz_mesh_status"));
+
+        // Sticker curation pins an exact pack revision per community. Keeping
+        // this in an additive table preserves the initial migration checksum.
+        assert_eq!(migrations[19].version, 20);
+        let sticker_catalog = migrations[19].sql.as_str();
+        assert!(sticker_catalog.contains("CREATE TABLE sticker_catalog_approvals"));
+        assert!(sticker_catalog.contains("PRIMARY KEY (community_id, coordinate)"));
+        assert!(sticker_catalog.contains("approved_event_id BYTEA"));
+        assert!(!migrations[0]
+            .sql
+            .as_str()
+            .contains("sticker_catalog_approvals"));
     }
 
     #[test]

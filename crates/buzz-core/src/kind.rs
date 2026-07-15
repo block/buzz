@@ -32,6 +32,10 @@ pub const KIND_NIP65_RELAY_LIST_METADATA: u32 = 10002;
 pub const KIND_BOOKMARK_LIST: u32 = 10003;
 /// NIP-51: Emoji list (replaceable) — user preferred emojis and pointers to emoji sets.
 pub const KIND_EMOJI_LIST: u32 = 10030;
+/// Sonar Stickers: ordered list of sticker packs installed by a user.
+///
+/// This is a user-owned replaceable event keyed by `(pubkey, kind)`.
+pub const KIND_USER_STICKER_PACKS: u32 = 10031;
 /// NIP-51: Follow set (parameterized replaceable, 30000–39999 range) — named curated lists of pubkeys.
 ///
 /// User-owned, keyed by `(pubkey, kind, d_tag)`. Allows multiple named follow lists on top of
@@ -50,6 +54,11 @@ pub const KIND_BOOKMARK_SET: u32 = 30003;
 /// `required_scope_for_kind`), and the generic NIP-33 replace path keeps only the
 /// latest per `(pubkey, d_tag)`.
 pub const KIND_EMOJI_SET: u32 = 30030;
+/// Sonar Stickers: a parameterized-replaceable sticker pack.
+///
+/// The `d` tag is the stable pack identifier. Sticker assets are addressed by
+/// immutable plaintext SHA-256 hashes within the pack.
+pub const KIND_STICKER_PACK: u32 = 30031;
 /// NIP-01: Channel metadata (replaceable). Not used by Buzz today.
 pub const KIND_CHANNEL_METADATA: u32 = 41;
 /// NIP-09: Event deletion request.
@@ -257,9 +266,13 @@ pub const RELAY_ADMIN_REMOVE_MEMBER: u32 = 9031;
 pub const RELAY_ADMIN_CHANGE_ROLE: u32 = 9032;
 /// Buzz: Set the workspace profile (icon). Admin/owner-signed command.
 pub const RELAY_ADMIN_SET_WORKSPACE_PROFILE: u32 = 9033;
+/// Buzz: Approve or remove a Sonar sticker pack from the workspace catalog.
+pub const RELAY_ADMIN_CURATE_STICKER_PACK: u32 = 9034;
 // NIP-43 relay membership announcement events (relay-signed)
 /// NIP-43: Relay membership list snapshot (relay-signed, replaceable by convention).
 pub const KIND_NIP43_MEMBERSHIP_LIST: u32 = 13534;
+/// Buzz: Workspace Sonar sticker catalog snapshot (relay-signed, replaceable).
+pub const KIND_STICKER_CATALOG: u32 = 13536;
 /// NIP-43: Member added announcement (relay-signed).
 pub const KIND_NIP43_MEMBER_ADDED: u32 = 8000;
 /// NIP-43: Member removed announcement (relay-signed).
@@ -496,9 +509,11 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_NIP65_RELAY_LIST_METADATA,
     KIND_BOOKMARK_LIST,
     KIND_EMOJI_LIST,
+    KIND_USER_STICKER_PACKS,
     KIND_FOLLOW_SET,
     KIND_BOOKMARK_SET,
     KIND_EMOJI_SET,
+    KIND_STICKER_PACK,
     KIND_CHANNEL_METADATA,
     KIND_DELETION,
     KIND_REACTION,
@@ -530,7 +545,9 @@ pub const ALL_KINDS: &[u32] = &[
     RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_CHANGE_ROLE,
     RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    RELAY_ADMIN_CURATE_STICKER_PACK,
     KIND_NIP43_MEMBERSHIP_LIST,
+    KIND_STICKER_CATALOG,
     KIND_NIP43_MEMBER_ADDED,
     KIND_NIP43_MEMBER_REMOVED,
     KIND_NIP43_LEAVE_REQUEST,
@@ -643,7 +660,7 @@ pub const fn is_workflow_execution_kind(kind: u32) -> bool {
 }
 
 /// Returns `true` if `kind` is a NIP-43 relay membership admin command (9030–9032)
-/// or the Buzz workspace-profile admin command (9033).
+/// or a Buzz workspace administration command (9033–9034).
 pub const fn is_relay_admin_kind(kind: u32) -> bool {
     matches!(
         kind,
@@ -651,6 +668,7 @@ pub const fn is_relay_admin_kind(kind: u32) -> bool {
             | RELAY_ADMIN_REMOVE_MEMBER
             | RELAY_ADMIN_CHANGE_ROLE
             | RELAY_ADMIN_SET_WORKSPACE_PROFILE
+            | RELAY_ADMIN_CURATE_STICKER_PACK
     )
 }
 
@@ -687,6 +705,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
+            | KIND_STICKER_CATALOG
     )
 }
 
@@ -712,6 +731,8 @@ const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 303
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_STICKER_PACK)); // 30031 ∈ 30000–39999
+const _: () = assert!(is_replaceable(KIND_USER_STICKER_PACKS)); // 10031 ∈ 10000–19999
 
 // Compile-time: NIP-34 parameterized replaceable kinds are in the correct range.
 const _: () = assert!(

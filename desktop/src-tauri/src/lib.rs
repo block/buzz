@@ -816,6 +816,8 @@ pub fn run() {
             upload_media,
             pick_and_upload_media,
             pick_and_upload_image,
+            pick_and_upload_sticker_image,
+            import_signal_sticker_pack,
             upload_media_bytes,
             download_image,
             download_file,

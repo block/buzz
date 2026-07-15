@@ -133,6 +133,9 @@ buzz-media = { path = "crates/buzz-media" }
 buzz-sdk = { path = "crates/buzz-sdk" }
 buzz-ws-client = { path = "crates/buzz-ws-client" }
 buzz-relay-mesh = { path = "crates/buzz-relay-mesh" }
+# Sonar sticker pack wire model and validators. Keep this exact revision in
+# sync with the standalone desktop Tauri workspace.
+sonar-stickers = { git = "https://github.com/hedwig-corp/bitchat-to-sonar", rev = "eea8ada304517d6a3ea6c81d6ffa57ce00504bcd", package = "sonar-stickers" }
 
 # CI profile — builds the relay for desktop e2e. Dependencies keep full
 # release optimization (warm from main's cache; they carry the runtime hot
