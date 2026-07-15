@@ -161,6 +161,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
+    // HTTPS clients invoked through this MCP process need a Rustls provider;
+    // repeated installation is harmless.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // buzz CLI needs tokio (async HTTP client).
