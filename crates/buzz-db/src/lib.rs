@@ -3252,7 +3252,9 @@ impl Db {
     /// The entire check → retire old payload → insert runs in a single transaction
     /// with an advisory lock to prevent concurrent-insert races. NIP-RS read-state
     /// coordinates hard-delete the superseded payload and preserve a compact
-    /// ordering watermark; other NIP-33 kinds retain soft-deleted history.
+    /// ordering watermark. Buzz mesh status coordinates also hard-delete their
+    /// superseded heartbeat payload because only the live head has product
+    /// value; other NIP-33 kinds retain soft-deleted history.
     ///
     /// **Channel policy:** NIP-33 replacement keys on `(kind, pubkey, d_tag)` globally —
     /// `channel_id` is NOT part of the replacement key. This matches the Nostr spec:
@@ -3318,6 +3320,13 @@ impl Db {
                         .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
             })
             && read_state_t_tag_count == 1;
+        let is_buzz_mesh_status = kind_i32 == buzz_core::kind::KIND_BOOKMARK_SET as i32
+            && d_tag.starts_with("buzz-mesh-member-status:")
+            && event.tags.iter().any(|tag| {
+                let parts = tag.as_slice();
+                parts.len() == 2 && parts[0] == "k" && parts[1] == "buzz-mesh-status"
+            });
+        let hard_delete_superseded = is_nip_rs || is_buzz_mesh_status;
 
         // Check the live head and, for NIP-RS, the compact historical ordering
         // watermark. The watermark remains after a NIP-09 coordinate deletion,
@@ -3369,13 +3378,15 @@ impl Db {
         }
 
         if existing.is_some() {
-            let statement = if is_nip_rs {
+            if is_nip_rs {
                 // Migration 0011 rejects regex-coordinate hard deletes from
                 // pre-fix writers. Authorize only this corrected NIP-RS delete,
                 // transaction-locally so pooled connections cannot leak it.
                 sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
                     .execute(&mut *tx)
                     .await?;
+            }
+            let statement = if hard_delete_superseded {
                 "DELETE FROM events \
                  WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
             } else {
@@ -3390,7 +3401,7 @@ impl Db {
                 .execute(&mut *tx)
                 .await?;
 
-            if is_nip_rs {
+            if hard_delete_superseded {
                 if let Some((_, existing_id)) = &existing {
                     // Event first, mentions second: migration 0009's live-event
                     // fence uses this global lock order to avoid deadlocks.
@@ -3657,6 +3668,75 @@ mod tests {
         .await
         .expect("count live NIP-RS rows");
         assert_eq!(live, 0, "watermark must block stale resurrection");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mesh_status_replacement_keeps_one_physical_row() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = "buzz-mesh-member-status:owner-test";
+        let tags = vec![
+            Tag::parse(["d", d_tag]).expect("d tag"),
+            Tag::parse(["k", "buzz-mesh-status"]).expect("k tag"),
+        ];
+        let base = Timestamp::now().as_secs();
+        for (offset, content) in [(0, "running"), (1, "running-again"), (2, "stopped")] {
+            let event = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_BOOKMARK_SET as u16),
+                content,
+            )
+            .tags(tags.clone())
+            .custom_created_at(Timestamp::from(base + offset))
+            .sign_with_keys(&keys)
+            .expect("sign mesh status");
+            assert!(
+                db.replace_parameterized_event(community, &event, d_tag, None)
+                    .await
+                    .expect("replace mesh status")
+                    .1
+            );
+        }
+
+        let (rows, live): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE deleted_at IS NULL) FROM events \
+             WHERE community_id=$1 AND kind=30003 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count mesh status rows");
+        assert_eq!((rows, live), (1, 1));
+
+        sqlx::query(
+            "UPDATE events SET deleted_at=NOW() \
+             WHERE community_id=$1 AND kind=30003 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(d_tag)
+        .execute(&db.pool)
+        .await
+        .expect("simulate old relay soft delete");
+        let rows_after_legacy_delete: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE community_id=$1 AND kind=30003 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count rows after old relay soft delete");
+        assert_eq!(
+            rows_after_legacy_delete, 0,
+            "migration trigger must purge soft-deleted mesh status"
+        );
     }
 
     #[tokio::test]

@@ -499,57 +499,74 @@ mod tests {
     /// Hardware-gated (`#[ignore]`): loads a real model. Run with:
     ///   cargo test -p buzz-desktop --features mesh-llm \
     ///     ensure_serve_runtime_serves_other_model -- --ignored --nocapture
-    #[tokio::test]
+    #[test]
     #[ignore = "loads a real model; run manually with --ignored"]
-    async fn ensure_serve_runtime_serves_other_model() {
-        const HOSTED_MODEL: &str = "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M";
-        const OTHER_MODEL: &str = "some/other-model-not-hosted-locally:Q4_K_M";
+    fn ensure_serve_runtime_serves_other_model() {
+        std::thread::Builder::new()
+            .name("mesh-hardware-acceptance".to_string())
+            .stack_size(mesh_llm::MESH_WORKER_STACK_SIZE)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_stack_size(mesh_llm::MESH_WORKER_STACK_SIZE)
+                    .enable_all()
+                    .build()
+                    .expect("build mesh acceptance runtime");
+                runtime.block_on(async {
+                    const HOSTED_MODEL: &str = "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M";
+                    const OTHER_MODEL: &str = "some/other-model-not-hosted-locally:Q4_K_M";
 
-        let state = build_app_state();
+                    let state = build_app_state();
 
-        // Start a serve runtime hosting HOSTED_MODEL — this is the "Share
-        // compute" path.
-        let serve = mesh_llm::DesktopMeshRuntime::start(mesh_llm::StartMeshNodeRequest {
-            mode: mesh_llm::MeshNodeMode::Serve,
-            model_id: Some(HOSTED_MODEL.to_string()),
-            max_vram_gb: None,
-            join_token: None,
-            trusted_owner_ids: None,
-        })
-        .await
-        .expect("serve runtime should start");
+                    // Start a serve runtime hosting HOSTED_MODEL — this is the "Share
+                    // compute" path.
+                    let serve =
+                        mesh_llm::DesktopMeshRuntime::start(mesh_llm::StartMeshNodeRequest {
+                            mode: mesh_llm::MeshNodeMode::Serve,
+                            model_id: Some(HOSTED_MODEL.to_string()),
+                            max_vram_gb: None,
+                            join_token: None,
+                            trusted_owner_ids: None,
+                        })
+                        .await
+                        .expect("serve runtime should start");
 
-        let serve_status = serve.status().await.expect("serve status");
-        let serve_base = serve_status.api_base_url.clone();
-        assert_eq!(serve_status.mode, Some(mesh_llm::MeshNodeMode::Serve));
+                    let serve_status = serve.status().await.expect("serve status");
+                    let serve_base = serve_status.api_base_url.clone();
+                    assert_eq!(serve_status.mode, Some(mesh_llm::MeshNodeMode::Serve));
 
-        {
-            let mut runtime = state.mesh_llm_runtime.lock().await;
-            *runtime = Some(serve);
-        }
+                    {
+                        let mut runtime = state.mesh_llm_runtime.lock().await;
+                        *runtime = Some(serve);
+                    }
 
-        // Preflight for a DIFFERENT model with no explicit target. Old code:
-        // Err(...sharing compute...). New code: reuse the running ingress.
-        let status = ensure_client_node_for_model(&state, OTHER_MODEL, None)
-            .await
-            .expect("serve runtime must not reject a different-model preflight");
+                    // Preflight for a DIFFERENT model with no explicit target. Old code:
+                    // Err(...sharing compute...). New code: reuse the running ingress.
+                    let status = ensure_client_node_for_model(&state, OTHER_MODEL, None)
+                        .await
+                        .expect("serve runtime must not reject a different-model preflight");
 
-        // It returns the SAME running node — agents keep using A's 9337, and
-        // the router decides routability for OTHER_MODEL per request.
-        assert_eq!(
-            status.mode,
-            Some(mesh_llm::MeshNodeMode::Serve),
-            "preflight should reuse the existing serve runtime, not spin up a client"
-        );
-        assert_eq!(
-            status.api_base_url, serve_base,
-            "agent must be pointed at the existing serve node's ingress"
-        );
+                    // It returns the SAME running node — agents keep using A's 9337, and
+                    // the router decides routability for OTHER_MODEL per request.
+                    assert_eq!(
+                        status.mode,
+                        Some(mesh_llm::MeshNodeMode::Serve),
+                        "preflight should reuse the existing serve runtime, not spin up a client"
+                    );
+                    assert_eq!(
+                        status.api_base_url, serve_base,
+                        "agent must be pointed at the existing serve node's ingress"
+                    );
 
-        // Clean up the runtime.
-        let taken = state.mesh_llm_runtime.lock().await.take();
-        if let Some(runtime) = taken {
-            let _ = runtime.stop().await;
-        }
+                    // Clean up the runtime.
+                    let taken = state.mesh_llm_runtime.lock().await.take();
+                    if let Some(runtime) = taken {
+                        let _ = runtime.stop().await;
+                    }
+                });
+            })
+            .expect("spawn mesh acceptance thread")
+            .join()
+            .expect("mesh acceptance thread panicked");
     }
 }

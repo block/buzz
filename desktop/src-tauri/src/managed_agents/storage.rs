@@ -404,11 +404,6 @@ pub fn migrate_agent_keys_to_dev_service(app: &tauri::AppHandle) {
         .filter(|r| !r.pubkey.is_empty())
         .map(|r| r.pubkey)
         .collect();
-
-    if pubkeys.is_empty() {
-        return;
-    }
-
     // A fresh non-singleton store for the prod service — its own empty
     // cache so reads go to the OS keyring without polluting the dev
     // singleton's cache.
@@ -457,14 +452,20 @@ fn copy_agent_keys_between_stores(pubkeys: &[String], src: &impl KeyStore, dst: 
             return;
         }
     };
-
-    // One read of the prod blob.
-    let src_map: HashMap<String, String> = match src.load_all_readonly() {
-        Ok(Some(map)) => map,
-        Ok(None) => HashMap::new(), // prod has no blob yet — nothing to copy
-        Err(e) => {
-            eprintln!("buzz-desktop: keyring-dev-migration: cannot read prod keyring: {e}");
-            return;
+    // Skip production when a reset left no agents or onboarding created every dev key.
+    let src_map: HashMap<String, String> = if pubkeys
+        .iter()
+        .all(|pubkey| dst_map.contains_key(&agent_keyring_name(pubkey)))
+    {
+        HashMap::new()
+    } else {
+        match src.load_all_readonly() {
+            Ok(Some(map)) => map,
+            Ok(None) => HashMap::new(), // prod has no blob yet — nothing to copy
+            Err(e) => {
+                eprintln!("buzz-desktop: keyring-dev-migration: cannot read prod keyring: {e}");
+                return;
+            }
         }
     };
 
@@ -1214,6 +1215,7 @@ mod tests {
             Some("done"),
             "marker must be set even when all keys are already present"
         );
+        assert_eq!(*src.read_count.borrow(), 0);
     }
 
     #[test]
@@ -1316,6 +1318,7 @@ mod tests {
             Some("done"),
             "marker must be set even when pubkey list is empty"
         );
+        assert_eq!(*src.read_count.borrow(), 0);
     }
 
     #[test]

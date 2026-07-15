@@ -19,6 +19,11 @@ pub use identity::ensure_owner_identity;
 mod progress;
 pub use progress::install_progress_sink;
 
+mod transport_policy;
+#[cfg(test)]
+use transport_policy::iroh_relay_mode_from;
+use transport_policy::{iroh_relay_mode, validate_advertised_endpoint, IrohRelayMode};
+
 use mesh_llm_sdk::{client, serve, EmbeddedNodeHandle, MeshDiscoveryMode, TrustPolicy};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -289,19 +294,19 @@ impl DesktopMeshRuntime {
                     .console_port(mesh_console_port()?)
                     // No-leak invariants: never publish mesh presence, never
                     // auto-discover other meshes, no public Nostr relays.
-                    // Iroh relays are transport-only and opt-in (see
-                    // MESH_IROH_RELAYS_ENV); everything else stays closed.
+                    // Iroh relays are transport-only and enabled by default
+                    // (see MESH_IROH_RELAYS_ENV); everything else stays closed.
                     .publish(false)
                     .auto_join(false)
                     .discovery_mode(MeshDiscoveryMode::Nostr)
                     .startup_timeout(MESH_STARTUP_TIMEOUT)
                     .console_ui(true);
-                builder = match iroh_relay_mode() {
+                builder = match iroh_relay_mode()? {
                     IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
                     IrohRelayMode::Default => builder.disable_iroh_relays(false),
-                    IrohRelayMode::Custom(urls) => {
-                        builder.disable_iroh_relays(false).iroh_relays(urls)
-                    }
+                    IrohRelayMode::Custom(urls) => builder
+                        .disable_iroh_relays(false)
+                        .iroh_relays(urls.into_iter().map(|url| url.to_string())),
                 };
                 if let Some(max_vram_gb) = request.max_vram_gb {
                     builder = builder.max_vram_gb(max_vram_gb as f64);
@@ -333,12 +338,12 @@ impl DesktopMeshRuntime {
                     .discovery_mode(MeshDiscoveryMode::Nostr)
                     .startup_timeout(MESH_STARTUP_TIMEOUT)
                     .console_ui(true);
-                builder = match iroh_relay_mode() {
+                builder = match iroh_relay_mode()? {
                     IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
                     IrohRelayMode::Default => builder.disable_iroh_relays(false),
-                    IrohRelayMode::Custom(urls) => {
-                        builder.disable_iroh_relays(false).iroh_relays(urls)
-                    }
+                    IrohRelayMode::Custom(urls) => builder
+                        .disable_iroh_relays(false)
+                        .iroh_relays(urls.into_iter().map(|url| url.to_string())),
                 };
                 if let Some(join_token) = request.join_token.as_deref() {
                     builder = builder.join_token(join_token);
@@ -411,6 +416,8 @@ impl DesktopMeshRuntime {
     }
 
     pub async fn dial_endpoint_addr(&self, endpoint_addr: impl Into<String>) -> anyhow::Result<()> {
+        let endpoint_addr = endpoint_addr.into();
+        validate_advertised_endpoint(&endpoint_addr)?;
         self.handle.join_token(endpoint_addr).await
     }
 
@@ -473,35 +480,6 @@ fn mesh_port_from_env(name: &str, default: u16) -> anyhow::Result<u16> {
     Ok(port)
 }
 
-/// Parsed value of `BUZZ_MESH_IROH_RELAYS` (see the const doc).
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum IrohRelayMode {
-    /// Direct QUIC only — no relay servers in the iroh endpoint (default).
-    Disabled,
-    /// Enable iroh's default relay servers for NAT tunneling.
-    Default,
-    /// Enable specific iroh relay URLs.
-    Custom(Vec<String>),
-}
-
-fn iroh_relay_mode() -> IrohRelayMode {
-    iroh_relay_mode_from(std::env::var(MESH_IROH_RELAYS_ENV).ok().as_deref())
-}
-
-fn iroh_relay_mode_from(raw: Option<&str>) -> IrohRelayMode {
-    match raw.map(str::trim) {
-        Some("0") => IrohRelayMode::Disabled,
-        None | Some("") | Some("1") | Some("default") => IrohRelayMode::Default,
-        Some(list) => IrohRelayMode::Custom(
-            list.split(',')
-                .map(str::trim)
-                .filter(|url| !url.is_empty())
-                .map(str::to_string)
-                .collect(),
-        ),
-    }
-}
-
 /// Normalize a resolved roster for allowlist enforcement: sorted, deduped,
 /// and always containing our own owner id (so a solo sharer can dial their
 /// own node and the first member of a fresh relay isn't locked out).
@@ -523,8 +501,8 @@ fn normalized_roster(
 }
 
 fn validate_no_leak_request(request: &StartMeshNodeRequest) -> anyhow::Result<()> {
-    if request.join_token.as_deref().is_some_and(str::is_empty) {
-        anyhow::bail!("joinToken cannot be empty when provided");
+    if let Some(join_token) = request.join_token.as_deref() {
+        validate_advertised_endpoint(join_token)?;
     }
     Ok(())
 }

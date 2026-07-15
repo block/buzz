@@ -20,7 +20,7 @@ use crate::app_state::AppState;
 pub const KIND_BUZZ_MESH_MEMBER_STATUS: u16 = buzz_core_pkg::kind::KIND_BOOKMARK_SET as u16;
 const STATUS_D_TAG_PREFIX: &str = "buzz-mesh-member-status";
 const ROSTER_POLL_INTERVAL: Duration = Duration::from_secs(60);
-const STATUS_PUBLISH_INTERVAL: Duration = Duration::from_secs(15);
+const STATUS_PUBLISH_INTERVAL: Duration = Duration::from_secs(45);
 
 pub struct MeshCoordinator {
     _status_publisher: tokio::task::JoinHandle<()>,
@@ -38,9 +38,13 @@ pub async fn start_coordinator(app: AppHandle) {
 
     let publisher_app = app.clone();
     let status_publisher = tokio::spawn(async move {
+        // Clear a stale serving status promptly after an app restart. Once the
+        // node is stopped, the explicit stopped event is sufficient; only a
+        // running node needs periodic freshness heartbeats.
+        publish_current_status_once(&publisher_app, "startup").await;
         loop {
-            publish_current_status_once(&publisher_app, "periodic").await;
             tokio::time::sleep(STATUS_PUBLISH_INTERVAL).await;
+            publish_running_status_once(&publisher_app).await;
         }
     });
     let roster_app = app.clone();
@@ -114,6 +118,13 @@ pub(crate) async fn publish_stopped_status_once(app: &AppHandle, reason: &str) {
     }
 }
 
+async fn publish_running_status_once(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if let Err(error) = publish_running_status_for_state(&state).await {
+        eprintln!("buzz-mesh: periodic status report failed: {error}");
+    }
+}
+
 async fn publish_current_status_for_state(state: &AppState) -> Result<(), String> {
     let identity = super::ensure_owner_identity()
         .map_err(|error| format!("failed to load mesh owner identity: {error}"))?;
@@ -139,6 +150,23 @@ async fn publish_stopped_status_for_state(state: &AppState) -> Result<(), String
     publish_status_report(state, payload).await
 }
 
+async fn publish_running_status_for_state(state: &AppState) -> Result<(), String> {
+    let identity = super::ensure_owner_identity()
+        .map_err(|error| format!("failed to load mesh owner identity: {error}"))?;
+    let mut payload = {
+        let runtime = state.mesh_llm_runtime.lock().await;
+        let Some(runtime) = runtime.as_ref() else {
+            return Ok(());
+        };
+        runtime
+            .status_report_payload()
+            .await
+            .map_err(|error| error.to_string())?
+    };
+    bind_payload_to_member(state, &identity, &mut payload)?;
+    publish_status_report(state, payload).await
+}
+
 fn stopped_status_payload(identity: &super::identity::OwnerIdentity) -> serde_json::Value {
     serde_json::json!({
         "ownerId": identity.owner_id,
@@ -154,11 +182,18 @@ fn bind_payload_to_member(
     payload: &mut serde_json::Value,
 ) -> Result<(), String> {
     let member_pubkey = state.signing_keys()?.public_key().to_hex();
+    let endpoint_tokens = super::identity::advertised_endpoint_tokens(payload)
+        .ok_or_else(|| "mesh discovery status has malformed serveTargets".to_string())?;
     payload["ownerId"] = serde_json::Value::String(identity.owner_id.clone());
     payload["ownerVerifyingKey"] = serde_json::Value::String(identity.verifying_key_hex.clone());
     payload["ownerBindingSig"] = serde_json::Value::String(
         identity
             .sign_member_binding(&member_pubkey)
+            .map_err(|error| error.to_string())?,
+    );
+    payload["ownerEndpointBindingSig"] = serde_json::Value::String(
+        identity
+            .sign_member_endpoint_binding(&member_pubkey, &endpoint_tokens)
             .map_err(|error| error.to_string())?,
     );
     Ok(())
@@ -197,6 +232,13 @@ mod tests {
     use nostr::JsonUtil;
 
     use super::*;
+
+    #[test]
+    fn heartbeat_leaves_room_before_status_expires() {
+        assert!(
+            STATUS_PUBLISH_INTERVAL.as_secs() * 2 < super::super::discovery::STATUS_FRESHNESS_SECS
+        );
+    }
 
     #[test]
     fn stopped_status_advertises_identity_without_targets() {

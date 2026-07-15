@@ -148,10 +148,20 @@ causes are:
 
 Buzz publishes member-signed discovery notes through an ordinary relay-supported
 NIP-51 event. The note includes a MeshLLM-key signature binding the member to the
-advertised MeshLLM owner identity. Current Buzz membership controls which owner
-identities are admitted and which serving targets are selectable.
+advertised MeshLLM node identity, plus a second signature over the exact endpoint
+tokens in the note. Current Buzz membership controls which node identities are
+admitted. A serving target is selectable only when its endpoint signature is
+valid, its invite token decodes as a bounded Iroh endpoint, and every advertised
+relay URL matches this machine's locally configured Iroh relay policy.
+
+`BUZZ_MESH_IROH_RELAYS` defaults to Iroh's production relay set. Set it to `0`
+for direct QUIC only, or to a comma-separated HTTPS allowlist for custom relays.
+Plain HTTP is accepted only for loopback development relays. Remote status notes
+cannot expand this local allowlist.
 
 MeshLLM—not the Buzz relay—carries inference over direct QUIC or its encrypted
 iroh relays and enforces the owner allowlist. The dependency is pinned to the
 post-v0.72.2 admission fix that prevents a non-member with a leaked invite token
-from using passive inference streams.
+from using passive inference streams. MeshLLM v0.73.1 still performs its owner
+check during gossip after transport connection; authenticating before any gossip
+is an upstream protocol change and is not claimed by the Buzz-side checks above.

@@ -80,21 +80,24 @@ fn iroh_relay_mode_defaults_to_enabled() {
     // default iroh relays, so members connect regardless of NAT. Relays are
     // transport-only (ciphertext forwarding) — admission is a separate layer.
     use super::IrohRelayMode;
-    assert_eq!(super::iroh_relay_mode_from(None), IrohRelayMode::Default);
     assert_eq!(
-        super::iroh_relay_mode_from(Some("")),
+        super::iroh_relay_mode_from(None).unwrap(),
         IrohRelayMode::Default
     );
     assert_eq!(
-        super::iroh_relay_mode_from(Some("  ")),
+        super::iroh_relay_mode_from(Some("")).unwrap(),
         IrohRelayMode::Default
     );
     assert_eq!(
-        super::iroh_relay_mode_from(Some("1")),
+        super::iroh_relay_mode_from(Some("  ")).unwrap(),
         IrohRelayMode::Default
     );
     assert_eq!(
-        super::iroh_relay_mode_from(Some("default")),
+        super::iroh_relay_mode_from(Some("1")).unwrap(),
+        IrohRelayMode::Default
+    );
+    assert_eq!(
+        super::iroh_relay_mode_from(Some("default")).unwrap(),
         IrohRelayMode::Default
     );
 }
@@ -104,17 +107,38 @@ fn iroh_relay_mode_opt_out_and_custom() {
     use super::IrohRelayMode;
     // "0" is the explicit opt-out for metadata-conscious deployments.
     assert_eq!(
-        super::iroh_relay_mode_from(Some("0")),
+        super::iroh_relay_mode_from(Some("0")).unwrap(),
         IrohRelayMode::Disabled
     );
     // Anything else is a comma-separated custom relay list.
     assert_eq!(
-        super::iroh_relay_mode_from(Some("https://relay1.example, https://relay2.example ,")),
+        super::iroh_relay_mode_from(Some("https://relay1.example, https://relay2.example ,"))
+            .unwrap(),
         IrohRelayMode::Custom(vec![
-            "https://relay1.example".to_string(),
-            "https://relay2.example".to_string(),
+            "https://relay1.example".parse().unwrap(),
+            "https://relay2.example".parse().unwrap(),
         ])
     );
+}
+
+fn test_endpoint_token() -> String {
+    super::transport_policy::endpoint_token_for_test([iroh::TransportAddr::Ip(
+        "192.168.1.20:47916".parse().unwrap(),
+    )])
+}
+
+fn add_test_owner_bindings(
+    payload: &mut serde_json::Value,
+    owner: &mesh_llm_host_runtime::crypto::OwnerKeypair,
+    member_pubkey: &str,
+) {
+    let endpoints = super::identity::advertised_endpoint_tokens(payload).unwrap();
+    payload["ownerBindingSig"] = serde_json::Value::String(hex::encode(
+        owner.sign_bytes(&super::identity::member_binding_bytes(member_pubkey)),
+    ));
+    payload["ownerEndpointBindingSig"] = serde_json::Value::String(hex::encode(owner.sign_bytes(
+        &super::identity::member_endpoint_binding_bytes(member_pubkey, &endpoints),
+    )));
 }
 
 #[test]
@@ -166,17 +190,16 @@ fn signed_reporter_status(reporter_secret: &str, _label: &str) -> nostr::Event {
     let keys = nostr::Keys::parse(reporter_secret).expect("valid reporter secret");
     let owner = OwnerKeypair::generate();
     let member_pubkey = keys.public_key().to_hex();
-    super::coordinator::build_status_report_event(json!({
+    let mut payload = json!({
         "ownerId": owner.owner_id(),
         "ownerVerifyingKey": hex::encode(owner.verifying_key().as_bytes()),
-        "ownerBindingSig": hex::encode(owner.sign_bytes(
-            &super::identity::member_binding_bytes(&member_pubkey)
-        )),
         "serveTargets": []
-    }))
-    .expect("status builder")
-    .sign_with_keys(&keys)
-    .expect("test event signs")
+    });
+    add_test_owner_bindings(&mut payload, &owner, &member_pubkey);
+    super::coordinator::build_status_report_event(payload)
+        .expect("status builder")
+        .sign_with_keys(&keys)
+        .expect("test event signs")
 }
 
 fn signed_membership_event(members: &[String]) -> nostr::Event {
@@ -238,25 +261,25 @@ fn owner_roster_rejects_spoofed_owner_id_and_cross_member_binding() {
     let member_pubkey = member_keys.public_key().to_hex();
     let owner = OwnerKeypair::generate();
     let verifying_key = hex::encode(owner.verifying_key().as_bytes());
+    let endpoint = test_endpoint_token();
 
     let sign_status = |owner_id: String, binding_pubkey: &str| {
-        super::coordinator::build_status_report_event(json!({
+        let mut payload = json!({
             "ownerId": owner_id,
-            "ownerVerifyingKey": verifying_key,
-            "ownerBindingSig": hex::encode(owner.sign_bytes(
-                &super::identity::member_binding_bytes(binding_pubkey)
-            )),
+            "ownerVerifyingKey": verifying_key.clone(),
             "serveTargets": [{
                 "modelId": "spoofed-model",
                 "modelName": null,
-                "endpointAddr": "spoofed-addr",
+                "endpointAddr": endpoint.clone(),
                 "nodeName": null,
                 "capacity": null
             }]
-        }))
-        .unwrap()
-        .sign_with_keys(&member_keys)
-        .unwrap()
+        });
+        add_test_owner_bindings(&mut payload, &owner, binding_pubkey);
+        super::coordinator::build_status_report_event(payload)
+            .unwrap()
+            .sign_with_keys(&member_keys)
+            .unwrap()
     };
 
     let spoofed_owner = sign_status("0".repeat(64), &member_pubkey);
@@ -277,6 +300,44 @@ fn owner_roster_rejects_spoofed_owner_id_and_cross_member_binding() {
 }
 
 #[test]
+fn owner_roster_rejects_endpoint_substitution_without_owner_signature() {
+    use mesh_llm_host_runtime::crypto::OwnerKeypair;
+
+    let keys = nostr::Keys::parse(&"b".repeat(64)).unwrap();
+    let member_pubkey = keys.public_key().to_hex();
+    let owner = OwnerKeypair::generate();
+    let signed_endpoint = test_endpoint_token();
+    let substituted_endpoint = test_endpoint_token();
+    let mut payload = json!({
+        "ownerId": owner.owner_id(),
+        "ownerVerifyingKey": hex::encode(owner.verifying_key().as_bytes()),
+        "serveTargets": [{
+            "modelId": "model-a",
+            "modelName": null,
+            "endpointAddr": signed_endpoint,
+            "nodeName": null,
+            "capacity": null
+        }]
+    });
+    add_test_owner_bindings(&mut payload, &owner, &member_pubkey);
+    payload["serveTargets"][0]["endpointAddr"] = serde_json::Value::String(substituted_endpoint);
+    let status = super::coordinator::build_status_report_event(payload)
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+    let membership = signed_membership_event(std::slice::from_ref(&member_pubkey));
+
+    assert_eq!(
+        super::owner_ids_from_events(&[status.clone(), membership.clone()]).len(),
+        1,
+        "endpoint substitution must not erase a valid member-to-owner admission binding"
+    );
+    assert!(super::availability_from_events(vec![status, membership])
+        .serve_targets
+        .is_empty());
+}
+
+#[test]
 fn availability_excludes_removed_member_status() {
     let current_secret = "6".repeat(64);
     let removed_secret = "7".repeat(64);
@@ -284,9 +345,10 @@ fn availability_excludes_removed_member_status() {
         .unwrap()
         .public_key()
         .to_hex();
+    let current_endpoint = test_endpoint_token();
     let events = vec![
-        signed_reporter_target(&current_secret, "model-current", "addr-current"),
-        signed_reporter_target(&removed_secret, "model-removed", "addr-removed"),
+        signed_reporter_target(&current_secret, "model-current", &current_endpoint),
+        signed_reporter_target(&removed_secret, "model-removed", &test_endpoint_token()),
         signed_membership_event(std::slice::from_ref(&current_member)),
     ];
 
@@ -294,7 +356,10 @@ fn availability_excludes_removed_member_status() {
     assert_eq!(availability.models.len(), 1);
     assert_eq!(availability.models[0].id, "model-current");
     assert_eq!(availability.serve_targets.len(), 1);
-    assert_eq!(availability.serve_targets[0].endpoint_addr, "addr-current");
+    assert_eq!(
+        availability.serve_targets[0].endpoint_addr,
+        current_endpoint
+    );
 }
 
 fn signed_reporter_target(reporter_secret: &str, model: &str, endpoint: &str) -> nostr::Event {
@@ -303,12 +368,9 @@ fn signed_reporter_target(reporter_secret: &str, model: &str, endpoint: &str) ->
     let keys = nostr::Keys::parse(reporter_secret).unwrap();
     let owner = OwnerKeypair::generate();
     let member_pubkey = keys.public_key().to_hex();
-    super::coordinator::build_status_report_event(json!({
+    let mut payload = json!({
         "ownerId": owner.owner_id(),
         "ownerVerifyingKey": hex::encode(owner.verifying_key().as_bytes()),
-        "ownerBindingSig": hex::encode(owner.sign_bytes(
-            &super::identity::member_binding_bytes(&member_pubkey)
-        )),
         "models": [{"id": model, "name": null}],
         "serveTargets": [{
             "modelId": model,
@@ -317,17 +379,19 @@ fn signed_reporter_target(reporter_secret: &str, model: &str, endpoint: &str) ->
             "nodeName": null,
             "capacity": null
         }]
-    }))
-    .unwrap()
-    .sign_with_keys(&keys)
-    .unwrap()
+    });
+    add_test_owner_bindings(&mut payload, &owner, &member_pubkey);
+    super::coordinator::build_status_report_event(payload)
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap()
 }
 
 #[test]
 fn stale_status_is_excluded_from_admission_and_availability() {
     let secret = "8".repeat(64);
     let member = nostr::Keys::parse(&secret).unwrap().public_key().to_hex();
-    let stale = signed_reporter_target_at(&secret, "stale-model", "stale-addr", 1_000);
+    let stale = signed_reporter_target_at(&secret, "stale-model", &test_endpoint_token(), 1_000);
     // No newer event is required to age this status out. Freshness is measured
     // against wall clock, so an entirely offline mesh cannot remain live forever.
     let membership = signed_membership_event_at(std::slice::from_ref(&member), 900);
@@ -342,9 +406,10 @@ fn stale_status_is_excluded_from_admission_and_availability() {
 fn one_endpoint_can_advertise_multiple_models() {
     let secret = "a".repeat(64);
     let member = nostr::Keys::parse(&secret).unwrap().public_key().to_hex();
+    let endpoint = test_endpoint_token();
     let availability = super::availability_from_events(vec![
-        signed_reporter_target(&secret, "model-a", "shared-addr"),
-        signed_reporter_target(&secret, "model-b", "shared-addr"),
+        signed_reporter_target(&secret, "model-a", &endpoint),
+        signed_reporter_target(&secret, "model-b", &endpoint),
         signed_membership_event(std::slice::from_ref(&member)),
     ]);
 
@@ -363,8 +428,8 @@ fn one_endpoint_can_advertise_multiple_models() {
 fn same_member_can_publish_multiple_owner_scoped_devices() {
     let secret = "9".repeat(64);
     let member = nostr::Keys::parse(&secret).unwrap().public_key().to_hex();
-    let first = signed_reporter_target(&secret, "model-a", "addr-a");
-    let second = signed_reporter_target(&secret, "model-b", "addr-b");
+    let first = signed_reporter_target(&secret, "model-a", &test_endpoint_token());
+    let second = signed_reporter_target(&secret, "model-b", &test_endpoint_token());
     let first_d = first
         .tags
         .iter()
@@ -409,12 +474,9 @@ fn signed_reporter_target_at(
     let keys = nostr::Keys::parse(reporter_secret).unwrap();
     let owner = OwnerKeypair::generate();
     let member_pubkey = keys.public_key().to_hex();
-    super::coordinator::build_status_report_event(json!({
+    let mut payload = json!({
         "ownerId": owner.owner_id(),
         "ownerVerifyingKey": hex::encode(owner.verifying_key().as_bytes()),
-        "ownerBindingSig": hex::encode(owner.sign_bytes(
-            &super::identity::member_binding_bytes(&member_pubkey)
-        )),
         "models": [{"id": model, "name": null}],
         "serveTargets": [{
             "modelId": model,
@@ -423,11 +485,13 @@ fn signed_reporter_target_at(
             "nodeName": null,
             "capacity": null
         }]
-    }))
-    .unwrap()
-    .custom_created_at(nostr::Timestamp::from(created_at))
-    .sign_with_keys(&keys)
-    .unwrap()
+    });
+    add_test_owner_bindings(&mut payload, &owner, &member_pubkey);
+    super::coordinator::build_status_report_event(payload)
+        .unwrap()
+        .custom_created_at(nostr::Timestamp::from(created_at))
+        .sign_with_keys(&keys)
+        .unwrap()
 }
 
 fn signed_membership_event_at(members: &[String], created_at: u64) -> nostr::Event {

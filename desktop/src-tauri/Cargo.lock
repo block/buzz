@@ -974,6 +974,7 @@ dependencies = [
  "hex",
  "image",
  "infer",
+ "iroh",
  "keyring",
  "libc",
  "mesh-llm-client",

@@ -1,15 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use super::{dedupe_models, MeshAvailability, MeshModelOption, MeshServeTarget, MESH_STATUS_KIND};
 
-/// Status notes are refreshed every 15 seconds. Ignore notes older than two
-/// minutes so crashed/offline devices stop contributing compute or admission
-/// identities without requiring a relay-side cleanup job.
-const STATUS_FRESHNESS_SECS: u64 = 120;
+/// Running-node status notes are refreshed every 45 seconds. Ignore notes older
+/// than two minutes so crashed/offline devices stop contributing compute or
+/// admission identities without requiring a relay-side cleanup job.
+pub(super) const STATUS_FRESHNESS_SECS: u64 = 120;
 
 fn status_is_fresh(event: &nostr::Event, now: u64) -> bool {
     event
@@ -108,6 +107,42 @@ fn owner_id_from_status_event(event: &nostr::Event) -> Option<String> {
     Some(owner_id.to_string())
 }
 
+fn endpoint_binding_is_valid(event: &nostr::Event, content: &serde_json::Value) -> bool {
+    let Some(endpoint_tokens) = super::identity::advertised_endpoint_tokens(content) else {
+        return false;
+    };
+    let Some(verifying_key_bytes) = content
+        .get("ownerVerifyingKey")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .and_then(|value| hex::decode(value).ok())
+        .and_then(|value| <[u8; 32]>::try_from(value).ok())
+    else {
+        return false;
+    };
+    let Some(signature) = content
+        .get("ownerEndpointBindingSig")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .and_then(|value| hex::decode(value).ok())
+        .and_then(|value| Signature::from_slice(&value).ok())
+    else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&verifying_key_bytes) else {
+        return false;
+    };
+    verifying_key
+        .verify(
+            &super::identity::member_endpoint_binding_bytes(
+                &event.pubkey.to_hex(),
+                &endpoint_tokens,
+            ),
+            &signature,
+        )
+        .is_ok()
+}
+
 pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
     if events.is_empty() {
         return MeshAvailability::unavailable("Buzz shared compute status is not published yet");
@@ -139,6 +174,9 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
         if owner_id_from_status_event(&event).is_none() {
             continue;
         }
+        if !endpoint_binding_is_valid(&event, &content) {
+            continue;
+        }
         saw_valid_status = true;
         let mut serve_targets = content
             .get("serveTargets")
@@ -147,9 +185,12 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
             .and_then(|value| serde_json::from_value::<Vec<MeshServeTarget>>(value).ok())
             .unwrap_or_default()
             .into_iter()
-            .map(|mut target| {
+            .filter_map(|mut target| {
+                let endpoint_id =
+                    super::transport_policy::validate_advertised_endpoint(&target.endpoint_addr)
+                        .ok()?;
                 if target.endpoint_id.is_none() {
-                    target.endpoint_id = endpoint_id_from_invite_token(&target.endpoint_addr);
+                    target.endpoint_id = Some(endpoint_id);
                 }
                 if target.device_id.is_none() {
                     target.device_id = target.endpoint_id.clone();
@@ -160,7 +201,7 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
                         .clone()
                         .or_else(|| target.endpoint_id.as_deref().map(short_endpoint_label));
                 }
-                target
+                Some(target)
             })
             .collect::<Vec<_>>();
 
@@ -259,9 +300,7 @@ pub(super) fn device_name_from_status(
 }
 
 fn endpoint_id_from_invite_token(invite_token: &str) -> Option<String> {
-    let json = URL_SAFE_NO_PAD.decode(invite_token).ok()?;
-    let value = serde_json::from_slice::<serde_json::Value>(&json).ok()?;
-    string_value(&value, "id")
+    super::transport_policy::validate_advertised_endpoint(invite_token).ok()
 }
 
 fn string_value(value: &serde_json::Value, key: &str) -> Option<String> {
