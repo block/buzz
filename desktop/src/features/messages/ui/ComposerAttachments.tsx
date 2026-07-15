@@ -1,7 +1,15 @@
 import * as React from "react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { Bot, FileText, HatGlasses, Pencil, Play, X } from "lucide-react";
+import {
+  Bot,
+  FileText,
+  HatGlasses,
+  Pencil,
+  Play,
+  Users,
+  X,
+} from "lucide-react";
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
@@ -66,29 +74,40 @@ function formatAttachmentSize(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function isAgentSnapshot(attachment: ImetaMedia): boolean {
+type SnapshotKind = "agent" | "team";
+
+function getSnapshotKind(attachment: ImetaMedia): SnapshotKind | null {
   const filename = attachment.filename?.toLowerCase();
-  return (
-    attachment.sha256.length === 64 &&
-    (filename?.endsWith(".agent.png") === true ||
-      filename?.endsWith(".agent.json") === true)
-  );
+  if (attachment.sha256.length !== 64) return null;
+  if (filename?.endsWith(".agent.png") || filename?.endsWith(".agent.json")) {
+    return "agent";
+  }
+  if (filename?.endsWith(".team.png") || filename?.endsWith(".team.json")) {
+    return "team";
+  }
+  return null;
 }
 
-function ComposerAgentSnapshotCard({
+function ComposerSnapshotCard({
   attachment,
   onRemove,
+  snapshotKind,
 }: {
   attachment: ImetaMedia;
   onRemove: (url: string) => void;
+  snapshotKind: SnapshotKind;
 }) {
   const [thumbError, setThumbError] = React.useState(false);
-  const isPng = attachment.filename?.toLowerCase().endsWith(".agent.png");
-  const showThumb = isPng && !thumbError;
+  const isAgentPng =
+    snapshotKind === "agent" &&
+    attachment.filename?.toLowerCase().endsWith(".agent.png");
+  const showThumb = isAgentPng && !thumbError;
+  const SnapshotIcon = snapshotKind === "team" ? Users : Bot;
+  const fallbackLabel = snapshotKind === "team" ? "Team" : "Agent";
   const displayName =
     attachment.displayLabel?.trim() ||
-    attachment.filename?.replace(/\.agent\.(?:png|json)$/i, "") ||
-    "Agent";
+    attachment.filename?.replace(/\.(?:agent|team)\.(?:png|json)$/i, "") ||
+    fallbackLabel;
 
   return (
     <motion.div
@@ -101,7 +120,7 @@ function ComposerAgentSnapshotCard({
     >
       <Attachment
         className="w-fit max-w-full shadow-none"
-        data-testid="composer-agent-snapshot-card"
+        data-testid={`composer-${snapshotKind}-snapshot-card`}
         size="sm"
       >
         <AttachmentMedia
@@ -128,7 +147,7 @@ function ComposerAgentSnapshotCard({
               />
             </>
           ) : (
-            <Bot />
+            <SnapshotIcon />
           )}
         </AttachmentMedia>
         <AttachmentContent>
@@ -143,7 +162,7 @@ function ComposerAgentSnapshotCard({
           <AttachmentAction
             aria-label={`Remove ${displayName}`}
             className="border-0 bg-transparent text-muted-foreground/70 shadow-none hover:text-foreground hover:shadow-none focus-visible:bg-muted focus-visible:ring-0"
-            data-testid="composer-agent-snapshot-remove"
+            data-testid={`composer-${snapshotKind}-snapshot-remove`}
             onClick={() => onRemove(attachment.url)}
             title="Remove"
             type="button"
@@ -516,12 +535,14 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
             const isImage = attachment.type.startsWith("image/");
             const isFile = !isVideo && !isImage;
 
-            if (isAgentSnapshot(attachment)) {
+            const snapshotKind = getSnapshotKind(attachment);
+            if (snapshotKind) {
               return (
-                <ComposerAgentSnapshotCard
+                <ComposerSnapshotCard
                   attachment={attachment}
                   key={attachment.url}
                   onRemove={onRemove}
+                  snapshotKind={snapshotKind}
                 />
               );
             }

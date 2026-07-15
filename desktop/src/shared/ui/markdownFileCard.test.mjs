@@ -301,7 +301,7 @@ test("resolveSnapshotCard: .team.png with image/png returns team snapshot card",
   );
   assert.ok(card !== null);
   assert.equal(card.snapshotKind, "team");
-  assert.ok(card.thumb != null, "PNG team card must have a thumb");
+  assert.equal(card.thumb, undefined);
 });
 
 test("resolveSnapshotCard: plain .team without suffix is not a snapshot", () => {

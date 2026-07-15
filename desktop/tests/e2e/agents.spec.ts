@@ -796,6 +796,45 @@ test("custom personas share with people and keep export separate", async ({
   const emptyRecipientFieldWidth =
     (await recipientField.boundingBox())?.width ?? 0;
   await recipientSearch.click();
+  const recipientPopover = page.getByTestId("persona-share-recipient-popover");
+  await expect(recipientPopover).toBeVisible();
+  await page.evaluate(() => {
+    const content = document.querySelector(
+      '[data-testid="persona-share-recipient-popover"]',
+    );
+    if (!content) throw new Error("Recipient popover is not mounted");
+
+    const stateChanges: string[] = [];
+    const observer = new MutationObserver(() => {
+      stateChanges.push(content.getAttribute("data-state") ?? "unmounted");
+    });
+    observer.observe(content, {
+      attributeFilter: ["data-state"],
+      attributes: true,
+    });
+    (
+      window as Window & {
+        __BUZZ_RECIPIENT_POPOVER_OBSERVER__?: MutationObserver;
+        __BUZZ_RECIPIENT_POPOVER_STATE_CHANGES__?: string[];
+      }
+    ).__BUZZ_RECIPIENT_POPOVER_OBSERVER__ = observer;
+    (
+      window as Window & {
+        __BUZZ_RECIPIENT_POPOVER_STATE_CHANGES__?: string[];
+      }
+    ).__BUZZ_RECIPIENT_POPOVER_STATE_CHANGES__ = stateChanges;
+  });
+  await recipientSearch.click();
+  await waitForAnimations(page);
+  const recipientPopoverStateChanges = await page.evaluate(() => {
+    const trackedWindow = window as Window & {
+      __BUZZ_RECIPIENT_POPOVER_OBSERVER__?: MutationObserver;
+      __BUZZ_RECIPIENT_POPOVER_STATE_CHANGES__?: string[];
+    };
+    trackedWindow.__BUZZ_RECIPIENT_POPOVER_OBSERVER__?.disconnect();
+    return trackedWindow.__BUZZ_RECIPIENT_POPOVER_STATE_CHANGES__ ?? [];
+  });
+  expect(recipientPopoverStateChanges).not.toContain("closed");
   const recipientList = page.getByTestId("persona-share-recipient-results");
   await expect(recipientList).toBeVisible();
   await expect
@@ -873,6 +912,7 @@ test("custom personas share with people and keep export separate", async ({
     `persona-share-recipient-chip-${TEST_IDENTITIES.bob.pubkey}`,
   );
   await expect(bobChip).toBeVisible();
+  await expect(bobChip).not.toHaveClass(/buzz-poof-trigger/);
   await waitForAnimations(page);
   const bobChipBox = await bobChip.boundingBox();
   expect(bobChipBox).not.toBeNull();
@@ -883,18 +923,7 @@ test("custom personas share with people and keep export separate", async ({
   };
   await page.mouse.move(removePointer.x, removePointer.y);
   await page.mouse.down();
-  const poofBurst = page.locator(".buzz-poof-burst").last();
-  await expect(poofBurst).toBeVisible();
-  const poofOrigin = await poofBurst.evaluate((element) => ({
-    x: Number.parseFloat(
-      getComputedStyle(element).getPropertyValue("--buzz-poof-x"),
-    ),
-    y: Number.parseFloat(
-      getComputedStyle(element).getPropertyValue("--buzz-poof-y"),
-    ),
-  }));
-  expect(Math.abs(poofOrigin.x - removePointer.x)).toBeLessThanOrEqual(0.5);
-  expect(Math.abs(poofOrigin.y - removePointer.y)).toBeLessThanOrEqual(0.5);
+  await expect(page.locator(".buzz-poof-burst")).toHaveCount(0);
   await page.mouse.up();
   await expect(bobChip).toHaveCount(0);
 
@@ -1109,19 +1138,26 @@ test("share access controls include the selected memories", async ({
   await expect(memoryConfirmation).toContainText(
     "Only share with people you trust.",
   );
-  const encodeCountBeforeLinkConfirmation = await page.evaluate(
-    () =>
+  const encodeLevelsBeforeLinkConfirmation = await page.evaluate(() =>
+    (
       (
         window as Window & {
-          __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: { memoryLevel?: string };
+          }>;
         }
-      ).__BUZZ_E2E_COMMAND_LOG__?.filter(
-        (entry) => entry.command === "encode_agent_snapshot_for_send",
-      ).length ?? 0,
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+    )
+      .filter((entry) => entry.command === "encode_agent_snapshot_for_send")
+      .map((entry) => entry.payload.memoryLevel),
   );
-  expect(encodeCountBeforeLinkConfirmation).toBe(0);
+  expect(encodeLevelsBeforeLinkConfirmation).toContain("none");
+  expect(encodeLevelsBeforeLinkConfirmation).not.toContain("core");
   await memoryConfirmation.getByTestId("persona-share-memory-confirm").click();
-  await expect(page.getByText("Link copied")).toBeVisible();
+  await expect(page.getByTestId("persona-share-copy-link")).toContainText(
+    "Copied",
+  );
   await linkAccess.click();
   await page
     .getByRole("menuitemradio", { name: "Agent only", exact: true })
@@ -1210,17 +1246,23 @@ test("share access controls include the selected memories", async ({
   await expect(memoryConfirmation).toContainText(
     "Charlie—and anyone with the file link—can view it.",
   );
-  const encodeCountBeforeSendConfirmation = await page.evaluate(
-    () =>
+  const encodeLevelsBeforeSendConfirmation = await page.evaluate(() =>
+    (
       (
         window as Window & {
-          __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: { memoryLevel?: string };
+          }>;
         }
-      ).__BUZZ_E2E_COMMAND_LOG__?.filter(
-        (entry) => entry.command === "encode_agent_snapshot_for_send",
-      ).length ?? 0,
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+    )
+      .filter((entry) => entry.command === "encode_agent_snapshot_for_send")
+      .map((entry) => entry.payload.memoryLevel),
   );
-  expect(encodeCountBeforeSendConfirmation).toBe(1);
+  expect(encodeLevelsBeforeSendConfirmation).toContain("none");
+  expect(encodeLevelsBeforeSendConfirmation).toContain("core");
+  expect(encodeLevelsBeforeSendConfirmation).not.toContain("everything");
   await memoryConfirmation.getByTestId("persona-share-memory-confirm").click();
   await expect(
     page.getByText("Sent a copy of Animation Auditor"),
@@ -1240,16 +1282,23 @@ test("share access controls include the selected memories", async ({
       .filter((entry) => entry.command === "encode_agent_snapshot_for_send")
       .map((entry) => entry.payload),
   );
-  expect(encodePayloads).toEqual([
-    expect.objectContaining({
-      memoryLevel: "core",
-      memorySourcePubkey: linkedAgentPubkey,
-    }),
-    expect.objectContaining({
-      memoryLevel: "everything",
-      memorySourcePubkey: linkedAgentPubkey,
-    }),
-  ]);
+  expect(
+    encodePayloads.filter(
+      (payload) => (payload as { memoryLevel?: string }).memoryLevel === "none",
+    ),
+  ).toHaveLength(1);
+  expect(encodePayloads).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        memoryLevel: "core",
+        memorySourcePubkey: linkedAgentPubkey,
+      }),
+      expect.objectContaining({
+        memoryLevel: "everything",
+        memorySourcePubkey: linkedAgentPubkey,
+      }),
+    ]),
+  );
 });
 
 test("people sharing waits for relay identity and excludes the moderation recipient", async ({

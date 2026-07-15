@@ -36,6 +36,7 @@ export function PersonaShareRecipients({
   open,
   renderEndControl,
   selectedUsers,
+  testIdPrefix = "persona-share",
 }: {
   disabled: boolean;
   excludedPubkeys?: readonly string[];
@@ -43,9 +44,11 @@ export function PersonaShareRecipients({
   open: boolean;
   renderEndControl?: (onOpenChange: (open: boolean) => void) => React.ReactNode;
   selectedUsers: UserSearchResult[];
+  testIdPrefix?: string;
 }) {
   const [searchQuery, setSearchQuery] = React.useState("");
   const [isPickerOpen, setIsPickerOpen] = React.useState(false);
+  const recipientFieldRef = React.useRef<HTMLDivElement>(null);
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const deferredSearchQuery = React.useDeferredValue(searchQuery.trim());
   const identityQuery = useIdentityQuery();
@@ -138,16 +141,17 @@ export function PersonaShareRecipients({
           {/* biome-ignore lint/a11y/useKeyWithClickEvents: clicking the shell focuses the nested search input */}
           <div
             className="grid min-h-10 min-w-0 cursor-text grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 rounded-md border border-input bg-background px-2 py-1.5 focus-within:ring-1 focus-within:ring-ring"
-            data-testid="persona-share-recipient-field"
+            data-testid={`${testIdPrefix}-recipient-field`}
             onClick={() => {
               if (disabled) return;
               setIsPickerOpen(true);
               searchInputRef.current?.focus({ preventScroll: true });
             }}
+            ref={recipientFieldRef}
           >
             <div
               className="flex min-w-0 flex-wrap items-center gap-1.5"
-              data-testid="persona-share-recipient-input-region"
+              data-testid={`${testIdPrefix}-recipient-input-region`}
             >
               {selectedUsers.length === 0 ? (
                 <Search className="h-4 w-4 shrink-0 text-muted-foreground/55" />
@@ -159,22 +163,23 @@ export function PersonaShareRecipients({
                   key={user.pubkey}
                   label={formatShareRecipientName(user)}
                   onRemove={() => removeUser(user.pubkey)}
+                  poofOnRemove={false}
                   testIds={{
-                    chip: `persona-share-recipient-chip-${user.pubkey}`,
+                    chip: `${testIdPrefix}-recipient-chip-${user.pubkey}`,
                   }}
                   user={user}
                 />
               ))}
               <input
                 aria-autocomplete="list"
-                aria-controls="persona-share-recipient-results"
+                aria-controls={`${testIdPrefix}-recipient-results`}
                 aria-expanded={isPickerOpen && !disabled}
                 aria-label="Share with"
                 autoCapitalize="none"
                 autoComplete="off"
                 autoCorrect="off"
                 className="h-7 min-w-16 flex-1 border-0 bg-transparent p-0 text-sm outline-hidden placeholder:text-muted-foreground/55"
-                data-testid="persona-share-recipient-search"
+                data-testid={`${testIdPrefix}-recipient-search`}
                 disabled={disabled || selectedUsers.length >= RECIPIENT_LIMIT}
                 onChange={(event) => {
                   setSearchQuery(event.target.value);
@@ -233,15 +238,24 @@ export function PersonaShareRecipients({
         <PopoverContent
           align="start"
           className="w-(--radix-popover-trigger-width) overflow-hidden p-0"
-          data-testid="persona-share-recipient-popover"
+          data-testid={`${testIdPrefix}-recipient-popover`}
           onCloseAutoFocus={(event) => event.preventDefault()}
+          onInteractOutside={(event) => {
+            const target = event.detail.originalEvent.target;
+            if (
+              target instanceof Element &&
+              recipientFieldRef.current?.contains(target)
+            ) {
+              event.preventDefault();
+            }
+          }}
           onOpenAutoFocus={(event) => event.preventDefault()}
           sideOffset={6}
         >
           <div
             className="max-h-64 overflow-y-auto overscroll-contain py-1"
-            data-testid="persona-share-recipient-results"
-            id="persona-share-recipient-results"
+            data-testid={`${testIdPrefix}-recipient-results`}
+            id={`${testIdPrefix}-recipient-results`}
             onScroll={handleDirectoryScroll}
             onTouchMoveCapture={(event) => event.stopPropagation()}
             onWheelCapture={(event) => event.stopPropagation()}
@@ -265,7 +279,7 @@ export function PersonaShareRecipients({
                 <button
                   aria-label={`Add ${formatShareRecipientName(user)}`}
                   className="flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-hidden"
-                  data-testid={`persona-share-recipient-option-${user.pubkey}`}
+                  data-testid={`${testIdPrefix}-recipient-option-${user.pubkey}`}
                   key={user.pubkey}
                   onClick={() => selectUser(user)}
                   role="option"

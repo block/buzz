@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Bot, Download, Loader2 } from "lucide-react";
+import { Bot, Download, Loader2, Users } from "lucide-react";
 
 import { invokeTauri } from "@/shared/api/tauri";
 import { fetchSnapshotBytes } from "@/shared/api/tauriMedia";
@@ -106,6 +106,7 @@ export function AgentSnapshotCard({
   }
 
   const isFetching = importState.phase === "fetching";
+  const SnapshotIcon = snapshotKind === "team" ? Users : Bot;
   const showThumb = !!thumb && !thumbError;
   const formattedSize =
     size == null
@@ -152,7 +153,7 @@ export function AgentSnapshotCard({
             />
           </>
         ) : (
-          <Bot />
+          <SnapshotIcon />
         )}
       </AttachmentMedia>
       <AttachmentContent>
@@ -200,7 +201,7 @@ export function AgentSnapshotCard({
           type="button"
           variant="default"
         >
-          {isFetching ? <Loader2 className="animate-spin" /> : <Bot />}
+          {isFetching ? <Loader2 className="animate-spin" /> : <SnapshotIcon />}
           {isFetching
             ? "Loading…"
             : snapshotKind === "team"

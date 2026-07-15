@@ -1,12 +1,14 @@
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import type { ImetaMedia } from "./imetaMediaMarkdown";
 
+// Keep the original attribute name for clipboard compatibility. The payload
+// now accepts both agent and team snapshot filenames.
 const CLIPBOARD_ATTRIBUTE = "data-buzz-agent-snapshot";
 const MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024;
 const MAX_DISPLAY_NAME_LENGTH = 200;
 const MAX_FILENAME_LENGTH = 255;
 
-type AgentSnapshotClipboardPayload = {
+type SnapshotClipboardPayload = {
   version: 1;
   displayName: string;
   filename: string;
@@ -38,17 +40,19 @@ function isSafeSnapshotUrl(value: string): boolean {
 }
 
 /** Build Buzz-specific clipboard HTML with the raw URL as its visible link. */
-export function buildAgentSnapshotClipboardHtml({
+export function buildSnapshotClipboardHtml({
   attachment,
   displayName,
+  snapshotKind,
 }: {
   attachment: ImetaMedia;
   displayName: string;
+  snapshotKind: "agent" | "team";
 }): string {
-  const payload: AgentSnapshotClipboardPayload = {
+  const payload: SnapshotClipboardPayload = {
     version: 1,
     displayName,
-    filename: attachment.filename ?? "agent.agent.png",
+    filename: attachment.filename ?? `shared.${snapshotKind}.png`,
     sha256: attachment.sha256,
     size: attachment.size,
     type: attachment.type,
@@ -59,18 +63,28 @@ export function buildAgentSnapshotClipboardHtml({
   return `<a ${CLIPBOARD_ATTRIBUTE}="${encodedPayload}" href="${escapeHtml(attachment.url)}">${escapeHtml(displayName)}</a>`;
 }
 
+export function buildAgentSnapshotClipboardHtml(
+  input: Omit<Parameters<typeof buildSnapshotClipboardHtml>[0], "snapshotKind">,
+): string {
+  return buildSnapshotClipboardHtml({ ...input, snapshotKind: "agent" });
+}
+
+export function buildTeamSnapshotClipboardHtml(
+  input: Omit<Parameters<typeof buildSnapshotClipboardHtml>[0], "snapshotKind">,
+): string {
+  return buildSnapshotClipboardHtml({ ...input, snapshotKind: "team" });
+}
+
 /**
- * Restore a copied agent snapshot as composer attachment state.
+ * Restore a copied agent or team snapshot as composer attachment state.
  *
  * Clipboard HTML is untrusted input, so every field is checked before it can
- * become an outbound imeta tag. Invalid or non-agent payloads fall through to
+ * become an outbound imeta tag. Invalid or non-snapshot payloads fall through to
  * the composer's normal paste behavior.
  */
-export function parseAgentSnapshotClipboardHtml(
-  html: string,
-): ImetaMedia | null {
+export function parseSnapshotClipboardHtml(html: string): ImetaMedia | null {
   const match = html.match(
-    /\bdata-buzz-agent-snapshot=(?:"([^"]+)"|'([^']+)')/i,
+    new RegExp(`\\b${CLIPBOARD_ATTRIBUTE}=(?:"([^"]+)"|'([^']+)')`, "i"),
   );
   const encodedPayload = match?.[1] ?? match?.[2];
   if (!encodedPayload) return null;
@@ -83,7 +97,7 @@ export function parseAgentSnapshotClipboardHtml(
   }
 
   if (!payload || typeof payload !== "object") return null;
-  const candidate = payload as Partial<AgentSnapshotClipboardPayload>;
+  const candidate = payload as Partial<SnapshotClipboardPayload>;
   const displayName = candidate.displayName?.trim();
   const filename = candidate.filename?.trim();
   const sha256 = candidate.sha256?.trim().toLowerCase();
@@ -96,7 +110,7 @@ export function parseAgentSnapshotClipboardHtml(
     filename.length > MAX_FILENAME_LENGTH ||
     filename.includes("/") ||
     filename.includes("\\") ||
-    !filename.toLowerCase().endsWith(".agent.png") ||
+    !/\.(?:agent|team)\.png$/i.test(filename) ||
     !sha256 ||
     !/^[0-9a-f]{64}$/.test(sha256) ||
     typeof candidate.size !== "number" ||
@@ -121,15 +135,17 @@ export function parseAgentSnapshotClipboardHtml(
   };
 }
 
+export const parseAgentSnapshotClipboardHtml = parseSnapshotClipboardHtml;
+
 /** Convert a Buzz snapshot clipboard payload into one pending attachment. */
-export function handleAgentSnapshotPaste(
+export function handleSnapshotPaste(
   event: Pick<ClipboardEvent, "clipboardData" | "preventDefault">,
   setPendingImeta: (
     update: (current: BlobDescriptor[]) => BlobDescriptor[],
   ) => void,
 ): boolean {
   const html = event.clipboardData?.getData("text/html") ?? "";
-  const pastedSnapshot = parseAgentSnapshotClipboardHtml(html);
+  const pastedSnapshot = parseSnapshotClipboardHtml(html);
   if (!pastedSnapshot) return false;
 
   event.preventDefault();
@@ -144,3 +160,5 @@ export function handleAgentSnapshotPaste(
   );
   return true;
 }
+
+export const handleAgentSnapshotPaste = handleSnapshotPaste;

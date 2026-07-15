@@ -13,6 +13,7 @@ import { AgentSnapshotExportDialog } from "./AgentSnapshotExportDialog";
 import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
 import { TeamSnapshotExportDialog } from "./TeamSnapshotExportDialog";
 import { TeamSnapshotImportDialog } from "./TeamSnapshotImportDialog";
+import { TeamShareDialog } from "./TeamShareDialog";
 import { RelayDirectorySection } from "./RelayDirectorySection";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
@@ -172,7 +173,7 @@ export function AgentsView() {
               onDuplicate={teamActions.openDuplicateDialog}
               onEdit={teamActions.openEditDialog}
               onAddToChannel={teamActions.setTeamToAddToChannel}
-              onExport={teamActions.openExportSnapshot}
+              onShare={teamActions.openShare}
               onImport={() => {
                 teamImportInputRef.current?.click();
               }}
@@ -428,6 +429,29 @@ export function AgentsView() {
           open={teamActions.teamToAddToChannel !== null}
           personas={personas.libraryPersonas}
           team={teamActions.teamToAddToChannel}
+        />
+      ) : null}
+      {teamActions.teamToShare ? (
+        <TeamShareDialog
+          isPending={
+            teamActions.createTeamMutation.isPending ||
+            teamActions.updateTeamMutation.isPending ||
+            teamActions.deleteTeamMutation.isPending
+          }
+          onExport={() => {
+            if (teamActions.teamToShare) {
+              const team = teamActions.teamToShare;
+              teamActions.setTeamToShare(null);
+              teamActions.openExportSnapshot(team);
+            }
+          }}
+          onOpenChange={(open) => {
+            if (!open) {
+              teamActions.setTeamToShare(null);
+            }
+          }}
+          open={teamActions.teamToShare !== null}
+          team={teamActions.teamToShare}
         />
       ) : null}
       {teamActions.teamToExport ? (

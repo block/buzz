@@ -111,9 +111,9 @@ export function resolveSnapshotCard(
     size: entry.size,
     sha256,
     snapshotKind,
-    // PNG snapshots use the attachment URL as the thumb source because it is
-    // the avatar card image. JSON snapshots use the generic icon.
-    thumb: isAnyPng ? rewriteRelayUrl(href) : undefined,
+    // Agent PNG snapshots carry the avatar card image. Team PNG snapshots use
+    // a transport placeholder, so render the team icon instead of that image.
+    thumb: isPng ? rewriteRelayUrl(href) : undefined,
   };
 }
 
