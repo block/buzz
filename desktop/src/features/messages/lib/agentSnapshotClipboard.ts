@@ -4,7 +4,8 @@ import type { ImetaMedia } from "./imetaMediaMarkdown";
 // Keep the original attribute name for clipboard compatibility. The payload
 // now accepts both agent and team snapshot filenames.
 const CLIPBOARD_ATTRIBUTE = "data-buzz-agent-snapshot";
-const MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024;
+const MAX_AGENT_SNAPSHOT_BYTES = 10 * 1024 * 1024;
+const MAX_TEAM_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const MAX_DISPLAY_NAME_LENGTH = 200;
 const MAX_FILENAME_LENGTH = 255;
 
@@ -101,6 +102,9 @@ export function parseSnapshotClipboardHtml(html: string): ImetaMedia | null {
   const displayName = candidate.displayName?.trim();
   const filename = candidate.filename?.trim();
   const sha256 = candidate.sha256?.trim().toLowerCase();
+  const maxSnapshotBytes = filename?.toLowerCase().endsWith(".team.png")
+    ? MAX_TEAM_SNAPSHOT_BYTES
+    : MAX_AGENT_SNAPSHOT_BYTES;
 
   if (
     candidate.version !== 1 ||
@@ -116,7 +120,7 @@ export function parseSnapshotClipboardHtml(html: string): ImetaMedia | null {
     typeof candidate.size !== "number" ||
     !Number.isInteger(candidate.size) ||
     candidate.size <= 0 ||
-    candidate.size > MAX_SNAPSHOT_BYTES ||
+    candidate.size > maxSnapshotBytes ||
     candidate.type !== "image/png" ||
     typeof candidate.url !== "string" ||
     !isSafeSnapshotUrl(candidate.url)

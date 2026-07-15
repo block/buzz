@@ -62,6 +62,23 @@ test("copied team HTML restores a labeled snapshot attachment", () => {
   });
 });
 
+test("copied team HTML accepts snapshots above the agent size cap", () => {
+  const teamSize = 11 * 1024 * 1024;
+  const html = buildTeamSnapshotClipboardHtml({
+    attachment: {
+      filename: "design-review.team.png",
+      sha256: SHA256,
+      size: teamSize,
+      type: "image/png",
+      uploaded: 1,
+      url: URL,
+    },
+    displayName: "Design Review",
+  });
+
+  assert.equal(parseAgentSnapshotClipboardHtml(html)?.size, teamSize);
+});
+
 test("copied agent HTML escapes its visible link and name", () => {
   const html = buildAgentSnapshotClipboardHtml({
     attachment: {
@@ -80,10 +97,22 @@ test("copied agent HTML escapes its visible link and name", () => {
 });
 
 test("invalid copied snapshot metadata falls through to normal paste", () => {
+  const oversizedTeamHtml = buildTeamSnapshotClipboardHtml({
+    attachment: {
+      filename: "design-review.team.png",
+      sha256: SHA256,
+      size: 51 * 1024 * 1024,
+      type: "image/png",
+      uploaded: 1,
+      url: URL,
+    },
+    displayName: "Design Review",
+  });
   const invalid = [
     buildHtml({ sha256: "short" }),
     buildHtml({ filename: "not-an-agent.png" }),
     buildHtml({ size: 11 * 1024 * 1024 }),
+    oversizedTeamHtml,
     buildHtml({ type: "text/html" }),
     buildHtml({ url: "javascript:alert(1)" }),
     buildHtml({ url: `${URL})[hidden](https://attacker.example` }),
