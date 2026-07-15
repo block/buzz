@@ -1,6 +1,7 @@
 import {
   Check,
   CircleDot,
+  FolderGit2,
   GitCommitHorizontal,
   GitPullRequest,
   MessageSquare,
@@ -32,6 +33,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type ActivityKind =
+  | "repository"
   | "commit"
   | "pull-request"
   | "issue"
@@ -40,6 +42,7 @@ type ActivityKind =
   | "review-request";
 
 type ActivityTarget =
+  | { type: "project"; project: Project }
   | { type: "commit"; project: Project; commitHash: string }
   | {
       type: "pull-request";
@@ -89,6 +92,12 @@ const KIND_VISUALS: Record<
     detailClassName: string;
   }
 > = {
+  repository: {
+    icon: FolderGit2,
+    iconClassName: "text-primary",
+    badgeClassName: "bg-primary/10 text-primary",
+    detailClassName: "border-primary/30 text-primary",
+  },
   commit: {
     icon: GitCommitHorizontal,
     iconClassName: "text-primary",
@@ -148,6 +157,21 @@ function buildActivityItems({
   "issues" | "projects" | "pullRequests" | "snapshots"
 >) {
   const items: ProjectActivityItem[] = [];
+
+  for (const project of projects) {
+    items.push({
+      id: `repository:${project.id}`,
+      kind: "repository",
+      createdAt: project.createdAt,
+      actorPubkey: project.owner,
+      actorName: null,
+      action: "created the repository",
+      title: project.name,
+      body: contentPreview(project.description),
+      detail: null,
+      target: { type: "project", project },
+    });
+  }
 
   for (const project of projects) {
     const snapshot = snapshots?.[project.id];
@@ -464,7 +488,9 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
               compact={props.compact === true}
               item={item}
               onOpen={() => {
-                if (item.target.type === "commit") {
+                if (item.target.type === "project") {
+                  props.onOpenProject(item.target.project);
+                } else if (item.target.type === "commit") {
                   props.onOpenCommit(
                     item.target.project,
                     item.target.commitHash,
