@@ -335,23 +335,16 @@ pub struct TermsAcceptancePayload {
     pub c: String,
     /// Configured policy version.
     pub v: String,
-    /// Unique receipt identifier.
-    pub j: String,
-    /// Acceptance timestamp (unix seconds).
-    pub a: u64,
     /// Receipt expiry (unix seconds).
     pub e: u64,
 }
 
 /// Mint a relay-authenticated, invite-bound terms acceptance receipt.
 pub fn mint_terms_acceptance(key: &[u8; 32], code: &str, version: &str) -> String {
-    let accepted_at = now_unix();
     let payload = TermsAcceptancePayload {
         c: hex::encode(Sha256::digest(code.as_bytes())),
         v: version.to_string(),
-        j: uuid::Uuid::new_v4().to_string(),
-        a: accepted_at,
-        e: accepted_at + 10 * 60,
+        e: now_unix() + 10 * 60,
     };
     let bytes = serde_json::to_vec(&payload).expect("terms acceptance serializes");
     format!(

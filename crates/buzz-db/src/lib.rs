@@ -2651,26 +2651,6 @@ impl Db {
         relay_members::add_relay_member(&self.pool, community, pubkey, role, added_by).await
     }
 
-    /// Durably records an invite terms acceptance receipt.
-    pub async fn record_invite_terms_acceptance(
-        &self,
-        receipt_id: uuid::Uuid,
-        community: CommunityId,
-        pubkey: &str,
-        policy_version: &str,
-        accepted_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<()> {
-        relay_members::record_invite_terms_acceptance(
-            &self.pool,
-            receipt_id,
-            community,
-            pubkey,
-            policy_version,
-            accepted_at,
-        )
-        .await
-    }
-
     /// Removes a relay member from `community` atomically, refusing to delete the owner.
     pub async fn remove_relay_member(
         &self,

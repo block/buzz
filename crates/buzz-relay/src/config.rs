@@ -28,6 +28,8 @@ pub enum ConfigError {
 pub struct InviteTermsConfig {
     /// Public HTTPS URL containing the operator's terms.
     pub url: url::Url,
+    /// Optional public HTTPS URL containing the operator's privacy policy.
+    pub privacy_url: Option<url::Url>,
     /// Stable operator-defined identifier for the exact terms revision.
     pub version: String,
 }
@@ -263,6 +265,21 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
             "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTPS /v1/deliveries/apns URL without credentials, query, or fragment"
                 .to_string(),
         ));
+    }
+    Ok(url)
+}
+
+fn parse_invite_policy_url(name: &str, raw: &str) -> Result<url::Url, ConfigError> {
+    let url = url::Url::parse(raw)
+        .map_err(|e| ConfigError::InvalidValue(format!("{name} must be a valid HTTPS URL: {e}")))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || url.username() != ""
+        || url.password().is_some()
+    {
+        return Err(ConfigError::InvalidValue(format!(
+            "{name} must be an HTTPS URL without credentials"
+        )));
     }
     Ok(url)
 }
@@ -621,30 +638,36 @@ impl Config {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
+        let invite_privacy_url = std::env::var("BUZZ_INVITE_PRIVACY_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
         let invite_terms = match (invite_terms_url, invite_terms_version) {
-            (None, None) => None,
+            (None, None) => {
+                if invite_privacy_url.is_some() {
+                    return Err(ConfigError::InvalidValue(
+                        "BUZZ_INVITE_PRIVACY_URL requires BUZZ_INVITE_TERMS_URL and BUZZ_INVITE_TERMS_VERSION"
+                            .to_string(),
+                    ));
+                }
+                None
+            }
             (Some(raw_url), Some(version)) => {
                 if version.len() > 128 {
                     return Err(ConfigError::InvalidValue(
                         "BUZZ_INVITE_TERMS_VERSION must contain at most 128 bytes".to_string(),
                     ));
                 }
-                let url = url::Url::parse(&raw_url).map_err(|e| {
-                    ConfigError::InvalidValue(format!(
-                        "BUZZ_INVITE_TERMS_URL must be a valid HTTPS URL: {e}"
-                    ))
-                })?;
-                if url.scheme() != "https"
-                    || url.host_str().is_none()
-                    || url.username() != ""
-                    || url.password().is_some()
-                {
-                    return Err(ConfigError::InvalidValue(
-                        "BUZZ_INVITE_TERMS_URL must be an HTTPS URL without credentials"
-                            .to_string(),
-                    ));
-                }
-                Some(InviteTermsConfig { url, version })
+                let url = parse_invite_policy_url("BUZZ_INVITE_TERMS_URL", &raw_url)?;
+                let privacy_url = invite_privacy_url
+                    .as_deref()
+                    .map(|raw| parse_invite_policy_url("BUZZ_INVITE_PRIVACY_URL", raw))
+                    .transpose()?;
+                Some(InviteTermsConfig {
+                    url,
+                    privacy_url,
+                    version,
+                })
             }
             _ => {
                 return Err(ConfigError::InvalidValue(

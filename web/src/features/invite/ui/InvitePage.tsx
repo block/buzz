@@ -4,13 +4,14 @@ import { Button } from "@/shared/ui/button";
 import * as React from "react";
 
 const DOWNLOAD_URL = "https://github.com/block/buzz/releases/latest";
-type Terms = { url: string; version: string };
+type Terms = { url: string; privacy_url?: string; version: string };
 
 /** Landing page for a community invite link (`/invite/<code>`). */
 export function InvitePage({ code }: { code: string }) {
   const relay = relayWsUrl();
   const host = relay.replace(/^wss?:\/\//, "");
   const [terms, setTerms] = React.useState<Terms | null | undefined>(undefined);
+  const [ageConfirmed, setAgeConfirmed] = React.useState(false);
   const [opening, setOpening] = React.useState(false);
 
   React.useEffect(() => {
@@ -34,7 +35,7 @@ export function InvitePage({ code }: { code: string }) {
           body: JSON.stringify({
             code,
             policy_version: terms.version,
-            accepted: true,
+            age_confirmed: ageConfirmed,
           }),
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -48,7 +49,8 @@ export function InvitePage({ code }: { code: string }) {
     }
   };
 
-  const disabled = terms === undefined || opening;
+  const disabled =
+    terms === undefined || opening || (terms !== null && !ageConfirmed);
   return (
     <div
       className="flex flex-1 flex-col items-center justify-center px-4 py-16 text-center"
@@ -69,7 +71,18 @@ export function InvitePage({ code }: { code: string }) {
           </h1>
           <p className="mt-9 font-mono text-lg text-black/70">{host}</p>
 
-          <div className="mt-9">
+          {terms && (
+            <label className="mt-9 flex max-w-md cursor-pointer items-start gap-3 text-left text-sm text-black/70">
+              <input
+                className="mt-0.5 h-4 w-4 accent-black"
+                type="checkbox"
+                checked={ageConfirmed}
+                onChange={(event) => setAgeConfirmed(event.target.checked)}
+              />
+              <span>I confirm that I am at least 18 years old.</span>
+            </label>
+          )}
+          <div className={terms ? "mt-5" : "mt-9"}>
             {terms === null ? (
               <Button
                 asChild
@@ -104,6 +117,20 @@ export function InvitePage({ code }: { code: string }) {
               >
                 Terms of Service
               </a>
+              {terms.privacy_url && (
+                <>
+                  {" "}
+                  and{" "}
+                  <a
+                    className="text-black underline-offset-4 hover:text-black/70 hover:decoration-current hover:underline focus-visible:underline"
+                    href={terms.privacy_url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Privacy Policy
+                  </a>
+                </>
+              )}
               .
             </p>
           )}
