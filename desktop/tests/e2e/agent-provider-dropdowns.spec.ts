@@ -24,11 +24,16 @@ import { waitForAnimations } from "../helpers/animations";
 const SHOTS = "test-results/screenshots-dialogs";
 
 /**
- * Navigate to the agents view and wait for the global agent config card to
- * finish its async load (spinner gone, card content visible).
+ * Open Settings → Agents through the app UI and wait for the defaults card to
+ * finish loading. The CI static server does not provide SPA fallbacks for a
+ * direct `/settings` request.
  */
 async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
-  await page.goto("/settings?section=agents");
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await page.getByTestId("settings-nav-agents").click();
   await expect(page.getByTestId("settings-global-agent-config")).toBeVisible({
     timeout: 10_000,
   });

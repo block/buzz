@@ -12,12 +12,16 @@ async function settleAnimations(page: import("@playwright/test").Page) {
 }
 
 /**
- * Open Settings → Agents directly and wait for the defaults card to load.
- * Direct routing keeps this helper stable when the managed-agents feature gate
- * hides the sidebar entry in a mocked state.
+ * Open Settings → Agents through the app UI and wait for the defaults card to
+ * load. CI serves the built SPA with a static file server, so navigating to
+ * `/settings` directly returns a 404 before the client router can start.
  */
 async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
-  await page.goto("/settings?section=agents");
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await page.getByTestId("settings-nav-agents").click();
   await expect(page.getByTestId("settings-global-agent-config")).toBeVisible({
     timeout: 10_000,
   });
