@@ -169,12 +169,10 @@ pub struct Config {
 
     /// Root directory for the relay's local git scratch. No per-repo bare repos
     /// or persistent git state live here — runtime reads/writes hydrate
-    /// ephemeral repos from object storage per request, and repo-name
-    /// uniqueness now lives in Postgres (`git_repo_names`), not on disk. Retained
-    /// for ephemeral working space and env compatibility; the relay no longer
-    /// depends on this path being persistent or shared across replicas, so it
-    /// needs no ReadWriteMany volume. (Removing the field entirely is a
-    /// follow-up cleanup once the deploy chart drops the git PVC mount.)
+    /// ephemeral repos from object storage per request, and all temporary Git
+    /// workspaces and buffered subprocess output are created beneath this path.
+    /// Repo-name uniqueness lives in Postgres (`git_repo_names`), not on disk,
+    /// so this directory need not be persistent or shared across replicas.
     pub git_repo_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
     pub git_max_pack_bytes: u64,

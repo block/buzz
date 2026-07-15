@@ -225,15 +225,16 @@ impl ParentState {
 /// HEAD or no HEAD yields an empty string.
 async fn snapshot_workspace_state(
     repo_path: &Path,
+    scratch_dir: &Path,
 ) -> Result<(BTreeMap<String, String>, String), CasError> {
     const MAX_REF_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
 
-    let refs_stdout_tmp = tempfile::NamedTempFile::new()
+    let refs_stdout_tmp = tempfile::NamedTempFile::new_in(scratch_dir)
         .map_err(|e| CasError::PackCapture(format!("for-each-ref stdout tempfile: {e}")))?;
     let refs_stdout_file = refs_stdout_tmp
         .reopen()
         .map_err(|e| CasError::PackCapture(format!("for-each-ref stdout reopen: {e}")))?;
-    let refs_stderr_tmp = tempfile::NamedTempFile::new()
+    let refs_stderr_tmp = tempfile::NamedTempFile::new_in(scratch_dir)
         .map_err(|e| CasError::PackCapture(format!("for-each-ref stderr tempfile: {e}")))?;
     let refs_stderr_file = refs_stderr_tmp
         .reopen()
@@ -325,9 +326,11 @@ async fn write_idx_sidecar(
     store: &GitStore,
     pack_key: &str,
     pack_bytes: &[u8],
+    scratch_dir: &Path,
 ) -> Result<(), CasError> {
     let pack_digest = digest_from_pack_key(pack_key)?;
-    let tempdir = TempDir::new().map_err(|e| CasError::PackCapture(format!("idx tempdir: {e}")))?;
+    let tempdir = TempDir::new_in(scratch_dir)
+        .map_err(|e| CasError::PackCapture(format!("idx tempdir in {scratch_dir:?}: {e}")))?;
     let pack_path = tempdir.path().join(format!("pack-{pack_digest}.pack"));
     tokio::fs::write(&pack_path, pack_bytes)
         .await
@@ -380,6 +383,7 @@ async fn capture_pack(
     refs_before: &BTreeMap<String, String>,
     refs_after: &BTreeMap<String, String>,
     max_pack_bytes: u64,
+    scratch_dir: &Path,
 ) -> Result<Option<Vec<u8>>, CasError> {
     // Build rev-spec stdin: positive new tips, negative old tips.
     // Deduplicate against the same-oid case — no point feeding `X ^X`.
@@ -401,12 +405,12 @@ async fn capture_pack(
         stdin_lines.push('\n');
     }
 
-    let stdout_tmp = tempfile::NamedTempFile::new()
+    let stdout_tmp = tempfile::NamedTempFile::new_in(scratch_dir)
         .map_err(|e| CasError::PackCapture(format!("pack-objects stdout tempfile: {e}")))?;
     let stdout_file = stdout_tmp
         .reopen()
         .map_err(|e| CasError::PackCapture(format!("pack-objects stdout reopen: {e}")))?;
-    let stderr_tmp = tempfile::NamedTempFile::new()
+    let stderr_tmp = tempfile::NamedTempFile::new_in(scratch_dir)
         .map_err(|e| CasError::PackCapture(format!("pack-objects stderr tempfile: {e}")))?;
     let stderr_file = stderr_tmp
         .reopen()
@@ -554,6 +558,7 @@ pub async fn cas_publish(
     owner: &str,
     repo: &str,
     parent_state: &ParentState,
+    scratch_dir: &Path,
     limits: PublishLimits,
 ) -> Result<CasSuccess, CasError> {
     let pkey = pointer_key(ctx.community(), owner, repo);
@@ -561,7 +566,7 @@ pub async fn cas_publish(
     // Snapshot post-receive-pack state from disk. `parent_state.parent.refs`
     // are the refs the workspace was hydrated from — `pack-objects --revs`
     // below uses them as the "negative" set to produce the delta pack.
-    let (refs_after, head_observed) = snapshot_workspace_state(repo_path).await?;
+    let (refs_after, head_observed) = snapshot_workspace_state(repo_path, scratch_dir).await?;
 
     // HEAD fallback: a bare repo serving pushes shouldn't have detached
     // HEAD, but if `git symbolic-ref` failed (or returned empty), inherit
@@ -583,6 +588,7 @@ pub async fn cas_publish(
         &parent_state.parent.refs,
         &refs_after,
         limits.max_pack_bytes,
+        scratch_dir,
     )
     .await?;
     let new_pack_key = if let Some(bytes) = pack_bytes {
@@ -599,7 +605,7 @@ pub async fn cas_publish(
         }
         debug!(bytes = bytes.len(), "captured push pack");
         let pack_key = store.put_pack(&bytes).await?;
-        if let Err(e) = write_idx_sidecar(store, &pack_key, &bytes).await {
+        if let Err(e) = write_idx_sidecar(store, &pack_key, &bytes, scratch_dir).await {
             warn!(
                 pack_key = %pack_key,
                 error = %e,

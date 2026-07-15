@@ -581,6 +581,7 @@ async fn info_refs_subprocess(
         tenant,
         &params.owner,
         &params.repo,
+        &state.config.git_repo_path,
         state.config.git_max_pack_bytes,
         state.config.git_max_repo_bytes,
     )
@@ -596,11 +597,11 @@ async fn info_refs_subprocess(
     // "receive-pack" (without the "git-" prefix).
     let git_subcmd = service.strip_prefix("git-").unwrap_or(service);
 
-    let stdout_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+    let stdout_tmp = tempfile::NamedTempFile::new_in(&state.config.git_repo_path).map_err(|e| {
         error!(error = %e, "git info_refs stdout tempfile failed");
         (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
     })?;
-    let stderr_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+    let stderr_tmp = tempfile::NamedTempFile::new_in(&state.config.git_repo_path).map_err(|e| {
         error!(error = %e, "git info_refs stderr tempfile failed");
         (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
     })?;
@@ -712,6 +713,7 @@ pub async fn upload_pack(
         &auth.tenant,
         &params.owner,
         &params.repo,
+        &state.config.git_repo_path,
         state.config.git_max_pack_bytes,
         state.config.git_max_repo_bytes,
     )
@@ -799,6 +801,7 @@ pub async fn receive_pack(
         &auth.tenant,
         &params.owner,
         &params.repo,
+        &state.config.git_repo_path,
         state.config.git_max_pack_bytes,
         state.config.git_max_repo_bytes,
     )
@@ -848,6 +851,7 @@ pub async fn receive_pack(
         "receive-pack",
         body,
         &hook_env,
+        &state.config.git_repo_path,
         RECEIVE_PACK_MAX_OUTPUT_BYTES,
     )
     .await?;
@@ -900,13 +904,14 @@ async fn run_git_at(
     service: &str,
     body: Body,
     extra_env: &[(&str, String)],
+    scratch_dir: &Path,
     max_output_bytes: u64,
 ) -> Result<PackOutput, Response> {
-    let stdout_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+    let stdout_tmp = tempfile::NamedTempFile::new_in(scratch_dir).map_err(|e| {
         error!(error = %e, service = %service, "git stdout tempfile failed");
         (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
     })?;
-    let stderr_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+    let stderr_tmp = tempfile::NamedTempFile::new_in(scratch_dir).map_err(|e| {
         error!(error = %e, service = %service, "git stderr tempfile failed");
         (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
     })?;
@@ -1356,6 +1361,7 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         &ctx.owner,
         &ctx.repo,
         &ctx.parent_state,
+        &state.config.git_repo_path,
         PublishLimits {
             parent_hydrated_bytes: ctx.repo_handle.hydrated_bytes(),
             max_pack_bytes: state.config.git_max_pack_bytes,
