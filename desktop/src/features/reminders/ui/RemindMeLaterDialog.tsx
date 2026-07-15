@@ -130,6 +130,7 @@ export function RemindMeLaterDialog({
             Cancel
           </Button>
           <Button
+            className="relative"
             disabled={create.isPending || customTimestamp === null}
             onClick={() => {
               if (customTimestamp === null) return;
@@ -137,11 +138,16 @@ export function RemindMeLaterDialog({
             }}
             variant="default"
           >
+            {/* The hidden label keeps the button width stable while the
+                spinner overlays it. */}
+            <span className={create.isPending ? "invisible" : undefined}>
+              Set reminder
+            </span>
             {create.isPending ? (
-              <Loader2 className="animate-spin" />
-            ) : (
-              "Set reminder"
-            )}
+              <span className="absolute inset-0 flex items-center justify-center">
+                <Loader2 className="animate-spin" />
+              </span>
+            ) : null}
           </Button>
         </DialogFooter>
       </DialogContent>
