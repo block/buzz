@@ -7707,13 +7707,10 @@ async function handleAddReaction(
   }
 
   const emoji = args.emoji.trim();
-  // `h` routes the live event to the channel store (getChannelIdFromTags);
-  // `e` names the reaction target. For a custom emoji, the NIP-30
-  // `["emoji", shortcode, url]` tag carries the image URL.
-  const tags: string[][] = [
-    ["h", channelId],
-    ["e", args.eventId],
-  ];
+  // Real add_reaction events carry only the target `e` tag. Channel live
+  // subscriptions already know which channel matched and restore that context
+  // before merging the event into the timeline cache.
+  const tags: string[][] = [["e", args.eventId]];
   if (args.emojiUrl) {
     const shortcode = emoji.replace(/^:+/, "").replace(/:+$/, "").toLowerCase();
     tags.push(["emoji", shortcode, args.emojiUrl]);

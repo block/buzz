@@ -88,6 +88,15 @@ export function isChannelUnreadTriggerKind(kind: number, isDmChannel: boolean) {
     : UNREAD_TRIGGER_KINDS.has(kind);
 }
 
+export function withChannelTagFallback(
+  event: RelayEvent,
+  channelId: string,
+): RelayEvent {
+  return getChannelIdFromTags(event.tags)
+    ? event
+    : { ...event, tags: [...event.tags, ["h", channelId]] };
+}
+
 function isExternalMentionEvent(event: RelayEvent, currentPubkey: string) {
   return (
     currentPubkey.length > 0 && event.pubkey.toLowerCase() !== currentPubkey
@@ -359,7 +368,8 @@ export function useLiveChannelUpdates(
                 limit: 1000,
                 since: Math.floor(Date.now() / 1_000),
               },
-              handleIncomingMessage,
+              (event) =>
+                handleIncomingMessage(withChannelTagFallback(event, channelId)),
             );
             if (isCancelled) {
               void dispose().catch(() => {});

@@ -16,7 +16,10 @@ import {
   resolveChannelReadMarker,
   resolveObservedUnreadRootId,
 } from "./useUnreadChannels.ts";
-import { isChannelUnreadTriggerKind } from "./useLiveChannelUpdates.ts";
+import {
+  isChannelUnreadTriggerKind,
+  withChannelTagFallback,
+} from "./useLiveChannelUpdates.ts";
 import {
   KIND_HUDDLE_ENDED,
   KIND_HUDDLE_STARTED,
@@ -56,6 +59,35 @@ test("receiveThenReopen_frontierAtLatestArrival_clobbersDivider", () => {
 
   assert.equal(marker.firstUnreadMessageId, null);
   assert.equal(marker.unreadCount, 0);
+});
+
+test("live reaction without h tag inherits its subscription channel", () => {
+  const reaction = {
+    id: "reaction",
+    kind: 7,
+    pubkey: "agent",
+    created_at: 1,
+    content: "👀",
+    tags: [["e", "message"]],
+  };
+
+  assert.deepEqual(withChannelTagFallback(reaction, "channel-a").tags, [
+    ["e", "message"],
+    ["h", "channel-a"],
+  ]);
+});
+
+test("live event with h tag is preserved", () => {
+  const message = {
+    id: "message",
+    kind: KIND_STREAM_MESSAGE,
+    pubkey: "author",
+    created_at: 1,
+    content: "hello",
+    tags: [["h", "channel-from-event"]],
+  };
+
+  assert.equal(withChannelTagFallback(message, "other-channel"), message);
 });
 
 test("dmHuddleStart_isDmOnlyUnreadTrigger", () => {
