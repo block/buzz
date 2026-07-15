@@ -20,6 +20,10 @@ export default defineConfig({
     {
       name: "smoke",
       testMatch: [
+        "**/onboarding-landing.screenshot.spec.ts",
+        "**/onboarding-agent.screenshot.spec.ts",
+        "**/onboarding-first-chat.screenshot.spec.ts",
+        "**/onboarding-welcome.screenshot.spec.ts",
         "**/smoke.spec.ts",
         "**/navigation.spec.ts",
         "**/channels.spec.ts",

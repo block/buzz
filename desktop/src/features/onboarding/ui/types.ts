@@ -1,6 +1,9 @@
 import type { AcpRuntimeCatalogEntry, Profile } from "@/shared/api/types";
 
 export type OnboardingPage =
+  | "landing"
+  | "agent"
+  | "first-chat"
   | "profile"
   | "key-import"
   | "backup"
@@ -66,6 +69,16 @@ export type SetupStepActions = {
 
 export type ThemeStepActions = {
   skip: () => void;
+  submit: () => void;
+};
+
+export type AgentStepActions = {
+  back: () => void;
+  submit: () => void;
+};
+
+export type FirstChatStepActions = {
+  back: () => void;
   submit: () => void;
 };
 

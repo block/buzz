@@ -1,8 +1,14 @@
 import * as React from "react";
 
 import { useAppShell } from "@/app/AppShellContext";
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useHomeFeedQuery } from "@/features/home/hooks";
 import { HomeView } from "@/features/home/ui/HomeView";
+import {
+  type WelcomeAction,
+  WelcomeEmptyState,
+} from "@/features/home/ui/WelcomeEmptyState";
+import { useWelcomeFirstRun } from "@/features/home/useWelcomeFirstRun";
 import type { HomeFeedResponse } from "@/shared/api/types";
 import {
   isRelayUnreachableError,
@@ -26,6 +32,21 @@ export function HomeScreen({
 }: HomeScreenProps) {
   const homeFeedQuery = useHomeFeedQuery();
   const { threadActivityFeedItems } = useAppShell();
+  const { goNewMessage } = useAppNavigation();
+  const { showWelcome, dismiss } = useWelcomeFirstRun(currentPubkey);
+
+  const handleWelcomeAction = React.useCallback(
+    (action: WelcomeAction) => {
+      // Dismissing reveals the normal Home inbox behind the welcome state.
+      // "inbox" and "channels" simply dismiss (inbox is Home; channels live in
+      // the sidebar); "dm" additionally opens the new-message composer.
+      dismiss();
+      if (action === "dm") {
+        void goNewMessage();
+      }
+    },
+    [dismiss, goNewMessage],
+  );
 
   const augmentedFeed = React.useMemo((): HomeFeedResponse | undefined => {
     if (!homeFeedQuery.data) return undefined;
@@ -44,6 +65,14 @@ export function HomeScreen({
       },
     };
   }, [homeFeedQuery.data, threadActivityFeedItems]);
+
+  if (showWelcome) {
+    return (
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <WelcomeEmptyState onAction={handleWelcomeAction} />
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">

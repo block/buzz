@@ -22,8 +22,13 @@ import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { ONBOARDING_DEFAULT_THEME_NAME } from "@/shared/theme/theme-loader";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
+import "../marketing/marketing.css";
+import { ONBOARDING_AGENTS } from "../agents";
+import { AgentStep } from "./AgentStep";
 import { AvatarStep } from "./AvatarStep";
 import { BackupStep } from "./BackupStep";
+import { FirstChatStep } from "./FirstChatStep";
+import { LandingStep } from "./LandingStep";
 import { MembershipDenied } from "./MembershipDenied";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import {
@@ -161,10 +166,19 @@ export function OnboardingFlow({
   // When identity was lost (keyring cleared after migration), land the user
   // directly on the import step with a recovery notice rather than profile setup.
   const [currentPage, setCurrentPage] = React.useState<OnboardingPage>(
-    identityLost ? "key-import" : "profile",
+    identityLost ? "key-import" : "landing",
   );
   const [profileDraft, setProfileDraft] =
     React.useState<OnboardingProfileValues>(savedProfile);
+  const [selectedAgentId, setSelectedAgentId] = React.useState<string | null>(
+    null,
+  );
+  // The agent chosen in step 3 drives the step-8 first chat. Fall back to the
+  // recommended agent if somehow unset (e.g. a skipped selection).
+  const resolvedFirstChatAgent =
+    ONBOARDING_AGENTS.find((agent) => agent.id === selectedAgentId) ??
+    ONBOARDING_AGENTS.find((agent) => agent.recommended) ??
+    ONBOARDING_AGENTS[0];
   const [deniedPubkey, setDeniedPubkey] = React.useState<string>("");
   const [persistError, setPersistError] = React.useState<string | null>(null);
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
@@ -229,6 +243,14 @@ export function OnboardingFlow({
     setCurrentPage("setup");
   }, []);
 
+  const showFirstChatPage = React.useCallback(
+    (direction: OnboardingTransitionDirection = "forward") => {
+      setTransitionDirection(direction);
+      setCurrentPage("first-chat");
+    },
+    [],
+  );
+
   const showThemePage = React.useCallback(
     (direction: OnboardingTransitionDirection = "forward") => {
       ensureThemeStepDefaults();
@@ -246,8 +268,26 @@ export function OnboardingFlow({
     [],
   );
 
+  const showAgentPage = React.useCallback(
+    (direction: OnboardingTransitionDirection = "forward") => {
+      setTransitionDirection(direction);
+      setCurrentPage("agent");
+    },
+    [],
+  );
+
   const showProfilePage = React.useCallback(() => {
     setTransitionDirection("backward");
+    setCurrentPage("profile");
+  }, []);
+
+  const showLandingPage = React.useCallback(() => {
+    setTransitionDirection("backward");
+    setCurrentPage("landing");
+  }, []);
+
+  const startFromLanding = React.useCallback(() => {
+    setTransitionDirection("forward");
     setCurrentPage("profile");
   }, []);
 
@@ -319,6 +359,7 @@ export function OnboardingFlow({
         const showNextPage: Partial<Record<OnboardingPage, () => void>> = {
           backup: showBackupPage,
           avatar: () => showAvatarPage(),
+          agent: () => showAgentPage(),
           theme: showThemePage,
           setup: showSetupPage,
         };
@@ -332,6 +373,7 @@ export function OnboardingFlow({
       profileDraft,
       profileUpdateMutation,
       savedProfile,
+      showAgentPage,
       showAvatarPage,
       showBackupPage,
       showSetupPage,
@@ -396,20 +438,24 @@ export function OnboardingFlow({
   };
   // Page sequences by path — step 1 is the community-picker that precedes
   // onboarding, so these pages start at step 2 (STEP_OFFSET below).
-  // Fresh-key path: profile(2) → backup(3) → avatar(4) → theme(5) → setup(6)
-  // Imported-key path: profile(2) → avatar(3) → theme(4) → setup(5)
+  // Fresh-key path: profile(2) → backup(3) → avatar(4) → agent(5) → theme(6) → setup(7) → first-chat(8)
+  // Imported-key path: profile(2) → avatar(3) → agent(4) → theme(5) → setup(6) → first-chat(7)
   const FRESH_STEPS: OnboardingPage[] = [
     "profile",
     "backup",
     "avatar",
+    "agent",
     "theme",
     "setup",
+    "first-chat",
   ];
   const IMPORT_STEPS: OnboardingPage[] = [
     "profile",
     "avatar",
+    "agent",
     "theme",
     "setup",
+    "first-chat",
   ];
   const STEP_OFFSET = 2;
   const activeSteps = identityWasImported ? IMPORT_STEPS : FRESH_STEPS;
@@ -484,12 +530,18 @@ export function OnboardingFlow({
     );
   }
 
+  const isLanding = currentPage === "landing";
+
   return (
     <div
-      className={`buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground ${
+      className={`buzz-startup-shell flex items-center justify-center px-4 py-8 ${
+        isLanding ? "buzz-marketing" : "bg-background text-foreground"
+      } ${
         currentPage === "profile" ||
         currentPage === "backup" ||
         currentPage === "avatar" ||
+        currentPage === "agent" ||
+        currentPage === "first-chat" ||
         currentPage === "key-import"
           ? "buzz-onboarding-neutral-theme"
           : ""
@@ -506,29 +558,43 @@ export function OnboardingFlow({
               ? "max-w-[1080px]"
               : currentPage === "setup"
                 ? "max-w-[920px]"
-                : "max-w-[500px]"
+                : currentPage === "agent"
+                  ? "max-w-[760px]"
+                  : currentPage === "first-chat"
+                    ? "max-w-[680px]"
+                    : "max-w-[500px]"
         }`}
       >
-        <OnboardingSlideTransition
-          className="w-auto"
-          containerClassName={`fixed bottom-12 left-1/2 z-40 w-auto -translate-x-1/2 ${
-            hideFixedProgressOnCompact ? "max-lg:hidden" : ""
-          }`}
-          direction={transitionDirection}
-          transitionKey={`progress-${currentStep}-${transitionDirection}-${
-            hideFixedProgressOnCompact ? "compact-hidden" : "visible"
-          }`}
-        >
-          <StepProgress
-            activeSegmentClassName="bg-primary"
-            completeSegmentClassName="bg-primary/35"
-            currentStep={currentStep}
-            inactiveSegmentClassName="bg-muted-foreground/25"
-            totalSteps={totalOnboardingSteps}
-          />
-        </OnboardingSlideTransition>
+        {isLanding ? null : (
+          <OnboardingSlideTransition
+            className="w-auto"
+            containerClassName={`fixed bottom-12 left-1/2 z-40 w-auto -translate-x-1/2 ${
+              hideFixedProgressOnCompact ? "max-lg:hidden" : ""
+            }`}
+            direction={transitionDirection}
+            transitionKey={`progress-${currentStep}-${transitionDirection}-${
+              hideFixedProgressOnCompact ? "compact-hidden" : "visible"
+            }`}
+          >
+            <StepProgress
+              activeSegmentClassName="bg-primary"
+              completeSegmentClassName="bg-primary/35"
+              currentStep={currentStep}
+              inactiveSegmentClassName="bg-muted-foreground/25"
+              totalSteps={totalOnboardingSteps}
+            />
+          </OnboardingSlideTransition>
+        )}
 
-        {currentPage === "profile" ? (
+        {isLanding ? (
+          <LandingStep
+            actions={{
+              getStarted: startFromLanding,
+              importExistingKey: showKeyImportPage,
+            }}
+            direction={transitionDirection}
+          />
+        ) : currentPage === "profile" ? (
           <ProfileStep
             actions={{
               advanceWithoutSaving: advanceFromProfileWithoutSaving,
@@ -537,7 +603,7 @@ export function OnboardingFlow({
                     setTransitionDirection("backward");
                     onBackToCommunitySetup();
                   }
-                : undefined,
+                : showLandingPage,
               clearAvatarDraft: resetAvatarDraft,
               importExistingKey: showKeyImportPage,
               onUploadingChange: setIsUploadingAvatar,
@@ -609,12 +675,12 @@ export function OnboardingFlow({
         ) : currentPage === "avatar" ? (
           <AvatarStep
             actions={{
-              advanceWithoutSaving: () => showThemePage(),
+              advanceWithoutSaving: () => showAgentPage(),
               back: identityWasImported ? showProfilePage : showBackupPage,
               onUploadingChange: setIsUploadingAvatar,
               skipForNow,
               submit: () => {
-                void saveProfileAndContinue("theme");
+                void saveProfileAndContinue("agent");
               },
               updateAvatarUrl: updateAvatarUrlDraft,
             }}
@@ -624,6 +690,19 @@ export function OnboardingFlow({
             state={avatarStepState}
             totalSteps={totalOnboardingSteps}
           />
+        ) : currentPage === "agent" ? (
+          <AgentStep
+            actions={{
+              back: () =>
+                identityWasImported
+                  ? showProfilePage()
+                  : showAvatarPage("backward"),
+              submit: () => showThemePage(),
+            }}
+            direction={transitionDirection}
+            selectedAgentId={selectedAgentId}
+            onSelectAgent={setSelectedAgentId}
+          />
         ) : currentPage === "theme" ? (
           <ThemeStep
             actions={{
@@ -632,15 +711,24 @@ export function OnboardingFlow({
             }}
             direction={transitionDirection}
           />
-        ) : (
+        ) : currentPage === "setup" ? (
           <SetupStep
             actions={{
               back: () => showThemePage("backward"),
-              complete,
+              complete: () => showFirstChatPage(),
             }}
             direction={transitionDirection}
           />
-        )}
+        ) : resolvedFirstChatAgent ? (
+          <FirstChatStep
+            actions={{
+              back: () => showSetupPage(),
+              submit: complete,
+            }}
+            agent={resolvedFirstChatAgent}
+            direction={transitionDirection}
+          />
+        ) : null}
       </div>
     </div>
   );
