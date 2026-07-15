@@ -97,6 +97,13 @@ type MockPersonaSeed = {
   envVars?: Record<string, string>;
 };
 
+type MockTeamSeed = {
+  id?: string;
+  name: string;
+  description?: string | null;
+  personaIds: string[];
+};
+
 type MockSearchProfileSeed = {
   pubkey: string;
   displayName: string | null;
@@ -123,6 +130,7 @@ type E2eConfig = {
     };
     managedAgents?: MockManagedAgentSeed[];
     personas?: MockPersonaSeed[];
+    teams?: MockTeamSeed[];
     relayAgents?: MockRelayAgentSeed[];
     agentListDelayMs?: number;
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
@@ -1953,7 +1961,7 @@ function resetMockPersonas(config?: E2eConfig) {
   }
 }
 
-function resetMockTeams() {
+function resetMockTeams(config?: E2eConfig) {
   const now = new Date().toISOString();
   mockTeams = [
     {
@@ -1996,6 +2004,22 @@ function resetMockTeams() {
       updated_at: now,
     },
   ];
+
+  for (const team of config?.mock?.teams ?? []) {
+    mockTeams.push({
+      id: team.id ?? crypto.randomUUID(),
+      name: team.name,
+      description: team.description ?? null,
+      persona_ids: [...team.personaIds],
+      is_builtin: false,
+      source_dir: null,
+      is_symlink: false,
+      symlink_target: null,
+      version: null,
+      created_at: now,
+      updated_at: now,
+    });
+  }
 }
 
 function seedMockSearchProfiles(config?: E2eConfig) {
@@ -8238,7 +8262,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
   resetMockPersonas(config);
-  resetMockTeams();
+  resetMockTeams(config);
   seedMockSearchProfiles(config);
   resetMockWorkflows();
   resetMockMesh();
