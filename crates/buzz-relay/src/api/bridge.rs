@@ -669,6 +669,7 @@ pub async fn query_events(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(&body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    enforce_bridge_filter_limit(raw_filters.len())?;
     let filters: Vec<nostr::Filter> = raw_filters
         .iter()
         .map(|v| serde_json::from_value(v.clone()))
@@ -999,6 +1000,7 @@ pub async fn query_events(
         }
     }
 
+    deduplicate_event_values(&mut events);
     Ok(Json(Value::Array(events)))
 }
 
@@ -1050,6 +1052,7 @@ pub async fn count_events(
 
     let filters: Vec<nostr::Filter> = serde_json::from_slice(&body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    enforce_bridge_filter_limit(filters.len())?;
 
     // P-gated kinds enforcement — same as WS REQ and /query.
     let authed_pubkey_hex = pubkey.to_hex();
@@ -1225,6 +1228,29 @@ pub async fn count_events(
     }
 
     Ok(Json(serde_json::json!({ "count": total })))
+}
+
+fn enforce_bridge_filter_limit(filter_count: usize) -> Result<(), (StatusCode, Json<Value>)> {
+    if filter_count > crate::protocol::MAX_FILTERS_PER_REQ {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "request contains {filter_count} filters, maximum is {}",
+                crate::protocol::MAX_FILTERS_PER_REQ
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn deduplicate_event_values(events: &mut Vec<Value>) {
+    let mut seen_ids = std::collections::HashSet::new();
+    events.retain(|event| {
+        event
+            .get("id")
+            .and_then(Value::as_str)
+            .is_none_or(|id| seen_ids.insert(id.to_string()))
+    });
 }
 
 fn has_mixed_search_filters(filters: &[nostr::Filter]) -> bool {
@@ -1888,6 +1914,30 @@ mod tests {
         ];
 
         assert!(!has_mixed_search_filters(&filters));
+    }
+
+    #[test]
+    fn bridge_filter_budget_bounds_work_and_duplicate_output() {
+        assert!(enforce_bridge_filter_limit(crate::protocol::MAX_FILTERS_PER_REQ).is_ok());
+
+        let (status, response) =
+            enforce_bridge_filter_limit(crate::protocol::MAX_FILTERS_PER_REQ + 1)
+                .expect_err("eleven filters must be rejected before query execution");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(response["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("maximum is 10")));
+
+        let mut events = vec![
+            serde_json::json!({"id": "same", "content": "first"}),
+            serde_json::json!({"id": "same", "content": "duplicate"}),
+            serde_json::json!({"id": "other", "content": "second"}),
+        ];
+        deduplicate_event_values(&mut events);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["content"], "first");
+        assert_eq!(events[1]["id"], "other");
     }
 
     #[test]
