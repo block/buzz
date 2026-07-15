@@ -2,18 +2,35 @@
 
 use crate::error::MediaError;
 
-/// Verify kind:24242 event validity per BUD-11:
+/// Blossom kind:24242 verbs Buzz currently accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlossomVerb {
+    Upload,
+    Get,
+}
+
+impl BlossomVerb {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Upload => "upload",
+            Self::Get => "get",
+        }
+    }
+}
+
+/// Verify common kind:24242 Blossom auth event validity:
 ///   1. Schnorr signature
 ///   2. kind == 24242
-///   3. `t` tag == "upload"
+///   3. `t` tag matches `verb`
 ///   4. `expiration` tag in the future
 ///   5. `created_at` in the past (with 5s clock-skew tolerance)
 ///   6. If `server` tags present, our domain must appear in at least one
 ///
-/// Does NOT check the `x` tag — that requires the body hash, computed later.
-/// Call this BEFORE trusting the event's pubkey for scope resolution.
-pub fn verify_blossom_auth_event(
+/// Does NOT check verb-specific scope tags (`x` for upload, `x` OR `server`
+/// for get). Call this BEFORE trusting the event's pubkey for scope resolution.
+pub fn verify_blossom_auth_event_for_verb(
     auth_event: &nostr::Event,
+    verb: BlossomVerb,
     server_domain: Option<&str>,
     max_age_secs: u64,
 ) -> Result<(), MediaError> {
@@ -42,7 +59,7 @@ pub fn verify_blossom_auth_event(
         match kind.as_str() {
             "t" => {
                 if let Some(v) = tag.content() {
-                    if v != "upload" {
+                    if v != verb.as_str() {
                         return Err(MediaError::InvalidAuthVerb);
                     }
                     found_t = true;
@@ -123,6 +140,18 @@ pub fn verify_blossom_auth_event(
     Ok(())
 }
 
+/// Verify common upload auth event validity.
+///
+/// Kept as the upload-shaped public wrapper for existing callers; new verb-aware
+/// code should prefer [`verify_blossom_auth_event_for_verb`].
+pub fn verify_blossom_auth_event(
+    auth_event: &nostr::Event,
+    server_domain: Option<&str>,
+    max_age_secs: u64,
+) -> Result<(), MediaError> {
+    verify_blossom_auth_event_for_verb(auth_event, BlossomVerb::Upload, server_domain, max_age_secs)
+}
+
 /// Normalize a Blossom `server` tag value (or a bound tenant host) into the
 /// canonical host form used as the community lookup key.
 ///
@@ -149,7 +178,12 @@ pub fn verify_blossom_upload_auth(
     server_domain: Option<&str>,
     max_age_secs: u64,
 ) -> Result<(), MediaError> {
-    verify_blossom_auth_event(auth_event, server_domain, max_age_secs)?;
+    verify_blossom_auth_event_for_verb(
+        auth_event,
+        BlossomVerb::Upload,
+        server_domain,
+        max_age_secs,
+    )?;
 
     // At least one x tag must match the body sha256 (BUD-11 §6)
     let has_matching_x = auth_event
@@ -159,6 +193,46 @@ pub fn verify_blossom_upload_auth(
 
     if !has_matching_x {
         return Err(MediaError::HashMismatch);
+    }
+
+    Ok(())
+}
+
+/// Verify a kind:24242 Blossom get auth event for one requested blob.
+///
+/// BUD-01 permits either blob-scoped authorization (`x` tag matches `sha256`)
+/// or server-scoped authorization (`server` tag matches this relay host). The
+/// latter intentionally grants reads for all blobs on the host until expiration;
+/// callers must still apply relay membership after this verifier returns.
+pub fn verify_blossom_get_auth(
+    auth_event: &nostr::Event,
+    sha256: &str,
+    server_domain: Option<&str>,
+    max_age_secs: u64,
+) -> Result<(), MediaError> {
+    verify_blossom_auth_event_for_verb(auth_event, BlossomVerb::Get, server_domain, max_age_secs)?;
+
+    let has_matching_x = auth_event
+        .tags
+        .iter()
+        .any(|tag| tag.kind().to_string() == "x" && (tag.content() == Some(sha256)));
+
+    let has_matching_server = match server_domain {
+        Some(domain) => {
+            let want = normalize_server_host(domain);
+            auth_event.tags.iter().any(|tag| {
+                tag.kind().to_string() == "server"
+                    && tag
+                        .content()
+                        .map(|value| normalize_server_host(value) == want)
+                        .unwrap_or(false)
+            })
+        }
+        None => false,
+    };
+
+    if !has_matching_x && !has_matching_server {
+        return Err(MediaError::InsufficientScope);
     }
 
     Ok(())
@@ -197,6 +271,104 @@ mod tests {
         let sha256 = "a".repeat(64);
         let event = build_valid_auth(&keys, &sha256);
         assert!(verify_blossom_auth_event(&event, None, 600).is_ok());
+    }
+
+    fn build_get_auth(keys: &Keys, tags: Vec<Tag>) -> nostr::Event {
+        EventBuilder::new(Kind::from(24242), "Get buzz-media")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn test_verify_get_accepts_matching_x_without_server_tag() {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        let now = Timestamp::now().as_secs();
+        let exp_str = (now + 300).to_string();
+        let event = build_get_auth(
+            &keys,
+            vec![
+                Tag::parse(["t", "get"]).unwrap(),
+                Tag::parse(["x", &sha256]).unwrap(),
+                Tag::parse(["expiration", &exp_str]).unwrap(),
+            ],
+        );
+
+        assert!(verify_blossom_get_auth(&event, &sha256, Some("relay.example"), 600).is_ok());
+    }
+
+    #[test]
+    fn test_verify_get_accepts_matching_server_without_x_tag() {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        let now = Timestamp::now().as_secs();
+        let exp_str = (now + 300).to_string();
+        let event = build_get_auth(
+            &keys,
+            vec![
+                Tag::parse(["t", "get"]).unwrap(),
+                Tag::parse(["server", "https://Relay.Example./media/ignored"]).unwrap(),
+                Tag::parse(["expiration", &exp_str]).unwrap(),
+            ],
+        );
+
+        assert!(verify_blossom_get_auth(&event, &sha256, Some("relay.example"), 600).is_ok());
+    }
+
+    #[test]
+    fn test_verify_get_rejects_upload_verb() {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        let event = build_valid_auth(&keys, &sha256);
+
+        assert!(matches!(
+            verify_blossom_get_auth(&event, &sha256, Some("relay.example"), 600),
+            Err(MediaError::InvalidAuthVerb)
+        ));
+    }
+
+    #[test]
+    fn test_verify_get_requires_x_or_server_scope() {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        let other_hash = "b".repeat(64);
+        let now = Timestamp::now().as_secs();
+        let exp_str = (now + 300).to_string();
+        let event = build_get_auth(
+            &keys,
+            vec![
+                Tag::parse(["t", "get"]).unwrap(),
+                Tag::parse(["x", &other_hash]).unwrap(),
+                Tag::parse(["expiration", &exp_str]).unwrap(),
+            ],
+        );
+
+        assert!(matches!(
+            verify_blossom_get_auth(&event, &sha256, Some("relay.example"), 600),
+            Err(MediaError::InsufficientScope)
+        ));
+    }
+
+    #[test]
+    fn test_verify_get_rejects_wrong_server_scope() {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        let now = Timestamp::now().as_secs();
+        let exp_str = (now + 300).to_string();
+        let event = build_get_auth(
+            &keys,
+            vec![
+                Tag::parse(["t", "get"]).unwrap(),
+                Tag::parse(["server", "other.example"]).unwrap(),
+                Tag::parse(["expiration", &exp_str]).unwrap(),
+            ],
+        );
+
+        assert!(matches!(
+            verify_blossom_get_auth(&event, &sha256, Some("relay.example"), 600),
+            Err(MediaError::ServerMismatch)
+        ));
     }
 
     #[test]

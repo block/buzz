@@ -57,6 +57,9 @@ diffy = "0.5"
 # Hex encoding — SHA-256 hash output for Blossom uploads
 hex = { workspace = true }
 
+# Byte buffers returned by authenticated media downloads
+bytes = "1"
+
 # MIME type detection via magic bytes — file upload validation
 infer = "0.19"
 

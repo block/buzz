@@ -4,7 +4,7 @@ use tauri::State;
 
 use crate::app_state::AppState;
 use crate::commands::export_util::save_bytes_with_dialog;
-use crate::commands::media::{detect_and_validate_mime, sanitize_filename};
+use crate::commands::media::{detect_and_validate_mime, mint_media_get_auth, sanitize_filename};
 use crate::commands::{
     personas::{
         decode_snapshot_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES, PNG_MAGIC,
@@ -271,13 +271,17 @@ async fn fetch_blob_bytes_with_cap(
     cap: u64,
 ) -> Result<Vec<u8>, String> {
     // Fetch bytes via the app's HTTP client (goes through WARP tunnel).
-    let resp = state
-        .http_client
-        .get(url)
-        .timeout(DOWNLOAD_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let mut req = state.http_client.get(url).timeout(DOWNLOAD_TIMEOUT);
+
+    // Every caller pre-validates `url` against the relay origin via
+    // `validate_download_url`, satisfying the mint_media_get_auth safety
+    // contract (the token never leaves the relay origin).
+    let relay_base = relay_api_base_url_with_override(state);
+    if let Some(auth) = mint_media_get_auth(state, &relay_base) {
+        req = req.header("authorization", auth);
+    }
+
+    let resp = req.send().await.map_err(|e| classify_request_error(&e))?;
 
     if !resp.status().is_success() {
         return Err(relay_error_message(resp).await);

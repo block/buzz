@@ -75,6 +75,10 @@ relay:
   sendBuffer: 1000
   requireAuthToken: true
   requireRelayMembership: true
+  # Staged rollout gate for authenticated media reads. When true, relay
+  # GET/HEAD /media/* requires Blossom kind 24242 t=get plus relay membership.
+  # Keep false until deployed desktop/mobile/CLI clients attach read auth.
+  requireMediaGetAuth: false
   allowNipOaAuth: true
   pubkeyAllowlist: false
   corsOrigins: []

@@ -163,6 +163,73 @@ pub(crate) fn detect_and_validate_mime(body: &[u8]) -> Result<String, String> {
     Ok(mime)
 }
 
+/// Lifetime of a Blossom `t=get` read token. Ten minutes keeps a token alive
+/// across a video's range-request stream while staying well inside the
+/// server's `created_at` freshness window (3600s, matching upload).
+pub(crate) const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 600;
+
+/// Sign a Blossom (BUD-01) `t=get` authorization event, server-scoped to the
+/// relay's authority, and return the full `Authorization` header value.
+///
+/// Server-scoped (a `server` tag, no `x` tag): one token authorizes reads of
+/// any blob on that host for its lifetime, which keeps avatar-grid bursts and
+/// video range requests cheap. This is deliberately broader than per-blob
+/// scoping and is safe only because the relay still enforces NIP-43
+/// membership on the verified pubkey — and because callers only attach this
+/// header to requests bound for the relay origin itself.
+pub(crate) fn sign_blossom_get_auth_header(
+    keys: &Keys,
+    base_url: &str,
+    expiry_secs: u64,
+) -> Result<String, String> {
+    let server = extract_server_authority(base_url)
+        .ok_or_else(|| "cannot derive server authority from relay URL".to_string())?;
+    let now = Timestamp::now().as_secs();
+    let tags = vec![
+        Tag::parse(vec!["t", "get"]).map_err(|e| e.to_string())?,
+        Tag::parse(vec!["expiration", &(now + expiry_secs).to_string()])
+            .map_err(|e| e.to_string())?,
+        Tag::parse(vec!["server".to_string(), server]).map_err(|e| e.to_string())?,
+    ];
+    let event = EventBuilder::new(Kind::from(24242), "Get buzz-media")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Nostr {}",
+        URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
+    ))
+}
+
+/// Mint a `t=get` Authorization header value for a relay media fetch, or
+/// `None` when signing is unavailable (identity in recovery mode).
+///
+/// Fail-open by design: while the relay's `BUZZ_REQUIRE_MEDIA_GET_AUTH` flag
+/// is off, an unauthenticated request still succeeds, so degrading to no
+/// header (instead of erroring) keeps media rendering during key recovery.
+/// Once the flag is on, these requests will 403 — the correct outcome for an
+/// identity that can't prove membership.
+///
+/// Safety contract: callers must only attach the returned header to URLs
+/// constructed from (or validated against) the app's own relay base URL —
+/// never to third-party origins, where the bearer token would leak.
+pub(crate) fn mint_media_get_auth(state: &AppState, base_url: &str) -> Option<String> {
+    let keys = match state.signing_keys() {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("buzz-desktop: media get auth unavailable (unsigned request): {e}");
+            return None;
+        }
+    };
+    match sign_blossom_get_auth_header(&keys, base_url, MEDIA_GET_AUTH_EXPIRY_SECS) {
+        Ok(header) => Some(header),
+        Err(e) => {
+            eprintln!("buzz-desktop: media get auth signing failed (unsigned request): {e}");
+            None
+        }
+    }
+}
+
 fn sign_blossom_upload_auth(
     keys: &Keys,
     sha256: &str,
@@ -594,6 +661,38 @@ mod tests {
     fn test_extract_server_authority_invalid() {
         assert_eq!(extract_server_authority("not-a-url"), None);
         assert_eq!(extract_server_authority(""), None);
+    }
+
+    #[test]
+    fn test_sign_blossom_get_auth_header_shape() {
+        let keys = Keys::generate();
+        let header = sign_blossom_get_auth_header(&keys, "http://localhost:3000", 600).unwrap();
+        let b64 = header.strip_prefix("Nostr ").expect("Nostr scheme prefix");
+        let json = URL_SAFE_NO_PAD.decode(b64).unwrap();
+        let event = nostr::Event::from_json(std::str::from_utf8(&json).unwrap()).unwrap();
+
+        assert_eq!(event.kind, Kind::from(24242));
+        event.verify().expect("valid signature");
+
+        let tag = |name: &str| -> Option<String> {
+            event.tags.iter().find_map(|t| {
+                let v = t.as_slice();
+                (v.first().map(String::as_str) == Some(name)).then(|| v[1].clone())
+            })
+        };
+        assert_eq!(tag("t").as_deref(), Some("get"));
+        assert_eq!(tag("server").as_deref(), Some("localhost:3000"));
+        // Server-scoped token: no x tag (BUD-01 allows x OR server).
+        assert!(tag("x").is_none());
+        let expiration: u64 = tag("expiration").unwrap().parse().unwrap();
+        let now = Timestamp::now().as_secs();
+        assert!(expiration > now && expiration <= now + 600);
+    }
+
+    #[test]
+    fn test_sign_blossom_get_auth_header_invalid_base_url() {
+        let keys = Keys::generate();
+        assert!(sign_blossom_get_auth_header(&keys, "not-a-url", 600).is_err());
     }
 
     #[test]
