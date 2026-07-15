@@ -1,4 +1,5 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -100,6 +101,23 @@ async function copyToClipboard(text: string): Promise<boolean> {
   } catch (error) {
     console.warn("copy signed nostr binding response failed:", error);
     return false;
+  }
+}
+
+function appendCallbackStatus(callbackUrl: string): string {
+  const url = new URL(callbackUrl);
+  url.searchParams.set("buzz_bind", "signed");
+  return url.toString();
+}
+
+async function notifySignedResponseReady(callbackUrl: string | undefined) {
+  if (!callbackUrl) {
+    return;
+  }
+  try {
+    await openUrl(appendCallbackStatus(callbackUrl));
+  } catch (error) {
+    console.warn("open nostr bind callback failed:", error);
   }
 }
 
@@ -455,13 +473,14 @@ export function NostrBindConsentDialog() {
     setCopyFailed(!copied);
     if (copied) {
       showCopiedState();
+      await notifySignedResponseReady(payload?.callbackUrl);
       toast.success(
         isPreview ? PREVIEW_COPY_SUCCESS_MESSAGE : COPY_SUCCESS_MESSAGE,
       );
     } else {
       toast.warning(COPY_FAILURE_MESSAGE);
     }
-  }, [isPreview, showCopiedState, signedResponse]);
+  }, [isPreview, payload?.callbackUrl, showCopiedState, signedResponse]);
 
   return (
     <DialogPrimitive.Root
