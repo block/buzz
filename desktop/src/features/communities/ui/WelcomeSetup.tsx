@@ -5,9 +5,14 @@ import {
   getIdentity,
   importIdentity as tauriImportIdentity,
 } from "@/shared/api/tauriIdentity";
-import { claimInvite } from "@/shared/api/invites";
+import {
+  claimInvite,
+  getJoinPolicy,
+  type JoinPolicy,
+} from "@/shared/api/invites";
 import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
 import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
+import { JoinPolicyNotice } from "@/features/onboarding/ui/JoinPolicyNotice";
 import { NostrKeyImportForm } from "@/features/onboarding/ui/NostrKeyImportForm";
 import {
   type OnboardingTransitionDirection,
@@ -48,13 +53,19 @@ function wait(ms: number) {
 }
 
 function NostrKeyImportPage({
+  ageConfirmed,
   connectionError,
   disabled,
+  joinPolicy,
+  onAgeConfirmedChange,
   onBack,
   onImport,
 }: {
+  ageConfirmed: boolean;
   connectionError: string | null;
   disabled: boolean;
+  joinPolicy: JoinPolicy | null | undefined;
+  onAgeConfirmedChange: (confirmed: boolean) => void;
   onBack: () => void;
   onImport: (nsec: string) => Promise<void>;
 }) {
@@ -75,8 +86,22 @@ function NostrKeyImportPage({
         </p>
       </div>
 
+      {joinPolicy ? (
+        <div className="mt-6 w-full">
+          <JoinPolicyNotice
+            ageConfirmed={ageConfirmed}
+            onAgeConfirmedChange={onAgeConfirmedChange}
+            policy={joinPolicy}
+          />
+        </div>
+      ) : null}
+
       <NostrKeyImportForm
-        disabled={disabled}
+        disabled={
+          disabled ||
+          joinPolicy === undefined ||
+          Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed)
+        }
         errorMessage={connectionError}
         onBack={onBack}
         onImport={onImport}
@@ -97,7 +122,35 @@ export function WelcomeSetup({
   const [error, setError] = React.useState<string | null>(null);
   const [isRedeeming, setIsRedeeming] = React.useState(false);
   const [inviteError, setInviteError] = React.useState<string | null>(null);
+  const [defaultJoinPolicy, setDefaultJoinPolicy] = React.useState<
+    JoinPolicy | null | undefined
+  >(undefined);
+  const [defaultAgeConfirmed, setDefaultAgeConfirmed] = React.useState(false);
   const systemColorScheme = useSystemColorScheme();
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setDefaultAgeConfirmed(false);
+    if (isLocalDevRelayUrl(defaultRelayUrl)) {
+      setDefaultJoinPolicy(null);
+      return;
+    }
+    setDefaultJoinPolicy(undefined);
+    void getJoinPolicy(defaultRelayUrl)
+      .then((policy) => {
+        if (!cancelled) {
+          setDefaultJoinPolicy(policy);
+        }
+      })
+      .catch((policyError) => {
+        if (!cancelled) {
+          setError(inviteErrorMessage(policyError));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [defaultRelayUrl]);
 
   const handleConnect = React.useCallback(
     async (relayUrl: string, communityName?: string, pubkey?: string) => {
@@ -249,10 +302,24 @@ export function WelcomeSetup({
             </p>
 
             <div className="mt-8 flex w-full flex-col gap-3">
+              {defaultJoinPolicy ? (
+                <JoinPolicyNotice
+                  ageConfirmed={defaultAgeConfirmed}
+                  onAgeConfirmedChange={setDefaultAgeConfirmed}
+                  policy={defaultJoinPolicy}
+                />
+              ) : null}
               {isLocalDevRelayUrl(defaultRelayUrl) ? null : (
                 <Button
                   className="h-10 w-full"
                   aria-disabled={isConnecting}
+                  disabled={
+                    defaultJoinPolicy === undefined ||
+                    Boolean(
+                      defaultJoinPolicy?.ageAttestationRequired &&
+                        !defaultAgeConfirmed,
+                    )
+                  }
                   onClick={() => {
                     if (isConnecting) {
                       return;
@@ -381,16 +448,23 @@ export function WelcomeSetup({
                 error={inviteError}
                 isRedeeming={isRedeeming}
                 onCancel={showWelcomePage}
-                onRedeem={(relayWsUrl, code) => {
-                  void handleWelcomeInviteRedeem(relayWsUrl, code);
+                onRedeem={(relayWsUrl, code, policyReceipt) => {
+                  void handleWelcomeInviteRedeem(
+                    relayWsUrl,
+                    code,
+                    policyReceipt,
+                  );
                 }}
               />
             </div>
           </OnboardingSlideTransition>
         ) : (
           <NostrKeyImportPage
+            ageConfirmed={defaultAgeConfirmed}
             connectionError={error}
             disabled={isConnecting}
+            joinPolicy={defaultJoinPolicy}
+            onAgeConfirmedChange={setDefaultAgeConfirmed}
             onBack={showWelcomePage}
             onImport={handleNostrImport}
           />

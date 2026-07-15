@@ -170,8 +170,8 @@ export function MembershipDenied({
                 setInviteError(null);
                 setIsInviteFormOpen(false);
               }}
-              onRedeem={(relayWsUrl, code) => {
-                void handleInviteRedeem(relayWsUrl, code);
+              onRedeem={(relayWsUrl, code, policyReceipt) => {
+                void handleInviteRedeem(relayWsUrl, code, policyReceipt);
               }}
             />
           ) : isImportFormOpen ? (
