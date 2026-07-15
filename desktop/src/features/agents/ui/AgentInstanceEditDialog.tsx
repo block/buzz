@@ -1090,10 +1090,8 @@ export function AgentInstanceEditDialog({
 
             <AgentAiDefaultsNotice
               confirmNavigation
-              explicitModel={model.trim() || linkedPersona?.model?.trim() || ""}
-              explicitProvider={
-                provider.trim() || linkedPersona?.provider?.trim() || ""
-              }
+              explicitModel={inheritedSubmission.model ?? ""}
+              explicitProvider={inheritedSubmission.provider ?? ""}
               inheritedModel={inheritedModelDefault}
               inheritedProvider={inheritedProviderDefault}
             />
