@@ -63,9 +63,6 @@ async function openNostrBind(
   }, payload);
 
   await expect(page.getByTestId("nostr-bind-page")).toBeVisible();
-  await expect(page.getByTestId("nostr-bind-requesting-origin")).toContainText(
-    payload.origin,
-  );
 }
 
 async function pasteCode(input: Locator, code: string) {
@@ -152,10 +149,13 @@ async function shakeCount(page: Page): Promise<number> {
   );
 }
 
-test("shows the exact origin and supports OTP entry, navigation, and paste", async ({
+test("supports OTP entry, navigation, and paste without signing incomplete input", async ({
   page,
 }) => {
   await openNostrBind(page);
+
+  await expect(page.getByText("Requesting origin")).toHaveCount(0);
+  await expect(page.getByText(VALID_REQUEST.origin)).toHaveCount(0);
 
   const first = page.getByTestId("nostr-bind-code-digit-1");
   const second = page.getByTestId("nostr-bind-code-digit-2");

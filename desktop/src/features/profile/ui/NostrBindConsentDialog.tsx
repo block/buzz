@@ -585,9 +585,7 @@ export function NostrBindConsentDialog() {
                   <div className="mt-10 w-full space-y-4 text-sm">
                     <fieldset
                       aria-describedby={
-                        hasCodeMismatch
-                          ? "nostr-bind-code-error nostr-bind-requesting-origin"
-                          : "nostr-bind-requesting-origin"
+                        hasCodeMismatch ? "nostr-bind-code-error" : undefined
                       }
                       aria-invalid={hasCodeMismatch}
                       className="w-full min-w-0 text-center"
@@ -689,18 +687,6 @@ export function NostrBindConsentDialog() {
                           ? VERIFICATION_CODE_MISMATCH_MESSAGE
                           : "\u00a0"}
                       </p>
-                      <div
-                        className="mt-1"
-                        data-testid="nostr-bind-requesting-origin"
-                        id="nostr-bind-requesting-origin"
-                      >
-                        <p className="text-xs font-medium text-muted-foreground">
-                          Requesting origin
-                        </p>
-                        <p className="mt-1 break-all font-mono text-sm font-medium text-foreground">
-                          {payload.origin}
-                        </p>
-                      </div>
                     </fieldset>
 
                     {isExpired ? (
