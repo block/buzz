@@ -154,9 +154,10 @@ pub struct OwnedAgent {
     /// desktop reader to distinguish a genuine runtime override from a stale
     /// session whose persona model was edited. Reset on spawn/restart.
     pub model_overridden: bool,
-    /// Protocol version reported by the agent in its initialize response.
-    /// Agents declaring >= 2 support `systemPrompt` in session/new.
-    pub protocol_version: u32,
+    /// Whether this runtime should receive Buzz instructions via
+    /// `session/new.systemPrompt`. Some runtimes advertise protocol v2 but
+    /// ignore that field, so support is protocol plus runtime compatibility.
+    pub supports_session_system_prompt: bool,
 }
 
 /// Pool of agents with take-and-return ownership semantics.
@@ -704,12 +705,11 @@ async fn create_session_and_apply_model(
 ) -> Result<String, AcpError> {
     // Combine base_prompt + system_prompt + agent core + canvas metadata into a
     // single systemPrompt value for the session/new request. Only sent when the
-    // agent declares protocol version >= 2 (supports systemPrompt); legacy agents
-    // ignore it and receive the same content as user-message sections via
-    // `format_prompt`. Core carries its own `[Agent Memory — core]` header, and
-    // canvas carries its own `[Channel Canvas]` header; both are appended with a
-    // blank-line separator.
-    let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
+    // runtime reliably applies session system prompts; fallback agents receive
+    // the same content as user-message sections via `format_prompt`. Core
+    // carries its own `[Agent Memory — core]` header, and canvas carries its own
+    // `[Channel Canvas]` header; both are appended with a blank-line separator.
+    let combined_system_prompt: Option<String> = if agent.supports_session_system_prompt {
         with_canvas(
             with_core(
                 with_team(
@@ -952,41 +952,40 @@ async fn apply_permission_mode(
     Ok(())
 }
 
-/// Prepend the `[Base]` section to a user-message body for legacy agents.
+/// Prepend the full Buzz instruction context when a runtime cannot reliably
+/// consume `session/new.systemPrompt`.
 ///
-/// Legacy agents (`protocol_version < 2`) don't receive `base_prompt` via the
-/// system role in `session/new`, so it must ride along in the user message.
-/// Agents with `protocol_version >= 2`, or any agent without a `base_prompt`,
-/// get `body` unchanged. The gate lives here so the heartbeat and
-/// initial-message dispatch paths can't drift apart again.
-pub(crate) fn prepend_base_for_legacy(
-    protocol_version: u32,
+/// This is used for pre-built prompts that bypass `queue::format_prompt`, such
+/// as `initial_message` and heartbeats. Regular channel turns use the same gate
+/// through `FormatPromptArgs::has_system_prompt_support`.
+pub(crate) fn prepend_system_context_for_fallback(
+    supports_session_system_prompt: bool,
+    cwd: &str,
     base_prompt: Option<&str>,
-    body: &str,
-) -> String {
-    match base_prompt {
-        Some(bp) if protocol_version < 2 => {
-            format!("{}\n\n{body}", crate::queue::base_section(bp))
-        }
-        _ => body.to_string(),
-    }
-}
-
-/// Prepend the `[Channel Canvas]` section to the legacy initial-message body.
-///
-/// Protocol-v2 agents already receive the canvas in `systemPrompt`; only
-/// legacy (protocol_version < 2) agents need it injected here so it arrives
-/// before the first prompt — the same "every turn" semantics as per-turn core.
-/// Heartbeats never have an initial_message, so the caller is responsible for
-/// not passing a canvas when `source` is `Heartbeat`.
-pub(crate) fn prepend_canvas_for_legacy(
-    protocol_version: u32,
+    system_prompt: Option<&str>,
+    team_instructions: Option<&str>,
+    agent_core: Option<&str>,
     agent_canvas: Option<&str>,
     body: &str,
 ) -> String {
-    match agent_canvas {
-        Some(canvas) if protocol_version < 2 => format!("{canvas}\n\n{body}"),
-        _ => body.to_string(),
+    if supports_session_system_prompt {
+        return body.to_string();
+    }
+
+    let context = with_canvas(
+        with_core(
+            with_team(
+                framed_system_prompt(cwd, base_prompt, system_prompt),
+                team_instructions,
+            ),
+            agent_core,
+        ),
+        agent_canvas,
+    );
+
+    match context {
+        Some(context) => format!("{context}\n\n{body}"),
+        None => body.to_string(),
     }
 }
 
@@ -1190,10 +1189,10 @@ pub async fn run_prompt_task(
 
     //
     // Core memory is delivered inside the system prompt the harness already
-    // builds (system role for protocol >= 2, the `[System]` user-message
-    // section for legacy agents). To put it on the wire at `session/new` for
-    // modern agents, the fetch must run *before* the session is created — so
-    // we do it here and cache the rendered section in `state.core_sections`.
+    // builds (system role for supported runtimes, the `[System]` user-message
+    // section for fallback agents). To put it on the wire at `session/new` for
+    // supported runtimes, the fetch must run *before* the session is created —
+    // so we do it here and cache the rendered section in `state.core_sections`.
     //
     // Core is keyed by (agent_keys, owner) — both fixed for the process — so
     // it is identical across channels; the per-channel cache just avoids a
@@ -1415,18 +1414,18 @@ pub async fn run_prompt_task(
                 target: "pool::session",
                 "sending initial_message to session {session_id} for channel {cid}"
             );
-            // For agents with systemPrompt support (protocol_version >= 2),
-            // base_prompt is delivered via the system role in session/new.
-            // Legacy agents receive it via [Base] in the user message instead.
-            // Canvas is also injected here for legacy agents: protocol-v2 agents
-            // already have it in systemPrompt; legacy agents need it before the
-            // first prompt, matching the "every turn" per-turn delivery semantics.
-            let init_msg =
-                prepend_base_for_legacy(agent.protocol_version, ctx.base_prompt, initial_msg);
-            let init_msg = prepend_canvas_for_legacy(
-                agent.protocol_version,
+            // For agents with systemPrompt support, Buzz instructions are
+            // delivered via session/new. Compatibility fallbacks receive the
+            // same context in this first user message instead.
+            let init_msg = prepend_system_context_for_fallback(
+                agent.supports_session_system_prompt,
+                &ctx.cwd,
+                ctx.base_prompt,
+                ctx.system_prompt.as_deref(),
+                ctx.team_instructions.as_deref(),
+                agent_core.as_deref(),
                 agent_canvas.as_deref(),
-                &init_msg,
+                initial_msg,
             );
             let init_result = agent
                 .acp
@@ -1585,7 +1584,7 @@ pub async fn run_prompt_task(
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
                 profile_lookup: profile_lookup.as_ref(),
-                has_system_prompt_support: agent.protocol_version >= 2,
+                has_system_prompt_support: agent.supports_session_system_prompt,
                 base_prompt: ctx.base_prompt,
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
@@ -3400,106 +3399,67 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
-    // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
-    // a legacy agent WITH a base_prompt must get [Base] prepended to the user
-    // message. This is the exact regression that shipped in the round-2 bug.
+    // These pin pre-built prompt dispatch paths (`initial_message`, heartbeat):
+    // an agent without session-system-prompt delivery must receive the same Buzz
+    // instruction context in the user message that supported agents receive via
+    // `session/new.systemPrompt`.
 
     #[test]
-    fn test_initial_message_legacy_agent_gets_base_prepended() {
-        // protocol_version 1 + Some(base_prompt): [Base] rides along in the
-        // user message, composed as `[Base]\n{bp}\n\n{initial_msg}`.
-        let composed = prepend_base_for_legacy(1, Some("you are a helpful agent"), "hello channel");
-        assert_eq!(composed, "[Base]\nyou are a helpful agent\n\nhello channel");
-        assert!(composed.starts_with("[Base]\nyou are a helpful agent\n\n"));
-    }
-
-    #[test]
-    fn test_initial_message_modern_agent_omits_base() {
-        // protocol_version 2 receives base_prompt via session/new, so the user
-        // message is left untouched even when a base_prompt is present.
-        let composed = prepend_base_for_legacy(2, Some("you are a helpful agent"), "hello channel");
-        assert_eq!(composed, "hello channel");
-    }
-
-    #[test]
-    fn test_initial_message_legacy_agent_without_base_is_unchanged() {
-        // No base_prompt configured: nothing to prepend regardless of version.
-        let composed = prepend_base_for_legacy(1, None, "hello channel");
-        assert_eq!(composed, "hello channel");
-    }
-
-    // ── prepend_canvas_for_legacy ─────────────────────────────────────────────
-
-    #[test]
-    fn test_initial_message_legacy_agent_gets_canvas_prepended() {
-        // Legacy agents (protocol_version < 2) receive the canvas section before
-        // the initial-message body so it arrives before the first prompt.
-        let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00Z\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
-        let composed = prepend_canvas_for_legacy(1, Some(canvas), "do the thing");
-        assert!(
-            composed.starts_with("[Channel Canvas]"),
-            "canvas must precede the body"
+    fn test_initial_message_fallback_gets_full_system_context() {
+        let composed = prepend_system_context_for_fallback(
+            false,
+            "/",
+            Some("base text"),
+            Some("persona text"),
+            Some("team text"),
+            Some("[Agent Memory — core]\ncore text"),
+            Some("[Channel Canvas]\ncanvas text"),
+            "hello channel",
         );
-        assert!(
-            composed.ends_with("do the thing"),
-            "body must follow the canvas"
-        );
-        assert!(
-            composed.contains("\n\ndo the thing"),
-            "canvas and body separated by blank line"
-        );
-    }
-
-    #[test]
-    fn test_initial_message_modern_agent_omits_canvas_from_body() {
-        // Protocol-v2 agents receive canvas in systemPrompt; it must NOT be
-        // duplicated in the initial-message user turn.
-        let canvas = "[Channel Canvas]\nsome section";
-        let composed = prepend_canvas_for_legacy(2, Some(canvas), "do the thing");
         assert_eq!(
-            composed, "do the thing",
-            "modern agent initial message must not contain canvas"
-        );
-        assert!(
-            !composed.contains("[Channel Canvas]"),
-            "canvas must be absent from modern agent initial message"
+            composed,
+            "[Base]\nbase text\n\n[System]\npersona text\n\n[Team Instructions]\nteam text\n\n[Agent Memory — core]\ncore text\n\n[Channel Canvas]\ncanvas text\n\nhello channel"
         );
     }
 
     #[test]
-    fn test_initial_message_legacy_agent_no_canvas_is_unchanged() {
-        // No canvas present: body passes through unmodified.
-        let composed = prepend_canvas_for_legacy(1, None, "do the thing");
-        assert_eq!(composed, "do the thing");
+    fn test_initial_message_supported_agent_omits_fallback_context() {
+        let composed = prepend_system_context_for_fallback(
+            true,
+            "/",
+            Some("base text"),
+            Some("persona text"),
+            Some("team text"),
+            Some("[Agent Memory — core]\ncore text"),
+            Some("[Channel Canvas]\ncanvas text"),
+            "hello channel",
+        );
+        assert_eq!(composed, "hello channel");
+        assert!(!composed.contains("[System]"));
+        assert!(!composed.contains("[Channel Canvas]"));
     }
 
     #[test]
-    fn test_initial_message_legacy_canvas_and_base_compose_correctly() {
-        // Verify the full composition order when both base and canvas are present:
-        // [Base] → canvas section → initial-message body.
-        let canvas = "[Channel Canvas]\ncanvas content";
-        let base_composed = prepend_base_for_legacy(1, Some("be helpful"), "do the thing");
-        let full = prepend_canvas_for_legacy(1, Some(canvas), &base_composed);
-        assert!(
-            full.starts_with("[Channel Canvas]"),
-            "canvas must be first in composed message"
+    fn test_initial_message_fallback_without_context_is_unchanged() {
+        let composed =
+            prepend_system_context_for_fallback(false, "/", None, None, None, None, None, "hello");
+        assert_eq!(composed, "hello");
+    }
+
+    #[test]
+    fn test_initial_message_fallback_workspace_precedes_base() {
+        let composed = prepend_system_context_for_fallback(
+            false,
+            "/Users/me/.buzz",
+            Some("base text"),
+            None,
+            None,
+            None,
+            None,
+            "hello",
         );
-        assert!(
-            full.contains("[Base]"),
-            "base must be present in composed message"
-        );
-        assert!(
-            full.ends_with("do the thing"),
-            "body must be last in composed message"
-        );
-        // Order: canvas → base → body
-        let canvas_pos = full.find("[Channel Canvas]").unwrap();
-        let base_pos = full.find("[Base]").unwrap();
-        let body_pos = full.find("do the thing").unwrap();
-        assert!(
-            canvas_pos < base_pos && base_pos < body_pos,
-            "order must be: canvas → base → body"
-        );
+        assert!(composed.starts_with("[Workspace]\n"));
+        assert!(composed.contains("\n\n[Base]\nbase text\n\nhello"));
     }
 
     // Pin the session/new systemPrompt framing: each present prompt carries its
@@ -4507,7 +4467,7 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
-            protocol_version: 2,
+            supports_session_system_prompt: true,
         };
 
         // Simulate dispatch: install a steer receiver (normally done by
@@ -4562,7 +4522,7 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
-            protocol_version: 2,
+            supports_session_system_prompt: true,
         };
 
         // Simulate a completed turn: `steer_rx` was consumed by the read loop

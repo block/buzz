@@ -28,7 +28,10 @@ use buzz_core::observer::{
     OBSERVER_MAX_PLAINTEXT_LEN,
 };
 use clap::Parser;
-use config::{Config, DedupMode, ModelsArgs, MultipleEventHandling, RespondTo, SubscribeMode};
+use config::{
+    agent_command_supports_session_system_prompt, Config, DedupMode, ModelsArgs,
+    MultipleEventHandling, RespondTo, SubscribeMode,
+};
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
@@ -1133,6 +1136,8 @@ async fn tokio_main() -> Result<()> {
     // We attempt each spawn under a 60-second timeout; failures are logged and
     // skipped. If ALL agents fail we return an error. A partial pool is valid —
     // the harness continues with reduced capacity and logs a warning.
+    let command_supports_session_system_prompt =
+        agent_command_supports_session_system_prompt(&config.agent_command);
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(config.agents as usize);
     for i in 0..config.agents as usize {
         // Spawn OUTSIDE the timeout so we always own the child for cleanup.
@@ -1178,7 +1183,8 @@ async fn tokio_main() -> Result<()> {
                             model_capabilities: None,
                             desired_model: config.model.clone(),
                             model_overridden: false,
-                            protocol_version,
+                            supports_session_system_prompt: protocol_version >= 2
+                                && command_supports_session_system_prompt,
                         }));
                     }
                     Ok(Err(e)) => {
@@ -1617,7 +1623,8 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         model_overridden: false,
-                        protocol_version,
+                        supports_session_system_prompt: protocol_version >= 2
+                            && command_supports_session_system_prompt,
                     };
                     pool.return_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
@@ -3168,10 +3175,18 @@ fn dispatch_heartbeat(
         .heartbeat_prompt
         .clone()
         .unwrap_or_else(default_heartbeat_prompt);
-    // For legacy agents (protocol_version < 2), prepend base_prompt to the
-    // heartbeat user message since they don't receive it via session/new.
-    let prompt_text =
-        pool::prepend_base_for_legacy(agent.protocol_version, ctx.base_prompt, &prompt_text);
+    // For legacy/compatibility fallback agents, prepend Buzz instructions to
+    // the heartbeat user message since they don't receive them via session/new.
+    let prompt_text = pool::prepend_system_context_for_fallback(
+        agent.supports_session_system_prompt,
+        &ctx.cwd,
+        ctx.base_prompt,
+        ctx.system_prompt.as_deref(),
+        ctx.team_instructions.as_deref(),
+        None,
+        None,
+        &prompt_text,
+    );
     let result_tx = pool.result_tx();
     let ctx_clone = Arc::clone(ctx);
     let agent_index = agent.index;
@@ -3510,33 +3525,46 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
 }
 
 #[cfg(test)]
-mod heartbeat_base_prompt_tests {
+mod heartbeat_system_context_tests {
     use super::*;
 
-    // Pins the heartbeat dispatch path (dispatch_heartbeat, ~line 2359): a
-    // legacy agent WITH a base_prompt must get [Base] prepended to the
-    // heartbeat user message, composed as `[Base]\n{bp}\n\n{prompt}`. This is
-    // the second half of the round-2 regression (the first being initial_message).
+    // Pins the heartbeat dispatch path: an agent without session-system-prompt
+    // support must get Buzz instructions prepended to the heartbeat user
+    // message. This is the second half of the round-2 regression (the first
+    // being initial_message).
 
     #[test]
-    fn test_heartbeat_legacy_agent_gets_base_prepended() {
-        // protocol_version 1 + Some(base_prompt): heartbeat prompt is prefixed
-        // with the [Base] section exactly as the legacy session/new path would.
+    fn test_heartbeat_fallback_agent_gets_system_context() {
         let prompt = "[System: Heartbeat]\nrun feed get";
-        let composed = pool::prepend_base_for_legacy(1, Some("you are a helpful agent"), prompt);
+        let composed = pool::prepend_system_context_for_fallback(
+            false,
+            "/",
+            Some("base text"),
+            Some("persona text"),
+            Some("team text"),
+            None,
+            None,
+            prompt,
+        );
         assert_eq!(
             composed,
-            "[Base]\nyou are a helpful agent\n\n[System: Heartbeat]\nrun feed get"
+            "[Base]\nbase text\n\n[System]\npersona text\n\n[Team Instructions]\nteam text\n\n[System: Heartbeat]\nrun feed get"
         );
-        assert!(composed.starts_with("[Base]\nyou are a helpful agent\n\n"));
     }
 
     #[test]
-    fn test_heartbeat_modern_agent_omits_base() {
-        // protocol_version 2 gets base_prompt via session/new; the heartbeat
-        // prompt is sent verbatim.
+    fn test_heartbeat_supported_agent_omits_fallback_context() {
         let prompt = "[System: Heartbeat]\nrun feed get";
-        let composed = pool::prepend_base_for_legacy(2, Some("you are a helpful agent"), prompt);
+        let composed = pool::prepend_system_context_for_fallback(
+            true,
+            "/",
+            Some("base text"),
+            Some("persona text"),
+            Some("team text"),
+            None,
+            None,
+            prompt,
+        );
         assert_eq!(composed, prompt);
     }
 }
@@ -4152,9 +4180,9 @@ mod error_outcome_emission_tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
-            // Error branches under test never read this; 1 is the legacy
-            // non-systemPrompt path, the simplest valid value.
-            protocol_version: 1,
+            // Error branches under test never read this; keep the legacy
+            // non-systemPrompt path as the simplest valid shape.
+            supports_session_system_prompt: false,
         }
     }
 

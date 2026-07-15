@@ -570,6 +570,13 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .collect()
 }
 
+pub(crate) fn agent_command_supports_session_system_prompt(command: &str) -> bool {
+    // Goose advertises ACP protocol v2 but ignores `session/new.systemPrompt`
+    // in versions observed in the wild. Keep Buzz instructions in the user
+    // prompt for Goose until it has a stable, broadly available prompt API.
+    normalize_agent_command_identity(command) != "goose"
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
@@ -1481,6 +1488,21 @@ mod tests {
         assert_eq!(normalize_agent_command_identity("   "), "");
         assert_eq!(normalize_agent_command_identity("/"), "");
         assert_eq!(normalize_agent_command_identity("///"), "");
+    }
+
+    #[test]
+    fn session_system_prompt_compatibility_disables_goose_only() {
+        assert!(!agent_command_supports_session_system_prompt("goose"));
+        assert!(!agent_command_supports_session_system_prompt(
+            "C:\\Program Files\\Goose\\goose.exe"
+        ));
+        assert!(agent_command_supports_session_system_prompt("buzz-agent"));
+        assert!(agent_command_supports_session_system_prompt(
+            "/usr/local/bin/codex-acp"
+        ));
+        assert!(agent_command_supports_session_system_prompt(
+            "custom-acp-runtime"
+        ));
     }
 
     #[test]

@@ -1326,19 +1326,20 @@ pub struct FormatPromptArgs<'a> {
     pub profile_lookup: Option<&'a PromptProfileLookup>,
     /// When true, base_prompt and system_prompt are delivered via the system
     /// role (session/new) and omitted from the user message. When false
-    /// (legacy agents), they are injected as `[Base]` and `[System]` sections.
+    /// (legacy agents or runtime compatibility fallbacks), they are injected as
+    /// `[Base]` and `[System]` sections.
     pub has_system_prompt_support: bool,
-    /// Base prompt content for legacy agents (protocol_version < 2).
+    /// Base prompt content for agents without session-system-prompt delivery.
     pub base_prompt: Option<&'a str>,
-    /// System prompt content for legacy agents (protocol_version < 2).
+    /// System prompt content for agents without session-system-prompt delivery.
     pub system_prompt: Option<&'a str>,
-    /// Team instructions for legacy agents, rendered after `[System]`.
+    /// Team instructions for fallback agents, rendered after `[System]`.
     pub team_instructions: Option<&'a str>,
-    /// Rendered `[Channel Canvas]` metadata section for legacy agents.
+    /// Rendered `[Channel Canvas]` metadata section for fallback agents.
     ///
-    /// For modern agents (protocol_version >= 2) the section is delivered via
-    /// the system role in session/new; omit here to avoid duplication.
-    /// For legacy agents it rides in the user message on every turn of the
+    /// For agents with session-system-prompt delivery the section is delivered
+    /// via the system role in session/new; omit here to avoid duplication.
+    /// For fallback agents it rides in the user message on every turn of the
     /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
 }
@@ -1355,8 +1356,8 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 /// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):
-/// 0. `[Base]` — base prompt (only for legacy agents without systemPrompt support)
-/// 1. `[System]` — system prompt (only for legacy agents without systemPrompt support)
+/// 0. `[Base]` — base prompt (only for agents without systemPrompt support)
+/// 1. `[System]` — system prompt (only for agents without systemPrompt support)
 /// 2. `[Agent Memory — core]` — if agent core memory is set
 /// 3. `[Context]` — scope, channel name, and contextual hints for the agent
 /// 4. `[Thread Context]` or `[Conversation Context]` — if fetched
@@ -1370,8 +1371,9 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 /// joining the blocks (legacy agents see a single `\n` between sections rather
 /// than a blank line; sections self-delimit with their `[Header]` line).
 ///
-/// For agents with `protocol_version >= 2`, base_prompt and system_prompt are
-/// delivered via the system role in `session/new` and omitted from this message.
+/// For agents with session-system-prompt delivery, base_prompt and system_prompt
+/// are delivered via the system role in `session/new` and omitted from this
+/// message.
 pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<String> {
     // Scope is always derived from the LAST event in the batch — that's the
     // one the agent is responding to. Thread/DM context is supplementary info
@@ -1392,9 +1394,9 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     let mut sections: Vec<String> = Vec::with_capacity(7);
 
-    // For legacy agents (protocol_version < 2), inject base_prompt and
-    // system_prompt as user-message sections. Modern agents receive these
-    // via the system role in session/new.
+    // For fallback agents, inject base_prompt and system_prompt as user-message
+    // sections. Supported agents receive these via the system role in
+    // session/new.
     if !args.has_system_prompt_support {
         if let Some(bp) = args.base_prompt {
             sections.push(base_section(bp));
@@ -1412,15 +1414,15 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     }
 
     // NIP-AE agent core memory (rendered by `engram_fetch::build_core_section`).
-    // For modern agents (protocol_version >= 2), core is delivered via the
+    // For agents with session-system-prompt delivery, core is delivered via the
     // system role in session/new, so it is omitted here to avoid duplication.
-    // Legacy agents have no system role, so core rides in the user message
-    // alongside `[Base]`/`[System]`.
+    // Fallback agents have no reliable system role, so core rides in the user
+    // message alongside `[Base]`/`[System]`.
     if !args.has_system_prompt_support {
         if let Some(core) = args.agent_core {
             sections.push(core.to_string());
         }
-        // Channel canvas metadata — same delivery semantics as core for legacy agents.
+        // Channel canvas metadata — same delivery semantics as core for fallback agents.
         if let Some(canvas) = args.agent_canvas {
             sections.push(canvas.to_string());
         }
@@ -2235,9 +2237,9 @@ mod tests {
 
     #[test]
     fn test_format_prompt_modern_agent_omits_core_from_user_message() {
-        // Modern agents (protocol_version >= 2) receive core via the system
-        // role in session/new, so format_prompt must NOT also emit it in the
-        // user message — otherwise core would double-render.
+        // Supported agents receive core via the system role in session/new, so
+        // format_prompt must NOT also emit it in the user message — otherwise
+        // core would double-render.
         let ch = Uuid::new_v4();
         let event = make_event("hi");
         let batch = FlushBatch {
@@ -2261,7 +2263,7 @@ mod tests {
         .join("\n\n");
         assert!(
             !prompt.contains("[Agent Memory — core]"),
-            "modern agents must not get core in the user message; got: {prompt}"
+            "supported agents must not get core in the user message; got: {prompt}"
         );
         assert!(prompt.starts_with("[Context]"));
     }
@@ -2402,11 +2404,11 @@ mod tests {
         // Neither section should appear — they are delivered via session/new
         assert!(
             !prompt.contains("[Base]"),
-            "[Base] should be suppressed for modern agents"
+            "[Base] should be suppressed for supported agents"
         );
         assert!(
             !prompt.contains("[System]"),
-            "[System] should be suppressed for modern agents"
+            "[System] should be suppressed for supported agents"
         );
         assert!(prompt.starts_with("[Context]"));
     }
