@@ -99,6 +99,7 @@ export default defineConfig({
         "**/onboarding-avatar-skip.spec.ts",
         "**/onboarding-backup.spec.ts",
         "**/onboarding-agent-defaults.spec.ts",
+        "**/nostr-bind.spec.ts",
         "**/profile-nsec-reveal.spec.ts",
         "**/agent-provider-dropdowns.spec.ts",
         "**/agent-lifecycle-feedback.spec.ts",

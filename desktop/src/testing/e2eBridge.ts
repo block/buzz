@@ -8650,6 +8650,31 @@ export function maybeInstallE2eTauriMocks() {
 
         return { ...DEFAULT_MOCK_IDENTITY, lost: isLost, locked: isLocked };
       }
+      case "sign_nostr_identity_binding": {
+        const request = payload as {
+          challengeId: string;
+          expiresAt: string;
+          nonce: string;
+          origin: string;
+          verificationCode: string;
+        };
+        const activeIdentity = identity ?? DEFAULT_MOCK_IDENTITY;
+        return JSON.stringify({
+          id: "e2e-signed-nostr-binding",
+          pubkey: activeIdentity.pubkey,
+          created_at: 0,
+          kind: 24243,
+          tags: [
+            ["challenge_id", request.challengeId],
+            ["nonce", request.nonce],
+            ["verification_code", request.verificationCode],
+            ["origin", request.origin],
+            ["expires_at", request.expiresAt],
+          ],
+          content: "",
+          sig: "e2e-signed-nostr-binding",
+        });
+      }
       case "get_nsec": {
         const nsecSequence = activeConfig?.mock?.nsecErrors;
         if (nsecSequence && nsecSequence.length > 0) {
@@ -9715,7 +9740,7 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
     handleMockCommand(command, payload ?? null);
-  mockIPC(handleMockCommand);
+  mockIPC(handleMockCommand, { shouldMockEvents: true });
 
   // Wire up __TAURI_INTERNALS__.listen so tests can subscribe to backend-emitted
   // events (e.g. "agents-data-changed"). mockIPC already ensures __TAURI_INTERNALS__
