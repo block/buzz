@@ -13,13 +13,47 @@ use axum::{
 use base64::Engine;
 use serde_json::Value;
 
-use buzz_auth::{Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS};
+use buzz_auth::{LimitType, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS};
 use buzz_core::TenantContext;
 
 use crate::handlers::ingest::{IngestAuth, IngestError};
 use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
+
+async fn enforce_http_admission(
+    state: &AppState,
+    tenant: &TenantContext,
+    pubkey: &nostr::PublicKey,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let limit = state.auth.config().rate_limits.human_api_calls_per_min;
+    match crate::admission::check_principal(
+        state.admission_rate_limiter.as_ref(),
+        tenant,
+        pubkey,
+        LimitType::ApiCalls,
+        60,
+        limit,
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "quota").increment(1);
+            Err(api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
+            ))
+        }
+        Err(crate::admission::AdmissionError::Unavailable) => {
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "http", "reason" => "unavailable").increment(1);
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "rate-limited: shared admission unavailable",
+            ))
+        }
+    }
+}
 
 /// Verify bridge auth: NIP-98 (production) or X-Pubkey (dev mode).
 ///
@@ -584,6 +618,7 @@ pub async fn submit_event(
         Some(&body),
         state.config.require_auth_token,
     )?;
+    enforce_http_admission(&state, &tenant, &pubkey).await?;
     check_nip98_replay(&state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
@@ -653,6 +688,7 @@ pub async fn query_events(
         Some(&body),
         state.config.require_auth_token,
     )?;
+    enforce_http_admission(&state, &tenant, &pubkey).await?;
     check_nip98_replay(&state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
@@ -1036,6 +1072,7 @@ pub async fn count_events(
         Some(&body),
         state.config.require_auth_token,
     )?;
+    enforce_http_admission(&state, &tenant, &pubkey).await?;
     check_nip98_replay(&state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
