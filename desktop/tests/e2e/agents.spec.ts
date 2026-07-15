@@ -164,25 +164,22 @@ test("built-in personas are used from the catalog dialog", async ({ page }) => {
   await expect(page.getByTestId("persona-catalog-dialog")).toContainText(
     "Fizz",
   );
-  const previewPersonas = [
-    ["builtin:product-strategist", "Product Strategist"],
-    ["builtin:implementation-partner", "Implementation Partner"],
-    ["builtin:qa-reviewer", "QA Reviewer"],
-    ["builtin:work-coordinator", "Work Coordinator"],
-    ["builtin:support-guide", "Support Guide"],
-    ["builtin:experiment-designer", "Experiment Designer"],
-  ] as const;
-  for (const [, personaName] of previewPersonas) {
+  for (const personaName of ["Fizz", "Honey", "Bumble"]) {
     await expect(page.getByTestId("persona-catalog-dialog")).toContainText(
       personaName,
     );
   }
-  for (const [personaId, personaName] of previewPersonas) {
-    await expect(
-      page
-        .getByTestId(`persona-catalog-list-item-${personaId}`)
-        .getByRole("img", { name: `${personaName} avatar` }),
-    ).toHaveAttribute("src", /.+/);
+  for (const retiredPersonaName of [
+    "Product Strategist",
+    "Implementation Partner",
+    "QA Reviewer",
+    "Work Coordinator",
+    "Support Guide",
+    "Experiment Designer",
+  ]) {
+    await expect(page.getByTestId("persona-catalog-dialog")).not.toContainText(
+      retiredPersonaName,
+    );
   }
   await expect(page.getByTestId("persona-catalog-dialog-header")).toBeVisible();
   await expect(

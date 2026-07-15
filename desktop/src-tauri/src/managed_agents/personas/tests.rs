@@ -39,27 +39,11 @@ fn merge_personas_adds_missing_built_ins() {
     assert!(records
         .iter()
         .any(|record| record.id == "builtin:fizz" && record.runtime.is_none()));
-    assert!(records
-        .iter()
-        .any(|record| record.id == "builtin:product-strategist" && !record.is_active));
     let display_names: Vec<&str> = records
         .iter()
         .map(|record| record.display_name.as_str())
         .collect();
-    assert_eq!(
-        display_names,
-        vec![
-            "Fizz",
-            "Honey",
-            "Bumble",
-            "Product Strategist",
-            "Implementation Partner",
-            "QA Reviewer",
-            "Work Coordinator",
-            "Support Guide",
-            "Experiment Designer"
-        ]
-    );
+    assert_eq!(display_names, vec!["Fizz", "Honey", "Bumble"]);
     let active_ids: Vec<&str> = records
         .iter()
         .filter(|record| record.is_active)
