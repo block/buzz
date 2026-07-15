@@ -78,6 +78,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // Relay invites: mint (owner/admin) + claim (membership-gate exempt)
         .route("/api/invites", post(api::invites::mint_invite))
+        .route("/api/invites/config", get(api::invites::invite_config))
+        .route(
+            "/api/invites/accept-terms",
+            post(api::invites::accept_terms),
+        )
         .route("/api/invites/claim", post(api::invites::claim_invite))
         // Moderation queue reads (NIP-98 auth + mod-authz gate, L6)
         .route("/moderation/reports", get(api::bridge::moderation_reports))

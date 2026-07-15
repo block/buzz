@@ -25,6 +25,15 @@ pub enum ConfigError {
 
 /// Relay runtime configuration, loaded from environment variables.
 #[derive(Debug, Clone)]
+pub struct InviteTermsConfig {
+    /// Public HTTPS URL containing the operator's terms.
+    pub url: url::Url,
+    /// Stable operator-defined identifier for the exact terms revision.
+    pub version: String,
+}
+
+/// Relay runtime configuration, loaded from environment variables.
+#[derive(Debug, Clone)]
 pub struct Config {
     /// Address the relay HTTP/WebSocket server binds to.
     pub bind_addr: SocketAddr,
@@ -196,6 +205,11 @@ pub struct Config {
     pub push_gateway_delivery_url: Option<url::Url>,
     /// Hard timeout for one gateway delivery request.
     pub push_gateway_timeout: Duration,
+
+    /// Optional terms policy shown and enforced for relay invite acceptance.
+    /// Disabled unless both `BUZZ_INVITE_TERMS_URL` and
+    /// `BUZZ_INVITE_TERMS_VERSION` are set.
+    pub invite_terms: Option<InviteTermsConfig>,
 
     /// Optional path to the web UI `dist/` directory.
     /// When set, the relay serves the SPA from this directory for browser requests.
@@ -599,6 +613,47 @@ impl Config {
         };
         let push_gateway_timeout = Duration::from_millis(push_gateway_timeout_millis);
 
+        let invite_terms_url = std::env::var("BUZZ_INVITE_TERMS_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let invite_terms_version = std::env::var("BUZZ_INVITE_TERMS_VERSION")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let invite_terms = match (invite_terms_url, invite_terms_version) {
+            (None, None) => None,
+            (Some(raw_url), Some(version)) => {
+                if version.len() > 128 {
+                    return Err(ConfigError::InvalidValue(
+                        "BUZZ_INVITE_TERMS_VERSION must contain at most 128 bytes".to_string(),
+                    ));
+                }
+                let url = url::Url::parse(&raw_url).map_err(|e| {
+                    ConfigError::InvalidValue(format!(
+                        "BUZZ_INVITE_TERMS_URL must be a valid HTTPS URL: {e}"
+                    ))
+                })?;
+                if url.scheme() != "https"
+                    || url.host_str().is_none()
+                    || url.username() != ""
+                    || url.password().is_some()
+                {
+                    return Err(ConfigError::InvalidValue(
+                        "BUZZ_INVITE_TERMS_URL must be an HTTPS URL without credentials"
+                            .to_string(),
+                    ));
+                }
+                Some(InviteTermsConfig { url, version })
+            }
+            _ => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_INVITE_TERMS_URL and BUZZ_INVITE_TERMS_VERSION must be set together"
+                        .to_string(),
+                ))
+            }
+        };
+
         // Web UI static file serving
         let web_dir = std::env::var("BUZZ_WEB_DIR")
             .ok()
@@ -667,6 +722,7 @@ impl Config {
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
+            invite_terms,
             web_dir,
         })
     }
