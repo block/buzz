@@ -2,6 +2,7 @@ import { Bug, ImageIcon, ThumbsUp, Wrench, X } from "lucide-react";
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import {
@@ -82,6 +83,9 @@ export function SendFeedbackDialog({
   open: boolean;
 }) {
   const { burstEmoji } = useEmojiBurst();
+  const resolvedAttachedImageUrl = attachedImageUrl
+    ? rewriteRelayUrl(attachedImageUrl)
+    : null;
   const [category, setCategory] = React.useState<FeedbackCategoryId | null>(
     null,
   );
@@ -237,7 +241,7 @@ export function SendFeedbackDialog({
               value={message}
             />
 
-            {attachedImageUrl ? (
+            {resolvedAttachedImageUrl ? (
               <div className="group/attachment relative flex w-32 shrink-0 flex-col overflow-hidden rounded-lg border border-border/70 bg-muted/40">
                 <button
                   aria-label="View attached image"
@@ -249,7 +253,7 @@ export function SendFeedbackDialog({
                   <img
                     alt="Attached"
                     className="h-20 w-full object-cover"
-                    src={attachedImageUrl}
+                    src={resolvedAttachedImageUrl}
                   />
                   <span className="flex items-center gap-1 px-2 py-1.5 text-2xs font-medium text-muted-foreground">
                     <ImageIcon
@@ -340,7 +344,7 @@ export function SendFeedbackDialog({
       </DialogContent>
 
       {/* Full-size attachment preview. */}
-      {attachedImageUrl ? (
+      {resolvedAttachedImageUrl ? (
         <Dialog onOpenChange={setPreviewOpen} open={previewOpen}>
           <DialogContent
             aria-describedby={undefined}
@@ -351,7 +355,7 @@ export function SendFeedbackDialog({
             <img
               alt="Attached"
               className="max-h-[80vh] w-full rounded-lg bg-black/40 object-contain"
-              src={attachedImageUrl}
+              src={resolvedAttachedImageUrl}
             />
           </DialogContent>
         </Dialog>

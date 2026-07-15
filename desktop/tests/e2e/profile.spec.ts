@@ -677,6 +677,35 @@ test("keeps Send disabled when a stale attachment attempt finishes", async ({
   await expect(submit).toBeEnabled();
 });
 
+test("proxies feedback attachment previews", async ({ page }) => {
+  const sha256 = "c".repeat(64);
+  const proxyUrl = `http://127.0.0.1:54321/media/${sha256}.png`;
+  await installMockBridge(page, {
+    uploadDescriptors: [
+      {
+        url: `http://localhost:3000/media/${sha256}.png`,
+        sha256,
+        size: 42,
+        type: "image/png",
+        uploaded: 42,
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await openProfileMenu(page);
+  await page.getByTestId("profile-popover-send-feedback").click();
+  await page.getByTestId("feedback-attach-image").click();
+
+  const thumbnail = page.getByTestId("feedback-attachment-thumb");
+  await expect(thumbnail.locator("img")).toHaveAttribute("src", proxyUrl);
+  await thumbnail.click();
+
+  const preview = page.getByTestId("feedback-attachment-preview");
+  await expect(preview).toBeVisible();
+  await expect(preview.locator("img")).toHaveAttribute("src", proxyUrl);
+});
+
 test("updates presence from the profile menu", async ({ page }) => {
   await page.goto("/");
 
