@@ -94,6 +94,7 @@ struct NostrBindDeepLinkPayload {
     origin: String,
     expires_at: String,
     return_mode: String,
+    callback_url: Option<String>,
 }
 
 fn non_empty_param(url: &Url, name: &str) -> Result<String, String> {
@@ -102,6 +103,35 @@ fn non_empty_param(url: &Url, name: &str) -> Result<String, String> {
         .map(|(_, value)| value.into_owned())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("missing {name}"))
+}
+
+fn optional_non_empty_param(url: &Url, name: &str) -> Option<String> {
+    url.query_pairs()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_nostr_bind_callback_url(callback_url: &str, origin: &str) -> Result<(), String> {
+    let callback =
+        Url::parse(callback_url).map_err(|error| format!("invalid callback_url: {error}"))?;
+    let origin = Url::parse(origin).map_err(|error| format!("invalid origin: {error}"))?;
+    if callback.scheme() != "https" {
+        return Err("callback_url must use https".into());
+    }
+    if callback.host_str().is_none() {
+        return Err("callback_url missing host".into());
+    }
+    if !callback.username().is_empty() || callback.password().is_some() {
+        return Err("callback_url must not include credentials".into());
+    }
+    if callback.scheme() != origin.scheme()
+        || callback.host_str() != origin.host_str()
+        || callback.port_or_known_default() != origin.port_or_known_default()
+    {
+        return Err("callback_url must match origin".into());
+    }
+    Ok(())
 }
 
 fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, String> {
@@ -115,6 +145,7 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
     let origin = non_empty_param(url, "origin")?;
     let expires_at = non_empty_param(url, "expires_at")?;
     let return_mode = non_empty_param(url, "return")?;
+    let callback_url = optional_non_empty_param(url, "callback_url");
 
     nostr_bind::validate_challenge_id(&challenge_id)?;
     nostr_bind::validate_nonce(&nonce)?;
@@ -126,6 +157,9 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
     nostr_bind::validate_expires_at_format(&expires_at)?;
     if return_mode != nostr_bind::RETURN_MODE {
         return Err("unsupported return mode".into());
+    }
+    if let Some(callback_url) = callback_url.as_deref() {
+        validate_nostr_bind_callback_url(callback_url, &origin)?;
     }
 
     Ok(NostrBindDeepLinkPayload {
@@ -139,6 +173,7 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
         origin,
         expires_at,
         return_mode,
+        callback_url,
     })
 }
 
@@ -341,6 +376,29 @@ mod tests {
         assert_eq!(payload.origin, "https://example.com");
         assert_eq!(payload.expires_at, "2999-01-01T00:00:00Z");
         assert_eq!(payload.return_mode, "clipboard");
+        assert_eq!(payload.callback_url, None);
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_accepts_same_origin_callback_url() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard&callback_url=https%3A%2F%2Fexample.com%2Fbuzz%3FmockSession%3D1").unwrap();
+        let payload = parse_nostr_bind_deep_link(&url).unwrap();
+        assert_eq!(
+            payload.callback_url.as_deref(),
+            Some("https://example.com/buzz?mockSession=1")
+        );
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_cross_origin_callback_url() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard&callback_url=https%3A%2F%2Fevil.example%2Fbuzz").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_http_callback_url() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard&callback_url=http%3A%2F%2Fexample.com%2Fbuzz").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
     }
 
     #[test]
