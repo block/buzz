@@ -2,39 +2,51 @@ import buzzAppIcon from "@/assets/app-icon@3x.png";
 import { relayWsUrl } from "@/shared/lib/relay-url";
 import { Button } from "@/shared/ui/button";
 import * as React from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 const DOWNLOAD_URL = "https://github.com/block/buzz/releases/latest";
-type Terms = { url: string; privacy_url?: string; version: string };
+type JoinPolicy = {
+  terms_markdown?: string;
+  privacy_markdown?: string;
+  age_attestation_required: boolean;
+  version: string;
+};
+
+type PolicyDocument = { title: string; markdown: string };
 
 /** Landing page for a community invite link (`/invite/<code>`). */
 export function InvitePage({ code }: { code: string }) {
   const relay = relayWsUrl();
   const host = relay.replace(/^wss?:\/\//, "");
-  const [terms, setTerms] = React.useState<Terms | null | undefined>(undefined);
+  const [policy, setPolicy] = React.useState<JoinPolicy | null | undefined>(
+    undefined,
+  );
+  const [document, setDocument] = React.useState<PolicyDocument | null>(null);
   const [ageConfirmed, setAgeConfirmed] = React.useState(false);
   const [opening, setOpening] = React.useState(false);
 
   React.useEffect(() => {
-    fetch("/api/invites/config")
+    fetch("/api/join-policy")
       .then(async (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const config = (await response.json()) as { terms?: Terms };
-        setTerms(config.terms ?? null);
+        const config = (await response.json()) as { policy?: JoinPolicy };
+        setPolicy(config.policy ?? null);
       })
-      .catch(() => setTerms(undefined));
+      .catch(() => setPolicy(undefined));
   }, []);
 
   const openInvite = async () => {
     setOpening(true);
     try {
       let receipt: string | undefined;
-      if (terms) {
-        const response = await fetch("/api/invites/accept-terms", {
+      if (policy) {
+        const response = await fetch("/api/invites/accept-policy", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             code,
-            policy_version: terms.version,
+            policy_version: policy.version,
             age_confirmed: ageConfirmed,
           }),
         });
@@ -42,7 +54,7 @@ export function InvitePage({ code }: { code: string }) {
         receipt = ((await response.json()) as { receipt: string }).receipt;
       }
       const query = new URLSearchParams({ relay, code });
-      if (receipt) query.set("terms_receipt", receipt);
+      if (receipt) query.set("policy_receipt", receipt);
       window.location.href = `buzz://join?${query.toString()}`;
     } finally {
       setOpening(false);
@@ -50,7 +62,12 @@ export function InvitePage({ code }: { code: string }) {
   };
 
   const disabled =
-    terms === undefined || opening || (terms !== null && !ageConfirmed);
+    policy === undefined ||
+    opening ||
+    Boolean(policy?.age_attestation_required && !ageConfirmed);
+  const showDocument = (title: string, markdown: string) =>
+    setDocument({ title, markdown });
+
   return (
     <div
       className="flex flex-1 flex-col items-center justify-center px-4 py-16 text-center"
@@ -71,7 +88,7 @@ export function InvitePage({ code }: { code: string }) {
           </h1>
           <p className="mt-9 font-mono text-lg text-black/70">{host}</p>
 
-          {terms && (
+          {policy?.age_attestation_required && (
             <label className="mt-9 flex max-w-md cursor-pointer items-start gap-3 text-left text-sm text-black/70">
               <input
                 className="mt-0.5 h-4 w-4 accent-black"
@@ -79,11 +96,11 @@ export function InvitePage({ code }: { code: string }) {
                 checked={ageConfirmed}
                 onChange={(event) => setAgeConfirmed(event.target.checked)}
               />
-              <span>I confirm that I am at least 18 years old.</span>
+              <span>I am 18 years of age or older.</span>
             </label>
           )}
-          <div className={terms ? "mt-5" : "mt-9"}>
-            {terms === null ? (
+          <div className={policy?.age_attestation_required ? "mt-5" : "mt-9"}>
+            {policy === null ? (
               <Button
                 asChild
                 className="bg-black text-white hover:bg-black/90 focus-visible:ring-black"
@@ -106,30 +123,37 @@ export function InvitePage({ code }: { code: string }) {
               </Button>
             )}
           </div>
-          {terms && (
+          {policy && (policy.terms_markdown || policy.privacy_markdown) && (
             <p className="mt-4 max-w-md text-xs text-black/60">
-              By accepting this invite, you agree to the{" "}
-              <a
-                className="text-black underline-offset-4 hover:text-black/70 hover:decoration-current hover:underline focus-visible:underline"
-                href={terms.url}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Terms of Service
-              </a>
-              {terms.privacy_url && (
-                <>
-                  {" "}
-                  and{" "}
-                  <a
-                    className="text-black underline-offset-4 hover:text-black/70 hover:decoration-current hover:underline focus-visible:underline"
-                    href={terms.privacy_url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Privacy Policy
-                  </a>
-                </>
+              By proceeding you agree to the Buzz{" "}
+              {policy.terms_markdown && (
+                <button
+                  className="text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
+                  type="button"
+                  onClick={() =>
+                    showDocument(
+                      "Terms of Service",
+                      policy.terms_markdown ?? "",
+                    )
+                  }
+                >
+                  Terms of Service
+                </button>
+              )}
+              {policy.terms_markdown && policy.privacy_markdown && " and "}
+              {policy.privacy_markdown && (
+                <button
+                  className="text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
+                  type="button"
+                  onClick={() =>
+                    showDocument(
+                      "Privacy Policy",
+                      policy.privacy_markdown ?? "",
+                    )
+                  }
+                >
+                  Privacy Policy
+                </button>
               )}
               .
             </p>
@@ -138,7 +162,7 @@ export function InvitePage({ code }: { code: string }) {
         <p className="flex h-[3.125rem] items-center justify-center rounded-2xl bg-white text-sm text-black/60">
           Don&apos;t have the app?{" "}
           <a
-            className="ml-1 font-medium text-black underline-offset-4 hover:text-black/70 hover:decoration-current hover:underline focus-visible:underline"
+            className="ml-1 font-medium text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
             href={DOWNLOAD_URL}
             rel="noreferrer"
             target="_blank"
@@ -147,6 +171,37 @@ export function InvitePage({ code }: { code: string }) {
           </a>
         </p>
       </div>
+
+      {document && (
+        <div
+          aria-label={document.title}
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 text-left"
+          role="dialog"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) setDocument(null);
+          }}
+        >
+          <div className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white p-6 text-black shadow-xl sm:p-8">
+            <div className="mb-6 flex items-start justify-between gap-4">
+              <h2 className="text-xl font-semibold">{document.title}</h2>
+              <button
+                aria-label="Close"
+                className="text-2xl leading-none text-black/60 hover:text-black"
+                type="button"
+                onClick={() => setDocument(null)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="prose prose-sm max-w-none">
+              <Markdown remarkPlugins={[remarkGfm]}>
+                {document.markdown}
+              </Markdown>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

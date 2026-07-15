@@ -1,9 +1,18 @@
 import * as React from "react";
 
-import { parseInviteInput } from "@/shared/api/inviteHelpers";
+import {
+  inviteErrorMessage,
+  parseInviteInput,
+} from "@/shared/api/inviteHelpers";
+import {
+  acceptJoinPolicy,
+  getJoinPolicy,
+  type JoinPolicy,
+} from "@/shared/api/invites";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
+import { JoinPolicyNotice } from "./JoinPolicyNotice";
 
 type InviteRedeemFormProps = {
   /**
@@ -16,7 +25,7 @@ type InviteRedeemFormProps = {
   error: string | null;
   isRedeeming: boolean;
   onCancel: () => void;
-  onRedeem: (relayWsUrl: string, code: string) => void;
+  onRedeem: (relayWsUrl: string, code: string, policyReceipt?: string) => void;
 };
 
 export function InviteRedeemForm({
@@ -30,6 +39,14 @@ export function InviteRedeemForm({
   const [bareCodeRelayUrl, setBareCodeRelayUrl] = React.useState(
     defaultRelayUrl ?? "",
   );
+  const [joinPolicy, setJoinPolicy] = React.useState<JoinPolicy | null>(null);
+  const [policyInvite, setPolicyInvite] = React.useState<{
+    relayWsUrl: string;
+    code: string;
+  } | null>(null);
+  const [ageConfirmed, setAgeConfirmed] = React.useState(false);
+  const [policyError, setPolicyError] = React.useState<string | null>(null);
+  const [isLoadingPolicy, setIsLoadingPolicy] = React.useState(false);
 
   const parsed = React.useMemo(
     () => parseInviteInput(inviteInput),
@@ -44,17 +61,61 @@ export function InviteRedeemForm({
       (isBareCode && bareCodeRelayUrl.trim().length > 0));
 
   const handleSubmit = React.useCallback(
-    (event: React.FormEvent) => {
+    async (event: React.FormEvent) => {
       event.preventDefault();
       if (!parsed) return;
 
-      if ("relayWsUrl" in parsed) {
-        onRedeem(parsed.relayWsUrl, parsed.code);
-      } else if (bareCodeRelayUrl.trim()) {
-        onRedeem(bareCodeRelayUrl.trim(), parsed.code);
+      const relayWsUrl =
+        "relayWsUrl" in parsed ? parsed.relayWsUrl : bareCodeRelayUrl.trim();
+      if (!relayWsUrl) return;
+
+      setPolicyError(null);
+      setIsLoadingPolicy(true);
+      try {
+        const policy = await getJoinPolicy(relayWsUrl);
+        if (!policy) {
+          onRedeem(relayWsUrl, parsed.code);
+          return;
+        }
+
+        if (
+          !joinPolicy ||
+          joinPolicy.version !== policy.version ||
+          policyInvite?.relayWsUrl !== relayWsUrl ||
+          policyInvite.code !== parsed.code
+        ) {
+          setJoinPolicy(policy);
+          setPolicyInvite({ relayWsUrl, code: parsed.code });
+          setAgeConfirmed(false);
+          return;
+        }
+
+        if (policy.ageAttestationRequired && !ageConfirmed) {
+          setPolicyError("Confirm that you are at least 18 years old.");
+          return;
+        }
+
+        const receipt = await acceptJoinPolicy(
+          relayWsUrl,
+          parsed.code,
+          policy.version,
+          ageConfirmed,
+        );
+        onRedeem(relayWsUrl, parsed.code, receipt);
+      } catch (policyFetchError) {
+        setPolicyError(inviteErrorMessage(policyFetchError));
+      } finally {
+        setIsLoadingPolicy(false);
       }
     },
-    [bareCodeRelayUrl, onRedeem, parsed],
+    [
+      ageConfirmed,
+      bareCodeRelayUrl,
+      joinPolicy,
+      onRedeem,
+      parsed,
+      policyInvite,
+    ],
   );
 
   return (
@@ -74,7 +135,13 @@ export function InviteRedeemForm({
           data-testid="invite-redeem-input"
           disabled={isRedeeming}
           id="invite-input"
-          onChange={(event) => setInviteInput(event.target.value)}
+          onChange={(event) => {
+            setInviteInput(event.target.value);
+            setJoinPolicy(null);
+            setPolicyInvite(null);
+            setAgeConfirmed(false);
+            setPolicyError(null);
+          }}
           placeholder="https://relay.example.com/invite/abc123 or paste a code"
           spellCheck={false}
           type="text"
@@ -94,12 +161,33 @@ export function InviteRedeemForm({
             className="h-10 bg-background"
             disabled={isRedeeming}
             id="invite-relay-url"
-            onChange={(event) => setBareCodeRelayUrl(event.target.value)}
+            onChange={(event) => {
+              setBareCodeRelayUrl(event.target.value);
+              setJoinPolicy(null);
+              setPolicyInvite(null);
+              setAgeConfirmed(false);
+              setPolicyError(null);
+            }}
             placeholder="wss://relay.example.com"
             type="text"
             value={bareCodeRelayUrl}
           />
         </div>
+      ) : null}
+
+      {joinPolicy ? (
+        <JoinPolicyNotice
+          ageConfirmed={ageConfirmed}
+          onAgeConfirmedChange={(confirmed) => {
+            setAgeConfirmed(confirmed);
+            setPolicyError(null);
+          }}
+          policy={joinPolicy}
+        />
+      ) : null}
+
+      {policyError ? (
+        <p className="text-center text-sm text-destructive">{policyError}</p>
       ) : null}
 
       {error ? (
@@ -109,11 +197,21 @@ export function InviteRedeemForm({
       <Button
         className="h-10 w-full"
         data-testid="invite-redeem-submit"
-        disabled={!canSubmit || isRedeeming}
+        disabled={
+          !canSubmit ||
+          isRedeeming ||
+          isLoadingPolicy ||
+          Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed)
+        }
         type="submit"
       >
-        {isRedeeming ? (
-          <Spinner aria-label="Redeeming invite" className="h-4 w-4 border-2" />
+        {isRedeeming || isLoadingPolicy ? (
+          <Spinner
+            aria-label={isRedeeming ? "Redeeming invite" : "Loading policy"}
+            className="h-4 w-4 border-2"
+          />
+        ) : joinPolicy ? (
+          "Accept and redeem invite"
         ) : (
           "Redeem invite"
         )}

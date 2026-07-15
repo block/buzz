@@ -18,6 +18,13 @@ export type MintedInvite = {
   url: string;
 };
 
+export type JoinPolicy = {
+  termsMarkdown?: string;
+  privacyMarkdown?: string;
+  ageAttestationRequired: boolean;
+  version: string;
+};
+
 export type ClaimResult = {
   status: "joined" | "already_member";
   communityId: string;
@@ -84,6 +91,57 @@ async function invitePost<T>(
   return json as T;
 }
 
+/** Fetch relay-hosted policy content for any join surface. */
+export async function getJoinPolicy(
+  relayWsUrl: string,
+): Promise<JoinPolicy | null> {
+  const base = relayHttpFromWs(relayWsUrl);
+  const response = await fetch(`${base.replace(/\/+$/, "")}/api/join-policy`);
+  // Relays predating join-policy support have no configured policy.
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const raw = (await response.json()) as {
+    policy?: {
+      terms_markdown?: string;
+      privacy_markdown?: string;
+      age_attestation_required: boolean;
+      version: string;
+    };
+  };
+  return raw.policy
+    ? {
+        termsMarkdown: raw.policy.terms_markdown,
+        privacyMarkdown: raw.policy.privacy_markdown,
+        ageAttestationRequired: raw.policy.age_attestation_required,
+        version: raw.policy.version,
+      }
+    : null;
+}
+
+/** Accept the current join policy for an invite and receive a bound receipt. */
+export async function acceptJoinPolicy(
+  relayWsUrl: string,
+  code: string,
+  policyVersion: string,
+  ageConfirmed: boolean,
+): Promise<string> {
+  const base = relayHttpFromWs(relayWsUrl);
+  const response = await fetch(
+    `${base.replace(/\/+$/, "")}/api/invites/accept-policy`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code,
+        policy_version: policyVersion,
+        age_confirmed: ageConfirmed,
+      }),
+    },
+  );
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return ((await response.json()) as { receipt: string }).receipt;
+}
+
 /** Mint an invite code on the active community's relay (owner/admin only). */
 export async function mintInvite(ttlSecs?: number): Promise<MintedInvite> {
   const base = await getRelayHttpUrl();
@@ -103,10 +161,10 @@ export async function mintInvite(ttlSecs?: number): Promise<MintedInvite> {
 export async function claimInvite(
   relayWsUrl: string,
   code: string,
-  termsReceipt?: string,
+  policyReceipt?: string,
 ): Promise<ClaimResult> {
   const base = relayHttpFromWs(relayWsUrl);
-  const body = JSON.stringify({ code, terms_receipt: termsReceipt });
+  const body = JSON.stringify({ code, policy_receipt: policyReceipt });
   const raw = await invitePost<{
     status: "joined" | "already_member";
     community_id: string;

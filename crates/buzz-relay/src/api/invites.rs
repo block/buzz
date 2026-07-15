@@ -56,27 +56,29 @@ pub struct ClaimInviteRequest {
     pub code: String,
     /// Relay-issued proof of accepting the configured terms, when required.
     #[serde(default)]
-    pub terms_receipt: Option<String>,
+    pub policy_receipt: Option<String>,
 }
 
-/// Body for `POST /api/invites/accept-terms`.
+/// Body for `POST /api/invites/accept-policy`.
 #[derive(Debug, Deserialize)]
-pub struct AcceptTermsRequest {
+pub struct AcceptPolicyRequest {
     /// Invite code the acceptance receipt will be bound to.
     pub code: String,
-    /// Policy revision displayed by the browser.
+    /// Policy revision displayed by the client.
     pub policy_version: String,
-    /// Required minimum-age assertion from the invite page.
+    /// Minimum-age assertion, required only when configured by the operator.
+    #[serde(default)]
     pub age_confirmed: bool,
 }
 
-/// Public invite-page configuration. Empty when the operator has no policy.
-pub async fn invite_config(State(state): State<Arc<AppState>>) -> Json<Value> {
-    match &state.config.invite_terms {
+/// Public join policy shared by every client-side join surface.
+pub async fn join_policy(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match &state.config.join_policy {
         Some(policy) => Json(serde_json::json!({
-            "terms": {
-                "url": policy.url,
-                "privacy_url": policy.privacy_url,
+            "policy": {
+                "terms_markdown": policy.terms_markdown,
+                "privacy_markdown": policy.privacy_markdown,
+                "age_attestation_required": policy.age_attestation_required,
                 "version": policy.version
             }
         })),
@@ -84,31 +86,33 @@ pub async fn invite_config(State(state): State<Arc<AppState>>) -> Json<Value> {
     }
 }
 
-/// Exchange an explicit browser acceptance for a short-lived, invite-bound receipt.
-pub async fn accept_terms(
+/// Exchange explicit policy acceptance for a short-lived, invite-bound receipt.
+pub async fn accept_policy(
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let Some(policy) = &state.config.invite_terms else {
+    let Some(policy) = &state.config.join_policy else {
         return Err(api_error(
             StatusCode::NOT_FOUND,
-            "invite_terms_not_configured",
+            "join_policy_not_configured",
         ));
     };
-    let request: AcceptTermsRequest = serde_json::from_slice(&body).map_err(|e| {
+    let request: AcceptPolicyRequest = serde_json::from_slice(&body).map_err(|e| {
         api_error(
             StatusCode::BAD_REQUEST,
-            &format!("invalid acceptance JSON: {e}"),
+            &format!("invalid policy acceptance JSON: {e}"),
         )
     })?;
-    if !request.age_confirmed || request.policy_version != policy.version {
+    if request.policy_version != policy.version
+        || (policy.age_attestation_required && !request.age_confirmed)
+    {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "invite_terms_not_accepted",
+            "join_policy_not_accepted",
         ));
     }
     let key = invite_token::derive_invite_key(&state.relay_keypair);
-    let receipt = invite_token::mint_terms_acceptance(&key, &request.code, &policy.version);
+    let receipt = invite_token::mint_policy_acceptance(&key, &request.code, &policy.version);
     Ok(Json(serde_json::json!({ "receipt": receipt })))
 }
 
@@ -242,13 +246,13 @@ pub async fn claim_invite(
     )?;
 
     let claimer_hex = pubkey.to_hex();
-    if let Some(policy) = &state.config.invite_terms {
+    if let Some(policy) = &state.config.join_policy {
         let receipt = request
-            .terms_receipt
+            .policy_receipt
             .as_deref()
-            .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "invite_terms_required"))?;
-        invite_token::verify_terms_acceptance(&key, receipt, &request.code, &policy.version)
-            .map_err(|_| api_error(StatusCode::FORBIDDEN, "invite_terms_required"))?;
+            .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+        invite_token::verify_policy_acceptance(&key, receipt, &request.code, &policy.version)
+            .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
     }
 
     let was_inserted = state

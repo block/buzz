@@ -48,7 +48,7 @@ export type NostrBindDeepLinkPayload = {
 export type JoinDeepLinkPayload = {
   relayUrl: string;
   code: string;
-  termsReceipt: string | null;
+  policyReceipt: string | null;
 };
 
 /**
@@ -90,8 +90,8 @@ export function listenForDeepLinks(deps: DeepLinkDeps): Promise<UnlistenFn> {
   });
 
   const joinPromise = listen<JoinDeepLinkPayload>("deep-link-join", (event) => {
-    const { relayUrl, code, termsReceipt } = event.payload;
-    void claimInvite(relayUrl, code, termsReceipt ?? undefined)
+    const { relayUrl, code, policyReceipt } = event.payload;
+    void claimInvite(relayUrl, code, policyReceipt ?? undefined)
       .then((result) => {
         const name = addAndSwitch(relayUrl);
         toast.success(

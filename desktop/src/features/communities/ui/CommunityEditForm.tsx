@@ -1,7 +1,10 @@
 import * as React from "react";
+import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
+import { getJoinPolicy, type JoinPolicy } from "@/shared/api/invites";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
+import { JoinPolicyNotice } from "@/features/onboarding/ui/JoinPolicyNotice";
 import { normalizeRelayUrl, probeRelayReachable } from "../relayProbe";
 
 export type CommunityEditFormProps = {
@@ -9,6 +12,7 @@ export type CommunityEditFormProps = {
   initialName: string;
   initialRelayUrl: string;
   isSubmitting?: boolean;
+  joinPolicyRequired?: boolean;
   onCancel: () => void;
   onSubmit: (name: string, relayUrl: string) => void;
   submitLabel: string;
@@ -19,6 +23,7 @@ export function CommunityEditForm({
   initialName,
   initialRelayUrl,
   isSubmitting = false,
+  joinPolicyRequired = false,
   onCancel,
   onSubmit,
   submitLabel,
@@ -29,6 +34,11 @@ export function CommunityEditForm({
   const [probeWarning, setProbeWarning] = React.useState<string | null>(null);
   const [isProbing, setIsProbing] = React.useState(false);
   const [useAnywayOverride, setUseAnywayOverride] = React.useState(false);
+  const [joinPolicy, setJoinPolicy] = React.useState<JoinPolicy | null>(null);
+  const [policyRelayUrl, setPolicyRelayUrl] = React.useState<string | null>(
+    null,
+  );
+  const [ageConfirmed, setAgeConfirmed] = React.useState(false);
 
   const cancelRef = React.useRef<(() => void) | null>(null);
 
@@ -50,6 +60,33 @@ export function CommunityEditForm({
       if (!normalizedUrl) {
         setError("Enter a valid ws:// or wss:// relay URL.");
         return;
+      }
+
+      if (joinPolicyRequired) {
+        try {
+          const policy = await getJoinPolicy(normalizedUrl);
+          if (!policy) {
+            onSubmit(trimmedName, normalizedUrl);
+            return;
+          }
+          if (
+            !joinPolicy ||
+            joinPolicy.version !== policy.version ||
+            policyRelayUrl !== normalizedUrl
+          ) {
+            setJoinPolicy(policy);
+            setPolicyRelayUrl(normalizedUrl);
+            setAgeConfirmed(false);
+            return;
+          }
+          if (policy.ageAttestationRequired && !ageConfirmed) {
+            setError("Confirm that you are at least 18 years old.");
+            return;
+          }
+        } catch (policyError) {
+          setError(inviteErrorMessage(policyError));
+          return;
+        }
       }
 
       if (useAnywayOverride) {
@@ -79,7 +116,16 @@ export function CommunityEditForm({
 
       onSubmit(trimmedName, normalizedUrl);
     },
-    [name, onSubmit, relayUrl, useAnywayOverride],
+    [
+      ageConfirmed,
+      joinPolicy,
+      joinPolicyRequired,
+      name,
+      onSubmit,
+      policyRelayUrl,
+      relayUrl,
+      useAnywayOverride,
+    ],
   );
 
   const handleUseAnyway = React.useCallback(() => {
@@ -139,6 +185,9 @@ export function CommunityEditForm({
             setError(null);
             setProbeWarning(null);
             setUseAnywayOverride(false);
+            setJoinPolicy(null);
+            setPolicyRelayUrl(null);
+            setAgeConfirmed(false);
           }}
           placeholder="wss://relay.example.com"
           type="text"
@@ -146,10 +195,26 @@ export function CommunityEditForm({
         />
       </div>
 
+      {joinPolicy ? (
+        <JoinPolicyNotice
+          ageConfirmed={ageConfirmed}
+          onAgeConfirmedChange={(confirmed) => {
+            setAgeConfirmed(confirmed);
+            setError(null);
+          }}
+          policy={joinPolicy}
+        />
+      ) : null}
+
       <div className="flex w-full flex-col gap-3 pt-1">
         <Button
           className="h-10 w-full"
-          disabled={isBusy || !name.trim() || !relayUrl.trim()}
+          disabled={
+            isBusy ||
+            !name.trim() ||
+            !relayUrl.trim() ||
+            Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed)
+          }
           type="submit"
         >
           {isProbing ? (

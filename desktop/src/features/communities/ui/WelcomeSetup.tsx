@@ -159,11 +159,11 @@ export function WelcomeSetup({
   );
 
   const handleWelcomeInviteRedeem = React.useCallback(
-    async (relayWsUrl: string, code: string) => {
+    async (relayWsUrl: string, code: string, policyReceipt?: string) => {
       setIsRedeeming(true);
       setInviteError(null);
       try {
-        await claimInvite(relayWsUrl, code);
+        await claimInvite(relayWsUrl, code, policyReceipt);
         await handleConnect(relayWsUrl);
       } catch (err) {
         setInviteError(inviteErrorMessage(err));
@@ -341,6 +341,7 @@ export function WelcomeSetup({
                 initialName=""
                 initialRelayUrl=""
                 isSubmitting={isConnecting}
+                joinPolicyRequired
                 onCancel={showWelcomePage}
                 onSubmit={(name, url) => {
                   void handleConnect(url, name);

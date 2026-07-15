@@ -10,7 +10,12 @@ import {
   inviteErrorMessage,
   isInviteExpiredError,
 } from "@/shared/api/inviteHelpers";
-import { claimInvite } from "@/shared/api/invites";
+import {
+  acceptJoinPolicy,
+  claimInvite,
+  getJoinPolicy,
+  type JoinPolicy,
+} from "@/shared/api/invites";
 import { validateReposDir } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 import {
@@ -21,6 +26,7 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
+import { JoinPolicyNotice } from "@/features/onboarding/ui/JoinPolicyNotice";
 
 type AddCommunityDialogProps = {
   open: boolean;
@@ -38,6 +44,8 @@ export function AddCommunityDialog({
   const [token, setToken] = React.useState("");
   const [inviteCode, setInviteCode] = React.useState("");
   const [inviteError, setInviteError] = React.useState<string | null>(null);
+  const [joinPolicy, setJoinPolicy] = React.useState<JoinPolicy | null>(null);
+  const [ageConfirmed, setAgeConfirmed] = React.useState(false);
   const [reposDir, setReposDir] = React.useState("");
   const [reposDirError, setReposDirError] = React.useState<string | null>(null);
 
@@ -48,6 +56,8 @@ export function AddCommunityDialog({
     setToken("");
     setInviteCode("");
     setInviteError(null);
+    setJoinPolicy(null);
+    setAgeConfirmed(false);
     setReposDir("");
     setReposDirError(null);
   }, [onOpenChange]);
@@ -71,21 +81,45 @@ export function AddCommunityDialog({
         return;
       }
 
-      // If the relay handed out an invite code, claim it before saving the
-      // community — a closed relay would otherwise reject the connection.
       const normalizedRelayUrl = normalizeRelayUrl(relayUrl.trim());
-      if (inviteCode.trim()) {
-        try {
-          await claimInvite(normalizedRelayUrl, inviteCode.trim());
-        } catch (error) {
-          const message = inviteErrorMessage(error);
-          setInviteError(
-            isInviteExpiredError(error)
-              ? "This invite code has expired — ask for a new one."
-              : `Invite rejected: ${message}`,
-          );
+      try {
+        const policy = await getJoinPolicy(normalizedRelayUrl);
+        if (policy && (!joinPolicy || joinPolicy.version !== policy.version)) {
+          setJoinPolicy(policy);
+          setAgeConfirmed(false);
+          setInviteError("Review this relay's join policy below.");
           return;
         }
+        if (policy?.ageAttestationRequired && !ageConfirmed) {
+          setInviteError("Confirm that you are at least 18 years old.");
+          return;
+        }
+
+        // If the relay handed out an invite code, claim it before saving the
+        // community — a closed relay would otherwise reject the connection.
+        if (inviteCode.trim()) {
+          const policyReceipt = policy
+            ? await acceptJoinPolicy(
+                normalizedRelayUrl,
+                inviteCode.trim(),
+                policy.version,
+                ageConfirmed,
+              )
+            : undefined;
+          await claimInvite(
+            normalizedRelayUrl,
+            inviteCode.trim(),
+            policyReceipt,
+          );
+        }
+      } catch (error) {
+        const message = inviteErrorMessage(error);
+        setInviteError(
+          isInviteExpiredError(error)
+            ? "This invite code has expired — ask for a new one."
+            : `Community rejected: ${message}`,
+        );
+        return;
       }
 
       const community: Community = {
@@ -100,7 +134,17 @@ export function AddCommunityDialog({
       onSubmit(community);
       handleClose();
     },
-    [name, relayUrl, token, inviteCode, reposDir, onSubmit, handleClose],
+    [
+      name,
+      relayUrl,
+      token,
+      inviteCode,
+      reposDir,
+      joinPolicy,
+      ageConfirmed,
+      onSubmit,
+      handleClose,
+    ],
   );
 
   return (
@@ -127,7 +171,12 @@ export function AddCommunityDialog({
             <Input
               autoFocus
               id="ws-relay-url"
-              onChange={(e) => setRelayUrl(e.target.value)}
+              onChange={(e) => {
+                setRelayUrl(e.target.value);
+                setInviteError(null);
+                setJoinPolicy(null);
+                setAgeConfirmed(false);
+              }}
               placeholder="wss://relay.example.com"
               type="text"
               value={relayUrl}
@@ -184,6 +233,8 @@ export function AddCommunityDialog({
               onChange={(e) => {
                 setInviteCode(e.target.value);
                 setInviteError(null);
+                setJoinPolicy(null);
+                setAgeConfirmed(false);
               }}
               placeholder="Paste an invite code for a members-only relay"
               type="text"
@@ -191,6 +242,16 @@ export function AddCommunityDialog({
             />
             {inviteError ? (
               <p className="text-xs text-destructive">{inviteError}</p>
+            ) : null}
+            {joinPolicy ? (
+              <JoinPolicyNotice
+                ageConfirmed={ageConfirmed}
+                onAgeConfirmedChange={(confirmed) => {
+                  setAgeConfirmed(confirmed);
+                  setInviteError(null);
+                }}
+                policy={joinPolicy}
+              />
             ) : null}
           </div>
           <div className="flex flex-col gap-1.5">
@@ -230,7 +291,13 @@ export function AddCommunityDialog({
             <Button onClick={handleClose} type="button" variant="outline">
               Cancel
             </Button>
-            <Button disabled={!relayUrl.trim()} type="submit">
+            <Button
+              disabled={
+                !relayUrl.trim() ||
+                Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed)
+              }
+              type="submit"
+            >
               Add Community
             </Button>
           </div>

@@ -59,7 +59,7 @@ fn parse_message_deep_link(url: &Url) -> Option<serde_json::Value> {
 fn parse_join_deep_link(url: &Url) -> Option<serde_json::Value> {
     let mut relay: Option<String> = None;
     let mut code: Option<String> = None;
-    let mut terms_receipt: Option<String> = None;
+    let mut policy_receipt: Option<String> = None;
     for (k, v) in url.query_pairs() {
         let v = v.into_owned();
         if v.is_empty() {
@@ -68,7 +68,7 @@ fn parse_join_deep_link(url: &Url) -> Option<serde_json::Value> {
         match k.as_ref() {
             "relay" => relay = Some(v),
             "code" => code = Some(v),
-            "terms_receipt" => terms_receipt = Some(v),
+            "policy_receipt" => policy_receipt = Some(v),
             _ => {}
         }
     }
@@ -80,7 +80,7 @@ fn parse_join_deep_link(url: &Url) -> Option<serde_json::Value> {
     Some(serde_json::json!({
         "relayUrl": relay_url,
         "code": code,
-        "termsReceipt": terms_receipt,
+        "policyReceipt": policy_receipt,
     }))
 }
 
@@ -305,17 +305,17 @@ mod tests {
         let payload = parse_join_deep_link(&url).expect("required params present");
         assert_eq!(payload["relayUrl"], "wss://relay.example");
         assert_eq!(payload["code"], "abc.def");
-        assert!(payload["termsReceipt"].is_null());
+        assert!(payload["policyReceipt"].is_null());
     }
 
     #[test]
-    fn parse_join_deep_link_extracts_terms_receipt() {
+    fn parse_join_deep_link_extracts_policy_receipt() {
         let url = Url::parse(
-            "buzz://join?relay=wss%3A%2F%2Frelay.example&code=abc.def&terms_receipt=receipt.value",
+            "buzz://join?relay=wss%3A%2F%2Frelay.example&code=abc.def&policy_receipt=receipt.value",
         )
         .unwrap();
         let payload = parse_join_deep_link(&url).expect("required params present");
-        assert_eq!(payload["termsReceipt"], "receipt.value");
+        assert_eq!(payload["policyReceipt"], "receipt.value");
     }
 
     #[test]
