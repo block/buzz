@@ -2,7 +2,6 @@ import { isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
-import { Hexagon } from "lucide-react";
 import {
   type ReactNode,
   useCallback,
@@ -26,7 +25,10 @@ import type { Community } from "@/features/communities/types";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
+import {
+  WelcomeSetup,
+  type WelcomeSetupPage,
+} from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
@@ -178,8 +180,32 @@ function CommunitySwitchGate() {
   );
 }
 
-function OnboardingLoadingGate() {
+// Headings for the connecting variant, matching the WelcomeSetup sub-page the
+// user pressed the button on so the gate reads as that page's loading state.
+const CONNECTING_GATE_HEADINGS: Record<
+  Exclude<WelcomeSetupPage, "welcome">,
+  string
+> = {
+  "create-community": "Join a community",
+  invite: "Redeem an invite",
+  "nostr-key": "Use your existing key",
+};
+
+// Shown while a first-run community handoff settles (config apply + relay
+// round trips). For the default-community path the user pressed a button on
+// the welcome page itself, so the gate keeps rendering that same page with
+// the buttons disabled — seamless continuity. Every other WelcomeSetup
+// sub-page (key import, invite, join community) instead gets a forward-motion
+// connecting view under its own heading; showing the welcome replica there
+// reads as being kicked back to step 1.
+function OnboardingLoadingGate({
+  source,
+}: {
+  source: WelcomeSetupPage | null;
+}) {
   const systemColorScheme = useSystemColorScheme();
+  const connectingHeading =
+    source && source !== "welcome" ? CONNECTING_GATE_HEADINGS[source] : null;
 
   return (
     <div
@@ -196,55 +222,85 @@ function OnboardingLoadingGate() {
           inactiveSegmentClassName="bg-muted-foreground/25"
         />
 
-        <OnboardingSlideTransition
-          className="flex w-full flex-col items-center text-center"
-          direction="forward"
-          effect="none"
-          transitionKey="community-connecting"
-        >
-          <div className="flex h-14 w-14 items-center justify-center rounded-lg border border-border bg-background text-foreground shadow-xs">
-            <Hexagon className="h-7 w-7" aria-hidden="true" />
-          </div>
-
-          <h1 className="mt-6 text-3xl font-semibold tracking-tight">
-            Welcome to Buzz
-          </h1>
-          <p className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground">
-            Choose your first community to get started.
-          </p>
-
-          <div className="mt-8 flex w-full max-w-[500px] flex-col gap-3">
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              tabIndex={-1}
-              type="button"
+        {connectingHeading !== null ? (
+          <OnboardingSlideTransition
+            className="flex w-full flex-col items-center text-center"
+            direction="forward"
+            effect="none"
+            transitionKey="community-connecting"
+          >
+            <div
+              className="flex w-full max-w-[440px] flex-col items-center"
+              data-testid="onboarding-connecting-gate"
+              role="status"
             >
-              Continue with default community
-            </Button>
+              <h1 className="text-3xl font-semibold tracking-tight">
+                {connectingHeading}
+              </h1>
+              <BeeLoader
+                ariaLabel="Connecting to your community…"
+                className="mt-12 h-auto w-20"
+                tintClassName="text-muted-foreground"
+              />
+              <p className="mt-6 text-sm leading-6 text-muted-foreground">
+                Connecting to your community…
+              </p>
+            </div>
+          </OnboardingSlideTransition>
+        ) : (
+          <OnboardingSlideTransition
+            className="flex w-full flex-col items-center text-center"
+            direction="forward"
+            effect="none"
+            transitionKey="community-connecting"
+          >
+            <img
+              alt="Buzz"
+              className="h-14 w-14 rounded-xl shadow-xs"
+              src="/app-icon@2x.png"
+              srcSet="/app-icon@2x.png 1x, /app-icon@3x.png 2x"
+            />
 
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              tabIndex={-1}
-              type="button"
-              variant="secondary"
-            >
-              Join a community
-            </Button>
+            <h1 className="mt-6 text-3xl font-semibold tracking-tight">
+              Welcome to Buzz
+            </h1>
+            <p className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground">
+              Choose your first community to get started.
+            </p>
 
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              data-testid="welcome-continue-nostr"
-              tabIndex={-1}
-              type="button"
-              variant="ghost"
-            >
-              I already have a key
-            </Button>
-          </div>
-        </OnboardingSlideTransition>
+            <div className="mt-8 flex w-full max-w-[500px] flex-col gap-3">
+              <Button
+                aria-disabled="true"
+                className="h-10 w-full"
+                tabIndex={-1}
+                type="button"
+              >
+                Continue with default community
+              </Button>
+
+              <Button
+                aria-disabled="true"
+                className="h-10 w-full"
+                tabIndex={-1}
+                type="button"
+                variant="secondary"
+              >
+                Join a community
+              </Button>
+
+              <Button
+                aria-disabled="true"
+                className="h-10 w-full"
+                data-testid="welcome-continue-nostr"
+                tabIndex={-1}
+                type="button"
+                variant="ghost"
+              >
+                I already have a key
+              </Button>
+            </div>
+          </OnboardingSlideTransition>
+        )}
       </div>
     </div>
   );
@@ -276,11 +332,13 @@ function CommunityQueryProvider({ children }: { children: ReactNode }) {
 }
 
 function AppReady({
+  firstRunHandoffSource,
   isCompletingFirstRunCommunity,
   isSharedIdentity,
   isCommunitySwitch,
   onFirstRunCommunitySettled,
 }: {
+  firstRunHandoffSource: WelcomeSetupPage | null;
   isCompletingFirstRunCommunity: boolean;
   isSharedIdentity: boolean;
   isCommunitySwitch: boolean;
@@ -323,7 +381,7 @@ function AppReady({
 
   if (onboarding.stage === "blocking") {
     if (isCompletingFirstRunCommunity) {
-      return <OnboardingLoadingGate />;
+      return <OnboardingLoadingGate source={firstRunHandoffSource} />;
     }
 
     return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
@@ -361,6 +419,8 @@ export function App() {
   } = useCommunities();
   const [isCompletingFirstRunCommunity, setIsCompletingFirstRunCommunity] =
     useState(false);
+  const [firstRunHandoffSource, setFirstRunHandoffSource] =
+    useState<WelcomeSetupPage | null>(null);
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
 
   useEffect(() => {
@@ -399,8 +459,9 @@ export function App() {
   );
 
   const handleSetupComplete = useCallback(
-    (community: Community) => {
+    (community: Community, source: WelcomeSetupPage) => {
       setIsCompletingFirstRunCommunity(true);
+      setFirstRunHandoffSource(source);
       const communityId = addCommunity(community);
       switchCommunity(communityId);
     },
@@ -409,6 +470,7 @@ export function App() {
 
   const handleFirstRunCommunitySettled = useCallback(() => {
     setIsCompletingFirstRunCommunity(false);
+    setFirstRunHandoffSource(null);
   }, []);
 
   const bootSplashPhase = useBootSplashHold();
@@ -454,7 +516,7 @@ export function App() {
   // backend is still configured for the previous one.
   if (!community.isReady || community.appliedKey !== communityKey) {
     if (isCompletingFirstRunCommunity) {
-      return <OnboardingLoadingGate />;
+      return <OnboardingLoadingGate source={firstRunHandoffSource} />;
     }
 
     return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
@@ -471,6 +533,7 @@ export function App() {
   return (
     <CommunityQueryProvider key={communityKey}>
       <AppReady
+        firstRunHandoffSource={firstRunHandoffSource}
         isCompletingFirstRunCommunity={isCompletingFirstRunCommunity}
         isCommunitySwitch={isCommunitySwitch}
         key={communityKey}

@@ -22,13 +22,17 @@ import type { Community } from "../types";
 import { initFirstCommunity } from "../communityStorage";
 import { CommunityEditForm } from "./CommunityEditForm";
 
-type WelcomeSetupPage = "welcome" | "create-community" | "invite" | "nostr-key";
+export type WelcomeSetupPage =
+  | "welcome"
+  | "create-community"
+  | "invite"
+  | "nostr-key";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
   defaultRelayUrl: string;
   initialTransitionMode?: WelcomeTransitionMode;
-  onComplete: (community: Community) => void;
+  onComplete: (community: Community, source: WelcomeSetupPage) => void;
 };
 
 const DEFAULT_COMMUNITY_HANDOFF_MIN_MS = 200;
@@ -138,8 +142,9 @@ export function WelcomeSetup({
         }
 
         // The parent moves this community into React state so first-run setup
-        // can continue without a full page reload.
-        onComplete(community);
+        // can continue without a full page reload. The source page lets the
+        // parent's loading gate keep matching the page the user came from.
+        onComplete(community, page);
       } catch (err) {
         setError(
           err instanceof Error ? err.message : "Failed to connect. Try again.",
@@ -147,7 +152,7 @@ export function WelcomeSetup({
         setIsConnecting(false);
       }
     },
-    [onComplete],
+    [onComplete, page],
   );
 
   const handleNostrImport = React.useCallback(

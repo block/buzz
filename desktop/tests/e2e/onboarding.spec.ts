@@ -588,6 +588,7 @@ test("first-run default community handoff gives immediate stepper feedback", asy
   );
   await page.waitForTimeout(240);
   await expect(page.getByTestId("welcome-continue-nostr")).toBeVisible();
+  await expect(page.getByTestId("onboarding-connecting-gate")).toHaveCount(0);
   await expect(page.getByRole("progressbar")).toHaveAttribute(
     "aria-valuenow",
     "2",
@@ -634,6 +635,54 @@ test("welcome can continue using an existing Nostr key", async ({ page }) => {
       }),
     )
     .toBe(TEST_IDENTITIES.alice.pubkey);
+  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
+  await expectHomeView(page);
+});
+
+test("key import handoff shows a connecting gate, not the welcome replica", async ({
+  page,
+}) => {
+  // Delay the profile read so the post-import handoff gate stays on screen
+  // long enough to assert its contents.
+  await installMockBridge(
+    page,
+    { profileReadDelayMs: 2_000 },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("welcome-continue-nostr").click();
+  await expect(
+    page.getByRole("heading", { name: "Use your existing key" }),
+  ).toBeVisible();
+
+  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
+  await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
+  await expect(page.getByTestId("nostr-import-npub-preview")).toBeVisible();
+  await page.getByTestId("nostr-import-submit").click();
+
+  // The handoff gate reads as the key-import page still loading: same
+  // heading with forward-motion connecting copy — never the step-1 welcome
+  // replica, which looks like being kicked back to the start.
+  const connectingGate = page.getByTestId("onboarding-connecting-gate");
+  await expect(connectingGate).toBeVisible();
+  await expect(
+    connectingGate.getByRole("heading", { name: "Use your existing key" }),
+  ).toBeVisible();
+  await expect(connectingGate).toContainText("Connecting to your community…");
+  await expect(page.getByRole("progressbar")).toHaveAttribute(
+    "aria-valuenow",
+    "2",
+  );
+  await expect(page.getByText("Choose your first community")).toHaveCount(0);
+  await expect(page.getByTestId("welcome-continue-nostr")).toHaveCount(0);
+
+  // Alice already has a relay profile with a display name, so onboarding
+  // auto-completes into the app once the handoff settles.
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectHomeView(page);
 });
