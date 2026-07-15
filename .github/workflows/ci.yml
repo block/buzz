@@ -55,6 +55,8 @@ jobs:
             mobile:
               - 'mobile/**'
               - '.github/workflows/ci.yml'
+      - name: Release workflow source contract
+        run: scripts/test-release-ref-contract.sh
 
   rust-lint:
     name: Rust Lint
