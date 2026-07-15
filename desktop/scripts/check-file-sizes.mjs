@@ -85,7 +85,9 @@ const overrides = new Map([
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
   // already at 995; this load-bearing correctness fix crossed 1000. Not generic
   // debt growth. Approved override; queued to split with the rest of this list.
-  ["src-tauri/src/commands/messages.rs", 1082],
+  // thread-reply-broadcast: `broadcast: Option<bool>` IPC param threaded into
+  // build_message (+3 lines) — NIP-CW "Also send to #channel". Queued to split.
+  ["src-tauri/src/commands/messages.rs", 1085],
   // Residual repos_dir integration in ensure_nest_at: REPOS is provisioned
   // outside NEST_DIRS (it may be a symlink), so it needs its own create +
   // chmod-only-when-real-dir handling plus integration test coverage. The
@@ -202,7 +204,9 @@ const overrides = new Map([
   // mapper. This is the existing API boundary; split remains queued.
   // team-instructions-first-class: createManagedAgent Tauri bridge threads the
   // new teamId input through to the backend (+1 line).
-  ["src/shared/api/tauri.ts", 1305],
+  // thread-reply-broadcast: sendChannelMessage threads the NIP-CW broadcast
+  // opt-in through the IPC payload (+2 lines).
+  ["src/shared/api/tauri.ts", 1307],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
   // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
   // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/
@@ -324,7 +328,10 @@ const overrides = new Map([
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
   // Approved override; still queued to split with the rest of this list.
-  ["src/features/messages/ui/MessageThreadPanel.tsx", 1006],
+  // thread-reply-broadcast: one-shot "Also send to #channel" opt-in (NIP-CW) —
+  // checkbox row under the composer + submit-time capture state (+39 lines).
+  // Load-bearing feature growth; queued to split.
+  ["src/features/messages/ui/MessageThreadPanel.tsx", 1045],
   // AgentConfigPanel footer fold into ProfileFieldGroup for the config-bridge
   // panel — a small overage from load-bearing UI plumbing, not generic debt
   // growth. Approved override; still queued to split with the rest of this list.

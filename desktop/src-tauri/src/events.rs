@@ -287,6 +287,7 @@ pub fn build_remove_member(channel_id: Uuid, target_pubkey: &str) -> Result<Even
 // ── Messages ─────────────────────────────────────────────────────────────────
 
 /// Kind 9 — stream message.
+#[allow(clippy::too_many_arguments)]
 pub fn build_message(
     channel_id: Uuid,
     content: &str,
@@ -295,6 +296,7 @@ pub fn build_message(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    broadcast: bool,
 ) -> Result<EventBuilder, String> {
     build_message_with_client_tags(
         channel_id,
@@ -304,6 +306,7 @@ pub fn build_message(
         media_tags,
         custom_emoji_tags,
         mention_ref_tags,
+        broadcast,
         &[],
     )
 }
@@ -313,6 +316,12 @@ pub fn build_message(
 /// This is intentionally narrower than arbitrary extra tags: callers can add
 /// only `["client", ...]` tags, which are useful for idempotency markers but
 /// cannot forge channel/thread/mention metadata.
+///
+/// `broadcast` appends the NIP-CW `["broadcast", "1"]` tag — the author's
+/// opt-in to surface a thread reply on the channel timeline as well as in its
+/// thread. It only applies to replies: without a `thread_ref` the flag is
+/// ignored (the tag is defined for replies only; the relay treats it as inert
+/// elsewhere).
 #[allow(clippy::too_many_arguments)]
 pub fn build_message_with_client_tags(
     channel_id: Uuid,
@@ -322,12 +331,16 @@ pub fn build_message_with_client_tags(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    broadcast: bool,
     client_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     if let Some(tr) = thread_ref {
         tags.extend(thread_tags(tr)?);
+        if broadcast {
+            tags.push(tag(vec!["broadcast", "1"])?);
+        }
     }
     tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
@@ -833,6 +846,58 @@ pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuild
 mod tests {
     use super::*;
     use nostr::Keys;
+
+    fn message_tags(thread_ref: Option<&ThreadRef>, broadcast: bool) -> Vec<Vec<String>> {
+        let channel_id = Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap();
+        let builder = build_message(
+            channel_id,
+            "hello",
+            thread_ref,
+            &[],
+            &[],
+            &[],
+            &[],
+            broadcast,
+        )
+        .expect("build_message");
+        let secret = nostr::SecretKey::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+        let event = builder.sign_with_keys(&Keys::new(secret)).unwrap();
+        event.tags.iter().map(|t| t.as_slice().to_vec()).collect()
+    }
+
+    fn has_broadcast_tag(tags: &[Vec<String>]) -> bool {
+        tags.iter()
+            .any(|t| t.len() >= 2 && t[0] == "broadcast" && t[1] == "1")
+    }
+
+    /// NIP-CW: a broadcast reply carries the exact tag `["broadcast", "1"]`.
+    #[test]
+    fn message_reply_broadcast_tag() {
+        const PARENT_HEX: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+        let parent = EventId::from_hex(PARENT_HEX).unwrap();
+        let thread_ref = ThreadRef {
+            root_event_id: parent,
+            parent_event_id: parent,
+        };
+
+        let tags = message_tags(Some(&thread_ref), true);
+        assert!(has_broadcast_tag(&tags));
+
+        // Off by default.
+        let tags = message_tags(Some(&thread_ref), false);
+        assert!(!has_broadcast_tag(&tags));
+    }
+
+    /// Broadcast is defined for replies only — a top-level message never
+    /// carries the tag, even when a caller asks for it.
+    #[test]
+    fn message_top_level_ignores_broadcast() {
+        let tags = message_tags(None, true);
+        assert!(!has_broadcast_tag(&tags));
+    }
 
     /// Builder layout regression for the NIP-IA owner-of-agent archive flow.
     /// Compares against `docs/nips/NIP-IA.md` §Vector 1.

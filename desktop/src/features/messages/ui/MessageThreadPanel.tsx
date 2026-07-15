@@ -3,6 +3,7 @@ import { ArrowDown } from "lucide-react";
 
 import {
   buildThreadSummaryFromVisibleEntries,
+  canBroadcastThreadReply,
   hasNestedThreadBranches,
   type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
@@ -12,6 +13,7 @@ import {
 } from "@/features/messages/lib/messageGrouping";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
+import type { ThreadSendContext } from "@/features/messages/lib/threading";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
@@ -26,6 +28,7 @@ import {
   AuxiliaryPanelTitle,
 } from "@/shared/layout/AuxiliaryPanel";
 import { Button } from "@/shared/ui/button";
+import { Checkbox } from "@/shared/ui/checkbox";
 import { Skeleton } from "@/shared/ui/skeleton";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageComposer } from "./MessageComposer";
@@ -72,10 +75,7 @@ type MessageThreadPanelProps = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
     channelId?: string | null,
-    threadContext?: {
-      parentEventId: string | null;
-      threadHeadId: string | null;
-    } | null,
+    threadContext?: ThreadSendContext | null,
   ) => Promise<void>;
   onToggleReaction?: (
     message: TimelineMessage,
@@ -364,12 +364,60 @@ export function MessageThreadPanel({
   const replyTargetMessageRef = React.useRef(replyTargetMessage);
   replyTargetMessageRef.current = replyTargetMessage;
 
-  const onCaptureSendContext = React.useCallback(
-    () => ({
-      parentEventId: replyTargetMessageRef.current?.id ?? threadHeadId,
+  // "Also send to #channel" (NIP-CW broadcast): a one-shot opt-in to surface
+  // the next reply on the channel timeline as well as in this thread. Stored
+  // as the thread-head id it applies to (same pattern as
+  // collapsedThreadHeadId) so switching threads inherently clears it.
+  const [broadcastThreadHeadId, setBroadcastThreadHeadId] = React.useState<
+    string | null
+  >(null);
+  const broadcastToChannel =
+    broadcastThreadHeadId != null && broadcastThreadHeadId === threadHeadId;
+  const broadcastToChannelRef = React.useRef(broadcastToChannel);
+  broadcastToChannelRef.current = broadcastToChannel;
+  const broadcastCheckboxId = React.useId();
+  const threadHeadIsRoot = threadHead != null && threadHead.parentId == null;
+  const threadHeadIsRootRef = React.useRef(threadHeadIsRoot);
+  threadHeadIsRootRef.current = threadHeadIsRoot;
+
+  const onCaptureSendContext = React.useCallback(() => {
+    const replyTarget = replyTargetMessageRef.current;
+    return {
+      parentEventId: replyTarget?.id ?? threadHeadId,
       threadHeadId,
-    }),
-    [threadHeadId],
+      // Belt and braces: even if the checkbox was checked before the user
+      // picked a nested reply target, never broadcast a depth ≥ 2 reply.
+      broadcast:
+        broadcastToChannelRef.current &&
+        canBroadcastThreadReply(
+          threadHeadIsRootRef.current && threadHeadId
+            ? { id: threadHeadId, parentId: null }
+            : null,
+          replyTarget,
+        ),
+    };
+  }, [threadHeadId]);
+
+  // A completed send consumes the opt-in — the next reply starts unchecked,
+  // matching Slack. Failed sends keep the checkbox so a retry still broadcasts.
+  const handleComposerSend = React.useCallback(
+    async (
+      content: string,
+      mentionPubkeys: string[],
+      mediaTags?: string[][],
+      sendChannelId?: string | null,
+      threadContext?: ThreadSendContext | null,
+    ) => {
+      await onSend(
+        content,
+        mentionPubkeys,
+        mediaTags,
+        sendChannelId,
+        threadContext,
+      );
+      setBroadcastThreadHeadId(null);
+    },
+    [onSend],
   );
 
   const collapseThreadHeadReplies = React.useCallback(() => {
@@ -896,13 +944,45 @@ export function MessageThreadPanel({
             onCaptureSendContext={onCaptureSendContext}
             onEditLastOwnMessage={onEditLastOwnMessage}
             onEditSave={onEditSave}
-            onSend={onSend}
+            onSend={handleComposerSend}
             placeholder={`Reply in thread to ${threadHead.author}`}
             profiles={profiles}
             replyTarget={composerReplyTarget}
             typingParentEventId={threadHead.id}
             typingRootEventId={threadHead.rootId}
           />
+          {!editTarget &&
+          canBroadcastThreadReply(threadHead, replyTargetMessage) ? (
+            <div
+              className={cn(
+                "bg-background pt-1.5",
+                THREAD_PANEL_COMPOSER_GUTTER_CLASS,
+              )}
+            >
+              <div className="mx-auto flex w-full max-w-4xl items-center gap-2">
+                <Checkbox
+                  checked={broadcastToChannel}
+                  data-testid="thread-broadcast-checkbox"
+                  disabled={disabled || !channelId}
+                  id={broadcastCheckboxId}
+                  onCheckedChange={(checked) =>
+                    setBroadcastThreadHeadId(
+                      checked === true ? threadHead.id : null,
+                    )
+                  }
+                />
+                <label
+                  className="cursor-pointer select-none text-xs text-muted-foreground"
+                  data-testid="thread-broadcast-label"
+                  htmlFor={broadcastCheckboxId}
+                >
+                  {channel?.channelType === "dm"
+                    ? "Also send as direct message"
+                    : `Also send to #${channelName}`}
+                </label>
+              </div>
+            </div>
+          ) : null}
           <div
             className={cn(
               "min-h-8 bg-background pb-1.5 pt-0",

@@ -484,6 +484,7 @@ pub async fn send_channel_message(
     mention_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
+    broadcast: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
@@ -537,6 +538,7 @@ pub async fn send_channel_message(
                 &media,
                 &emoji,
                 &mention_refs_only,
+                broadcast.unwrap_or(false),
             )?
         }
     };
@@ -734,6 +736,7 @@ pub async fn send_managed_agent_channel_message(
         &[],
         &[],
         &[],
+        false,
         &client_tags,
     )?;
     let result =

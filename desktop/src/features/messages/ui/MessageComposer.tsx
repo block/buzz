@@ -24,6 +24,7 @@ import {
   useMediaUpload,
 } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
+import type { ThreadSendContext } from "@/features/messages/lib/threading";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
   hasMentionClipboardHtml,
@@ -104,10 +105,7 @@ type MessageComposerProps = {
   onEditLastOwnMessage?: () => boolean;
   onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
   /** Captures send context synchronously before awaits can change navigation. */
-  onCaptureSendContext?: () => {
-    parentEventId: string | null;
-    threadHeadId: string | null;
-  } | null;
+  onCaptureSendContext?: () => ThreadSendContext | null;
   /** Resolves the channel required to prepare mentions before sending. */
   onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
   onPreparingMentionSendChange?: (isPreparing: boolean) => void;
@@ -116,10 +114,7 @@ type MessageComposerProps = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
     channelId?: string | null,
-    threadContext?: {
-      parentEventId: string | null;
-      threadHeadId: string | null;
-    } | null,
+    threadContext?: ThreadSendContext | null,
   ) => Promise<void>;
   placeholder?: string;
   profiles?: UserProfileLookup;
