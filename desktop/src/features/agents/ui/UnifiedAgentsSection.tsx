@@ -32,6 +32,7 @@ import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
+  aiDefaultsSummary: string;
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
@@ -41,6 +42,7 @@ type UnifiedAgentsSectionProps = {
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
   onBulkStopRunning: () => void;
+  onEditAiDefaults: () => void;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
@@ -74,6 +76,7 @@ const AGENT_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} grid grid-cols-[repeat
 export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   const {
     actionErrorMessage,
+    aiDefaultsSummary,
     actionNoticeMessage,
     agents,
     agentsError,
@@ -82,6 +85,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     startingAgentPubkey,
     startingPersonaIds,
     onBulkStopRunning,
+    onEditAiDefaults,
     onOpenAgentProfile,
     onOpenPersonaProfile,
     onStartAgent,
@@ -160,11 +164,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 
       <AgentsListHeader
         agentCount={agents.length}
+        aiDefaultsSummary={aiDefaultsSummary}
         fileInputRef={fileInputRef}
         handleFileChange={handleFileChange}
         isActionPending={isActionPending}
         runningCount={runningCount}
         onBulkStopRunning={onBulkStopRunning}
+        onEditAiDefaults={onEditAiDefaults}
       />
 
       {isLoading ? <LoadingSkeleton /> : null}
@@ -437,18 +443,22 @@ function firstAvatarUrl(
 
 function AgentsListHeader({
   agentCount,
+  aiDefaultsSummary,
   fileInputRef,
   handleFileChange,
   isActionPending,
   runningCount,
   onBulkStopRunning,
+  onEditAiDefaults,
 }: {
   agentCount: number;
+  aiDefaultsSummary: string;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   handleFileChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   isActionPending: boolean;
   runningCount: number;
   onBulkStopRunning: () => void;
+  onEditAiDefaults: () => void;
 }) {
   return (
     <div className={AGENT_CARD_COLUMN_CLASS}>
@@ -461,7 +471,22 @@ function AgentsListHeader({
       />
       <SectionHeader
         title="Agents"
-        description="Agents in this community."
+        description={
+          <>
+            <span>Agents in this community.</span>
+            <span className="mt-1 flex flex-wrap items-center gap-x-1 text-xs">
+              <span>AI defaults: {aiDefaultsSummary}</span>
+              <Button
+                onClick={onEditAiDefaults}
+                size="xs"
+                type="button"
+                variant="link"
+              >
+                Edit defaults
+              </Button>
+            </span>
+          </>
+        }
         action={
           agentCount > 0 ? (
             <DropdownMenu modal={false}>

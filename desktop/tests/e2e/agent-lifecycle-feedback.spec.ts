@@ -41,6 +41,16 @@ async function openAgentsView(page: import("@playwright/test").Page) {
   });
 }
 
+async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
+  await page.goto("/settings?section=agents");
+  await expect(page.getByTestId("settings-global-agent-config")).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.locator(".animate-spin").first()).not.toBeVisible({
+    timeout: 5_000,
+  });
+}
+
 test.describe("agent lifecycle feedback screenshots", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
@@ -120,7 +130,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalConfigRestartedCount: 2,
     });
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
 
@@ -150,7 +160,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
   test("03-save-plain", async ({ page }) => {
     await installMockBridge(page);
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
 
@@ -264,7 +274,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalConfigRestartedCount: 1,
     });
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
 
@@ -287,7 +297,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalConfigFailedRestartCount: 1,
     });
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
 
@@ -319,7 +329,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalConfigSaveDelayMs: 2_000,
     });
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
     const provider = page.locator("#global-agent-provider");

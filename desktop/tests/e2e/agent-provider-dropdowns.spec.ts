@@ -27,9 +27,8 @@ const SHOTS = "test-results/screenshots-dialogs";
  * Navigate to the agents view and wait for the global agent config card to
  * finish its async load (spinner gone, card content visible).
  */
-async function openAgentsView(page: import("@playwright/test").Page) {
-  await page.goto("/");
-  await page.getByTestId("open-agents-view").click();
+async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
+  await page.goto("/settings?section=agents");
   await expect(page.getByTestId("settings-global-agent-config")).toBeVisible({
     timeout: 10_000,
   });
@@ -58,7 +57,7 @@ test.describe("agent provider dropdown screenshots", () => {
   // BUZZ_AGENT_PROVIDER is baked and hideProviderIds is empty → v1 appears.
   test("01-provider-dropdown-oss", async ({ page }) => {
     await installMockBridge(page);
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const providerSelect = page.locator("#global-agent-provider");
     await expect(providerSelect).toBeVisible({ timeout: 5_000 });
@@ -98,7 +97,7 @@ test.describe("agent provider dropdown screenshots", () => {
         env_vars: {},
       },
     });
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const effortSelect = page.locator("#global-agent-thinking-effort");
     await expect(effortSelect).toBeVisible({ timeout: 5_000 });

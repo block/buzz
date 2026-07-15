@@ -12,17 +12,15 @@ async function settleAnimations(page: import("@playwright/test").Page) {
 }
 
 /**
- * Navigate to the Agents view (where GlobalAgentConfigSettingsCard lives) and
- * wait for the card to finish loading.
+ * Open Settings → Agents directly and wait for the defaults card to load.
+ * Direct routing keeps this helper stable when the managed-agents feature gate
+ * hides the sidebar entry in a mocked state.
  */
-async function openAgentsView(page: import("@playwright/test").Page) {
-  await page.goto("/");
-  await page.getByTestId("open-agents-view").click();
-  // Wait for the global agent config card to mount and finish its load effect.
+async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
+  await page.goto("/settings?section=agents");
   await expect(page.getByTestId("settings-global-agent-config")).toBeVisible({
     timeout: 10_000,
   });
-  // The card shows a spinner while loading; wait for it to disappear.
   await expect(page.locator(".animate-spin").first()).not.toBeVisible({
     timeout: 5_000,
   });
@@ -65,7 +63,7 @@ test.describe("global agent config screenshots", () => {
       },
     });
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
     await card.scrollIntoViewIfNeeded();
@@ -187,14 +185,12 @@ test.describe("global agent config screenshots", () => {
     await openCreateDialog(page);
 
     await expect(page.locator("#persona-llm-provider")).toHaveText(
-      "Inherit global default (anthropic)",
+      "Use AI defaults (anthropic)",
     );
     await expect(page.locator("#persona-model")).toHaveText(
-      "Inherit global default (claude-opus-4-5)",
+      "Use AI defaults (claude-opus-4-5)",
     );
-    await expect(
-      page.getByText("Using global defaults: effort low"),
-    ).toBeVisible();
+    await expect(page.getByText("Using AI defaults: effort low")).toBeVisible();
   });
 
   // Shot 04: Create gate BLOCKED — no per-agent provider, no global provider

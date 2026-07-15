@@ -78,6 +78,7 @@ import {
 } from "./bakedEnvHelpers";
 import { getProviderApiKeyEnvVar } from "./personaDialogPickers";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
+import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -1086,6 +1087,16 @@ export function AgentInstanceEditDialog({
                       : "Select a provider above to see available models."}
               </p>
             </div>
+
+            <AgentAiDefaultsNotice
+              confirmNavigation
+              explicitModel={model.trim() || linkedPersona?.model?.trim() || ""}
+              explicitProvider={
+                provider.trim() || linkedPersona?.provider?.trim() || ""
+              }
+              inheritedModel={inheritedModelDefault}
+              inheritedProvider={inheritedProviderDefault}
+            />
 
             {/* Advanced settings */}
             <div className="space-y-3">
