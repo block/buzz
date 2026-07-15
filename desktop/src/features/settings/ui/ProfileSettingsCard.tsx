@@ -772,9 +772,9 @@ export function ProfileSettingsCard({
                           data-testid="profile-metadata-card"
                         >
                           <div className="flex min-h-14 items-center justify-between gap-4 px-4 py-3">
-                            <h3 className="text-sm font-medium">
+                            <h2 className="text-lg font-semibold tracking-tight">
                               Profile info
-                            </h3>
+                            </h2>
                             <EditProfileMetadataButton
                               disabled={updateProfileMutation.isPending}
                               isEditing={isEditingProfileMetadata}
@@ -866,9 +866,9 @@ export function ProfileSettingsCard({
                               data-testid="profile-identity-toggle"
                             >
                               <div className="min-w-0">
-                                <h3 className="text-sm font-medium">
+                                <h2 className="text-lg font-semibold tracking-tight">
                                   Identity
-                                </h3>
+                                </h2>
                                 <p className="mt-1 text-sm font-normal text-muted-foreground">
                                   Your keypair and NIP-05 handle are fixed for
                                   this device.
@@ -961,7 +961,7 @@ export function ProfileSettingsCard({
       >
         <div className="flex items-center justify-between gap-4 px-1">
           <div className="min-w-0 space-y-1">
-            <h2 className="text-sm font-medium">Sign out</h2>
+            <h2 className="text-lg font-semibold tracking-tight">Sign out</h2>
             <p className="text-sm text-muted-foreground">
               Removes your identity key and all local app data from this device.
               Back up your private key (nsec) first — this cannot be undone.

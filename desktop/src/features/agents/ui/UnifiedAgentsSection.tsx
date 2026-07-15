@@ -24,6 +24,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
+import { SectionHeader } from "@/shared/ui/PageHeader";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
@@ -157,7 +158,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
         </div>
       ) : null}
 
-      <SectionHeader
+      <AgentsListHeader
         agentCount={agents.length}
         fileInputRef={fileInputRef}
         handleFileChange={handleFileChange}
@@ -434,7 +435,7 @@ function firstAvatarUrl(
   return null;
 }
 
-function SectionHeader({
+function AgentsListHeader({
   agentCount,
   fileInputRef,
   handleFileChange,
@@ -450,15 +451,7 @@ function SectionHeader({
   onBulkStopRunning: () => void;
 }) {
   return (
-    <div
-      className={`${AGENT_CARD_COLUMN_CLASS} flex items-center justify-between gap-3`}
-    >
-      <div>
-        <h3 className="text-sm font-semibold tracking-tight">Agents</h3>
-        <p className="text-sm text-secondary-foreground/75">
-          Agents in this community.
-        </p>
-      </div>
+    <div className={AGENT_CARD_COLUMN_CLASS}>
       <input
         accept=".agent.json,.agent.png"
         className="hidden"
@@ -466,32 +459,38 @@ function SectionHeader({
         ref={fileInputRef}
         type="file"
       />
-      {agentCount > 0 ? (
-        <DropdownMenu modal={false}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label="Bulk actions"
-              className="h-7 w-7"
-              size="icon"
-              variant="ghost"
-            >
-              <Ellipsis className="h-4 w-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            onCloseAutoFocus={(event) => event.preventDefault()}
-          >
-            <DropdownMenuItem
-              disabled={isActionPending || runningCount === 0}
-              onClick={onBulkStopRunning}
-            >
-              <OctagonX className="h-4 w-4" />
-              Stop all running ({runningCount})
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      ) : null}
+      <SectionHeader
+        title="Agents"
+        description="Agents in this community."
+        action={
+          agentCount > 0 ? (
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label="Bulk actions"
+                  className="h-7 w-7"
+                  size="icon"
+                  variant="ghost"
+                >
+                  <Ellipsis className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="end"
+                onCloseAutoFocus={(event) => event.preventDefault()}
+              >
+                <DropdownMenuItem
+                  disabled={isActionPending || runningCount === 0}
+                  onClick={onBulkStopRunning}
+                >
+                  <OctagonX className="h-4 w-4" />
+                  Stop all running ({runningCount})
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : undefined
+        }
+      />
     </div>
   );
 }

@@ -34,16 +34,16 @@ export function KeyboardShortcutsCard() {
   return (
     <section className="min-w-0" data-testid="settings-shortcuts">
       <SettingsSectionHeader
-        title="Keyboard Shortcuts"
+        title="Keyboard shortcuts"
         description="All available keyboard shortcuts. Shortcuts are read-only."
       />
 
       <div className="space-y-4">
         {[...categories.entries()].map(([category, shortcuts]) => (
           <div key={category}>
-            <h3 className="mb-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+            <h2 className="mb-2 text-lg font-semibold tracking-tight">
               {category}
-            </h3>
+            </h2>
             <SettingsOptionGroup>
               {shortcuts.map((shortcut) => (
                 <SettingsOptionRow

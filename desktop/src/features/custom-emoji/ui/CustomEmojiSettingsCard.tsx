@@ -126,7 +126,7 @@ export function CustomEmojiSettingsCard() {
   return (
     <section className="min-w-0" data-testid="settings-custom-emoji">
       <SettingsSectionHeader
-        title="Custom Emoji"
+        title="Custom emoji"
         description={
           <>
             Add your own custom emoji for everyone on this relay to use. Type{" "}
@@ -257,9 +257,9 @@ export function CustomEmojiSettingsCard() {
         </form>
 
         <div className="space-y-3" data-testid="custom-emoji-mine">
-          <h3 className="text-sm font-medium">
+          <h2 className="text-lg font-semibold tracking-tight">
             My emoji{own.length > 0 ? ` (${own.length})` : ""}
-          </h3>
+          </h2>
           {ownLoading ? (
             <SettingsOptionGroup>
               <div className="px-4 py-3 text-sm font-normal text-muted-foreground">
@@ -305,9 +305,9 @@ export function CustomEmojiSettingsCard() {
 
         {!communityLoading && othersEmoji.length > 0 ? (
           <div className="space-y-3" data-testid="custom-emoji-community">
-            <h3 className="text-sm font-medium">
+            <h2 className="text-lg font-semibold tracking-tight">
               Community emoji ({othersEmoji.length})
-            </h3>
+            </h2>
             <p className="text-sm font-normal text-muted-foreground">
               Added by other members. You can use these, but only their owner
               can remove them.

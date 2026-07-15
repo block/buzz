@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
+import { SectionHeader } from "@/shared/ui/PageHeader";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { TeamIdentityCard } from "./TeamIdentityCard";
 
@@ -55,15 +56,11 @@ export function TeamsSection({
 }: TeamsSectionProps) {
   return (
     <section className="relative space-y-4" data-testid="agents-library-teams">
-      <div
-        className={`${TEAM_CARD_COLUMN_CLASS} flex items-center justify-between gap-3`}
-      >
-        <div>
-          <h3 className="text-sm font-semibold tracking-tight">Teams</h3>
-          <p className="text-sm text-secondary-foreground/75">
-            Saved groups from My Agents that you can add to a channel together.
-          </p>
-        </div>
+      <div className={TEAM_CARD_COLUMN_CLASS}>
+        <SectionHeader
+          title="Teams"
+          description="Groups of your agents you can add to a channel together."
+        />
       </div>
 
       {isLoading ? (
