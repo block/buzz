@@ -12,6 +12,8 @@ export interface FeatureDefinition {
   id: string;
   name: string;
   description: string;
+  /** Whether the preview is enabled when the user has not chosen an override */
+  defaultEnabled?: boolean;
   /** If omitted, feature is available on all platforms */
   platforms?: FeaturePlatform[];
 }
