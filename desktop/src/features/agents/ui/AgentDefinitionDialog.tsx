@@ -32,20 +32,17 @@ import {
   personaBehaviorDraftValid,
 } from "./personaBehaviorDraft";
 import {
+  AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
-  buildTemplateModelDropdownOptions,
-  CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
   getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
-  getModelSelectValue,
   getPersonaModelOptions,
   getPersonaProviderOptions,
   getRuntimePersonaModelOptions,
-  hasPersonaModelOption,
   NO_RUNTIME_DROPDOWN_VALUE,
   providerRequiresExplicitModel,
   runtimeSupportsLlmProviderSelection,
@@ -57,6 +54,10 @@ import {
   sortPersonaRuntimes,
 } from "./personaDialogPickers";
 import { RequiredFieldLabel } from "./personaProviderModelFields";
+import {
+  modelDropdownOptions as buildModelDropdownOptions,
+  relayMeshModelPickerState,
+} from "./relayMeshModelPicker";
 import {
   selectionOnModelDropdownChange,
   selectionOnProviderDropdownChange,
@@ -94,11 +95,6 @@ type AgentDefinitionDialogProps = {
   createRunSection?: React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
-  /**
-   * When true, the agent is being created to run on the relay mesh — the
-   * local-mode provider/model gate does not apply and must be bypassed.
-   */
-  createRunOnMesh?: boolean;
 };
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -120,7 +116,6 @@ export function AgentDefinitionDialog({
   onSubmit,
   createRunSection,
   createSubmitBlocked = false,
-  createRunOnMesh = false,
 }: AgentDefinitionDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
@@ -345,11 +340,9 @@ export function AgentDefinitionDialog({
         provider: trimmedProvider,
         runtimeId: runtime,
         runtimeFileConfig,
-        useMesh: createRunOnMesh,
       }),
     [
       bakedEnvKeys,
-      createRunOnMesh,
       envVars,
       globalConfig.env_vars,
       inheritedModelDefault.value,
@@ -448,18 +441,21 @@ export function AgentDefinitionDialog({
   });
   const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
-  const modelOptions = discoveredModelOptions ?? staticModelOptions;
-  const isModelCustom = !hasPersonaModelOption(
-    discoveredModelOptions ?? runtimeModelOptions,
+  const {
+    isCustom: isModelCustom,
+    isRelayMesh,
+    options: modelOptions,
+    selectValue: modelSelectValue,
+    showCustomInput: showCustomModelInput,
+  } = relayMeshModelPickerState({
+    discoveredOptions: discoveredModelOptions,
+    fallbackOptions: staticModelOptions,
+    knownOptions: discoveredModelOptions ?? runtimeModelOptions,
+    isCustomEditing: isCustomModelEditing,
     model,
-  );
-  const modelSelectValue = getModelSelectValue({
-    isCustomModelEditing,
-    isModelCustom,
-    model,
+    modelFieldVisible,
+    provider: effectiveProvider,
   });
-  const showCustomModelInput =
-    modelFieldVisible && (isCustomModelEditing || isModelCustom);
   // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
   // migration rewrites any persisted Databricks v1 values → v2. Hide the v1
   // option there so it is not offered for new selections. OSS builds have no
@@ -538,23 +534,15 @@ export function AgentDefinitionDialog({
     inheritedModelDefault.source === "build"
       ? getBakedModelInheritLabel(inheritedModelDefault.value)
       : undefined;
-  const modelDropdownOptions: PersonaDropdownOption[] = [
-    ...buildTemplateModelDropdownOptions(
-      modelOptions,
-      inheritedModelDefault.value,
-      inheritedModelLabel,
-    ),
-    ...(modelDiscoveryLoading && discoveredModelOptions === null
-      ? [
-          {
-            disabled: true,
-            label: "Loading models...",
-            value: MODEL_DISCOVERY_LOADING_VALUE,
-          },
-        ]
-      : []),
-    { label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE },
-  ];
+  const modelDropdownOptions: PersonaDropdownOption[] =
+    buildModelDropdownOptions({
+      allowCustom: !isRelayMesh,
+      globalModel: isRelayMesh ? undefined : inheritedModelDefault.value,
+      globalModelLabel: isRelayMesh ? undefined : inheritedModelLabel,
+      loading: modelDiscoveryLoading && discoveredModelOptions === null,
+      loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
+      options: modelOptions,
+    });
   const previewLabel = displayName.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
   const runtimeWarning =
@@ -634,13 +622,20 @@ export function AgentDefinitionDialog({
   }
 
   function handleProviderDropdownChange(nextValue: string) {
-    applySelection(
-      selectionOnProviderDropdownChange(selection, {
-        runtime,
-        nextValue,
-        clearModelWhenApiKeyMissing: true,
-      }),
-    );
+    const nextProvider =
+      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
+    if (nextProvider === "relay-mesh" && runtime !== "buzz-agent") {
+      handleRuntimeDropdownChange("buzz-agent");
+    }
+    const nextSelection = selectionOnProviderDropdownChange(selection, {
+      runtime: nextProvider === "relay-mesh" ? "buzz-agent" : runtime,
+      nextValue,
+      clearModelWhenApiKeyMissing: true,
+    });
+    applySelection({
+      ...nextSelection,
+      model: nextProvider === "relay-mesh" ? "auto" : nextSelection.model,
+    });
   }
 
   function handleModelDropdownChange(nextValue: string) {
@@ -858,6 +853,10 @@ export function AgentDefinitionDialog({
                   modelDropdownOptions={modelDropdownOptions}
                   modelSelectValue={modelSelectValue}
                   onCustomModelChange={setModel}
+                  showSharedComputeAutoHint={
+                    isRelayMesh &&
+                    modelSelectValue === AUTO_MODEL_DROPDOWN_VALUE
+                  }
                   onModelValueChange={handleModelDropdownChange}
                   showCustomModelInput={showCustomModelInput}
                   transition={advancedFieldsTransition}

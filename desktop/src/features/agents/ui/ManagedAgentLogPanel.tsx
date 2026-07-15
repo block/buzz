@@ -161,7 +161,7 @@ function HarnessLogHeader({
   return (
     <div className="flex min-h-12 items-center justify-between gap-3 border-b border-white/10 px-3 py-2">
       <div className="flex min-w-0 flex-col gap-0.5">
-        <span className="min-w-0 truncate text-2xs font-semibold uppercase tracking-[0.18em] text-zinc-300">
+        <span className="min-w-0 truncate text-2xs font-semibold uppercase tracking-wide text-zinc-300">
           Harness Log
         </span>
         <span

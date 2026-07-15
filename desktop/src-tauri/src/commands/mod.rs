@@ -2,6 +2,7 @@ mod agent_config;
 mod agent_discovery;
 mod agent_logs;
 mod agent_metric_archive;
+mod agent_model_process;
 mod agent_models;
 mod agent_providers;
 mod agent_settings;
@@ -22,7 +23,7 @@ mod media;
 mod media_download;
 mod media_transcode;
 #[cfg(feature = "mesh-llm")]
-mod mesh_llm;
+pub(crate) mod mesh_llm;
 mod messages;
 mod notifications;
 mod observer_archive;

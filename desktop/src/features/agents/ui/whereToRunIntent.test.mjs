@@ -26,29 +26,11 @@ function providerDraft(overrides = {}) {
   };
 }
 
-function meshDraft(overrides = {}) {
-  return {
-    ...emptyWhereToRunDraft,
-    runOn: "mesh",
-    meshModelId: "mesh/model:Q4",
-    meshTarget: { endpointAddr: "10.0.0.1:9337", modelId: "mesh/model:Q4" },
-    meshPatch: {
-      acpCommand: "buzz-acp",
-      agentCommand: "buzz-agent",
-      agentArgs: ["acp"],
-      mcpCommand: "",
-      model: "mesh/model:Q4",
-      envVars: {},
-    },
-    ...overrides,
-  };
-}
-
-// ── Submit gating ───────────────────────────────────────────────────────────
-
 test("provider selection blocks submit until the probe completes", () => {
-  const unprobed = providerDraft({ probedProvider: null });
-  assert.equal(canSubmitWhereToRun(unprobed), false);
+  assert.equal(
+    canSubmitWhereToRun(providerDraft({ probedProvider: null })),
+    false,
+  );
 });
 
 test("provider selection blocks submit while required config is missing", () => {
@@ -61,21 +43,9 @@ test("complete provider config allows submit", () => {
   assert.equal(canSubmitWhereToRun(providerDraft()), true);
 });
 
-test("mesh selection blocks submit without a concrete serve target", () => {
-  assert.equal(
-    canSubmitWhereToRun(meshDraft({ meshTarget: null })),
-    false,
-    "a model name alone is not a startable mesh selection",
-  );
-  assert.equal(canSubmitWhereToRun(meshDraft({ meshModelId: "" })), false);
-  assert.equal(canSubmitWhereToRun(meshDraft()), true);
-});
-
 test("local never gates submit", () => {
   assert.equal(canSubmitWhereToRun(emptyWhereToRunDraft), true);
 });
-
-// ── Intent resolution ────────────────────────────────────────────────────────
 
 test("local draft resolves to null intent", () => {
   assert.equal(resolveBackendIntent(emptyWhereToRunDraft), null);
@@ -88,17 +58,4 @@ test("provider draft resolves with coerced config values", () => {
     id: "blox",
     config: { region: "us", size: 3 },
   });
-});
-
-test("mesh draft resolves with target and patch", () => {
-  const intent = resolveBackendIntent(meshDraft());
-  assert.equal(intent.type, "mesh");
-  assert.equal(intent.modelId, "mesh/model:Q4");
-  assert.equal(intent.target.endpointAddr, "10.0.0.1:9337");
-  assert.equal(intent.patch.agentCommand, "buzz-agent");
-});
-
-test("mesh draft without patch or target resolves to null, not a broken intent", () => {
-  assert.equal(resolveBackendIntent(meshDraft({ meshPatch: null })), null);
-  assert.equal(resolveBackendIntent(meshDraft({ meshTarget: null })), null);
 });

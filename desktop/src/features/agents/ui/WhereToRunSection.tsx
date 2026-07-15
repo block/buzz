@@ -2,143 +2,95 @@ import { AlertTriangle } from "lucide-react";
 import * as React from "react";
 
 import { useBackendProvidersQuery } from "@/features/agents/hooks";
-import { RelayMeshAgentSection } from "@/features/mesh-compute/ui/RelayMeshAgentSection";
 import { probeBackendProvider } from "@/shared/api/tauri";
-import type { MeshAvailability } from "@/shared/api/tauriMesh";
 
 import { ProviderConfigFields } from "./ProviderConfigFields";
 import { emptyWhereToRunDraft, type WhereToRunDraft } from "./whereToRunIntent";
 
-/**
- * "Where to run" selector for the definition-create start flow (B5): local
- * (default), a discovered backend provider, or the relay mesh. Owns the
- * probe/config/mesh-target draft internally and reports it upward via
- * `onDraftChange`; the parent resolves it into a BackendIntent at submit
- * (`resolveBackendIntent`) and gates the submit button
- * (`canSubmitWhereToRun`).
- *
- * Always rendered in the create flow — agents are always started after
- * creation. The parent owns the availability-flip guard so visibility and the
- * submit path share one snapshot; this section only renders that snapshot.
- *
- * Honest-copy note: unlike the legacy create dialog, the mesh preset never
- * overwrites the definition's fields — only the minted instance carries the
- * mesh commands/env — so RelayMeshAgentSection's override warning gets an
- * empty `current` and stays silent by construction.
- */
+/** Optional remote-backend selector. Buzz shared compute is an LLM provider, not a run destination. */
 export function WhereToRunSection({
   draft,
   isPending,
-  meshAvailability,
   onDraftChange,
 }: {
   draft: WhereToRunDraft;
   isPending: boolean;
-  meshAvailability: MeshAvailability | null;
   onDraftChange: (next: WhereToRunDraft) => void;
 }) {
-  const backendProvidersQuery = useBackendProvidersQuery();
-  const backendProviders = backendProvidersQuery.data ?? [];
+  const backendProviders = useBackendProvidersQuery().data ?? [];
   const [probeError, setProbeError] = React.useState<string | null>(null);
-
-  const isProviderMode = draft.runOn !== "local" && draft.runOn !== "mesh";
+  const isProviderMode = draft.runOn !== "local";
   const selectedBackendProvider = React.useMemo(
-    () => backendProviders.find((p) => p.id === draft.runOn) ?? null,
+    () =>
+      backendProviders.find((provider) => provider.id === draft.runOn) ?? null,
     [backendProviders, draft.runOn],
   );
 
-  // Latest draft, updated synchronously on every emit — RelayMeshAgentSection
-  // fires onTargetChange and onModelIdChange back-to-back in one event
-  // handler, before React re-renders, so reading the prop alone would let the
-  // second callback stamp stale sibling fields over the first one's update.
-  const draftRef = React.useRef(draft);
-  draftRef.current = draft;
-  const emit = React.useCallback(
-    (next: WhereToRunDraft) => {
-      draftRef.current = next;
-      onDraftChange(next);
-    },
-    [onDraftChange],
-  );
-
-  // Probe the provider when a non-local, non-mesh backend is selected.
-  // Mirrors the legacy dialog: config defaults from the schema are seeded so
-  // unchanged defaults are included in the submit payload.
   React.useEffect(() => {
     if (!isProviderMode || !selectedBackendProvider) {
       setProbeError(null);
       return;
     }
-
     let cancelled = false;
     setProbeError(null);
-
-    probeBackendProvider(selectedBackendProvider.binaryPath)
+    void probeBackendProvider(selectedBackendProvider.binaryPath)
       .then((result) => {
         if (cancelled) return;
         const defaults: Record<string, string> = {};
-        if (result.config_schema) {
-          const props =
-            (result.config_schema as Record<string, unknown>)?.properties ?? {};
-          for (const [key, prop] of Object.entries(props) as [
-            string,
-            Record<string, unknown>,
-          ][]) {
-            if (prop.default != null) {
-              defaults[key] = String(prop.default);
-            }
-          }
+        const properties =
+          (result.config_schema as Record<string, unknown> | undefined)
+            ?.properties ?? {};
+        for (const [key, property] of Object.entries(properties) as [
+          string,
+          Record<string, unknown>,
+        ][]) {
+          if (property.default != null)
+            defaults[key] = String(property.default);
         }
-        emit({
-          ...draftRef.current,
+        onDraftChange({
+          ...draft,
           probedProvider: result,
           providerConfig: defaults,
         });
       })
-      .catch((err: unknown) => {
+      .catch((error: unknown) => {
         if (!cancelled) {
-          setProbeError(err instanceof Error ? err.message : String(err));
+          setProbeError(error instanceof Error ? error.message : String(error));
         }
       });
-
     return () => {
       cancelled = true;
     };
-  }, [isProviderMode, selectedBackendProvider, emit]);
+  }, [draft, isProviderMode, onDraftChange, selectedBackendProvider]);
 
-  function handleRunOnChange(nextValue: string) {
-    setProbeError(null);
-    // Switching destination resets the destination-specific draft state so a
-    // previous selection can't leak into the new one.
-    emit({ ...emptyWhereToRunDraft, runOn: nextValue });
-  }
-
-  const useMesh = draft.runOn === "mesh";
-  const showRunOnPicker = backendProviders.length > 0 || useMesh;
+  if (backendProviders.length === 0) return null;
 
   return (
     <div className="space-y-4">
-      {showRunOnPicker ? (
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium" htmlFor="agent-run-on">
-            Run on
-          </label>
-          <select
-            className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-            disabled={isPending}
-            id="agent-run-on"
-            onChange={(e) => handleRunOnChange(e.target.value)}
-            value={draft.runOn}
-          >
-            <option value="local">This computer</option>
-            {backendProviders.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.id}
-              </option>
-            ))}
-          </select>
-        </div>
-      ) : null}
+      <div className="space-y-1.5">
+        <label className="text-sm font-medium" htmlFor="agent-run-on">
+          Run on
+        </label>
+        <select
+          className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+          disabled={isPending}
+          id="agent-run-on"
+          onChange={(event) =>
+            onDraftChange({
+              ...emptyWhereToRunDraft,
+              runOn: event.target.value,
+            })
+          }
+          value={draft.runOn}
+        >
+          <option value="local">This computer</option>
+          {backendProviders.map((provider) => (
+            <option key={provider.id} value={provider.id}>
+              {provider.id}
+            </option>
+          ))}
+        </select>
+      </div>
 
       {isProviderMode && selectedBackendProvider ? (
         <div className="space-y-4">
@@ -153,67 +105,21 @@ export function WhereToRunSection({
               from trusted sources.
             </p>
           </div>
-
           {probeError ? (
             <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
               Could not probe provider: {probeError}
             </p>
           ) : null}
-
           {draft.probedProvider?.config_schema ? (
             <ProviderConfigFields
               config={draft.providerConfig}
-              onChange={(config) =>
-                emit({ ...draftRef.current, providerConfig: config })
+              onChange={(providerConfig) =>
+                onDraftChange({ ...draft, providerConfig })
               }
               schema={draft.probedProvider.config_schema}
             />
           ) : null}
         </div>
-      ) : null}
-
-      {!isProviderMode ? (
-        <>
-          <RelayMeshAgentSection
-            availability={meshAvailability}
-            current={{
-              // The definition's own fields are never overwritten by the mesh
-              // preset — only the minted instance carries it — so the override
-              // warning has nothing to warn about.
-              acpCommand: "",
-              agentCommand: "",
-              agentArgs: [],
-              mcpCommand: "",
-              model: null,
-              envVars: {},
-            }}
-            targetEndpointAddr={draft.meshTarget?.endpointAddr ?? ""}
-            onModelIdChange={(nextId, patch) => {
-              emit({
-                ...draftRef.current,
-                meshModelId: nextId,
-                meshPatch: patch,
-              });
-            }}
-            onTargetChange={(target) => {
-              emit({ ...draftRef.current, meshTarget: target });
-            }}
-            onUseMeshChange={(next) => {
-              emit(
-                next
-                  ? { ...emptyWhereToRunDraft, runOn: "mesh" }
-                  : { ...emptyWhereToRunDraft },
-              );
-            }}
-            useMesh={useMesh}
-          />
-          {useMesh ? (
-            <p className="text-xs text-muted-foreground">
-              The started instance runs on the mesh model; the agent profile
-              keeps its own settings.
-            </p>
-          ) : null}
-        </>
       ) : null}
     </div>
   );

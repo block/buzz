@@ -534,6 +534,7 @@ export function collectMessageAuthorPubkeys(events: RelayEvent[]) {
         pubkeys.add(pk);
       }
     } else {
+      pubkeys.add(event.pubkey.toLowerCase());
       pubkeys.add(
         resolveEventAuthorPubkey({
           pubkey: event.pubkey,

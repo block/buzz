@@ -424,8 +424,7 @@
   display: inline-block;
   line-height: var(--buzz-sidebar-action-description-line-height);
   max-width: 100%;
-  overflow: hidden;
-  white-space: nowrap;
+  overflow-wrap: break-word;
 }
 
 .buzz-sidebar-action-description__motion {
@@ -443,10 +442,16 @@
   will-change: transform;
 }
 
+/* The roll-up reel animates between two fixed one-line slots, so text is
+   clipped to a single line only while the transition plays; the settled
+   state above wraps freely. */
 .buzz-sidebar-action-description__reel > span {
   display: block;
   height: var(--buzz-sidebar-action-description-line-height);
   line-height: var(--buzz-sidebar-action-description-line-height);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @keyframes buzz-sidebar-action-description-roll-up {

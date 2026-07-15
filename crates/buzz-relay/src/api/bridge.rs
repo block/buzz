@@ -589,8 +589,6 @@ pub async fn submit_event(
 
     let event: nostr::Event = serde_json::from_slice(&body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid event JSON: {e}")))?;
-    let kind_u32 = buzz_core::kind::event_kind_u32(&event);
-
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
     super::relay_members::enforce_relay_membership(
@@ -600,30 +598,6 @@ pub async fn submit_event(
         auth_tag,
     )
     .await?;
-
-    // Mesh signaling kinds (24620 status report, 24621 connect request) are
-    // ephemeral and deliberately absent from ingest_event's per-kind allowlist.
-    // The desktop's Rust coordinator publishes them via this bridge, so route
-    // them to the mesh handlers — the HTTP twin of the WS door's special-casing
-    // in handlers::event. Membership was enforced above; the handlers re-check
-    // it fail-closed.
-    if kind_u32 == buzz_core::kind::KIND_MESH_STATUS_REPORT
-        || kind_u32 == buzz_core::kind::KIND_MESH_CONNECT_REQUEST
-    {
-        let event_id = event.id.to_hex();
-        return match crate::handlers::mesh_signaling::handle_mesh_event_http(
-            &state, &tenant, &pubkey, &event,
-        )
-        .await
-        {
-            Ok(()) => Ok(Json(serde_json::json!({
-                "event_id": event_id,
-                "accepted": true,
-                "message": "",
-            }))),
-            Err(msg) => Err(api_error(StatusCode::BAD_REQUEST, &msg)),
-        };
-    }
 
     let auth = IngestAuth::Http {
         pubkey,

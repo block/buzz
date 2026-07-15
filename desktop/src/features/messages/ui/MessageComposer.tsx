@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
+import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
 import { useDrafts } from "@/features/messages/lib/useDrafts";
@@ -15,6 +16,7 @@ import {
   findSpoileredImetaMediaUrls,
   type ImetaMedia,
   mergeOutgoingTags,
+  restoreImetaMediaDisplayLabels,
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
 
@@ -368,21 +370,19 @@ function MessageComposerImpl({
       // Strip the trailing `![image|video](url)` lines that correspond to
       // imeta attachments — the user manages those via the attachments row,
       // not via raw markdown in the editor.
-      const editableBody = stripImetaMediaLines(
+      const editableImeta = restoreImetaMediaDisplayLabels(
         editTarget.body,
         editTarget.imetaMedia ?? [],
       );
+      const editableBody = stripImetaMediaLines(editTarget.body, editableImeta);
       setComposerContent(editableBody);
       richText.setContent(editableBody);
       // Seed the composer's pending-imeta state with the original event's
       // attachments so they show up in `ComposerAttachments` and the user
       // can remove existing ones / add new ones before saving.
-      media.setPendingImeta(editTarget.imetaMedia ?? []);
+      media.setPendingImeta(editableImeta);
       setSpoileredAttachmentUrls(
-        findSpoileredImetaMediaUrls(
-          editTarget.body,
-          editTarget.imetaMedia ?? [],
-        ),
+        findSpoileredImetaMediaUrls(editTarget.body, editableImeta),
       );
       // Defer focus to the next frame so it runs after any focus-
       // restoration the trigger UI (e.g. the message-row context menu)
@@ -810,12 +810,10 @@ function MessageComposerImpl({
             return true;
           }
 
-          // --- Mention / channel-link normalization ---
-          // When copying from the chat area the browser puts styled HTML
-          // on the clipboard. The mention/channel-link wrappers have
-          // font-weight:600 which Tiptap's Bold extension misinterprets
-          // as bold. Strip those wrappers and use ProseMirror's pasteHTML
-          // to parse the cleaned HTML into proper rich content nodes.
+          // Restore Buzz snapshots before normal styled-HTML normalization.
+          if (handleAgentSnapshotPaste(event, media.setPendingImeta))
+            return true;
+          // Strip mention/channel wrappers that Tiptap would misread as bold.
           const html = event.clipboardData?.getData("text/html");
           if (html && hasMentionClipboardHtml(html)) {
             const cleanHtml = normalizeMentionClipboardHtml(html);
@@ -833,7 +831,7 @@ function MessageComposerImpl({
         },
       },
     });
-  }, [richText.editor, scrollComposerToBottom]);
+  }, [media.setPendingImeta, richText.editor, scrollComposerToBottom]);
 
   // ── Send button state ───────────────────────────────────────────────
   const sendDisabled = React.useMemo(

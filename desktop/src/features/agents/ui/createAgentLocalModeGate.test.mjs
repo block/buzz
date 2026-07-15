@@ -87,7 +87,6 @@ test("localMode_buzzAgent_emptyProvider_notSatisfied", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -111,7 +110,6 @@ test("localMode_buzzAgent_emptyModel_notSatisfied", () => {
     model: "",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -137,7 +135,6 @@ test("localMode_buzzAgent_anthropic_missingKey_notSatisfied", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -159,7 +156,6 @@ test("localMode_buzzAgent_anthropic_allRequired_present_allowed", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.deepEqual(
@@ -191,7 +187,6 @@ test("localMode_claude_noRequiredFields_notBlocked", () => {
     model: "",
     provider: "",
     runtimeId: "claude",
-    useMesh: false,
   });
 
   assert.deepEqual(
@@ -211,7 +206,7 @@ test("localMode_claude_noRequiredFields_notBlocked", () => {
   );
 });
 
-// ── Gate: isProviderMode / useMesh bypass ─────────────────────────────────
+// ── Gate: provider mode bypass ─────────────────────────────────
 
 test("localMode_gate_bypassed_for_providerMode", () => {
   // In provider mode, gate must be satisfied regardless of local fields.
@@ -221,30 +216,12 @@ test("localMode_gate_bypassed_for_providerMode", () => {
     model: "",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
     result.satisfied,
     true,
     "provider mode must bypass the local-mode gate",
-  );
-});
-
-test("localMode_gate_bypassed_for_meshMode", () => {
-  const result = computeLocalModeGate({
-    envVars: {},
-    isProviderMode: false,
-    model: "",
-    provider: "",
-    runtimeId: "buzz-agent",
-    useMesh: true,
-  });
-
-  assert.equal(
-    result.satisfied,
-    true,
-    "relay-mesh mode must bypass the local-mode gate",
   );
 });
 
@@ -270,7 +247,6 @@ test("localMode_requiredEnvKeys_gate_and_envVarsEditor_share_same_key_set", () =
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
   const fullKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
 
@@ -292,7 +268,6 @@ test("localMode_providerSelection_drives_requiredKey", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
   const databricksGate = computeLocalModeGate({
     envVars: {},
@@ -300,7 +275,6 @@ test("localMode_providerSelection_drives_requiredKey", () => {
     model: "databricks-meta-llama",
     provider: "databricks",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -335,7 +309,6 @@ test("localMode_goose_databricksHost_satisfiedByFileConfig_notRequired", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: fileConfig,
-    useMesh: false,
   });
 
   assert.ok(
@@ -363,7 +336,6 @@ test("localMode_goose_databricksHost_noFileConfig_stillRequired", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.ok(
@@ -392,7 +364,6 @@ test("localMode_goose_providerSatisfiedByFileConfig_noNormalizedFieldRequired", 
     provider: "",
     runtimeId: "goose",
     runtimeFileConfig: fileConfig,
-    useMesh: false,
   });
 
   assert.deepEqual(
@@ -412,7 +383,6 @@ test("localMode_goose_envPlusFileConfig_bothEmpty_stillRequired", () => {
     provider: "",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.ok(
@@ -439,7 +409,6 @@ test("baked_databricksHost_silencesRequirement", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.ok(
@@ -465,7 +434,6 @@ test("baked_databricksHost_andAgentLocal_agentLocalWins_keyNotRequired", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.ok(
@@ -485,7 +453,6 @@ test("baked_emptyOrUndefined_behaviorUnchanged", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
   const resultEmpty = computeLocalModeGate({
     bakedEnvKeys: [],
@@ -495,7 +462,6 @@ test("baked_emptyOrUndefined_behaviorUnchanged", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.ok(
@@ -529,7 +495,6 @@ test("baked_satisfiedKey_doesNotCountAsMissing_noSaveBlock", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.deepEqual(
@@ -674,7 +639,6 @@ test("localMode_globalEnvVars_satisfies_missing_env_key", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -699,7 +663,6 @@ test("localMode_perAgentEnvVar_wins_over_globalEnvVars_for_gate", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -718,7 +681,6 @@ test("localMode_globalEnvVars_empty_still_fails_gate", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -755,7 +717,6 @@ test("localMode_globalProvider_inherited_no_key_surfacesAsRequired", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -780,7 +741,6 @@ test("localMode_globalProvider_inherited_globalEnv_satisfies_key", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -814,7 +774,6 @@ test("localMode_requiredKey_stays_in_requiredEnvKeys_when_locally_filled", () =>
     model: "claude-3-5-sonnet-20241022",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -835,7 +794,6 @@ test("localMode_requiredKey_stays_in_requiredEnvKeys_when_locally_filled", () =>
     model: "claude-3-5-sonnet-20241022",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -894,6 +852,13 @@ test("providerDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () =
     label,
     "Inherit global default (openai)",
     "global provider with surrounding whitespace must be trimmed in label",
+  );
+});
+
+test("providerDefaultLabel_sharedCompute_neverLeaksInternalId", () => {
+  assert.equal(
+    getDefaultLlmProviderLabel("buzz-agent", "relay-mesh"),
+    "Inherit global default (Buzz shared compute)",
   );
 });
 
@@ -1075,7 +1040,6 @@ test("globalAwareGate_globalProviderSet_requiredKeyAppearsWhenMissing", () => {
     provider: "",
     runtimeId: "buzz-agent",
     runtimeFileConfig: undefined,
-    useMesh: false,
   });
   assert.ok(
     gate.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
@@ -1094,7 +1058,6 @@ test("globalAwareGate_globalProviderAndKeySet_requiredKeyAbsent", () => {
     provider: "",
     runtimeId: "buzz-agent",
     runtimeFileConfig: undefined,
-    useMesh: false,
   });
   assert.equal(
     gate.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
@@ -1125,7 +1088,6 @@ test("f3_templateDialog_localAnthropicWithGlobalModel_modelNotRequired", () => {
     model: "",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -1154,7 +1116,6 @@ test("f3_templateDialog_localProviderBlankGlobalAnthropicNoModel_saveBlocked", (
     model: "",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -1383,7 +1344,6 @@ test("localMode_globalEnvSatisfied_agentLocalExplicitlyEmpty_stillRequired", () 
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -1412,7 +1372,6 @@ test("localMode_globalEnvSatisfied_agentLocalKeyAbsent_silenced", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(

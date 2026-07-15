@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
     event_kind_u32, is_ephemeral, AUTHOR_ONLY_KINDS, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
-    KIND_MESH_CONNECT_REQUEST, KIND_MESH_STATUS_REPORT, KIND_PRESENCE_UPDATE,
+    KIND_PRESENCE_UPDATE,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -800,70 +800,6 @@ async fn handle_ephemeral_event(
         // Presence is a channel-less ephemeral event. After updating Redis
         // presence state, let it fall through to the shared global ephemeral
         // publish/fan-out path below so other relay nodes receive the live delta.
-    }
-
-    // Mesh status report (kind:24620). An authenticated relay member reports its
-    // current mesh serve availability; the relay projects it into a relay-signed,
-    // per-reporter kind:30621 discovery note. The report is ephemeral input; the
-    // 30621 is the durable, relay-owned record.
-    if event_kind_u32(&event) == KIND_MESH_STATUS_REPORT {
-        let reporter_hex = auth_pubkey.to_hex();
-        match super::mesh_signaling::handle_status_report(
-            &state,
-            &conn.tenant,
-            &reporter_hex,
-            &event,
-        )
-        .await
-        {
-            Ok(()) => {
-                conn.send(RelayMessage::ok(event_id_hex, true, ""));
-            }
-            Err(reason) => {
-                conn.send(RelayMessage::ok(event_id_hex, false, &reason));
-            }
-        }
-        return;
-    }
-
-    // Mesh hole-punch signaling (kind:24621). An authenticated relay member
-    // asks the relay to coordinate a direct iroh hole-punch to a peer it found
-    // via kind:30621. The relay validates the target is also a member, then
-    // emits the paired call-me-now (kind:24622). This is the relay's ONLY role
-    // in the v1 direct-iroh mesh — validate membership + pair + fan out. It
-    // never carries iroh traffic and stores no endpoint state.
-    if event_kind_u32(&event) == KIND_MESH_CONNECT_REQUEST {
-        // Per-requester rate limit shared with the HTTP door — see
-        // `mesh_signaling::connect_request_rate_limited` for rationale.
-        if super::mesh_signaling::connect_request_rate_limited(
-            &state,
-            conn.tenant.community(),
-            &auth_pubkey,
-        ) {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                "rate-limited: mesh connect request rate exceeded (20/sec)",
-            ));
-            return;
-        }
-        let requester_hex = auth_pubkey.to_hex();
-        match super::mesh_signaling::handle_connect_request(
-            &state,
-            &conn.tenant,
-            &requester_hex,
-            &event,
-        )
-        .await
-        {
-            Ok(()) => {
-                conn.send(RelayMessage::ok(event_id_hex, true, ""));
-            }
-            Err(reason) => {
-                conn.send(RelayMessage::ok(event_id_hex, false, &reason));
-            }
-        }
-        return;
     }
 
     // Check channel membership before publishing other ephemeral events.

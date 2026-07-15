@@ -3,7 +3,9 @@ import { expect, test } from "@playwright/test";
 import {
   installMockBridge,
   createMockAgentMemoryListing,
+  TEST_IDENTITIES,
 } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -221,9 +223,9 @@ test("team_snapshot_import_keep_allowlist_sends_keepAllowlist_true", async ({
   expect(confirmPayload?.input?.keepAllowlist).toBe(true);
 });
 
-// ── (c) Memory gate ordering ────────────────────────────────────────────────
+// ── (c) Sharing parity ──────────────────────────────────────────────────────
 
-test("team_snapshot_send_memory_gate_blocks_encode_until_confirmed", async ({
+test("team sharing uses the people picker and gates memory before sending", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -243,76 +245,76 @@ test("team_snapshot_send_memory_gate_blocks_encode_until_confirmed", async ({
       },
     ],
     agentMemory: createMockAgentMemoryListing(),
+    searchProfiles: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        displayName: "Charlie",
+      },
+    ],
     uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
   });
   await gotoAgentsPage(page);
 
-  // Open export dialog for the "Engineering" seeded team.
   await page.getByLabel("Engineering team actions").click();
-  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  const shareDialog = page.getByTestId("team-share-dialog");
+  await expect(shareDialog).toBeVisible();
+  await expect(
+    shareDialog.getByRole("heading", { name: "Share Engineering" }),
+  ).toBeVisible();
 
-  // Select memory level = "core".
-  const coreOption = page.getByRole("radio", {
-    name: "Config + core memory",
-  });
-  if (await coreOption.isVisible()) {
-    await coreOption.click();
-  }
-
-  // Click "Send in Buzz" to open the send dialog.
-  await page.getByTestId("team-snapshot-send-in-buzz").click();
-  await expect(page.getByTestId("team-snapshot-send-dialog")).toBeVisible();
-
-  // Select #general.
+  const search = shareDialog.getByTestId("team-share-recipient-search");
+  await expect(search).toBeEnabled({ timeout: 5_000 });
+  await search.fill("charlie");
   await page
-    .getByTestId("team-snapshot-send-channel-list")
-    .getByText("general")
+    .getByTestId(
+      `team-share-recipient-option-${TEST_IDENTITIES.charlie.pubkey}`,
+    )
     .click();
+  await shareDialog.getByTestId("team-share-recipient-access").click();
+  await page.getByRole("menuitemradio", { name: "Team + core memory" }).click();
+  await shareDialog.getByTestId("team-share-send").click();
 
-  // Click Next (memory-bearing send shows "Next" instead of "Send").
-  await page.getByTestId("team-snapshot-send-confirm").click();
+  const memoryConfirmation = page.getByTestId("team-share-memory-confirmation");
+  await expect(memoryConfirmation).toBeVisible();
+  await expect(memoryConfirmation).toContainText("This team includes");
+  await expect(memoryConfirmation).toContainText("plaintext core memory");
+  const logBeforeConfirmation = await readCommandLog(page);
+  const encodeLevelsBeforeConfirmation = logBeforeConfirmation
+    .filter((entry) => entry.command === "encode_team_snapshot_for_send")
+    .map(
+      (entry) =>
+        (entry.payload as { memoryLevel?: string } | undefined)?.memoryLevel,
+    );
+  expect(encodeLevelsBeforeConfirmation).toEqual([]);
 
-  // The memory gate step must be visible.
-  const memGate = page.getByTestId("team-snapshot-send-memgate-confirm");
-  await expect(memGate).toBeVisible({ timeout: 3000 });
-
-  // At this point NO encode should have happened — the gate blocks it.
-  const logBeforeGate = await readCommandLog(page);
-  const encodeBeforeGate = logBeforeGate.filter(
-    (e) => e.command === "encode_team_snapshot_for_send",
-  );
-  expect(encodeBeforeGate).toHaveLength(0);
-
-  // Confirm the memory gate — "Send anyway".
-  await memGate.click();
-
-  // Wait for done.
-  await expect(page.getByTestId("team-snapshot-send-done")).toBeVisible({
-    timeout: 8000,
+  await memoryConfirmation.getByTestId("team-share-memory-confirm").click();
+  await expect(page.getByText("Sent a copy of Engineering")).toBeVisible({
+    timeout: 8_000,
   });
 
-  // Now encode must have been called.
-  const logAfterGate = await readCommandLog(page);
-  const encodeAfterGate = logAfterGate.filter(
-    (e) => e.command === "encode_team_snapshot_for_send",
-  );
-  expect(encodeAfterGate).toHaveLength(1);
-
-  // The sent message content must use a file-link, not an inline image —
-  // a .team.png rendered as ![image](...) produces a blank/invisible message
-  // because the PNG body is a 1×1 placeholder.
-  const sendEntry = logAfterGate.find(
-    (e) => e.command === "send_channel_message",
+  const log = await readCommandLog(page);
+  expect(
+    log.filter(
+      (entry) =>
+        entry.command === "encode_team_snapshot_for_send" &&
+        (entry.payload as { memoryLevel?: string } | undefined)?.memoryLevel ===
+          "core",
+    ),
+  ).toHaveLength(1);
+  const sendEntry = log.find(
+    (entry) => entry.command === "send_channel_message",
   );
   expect(sendEntry).toBeTruthy();
   const sendPayload = sendEntry?.payload as { content?: string } | undefined;
-  expect(sendPayload?.content).toContain("[e2e-team.team.png](");
+  expect(sendPayload?.content).toContain("[Engineering](");
   expect(sendPayload?.content).not.toContain("![image](");
 });
 
-test("team_snapshot_send_none_memory_skips_gate_and_encodes_directly", async ({
+test("team sharing keeps link copy and export in the shared surface", async ({
   page,
 }) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await installMockBridge(page, {
     personas: [
       {
@@ -329,49 +331,139 @@ test("team_snapshot_send_none_memory_skips_gate_and_encodes_directly", async ({
       },
     ],
     uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
+    uploadDelayMs: 800,
   });
   await gotoAgentsPage(page);
 
-  // Open export dialog for the "Engineering" seeded team.
   await page.getByLabel("Engineering team actions").click();
-  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+  const menu = page.getByRole("menu");
+  await expect(
+    menu.getByRole("menuitem", { name: "Export snapshot" }),
+  ).toHaveCount(0);
+  await menu.getByRole("menuitem", { name: "Share" }).click();
 
-  // Memory level defaults to "none" — no need to change it.
+  const shareDialog = page.getByTestId("team-share-dialog");
+  await expect(shareDialog.getByTestId("team-share-link-access")).toHaveText(
+    "Team only",
+  );
+  const exportTeamRow = shareDialog.getByTestId("team-share-export");
+  const copyLinkButton = shareDialog.getByTestId("team-share-copy-link");
+  const recipientSearch = shareDialog.getByTestId(
+    "team-share-recipient-search",
+  );
+  const linkAccess = shareDialog.getByTestId("team-share-link-access");
+  const closeButton = shareDialog.getByRole("button", { name: "Close" });
+  await waitForAnimations(page);
+  await expect(
+    copyLinkButton.getByTestId("team-share-copy-link-stage"),
+  ).toHaveCSS("position", "relative");
+  const idleCopyLinkButtonBox = await copyLinkButton.boundingBox();
+  await copyLinkButton.click();
+  await expect(copyLinkButton.locator(".sprout-arc-spinner")).toBeVisible();
+  await expect(copyLinkButton).toContainText("Copying…");
+  await expect(copyLinkButton).toHaveCSS("opacity", "1");
+  await expect(recipientSearch).toBeEnabled();
+  await expect(linkAccess).toBeEnabled();
+  await expect(closeButton).toBeDisabled();
+  await expect(exportTeamRow).toBeDisabled();
+  await expect(exportTeamRow).toHaveCSS("opacity", "1");
+  await page.keyboard.press("Escape");
+  await expect(shareDialog).toBeVisible();
+  await expect(copyLinkButton).toContainText("Copied");
+  await expect(copyLinkButton).toHaveAttribute("data-copy-status", "copied");
+  await expect(closeButton).toBeEnabled();
+  await expect(exportTeamRow).toBeEnabled();
+  await waitForAnimations(page);
+  const copiedButtonBox = await copyLinkButton.boundingBox();
+  const copiedStateColors = await copyLinkButton
+    .getByTestId("team-share-copy-link-state")
+    .evaluate((element) => {
+      const icon = element.querySelector("svg");
+      const label = element.querySelector("span");
+      return {
+        icon: icon ? getComputedStyle(icon).color : null,
+        label: label ? getComputedStyle(label).color : null,
+      };
+    });
+  expect(copiedStateColors.icon).toBe(copiedStateColors.label);
+  expect(copiedButtonBox?.width).toBeLessThan(
+    idleCopyLinkButtonBox?.width ?? 0,
+  );
+  expect(
+    Math.abs(
+      (copiedButtonBox?.x ?? 0) +
+        (copiedButtonBox?.width ?? 0) -
+        ((idleCopyLinkButtonBox?.x ?? 0) + (idleCopyLinkButtonBox?.width ?? 0)),
+    ),
+  ).toBeLessThanOrEqual(1);
+  await expect(copyLinkButton).toContainText("Copy link", { timeout: 4_000 });
+  await expect(copyLinkButton).toHaveAttribute("data-copy-status", "idle");
 
-  // Click "Send in Buzz".
-  await page.getByTestId("team-snapshot-send-in-buzz").click();
-  await expect(page.getByTestId("team-snapshot-send-dialog")).toBeVisible();
+  const log = await readCommandLog(page);
+  const encodeEntry = log.find(
+    (entry) => entry.command === "encode_team_snapshot_for_send",
+  );
+  expect(encodeEntry?.payload).toEqual(
+    expect.objectContaining({ memoryLevel: "none", format: "png" }),
+  );
 
-  // Select #general.
-  await page
-    .getByTestId("team-snapshot-send-channel-list")
-    .getByText("general")
-    .click();
-
-  // Click Send (no "Next" for none-memory — goes straight to send).
-  await page.getByTestId("team-snapshot-send-confirm").click();
-
-  // The memory gate must NOT appear — should go directly to progress/done.
-  const memGateBtn = page.getByTestId("team-snapshot-send-memgate-confirm");
-  // Give a brief window to ensure memgate doesn't appear.
-  await expect(memGateBtn).toHaveCount(0);
-
-  // Wait for done.
-  await expect(page.getByTestId("team-snapshot-send-done")).toBeVisible({
-    timeout: 8000,
+  const copiedTeam = await page.evaluate(() => {
+    const commands =
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: { html?: string; text?: string };
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+    return commands.findLast(
+      (entry) => entry.command === "copy_text_to_clipboard",
+    )?.payload;
   });
 
-  // Encode must have been called directly (no gate).
-  const log = await readCommandLog(page);
-  const encodeEntries = log.filter(
-    (e) => e.command === "encode_team_snapshot_for_send",
-  );
-  expect(encodeEntries).toHaveLength(1);
+  await page.keyboard.press("Escape");
+  await expect(shareDialog).toHaveCount(0);
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(async ({ html, text }) => {
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        "text/html": new Blob([html ?? ""], { type: "text/html" }),
+        "text/plain": new Blob([text ?? ""], { type: "text/plain" }),
+      }),
+    ]);
+  }, copiedTeam ?? {});
+  await page
+    .getByTestId("message-composer")
+    .locator("[contenteditable='true']")
+    .click();
+  await page.keyboard.press("ControlOrMeta+V");
 
-  // The sent message content must use a file-link, not an inline image.
-  const sendEntry = log.find((e) => e.command === "send_channel_message");
-  expect(sendEntry).toBeTruthy();
-  const sendPayload = sendEntry?.payload as { content?: string } | undefined;
-  expect(sendPayload?.content).toContain("[e2e-team.team.png](");
-  expect(sendPayload?.content).not.toContain("![image](");
+  const composerTeamCard = page.getByTestId("composer-team-snapshot-card");
+  await expect(composerTeamCard).toBeVisible();
+  await expect(composerTeamCard).toContainText("Engineering");
+  await expect(composerTeamCard.locator("img")).toHaveCount(0);
+  await page.getByTestId("send-message").click();
+
+  const sentTeamCard = page.getByTestId("agent-snapshot-card").last();
+  await expect(sentTeamCard).toBeVisible();
+  await expect(sentTeamCard).toContainText("Engineering");
+  await expect(sentTeamCard).toContainText("Add team");
+  await expect(sentTeamCard.locator("img")).toHaveCount(0);
+
+  await page.getByTestId("open-agents-view").click();
+  await page.getByLabel("Engineering team actions").click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  await page.getByTestId("team-share-export").click();
+  const exportDialog = page.getByTestId("team-snapshot-export-dialog");
+  await expect(exportDialog).toBeVisible();
+  await expect(
+    exportDialog.getByRole("heading", { name: "Export Engineering" }),
+  ).toBeVisible();
+  await expect(
+    exportDialog.getByTestId("team-snapshot-memory-trigger"),
+  ).toHaveText("Team only");
+  await expect(
+    exportDialog.getByTestId("team-snapshot-format-trigger"),
+  ).toHaveText("PNG");
 });

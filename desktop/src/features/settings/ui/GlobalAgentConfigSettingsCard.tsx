@@ -25,7 +25,7 @@ import {
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/GlobalAgentConfigFields";
 import { Button } from "@/shared/ui/button";
-import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { SectionHeader } from "@/shared/ui/PageHeader";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -133,10 +133,13 @@ export function GlobalAgentConfigSettingsCard() {
   }
 
   return (
-    <section className="min-w-0" data-testid="settings-global-agent-config">
-      <SettingsSectionHeader
+    <section
+      className="min-w-0 space-y-4"
+      data-testid="settings-global-agent-config"
+    >
+      <SectionHeader
         title="Agent defaults"
-        description="Global configuration inherited by all local agents. Per-agent and persona settings always take priority."
+        description="Default settings for every agent running on this computer. You can override them for any individual agent or persona."
       />
 
       {isLoading ? (

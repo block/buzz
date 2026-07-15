@@ -158,6 +158,19 @@ describe("getWorkingAgentPubkeysForChannel", () => {
 });
 
 describe("subscription and caching", () => {
+  it("returns reference-stable snapshots before React subscribes", () => {
+    startTurn(AGENT, "chan-1");
+    assert.equal(
+      getAgentWorkingState(AGENT, "chan-1"),
+      getAgentWorkingState(AGENT, "chan-1"),
+    );
+    assert.equal(getWorkingChannels(), getWorkingChannels());
+    assert.equal(
+      getWorkingAgentPubkeysForChannel("chan-1"),
+      getWorkingAgentPubkeysForChannel("chan-1"),
+    );
+  });
+
   it("returns reference-stable snapshots while subscribed", () => {
     startTurn(AGENT, "chan-1");
     const unsubscribe = subscribeAgentWorkingSignal(() => {});

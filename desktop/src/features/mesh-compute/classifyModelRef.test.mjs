@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyModelRef, modelRefHintLabel } from "./classifyModelRef.ts";
+import { classifyModelRef } from "./classifyModelRef.ts";
 
 test("empty string → unknown", () => {
   assert.deepEqual(classifyModelRef(""), { kind: "unknown" });
@@ -56,20 +56,4 @@ test("trims whitespace before classifying", () => {
     kind: "catalog",
     name: "Qwen3-8B-Q4_K_M",
   });
-});
-
-test("hint labels are user-facing strings", () => {
-  assert.equal(
-    modelRefHintLabel({ kind: "catalog", name: "x" }),
-    "Looks like a catalog name",
-  );
-  assert.equal(
-    modelRefHintLabel({ kind: "huggingface", ref: "hf://x" }),
-    "HuggingFace ref",
-  );
-  assert.equal(
-    modelRefHintLabel({ kind: "local-path", path: "/x" }),
-    "Local file",
-  );
-  assert.equal(modelRefHintLabel({ kind: "unknown" }), null);
 });

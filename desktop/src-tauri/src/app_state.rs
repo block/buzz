@@ -93,9 +93,9 @@ pub struct AppState {
     /// In-process mesh-llm node started by Buzz Desktop.
     #[cfg(feature = "mesh-llm")]
     pub mesh_llm_runtime: AsyncMutex<Option<crate::mesh_llm::DesktopMeshRuntime>>,
-    /// Runtime-owned relay-mesh control plane (call-me-now listener + connect
-    /// request publish/retry). Installed once at identity-set time so the
-    /// listener is up before any restore/create can request a connection.
+    /// Runtime-owned shared-compute coordinator. It publishes member-signed
+    /// discovery status and reconciles MeshLLM's admission roster; MeshLLM
+    /// itself owns direct QUIC/iroh connection establishment.
     #[cfg(feature = "mesh-llm")]
     pub mesh_coordinator: AsyncMutex<Option<crate::mesh_llm::MeshCoordinator>>,
     /// `(creator_pubkey_hex, channel_id)` pairs for channels the *named*

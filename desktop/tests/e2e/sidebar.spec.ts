@@ -22,10 +22,12 @@ async function storedSidebarWidth(page: Page) {
   );
 }
 
-// Regression guard for the "Leave channel" lockup: opening a modal AlertDialog
-// from a modal Radix ContextMenu leaves `pointer-events: none` stuck on <body>
-// after the dialog closes, freezing the whole app. The fix makes the sidebar
-// context menus non-modal. This asserts the app is still interactive.
+// Regression guard for the "Leave channel" lockup: with two bundled copies of
+// @radix-ui/react-dismissable-layer, opening a modal AlertDialog from a modal
+// Radix ContextMenu left `pointer-events: none` stuck on <body> after the
+// dialog closed, freezing the whole app. Fixed by the pnpm override in
+// pnpm-workspace.yaml deduplicating the layer. This asserts the app is still
+// interactive.
 async function expectAppClickable(page: Page) {
   await expect
     .poll(() =>

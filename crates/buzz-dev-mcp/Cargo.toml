@@ -30,6 +30,9 @@ tempfile = "3"
 ignore = "0.4.25"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# wss:// tool calls use rustls via tokio-tungstenite/reqwest. The workspace
+# pulls both ring and aws-lc-rs transitively, so install ring explicitly.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # view_image tool: HTTP fetch (workspace reqwest is already used by buzz-cli;
 # adding it here is essentially free), base64 encoding, and decode/resize.
 reqwest = { workspace = true }

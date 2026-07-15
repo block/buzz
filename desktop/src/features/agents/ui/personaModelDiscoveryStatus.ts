@@ -26,8 +26,19 @@ function providerObjectLabel(provider: string): string {
     case "openai-compat":
       return "OpenAI-compatible";
     default:
-      return "the selected provider";
+      return provider.trim() || "this provider";
   }
+}
+
+function isEmptySharedComputeError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("shared compute status is not published") ||
+    normalized.includes("no buzz shared compute serving members") ||
+    normalized.includes("no live buzz shared compute models") ||
+    normalized.includes("no live member is serving") ||
+    normalized.includes("requires a live serving member")
+  );
 }
 
 export function formatModelDiscoveryErrorStatus(
@@ -35,6 +46,46 @@ export function formatModelDiscoveryErrorStatus(
   provider: string,
 ): PersonaModelDiscoveryStatus | null {
   const message = errorMessage(error);
+
+  if (provider.trim() === "relay-mesh") {
+    if (message.includes("waiting for the current member roster")) {
+      return {
+        message:
+          "Buzz is waiting for the relay's member roster. Try again shortly; if this persists, check the relay's membership configuration.",
+        tone: "warning",
+      };
+    }
+
+    if (isEmptySharedComputeError(message)) {
+      return {
+        message:
+          "No members are sharing compute right now. On a member machine, open Settings > Compute, choose a model, and turn on Share this machine.",
+        tone: "warning",
+      };
+    }
+
+    if (message.includes("shared compute is not available in this build")) {
+      return {
+        message:
+          "This version of Buzz cannot use shared compute. Update Buzz or choose another provider.",
+        tone: "warning",
+      };
+    }
+
+    if (message.includes("shared compute status is malformed")) {
+      return {
+        message:
+          "Buzz received an invalid shared compute status. Check the member machine, then try again.",
+        tone: "warning",
+      };
+    }
+
+    return {
+      message:
+        "Buzz couldn't check shared compute through the relay. Check your relay connection and try again.",
+      tone: "warning",
+    };
+  }
 
   if (message.includes("ANTHROPIC_API_KEY required")) {
     return {

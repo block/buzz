@@ -470,6 +470,42 @@ fn resolve_global_fallback_when_record_and_persona_have_none() {
 
 /// Tier 4 — no persona linked: record.persona_id is None, record has no
 /// model/provider; global defaults must still fill in (persona lookup skipped).
+#[cfg(feature = "mesh-llm")]
+#[test]
+fn inherited_shared_compute_translates_to_supported_agent_transport() {
+    let record = bare_record();
+    let personas: Vec<AgentDefinition> = vec![];
+    let global = GlobalAgentConfig {
+        model: Some("auto".to_string()),
+        provider: Some(super::super::RELAY_MESH_PROVIDER_ID.to_string()),
+        ..Default::default()
+    };
+    let runtime = super::super::known_acp_runtime("buzz-agent").expect("buzz-agent runtime");
+
+    let effective = super::super::readiness::resolve_effective_agent_env(
+        &record,
+        &personas,
+        Some(runtime),
+        &global,
+    );
+
+    assert_eq!(
+        effective.env.get("BUZZ_AGENT_PROVIDER").map(String::as_str),
+        Some("openai")
+    );
+    assert_eq!(
+        effective.env.get("BUZZ_AGENT_MODEL").map(String::as_str),
+        Some("auto")
+    );
+    assert_eq!(
+        effective
+            .env
+            .get("OPENAI_COMPAT_BASE_URL")
+            .map(String::as_str),
+        Some(super::super::RELAY_MESH_API_BASE_URL)
+    );
+}
+
 #[test]
 fn resolve_global_fallback_when_no_persona_linked() {
     let record = bare_record(); // persona_id = None, model/provider = None

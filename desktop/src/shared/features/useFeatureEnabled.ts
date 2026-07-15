@@ -82,7 +82,7 @@ export function useFeatureSnapshot(): Record<string, boolean> {
  *
  * The manifest (`preview-features.json`) lists ONLY preview features:
  *
- * - in manifest (preview): true only if the user opted in via overrides
+ * - in manifest (preview): explicit user override, then manifest default (off if omitted)
  * - NOT in manifest (stable): always true (fail-open)
  *
  * Membership in the manifest signals "this needs gating"; absence means
@@ -102,7 +102,7 @@ export function useFeatureEnabled(featureId: string): boolean {
     return true;
   }
 
-  return resolveEnabled(featureId, overrides);
+  return resolveEnabled(featureId, overrides, feature.defaultEnabled);
 }
 
 /**

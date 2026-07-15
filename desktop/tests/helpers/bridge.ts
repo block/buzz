@@ -154,6 +154,8 @@ type MockBridgeOptions = {
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
   addChannelMembersDelayMs?: number;
+  /** Sequenced add-member failures. A string fails that call; null succeeds. */
+  addChannelMembersErrors?: (string | null)[];
   channelMembersReadDelayMs?: number;
   channelsReadError?: string;
   /** Reject successive mock `create_channel` calls, then resume. */
@@ -211,11 +213,6 @@ type MockBridgeOptions = {
    * evaluates false).
    */
   relayRole?: "owner" | "admin" | "member" | null;
-  /**
-   * Reporter pubkey injected into mocked mesh serve targets. Defaults to the
-   * active identity; specs can override to catch malformed/missing #p handling.
-   */
-  meshReporterPubkey?: string;
   /**
    * Descriptors returned by the mocked `pick_and_upload_media` /
    * `upload_media_bytes` commands. When omitted, the bridge returns a single

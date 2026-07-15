@@ -1,7 +1,6 @@
 /**
  * Classification of a free-text model ref entered into the serve card.
- * UI shows a hint inline ("Looks like a catalog name") for trust feedback.
- * Mirrors mesh's own resolve logic at `runtime/mod.rs:3390`.
+ * Mirrors mesh's own resolution categories for input validation.
  */
 export type ModelRefKind =
   | { kind: "catalog"; name: string }
@@ -18,9 +17,8 @@ export type ModelRefKind =
  *
  * Source: mesh runtime/mod.rs:3390 ("local file, catalog name, or HuggingFace URL").
  *
- * This is presentational only — the canonical resolution still happens server-
- * side via `mesh_start_node`. UI uses this for the "Looks like a …" hint that
- * makes the free-text field feel honest instead of opaque.
+ * This is validation-only — canonical resolution happens server-side via
+ * `mesh_start_node`.
  */
 export function classifyModelRef(raw: string): ModelRefKind {
   const trimmed = raw.trim();
@@ -42,18 +40,4 @@ export function classifyModelRef(raw: string): ModelRefKind {
     return { kind: "local-path", path: trimmed };
   }
   return { kind: "catalog", name: trimmed };
-}
-
-/** Short label for the inline hint, e.g. "Looks like a catalog name". */
-export function modelRefHintLabel(kind: ModelRefKind): string | null {
-  switch (kind.kind) {
-    case "catalog":
-      return "Looks like a catalog name";
-    case "huggingface":
-      return "HuggingFace ref";
-    case "local-path":
-      return "Local file";
-    case "unknown":
-      return null;
-  }
 }

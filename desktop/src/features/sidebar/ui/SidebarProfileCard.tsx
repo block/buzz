@@ -21,6 +21,7 @@ type SidebarProfileCardProps = {
   onOpenAddCommunity: () => void;
   onOpenSettings: (section?: "profile" | "appearance") => void;
   onRemoveCommunity: (id: string) => void;
+  onSendFeedback?: () => void;
   onSetPresenceStatus?: (status: PresenceStatus) => void;
   onSetUserStatus: (text: string, emoji: string) => void;
   onClearUserStatus: () => void;
@@ -41,6 +42,7 @@ export function SidebarProfileCard({
   isPresencePending,
   onOpenAddCommunity,
   onOpenSettings,
+  onSendFeedback,
   onRemoveCommunity,
   onSetPresenceStatus,
   onSetUserStatus,
@@ -145,6 +147,7 @@ export function SidebarProfileCard({
             isStatusPending={isPresencePending}
             onClearUserStatus={onClearUserStatus}
             onOpenSettings={onOpenSettings}
+            onSendFeedback={onSendFeedback}
             onSetStatus={onSetPresenceStatus ?? (() => {})}
             onSetUserStatus={onSetUserStatus}
             triggerContainerRef={profileCardRef}

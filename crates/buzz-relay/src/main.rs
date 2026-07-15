@@ -464,38 +464,31 @@ async fn main() -> anyhow::Result<()> {
     // NIP-43: publish the initial membership list on startup so clients can
     // REQ kind:13534 immediately without waiting for the next membership change.
     if config.require_relay_membership {
-        let startup_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            // Resolve the deployment's community from the configured relay URL
-            // host (single-community per deployment), failing closed if the host
-            // isn't mapped — the membership list is community-scoped now, so the
-            // relay-signed startup publish must carry a resolved tenant.
-            let tenant = match buzz_relay::tenant::bind_deployment_community(
-                &startup_state.db,
-                &startup_state.config.relay_url,
-            )
+        // Resolve the deployment's community from the configured relay URL
+        // host (single-community per deployment), failing closed if the host
+        // isn't mapped. Await publication before opening the listener so the
+        // first client query observes the roster.
+        match buzz_relay::tenant::bind_deployment_community(&state.db, &state.config.relay_url)
             .await
-            {
-                Ok(ctx) => ctx,
-                Err(e) => {
-                    tracing::warn!(
-                        error = ?e,
-                        "initial NIP-43 membership list skipped: relay host is not mapped to a community"
-                    );
-                    return;
+        {
+            Ok(tenant) => {
+                if let Err(e) = buzz_relay::handlers::side_effects::publish_nip43_membership_list(
+                    &tenant, &state,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "failed to publish initial NIP-43 membership list on startup");
+                } else {
+                    tracing::info!("NIP-43 membership list published on startup");
                 }
-            };
-            if let Err(e) = buzz_relay::handlers::side_effects::publish_nip43_membership_list(
-                &tenant,
-                &startup_state,
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "failed to publish initial NIP-43 membership list on startup");
-            } else {
-                tracing::info!("NIP-43 membership list published on startup");
             }
-        });
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    "initial NIP-43 membership list skipped: relay host is not mapped to a community"
+                );
+            }
+        }
     }
 
     // Emit kind:39000/39002 discovery events for channels that exist in the DB

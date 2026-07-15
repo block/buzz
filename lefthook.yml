@@ -22,6 +22,8 @@ pre-push:
   commands:
     rust-tests:
       run: just test-unit
+    desktop-check:
+      run: just desktop-check
     desktop-test:
       run: just desktop-test
     desktop-tauri-test:

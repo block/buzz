@@ -1,9 +1,5 @@
 import * as React from "react";
 import {
-  consumePendingOpenCreateAgent,
-  subscribeOpenCreateAgent,
-} from "@/features/agents/openCreateAgentEvent";
-import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
 } from "@/features/agents/openSnapshotImportFromUrlEvent";
@@ -17,6 +13,7 @@ import { AgentSnapshotExportDialog } from "./AgentSnapshotExportDialog";
 import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
 import { TeamSnapshotExportDialog } from "./TeamSnapshotExportDialog";
 import { TeamSnapshotImportDialog } from "./TeamSnapshotImportDialog";
+import { TeamShareDialog } from "./TeamShareDialog";
 import { RelayDirectorySection } from "./RelayDirectorySection";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
@@ -27,6 +24,7 @@ import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
+import { PageHeader } from "@/shared/ui/PageHeader";
 import { GlobalAgentConfigSettingsCard } from "@/features/settings/ui/GlobalAgentConfigSettingsCard";
 
 export function AgentsView() {
@@ -60,19 +58,6 @@ export function AgentsView() {
     teamActions.updateTeamMutation.isPending ||
     teamActions.deleteTeamMutation.isPending;
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only shortcut subscription; openUnifiedCreate only calls stable setState-backed callbacks
-  React.useEffect(() => {
-    // The app-wide "create agent" shortcut routes to the unified definition
-    // flow (B5): one create path, always starting the agent after creation.
-    if (consumePendingOpenCreateAgent()) {
-      openUnifiedCreate();
-    }
-
-    return subscribeOpenCreateAgent(() => {
-      openUnifiedCreate();
-    });
-  }, []);
-
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile and teamActions.handleImportTeamSnapshotFile are stable
   React.useEffect(() => {
     // Consume a snapshot import that was enqueued before navigation (e.g. from
@@ -105,6 +90,10 @@ export function AgentsView() {
     <>
       <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8">
         <div className="mx-auto flex w-full max-w-6xl flex-col gap-8">
+          <PageHeader
+            description="Set up and manage your agents."
+            title="Agents"
+          />
           <div className="flex flex-col gap-8">
             <GlobalAgentConfigSettingsCard />
 
@@ -163,7 +152,6 @@ export function AgentsView() {
               onDuplicatePersona={personas.openDuplicate}
               onEditPersona={personas.openEdit}
               onSharePersona={personas.openShare}
-              onExportPersonaSnapshot={personas.openExportSnapshot}
               onDeactivatePersona={(persona) => {
                 void personas.handleSetActive(persona, false, "library");
               }}
@@ -190,7 +178,7 @@ export function AgentsView() {
               onDuplicate={teamActions.openDuplicateDialog}
               onEdit={teamActions.openEditDialog}
               onAddToChannel={teamActions.setTeamToAddToChannel}
-              onExport={teamActions.openExportSnapshot}
+              onShare={teamActions.openShare}
               onImport={() => {
                 teamImportInputRef.current?.click();
               }}
@@ -222,9 +210,7 @@ export function AgentsView() {
           isDefinitionPending={personas.isPending}
           mode="definition"
           onOpenChange={(open) => {
-            if (!open) {
-              setIsCreateDialogOpen(false);
-            }
+            if (!open) setIsCreateDialogOpen(false);
           }}
           onSubmitDefinition={personas.handleSubmit}
           runtimes={personas.acpRuntimesQuery.data ?? []}
@@ -257,9 +243,7 @@ export function AgentsView() {
         <SecretRevealDialog
           created={personas.createdAgent}
           onOpenChange={(open) => {
-            if (!open) {
-              personas.setCreatedAgent(null);
-            }
+            if (!open) personas.dismissCreatedAgent();
           }}
         />
       ) : null}
@@ -310,23 +294,13 @@ export function AgentsView() {
       ) : null}
       {personas.personaToShare ? (
         <PersonaShareDialog
-          isCatalogVisible={
-            personas.personaToShare.isBuiltIn ||
-            personas.sharedCatalogPersonaIdSet.has(personas.personaToShare.id)
-          }
           isPending={personas.isPending}
-          onCatalogVisibilityChange={(visible) => {
-            if (personas.personaToShare) {
-              personas.setPersonaCatalogVisibility(
-                personas.personaToShare,
-                visible,
-              );
-            }
-          }}
+          linkedAgentPubkey={personas.personaToShare.linkedAgentPubkey}
           onExport={() => {
-            if (personas.personaToShare) {
-              personas.openShareExportSnapshot(personas.personaToShare);
-            }
+            const shareTarget = personas.personaToShare;
+            if (!shareTarget) return;
+            personas.setPersonaToShare(null);
+            personas.setPersonaToExportSnapshot(shareTarget);
           }}
           onOpenChange={(open) => {
             if (!open) {
@@ -334,14 +308,14 @@ export function AgentsView() {
             }
           }}
           open={personas.personaToShare !== null}
-          persona={personas.personaToShare}
+          persona={personas.personaToShare.persona}
         />
       ) : null}
       {personas.personaToExportSnapshot ? (
         <AgentSnapshotExportDialog
+          agentName={personas.personaToExportSnapshot.persona.displayName}
           isSavePending={personas.isPending}
           open={personas.personaToExportSnapshot !== null}
-          persona={personas.personaToExportSnapshot.persona}
           linkedAgentPubkey={personas.personaToExportSnapshot.linkedAgentPubkey}
           onSaveFile={(memoryLevel, format) => {
             if (personas.personaToExportSnapshot) {
@@ -460,6 +434,29 @@ export function AgentsView() {
           open={teamActions.teamToAddToChannel !== null}
           personas={personas.libraryPersonas}
           team={teamActions.teamToAddToChannel}
+        />
+      ) : null}
+      {teamActions.teamToShare ? (
+        <TeamShareDialog
+          isPending={
+            teamActions.createTeamMutation.isPending ||
+            teamActions.updateTeamMutation.isPending ||
+            teamActions.deleteTeamMutation.isPending
+          }
+          onExport={() => {
+            if (teamActions.teamToShare) {
+              const team = teamActions.teamToShare;
+              teamActions.setTeamToShare(null);
+              teamActions.openExportSnapshot(team);
+            }
+          }}
+          onOpenChange={(open) => {
+            if (!open) {
+              teamActions.setTeamToShare(null);
+            }
+          }}
+          open={teamActions.teamToShare !== null}
+          team={teamActions.teamToShare}
         />
       ) : null}
       {teamActions.teamToExport ? (

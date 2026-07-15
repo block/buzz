@@ -1,13 +1,13 @@
 //! Local mesh serve→client→inference smoke test.
 //!
-//! Proves the full path Buzz's "Share compute" + "Run on relay mesh" pair
-//! relies on, on a single box and without a relay or Nostr discovery:
+//! Proves the full Buzz shared compute serve→consume path on a single box,
+//! without a relay or Nostr discovery:
 //!
 //!   1. Start a SERVE node hosting a GGUF (the `serve::start` path desktop
 //!      uses in Share-compute mode), and read its mesh invite token.
 //!   2. Start a CLIENT node joined to that serve node via the invite token
-//!      (the `client::start` path an agent's "Run on relay mesh" provider
-//!      uses), binding its own local OpenAI-compatible endpoint.
+//!      (the `client::start` path a Buzz shared compute agent uses), binding
+//!      its own local OpenAI-compatible endpoint.
 //!   3. Drive one chat completion against the CLIENT endpoint and assert it
 //!      routed through the mesh to the serve node and produced real output.
 //!
@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("MeshLLM native runtime for MeshLLM {current} is not installed; run `just mesh-e2e-hardware` to prepare it");
     }
     mesh_llm_host_runtime::initialize_host_runtime()
+        .await
         .map_err(|error| anyhow::anyhow!("MeshLLM host runtime init failed: {error}"))?;
     eprintln!("[smoke] MeshLLM host runtime initialized");
 
@@ -137,7 +138,14 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("[smoke] OK — routed completion finish_reason={finish:?} content={content:?}");
     eprintln!("[smoke] PASS: serve→client→inference proven over mesh");
-    Ok(())
+    // Exit immediately, skipping remaining Rust drops (tokio runtime, iroh
+    // endpoints). The embedded ggml Metal runtime can GGML_ASSERT inside C++
+    // static destructors at process teardown when a node wasn't cleanly shut
+    // down (observed here after a startup failure; mesh-console issue #8 is
+    // the same crash — its fix is libc::_exit, which this repo's no-unsafe
+    // rule rules out). Both nodes are stopped above, which is what keeps the
+    // finalizers quiet on the success path.
+    std::process::exit(0);
 }
 
 /// Poll a node's `/models` until it reports a model, returning the served id

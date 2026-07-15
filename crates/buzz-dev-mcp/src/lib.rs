@@ -10,6 +10,7 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod buzz_message;
 mod paths;
 mod read_file;
 mod rg;
@@ -47,6 +48,17 @@ impl DevMcp {
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         shell::run(&self.state, p, context.ct).await
+    }
+
+    #[tool(
+        name = "buzz_send_message",
+        description = "Publish the user-visible reply for the current Buzz turn. Use the channel UUID and optional reply event id from the prompt Context. Every Buzz turn must call this before ending; use shell-based buzz messages send only if this tool is unavailable."
+    )]
+    async fn buzz_send_message(
+        &self,
+        Parameters(p): Parameters<buzz_message::SendMessageParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        buzz_message::run(&self.state, p).await
     }
 
     #[tool(
@@ -161,6 +173,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
+    // HTTPS clients invoked through this MCP process need a Rustls provider;
+    // repeated installation is harmless.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // buzz CLI needs tokio (async HTTP client).
     if cmd == "buzz" {
         std::process::exit(buzz_cli::run_from_args(std::env::args()).await);

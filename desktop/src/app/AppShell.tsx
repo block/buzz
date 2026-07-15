@@ -41,6 +41,8 @@ import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh
 import { useAutoRestartPolicy } from "@/features/agents/lib/useAutoRestartPolicy";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
+import { AgentManagementDialogs } from "@/features/agents/ui/AgentManagementDialogs";
+import { RequestedAgentCreateDialogs } from "@/features/agents/ui/RequestedAgentCreateDialogs";
 import {
   usePresenceSession,
   usePresenceSubscription,
@@ -55,6 +57,7 @@ import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
 import { useObserverArchiveSeed } from "@/features/local-archive/useObserverArchiveSeed";
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
 import { useProfileQuery } from "@/features/profile/hooks";
+import { SendFeedbackController } from "@/features/settings/ui/SendFeedbackController";
 import {
   DEFAULT_SETTINGS_SECTION,
   type SettingsSection,
@@ -110,6 +113,7 @@ export function AppShell() {
   const [browseDialogType, setBrowseDialogType] =
     React.useState<BrowseDialogType>(null);
   const [isCreateChannelOpen, setIsCreateChannelOpen] = React.useState(false);
+  const [isSendFeedbackOpen, setIsSendFeedbackOpen] = React.useState(false);
   const [isHuddleDrawerOpen, setIsHuddleDrawerOpen] = React.useState(false);
   const mainInsetRef = React.useRef<HTMLElement>(null);
   const location = useLocation();
@@ -767,12 +771,11 @@ export function AppShell() {
                           onNewMessage={handleOpenNewDm}
                           onCreateChannelOpenChange={setIsCreateChannelOpen}
                           onOpenAddCommunity={() => setIsAddCommunityOpen(true)}
+                          onSendFeedback={() => setIsSendFeedbackOpen(true)}
                           onUpdateCommunity={communitiesHook.updateCommunity}
                           onRemoveCommunity={communitiesHook.removeCommunity}
                           onSwitchCommunity={handleSwitchCommunity}
-                          onCreateAgent={() =>
-                            void goAgents().then(requestOpenCreateAgent)
-                          }
+                          onCreateAgent={() => requestOpenCreateAgent()}
                           selfPresenceStatus={presenceSession.currentStatus}
                           communities={communitiesHook.communities}
                           onCreateChannel={async ({
@@ -901,6 +904,8 @@ export function AppShell() {
                         />
                       </div>
                     )}
+                    <RequestedAgentCreateDialogs />
+                    <AgentManagementDialogs />
                     <AppShellOverlays
                       activeChannel={managedChannel}
                       browseDialogType={browseDialogType}
@@ -923,6 +928,10 @@ export function AppShell() {
                       onSelectChannel={(channelId) => {
                         void goChannel(channelId);
                       }}
+                    />
+                    <SendFeedbackController
+                      onOpenChange={setIsSendFeedbackOpen}
+                      open={isSendFeedbackOpen}
                     />
                   </SidebarProvider>
                 </div>

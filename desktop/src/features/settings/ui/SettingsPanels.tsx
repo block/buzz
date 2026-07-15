@@ -179,7 +179,7 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "community-members",
-    label: "Community Access",
+    label: "Community access",
     icon: LockKeyhole,
   },
   {
@@ -189,13 +189,13 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "custom-emoji",
-    label: "Custom Emoji",
+    label: "Custom emoji",
     icon: Smile,
     featureGate: "custom-emoji",
   },
   {
     value: "local-archive",
-    label: "Local Archive",
+    label: "Local archive",
     icon: Archive,
   },
   {

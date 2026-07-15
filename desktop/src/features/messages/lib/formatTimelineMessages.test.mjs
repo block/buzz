@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  collectMessageAuthorPubkeys,
   collectReactionActorPubkeys,
   countTopLevelTimelineRows,
   formatTimelineMessages,
@@ -167,6 +168,22 @@ test("non-deletion event kinds do NOT hide the target message", () => {
   const events = [streamMessage(), reaction];
   const out = formatTimelineMessages(events, null, undefined, null);
   assert.equal(out.length, 1, "the kind:9 message should still be visible");
+});
+
+test("collectMessageAuthorPubkeys includes the signer and attributed actor", () => {
+  const events = [
+    streamMessage({
+      tags: [
+        ["h", CHANNEL_ID],
+        ["actor", PUBKEY_B],
+      ],
+    }),
+  ];
+
+  assert.deepEqual(
+    new Set(collectMessageAuthorPubkeys(events)),
+    new Set([PUBKEY_A, PUBKEY_B]),
+  );
 });
 
 test("collectReactionActorPubkeys returns active kind:7 actors only", () => {

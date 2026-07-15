@@ -38,9 +38,12 @@ function getDiscoveredPersonaModelOptions(
     : [
         {
           id: "",
-          label: response.agentDefaultModel?.trim()
-            ? `Default model (${response.agentDefaultModel})`
-            : "Default model",
+          label:
+            provider === "relay-mesh"
+              ? "Default (auto)"
+              : response.agentDefaultModel?.trim()
+                ? `Default model (${response.agentDefaultModel})`
+                : "Default model",
         },
       ];
 

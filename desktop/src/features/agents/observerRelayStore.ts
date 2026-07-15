@@ -6,6 +6,10 @@ import type { ControlResultFrame } from "@/shared/api/types";
 import { putAgentSessionConfig } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
+import {
+  parseAgentManagementRequest,
+  type AgentManagementRequest,
+} from "./agentManagement";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
@@ -22,6 +26,7 @@ import {
 } from "./ui/agentSessionTranscript";
 
 const MAX_OBSERVER_EVENTS = 3000;
+const MAX_PENDING_UNKNOWN_AGENT_FRAMES = 100;
 
 export type ObserverSnapshot = {
   connectionState: ConnectionState;
@@ -95,6 +100,10 @@ const controlResultListeners = new Map<
   Set<(frame: ControlResultFrame) => void>
 >();
 
+const agentManagementListeners = new Set<
+  (agentPubkey: string, request: AgentManagementRequest) => void
+>();
+
 // Normalized pubkeys of agents we are actively managing. Only events whose
 // "agent" tag matches an entry here will be decrypted (defense-in-depth).
 //
@@ -105,6 +114,7 @@ const controlResultListeners = new Map<
 // recompute the union, so co-mounted callers no longer clobber each other.
 const knownAgentPubkeys = new Set<string>();
 const knownAgentsBySubscription = new Map<string, Set<string>>();
+const pendingUnknownAgentFrames: RelayEvent[] = [];
 
 // Callback invoked when session_config_captured is received, so React Query
 // can invalidate the config-surface query for the affected agent. Wired up
@@ -135,6 +145,14 @@ function registerKnownAgents(
     new Set(pubkeys.map((pubkey) => normalizePubkey(pubkey))),
   );
   recomputeKnownAgentPubkeys();
+  if (knownAgentPubkeys.size > 0 && pendingUnknownAgentFrames.length > 0) {
+    const pending = pendingUnknownAgentFrames.splice(0);
+    for (const event of pending) {
+      eventProcessingQueue = eventProcessingQueue.then(() =>
+        handleRelayObserverEvent(event, generation),
+      );
+    }
+  }
 }
 
 function unregisterKnownAgents(subscriptionId: string) {
@@ -329,9 +347,16 @@ async function handleRelayObserverEvent(
     return;
   }
 
-  // Verify agent is known/trusted before decrypting.
-  // Silently drop events from agents we are not managing.
+  // Ownership data arrives asynchronously during startup. Buffer raw signed
+  // frames until the first trusted-agent set is registered, then re-run this
+  // same gate. Once initialized, unknown agents are rejected immediately.
   if (!knownAgentPubkeys.has(normalizePubkey(agentPubkey))) {
+    if (knownAgentsBySubscription.size === 0 || knownAgentPubkeys.size === 0) {
+      pendingUnknownAgentFrames.push(event);
+      if (pendingUnknownAgentFrames.length > MAX_PENDING_UNKNOWN_AGENT_FRAMES) {
+        pendingUnknownAgentFrames.shift();
+      }
+    }
     return;
   }
 
@@ -366,6 +391,12 @@ async function handleRelayObserverEvent(
       }
     }
     appendAgentEvent(agentPubkey, parsed);
+    const managementRequest = parseAgentManagementRequest(parsed.payload);
+    if (managementRequest) {
+      for (const listener of agentManagementListeners) {
+        listener(agentPubkey, managementRequest);
+      }
+    }
     if (parsed.kind === "session_config_captured") {
       void putAgentSessionConfig(agentPubkey, parsed.payload);
       onSessionConfigCaptured?.(agentPubkey);
@@ -475,6 +506,15 @@ function dispatchControlResult(agentPubkey: string, payload: unknown) {
  * unsubscribe function. Used by the ModelPicker to learn the async outcome of
  * a `switch_model` frame.
  */
+export function subscribeAgentManagementRequests(
+  listener: (agentPubkey: string, request: AgentManagementRequest) => void,
+) {
+  agentManagementListeners.add(listener);
+  return () => {
+    agentManagementListeners.delete(listener);
+  };
+}
+
 export function subscribeControlResults(
   agentPubkey: string,
   listener: (frame: ControlResultFrame) => void,
@@ -700,7 +740,9 @@ export function resetAgentObserverStore() {
   archiveEventsByChannel.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
+  pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
+  agentManagementListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;

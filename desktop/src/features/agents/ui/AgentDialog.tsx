@@ -9,7 +9,6 @@ import type {
 import type { BackendIntent } from "../lib/instanceInputForDefinition";
 import type { AgentCreateIntent } from "./agentCreateIntent";
 import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
-import { useMeshAvailability } from "@/features/mesh-compute/hooks/useMeshAvailability";
 import { AgentInstanceEditDialog } from "./AgentInstanceEditDialog";
 import { createPersonaDialogState } from "./personaDialogState";
 import { AgentDefinitionDialog } from "./AgentDefinitionDialog";
@@ -22,6 +21,7 @@ import {
 
 type AgentDialogCreateProps = {
   mode: "definition";
+  initialValues?: CreatePersonaInput | null;
   onOpenChange: (open: boolean) => void;
   definitionError: Error | null;
   isDefinitionPending: boolean;
@@ -102,6 +102,7 @@ export function AgentDialog(props: AgentDialogProps) {
 }
 
 function AgentCreateDialogRouter({
+  initialValues: providedInitialValues,
   onOpenChange,
   definitionError,
   isDefinitionPending,
@@ -110,27 +111,9 @@ function AgentCreateDialogRouter({
   onSubmitDefinition,
 }: AgentDialogCreateProps) {
   const [runDraft, setRunDraft] = React.useState(emptyWhereToRunDraft);
-  const { availability: meshAvailability } = useMeshAvailability();
-  const meshUnavailable =
-    meshAvailability != null && !meshAvailability.available;
-  // The cleanup effect below resets the persisted draft after this render. The
-  // submit path must not wait for that effect: it uses the local fallback
-  // immediately when a selected mesh target disappears.
-  const effectiveRunDraft =
-    meshUnavailable && runDraft.runOn === "mesh"
-      ? emptyWhereToRunDraft
-      : runDraft;
-  // Persist the fallback after the synchronous guard has made the render safe.
-  // This cleanup keeps a future availability recovery from restoring an invalid
-  // mesh selection.
-  React.useEffect(() => {
-    if (meshUnavailable && runDraft.runOn === "mesh") {
-      setRunDraft(emptyWhereToRunDraft);
-    }
-  }, [meshUnavailable, runDraft.runOn]);
   const initialValues = React.useMemo(
-    () => createPersonaDialogState().initialValues,
-    [],
+    () => providedInitialValues ?? createPersonaDialogState().initialValues,
+    [providedInitialValues],
   );
 
   const copy = createPersonaDialogState();
@@ -141,12 +124,10 @@ function AgentCreateDialogRouter({
         <WhereToRunSection
           draft={runDraft}
           isPending={isDefinitionPending}
-          meshAvailability={meshAvailability}
           onDraftChange={setRunDraft}
         />
       }
-      createSubmitBlocked={!canSubmitWhereToRun(effectiveRunDraft)}
-      createRunOnMesh={effectiveRunDraft.runOn === "mesh"}
+      createSubmitBlocked={!canSubmitWhereToRun(runDraft)}
       description={copy.description}
       error={definitionError}
       initialValues={initialValues}
@@ -156,7 +137,7 @@ function AgentCreateDialogRouter({
         const submitted = await onSubmitDefinition(
           input,
           "definition_start",
-          resolveBackendIntent(effectiveRunDraft),
+          resolveBackendIntent(runDraft),
         );
         if (submitted) {
           onOpenChange(false);

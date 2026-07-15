@@ -1844,6 +1844,18 @@ pub fn spawn_agent_child(
         command.env(key, value);
     }
 
+    // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
+    // transport at spawn time and scrub any unrelated ambient OpenAI key.
+    #[cfg(feature = "mesh-llm")]
+    if effective_provider == Some(super::RELAY_MESH_PROVIDER_ID) {
+        let mut mesh_env = std::collections::BTreeMap::new();
+        super::apply_relay_mesh_env(&mut mesh_env, effective_provider, effective_model);
+        command.env_remove("OPENAI_API_KEY");
+        for (key, value) in mesh_env {
+            command.env(key, value);
+        }
+    }
+
     // Mark as Buzz-managed *and* which desktop instance owns us, so the
     // system-wide orphan sweep only reaps this instance's own agents and never
     // another live Buzz's (e.g. a `just dev` build won't kill a DMG build's

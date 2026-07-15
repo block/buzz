@@ -9,7 +9,7 @@ import {
   communityIconQueryKey,
 } from "@/features/communities/useCommunityIcons";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { communityInitials } from "@/features/sidebar/ui/CommunityRail";
+import { getInitials } from "@/shared/lib/initials";
 import { setCommunityIcon } from "@/shared/api/communityProfile";
 import { Button } from "@/shared/ui/button";
 
@@ -72,9 +72,7 @@ export function CommunityIconSettingsCard() {
   }
 
   const icon = iconQuery.data ?? null;
-  const initials = activeCommunity
-    ? communityInitials(activeCommunity.name)
-    : "";
+  const initials = activeCommunity ? getInitials(activeCommunity.name) : "";
 
   return (
     <div className="space-y-1.5" data-testid="community-icon-settings">

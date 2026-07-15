@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildVirtualizedItems,
   didPrependVirtualizedTimeline,
+  estimateVirtualizedTimelineItemHeight,
   virtualizedItemKey,
 } from "./virtualizedTimelineItems.ts";
 
@@ -203,4 +204,24 @@ test("naive counterexample stays rejected: same key cannot precede prepended row
     ),
     false,
   );
+});
+
+test("virtualized rows preserve their heterogeneous height estimates", () => {
+  const short = messageItem("short");
+  short.entry.message.body = "hello";
+  const tall = messageItem("tall");
+  tall.entry.message.body = Array.from(
+    { length: 20 },
+    (_, index) => `line ${index}`,
+  ).join("\n");
+  const items = buildVirtualizedItems(
+    [{ key: "day-A", headingTimestamp: DAY_A, items: [short, tall] }],
+    undefined,
+    true,
+  );
+  const estimates = items.map(estimateVirtualizedTimelineItemHeight);
+
+  assert.equal(estimates[0], 32);
+  assert.ok(estimates[2] > estimates[1] + 200);
+  assert.equal(estimates.at(-1), 96);
 });

@@ -27,18 +27,13 @@ import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
-  AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
-  buildTemplateModelDropdownOptions,
-  CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   formatRuntimeOptionLabel,
   getDefaultLlmModelLabel,
   getDefaultPersonaRuntime,
-  getModelSelectValue,
   getPersonaProviderOptions,
-  hasPersonaModelOption,
   isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -48,8 +43,11 @@ import {
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
   type PersonaDropdownOption,
-  type PersonaModelOption,
 } from "./personaDialogPickers";
+import {
+  modelDropdownOptions as buildModelDropdownOptions,
+  relayMeshModelPickerState,
+} from "./relayMeshModelPicker";
 import {
   computeEditAgentFormValidity,
   envVarsEqual,
@@ -553,13 +551,23 @@ export function AgentInstanceEditDialog({
   }
 
   function handleProviderDropdownChange(nextValue: string) {
-    applySelection(
-      selectionOnProviderDropdownChange(selection, {
-        runtime: selectedRuntime?.id ?? selectedRuntimeId,
-        nextValue,
-        clearModelWhenApiKeyMissing: false,
-      }),
-    );
+    const nextProvider =
+      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
+    if (nextProvider === "relay-mesh" && selectedRuntimeId !== "buzz-agent") {
+      handleRuntimeDropdownChange("buzz-agent");
+    }
+    const nextSelection = selectionOnProviderDropdownChange(selection, {
+      runtime:
+        nextProvider === "relay-mesh"
+          ? "buzz-agent"
+          : (selectedRuntime?.id ?? selectedRuntimeId),
+      nextValue,
+      clearModelWhenApiKeyMissing: false,
+    });
+    applySelection({
+      ...nextSelection,
+      model: nextProvider === "relay-mesh" ? "auto" : nextSelection.model,
+    });
   }
 
   function handleModelDropdownChange(nextValue: string) {
@@ -749,7 +757,6 @@ export function AgentInstanceEditDialog({
   }
 
   // Model and provider field derived state
-  const trimmedModel = model.trim();
   const normalizedConfig = configSurfaceQuery.data?.normalized;
   const modelRequired = isMissingRequiredDropdownField(
     normalizedConfig?.model,
@@ -763,43 +770,28 @@ export function AgentInstanceEditDialog({
     inheritedModelDefault.source === "build"
       ? getBakedModelInheritLabel(inheritedModelDefault.value)
       : getDefaultLlmModelLabel(inheritedModelDefault.value);
-  const staticModelOptions: readonly PersonaModelOption[] = [
-    { id: "", label: inheritedModelLabel },
-  ];
-  const effectiveModelOptions = buildTemplateModelDropdownOptions(
-    discoveredModelOptions ?? staticModelOptions,
-    inheritedModelDefault.value,
-    inheritedModelLabel,
-  ).map(({ label, value }) => ({
-    id: value === AUTO_MODEL_DROPDOWN_VALUE ? "" : value,
-    label,
-  }));
-  const isModelCustom = !hasPersonaModelOption(
-    effectiveModelOptions,
-    trimmedModel,
-  );
-  const modelSelectValue = getModelSelectValue({
-    isCustomModelEditing,
-    isModelCustom,
+  const {
+    isRelayMesh,
+    options: effectiveModelOptions,
+    selectValue: modelSelectValue,
+    showCustomInput: showCustomModelInput,
+  } = relayMeshModelPickerState({
+    discoveredOptions: discoveredModelOptions,
+    fallbackOptions: [{ id: "", label: inheritedModelLabel }],
+    isCustomEditing: isCustomModelEditing,
     model,
+    provider: providerForDiscovery,
   });
-  const showCustomModelInput = isCustomModelEditing || isModelCustom;
-  const modelDropdownOptions: PersonaDropdownOption[] = [
-    ...effectiveModelOptions.map((option) => ({
-      label: option.label,
-      value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
-    })),
-    ...(modelDiscoveryLoading && discoveredModelOptions === null
-      ? [
-          {
-            disabled: true,
-            label: "Loading models...",
-            value: MODEL_DISCOVERY_LOADING_VALUE,
-          },
-        ]
-      : []),
-    { label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE },
-  ];
+  const modelDropdownOptions = buildModelDropdownOptions({
+    allowCustom: !isRelayMesh,
+    globalModel: isRelayMesh ? undefined : inheritedModelDefault.value,
+    globalModelLabel: isRelayMesh ? undefined : inheritedModelLabel,
+    loading: modelDiscoveryLoading && discoveredModelOptions === null,
+    loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
+    options: effectiveModelOptions,
+  });
+
+  // Provider field derived state
   const trimmedProvider = provider.trim();
   const hideProviderIds = React.useMemo(
     () =>

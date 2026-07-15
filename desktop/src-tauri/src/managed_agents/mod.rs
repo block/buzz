@@ -19,7 +19,6 @@ mod personas;
 mod process_lifecycle;
 pub(crate) mod readiness;
 pub(crate) mod reconcile;
-#[cfg(feature = "mesh-llm")]
 mod relay_mesh;
 mod repos;
 mod restore;
@@ -58,7 +57,6 @@ pub use process_lifecycle::*;
 pub(crate) use readiness::{
     agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
 };
-#[cfg(feature = "mesh-llm")]
 pub use relay_mesh::*;
 pub use repos::{
     effective_repos_dir, ensure_repos_symlink, resolve_repos_at_boot, validate_repos_dir,

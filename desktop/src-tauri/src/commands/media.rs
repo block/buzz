@@ -300,9 +300,15 @@ pub async fn upload_media(
 
 /// Read a picked path through the TOCTOU-safe pipeline (fd pin → sniff →
 /// transcode-or-passthrough → MIME validation → upload).
+///
+/// When `images_only` is set, the file is rejected **before upload** if it is
+/// not an image (videos and non-image files error out; HEIC/HEIF still
+/// transcode to JPEG, which is an image). This keeps discarded/non-image
+/// files from ever leaving the client on image-only surfaces.
 async fn process_picked_path(
     path: std::path::PathBuf,
     state: &State<'_, AppState>,
+    images_only: bool,
 ) -> Result<BlobDescriptor, String> {
     // Pin the inode by opening the fd BEFORE spawn_blocking. This prevents a
     // local attacker from swapping the file between dialog return and read.
@@ -325,6 +331,9 @@ async fn process_picked_path(
             let n = file.read(&mut header).map_err(|e| e.to_string())?;
 
             if is_video_file(&header[..n]) {
+                if images_only {
+                    return Err("Please choose an image file.".to_string());
+                }
                 // ffmpeg needs a path, not an fd. Resolve the fd's real path
                 // so we pass the actual inode's location, not the original
                 // (potentially swapped) pathname. Same pattern as upload_media.
@@ -356,6 +365,12 @@ async fn process_picked_path(
         .map_err(|e| format!("transcode task failed: {e}"))??;
 
     let mime = detect_and_validate_mime(&body)?;
+
+    // Image-only surfaces (e.g. "Send feedback"): reject anything that didn't
+    // sniff as an image, BEFORE the upload leaves the client.
+    if images_only && !mime.starts_with("image/") {
+        return Err("Please choose an image file.".to_string());
+    }
 
     // Upload video first, then poster (best-effort). If poster upload fails,
     // the video descriptor is returned without an image field.
@@ -414,11 +429,49 @@ pub async fn pick_and_upload_media(
     let mut descriptors = Vec::with_capacity(file_paths.len());
     for file_path in file_paths {
         let path = file_path.as_path().ok_or("invalid path")?.to_path_buf();
-        let descriptor = process_picked_path(path, &state).await?;
+        let descriptor = process_picked_path(path, &state, false).await?;
         descriptors.push(descriptor);
     }
 
     Ok(descriptors)
+}
+
+/// Open a native single-file dialog constrained to images, read the picked
+/// file, and upload it — rejecting anything that doesn't sniff as an image
+/// **before** the bytes leave the client.
+///
+/// This is the secure path for image-only surfaces (e.g. the "Send feedback"
+/// attachment). Unlike [`pick_and_upload_media`], the dialog is filtered to
+/// common image extensions and `process_picked_path` runs with
+/// `images_only = true`, so a user who bypasses the extension filter still
+/// can't upload a non-image (videos and other files error out during MIME
+/// validation, before `do_upload`). Returns `None` when the user cancels.
+#[tauri::command]
+pub async fn pick_and_upload_image(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<BlobDescriptor>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter(
+            "Images",
+            &["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp"],
+        )
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+
+    let file_path = match rx.await.map_err(|_| "dialog cancelled".to_string())? {
+        Some(path) => path,
+        None => return Ok(None),
+    };
+
+    let path = file_path.as_path().ok_or("invalid path")?.to_path_buf();
+    let descriptor = process_picked_path(path, &state, true).await?;
+    Ok(Some(descriptor))
 }
 
 /// Upload raw bytes directly (for paste and drag-drop).

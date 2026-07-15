@@ -8,6 +8,7 @@
 
 import type * as React from "react";
 
+import { estimateTimelineItemHeight } from "./rowHeightEstimate";
 import {
   getTimelineItemKey,
   type TimelineDayGroup,
@@ -25,6 +26,15 @@ export type VirtualizedTimelineItem =
       kind: "timeline-item";
       item: TimelineNonDayItem;
     };
+
+export function estimateVirtualizedTimelineItemHeight(
+  item: VirtualizedTimelineItem,
+): number {
+  if (item.kind === "bottom-spacer") return 96;
+  if (item.kind === "leading-content") return 60;
+  if (item.kind === "day-divider") return 32;
+  return estimateTimelineItemHeight(item.item);
+}
 
 export function virtualizedItemKey(item: VirtualizedTimelineItem): string {
   if (item.kind === "bottom-spacer") return "bottom-spacer";

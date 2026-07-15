@@ -28,6 +28,7 @@
     {
       "id": "workspaceRail",
       "name": "Community Rail",
+      "defaultEnabled": true,
       "description": "Far-left rail for switching communities with cross-community unread indicators",
       "platforms": [
         "desktop"

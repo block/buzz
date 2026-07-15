@@ -39,6 +39,7 @@ export type NostrBindDeepLinkPayload = {
   origin: string;
   expiresAt: string;
   returnMode: "clipboard";
+  callbackUrl?: string;
 };
 
 /**

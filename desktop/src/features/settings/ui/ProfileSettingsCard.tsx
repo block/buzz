@@ -31,6 +31,7 @@ import {
   parseEmojiAvatarDataUrl,
 } from "@/features/profile/ui/ProfileAvatarEditor";
 import { cn } from "@/shared/lib/cn";
+import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { Textarea } from "@/shared/ui/textarea";
@@ -771,9 +772,9 @@ export function ProfileSettingsCard({
                           data-testid="profile-metadata-card"
                         >
                           <div className="flex min-h-14 items-center justify-between gap-4 px-4 py-3">
-                            <h3 className="text-sm font-medium">
+                            <h2 className="text-lg font-semibold tracking-tight">
                               Profile info
-                            </h3>
+                            </h2>
                             <EditProfileMetadataButton
                               disabled={updateProfileMutation.isPending}
                               isEditing={isEditingProfileMetadata}
@@ -865,9 +866,9 @@ export function ProfileSettingsCard({
                               data-testid="profile-identity-toggle"
                             >
                               <div className="min-w-0">
-                                <h3 className="text-sm font-medium">
+                                <h2 className="text-lg font-semibold tracking-tight">
                                   Identity
-                                </h3>
+                                </h2>
                                 <p className="mt-1 text-sm font-normal text-muted-foreground">
                                   Your keypair and NIP-05 handle are fixed for
                                   this device.
@@ -954,36 +955,31 @@ export function ProfileSettingsCard({
         </div>
       </div>
 
-      <div className="mt-8" data-testid="settings-signout">
-        <SettingsSectionHeader
-          title="Sign out"
-          description="Removes your identity key and all local app data from this device. Back up your private key (nsec) before proceeding — this cannot be undone."
-        />
-        <div className="overflow-hidden rounded-xl border border-destructive/20 bg-background/70 shadow-xs">
-          <div className="flex items-center justify-between gap-4 px-4 py-3">
-            <div className="min-w-0 space-y-1">
-              <p className="text-sm font-medium">Clear data and sign out</p>
-              <p className="text-sm text-muted-foreground">
-                Wipes the keychain, agent settings, and app cache, then
-                relaunches Buzz into first-run setup.
-              </p>
-            </div>
-            <button
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-destructive/30 bg-destructive/5 px-3 py-1.5 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-              data-testid="signout-open-dialog"
-              disabled={isSignOutPending}
-              onClick={() => setIsSignOutOpen(true)}
-              type="button"
-            >
-              {isSignOutPending ? (
-                <Spinner
-                  aria-label="Signing out"
-                  className="h-4 w-4 border-2"
-                />
-              ) : null}
-              {isSignOutPending ? "Signing out…" : "Sign Out"}
-            </button>
+      <div
+        className="mt-8 border-t border-border/60 pb-6 pt-5"
+        data-testid="settings-signout"
+      >
+        <div className="flex items-center justify-between gap-4 px-1">
+          <div className="min-w-0 space-y-1">
+            <h2 className="text-lg font-semibold tracking-tight">Sign out</h2>
+            <p className="text-sm text-muted-foreground">
+              Removes your identity key and all local app data from this device.
+              Back up your private key (nsec) first — this cannot be undone.
+            </p>
           </div>
+          <Button
+            className="shrink-0"
+            data-testid="signout-open-dialog"
+            disabled={isSignOutPending}
+            onClick={() => setIsSignOutOpen(true)}
+            type="button"
+            variant="destructive"
+          >
+            {isSignOutPending ? (
+              <Spinner aria-label="Signing out" className="h-4 w-4 border-2" />
+            ) : null}
+            {isSignOutPending ? "Signing out…" : "Sign Out"}
+          </Button>
         </div>
         <AlertDialog
           onOpenChange={(open) => {

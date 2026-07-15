@@ -623,26 +623,109 @@ test("snaps custom avatar colors to the dot grid", async ({ page }) => {
   await expect(page.getByTestId("profile-avatar-done")).toBeVisible();
 });
 
+test("opens Send feedback from the profile menu", async ({ page }) => {
+  await page.goto("/");
+  await openProfileMenu(page);
+  await page.getByTestId("profile-popover-send-feedback").click();
+  await expect(page.getByTestId("send-feedback-dialog")).toBeVisible();
+  await expect(page.getByTestId("feedback-privacy-disclosure")).toContainText(
+    "not posted to a channel",
+  );
+});
+
+test("keeps Send disabled when a stale attachment attempt finishes", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    uploadDelayMs: 1_200,
+    uploadDescriptors: [
+      {
+        url: `https://mock.relay/media/${"b".repeat(64)}.png`,
+        sha256: "b".repeat(64),
+        size: 42,
+        type: "image/png",
+        uploaded: 42,
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await openProfileMenu(page);
+  await page.getByTestId("profile-popover-send-feedback").click();
+  await page.getByTestId("feedback-message").fill("Attachment race");
+  await page.getByTestId("feedback-attach-image").click();
+  await expect(page.getByTestId("feedback-attach-image")).toContainText(
+    "Attaching…",
+  );
+
+  await page.waitForTimeout(450);
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await openProfileMenu(page);
+  await page.getByTestId("profile-popover-send-feedback").click();
+  await page.getByTestId("feedback-message").fill("Second attachment");
+  await page.getByTestId("feedback-attach-image").click();
+
+  const submit = page.getByTestId("feedback-submit");
+  await expect(submit).toBeDisabled();
+  await page.waitForTimeout(900);
+  await expect(page.getByTestId("feedback-attach-image")).toContainText(
+    "Attaching…",
+  );
+  await expect(submit).toBeDisabled();
+
+  await expect(page.getByTestId("feedback-attachment-thumb")).toBeVisible();
+  await expect(submit).toBeEnabled();
+});
+
+test("proxies feedback attachment previews", async ({ page }) => {
+  const sha256 = "c".repeat(64);
+  const proxyUrl = `http://127.0.0.1:54321/media/${sha256}.png`;
+  await installMockBridge(page, {
+    uploadDescriptors: [
+      {
+        url: `http://localhost:3000/media/${sha256}.png`,
+        sha256,
+        size: 42,
+        type: "image/png",
+        uploaded: 42,
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await openProfileMenu(page);
+  await page.getByTestId("profile-popover-send-feedback").click();
+  await page.getByTestId("feedback-attach-image").click();
+
+  const thumbnail = page.getByTestId("feedback-attachment-thumb");
+  await expect(thumbnail.locator("img")).toHaveAttribute("src", proxyUrl);
+  await thumbnail.click();
+
+  const preview = page.getByTestId("feedback-attachment-preview");
+  await expect(preview).toBeVisible();
+  await expect(preview.locator("img")).toHaveAttribute("src", proxyUrl);
+});
+
 test("updates presence from the profile menu", async ({ page }) => {
   await page.goto("/");
 
   await openProfileMenu(page);
   await expect(
-    page.getByTestId("profile-popover-current-status"),
+    page.getByTestId("profile-popover-presence-trigger"),
   ).toContainText("Online");
 
   await page.getByTestId("profile-popover-presence-trigger").click();
   await page.getByTestId("profile-popover-status-away").click();
   await openProfileMenu(page);
   await expect(
-    page.getByTestId("profile-popover-current-status"),
+    page.getByTestId("profile-popover-presence-trigger"),
   ).toContainText("Away");
 
   await page.getByTestId("profile-popover-presence-trigger").click();
   await page.getByTestId("profile-popover-status-offline").click();
   await openProfileMenu(page);
   await expect(
-    page.getByTestId("profile-popover-current-status"),
+    page.getByTestId("profile-popover-presence-trigger"),
   ).toContainText("Offline");
 });
 

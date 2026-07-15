@@ -287,7 +287,7 @@ async function expectWelcomeView(page: Page) {
   );
   await expectIntroActionIconStackedAboveTitle(
     page.getByTestId("welcome-intro-action-create-agent"),
-    "Create a custom agent",
+    "Create an agent",
   );
   await expect(page.getByTestId("message-composer")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toBeVisible();
