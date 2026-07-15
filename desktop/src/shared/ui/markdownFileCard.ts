@@ -86,7 +86,7 @@ export function resolveSnapshotCard(
   const snapshotKind: "agent" | "team" = isJson || isPng ? "agent" : "team";
 
   return {
-    href: rewriteRelayUrl(href),
+    href,
     filename,
     size: entry.size,
     sha256,

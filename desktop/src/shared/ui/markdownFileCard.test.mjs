@@ -227,17 +227,22 @@ test("resolveSnapshotCard: uppercase .AGENT.JSON classifies as snapshot card", (
 
 // ── snapshot card thumbnails ─────────────────────────────────────────────────
 
-test("resolveSnapshotCard: .agent.png uses its own URL as thumb", () => {
+test("resolveSnapshotCard: keeps canonical PNG URL for actions", () => {
   const card = resolveSnapshotCard(
     { m: "image/png", size: 2048, filename: "bot.agent.png", x: SHA256 },
     PNG_URL,
     "",
   );
   assert.ok(card !== null);
-  // PNG attachment URL is rewritten by rewriteRelayUrl — just verify it's set
+  assert.equal(card.href, PNG_URL);
   assert.ok(
     card.thumb != null,
     "PNG card must have a thumb set from its own URL",
+  );
+  assert.notEqual(
+    card.thumb,
+    card.href,
+    "only the display thumbnail may use the local media proxy",
   );
 });
 
