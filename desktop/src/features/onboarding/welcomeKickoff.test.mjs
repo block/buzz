@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  areWelcomeTeammatesOnline,
   buildWelcomeKickoffCloser,
   buildWelcomeKickoffOpener,
   resolveWelcomeAgentSet,
@@ -41,6 +42,24 @@ test("opener uses current agent names and requests bounded simultaneous intros",
   assert.match(opener, /@Honeybee and @Bumble/);
   assert.match(opener, /sentence or two/);
   assert.match(opener, /Don't start any work yet/);
+});
+
+test("teammates are not ready until every harness publishes online presence", () => {
+  assert.equal(areWelcomeTeammatesOnline([honey, bumble], undefined), false);
+  assert.equal(
+    areWelcomeTeammatesOnline([honey, bumble], {
+      [honey.pubkey]: "online",
+      [bumble.pubkey]: "offline",
+    }),
+    false,
+  );
+  assert.equal(
+    areWelcomeTeammatesOnline([honey, bumble], {
+      [honey.pubkey]: "online",
+      [bumble.pubkey]: "online",
+    }),
+    true,
+  );
 });
 
 test("closer degrades coherently for partial and total startup failure", () => {

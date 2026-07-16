@@ -1286,12 +1286,6 @@ async fn tokio_main() -> Result<()> {
 
     let presence_publisher = relay.event_publisher();
     let presence_keys = config.keys.clone();
-    if config.presence_enabled {
-        match publish_presence(&presence_publisher, &presence_keys, "online").await {
-            Ok(_) => tracing::info!("presence set to online"),
-            Err(e) => tracing::warn!("failed to set initial presence: {e}"),
-        }
-    }
 
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
     let startup_owner: Option<String> = resolve_agent_owner(&config);
@@ -1410,6 +1404,16 @@ async fn tokio_main() -> Result<()> {
             tracing::warn!("failed to subscribe to channel {channel_id}: {e}");
         } else {
             tracing::info!("subscribed to channel {channel_id}");
+        }
+    }
+
+    // Online means the harness can receive work, not merely that its socket is
+    // connected. Publishing after channel subscriptions gives desktop callers
+    // a durable readiness boundary before they send a startup mention.
+    if config.presence_enabled {
+        match publish_presence(&presence_publisher, &presence_keys, "online").await {
+            Ok(_) => tracing::info!("presence set to online"),
+            Err(e) => tracing::warn!("failed to set initial presence: {e}"),
         }
     }
 

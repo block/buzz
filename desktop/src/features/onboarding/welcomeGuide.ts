@@ -3,6 +3,7 @@ import {
   createManagedAgent,
   getChannelMembers,
   listManagedAgents,
+  updateManagedAgent,
 } from "@/shared/api/tauri";
 import { listPersonas, setPersonaActive } from "@/shared/api/tauriPersonas";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -233,6 +234,25 @@ export async function ensureWelcomeTeam(
     throw new Error("Welcome Team provisioning did not return every starter.");
   }
   const welcomeAgents = agents as unknown as WelcomeTeamAgents;
+  const leadPubkey = welcomeAgents[0].pubkey;
+  for (const teammate of welcomeAgents.slice(1)) {
+    const alreadyAllowsLead =
+      teammate.respondTo === "allowlist" &&
+      teammate.respondToAllowlist.some(
+        (pubkey) => normalizePubkey(pubkey) === normalizePubkey(leadPubkey),
+      );
+    if (!alreadyAllowsLead) {
+      const updated = await updateManagedAgent({
+        pubkey: teammate.pubkey,
+        respondTo: "allowlist",
+        respondToAllowlist: [leadPubkey],
+      });
+      const index = agents.findIndex(
+        (agent) => agent.pubkey === teammate.pubkey,
+      );
+      if (index >= 0) agents[index] = updated.agent;
+    }
+  }
   await ensureWelcomeTeamMembership(channelId, welcomeAgents);
   return welcomeAgents;
 }

@@ -6,6 +6,7 @@ import {
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
+import { usePresenceQuery } from "@/features/presence/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { welcomeKickoffMarker } from "@/features/onboarding/devFreshOnboarding";
 import { resolveAgentReadiness } from "@/features/onboarding/ui/agentReadiness";
@@ -71,6 +72,15 @@ export function buildWelcomeKickoffOpener(
   teammates: readonly [ManagedAgent, ManagedAgent],
 ) {
   return `Hi, I'm ${lead.name}. Welcome to Buzz. This is your private home base, and we're here to help you get oriented or work through something you're building.\n\n@${teammates[0].name} and @${teammates[1].name}, introduce yourselves in a sentence or two — share what you're good at and when to bring you in. Don't start any work yet.`;
+}
+
+export function areWelcomeTeammatesOnline(
+  teammates: readonly ManagedAgent[],
+  presence: Readonly<Record<string, string>> | undefined,
+) {
+  return teammates.every(
+    (agent) => presence?.[normalizePubkey(agent.pubkey)] === "online",
+  );
 }
 
 export function buildWelcomeKickoffCloser(failedNames: readonly string[]) {
@@ -141,6 +151,13 @@ export function useWelcomeKickoff(
     () => resolveAgentReadiness(runtimesQuery.data ?? [], globalConfig),
     [globalConfig, runtimesQuery.data],
   );
+  const teammatePubkeys = React.useMemo(
+    () => agentSet?.teammates.map((agent) => agent.pubkey) ?? [],
+    [agentSet],
+  );
+  const teammatePresence = usePresenceQuery(teammatePubkeys, {
+    enabled: isActiveWelcome,
+  });
 
   React.useEffect(() => {
     if (
@@ -206,6 +223,15 @@ export function useWelcomeKickoff(
         });
         if (openerAlreadySent) return;
 
+        const allTeammatesReady = areWelcomeTeammatesOnline(
+          resolvedAgentSet.teammates,
+          teammatePresence.data,
+        );
+        if (!allTeammatesReady) {
+          await teammatePresence.refetch();
+          return;
+        }
+
         await sendManagedAgentChannelMessage({
           agentPubkey: resolvedAgentSet.lead.pubkey,
           channelId,
@@ -234,6 +260,8 @@ export function useWelcomeKickoff(
     queryClient,
     readiness,
     runtimesQuery.isPending,
+    teammatePresence.data,
+    teammatePresence.refetch,
   ]);
 
   React.useEffect(() => {
