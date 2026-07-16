@@ -479,18 +479,18 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle"
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override"
     )]
     Create {
         /// Channel name
         #[arg(long)]
         name: String,
-        /// Channel type
-        #[arg(long = "type", value_enum)]
-        channel_type: ChannelType,
-        /// Channel visibility
-        #[arg(long, value_enum)]
-        visibility: ChannelVisibility,
+        /// Channel type. Required unless --template supplies one.
+        #[arg(long = "type", value_enum, required_unless_present = "template")]
+        channel_type: Option<ChannelType>,
+        /// Channel visibility. Required unless --template supplies one.
+        #[arg(long, value_enum, required_unless_present = "template")]
+        visibility: Option<ChannelVisibility>,
         /// Channel description
         #[arg(long)]
         description: Option<String>,
@@ -498,6 +498,15 @@ pub enum ChannelsCmd {
         /// it once this many seconds pass without a new message.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<i64>,
+        /// Apply a desktop-local channel template by name (case-insensitive):
+        /// supplies default type/visibility/description/canvas, and resolves
+        /// its agent roster against the relay to add as members.
+        #[arg(long)]
+        template: Option<String>,
+        /// Override the channel-templates.json path (default: the desktop
+        /// app's prod app-data dir). Mainly for the dev store or testing.
+        #[arg(long, value_name = "PATH")]
+        templates_file: Option<String>,
     },
     /// Update channel name, description, or ephemeral TTL
     Update {

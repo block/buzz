@@ -69,5 +69,13 @@ url = { workspace = true }
 # Persona pack parsing, validation, and resolution
 buzz-persona = { path = "../buzz-persona" }
 
+# Platform app-data dir resolution — locates the desktop app's
+# channel-templates.json store for `channels create --template`
+dirs = "6"
+
 # WebSocket client — ephemeral event publish (kind:20001 is WS-only on the relay)
 buzz-ws-client = { path = "../buzz-ws-client" }
+
+[dev-dependencies]
+# Scratch files for channel-templates.json fixtures in tests
+tempfile = "3"
