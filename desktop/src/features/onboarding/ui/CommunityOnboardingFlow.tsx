@@ -6,7 +6,7 @@ import {
   markCommunityOnboardingComplete,
   useCommunityOnboarding,
 } from "@/features/onboarding/communityOnboarding";
-import { initializeWelcomeChannel } from "@/features/onboarding/hooks";
+import { initializeStarterChannels } from "@/features/onboarding/hooks";
 import { useClaimInvite } from "@/features/onboarding/useClaimInvite";
 import { AvatarUpload } from "@/features/profile/ui/AvatarUpload";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -69,7 +69,7 @@ export function CommunityOnboardingFlow({
     update({ stage: "finalizing", error: undefined });
     try {
       const identity = await getIdentity();
-      const result = await initializeWelcomeChannel(queryClient, {
+      const result = await initializeStarterChannels(queryClient, {
         focus: true,
         pubkey: identity.pubkey,
         communityScope: relayUrl,

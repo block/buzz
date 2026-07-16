@@ -678,6 +678,8 @@ export function AppSidebar({
                     />
                   ))}
                   <ChannelGroupSection
+                    browseLabel="Browse channels"
+                    createLabel="New channel"
                     draggable
                     hasUnread={unreadChannelIds.size > 0}
                     isCollapsed={collapsedGroups.channels}
@@ -690,8 +692,8 @@ export function AppSidebar({
                     }
                     actionsTestId="section-actions-channels"
                     listTestId="stream-list"
-                    quickCreateLabel="Add channel"
-                    onQuickCreateClick={onBrowseChannels}
+                    onBrowseClick={onBrowseChannels}
+                    onCreateClick={() => openCreateDialog("stream")}
                     showQuickCreate
                     onMarkAllRead={onMarkAllChannelsRead}
                     onMarkChannelRead={onMarkChannelRead}

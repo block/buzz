@@ -1588,13 +1588,13 @@ test("inactive built-ins cannot be used to create teams", async ({ page }) => {
 
   const error = await invokeTauriExpectError(page, "create_team", {
     input: {
-      name: "Fizzes",
-      personaIds: ["builtin:fizz"],
+      name: "Honeys",
+      personaIds: ["builtin:honey"],
     },
   });
 
   expect(error).toBe(
-    "Fizz is not in My Agents. Choose it from Agent Catalog first.",
+    "Honey is not in My Agents. Choose it from Agent Catalog first.",
   );
 });
 
@@ -1603,24 +1603,24 @@ test("built-in removal failures show up from My Agents", async ({ page }) => {
 
   await page.getByTestId("open-agents-view").click();
   await openPersonaCatalog(page);
-  await selectCatalogPersona(page, "builtin:fizz");
-  await useCatalogPersona(page, "builtin:fizz");
+  await selectCatalogPersona(page, "builtin:honey");
+  await useCatalogPersona(page, "builtin:honey");
 
   await invokeTauri(page, "create_team", {
     input: {
-      name: "Fizzes",
-      personaIds: ["builtin:fizz"],
+      name: "Honeys",
+      personaIds: ["builtin:honey"],
     },
   });
 
   await page.keyboard.press("Escape");
-  await page.getByLabel("Open actions for Fizz").click();
+  await page.getByLabel("Open actions for Honey").click();
   await page.getByRole("menuitem", { name: "Delete" }).click();
 
   await expect(
     page
       .locator("[data-sonner-toast]")
-      .filter({ hasText: "Fizz is still referenced by a team." }),
+      .filter({ hasText: "Honey is still referenced by a team." }),
   ).toBeVisible();
 });
 

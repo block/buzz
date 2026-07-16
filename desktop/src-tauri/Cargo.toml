@@ -105,7 +105,7 @@ bzip2 = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2.3.3"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 png = "0.18"
 arboard = "3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }

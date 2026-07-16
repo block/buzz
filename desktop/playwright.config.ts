@@ -25,7 +25,6 @@ export default defineConfig({
         "**/channel-shared-header-backdrop.spec.ts",
         "**/badge.spec.ts",
         "**/channel-browser.spec.ts",
-        "**/channel-add-screenshots.spec.ts",
         "**/messaging.spec.ts",
         "**/custom-emoji.spec.ts",
         "**/profile-custom-emoji-status.spec.ts",
