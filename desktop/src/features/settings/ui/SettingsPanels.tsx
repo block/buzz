@@ -715,8 +715,8 @@ export function renderSettingsSection(
     case "agents":
       return (
         <div className="space-y-12">
-          <GlobalAgentConfigSettingsCard />
           <PreventSleepSettingsCard />
+          <GlobalAgentConfigSettingsCard />
         </div>
       );
     case "channel-templates":
