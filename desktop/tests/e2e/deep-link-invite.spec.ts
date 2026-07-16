@@ -32,6 +32,14 @@ const PENDING_ADD_COMMUNITY_LINK = {
   name: "Acme Team",
 };
 
+const SECOND_PENDING_ADD_COMMUNITY_LINK = {
+  id: "dl-add-community-2",
+  kind: "add-community" as const,
+  relayUrl: "wss://beta.communities.buzz.xyz",
+  code: null,
+  name: "Beta Team",
+};
+
 test("join deep link is acknowledged without claiming before setup", async ({
   page,
 }) => {
@@ -143,6 +151,62 @@ test("add-community deep link opens one editable prefill and acknowledges the qu
       payload: { id: PENDING_ADD_COMMUNITY_LINK.id },
     },
   ]);
+});
+
+test("queued add-community links open and acknowledge one at a time", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      pendingCommunityDeepLinks: [
+        PENDING_ADD_COMMUNITY_LINK,
+        SECOND_PENDING_ADD_COMMUNITY_LINK,
+      ],
+    },
+    { seedPreviewFeatures: true },
+  );
+  await page.goto("/");
+
+  const relayInput = page.locator("#ws-relay-url");
+  const nameInput = page.locator("#ws-name");
+  await expect(relayInput).toHaveValue(PENDING_ADD_COMMUNITY_LINK.relayUrl);
+  await expect(nameInput).toHaveValue(PENDING_ADD_COMMUNITY_LINK.name);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? [])
+          .filter(
+            (entry) =>
+              entry.command === "acknowledge_pending_community_deep_link",
+          )
+          .map((entry) => entry.payload),
+      ),
+    )
+    .toEqual([{ id: PENDING_ADD_COMMUNITY_LINK.id }]);
+
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  await expect(relayInput).toHaveValue(
+    SECOND_PENDING_ADD_COMMUNITY_LINK.relayUrl,
+  );
+  await expect(nameInput).toHaveValue(SECOND_PENDING_ADD_COMMUNITY_LINK.name);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? [])
+          .filter(
+            (entry) =>
+              entry.command === "acknowledge_pending_community_deep_link",
+          )
+          .map((entry) => entry.payload),
+      ),
+    )
+    .toEqual([
+      { id: PENDING_ADD_COMMUNITY_LINK.id },
+      { id: SECOND_PENDING_ADD_COMMUNITY_LINK.id },
+    ]);
 });
 
 test("Welcome failure can be skipped without abandoning community onboarding", async ({

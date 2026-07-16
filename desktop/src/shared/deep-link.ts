@@ -12,6 +12,7 @@ export interface DeepLinkDeps {
   openAddCommunity: (
     payload: AddCommunityDeepLinkPayload & { requestId: string },
   ) => boolean;
+  onAddCommunityAvailable: (listener: () => void) => () => void;
 }
 
 /**
@@ -89,6 +90,7 @@ async function drainPendingCommunityDeepLinks(deps: DeepLinkDeps) {
     );
     if (!pending) return;
     if (!(await acceptPendingCommunityDeepLink(pending, deps))) return;
+    if (pending.kind === "add-community") return;
   }
 }
 
@@ -111,11 +113,27 @@ async function drainPendingCommunityDeepLinks(deps: DeepLinkDeps) {
 export async function listenForDeepLinks(
   deps: DeepLinkDeps,
 ): Promise<UnlistenFn> {
+  let drainRunning = false;
+  let drainRequested = false;
   const drain = () => {
-    void drainPendingCommunityDeepLinks(deps).catch((error: unknown) => {
-      console.warn("Failed to drain pending community deep links", error);
-    });
+    drainRequested = true;
+    if (drainRunning) return;
+    drainRunning = true;
+    void (async () => {
+      try {
+        while (drainRequested) {
+          drainRequested = false;
+          await drainPendingCommunityDeepLinks(deps);
+        }
+      } catch (error: unknown) {
+        console.warn("Failed to drain pending community deep links", error);
+      } finally {
+        drainRunning = false;
+        if (drainRequested) drain();
+      }
+    })();
   };
+  const stopAvailabilityListener = deps.onAddCommunityAvailable(drain);
   const connectPromise = listen<string>("deep-link-connect", drain);
   const joinPromise = listen<JoinDeepLinkPayload>("deep-link-join", drain);
   const addCommunityPromise = listen<AddCommunityDeepLinkPayload>(
@@ -129,6 +147,7 @@ export async function listenForDeepLinks(
   ]);
   drain();
   return () => {
+    stopAvailabilityListener();
     for (const unlisten of unlistens) unlisten();
   };
 }

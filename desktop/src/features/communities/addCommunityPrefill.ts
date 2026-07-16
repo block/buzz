@@ -8,10 +8,12 @@ export type AddCommunityPrefillRequest = AddCommunityDeepLinkPayload & {
 
 let currentRequest: AddCommunityPrefillRequest | null = null;
 const listeners = new Set<() => void>();
+const availableListeners = new Set<() => void>();
 
 export function requestAddCommunityPrefill(
   request: AddCommunityPrefillRequest,
 ): boolean {
+  if (currentRequest) return false;
   currentRequest = request;
   for (const listener of listeners) listener();
   return true;
@@ -21,6 +23,14 @@ export function clearAddCommunityPrefill(requestId: string): void {
   if (!currentRequest || currentRequest.requestId !== requestId) return;
   currentRequest = null;
   for (const listener of listeners) listener();
+  for (const listener of availableListeners) listener();
+}
+
+export function onAddCommunityPrefillAvailable(
+  listener: () => void,
+): () => void {
+  availableListeners.add(listener);
+  return () => availableListeners.delete(listener);
 }
 
 export function useAddCommunityPrefill(): AddCommunityPrefillRequest | null {
