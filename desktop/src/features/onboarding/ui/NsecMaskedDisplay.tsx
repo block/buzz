@@ -4,6 +4,8 @@ import { Button } from "@/shared/ui/button";
 
 type NsecMaskedDisplayProps = {
   nsec: string;
+  /** "bare" drops the boxed chrome for the onboarding spotlight treatment. */
+  variant?: "boxed" | "bare";
 };
 
 /**
@@ -14,7 +16,10 @@ type NsecMaskedDisplayProps = {
  * - select is disabled while masked (user-select: none)
  * - state is cleared when the component unmounts
  */
-export function NsecMaskedDisplay({ nsec }: NsecMaskedDisplayProps) {
+export function NsecMaskedDisplay({
+  nsec,
+  variant = "boxed",
+}: NsecMaskedDisplayProps) {
   const [isRevealed, setIsRevealed] = React.useState(false);
   const [isCopied, setIsCopied] = React.useState(false);
   const copyTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -40,10 +45,18 @@ export function NsecMaskedDisplay({ nsec }: NsecMaskedDisplayProps) {
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border/70 bg-muted/30">
+    <div
+      className={
+        variant === "boxed"
+          ? "overflow-hidden rounded-lg border border-border/70 bg-muted/30"
+          : ""
+      }
+    >
       <div className="flex items-center gap-2 px-3 py-2">
         <p
-          className={`min-w-0 flex-1 break-all font-mono text-xs leading-5 ${
+          className={`min-w-0 flex-1 break-all font-mono leading-5 ${
+            variant === "bare" ? "text-base" : "text-xs"
+          } ${
             isRevealed
               ? "select-text text-foreground"
               : "select-none text-muted-foreground blur-[4px]"

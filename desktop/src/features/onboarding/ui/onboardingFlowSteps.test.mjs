@@ -59,66 +59,21 @@ test("currentStep_falls_back_to_1_for_pages_outside_the_step_list", () => {
 test("backup_next_disabled_while_loading", () => {
   // During a slow keychain read, Next must be blocked — user cannot race past
   // the key display before it is shown.
-  assert.equal(
-    backupNextDisabled({
-      isLoading: true,
-      loadError: null,
-      nsec: null,
-      hasAcknowledged: false,
-    }),
-    true,
-  );
+  assert.equal(backupNextDisabled({ isLoading: true, loadError: null }), true);
 });
 
 test("backup_next_disabled_on_load_error", () => {
   // Error state: only the explicit "Skip for now" ghost advances; Next blocked.
   assert.equal(
-    backupNextDisabled({
-      isLoading: false,
-      loadError: "IPC error",
-      nsec: null,
-      hasAcknowledged: false,
-    }),
+    backupNextDisabled({ isLoading: false, loadError: "IPC error" }),
     true,
   );
 });
 
-test("backup_next_disabled_when_nsec_loaded_and_not_acknowledged", () => {
-  // Key shown but checkbox unchecked.
+test("backup_next_enabled_after_clean_load", () => {
+  // Key shown (or backend cleanly returned none) — user may proceed.
   assert.equal(
-    backupNextDisabled({
-      isLoading: false,
-      loadError: null,
-      nsec: "nsec1test",
-      hasAcknowledged: false,
-    }),
-    true,
-  );
-});
-
-test("backup_next_enabled_when_nsec_loaded_and_acknowledged", () => {
-  // Key shown and checkbox checked — the normal happy path.
-  assert.equal(
-    backupNextDisabled({
-      isLoading: false,
-      loadError: null,
-      nsec: "nsec1test",
-      hasAcknowledged: true,
-    }),
-    false,
-  );
-});
-
-test("backup_next_enabled_when_backend_returned_null_key_cleanly", () => {
-  // Backend returned no key without an error (edge case): nothing to acknowledge,
-  // allow forward progress so onboarding is never bricked.
-  assert.equal(
-    backupNextDisabled({
-      isLoading: false,
-      loadError: null,
-      nsec: null,
-      hasAcknowledged: false,
-    }),
+    backupNextDisabled({ isLoading: false, loadError: null }),
     false,
   );
 });

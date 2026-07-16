@@ -20,7 +20,9 @@ test("backup step appears on fresh-key path after profile submit", async ({
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Save your private key" }),
+    page.getByRole("heading", {
+      name: "Your unique identity has been created",
+    }),
   ).toBeVisible();
 });
 
@@ -55,19 +57,11 @@ test("backup step shows masked nsec from mock bridge", async ({ page }) => {
   });
 });
 
-test("backup step Next is disabled until checkbox is checked", async ({
-  page,
-}) => {
+test("backup step Next is enabled once the key is shown", async ({ page }) => {
   await enterMachineBackup(page);
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("nsec-value")).toBeVisible();
-
-  // Next is disabled while checkbox is unchecked.
-  await expect(page.getByTestId("onboarding-next")).toBeDisabled();
-
-  // Check the checkbox → Next enables.
-  await page.getByTestId("backup-acknowledge").check();
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
 });
 
@@ -78,7 +72,6 @@ test("backup step advances to machine setup on Next click", async ({
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("nsec-value")).toBeVisible();
-  await page.getByTestId("backup-acknowledge").check();
   await page.getByTestId("onboarding-next").click();
 
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
