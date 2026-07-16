@@ -42,6 +42,10 @@ async function openCreateDialog(page: import("@playwright/test").Page) {
   await page.locator("#persona-display-name").fill("Test Agent");
 }
 
+async function customizeAgentAi(page: import("@playwright/test").Page) {
+  await page.getByRole("tab", { name: "Customize for this agent" }).click();
+}
+
 test.describe("global agent config screenshots", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
@@ -90,6 +94,7 @@ test.describe("global agent config screenshots", () => {
     });
 
     await openCreateDialog(page);
+    await customizeAgentAi(page);
 
     await expect(page.getByLabel("Anthropic API Key")).toBeVisible({
       timeout: 10_000,
@@ -110,6 +115,7 @@ test.describe("global agent config screenshots", () => {
     });
 
     await openCreateDialog(page);
+    await customizeAgentAi(page);
 
     await expect(page.getByLabel("Anthropic API Key")).toHaveAttribute(
       "placeholder",
@@ -151,15 +157,15 @@ test.describe("global agent config screenshots", () => {
 
     await openCreateDialog(page);
 
-    await expect(page.locator("#persona-llm-provider")).toHaveText(
-      "Anthropic (inherited from build)",
-    );
-    await expect(page.locator("#persona-model")).toHaveText(
-      "Inherit build default (claude-opus-4-8)",
-    );
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
     await expect(
-      page.getByText("Using build defaults: effort high"),
+      defaults.getByText("Anthropic", { exact: true }),
     ).toBeVisible();
+    await expect(
+      defaults.getByText("claude-opus-4-8", { exact: true }),
+    ).toBeVisible();
+    await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
+    await expect(page.locator("#persona-model")).not.toBeVisible();
   });
 
   test("07-explicit-global-defaults-override-baked-labels", async ({
@@ -188,13 +194,15 @@ test.describe("global agent config screenshots", () => {
 
     await openCreateDialog(page);
 
-    await expect(page.locator("#persona-llm-provider")).toHaveText(
-      "Use AI defaults (anthropic)",
-    );
-    await expect(page.locator("#persona-model")).toHaveText(
-      "Use AI defaults (claude-opus-4-5)",
-    );
-    await expect(page.getByText("Using AI defaults: effort low")).toBeVisible();
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
+    await expect(
+      defaults.getByText("Anthropic", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      defaults.getByText("claude-opus-4-5", { exact: true }),
+    ).toBeVisible();
+    await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
+    await expect(page.locator("#persona-model")).not.toBeVisible();
   });
 
   // Shot 04: Create gate BLOCKED — no per-agent provider, no global provider
