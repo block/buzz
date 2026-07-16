@@ -23,9 +23,7 @@ async function navigateToConfigPage(
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
 }
 
-test("config page shows Agent defaults section with readiness badge", async ({
-  page,
-}) => {
+test("config page shows Agent defaults form", async ({ page }) => {
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
@@ -34,18 +32,18 @@ test("config page shows Agent defaults section with readiness badge", async ({
 
   await navigateToConfigPage(page);
 
-  const badge = page.getByTestId("agent-readiness-badge");
-  await expect(badge).toBeVisible();
+  // The defaults form is the page's content; no readiness badge is shown.
+  await expect(page.locator("#global-agent-provider")).toBeVisible();
+  await expect(page.getByTestId("agent-readiness-badge")).toHaveCount(0);
 
-  // Take a screenshot of the entire config page to capture the readiness badge.
   await waitForAnimations(page);
   const configPage = page.locator('[data-testid="onboarding-page-config"]');
   await configPage.screenshot({
-    path: `${SHOTS}/04-setup-readiness-badge.png`,
+    path: `${SHOTS}/04-config-defaults-form.png`,
   });
 });
 
-test("config page shows Not configured badge when no CLI runtime or buzz-agent config", async ({
+test("config page shows configure-later hint when no CLI runtime or buzz-agent config", async ({
   page,
 }) => {
   // Seed empty ACP runtimes so no CLI harness is available.
@@ -58,11 +56,7 @@ test("config page shows Not configured badge when no CLI runtime or buzz-agent c
 
   await navigateToConfigPage(page);
 
-  const badge = page.getByTestId("agent-readiness-badge");
-  await expect(badge).toBeVisible();
-  await expect(badge).toContainText("Not configured");
-
-  // Not-configured warning text should be visible.
+  // Not-configured hint text should be visible below the form.
   await expect(
     page.getByText("You can finish now and configure agents later in Settings"),
   ).toBeVisible();
@@ -73,26 +67,6 @@ test("config page shows Not configured badge when no CLI runtime or buzz-agent c
   await configPage.screenshot({
     path: `${SHOTS}/05-setup-not-configured.png`,
   });
-});
-
-test("config page Re-check button triggers runtimes refetch", async ({
-  page,
-}) => {
-  await installMockBridge(page, undefined, {
-    skipCommunitySeed: true,
-    skipOnboardingSeed: true,
-  });
-  await page.goto("/");
-
-  await navigateToConfigPage(page);
-
-  const recheckBtn = page.getByTestId("agent-readiness-recheck");
-  await expect(recheckBtn).toBeVisible();
-  await expect(recheckBtn).toBeEnabled();
-  await recheckBtn.click();
-
-  // After click the button should still be there (page stays on config).
-  await expect(recheckBtn).toBeVisible();
 });
 
 test("Finish button is always enabled on config page regardless of readiness", async ({

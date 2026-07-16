@@ -1,5 +1,4 @@
 import * as React from "react";
-import { RefreshCw } from "lucide-react";
 
 import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import {
@@ -13,7 +12,6 @@ import {
   setGlobalAgentConfig,
 } from "@/shared/api/tauriGlobalAgentConfig";
 import type { GlobalAgentConfig } from "@/shared/api/types";
-import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import {
@@ -89,44 +87,6 @@ function AgentDefaultsSection() {
 
   return (
     <section className="w-full space-y-4 text-left">
-      <div className="flex items-center justify-center gap-2">
-        {readiness.ready ? (
-          <Badge
-            className="border border-primary/20 bg-primary/10 text-primary"
-            data-testid="agent-readiness-badge"
-            variant="outline"
-          >
-            {readiness.reason === "cli"
-              ? `${readiness.runtimeLabel} ready`
-              : "buzz-agent configured"}
-          </Badge>
-        ) : (
-          <Badge
-            className="border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-            data-testid="agent-readiness-badge"
-            variant="outline"
-          >
-            Not configured
-          </Badge>
-        )}
-        <Button
-          className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-          data-testid="agent-readiness-recheck"
-          disabled={runtimesQuery.isFetching}
-          onClick={() => void runtimesQuery.refetch()}
-          size="sm"
-          type="button"
-          variant="ghost"
-        >
-          {runtimesQuery.isFetching ? (
-            <Spinner className="h-3 w-3 border-[1.5px]" />
-          ) : (
-            <RefreshCw className="h-3 w-3" />
-          )}
-          Re-check
-        </Button>
-      </div>
-
       {isLoading ? (
         <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
           <Spinner className="h-4 w-4 border-2" />
