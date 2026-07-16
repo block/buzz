@@ -4,19 +4,40 @@ import {
   getChannelMembers,
   listManagedAgents,
 } from "@/shared/api/tauri";
-import { sendManagedAgentChannelMessage } from "@/shared/api/tauriManagedAgentMessages";
 import { listPersonas, setPersonaActive } from "@/shared/api/tauriPersonas";
 import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export const WELCOME_GUIDE_AGENT_NAME = "Fizz";
 export const WELCOME_GUIDE_PERSONA_ID = "builtin:fizz";
+export const WELCOME_TEAM_ID = "builtin-team:welcome";
 export const WELCOME_GUIDE_INTRO_MARKER = "buzz-welcome-intro.v1";
 const LEGACY_WELCOME_GUIDE_AGENT_NAME = "Kit";
 export const LEGACY_WELCOME_GUIDE_SYSTEM_PROMPT =
   "You are Kit, Sprout's friendly welcome guide. Help new users understand the community, channels, messages, and agents. Keep introductions concise, practical, and warm.";
 export const WELCOME_GUIDE_INTRO_MESSAGE =
   "Hi, I'm Fizz. Welcome to Buzz.\n\nI can help you get oriented, answer questions, and make the first few steps feel less mysterious.\n\nFeel free to ask me what else you can do in Buzz, or just talk through what you want to build.";
+
+export type WelcomeTeamRole = "lead" | "teammate";
+
+export type WelcomeTeamStarterDefinition = Readonly<{
+  name: string;
+  personaId: string;
+  role: WelcomeTeamRole;
+}>;
+
+/** Stable identities used to provision the Rust-seeded Welcome Team. */
+export const WELCOME_TEAM_STARTERS = [
+  { name: "Fizz", personaId: "builtin:fizz", role: "lead" },
+  { name: "Honey", personaId: "builtin:honey", role: "teammate" },
+  { name: "Bumble", personaId: "builtin:bumble", role: "teammate" },
+] as const satisfies readonly WelcomeTeamStarterDefinition[];
+
+export type WelcomeTeamAgents = readonly [
+  ManagedAgent,
+  ManagedAgent,
+  ManagedAgent,
+];
 
 function normalizeRelayUrl(relayUrl: string | null | undefined) {
   return relayUrl?.trim().replace(/\/+$/, "") ?? null;
@@ -30,17 +51,8 @@ function isAgentScopedToRelay(agent: ManagedAgent, relayUrl?: string | null) {
   return normalizeRelayUrl(agent.relayUrl) === targetRelayUrl;
 }
 
-function isNamedWelcomeGuideAgent(agent: ManagedAgent) {
-  return (
-    agent.name.trim().toLowerCase() === WELCOME_GUIDE_AGENT_NAME.toLowerCase()
-  );
-}
-
 function isBuiltInWelcomeGuideAgent(agent: ManagedAgent) {
-  return (
-    agent.personaId === WELCOME_GUIDE_PERSONA_ID &&
-    isNamedWelcomeGuideAgent(agent)
-  );
+  return agent.personaId === WELCOME_GUIDE_PERSONA_ID;
 }
 
 function isLegacyKitWelcomeGuideAgent(agent: ManagedAgent) {
@@ -82,6 +94,37 @@ export function pickWelcomeGuideAgentForRelay(
   );
 }
 
+/** Find the preferred managed instance for one starter persona and relay. */
+export function pickWelcomeTeamStarterAgentForRelay(
+  agents: ManagedAgent[],
+  starter: WelcomeTeamStarterDefinition,
+  relayUrl?: string | null,
+) {
+  return pickAgentByStatus(
+    agents.filter(
+      (agent) =>
+        agent.personaId === starter.personaId &&
+        isAgentScopedToRelay(agent, relayUrl),
+    ),
+  );
+}
+
+/** Pubkeys belonging to any managed Welcome Team persona on this relay. */
+export async function getWelcomeTeamAgentPubkeys(relayUrl?: string | null) {
+  const personaIds = new Set<string>(
+    WELCOME_TEAM_STARTERS.map(({ personaId }) => personaId),
+  );
+  return (await listManagedAgents())
+    .filter(
+      (agent) =>
+        agent.personaId !== null &&
+        personaIds.has(agent.personaId) &&
+        isAgentScopedToRelay(agent, relayUrl),
+    )
+    .map((agent) => agent.pubkey);
+}
+
+/** Legacy Fizz/Kit lookup retained for existing channel reuse checks. */
 export async function getWelcomeGuideAgentPubkeys(relayUrl?: string | null) {
   return (await listManagedAgents())
     .filter(
@@ -91,76 +134,104 @@ export async function getWelcomeGuideAgentPubkeys(relayUrl?: string | null) {
     .map((agent) => agent.pubkey);
 }
 
-async function ensureWelcomeGuidePersonaActive() {
-  const guidePersona = (await listPersonas()).find(
-    (persona) => persona.id === WELCOME_GUIDE_PERSONA_ID,
+async function ensureWelcomeTeamPersonasActive() {
+  const personas = await listPersonas();
+  const personasById = new Map(
+    personas.map((persona) => [persona.id, persona]),
   );
-  if (!guidePersona) {
-    throw new Error(`${WELCOME_GUIDE_AGENT_NAME} agent not found.`);
+
+  for (const starter of WELCOME_TEAM_STARTERS) {
+    if (!personasById.has(starter.personaId)) {
+      throw new Error(`${starter.name} agent not found.`);
+    }
   }
-  if (!guidePersona.isActive) {
-    await setPersonaActive(WELCOME_GUIDE_PERSONA_ID, true);
-  }
+
+  await Promise.all(
+    WELCOME_TEAM_STARTERS.filter(
+      ({ personaId }) => !personasById.get(personaId)?.isActive,
+    ).map(({ personaId }) => setPersonaActive(personaId, true)),
+  );
 }
 
-async function ensureWelcomeGuideAgent(relayUrl?: string | null) {
-  const agents = await listManagedAgents();
-  const existing = pickWelcomeGuideAgentForRelay(agents, relayUrl);
-  if (existing) {
-    return existing;
-  }
-
-  await ensureWelcomeGuidePersonaActive();
-
-  const created = await createManagedAgent({
-    name: WELCOME_GUIDE_AGENT_NAME,
-    personaId: WELCOME_GUIDE_PERSONA_ID,
-    relayUrl: relayUrl ?? undefined,
-    spawnAfterCreate: false,
-    startOnAppLaunch: false,
-    respondTo: "owner-only",
-  });
-
-  return created.agent;
-}
-
-async function ensureWelcomeGuideMembership(
+async function ensureWelcomeTeamMembership(
   channelId: string,
-  agent: ManagedAgent,
+  agents: WelcomeTeamAgents,
 ) {
-  const agentPubkey = normalizePubkey(agent.pubkey);
   const members = await getChannelMembers(channelId).catch(() => []);
-  if (
-    members.some((member) => normalizePubkey(member.pubkey) === agentPubkey)
-  ) {
+  const memberPubkeys = new Set(
+    members.map((member) => normalizePubkey(member.pubkey)),
+  );
+  const missingAgents = agents.filter(
+    (agent) => !memberPubkeys.has(normalizePubkey(agent.pubkey)),
+  );
+  if (missingAgents.length === 0) {
     return;
   }
 
   const result = await addChannelMembers({
     channelId,
-    pubkeys: [agent.pubkey],
+    pubkeys: missingAgents.map((agent) => agent.pubkey),
     role: "bot",
   });
-  const error = result.errors.find(
-    (entry) => normalizePubkey(entry.pubkey) === agentPubkey,
+  const unexpectedError = result.errors.find(
+    ({ error }) => !error.toLowerCase().includes("already"),
   );
-  if (error && !error.error.toLowerCase().includes("already")) {
-    throw new Error(error.error);
+  if (unexpectedError) {
+    throw new Error(unexpectedError.error);
   }
 }
 
+/**
+ * Ensure the complete built-in Welcome Team is ready for kickoff.
+ * The team itself is Rust-seeded; this only activates personas, creates any
+ * missing relay-scoped instances, and adds all three to Welcome as bots.
+ */
+export async function ensureWelcomeTeam(
+  channelId: string,
+  relayUrl?: string | null,
+): Promise<WelcomeTeamAgents> {
+  const existingAgents = await listManagedAgents();
+  await ensureWelcomeTeamPersonasActive();
+
+  const agents: ManagedAgent[] = [];
+  for (const starter of WELCOME_TEAM_STARTERS) {
+    const existing = pickWelcomeTeamStarterAgentForRelay(
+      existingAgents,
+      starter,
+      relayUrl,
+    );
+    if (existing) {
+      agents.push(existing);
+      continue;
+    }
+
+    const created = await createManagedAgent({
+      name: starter.name,
+      personaId: starter.personaId,
+      teamId: WELCOME_TEAM_ID,
+      relayUrl: relayUrl ?? undefined,
+      spawnAfterCreate: false,
+      startOnAppLaunch: false,
+      respondTo: "owner-only",
+    });
+    agents.push(created.agent);
+  }
+  if (agents.length !== WELCOME_TEAM_STARTERS.length) {
+    throw new Error("Welcome Team provisioning did not return every starter.");
+  }
+  const welcomeAgents = agents as unknown as WelcomeTeamAgents;
+  await ensureWelcomeTeamMembership(channelId, welcomeAgents);
+  return welcomeAgents;
+}
+
+/**
+ * Compatibility entry point for the former solo-guide provisioning flow.
+ * The kickoff orchestrator now owns introductions, so this sends no message.
+ */
 export async function ensureWelcomeGuideIntro(
   channelId: string,
   relayUrl?: string | null,
 ) {
-  const agent = await ensureWelcomeGuideAgent(relayUrl);
-  await ensureWelcomeGuideMembership(channelId, agent);
-  await sendManagedAgentChannelMessage({
-    agentPubkey: agent.pubkey,
-    channelId,
-    content: WELCOME_GUIDE_INTRO_MESSAGE,
-    marker: WELCOME_GUIDE_INTRO_MARKER,
-    markerScope: "channel",
-  });
-  return agent;
+  const agents = await ensureWelcomeTeam(channelId, relayUrl);
+  return agents[0];
 }

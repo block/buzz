@@ -58,7 +58,7 @@ export async function initializeStarterChannels(
         queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
       ]);
     } catch (error) {
-      console.warn("Failed to initialize Welcome guide.", error);
+      console.warn("Failed to initialize Welcome team.", error);
     }
     await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     if (focus) {

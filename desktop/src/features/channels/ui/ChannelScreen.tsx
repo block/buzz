@@ -27,6 +27,7 @@ import {
 } from "@/features/agents/hooks";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { pickWelcomeGuideAgent } from "@/features/onboarding/welcomeGuide";
+import { useWelcomeKickoff } from "@/features/onboarding/welcomeKickoff";
 import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
 import {
   mergeMessages,
@@ -146,7 +147,6 @@ export function ChannelScreen({
     string | null
   >(null);
   const [editTargetId, setEditTargetId] = React.useState<string | null>(null);
-  // URL-backed thread state catches up after navigation; this override keeps urgent open/close renders responsive.
   const [optimisticOpenThreadHeadId, setOptimisticOpenThreadHeadId] =
     React.useState<string | null | undefined>(undefined);
   const clearOptimisticThreadOverride = React.useCallback(() => {
@@ -246,6 +246,7 @@ export function ChannelScreen({
     }
     return extraEvents.reduce(mergeMessages, currentMessages);
   }, [activeChannel, findEvents, messagesQuery.data, targetMessageEvents]);
+  useWelcomeKickoff(activeChannel, resolvedMessages);
   const threadReplyEvents = threadRepliesQuery.data ?? EMPTY_RELAY_EVENTS;
   const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
     resolvedMessages,

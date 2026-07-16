@@ -470,6 +470,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           testId: "welcome-intro-action-create-agent",
         });
       }
+
       return {
         actions,
         channelKindLabel: isWelcomeChannel(activeChannel)

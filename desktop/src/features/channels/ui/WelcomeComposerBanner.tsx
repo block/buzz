@@ -391,8 +391,8 @@ export function WelcomeComposerBanner({ state }: WelcomeComposerBannerProps) {
                 key="prompt-copy"
                 variants={welcomeComposerBannerContentVariants}
               >
-                Try mentioning <WelcomeComposerPersonaMention /> to chat with an
-                agent in this channel.
+                Mention <WelcomeComposerPersonaMention /> or another teammate
+                whenever you want their help.
               </motion.span>
             )}
           </AnimatePresence>

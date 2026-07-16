@@ -29,8 +29,8 @@ pub async fn get_canvas(
     Ok(serde_json::json!({
         "content": event.content,
         "event_id": event.id.to_hex(),
-        "created_at": event.created_at.as_secs(),
-        "pubkey": event.pubkey.to_hex(),
+        "updated_at": event.created_at.as_secs(),
+        "author": event.pubkey.to_hex(),
     }))
 }
 
