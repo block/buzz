@@ -104,6 +104,7 @@ export function pickWelcomeTeamStarterAgentForRelay(
   return pickAgentByStatus(
     agents.filter(
       (agent) =>
+        agent.teamId === WELCOME_TEAM_ID &&
         agent.personaId === starter.personaId &&
         isAgentScopedToRelay(agent, relayUrl),
     ),
@@ -118,6 +119,7 @@ export async function getWelcomeTeamAgentPubkeys(relayUrl?: string | null) {
   return (await listManagedAgents())
     .filter(
       (agent) =>
+        agent.teamId === WELCOME_TEAM_ID &&
         agent.personaId !== null &&
         personaIds.has(agent.personaId) &&
         isAgentScopedToRelay(agent, relayUrl),

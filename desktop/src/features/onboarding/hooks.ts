@@ -9,19 +9,25 @@ import {
 import { channelsQueryKey } from "@/features/channels/hooks";
 import {
   ensureStarterChannels,
+  ensureWelcomeChannel,
   hasEnsuredWelcomeChannel,
   markWelcomeChannelEnsured,
   notifyWelcomeChannelReady,
   rememberPendingWelcomeChannel,
 } from "@/features/onboarding/welcome";
 import { forceFreshOnboarding } from "@/features/onboarding/devFreshOnboarding";
-import { ensureWelcomeGuideIntro } from "@/features/onboarding/welcomeGuide";
+import { ensureWelcomeCanvas } from "@/features/onboarding/welcomeCanvas";
+import { ensureWelcomeTeam } from "@/features/onboarding/welcomeGuide";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
+  createChannel,
+  deleteChannel,
   ensureStarterChannels as ensureStarterChannelsCommand,
+  getChannelMembers,
   getChannels,
+  updateChannel,
 } from "@/shared/api/tauri";
 
 export type ChannelInitResult = { ok: true } | { ok: false; reason: string };
@@ -43,27 +49,33 @@ export async function initializeStarterChannels(
       ensureStarterChannels: ensureStarterChannelsCommand,
       getChannels,
     });
+    const welcomeChannel = forceFreshOnboarding
+      ? await ensureWelcomeChannel(
+          {
+            createChannel,
+            deleteChannel,
+            getChannelMembers,
+            getChannels,
+            updateChannel,
+          },
+          { replaceExisting: true },
+        )
+      : starterChannels.welcomeChannel;
 
+    queryClient.setQueryData(channelsQueryKey, starterChannels.channels);
+    await ensureWelcomeTeam(welcomeChannel.id, communityScope);
+    await ensureWelcomeCanvas(welcomeChannel.id);
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+      queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
+    ]);
     markWelcomeChannelEnsured(pubkey, communityScope);
     if (focus) {
-      rememberPendingWelcomeChannel(starterChannels.welcomeChannel.id);
-    }
-    queryClient.setQueryData(channelsQueryKey, starterChannels.channels);
-    try {
-      await ensureWelcomeGuideIntro(
-        starterChannels.welcomeChannel.id,
-        communityScope,
-      );
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
-        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
-      ]);
-    } catch (error) {
-      console.warn("Failed to initialize Welcome team.", error);
+      rememberPendingWelcomeChannel(welcomeChannel.id);
     }
     await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     if (focus) {
-      notifyWelcomeChannelReady(starterChannels.welcomeChannel.id);
+      notifyWelcomeChannelReady(welcomeChannel.id);
     }
     return { ok: true };
   } catch (error) {

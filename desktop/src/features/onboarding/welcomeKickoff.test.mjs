@@ -16,6 +16,7 @@ function agent(name, personaId, pubkey) {
   return {
     name,
     personaId,
+    teamId: "builtin-team:welcome",
     pubkey,
     relayUrl: "ws://localhost:3000",
     status: "stopped",
@@ -82,6 +83,23 @@ test("readiness wait observes agents becoming online without navigation", async 
 
   assert.equal(ready, true);
   assert.equal(reads, 3);
+});
+
+test("readiness wait retries transient presence failures", async () => {
+  let reads = 0;
+  const ready = await waitForWelcomeTeammatesOnline([honey, bumble], {
+    isCancelled: () => false,
+    loadPresence: async () => {
+      reads += 1;
+      if (reads === 1) throw new Error("relay unavailable");
+      return { [honey.pubkey]: "online", [bumble.pubkey]: "online" };
+    },
+    pollMs: 0,
+    waitMs: 1_000,
+  });
+
+  assert.equal(ready, true);
+  assert.equal(reads, 2);
 });
 
 test("readiness wait cancels when Welcome loses focus", async () => {

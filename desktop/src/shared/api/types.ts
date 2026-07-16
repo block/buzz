@@ -319,6 +319,7 @@ export type ManagedAgent = {
   pubkey: string;
   name: string;
   personaId: string | null;
+  teamId?: string | null;
   relayUrl: string;
   acpCommand: string;
   /** Resolved/effective harness command (persona-wins, override-honored). */

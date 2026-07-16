@@ -112,6 +112,7 @@ export type RawManagedAgent = {
   pubkey: string;
   name: string;
   persona_id: string | null;
+  team_id?: string | null;
   relay_url: string;
   acp_command: string;
   agent_command: string;
@@ -636,6 +637,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     pubkey: agent.pubkey,
     name: agent.name,
     personaId: agent.persona_id,
+    teamId: agent.team_id ?? null,
     relayUrl: agent.relay_url,
     acpCommand: agent.acp_command,
     agentCommand: agent.agent_command,
@@ -649,7 +651,6 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
-    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
@@ -669,8 +670,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
-    // Fallbacks for pre-feature mocks/fixtures that don't carry these fields.
-    // Real agent records always include them (defaulted server-side).
+    // Compatibility defaults for pre-feature fixtures.
     respondTo: agent.respond_to ?? "owner-only",
     respondToAllowlist: agent.respond_to_allowlist ?? [],
   };

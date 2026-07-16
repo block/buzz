@@ -23,6 +23,10 @@ export function useWelcomeKickoffEntrance(
   const [entranceMessageId, setEntranceMessageId] = React.useState<
     string | null
   >(null);
+  React.useEffect(() => {
+    void activeChannel?.id;
+    setEntranceMessageId(null);
+  }, [activeChannel?.id]);
   const handleKickoffOpenerPosted = React.useCallback((eventId: string) => {
     setEntranceMessageId(eventId);
   }, []);

@@ -50,6 +50,7 @@ function makeAgent(overrides = {}) {
     backendAgentId: null,
     respondTo: "owner-only",
     respondToAllowlist: [],
+    teamId: WELCOME_TEAM_ID,
     ...overrides,
   };
 }
@@ -158,6 +159,19 @@ test("welcome team starter definitions and role identities are stable", () => {
     { name: "Honey", personaId: "builtin:honey", role: "teammate" },
     { name: "Bumble", personaId: "builtin:bumble", role: "teammate" },
   ]);
+});
+
+test("starter matching ignores user agents with a Welcome persona", () => {
+  const honey = WELCOME_TEAM_STARTERS[1];
+  const userHoney = makeAgent({
+    personaId: honey.personaId,
+    teamId: null,
+  });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay([userHoney], honey, RELAY_A),
+    null,
+  );
 });
 
 test("starter matching uses persona identity rather than display name", () => {

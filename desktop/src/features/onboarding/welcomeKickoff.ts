@@ -133,8 +133,12 @@ export async function waitForWelcomeTeammatesOnline(
   const pubkeys = teammates.map((agent) => agent.pubkey);
 
   while (!options.isCancelled() && Date.now() < deadline) {
-    if (areWelcomeTeammatesOnline(teammates, await loadPresence(pubkeys))) {
-      return true;
+    try {
+      if (areWelcomeTeammatesOnline(teammates, await loadPresence(pubkeys))) {
+        return true;
+      }
+    } catch (error) {
+      console.warn("Welcome teammate presence check failed; retrying.", error);
     }
     await new Promise((resolve) => globalThis.setTimeout(resolve, pollMs));
   }
@@ -380,7 +384,7 @@ export function useWelcomeKickoff(
         for (const [index, result] of startResults.entries()) {
           if (result.status === "rejected") {
             console.warn(
-              `Failed to start Welcome teammate ${agentsToStart[index]?.name ?? "unknown"}.`,
+              `Failed to start Welcome agent ${agentsToStart[index]?.name ?? "unknown"}.`,
               result.reason,
             );
           }
@@ -390,8 +394,20 @@ export function useWelcomeKickoff(
         });
         if (openerAlreadySent) return;
 
+        const leadStartIndex = agentsToStart.findIndex(
+          (agent) => agent.pubkey === resolvedAgentSet.lead.pubkey,
+        );
+        if (startResults[leadStartIndex]?.status === "rejected") return;
+        const teammatesToAwait = resolvedAgentSet.teammates.filter(
+          (teammate) =>
+            startResults[
+              agentsToStart.findIndex(
+                (agent) => agent.pubkey === teammate.pubkey,
+              )
+            ]?.status !== "rejected",
+        );
         const allTeammatesReady = await waitForWelcomeTeammatesOnline(
-          resolvedAgentSet.teammates,
+          teammatesToAwait,
           { isCancelled },
         );
         if (!allTeammatesReady || isCancelled()) {
