@@ -64,6 +64,7 @@ test("channel browser sorts alphabetically or by member count", async ({
     /#random/,
     /#sales/,
     /#secret-projects/,
+    /#welcome-everyone/,
   ]);
 
   await page.getByTestId("channel-browser-sort").click();
@@ -79,6 +80,7 @@ test("channel browser sorts alphabetically or by member count", async ({
     /#design/,
     /#sales/,
     /#secret-projects/,
+    /#welcome-everyone/,
   ]);
   await expect(page.getByTestId("channel-browser-sort")).toHaveAttribute(
     "aria-label",

@@ -150,6 +150,8 @@ type E2eConfig = {
     channelsReadError?: string;
     /** Reject successive mock `create_channel` calls, then resume. */
     createChannelErrors?: string[];
+    /** Reject successive mock `ensure_starter_channels` calls, then resume. */
+    ensureStarterChannelsErrors?: string[];
     /** Reject successive mock `join_channel` calls, then resume. */
     joinChannelErrors?: string[];
     channelsReadDelayMs?: number;
@@ -1018,6 +1020,10 @@ const PROFILE_ONLY_AGENT_PUBKEY =
 const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 const MOCK_IDENTITY_PUBKEY = DEFAULT_MOCK_IDENTITY.pubkey;
+const STARTER_GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const STARTER_WELCOME_CHANNEL_ID = "5f0b1b3c-2a37-5366-9b8c-31a4b21d8e77";
+const STARTER_GENERAL_CHANNEL_NAME = "general";
+const STARTER_WELCOME_CHANNEL_NAME = "welcome-everyone";
 
 // Tracks whether `persist_current_identity` or `import_identity` has cleared
 // the lost flag set by `mock.identityLost`. Reset to false on each fresh page
@@ -2088,8 +2094,8 @@ function createCurrentMember(
 
 const mockChannels: MockChannel[] = [
   createMockChannel({
-    id: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
-    name: "general",
+    id: STARTER_GENERAL_CHANNEL_ID,
+    name: STARTER_GENERAL_CHANNEL_NAME,
     channel_type: "stream",
     visibility: "open",
     description: "General discussion for everyone",
@@ -2113,6 +2119,28 @@ const mockChannels: MockChannel[] = [
       createMockMember(BOB_PUBKEY, "member", 960),
       createMockMember(PROFILE_ONLY_AGENT_PUBKEY, "member", 840),
     ],
+  }),
+  createMockChannel({
+    id: STARTER_WELCOME_CHANNEL_ID,
+    name: STARTER_WELCOME_CHANNEL_NAME,
+    channel_type: "stream",
+    visibility: "open",
+    description: "Say hi, ask a question, or share what brought you here.",
+    topic: null,
+    purpose: null,
+    last_message_at: null,
+    archived_at: null,
+    created_by: MOCK_IDENTITY_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 1440,
+    updated_minutes_ago: 1440,
+    members: [createMockMember(MOCK_IDENTITY_PUBKEY, "owner", 1440)],
   }),
   createMockChannel({
     id: "9dae0116-799b-5071-a0a8-fdd30a91a35d",
@@ -5295,6 +5323,51 @@ async function handleGetPresence(
     }
   }
   return result;
+}
+
+async function handleEnsureStarterChannels(
+  config: E2eConfig | undefined,
+): Promise<RawChannelWithMembership[]> {
+  const starterChannelError =
+    config?.mock?.ensureStarterChannelsErrors?.shift();
+  if (starterChannelError) {
+    throw new Error(starterChannelError);
+  }
+
+  const currentPubkey = getMockMemberPubkey(config);
+  const ensureMember = (channel: MockChannel) => {
+    if (
+      channel.members.some(
+        (member) =>
+          normalizePubkey(member.pubkey) === normalizePubkey(currentPubkey),
+      )
+    ) {
+      return;
+    }
+
+    channel.members.push(createCurrentMember(config, "member"));
+    syncMockChannel(channel);
+    touchMockChannel(channel);
+  };
+
+  for (const channelName of [
+    STARTER_GENERAL_CHANNEL_NAME,
+    STARTER_WELCOME_CHANNEL_NAME,
+  ]) {
+    const channel = mockChannels.find(
+      (candidate) =>
+        candidate.name === channelName &&
+        candidate.channel_type === "stream" &&
+        candidate.visibility === "open" &&
+        candidate.archived_at === null,
+    );
+    if (!channel) {
+      throw new Error(`Starter channel ${channelName} not found.`);
+    }
+    ensureMember(channel);
+  }
+
+  return listMockChannels(config);
 }
 
 async function handleCreateChannel(
@@ -9324,6 +9397,8 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleCreateChannel>[0],
           activeConfig,
         );
+      case "ensure_starter_channels":
+        return handleEnsureStarterChannels(activeConfig);
       case "open_dm":
         return handleOpenDm(
           payload as Parameters<typeof handleOpenDm>[0],

@@ -172,6 +172,8 @@ type MockBridgeOptions = {
   channelsReadError?: string;
   /** Reject successive mock `create_channel` calls, then resume. */
   createChannelErrors?: string[];
+  /** Reject successive mock `ensure_starter_channels` calls, then resume. */
+  ensureStarterChannelsErrors?: string[];
   /** Reject successive mock `join_channel` calls, then resume. */
   joinChannelErrors?: string[];
   /** Number of seeded rows in the deep-history fixture. Defaults to 600. */

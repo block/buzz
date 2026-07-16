@@ -1,12 +1,14 @@
 import { expect, test } from "@playwright/test";
 
-import { installMockBridge } from "../helpers/bridge";
+import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { seedActiveIdentity } from "../helpers/onboarding";
 
 // Community deep links that arrive before machine onboarding complete are
 // drained from Rust into a persisted transaction and acknowledged immediately.
 // Invite claiming waits until setup finishes and the final identity is known.
 
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
+const WELCOME_FAILURE_PUBKEY = TEST_IDENTITIES.tyler.pubkey;
 const TRANSACTION_STORAGE_KEY = "buzz-community-onboarding-transaction.v1";
 const COMMUNITY_RELAY_URL = "wss://hive.example.com";
 
@@ -96,6 +98,7 @@ test("Welcome failure can be skipped without abandoning community onboarding", a
   page,
 }) => {
   const welcomeError = "Channel creation is not permitted.";
+  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
   await page.addInitScript(
     ({ pubkey, relayUrl, storageKey }) => {
       window.localStorage.setItem(
@@ -118,14 +121,14 @@ test("Welcome failure can be skipped without abandoning community onboarding", a
       );
     },
     {
-      pubkey: DEFAULT_MOCK_PUBKEY,
+      pubkey: WELCOME_FAILURE_PUBKEY,
       relayUrl: COMMUNITY_RELAY_URL,
       storageKey: TRANSACTION_STORAGE_KEY,
     },
   );
   await installMockBridge(
     page,
-    { createChannelErrors: [welcomeError, welcomeError] },
+    { ensureStarterChannelsErrors: [welcomeError, welcomeError] },
     { relayWsUrl: COMMUNITY_RELAY_URL, skipOnboardingSeed: true },
   );
   await page.goto("/");
@@ -140,7 +143,7 @@ test("Welcome failure can be skipped without abandoning community onboarding", a
   await expect(skip).toBeVisible();
   await skip.click();
 
-  const completionKey = `buzz-community-onboarding-complete.v1:${encodeURIComponent(COMMUNITY_RELAY_URL)}:${DEFAULT_MOCK_PUBKEY}`;
+  const completionKey = `buzz-community-onboarding-complete.v1:${encodeURIComponent(COMMUNITY_RELAY_URL)}:${WELCOME_FAILURE_PUBKEY}`;
   await expect
     .poll(() =>
       page.evaluate(
