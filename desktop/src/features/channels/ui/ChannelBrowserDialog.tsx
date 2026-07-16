@@ -1,14 +1,8 @@
 import * as React from "react";
-import {
-  ArrowDownAZ,
-  ArrowDownWideNarrow,
-  Compass,
-  Search,
-  X,
-  type LucideIcon,
-} from "lucide-react";
+import { Compass, Search, X, type LucideIcon } from "lucide-react";
 
 import type { Channel } from "@/shared/api/types";
+import { ListSortAscending } from "@/shared/ui/icons";
 import {
   Dialog,
   DialogClose,
@@ -23,10 +17,23 @@ import {
   MODAL_SEARCH_SHELL_CLASS,
 } from "@/shared/ui/modalSearchStyles";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 
 const BROWSE_CHANNELS_SHORTCUT_HINT = "\u21E7\u2318O";
 type BrowserTab = "all" | "joined" | "archived";
 type ChannelSort = "alphabetical" | "members";
+
+const CHANNEL_SORT_OPTIONS: { label: string; value: ChannelSort }[] = [
+  { label: "Alphabetical", value: "alphabetical" },
+  { label: "Most members", value: "members" },
+];
 
 function BrowseState({
   icon: Icon,
@@ -351,29 +358,42 @@ export function ChannelBrowserDialog({
             >
               {BROWSE_CHANNELS_SHORTCUT_HINT}
             </span>
-            <Button
-              aria-label={`Sort ${entityLabel}s by ${
-                sort === "alphabetical" ? "most members" : "alphabetical order"
-              }`}
-              aria-pressed={sort === "members"}
-              data-testid="channel-browser-sort"
-              onClick={() => {
-                setSort((current) =>
-                  current === "alphabetical" ? "members" : "alphabetical",
-                );
-                setSelectedIndex(null);
-              }}
-              size="icon-xs"
-              title={sort === "alphabetical" ? "Alphabetical" : "Most members"}
-              type="button"
-              variant="ghost"
-            >
-              {sort === "alphabetical" ? (
-                <ArrowDownAZ />
-              ) : (
-                <ArrowDownWideNarrow />
-              )}
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label={`Sort ${entityLabel}s: ${
+                    sort === "alphabetical" ? "Alphabetical" : "Most members"
+                  }`}
+                  data-testid="channel-browser-sort"
+                  onClick={(event) => event.preventDefault()}
+                  size="icon-xs"
+                  type="button"
+                  variant="ghost"
+                >
+                  <ListSortAscending />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+                <DropdownMenuRadioGroup
+                  onValueChange={(value) => {
+                    setSort(value as ChannelSort);
+                    setSelectedIndex(null);
+                  }}
+                  value={sort}
+                >
+                  {CHANNEL_SORT_OPTIONS.map((option) => (
+                    <DropdownMenuRadioItem
+                      data-testid={`channel-browser-sort-${option.value}`}
+                      key={option.value}
+                      value={option.value}
+                    >
+                      {option.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </DialogHeader>
 
