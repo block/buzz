@@ -367,8 +367,11 @@ export async function getCanvas(channelId: string): Promise<CanvasResponse> {
   });
   return {
     content: response.content,
-    updatedAt: response.updated_at,
-    author: response.author,
+    // Normalize absent keys to null: ensureWelcomeCanvas treats null as
+    // "no canvas yet", and `undefined !== null` would make every fresh
+    // channel look already-seeded.
+    updatedAt: response.updated_at ?? null,
+    author: response.author ?? null,
   };
 }
 

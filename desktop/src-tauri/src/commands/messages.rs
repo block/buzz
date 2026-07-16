@@ -623,10 +623,13 @@ async fn find_managed_agent_channel_message_by_marker(
 fn marker_author_for_scope<'a>(
     marker_scope: Option<&str>,
     agent_pubkey: Option<&'a str>,
-) -> Option<&'a str> {
+) -> Result<Option<&'a str>, String> {
     match marker_scope {
-        Some("channel") => None,
-        _ => agent_pubkey,
+        Some("channel") => Ok(None),
+        Some("agent") | None => agent_pubkey
+            .map(Some)
+            .ok_or_else(|| "agent pubkey is required for agent-scoped markers".to_string()),
+        Some(scope) => Err(format!("unsupported marker scope: {scope}")),
     }
 }
 
@@ -649,14 +652,10 @@ pub async fn has_managed_agent_channel_message_marker(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    find_managed_agent_channel_message_by_marker(
-        &state,
-        marker_author_for_scope(marker_scope.as_deref(), agent_pubkey),
-        &channel_id,
-        marker,
-    )
-    .await
-    .map(|event| event.is_some())
+    let marker_author = marker_author_for_scope(marker_scope.as_deref(), agent_pubkey)?;
+    find_managed_agent_channel_message_by_marker(&state, marker_author, &channel_id, marker)
+        .await
+        .map(|event| event.is_some())
 }
 
 fn stored_managed_agent_auth_tag(auth_tag: Option<&str>) -> Option<String> {
@@ -722,6 +721,7 @@ pub async fn send_managed_agent_channel_message(
     marker_scope: Option<String>,
     mention_pubkeys: Option<Vec<String>>,
     parent_event_id: Option<String>,
+    additional_markers: Option<Vec<String>>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
@@ -766,7 +766,7 @@ pub async fn send_managed_agent_channel_message(
     if let Some(marker) = marker.as_deref() {
         if let Some(existing) = find_managed_agent_channel_message_by_marker(
             &state,
-            marker_author_for_scope(marker_scope.as_deref(), Some(&record.pubkey)),
+            marker_author_for_scope(marker_scope.as_deref(), Some(&record.pubkey))?,
             &channel_id,
             marker,
         )
@@ -786,10 +786,16 @@ pub async fn send_managed_agent_channel_message(
         }
     }
 
-    let client_tags = marker
+    let mut client_tags = marker
         .as_deref()
         .map(|marker| vec![vec!["client".to_string(), marker.to_string()]])
         .unwrap_or_default();
+    for marker in additional_markers.unwrap_or_default() {
+        let marker = marker.trim();
+        if !marker.is_empty() {
+            client_tags.push(vec!["client".to_string(), marker.to_string()]);
+        }
+    }
     let mentions = mention_pubkeys.unwrap_or_default();
     let builder = build_managed_agent_channel_message(
         channel_uuid,

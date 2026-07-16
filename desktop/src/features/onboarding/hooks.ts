@@ -21,6 +21,7 @@ import { ensureWelcomeTeam } from "@/features/onboarding/welcomeGuide";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import type { Channel } from "@/shared/api/types";
 import {
   createChannel,
   deleteChannel,
@@ -30,7 +31,9 @@ import {
   updateChannel,
 } from "@/shared/api/tauri";
 
-export type ChannelInitResult = { ok: true } | { ok: false; reason: string };
+export type ChannelInitResult =
+  | { ok: true; focusChannelId?: string }
+  | { ok: false; reason: string };
 
 export async function initializeStarterChannels(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -49,35 +52,65 @@ export async function initializeStarterChannels(
       ensureStarterChannels: ensureStarterChannelsCommand,
       getChannels,
     });
-    const welcomeChannel = forceFreshOnboarding
-      ? await ensureWelcomeChannel(
-          {
-            createChannel,
-            deleteChannel,
-            getChannelMembers,
-            getChannels,
-            updateChannel,
-          },
-          { replaceExisting: true },
-        )
-      : starterChannels.welcomeChannel;
+    const welcomeChannel = await ensureWelcomeChannel(
+      {
+        createChannel,
+        deleteChannel,
+        getChannelMembers,
+        getChannels,
+        updateChannel,
+      },
+      {
+        replaceExisting: forceFreshOnboarding,
+      },
+    );
 
-    queryClient.setQueryData(channelsQueryKey, starterChannels.channels);
-    await ensureWelcomeTeam(welcomeChannel.id, communityScope);
-    await ensureWelcomeCanvas(welcomeChannel.id);
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
-      queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
-    ]);
-    markWelcomeChannelEnsured(pubkey, communityScope);
-    if (focus) {
-      rememberPendingWelcomeChannel(welcomeChannel.id);
+    queryClient.setQueryData<Channel[]>(channelsQueryKey, (channels = []) => {
+      const ensuredIds = new Set(
+        starterChannels.channels.map((channel) => channel.id),
+      );
+      ensuredIds.add(welcomeChannel.id);
+      return [
+        ...starterChannels.channels,
+        ...(starterChannels.channels.some(
+          (channel) => channel.id === welcomeChannel.id,
+        )
+          ? []
+          : [welcomeChannel]),
+        ...channels.filter((channel) => !ensuredIds.has(channel.id)),
+      ];
+    });
+    try {
+      await ensureWelcomeTeam(welcomeChannel.id, communityScope);
+      await ensureWelcomeCanvas(welcomeChannel.id);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
+      ]);
+      markWelcomeChannelEnsured(pubkey, communityScope);
+    } catch (error) {
+      // The private Welcome channel itself is the first-run landing contract.
+      // Team/canvas seeding can retry from the focused Welcome surface instead
+      // of trapping the user on Home after onboarding.
+      console.warn("Failed to seed the private Welcome experience.", error);
     }
     await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     if (focus) {
+      // Refreshing can briefly replace the optimistic cache with an older relay
+      // snapshot. Reinsert the just-ensured channels before announcing focus so
+      // the route can consume the pending private Welcome channel immediately.
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (channels = []) => {
+        const byId = new Map(
+          [...channels, ...starterChannels.channels, welcomeChannel].map(
+            (channel) => [channel.id, channel],
+          ),
+        );
+        return [...byId.values()];
+      });
+      rememberPendingWelcomeChannel(welcomeChannel.id);
       notifyWelcomeChannelReady(welcomeChannel.id);
     }
-    return { ok: true };
+    return { ok: true, focusChannelId: focus ? welcomeChannel.id : undefined };
   } catch (error) {
     console.warn("Failed to initialize starter channels.", error);
     return {
@@ -538,17 +571,20 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
 
   const completeAndShowWelcome = React.useCallback(() => {
     setIsCompletingStarterSetup(true);
-    gateComplete();
-    void requestStarterChannels(true)
-      .then((starterResult) => {
-        if (!starterResult.ok) {
-          showStarterRetryToast(starterResult.reason);
-        }
-        return refreshChannelsCache(queryClient);
-      })
-      .finally(() => {
-        setIsCompletingStarterSetup(false);
-      });
+    void requestStarterChannels(true).then(async (starterResult) => {
+      await refreshChannelsCache(queryClient);
+      gateComplete();
+      setIsCompletingStarterSetup(false);
+      if (!starterResult.ok) {
+        showStarterRetryToast(starterResult.reason);
+        return;
+      }
+      if (starterResult.focusChannelId) {
+        window.location.hash = `/channels/${encodeURIComponent(
+          starterResult.focusChannelId,
+        )}`;
+      }
+    });
   }, [
     gateComplete,
     queryClient,

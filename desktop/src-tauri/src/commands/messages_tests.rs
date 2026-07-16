@@ -1,13 +1,28 @@
 use super::*;
 
 #[test]
-fn marker_author_scope_defaults_to_agent_and_supports_channel_scope() {
-    assert_eq!(marker_author_for_scope(None, Some("agent")), Some("agent"));
+fn marker_author_scope_validates_scope_and_required_pubkey() {
     assert_eq!(
-        marker_author_for_scope(Some("channel"), Some("agent")),
-        None
+        marker_author_for_scope(None, Some("agent")),
+        Ok(Some("agent"))
     );
-    assert_eq!(marker_author_for_scope(Some("agent"), None), None);
+    assert_eq!(
+        marker_author_for_scope(Some("agent"), Some("agent")),
+        Ok(Some("agent"))
+    );
+    assert_eq!(marker_author_for_scope(Some("channel"), None), Ok(None));
+    assert_eq!(
+        marker_author_for_scope(Some("agent"), None),
+        Err("agent pubkey is required for agent-scoped markers".to_string())
+    );
+    assert_eq!(
+        marker_author_for_scope(None, None),
+        Err("agent pubkey is required for agent-scoped markers".to_string())
+    );
+    assert_eq!(
+        marker_author_for_scope(Some("unexpected"), Some("agent")),
+        Err("unsupported marker scope: unexpected".to_string())
+    );
 }
 
 #[test]
@@ -29,6 +44,26 @@ fn managed_agent_message_builder_adds_mentions_and_client_marker() {
         parts.len() >= 2 && parts[0] == "p" && parts[1] == pubkey
     }));
     assert!(event_has_client_marker(&event, "welcome-v1"));
+}
+
+#[test]
+fn managed_agent_message_builder_can_carry_multiple_client_markers() {
+    let event = build_managed_agent_channel_message(
+        uuid::Uuid::new_v4(),
+        "Welcome!",
+        None,
+        &[],
+        &[
+            vec!["client".to_string(), "opener-v1".to_string()],
+            vec!["client".to_string(), "closer-v1".to_string()],
+        ],
+    )
+    .expect("message should build")
+    .sign_with_keys(&Keys::generate())
+    .expect("message should sign");
+
+    assert!(event_has_client_marker(&event, "opener-v1"));
+    assert!(event_has_client_marker(&event, "closer-v1"));
 }
 
 #[test]

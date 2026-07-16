@@ -5,8 +5,10 @@ import {
   areWelcomeTeammatesOnline,
   buildWelcomeKickoffCloser,
   buildWelcomeKickoffOpener,
+  buildWelcomeKickoffOpenerSendInput,
   createWelcomeKickoffCoordinator,
   resolveWelcomeAgentSet,
+  selectWelcomeKickoffIntroTeammates,
   waitForWelcomeKickoffBeat,
   waitForWelcomeTeammatesOnline,
   welcomeTeammateNeedsRestart,
@@ -45,6 +47,7 @@ test("opener uses current agent names and requests bounded simultaneous intros",
 
   assert.match(opener, /I'm Fizzy/);
   assert.match(opener, /@Honeybee and @Bumble/);
+  assert.doesNotMatch(opener, /@@/);
   assert.match(opener, /sentence or two/);
   assert.match(opener, /Don't start any work yet/);
 });
@@ -81,7 +84,7 @@ test("readiness wait observes agents becoming online without navigation", async 
     waitMs: 1_000,
   });
 
-  assert.equal(ready, true);
+  assert.deepEqual(ready, [honey, bumble]);
   assert.equal(reads, 3);
 });
 
@@ -98,7 +101,7 @@ test("readiness wait retries transient presence failures", async () => {
     waitMs: 1_000,
   });
 
-  assert.equal(ready, true);
+  assert.deepEqual(ready, [honey, bumble]);
   assert.equal(reads, 2);
 });
 
@@ -112,7 +115,7 @@ test("readiness wait cancels when Welcome loses focus", async () => {
     waitMs: 1_000,
   });
 
-  assert.equal(ready, false);
+  assert.deepEqual(ready, []);
 });
 
 test("kickoff beat waits for the configured pacing interval", async () => {
@@ -192,4 +195,54 @@ test("running teammates restart when their allowlist does not include the lead",
     ),
     true,
   );
+});
+
+test("opener keeps partial-readiness warm and mentions only online teammates", () => {
+  const agentSet = { lead: fizz, teammates: [honey, bumble] };
+  const introTeammates = selectWelcomeKickoffIntroTeammates(
+    agentSet.teammates,
+    [honey],
+  );
+  const input = buildWelcomeKickoffOpenerSendInput(
+    agentSet,
+    introTeammates,
+    "welcome-1",
+  );
+
+  assert.deepEqual(input.mentionPubkeys, [honey.pubkey]);
+  assert.deepEqual(input.additionalMarkers, []);
+  assert.match(input.content, /@Honey, introduce yourself/);
+  assert.doesNotMatch(input.content, /@@/);
+  assert.doesNotMatch(
+    input.content,
+    /Bumble.*trouble|couldn't start|taking longer/i,
+  );
+});
+
+test("opener degrades to one seeded Fizz message when no teammate comes online", () => {
+  const agentSet = { lead: fizz, teammates: [honey, bumble] };
+  const input = buildWelcomeKickoffOpenerSendInput(agentSet, [], "welcome-1");
+
+  assert.deepEqual(input.mentionPubkeys, []);
+  assert.equal(input.additionalMarkers.length, 1);
+  assert.match(input.content, /I'm here with Honey and Bumble/);
+  assert.match(input.content, /What can we help you build/);
+  assert.doesNotMatch(
+    input.content,
+    /introduce yourselves|trouble|couldn't start|taking longer/i,
+  );
+});
+
+test("readiness wait returns the subset that became online by the deadline", async () => {
+  const online = await waitForWelcomeTeammatesOnline([honey, bumble], {
+    isCancelled: () => false,
+    loadPresence: async () => ({
+      [honey.pubkey]: "online",
+      [bumble.pubkey]: "offline",
+    }),
+    pollMs: 0,
+    waitMs: 1,
+  });
+
+  assert.deepEqual(online, [honey]);
 });

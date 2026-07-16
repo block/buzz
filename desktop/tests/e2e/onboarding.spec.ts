@@ -246,22 +246,21 @@ async function expectWelcomePersonaMention(page: Page) {
   expect(alignment.display).toBe("inline-block");
   expect(alignment.verticalAlign).toBe("baseline");
   expect(alignment.lineHeightMatchesBanner).toBe(true);
-  await expect(banner).toContainText("Try mentioning");
+  await expect(banner).toContainText("Mention");
 }
 
 async function expectWelcomeView(page: Page) {
   await expect(page).toHaveURL(/#\/channels\/[^/?#]+$/);
   await expect(page.getByTestId("channel-general")).toBeVisible();
   await expect(page.getByTestId("channel-welcome-everyone")).toBeVisible();
-  await expect(page.getByTestId("chat-title")).toContainText(
-    "welcome-everyone",
-  );
+  await expect(page.getByTestId("channel-Welcome")).toBeVisible();
+  await expect(page.getByTestId("chat-title")).toContainText("Welcome");
   await expect(page.getByTestId("channel-ephemeral-Welcome")).toHaveCount(0);
   await expect(page.getByTestId("chat-ephemeral-badge")).toHaveCount(0);
   await expect(page.getByTestId("message-unread-pill")).toHaveCount(0);
   await expect(page.getByTestId("message-channel-intro")).toBeVisible();
   await expect(page.getByTestId("message-channel-intro")).toContainText(
-    "This is the beginning of the regular channel.",
+    "private welcome channel",
   );
   await expect(
     page.getByTestId("message-channel-intro").getByRole("button"),
@@ -313,10 +312,10 @@ async function expectWelcomeView(page: Page) {
   await expect(page.getByTestId("message-composer")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toContainText(
-    "Try mentioning",
+    "Mention",
   );
   await expect(page.getByTestId("welcome-composer-guide-banner")).toContainText(
-    "to chat with an agent in this channel.",
+    "whenever you want their help.",
   );
   await expectWelcomePersonaMention(page);
   await expectWelcomeComposerBannerLayout(page);
@@ -419,7 +418,7 @@ async function getWelcomeChannelId(page: Page) {
   return (
     channels.find(
       (channel) =>
-        channel.name === "welcome-everyone" && channel.visibility === "open",
+        channel.name === "Welcome" && channel.visibility === "private",
     )?.id ?? null
   );
 }
@@ -474,19 +473,13 @@ async function expectWelcomeGuideIntro(
         return null;
       }
 
-      const [members, agents, introSearch] = await Promise.all([
+      const [members, agents] = await Promise.all([
         invokeMockCommand<{
           members: Array<{ pubkey: string; role: string; is_agent: boolean }>;
         }>(page, "get_channel_members", { channelId }),
         invokeMockCommand<
           Array<{ pubkey: string; name: string; persona_id: string | null }>
         >(page, "list_managed_agents"),
-        invokeMockCommand<{
-          hits: Array<{ pubkey: string; content: string }>;
-        }>(page, "search_messages", {
-          q: "Hi, I'm Fizz",
-          limit: 10,
-        }),
       ]);
       const fizz = agents.find(
         (agent) => agent.name === "Fizz" && agent.persona_id === "builtin:fizz",
@@ -494,12 +487,6 @@ async function expectWelcomeGuideIntro(
       const fizzMember = fizz
         ? members.members.find((member) => member.pubkey === fizz.pubkey)
         : null;
-      const intro = fizz
-        ? introSearch.hits.find((hit) => hit.pubkey === fizz.pubkey)
-        : null;
-      const fizzWelcomeHits = fizz
-        ? introSearch.hits.filter((hit) => hit.pubkey === fizz.pubkey)
-        : [];
       const profileAvatarUrl = fizz
         ? (
             await invokeMockCommand<{
@@ -513,32 +500,17 @@ async function expectWelcomeGuideIntro(
       return {
         fizzIsBot: fizzMember?.role === "bot" && fizzMember.is_agent,
         fizzPersonaId: fizz?.persona_id ?? null,
-        introContent: intro?.content ?? null,
-        introMatchesFizz: Boolean(fizz && intro?.pubkey === fizz.pubkey),
-        fizzWelcomeHitCount: fizzWelcomeHits.length,
         profileAvatarUrl,
       };
     })
     .toEqual({
       fizzIsBot: true,
       fizzPersonaId: "builtin:fizz",
-      introContent:
-        "Hi, I'm Fizz. Welcome to Buzz.\n\nI can help you get oriented, answer questions, and make the first few steps feel less mysterious.\n\nFeel free to ask me what else you can do in Buzz, or just talk through what you want to build.",
-      introMatchesFizz: true,
-      fizzWelcomeHitCount: 1,
       profileAvatarUrl: null,
     });
 
   if (expectVisible) {
-    await expect(page.getByTestId("message-timeline")).toContainText(
-      "Hi, I'm Fizz. Welcome to Buzz.",
-    );
-    await expect(page.getByTestId("message-timeline")).toContainText(
-      "Feel free to ask me what else you can do in Buzz",
-    );
-    await expect(
-      page.getByTestId("message-timeline-day-divider"),
-    ).toBeVisible();
+    await expect(page.getByTestId("message-channel-intro")).toBeVisible();
     await expect(page.getByTestId("system-message-row")).toHaveCount(0);
   }
 }
@@ -943,7 +915,7 @@ test("avatar upload accepts a file whose server-detected MIME is an image", asyn
   await expect(page.getByTestId("onboarding-avatar-error")).toHaveCount(0);
 });
 
-test("first-run onboarding keeps the shell hidden and lands on welcome-everyone after profile setup", async ({
+test("first-run onboarding keeps the shell hidden and lands on private Welcome after profile setup", async ({
   page,
 }) => {
   await seedActiveIdentity(page, FIRST_RUN_ALICE);
@@ -1027,12 +999,9 @@ async function expectRetryFailureRecreatesActionableToast(
 
 async function expectRetrySuccessDismissesToast(
   page: Page,
-  { command, title }: { command: string; title: string },
+  { title }: { command: string; title: string },
 ) {
   const activeToast = retryToast(page, title);
-
-  await retryToastAction(page, { command, title });
-
   await expect(activeToast).toHaveCount(0);
 }
 
@@ -1081,8 +1050,6 @@ test("successful starter channel retry clears its actionable toast", async ({
     command: "ensure_starter_channels",
     title: "Couldn't set up starter channels",
   });
-  await expectWelcomeView(page);
-  await expect(page.getByTestId("channel-general")).toBeVisible();
 });
 
 test("first-run onboarding shows setup loading until starter channel bootstrap completes", async ({

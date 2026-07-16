@@ -23,7 +23,15 @@ pub async fn get_canvas(
     .await?;
 
     let Some(event) = events.first() else {
-        return Ok(serde_json::json!({ "content": "" }));
+        // Explicit nulls: the TS caller distinguishes "no canvas yet" from
+        // "canvas exists" via `updated_at`/`author`, so these keys must be
+        // present (absent keys deserialize as `undefined`, not `null`).
+        return Ok(serde_json::json!({
+            "content": "",
+            "event_id": null,
+            "updated_at": null,
+            "author": null,
+        }));
     };
 
     Ok(serde_json::json!({

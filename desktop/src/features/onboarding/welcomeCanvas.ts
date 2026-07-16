@@ -19,13 +19,23 @@ Bring the team something you are building, or give them a quick challenge to see
 Ask the team a question here, or read the [Buzz user guide](https://github.com/block/buzz#readme).
 `;
 
+type WelcomeCanvasClient = {
+  getCanvas: typeof getCanvas;
+  setCanvas: typeof setCanvas;
+};
+
 /** Seed the Welcome canvas without overwriting anything the user has written. */
-export async function ensureWelcomeCanvas(channelId: string) {
-  const existing = await getCanvas(channelId);
-  if (existing.updatedAt !== null || existing.author !== null) {
+export async function ensureWelcomeCanvas(
+  channelId: string,
+  client: WelcomeCanvasClient = { getCanvas, setCanvas },
+) {
+  const existing = await client.getCanvas(channelId);
+  // Nullish (not `!== null`) so an absent field can never masquerade as an
+  // existing canvas — that exact mismatch silently skipped seeding before.
+  if (existing.updatedAt != null || existing.author != null) {
     return false;
   }
 
-  await setCanvas({ channelId, content: WELCOME_CANVAS_CONTENT });
+  await client.setCanvas({ channelId, content: WELCOME_CANVAS_CONTENT });
   return true;
 }

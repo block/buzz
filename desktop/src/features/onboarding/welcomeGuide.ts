@@ -34,11 +34,7 @@ export const WELCOME_TEAM_STARTERS = [
   { name: "Bumble", personaId: "builtin:bumble", role: "teammate" },
 ] as const satisfies readonly WelcomeTeamStarterDefinition[];
 
-export type WelcomeTeamAgents = readonly [
-  ManagedAgent,
-  ManagedAgent,
-  ManagedAgent,
-];
+export type WelcomeTeamAgents = [ManagedAgent, ManagedAgent, ManagedAgent];
 
 function normalizeRelayUrl(relayUrl: string | null | undefined) {
   return relayUrl?.trim().replace(/\/+$/, "") ?? null;
@@ -232,12 +228,14 @@ export async function ensureWelcomeTeam(
     });
     agents.push(created.agent);
   }
-  if (agents.length !== WELCOME_TEAM_STARTERS.length) {
+  const [lead, honey, bumble] = agents;
+  if (!lead || !honey || !bumble) {
     throw new Error("Welcome Team provisioning did not return every starter.");
   }
-  const welcomeAgents = agents as unknown as WelcomeTeamAgents;
-  const leadPubkey = welcomeAgents[0].pubkey;
-  for (const teammate of welcomeAgents.slice(1)) {
+  const welcomeAgents: WelcomeTeamAgents = [lead, honey, bumble];
+  const leadPubkey = lead.pubkey;
+  for (const index of [1, 2] as const) {
+    const teammate = welcomeAgents[index];
     const alreadyAllowsLead =
       teammate.respondTo === "allowlist" &&
       teammate.respondToAllowlist.some(
@@ -249,10 +247,7 @@ export async function ensureWelcomeTeam(
         respondTo: "allowlist",
         respondToAllowlist: [leadPubkey],
       });
-      const index = agents.findIndex(
-        (agent) => agent.pubkey === teammate.pubkey,
-      );
-      if (index >= 0) agents[index] = updated.agent;
+      welcomeAgents[index] = updated.agent;
     }
   }
   await ensureWelcomeTeamMembership(channelId, welcomeAgents);
