@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Bot, Hash, LogIn, Plus, Sparkles, UserPlus } from "lucide-react";
+import { HashSearch } from "@/shared/ui/icons";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
@@ -100,6 +101,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onChannelManagementDeleted,
   onCloseProfilePanel,
   onAddAgent,
+  onBrowseChannels,
   onCreateChannel,
   onCloseThread,
   onDelete,
@@ -437,6 +439,24 @@ export const ChannelPane = React.memo(function ChannelPane({
 
     const actions = [];
     if (isWelcomeChannel(activeChannel)) {
+      if (onBrowseChannels) {
+        actions.push({
+          icon: <HashSearch aria-hidden className="h-6 w-6" />,
+          label: "Browse channels",
+          onClick: onBrowseChannels,
+          testId: "welcome-intro-action-browse-channels",
+        });
+      }
+
+      if (onCreateChannel) {
+        actions.push({
+          icon: <Plus aria-hidden className="h-6 w-6" />,
+          label: "Create a channel",
+          onClick: onCreateChannel,
+          testId: "welcome-intro-action-create-channel",
+        });
+      }
+
       if (onAddAgent) {
         actions.push({
           icon: <Bot aria-hidden className="h-6 w-6" />,
@@ -447,15 +467,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                 messageTimelineRef.current?.scrollToBottomOnNextUpdate(),
             }),
           testId: "welcome-intro-action-create-agent",
-        });
-      }
-
-      if (onCreateChannel) {
-        actions.push({
-          icon: <Plus aria-hidden className="h-6 w-6" />,
-          label: "Create a channel",
-          onClick: onCreateChannel,
-          testId: "welcome-intro-action-create-channel",
         });
       }
 
@@ -496,7 +507,13 @@ export const ChannelPane = React.memo(function ChannelPane({
       channelName: activeChannel.name,
       description: getChannelIntroDescription(activeChannel),
     };
-  }, [activeChannel, onAddAgent, onCreateChannel, onOpenMembers]);
+  }, [
+    activeChannel,
+    onAddAgent,
+    onBrowseChannels,
+    onCreateChannel,
+    onOpenMembers,
+  ]);
 
   const visibleMessages = React.useMemo(() => {
     if (!isWelcomeChannel(activeChannel)) {

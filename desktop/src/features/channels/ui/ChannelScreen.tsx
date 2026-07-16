@@ -93,6 +93,7 @@ export function ChannelScreen({
   targetMessageId,
 }: ChannelScreenProps) {
   const { goHome } = useAppNavigation();
+  const { openBrowseChannels, ...appShell } = useAppShell();
   const {
     markChannelRead,
     markChannelUnread,
@@ -108,7 +109,7 @@ export function ChannelScreen({
     isNotifiedForThread,
     isThreadMuted,
     readStateVersion,
-  } = useAppShell();
+  } = appShell;
   const {
     channelManagementOpen,
     clearAutoSend,
@@ -665,12 +666,10 @@ export function ChannelScreen({
       setThreadScrollTargetId(null);
       return;
     }
-
     if (openThreadHeadMessage && !threadReplyTargetId) {
       setThreadReplyTargetId(openThreadHeadMessage.id);
       return;
     }
-
     if (threadReplyTargetId && !threadReplyTargetMessage) {
       setThreadReplyTargetId(openThreadHeadMessage?.id ?? null);
     }
@@ -856,6 +855,7 @@ export function ChannelScreen({
                   hasOlderMessages={hasOlderMessages}
                   historyExhausted={historyExhausted}
                   onAddAgent={handleOpenAddBot}
+                  onBrowseChannels={openBrowseChannels}
                   onCreateChannel={openCreateChannel}
                   onOpenMembers={handleOpenMembersSidebar}
                   isFetchingOlder={isFetchingOlder}

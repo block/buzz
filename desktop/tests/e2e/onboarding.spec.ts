@@ -265,6 +265,28 @@ async function expectWelcomeView(page: Page) {
     "A few good first steps",
   );
   await expect(
+    page.getByTestId("message-channel-intro").getByRole("button"),
+  ).toHaveText(["Browse channels", "Create a channel", "Create an agent"]);
+  await expect(
+    page.getByTestId("welcome-intro-action-browse-channels"),
+  ).toBeVisible();
+  await expectWiderThanTall(
+    page.getByTestId("welcome-intro-action-browse-channels"),
+  );
+  await expectIntroActionIconStackedAboveTitle(
+    page.getByTestId("welcome-intro-action-browse-channels"),
+    "Browse channels",
+  );
+  await page.getByTestId("welcome-intro-action-browse-channels").click();
+  await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
+  await expect(page.getByTestId("channel-browser-search")).toBeFocused();
+  await expect(page.getByRole("tab", { name: "All channels" })).toHaveAttribute(
+    "data-state",
+    "active",
+  );
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("channel-browser-dialog")).toHaveCount(0);
+  await expect(
     page.getByTestId("welcome-intro-action-create-channel"),
   ).toBeVisible();
   await expectWiderThanTall(

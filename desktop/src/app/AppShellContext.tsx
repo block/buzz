@@ -15,6 +15,7 @@ type AppShellContextValue = {
     options?: { topLevelOnly?: boolean },
   ) => void;
   markChannelUnread: (channelId: string) => void;
+  openBrowseChannels: () => void;
   openCreateChannel: () => void;
   openChannelManagement: (channelId?: string) => void;
   // NIP-RS read marker for a channel as a unix-seconds timestamp, or null
@@ -56,6 +57,7 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   markAllChannelsRead: () => {},
   markChannelRead: () => {},
   markChannelUnread: () => {},
+  openBrowseChannels: () => {},
   openCreateChannel: () => {},
   openChannelManagement: () => {},
   getChannelReadAt: () => null,
