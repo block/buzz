@@ -2,6 +2,7 @@ import * as React from "react";
 import type { QueryClient } from "@tanstack/react-query";
 
 import {
+  getIdentity,
   importIdentity,
   persistCurrentIdentity,
 } from "@/shared/api/tauriIdentity";
@@ -33,7 +34,29 @@ export function MachineOnboardingFlow({
     null,
   );
 
-  const persistFreshIdentity = React.useCallback(async () => {
+  const loadFreshIdentity = React.useCallback(async () => {
+    setIsPending(true);
+    setError(null);
+    try {
+      const identity = await getIdentity();
+      queryClient.setQueryData(["identity"], identity);
+      setSelectedPubkey(identity.pubkey);
+      setPage("backup");
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Failed to load identity",
+      );
+    } finally {
+      setIsPending(false);
+    }
+  }, [queryClient]);
+
+  const replaceLostIdentity = React.useCallback(async () => {
+    const confirmed = window.confirm(
+      "This will create a new identity and abandon your previous key. This cannot be undone. Continue?",
+    );
+    if (!confirmed) return;
+
     setIsPending(true);
     setError(null);
     try {
@@ -95,7 +118,7 @@ export function MachineOnboardingFlow({
               <Button
                 className="h-10 w-full"
                 disabled={isPending}
-                onClick={() => void persistFreshIdentity()}
+                onClick={() => void loadFreshIdentity()}
                 type="button"
               >
                 {isPending ? "Saving identity…" : "Get started"}
@@ -126,9 +149,10 @@ export function MachineOnboardingFlow({
                 : "Import your Nostr private key to use that identity with Buzz."}
             </p>
             <NostrKeyImportForm
+              backLabel={identityLost ? "Start new identity" : "Back"}
               onBack={
                 identityLost
-                  ? () => void persistFreshIdentity()
+                  ? () => void replaceLostIdentity()
                   : () => setPage("identity")
               }
               onImport={importExistingIdentity}
