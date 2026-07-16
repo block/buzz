@@ -91,6 +91,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   isSinglePanelView = false,
   isSending,
   isTimelineLoading,
+  entranceMessageId = null,
+  onEntranceMessageComplete,
   messages,
   threadSummaries,
   firstUnreadMessageId = null,
@@ -690,6 +692,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                 : "No channel selected"
             }
             isLoading={isTimelineLoading}
+            entranceMessageId={entranceMessageId}
+            onEntranceMessageComplete={onEntranceMessageComplete}
             mainEntries={mainTimelineEntries}
             threadSummaries={threadSummaries}
             messages={visibleMessages}

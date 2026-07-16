@@ -695,6 +695,7 @@ fn managed_agent_submission_auth_tag(
 fn build_managed_agent_channel_message(
     channel_id: uuid::Uuid,
     content: &str,
+    thread_ref: Option<&events::ThreadRef>,
     mention_pubkeys: &[String],
     client_tags: &[Vec<String>],
 ) -> Result<nostr::EventBuilder, String> {
@@ -702,7 +703,7 @@ fn build_managed_agent_channel_message(
     events::build_message_with_client_tags(
         channel_id,
         content,
-        None,
+        thread_ref,
         &mention_refs,
         &[],
         &[],
@@ -720,6 +721,7 @@ pub async fn send_managed_agent_channel_message(
     marker: Option<String>,
     marker_scope: Option<String>,
     mention_pubkeys: Option<Vec<String>>,
+    parent_event_id: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
@@ -756,6 +758,10 @@ pub async fn send_managed_agent_channel_message(
     }
     let submission_auth_tag =
         managed_agent_submission_auth_tag(&record, &state, &keys.public_key())?;
+    let thread_ref = match parent_event_id.as_deref() {
+        Some(parent_id) => Some(resolve_thread_ref(parent_id, &state).await?),
+        None => None,
+    };
 
     if let Some(marker) = marker.as_deref() {
         if let Some(existing) = find_managed_agent_channel_message_by_marker(
@@ -768,9 +774,13 @@ pub async fn send_managed_agent_channel_message(
         {
             return Ok(SendChannelMessageResponse {
                 event_id: existing.id.to_hex(),
-                parent_event_id: None,
-                root_event_id: None,
-                depth: 0,
+                parent_event_id: thread_ref
+                    .as_ref()
+                    .map(|reference| reference.parent_event_id.to_hex()),
+                root_event_id: thread_ref
+                    .as_ref()
+                    .map(|reference| reference.root_event_id.to_hex()),
+                depth: if thread_ref.is_some() { 1 } else { 0 },
                 created_at: existing.created_at.as_secs() as i64,
             });
         }
@@ -781,16 +791,21 @@ pub async fn send_managed_agent_channel_message(
         .map(|marker| vec![vec!["client".to_string(), marker.to_string()]])
         .unwrap_or_default();
     let mentions = mention_pubkeys.unwrap_or_default();
-    let builder =
-        build_managed_agent_channel_message(channel_uuid, trimmed, &mentions, &client_tags)?;
+    let builder = build_managed_agent_channel_message(
+        channel_uuid,
+        trimmed,
+        thread_ref.as_ref(),
+        &mentions,
+        &client_tags,
+    )?;
     let result =
         submit_event_with_keys(builder, &state, &keys, submission_auth_tag.as_deref()).await?;
 
     Ok(SendChannelMessageResponse {
         event_id: result.event_id,
-        parent_event_id: None,
-        root_event_id: None,
-        depth: 0,
+        parent_event_id: parent_event_id.clone(),
+        root_event_id: thread_ref.map(|reference| reference.root_event_id.to_hex()),
+        depth: if parent_event_id.is_some() { 1 } else { 0 },
         created_at: chrono::Utc::now().timestamp(),
     })
 }

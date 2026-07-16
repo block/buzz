@@ -51,6 +51,8 @@ type MessageTimelineProps = {
     participants: DirectMessageIntroParticipant[];
   } | null;
   isLoading?: boolean;
+  entranceMessageId?: string | null;
+  onEntranceMessageComplete?: (messageId: string) => void;
   emptyTitle?: string;
   emptyDescription?: string;
   currentPubkey?: string;
@@ -166,6 +168,8 @@ const MessageTimelineBase = React.forwardRef<
     mainEntries,
     threadSummaries,
     isLoading = false,
+    entranceMessageId = null,
+    onEntranceMessageComplete,
     emptyTitle = "No messages yet",
     emptyDescription = "Send the first message to start the thread.",
     currentPubkey,
@@ -686,6 +690,8 @@ const MessageTimelineBase = React.forwardRef<
       huddleMemberPubkeysPending={huddleMemberPubkeysPending}
       isFollowingThreadById={isFollowingThreadById}
       isMessageUnreadById={isMessageUnreadById}
+      entranceMessageId={entranceMessageId}
+      onEntranceMessageComplete={onEntranceMessageComplete}
       messageFooters={messageFooters}
       mainEntries={renderedMessages === messages ? mainEntries : undefined}
       leadingContent={virtualizedLeadingContent}

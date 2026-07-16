@@ -53,6 +53,9 @@ export type ChannelPaneProps = {
   isSinglePanelView?: boolean;
   isSending: boolean;
   isTimelineLoading: boolean;
+  /** Newly-created message that should receive the one-shot conversation arrival motion. */
+  entranceMessageId?: string | null;
+  onEntranceMessageComplete?: (messageId: string) => void;
   messages: TimelineMessage[];
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   firstUnreadMessageId?: string | null;

@@ -16,7 +16,11 @@ import {
   type WelcomeTeamStarterDefinition,
 } from "@/features/onboarding/welcomeGuide";
 import { isWelcomeChannel } from "@/features/onboarding/welcome";
-import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
+import { getThreadReference } from "@/features/messages/lib/threading";
+import {
+  startManagedAgent,
+  stopManagedAgent,
+} from "@/shared/api/tauriManagedAgents";
 import { hasManagedAgentChannelMessageMarker } from "@/shared/api/tauriManagedAgentMessageMarkers";
 import { sendManagedAgentChannelMessage } from "@/shared/api/tauriManagedAgentMessages";
 import { getPresence } from "@/shared/api/tauri";
@@ -38,12 +42,39 @@ export const WELCOME_KICKOFF_PROVIDER_MESSAGE =
 
 const WELCOME_KICKOFF_CTA =
   "What can we help you build? Bring us something you're working on, or give us a quick challenge to see how we work together.";
-const kickoffInFlight = new Set<string>();
+export function createWelcomeKickoffCoordinator() {
+  const controllers = new Map<string, AbortController>();
+  return {
+    begin(channelId: string) {
+      if (controllers.has(channelId)) return null;
+      const controller = new AbortController();
+      controllers.set(channelId, controller);
+      return controller;
+    },
+    cancel(channelId: string) {
+      controllers.get(channelId)?.abort();
+      controllers.delete(channelId);
+    },
+    finish(channelId: string, controller: AbortController) {
+      if (controllers.get(channelId) === controller) {
+        controllers.delete(channelId);
+      }
+    },
+  };
+}
+
+const kickoffCoordinator = createWelcomeKickoffCoordinator();
 const closerInFlight = new Set<string>();
 const TEAMMATE_READY_POLL_MS = 250;
-const TEAMMATE_READY_WAIT_MS = 15_000;
+const TEAMMATE_READY_WAIT_MS = 60_000;
+const TEAMMATE_INTRO_WAIT_MS = 15_000;
 const KICKOFF_BEAT_MS = 3_000;
+const CLOSER_BEAT_MS = 10_000;
 const closerAbortControllers = new Map<string, AbortController>();
+const closerTimeouts = new Map<
+  string,
+  ReturnType<typeof globalThis.setTimeout>
+>();
 
 type WelcomeAgentSet = {
   lead: ManagedAgent;
@@ -129,12 +160,29 @@ export async function waitForWelcomeKickoffBeat(
   });
 }
 
-export function buildWelcomeKickoffCloser(failedNames: readonly string[]) {
-  if (failedNames.length === 0) return WELCOME_KICKOFF_CTA;
-  if (failedNames.length === 1) {
+export function buildWelcomeKickoffCloser(
+  failedNames: readonly string[],
+  delayedNames: readonly string[] = [],
+) {
+  if (failedNames.length === 0 && delayedNames.length === 0) {
+    return WELCOME_KICKOFF_CTA;
+  }
+  if (failedNames.length === 1 && delayedNames.length === 0) {
     return `${failedNames[0]} is having trouble starting — you can check on them in Agents.\n\n${WELCOME_KICKOFF_CTA}`;
   }
-  return `${failedNames.join(" and ")} couldn't start. You can check on them in Agents; I'm still here to help.\n\n${WELCOME_KICKOFF_CTA}`;
+  if (failedNames.length > 1 && delayedNames.length === 0) {
+    return `${failedNames.join(" and ")} couldn't start. You can check on them in Agents; I'm still here to help.\n\n${WELCOME_KICKOFF_CTA}`;
+  }
+  if (failedNames.length === 0 && delayedNames.length === 1) {
+    return `${delayedNames[0]} is taking longer to reply — I'm still here to help.\n\n${WELCOME_KICKOFF_CTA}`;
+  }
+  const names = [...failedNames, ...delayedNames].join(" and ");
+  return `${names} are taking longer than expected. I'm still here to help.\n\n${WELCOME_KICKOFF_CTA}`;
+}
+
+function isReplyToOpener(event: RelayEvent, opener: RelayEvent) {
+  const threadRef = getThreadReference(event.tags);
+  return threadRef.rootId === opener.id || threadRef.parentId === opener.id;
 }
 
 function introAuthorsAfterOpener(
@@ -144,7 +192,11 @@ function introAuthorsAfterOpener(
 ) {
   const authors = new Set(
     events
-      .filter((event) => event.created_at >= opener.created_at)
+      .filter(
+        (event) =>
+          event.created_at >= opener.created_at &&
+          isReplyToOpener(event, opener),
+      )
       .map((event) => normalizePubkey(event.pubkey)),
   );
   return new Set(
@@ -172,10 +224,63 @@ async function markerExists(channelId: string, marker: string) {
   });
 }
 
+export function welcomeTeammateNeedsRestart(
+  agent: ManagedAgent,
+  leadPubkey: string,
+) {
+  return (
+    agent.status === "running" &&
+    (agent.needsRestart ||
+      agent.respondTo !== "allowlist" ||
+      !agent.respondToAllowlist.some(
+        (pubkey) => normalizePubkey(pubkey) === normalizePubkey(leadPubkey),
+      ))
+  );
+}
+
+export async function restartWelcomeTeammate(
+  agent: ManagedAgent,
+  options: {
+    stopAgent?: typeof stopManagedAgent;
+    startAgent?: typeof startManagedAgent;
+  } = {},
+) {
+  const stopAgent = options.stopAgent ?? stopManagedAgent;
+  const startAgent = options.startAgent ?? startManagedAgent;
+  if (agent.status === "running") {
+    await stopAgent(agent.pubkey);
+  }
+  return startAgent(agent.pubkey);
+}
+
+async function sendWelcomeKickoffCloser({
+  agentSet,
+  channelId,
+  content,
+  opener,
+}: {
+  agentSet: WelcomeAgentSet;
+  channelId: string;
+  content: string;
+  opener: RelayEvent;
+}) {
+  if (await markerExists(channelId, closerMarker)) return;
+
+  await sendManagedAgentChannelMessage({
+    agentPubkey: agentSet.lead.pubkey,
+    channelId,
+    content,
+    marker: closerMarker,
+    markerScope: "channel",
+    parentEventId: opener.id,
+  });
+}
+
 /** Runs the Welcome choreography only while the Welcome channel is focused. */
 export function useWelcomeKickoff(
   activeChannel: Channel | null,
   channelEvents: readonly RelayEvent[],
+  onKickoffOpenerPosted?: (eventId: string) => void,
 ) {
   const queryClient = useQueryClient();
   const { activeCommunity } = useCommunities();
@@ -186,6 +291,8 @@ export function useWelcomeKickoff(
   const isActiveWelcome = isWelcomeChannel(activeChannel);
   const focusedWelcomeChannelRef = React.useRef<string | null>(null);
   focusedWelcomeChannelRef.current = isActiveWelcome ? channelId : null;
+  const channelEventsRef = React.useRef(channelEvents);
+  channelEventsRef.current = channelEvents;
   const agentSet = React.useMemo(() => {
     const relayUrl = activeCommunity?.relayUrl?.trim().replace(/\/+$/, "");
     return resolveWelcomeAgentSet(
@@ -204,30 +311,32 @@ export function useWelcomeKickoff(
       !channelId ||
       !isActiveWelcome ||
       configLoading ||
-      runtimesQuery.isPending ||
-      kickoffInFlight.has(channelId)
+      runtimesQuery.isPending
     ) {
       return;
     }
 
-    let cancelled = false;
+    const kickoffController = kickoffCoordinator.begin(channelId);
+    if (!kickoffController) return;
     const isCancelled = () =>
-      cancelled || focusedWelcomeChannelRef.current !== channelId;
-    const landingBeatController = new AbortController();
+      kickoffController.signal.aborted ||
+      focusedWelcomeChannelRef.current !== channelId;
     const landingBeat = waitForWelcomeKickoffBeat({
-      signal: landingBeatController.signal,
+      signal: kickoffController.signal,
     });
-    kickoffInFlight.add(channelId);
     void (async () => {
       try {
-        const resolvedAgentSet = agentSet;
-        if (!resolvedAgentSet) {
-          await ensureWelcomeTeam(channelId, activeCommunity?.relayUrl);
-          await queryClient.invalidateQueries({
-            queryKey: managedAgentsQueryKey,
-          });
-          return;
-        }
+        const welcomeTeam = await ensureWelcomeTeam(
+          channelId,
+          activeCommunity?.relayUrl,
+        );
+        await queryClient.invalidateQueries({
+          queryKey: managedAgentsQueryKey,
+        });
+        const resolvedAgentSet: WelcomeAgentSet = {
+          lead: welcomeTeam[0],
+          teammates: [welcomeTeam[1], welcomeTeam[2]],
+        };
 
         if (await markerExists(channelId, closerMarker)) {
           return;
@@ -251,11 +360,22 @@ export function useWelcomeKickoff(
           ? resolvedAgentSet.teammates
           : [resolvedAgentSet.lead, ...resolvedAgentSet.teammates];
         const startResults = await Promise.allSettled(
-          agentsToStart.map((agent) =>
-            agent.status === "running" || agent.status === "deployed"
+          agentsToStart.map((agent) => {
+            const isTeammate = resolvedAgentSet.teammates.some(
+              (teammate) =>
+                normalizePubkey(teammate.pubkey) ===
+                normalizePubkey(agent.pubkey),
+            );
+            if (
+              isTeammate &&
+              welcomeTeammateNeedsRestart(agent, resolvedAgentSet.lead.pubkey)
+            ) {
+              return restartWelcomeTeammate(agent);
+            }
+            return agent.status === "running" || agent.status === "deployed"
               ? Promise.resolve(agent)
-              : startManagedAgent(agent.pubkey),
-          ),
+              : startManagedAgent(agent.pubkey);
+          }),
         );
         for (const [index, result] of startResults.entries()) {
           if (result.status === "rejected") {
@@ -282,7 +402,7 @@ export function useWelcomeKickoff(
         }
         if (!(await landingBeat) || isCancelled()) return;
 
-        await sendManagedAgentChannelMessage({
+        const openerResult = await sendManagedAgentChannelMessage({
           agentPubkey: resolvedAgentSet.lead.pubkey,
           channelId,
           content: buildWelcomeKickoffOpener(
@@ -295,35 +415,37 @@ export function useWelcomeKickoff(
             (agent) => agent.pubkey,
           ),
         });
+        if (!isCancelled()) onKickoffOpenerPosted?.(openerResult.eventId);
       } catch (error) {
         console.warn("Failed to start the Welcome team kickoff.", error);
       } finally {
-        kickoffInFlight.delete(channelId);
+        kickoffCoordinator.finish(channelId, kickoffController);
       }
     })();
-    return () => {
-      cancelled = true;
-      landingBeatController.abort();
-    };
   }, [
     activeCommunity?.relayUrl,
-    agentSet,
     channelId,
     configLoading,
     isActiveWelcome,
+    onKickoffOpenerPosted,
     queryClient,
     readiness,
     runtimesQuery.isPending,
   ]);
 
   React.useEffect(() => {
+    void isActiveWelcome;
     return () => {
       if (!channelId) return;
+      kickoffCoordinator.cancel(channelId);
       closerAbortControllers.get(channelId)?.abort();
       closerAbortControllers.delete(channelId);
+      const timeout = closerTimeouts.get(channelId);
+      if (timeout) globalThis.clearTimeout(timeout);
+      closerTimeouts.delete(channelId);
       closerInFlight.delete(channelId);
     };
-  }, [channelId]);
+  }, [channelId, isActiveWelcome]);
 
   React.useEffect(() => {
     if (
@@ -346,31 +468,98 @@ export function useWelcomeKickoff(
     const failed = agentSet.teammates.filter((agent) =>
       failedAfterKickoff(agent, opener),
     );
-    const resolvedCount = agentSet.teammates.filter(
+    const unresolved = agentSet.teammates.filter(
       (agent) =>
-        introAuthors.has(normalizePubkey(agent.pubkey)) ||
-        failed.includes(agent),
-    ).length;
-    if (resolvedCount !== agentSet.teammates.length) return;
+        !introAuthors.has(normalizePubkey(agent.pubkey)) &&
+        !failed.includes(agent),
+    );
+
+    if (unresolved.length > 0) {
+      if (!closerTimeouts.has(channelId)) {
+        const elapsedMs = Math.max(0, Date.now() - opener.created_at * 1_000);
+        const waitMs = Math.max(0, TEAMMATE_INTRO_WAIT_MS - elapsedMs);
+        const timeout = globalThis.setTimeout(() => {
+          closerTimeouts.delete(channelId);
+          if (focusedWelcomeChannelRef.current !== channelId) return;
+          const latestEvents = channelEventsRef.current;
+          if (markerEvent(latestEvents, closerMarker)) return;
+          const latestOpener =
+            markerEvent(latestEvents, openerMarker) ?? opener;
+          const latestIntroAuthors = introAuthorsAfterOpener(
+            latestEvents,
+            latestOpener,
+            agentSet.teammates,
+          );
+          const latestFailed = agentSet.teammates.filter((agent) =>
+            failedAfterKickoff(agent, latestOpener),
+          );
+          const delayed = agentSet.teammates.filter(
+            (agent) =>
+              !latestIntroAuthors.has(normalizePubkey(agent.pubkey)) &&
+              !latestFailed.includes(agent),
+          );
+          const controller = new AbortController();
+          closerAbortControllers.set(channelId, controller);
+          closerInFlight.add(channelId);
+          void (async () => {
+            if (
+              !(await waitForWelcomeKickoffBeat({
+                signal: controller.signal,
+                waitMs: CLOSER_BEAT_MS,
+              })) ||
+              controller.signal.aborted ||
+              focusedWelcomeChannelRef.current !== channelId
+            )
+              return;
+
+            await sendWelcomeKickoffCloser({
+              agentSet,
+              channelId,
+              content: buildWelcomeKickoffCloser(
+                latestFailed.map((agent) => agent.name),
+                delayed.map((agent) => agent.name),
+              ),
+              opener: latestOpener,
+            });
+          })()
+            .catch((error) => {
+              console.warn("Failed to finish the Welcome team kickoff.", error);
+            })
+            .finally(() => {
+              if (closerAbortControllers.get(channelId) === controller) {
+                closerAbortControllers.delete(channelId);
+              }
+              closerInFlight.delete(channelId);
+            });
+        }, waitMs);
+        closerTimeouts.set(channelId, timeout);
+      }
+      return;
+    }
+
+    const timeout = closerTimeouts.get(channelId);
+    if (timeout) globalThis.clearTimeout(timeout);
+    closerTimeouts.delete(channelId);
 
     const controller = new AbortController();
     closerAbortControllers.set(channelId, controller);
     closerInFlight.add(channelId);
     void (async () => {
       if (
-        !(await waitForWelcomeKickoffBeat({ signal: controller.signal })) ||
+        !(await waitForWelcomeKickoffBeat({
+          signal: controller.signal,
+          waitMs: CLOSER_BEAT_MS,
+        })) ||
         controller.signal.aborted ||
         focusedWelcomeChannelRef.current !== channelId
       )
         return;
-      if (await markerExists(channelId, closerMarker)) return;
 
-      await sendManagedAgentChannelMessage({
-        agentPubkey: agentSet.lead.pubkey,
+      await sendWelcomeKickoffCloser({
+        agentSet,
         channelId,
         content: buildWelcomeKickoffCloser(failed.map((agent) => agent.name)),
-        marker: closerMarker,
-        markerScope: "channel",
+        opener,
       });
     })()
       .catch((error) => {

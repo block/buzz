@@ -16,6 +16,7 @@ export async function sendManagedAgentChannelMessage(input: {
   marker?: string;
   markerScope?: "agent" | "channel";
   mentionPubkeys?: string[];
+  parentEventId?: string;
 }): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_managed_agent_channel_message",
@@ -26,6 +27,7 @@ export async function sendManagedAgentChannelMessage(input: {
       marker: input.marker ?? null,
       markerScope: input.markerScope ?? null,
       mentionPubkeys: input.mentionPubkeys ?? null,
+      parentEventId: input.parentEventId ?? null,
     },
   );
 

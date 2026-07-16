@@ -16,6 +16,7 @@ fn managed_agent_message_builder_adds_mentions_and_client_marker() {
     let event = build_managed_agent_channel_message(
         uuid::Uuid::new_v4(),
         "Welcome!",
+        None,
         std::slice::from_ref(&pubkey),
         &[vec!["client".to_string(), "welcome-v1".to_string()]],
     )
@@ -35,6 +36,7 @@ fn managed_agent_message_builder_rejects_invalid_mentions() {
     let error = build_managed_agent_channel_message(
         uuid::Uuid::new_v4(),
         "Welcome!",
+        None,
         &["not-a-pubkey".to_string()],
         &[],
     )

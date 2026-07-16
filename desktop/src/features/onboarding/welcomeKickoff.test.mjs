@@ -5,9 +5,11 @@ import {
   areWelcomeTeammatesOnline,
   buildWelcomeKickoffCloser,
   buildWelcomeKickoffOpener,
+  createWelcomeKickoffCoordinator,
   resolveWelcomeAgentSet,
   waitForWelcomeKickoffBeat,
   waitForWelcomeTeammatesOnline,
+  welcomeTeammateNeedsRestart,
 } from "./welcomeKickoff.ts";
 
 function agent(name, personaId, pubkey) {
@@ -111,6 +113,18 @@ test("kickoff beat cancels when Welcome loses focus", async () => {
   assert.equal(await beat, false);
 });
 
+test("kickoff coordinator preserves one task across rerenders and cancels on navigation", () => {
+  const coordinator = createWelcomeKickoffCoordinator();
+  const first = coordinator.begin("welcome");
+  assert.ok(first);
+  assert.equal(coordinator.begin("welcome"), null);
+  assert.equal(first.signal.aborted, false);
+
+  coordinator.cancel("welcome");
+  assert.equal(first.signal.aborted, true);
+  assert.ok(coordinator.begin("welcome"));
+});
+
 test("closer degrades coherently for partial and total startup failure", () => {
   assert.match(buildWelcomeKickoffCloser([]), /What can we help you build/);
   assert.match(buildWelcomeKickoffCloser(["Honey"]), /Honey is having trouble/);
@@ -121,5 +135,43 @@ test("closer degrades coherently for partial and total startup failure", () => {
   assert.match(
     buildWelcomeKickoffCloser(["Honey", "Bumble"]),
     /I'm still here to help/,
+  );
+});
+
+test("closer names teammates that did not reply before the intro wait", () => {
+  assert.match(
+    buildWelcomeKickoffCloser([], ["Bumble"]),
+    /Bumble is taking longer to reply/,
+  );
+  assert.match(
+    buildWelcomeKickoffCloser(["Honey"], ["Bumble"]),
+    /Honey and Bumble are taking longer than expected/,
+  );
+});
+
+test("running teammates restart when their allowlist does not include the lead", () => {
+  assert.equal(
+    welcomeTeammateNeedsRestart(
+      {
+        ...honey,
+        status: "running",
+        respondTo: "allowlist",
+        respondToAllowlist: [fizz.pubkey],
+      },
+      fizz.pubkey,
+    ),
+    false,
+  );
+  assert.equal(
+    welcomeTeammateNeedsRestart(
+      {
+        ...bumble,
+        status: "running",
+        respondTo: "allowlist",
+        respondToAllowlist: [honey.pubkey],
+      },
+      fizz.pubkey,
+    ),
+    true,
   );
 });
