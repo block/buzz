@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 const ICC_CANONICAL_DESCRIPTION: &str = "Sanitized color profile";
 const ICC_CANONICAL_COPYRIGHT: &str = "Sanitized by Buzz";
+const PRIVATE_H264_SEI: &[u8] = b"GPS_PRIVATE_ALICE_IPHONE";
 
 fn config() -> MediaConfig {
     MediaConfig {
@@ -247,6 +248,9 @@ async fn assert_sanitized(
         );
     }
     let bytes = std::fs::read(source).expect("read source");
+    let has_private_h264_sei = bytes
+        .windows(PRIVATE_H264_SEI.len())
+        .any(|window| window == PRIVATE_H264_SEI);
     let probe = probe_media(source, &bytes[..bytes.len().min(4096)], config)
         .await
         .expect("probe source")
@@ -258,6 +262,16 @@ async fn assert_sanitized(
         .unwrap_or_else(|error| panic!("sanitize fixture {}: {error:?}", source.display()));
     assert_eq!(output.probe.class, expected_class);
     assert_ne!(input_hash, source_hash(output.file.path()));
+    if has_private_h264_sei {
+        let output_bytes = std::fs::read(output.file.path()).expect("read sanitized fixture");
+        assert!(
+            !output_bytes
+                .windows(PRIVATE_H264_SEI.len())
+                .any(|window| window == PRIVATE_H264_SEI),
+            "{} retained private H.264 SEI user data",
+            source.display()
+        );
+    }
     let residual = forbidden_metadata(config, output.file.path());
     assert!(
         residual.keys().all(|key| key.ends_with("SourceFile")),
@@ -401,6 +415,33 @@ async fn realistic_media_matrix_strips_location_and_descriptive_metadata() {
         }
         args.push(path(&fixture));
         ffmpeg(&config, &args);
+        if ext == "mp4" {
+            let with_sei = temp.path().join("location-with-private-sei.mp4");
+            ffmpeg(
+                &config,
+                &[
+                    "-i",
+                    path(&fixture),
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a:0?",
+                    "-c",
+                    "copy",
+                    "-bsf:v",
+                    "h264_metadata=sei_user_data=00112233-4455-6677-8899-aabbccddeeff+GPS_PRIVATE_ALICE_IPHONE",
+                    path(&with_sei),
+                ],
+            );
+            std::fs::rename(&with_sei, &fixture).expect("install private-SEI fixture");
+            assert!(
+                std::fs::read(&fixture)
+                    .expect("read private-SEI fixture")
+                    .windows(PRIVATE_H264_SEI.len())
+                    .any(|window| window == PRIVATE_H264_SEI),
+                "MP4 fixture must contain private H.264 SEI before sanitizing"
+            );
+        }
         assert_sanitized(&config, &fixture, MediaClass::Video, true).await;
     }
 

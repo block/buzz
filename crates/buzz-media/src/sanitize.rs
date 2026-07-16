@@ -149,6 +149,18 @@ pub async fn validate_toolchain(config: &MediaConfig) -> Result<(), MediaError> 
             return Err(MediaError::ToolUnavailable);
         }
     }
+    let bitstream_filters = run_tool(
+        &config.ffmpeg_path,
+        &["-hide_banner", "-bsfs"],
+        Duration::from_secs(15),
+    )
+    .await?;
+    if !String::from_utf8_lossy(&bitstream_filters.stdout)
+        .lines()
+        .any(|line| line.trim() == "filter_units")
+    {
+        return Err(MediaError::ToolUnavailable);
+    }
     let _ = TOOL_VERSIONS.set(ToolVersions {
         exiftool,
         ffmpeg,
@@ -219,9 +231,16 @@ pub async fn probe_media(
     sniff: &[u8],
     config: &MediaConfig,
 ) -> Result<Option<MediaProbe>, MediaError> {
-    if let Some((mime, ext)) = iso_bmff_still_image(sniff) {
-        let mut probe = match probe_with_ffprobe(path, config).await {
-            Ok(probe) => probe,
+    if let Some((mime, ext, expected_codec)) = iso_bmff_still_image(sniff) {
+        let mut probe = match probe_with_ffprobe(path, config, true).await {
+            Ok(probe) => {
+                if probe.audio_codec.is_some()
+                    || probe.video_codec.as_deref() != Some(expected_codec)
+                {
+                    return Err(MediaError::SanitizationFailed);
+                }
+                probe
+            }
             Err(_) => {
                 let (width, height, frame_count) = exiftool_image_dimensions(path, config).await?;
                 MediaProbe {
@@ -246,7 +265,7 @@ pub async fn probe_media(
     let mut recognized_media = false;
     if let Some(kind) = infer::get(sniff) {
         if let Some((mime, ext)) = supported_image(kind.mime_type()) {
-            let mut probe = match probe_with_ffprobe(path, config).await {
+            let mut probe = match probe_with_ffprobe(path, config, true).await {
                 Ok(probe) => probe,
                 Err(_) => {
                     let (width, height) = image_dimensions(path)?;
@@ -276,7 +295,7 @@ pub async fn probe_media(
             kind.mime_type().starts_with("video/") || kind.mime_type().starts_with("audio/");
     }
 
-    let probe = match probe_with_ffprobe(path, config).await {
+    let probe = match probe_with_ffprobe(path, config, false).await {
         Ok(probe) => probe,
         Err(MediaError::SanitizationFailed) if !recognized_media => return Ok(None),
         Err(error) => return Err(error),
@@ -389,6 +408,7 @@ pub async fn sanitize(
         return Err(MediaError::SanitizationFailed);
     }
     verify_stream_shape(&output_probe, file.path(), config).await?;
+    verify_no_codec_metadata(&output_probe, file.path(), config).await?;
     Ok(SanitizedMedia {
         file,
         probe: output_probe,
@@ -407,6 +427,8 @@ async fn sanitize_image(
             "-v".to_string(),
             "error".to_string(),
             "-y".to_string(),
+            "-protocol_whitelist".to_string(),
+            "file,pipe".to_string(),
             "-i".to_string(),
             path_string(source),
             "-map".to_string(),
@@ -433,6 +455,8 @@ async fn sanitize_image(
             "-v".to_string(),
             "error".to_string(),
             "-y".to_string(),
+            "-protocol_whitelist".to_string(),
+            "file,pipe".to_string(),
             "-i".to_string(),
             path_string(source),
             "-map".to_string(),
@@ -1022,6 +1046,8 @@ async fn sanitize_video(
         args.extend(strings(&["-c:a", "aac", "-b:a", "192k"]));
     }
     args.extend(strings(&[
+        "-bsf:v",
+        "filter_units=remove_types=6",
         "-movflags",
         "+faststart",
         "-metadata",
@@ -1178,7 +1204,7 @@ async fn verify_stream_shape(
     if probe.class == MediaClass::Image {
         return Ok(());
     }
-    let json = ffprobe_json(path, config).await?;
+    let json = ffprobe_json(path, config, false).await?;
     let streams = json["streams"]
         .as_array()
         .ok_or(MediaError::SanitizationFailed)?;
@@ -1208,6 +1234,45 @@ async fn verify_stream_shape(
     Ok(())
 }
 
+async fn verify_no_codec_metadata(
+    probe: &MediaProbe,
+    path: &Path,
+    config: &MediaConfig,
+) -> Result<(), MediaError> {
+    if probe.class != MediaClass::Video || probe.video_codec.as_deref() != Some("h264") {
+        return Ok(());
+    }
+
+    // H.264 SEI NAL units can contain arbitrary user/device/location payloads
+    // that container metadata tools and ffprobe stream tags do not expose.
+    // Select only SEI units and require an empty result after sanitization.
+    let mut args = common_ffmpeg_input(path);
+    args.extend(strings(&[
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "copy",
+        "-bsf:v",
+        "filter_units=pass_types=6",
+        "-f",
+        "data",
+        "pipe:1",
+    ]));
+    let output = run_tool(
+        &config.ffmpeg_path,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        Duration::from_secs(config.av_process_timeout_secs),
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(MediaError::SanitizationFailed);
+    }
+    if !output.stdout.is_empty() {
+        return Err(MediaError::ResidualMetadata);
+    }
+    Ok(())
+}
+
 fn is_structural_tag(tag: &str) -> bool {
     matches!(
         tag.to_ascii_lowercase().as_str(),
@@ -1215,8 +1280,12 @@ fn is_structural_tag(tag: &str) -> bool {
     )
 }
 
-async fn probe_with_ffprobe(path: &Path, config: &MediaConfig) -> Result<MediaProbe, MediaError> {
-    let json = ffprobe_json(path, config).await?;
+async fn probe_with_ffprobe(
+    path: &Path,
+    config: &MediaConfig,
+    count_frames: bool,
+) -> Result<MediaProbe, MediaError> {
+    let json = ffprobe_json(path, config, count_frames).await?;
     let streams = json["streams"]
         .as_array()
         .ok_or(MediaError::SanitizationFailed)?;
@@ -1285,17 +1354,25 @@ async fn probe_with_ffprobe(path: &Path, config: &MediaConfig) -> Result<MediaPr
     })
 }
 
-async fn ffprobe_json(path: &Path, config: &MediaConfig) -> Result<Value, MediaError> {
-    let args = [
+async fn ffprobe_json(
+    path: &Path,
+    config: &MediaConfig,
+    count_frames: bool,
+) -> Result<Value, MediaError> {
+    let mut args = vec![
         "-v".to_string(),
         "error".to_string(),
-        "-count_frames".to_string(),
+        "-protocol_whitelist".to_string(),
+        "file,pipe".to_string(),
         "-show_streams".to_string(),
         "-show_format".to_string(),
         "-of".to_string(),
         "json".to_string(),
-        path_string(path),
     ];
+    if count_frames {
+        args.push("-count_frames".to_string());
+    }
+    args.push(path_string(path));
     let output = run_tool(
         &config.ffprobe_path,
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -1342,20 +1419,25 @@ fn validate_media_limits(probe: &MediaProbe) -> Result<(), MediaError> {
     Ok(())
 }
 
-fn iso_bmff_still_image(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
-    if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+fn iso_bmff_still_image(bytes: &[u8]) -> Option<(&'static str, &'static str, &'static str)> {
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
         return None;
     }
-    let upper = bytes.len().min(64);
-    (8..upper.saturating_sub(3))
-        .step_by(4)
-        .find_map(|offset| match &bytes[offset..offset + 4] {
-            b"avif" | b"avis" => Some(("image/avif", "avif")),
-            b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"mif1" | b"msf1" => {
-                Some(("image/heic", "heic"))
-            }
-            _ => None,
-        })
+    let box_size = usize::try_from(u32::from_be_bytes(bytes[0..4].try_into().ok()?)).ok()?;
+    if box_size < 16 || box_size > bytes.len() {
+        return None;
+    }
+
+    // Only the declared major brand determines this early classification.
+    // Generic MP4 files may advertise mif1/msf1 as compatible brands, and
+    // bytes after the ftyp box are not brands at all.
+    match &bytes[8..12] {
+        b"avif" | b"avis" => Some(("image/avif", "avif", "av1")),
+        b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"mif1" | b"msf1" => {
+            Some(("image/heic", "heic", "hevc"))
+        }
+        _ => None,
+    }
 }
 
 fn supported_image(mime: &str) -> Option<(&'static str, &'static str)> {
@@ -1448,7 +1530,15 @@ fn audio_format(
 }
 
 fn common_ffmpeg_input(source: &Path) -> Vec<String> {
-    let mut args = strings(&["-nostdin", "-v", "error", "-y", "-i"]);
+    let mut args = strings(&[
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-protocol_whitelist",
+        "file,pipe",
+        "-i",
+    ]);
     args.push(path_string(source));
     args
 }
@@ -1619,9 +1709,21 @@ mod tests {
         assert_eq!(audio_format("ogg", Some("opus")).unwrap().1, "opus");
         assert!(video_format("avi").is_err());
         assert_eq!(
-            iso_bmff_still_image(b"\0\0\0\x18ftypheic\0\0\0\0heic"),
-            Some(("image/heic", "heic"))
+            iso_bmff_still_image(b"\0\0\0\x14ftypheic\0\0\0\0heic"),
+            Some(("image/heic", "heic", "hevc"))
         );
+        assert_eq!(
+            iso_bmff_still_image(b"\0\0\0\x14ftypmp42\0\0\0\0mif1"),
+            None
+        );
+        assert_eq!(
+            iso_bmff_still_image(b"\0\0\0\x10ftypmp42\0\0\0\0mif1"),
+            None
+        );
+        let args = common_ffmpeg_input(Path::new("fixture.mp4"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-protocol_whitelist", "file,pipe"]));
     }
 
     #[test]
