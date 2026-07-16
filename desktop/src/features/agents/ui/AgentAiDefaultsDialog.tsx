@@ -36,6 +36,8 @@ export function AgentAiDefaultsDialog({
   const [saving, setSaving] = React.useState(false);
   const [confirmDiscard, setConfirmDiscard] = React.useState(false);
   const [restartFailures, setRestartFailures] = React.useState(0);
+  const secondaryActionRef = React.useRef<HTMLButtonElement>(null);
+  const restoreDefaultsFocusRef = React.useRef(false);
 
   const closeAndRestoreFocus = React.useCallback(() => {
     onOpenChange(false);
@@ -97,6 +99,7 @@ export function AgentAiDefaultsDialog({
             secondaryAction={
               <Button
                 disabled={saving}
+                ref={secondaryActionRef}
                 onClick={
                   restartFailures > 0 ? closeAndRestoreFocus : requestClose
                 }
@@ -112,7 +115,15 @@ export function AgentAiDefaultsDialog({
       </Dialog>
 
       <AlertDialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
-        <AlertDialogContent data-testid="discard-ai-defaults-dialog">
+        <AlertDialogContent
+          data-testid="discard-ai-defaults-dialog"
+          onCloseAutoFocus={(event) => {
+            if (!restoreDefaultsFocusRef.current) return;
+            event.preventDefault();
+            restoreDefaultsFocusRef.current = false;
+            requestAnimationFrame(() => secondaryActionRef.current?.focus());
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>Discard changes to AI defaults?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -121,7 +132,13 @@ export function AgentAiDefaultsDialog({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Keep editing</AlertDialogCancel>
+            <AlertDialogCancel
+              onClick={() => {
+                restoreDefaultsFocusRef.current = true;
+              }}
+            >
+              Keep editing
+            </AlertDialogCancel>
             <AlertDialogAction asChild>
               <Button
                 onClick={() => {
