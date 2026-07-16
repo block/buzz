@@ -13,6 +13,7 @@ pub(crate) struct PendingCommunityDeepLink {
     kind: String,
     relay_url: String,
     code: Option<String>,
+    policy_receipt: Option<String>,
     name: Option<String>,
 }
 
@@ -26,6 +27,7 @@ impl PendingCommunityDeepLinks {
             item.kind == pending.kind
                 && item.relay_url == pending.relay_url
                 && item.code == pending.code
+                && item.policy_receipt == pending.policy_receipt
                 && item.name == pending.name
         }) {
             return;
@@ -72,6 +74,7 @@ fn queue_community_deep_link(
     kind: &str,
     relay_url: String,
     code: Option<String>,
+    policy_receipt: Option<String>,
     name: Option<String>,
 ) {
     app.state::<PendingCommunityDeepLinks>()
@@ -80,6 +83,7 @@ fn queue_community_deep_link(
             kind: kind.to_owned(),
             relay_url,
             code,
+            policy_receipt,
             name,
         });
 }
@@ -312,7 +316,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 return;
             };
             activate_main_window(app);
-            queue_community_deep_link(app, "connect", relay_url.clone(), None, None);
+            queue_community_deep_link(app, "connect", relay_url.clone(), None, None, None);
             let _ = app.emit("deep-link-connect", relay_url);
         }
         Some("join") => {
@@ -326,7 +330,8 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             activate_main_window(app);
             let relay_url = payload["relayUrl"].as_str().unwrap_or_default().to_owned();
             let code = payload["code"].as_str().map(str::to_owned);
-            queue_community_deep_link(app, "join", relay_url, code, None);
+            let policy_receipt = payload["policyReceipt"].as_str().map(str::to_owned);
+            queue_community_deep_link(app, "join", relay_url, code, policy_receipt, None);
             let _ = app.emit("deep-link-join", payload);
         }
         Some("add-community") => {
@@ -339,6 +344,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 app,
                 "add-community",
                 payload.relay_url.clone(),
+                None,
                 None,
                 payload.name.clone(),
             );
@@ -393,8 +399,18 @@ mod tests {
             kind: if code.is_some() { "join" } else { "connect" }.to_owned(),
             relay_url: relay_url.to_owned(),
             code: code.map(str::to_owned),
+            policy_receipt: None,
             name: None,
         }
+    }
+
+    #[test]
+    fn pending_join_serializes_policy_receipt_for_cold_launch_recovery() {
+        let mut link = pending("join", "wss://relay.example", Some("invite"));
+        link.policy_receipt = Some("relay-signed-receipt".to_owned());
+
+        let payload = serde_json::to_value(link).unwrap();
+        assert_eq!(payload["policyReceipt"], "relay-signed-receipt");
     }
 
     #[test]
