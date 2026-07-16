@@ -175,7 +175,7 @@ export function InviteRedeemForm({
         </div>
       ) : null}
 
-      {joinPolicy ? (
+      {joinPolicy && policyInvite ? (
         <JoinPolicyNotice
           ageConfirmed={ageConfirmed}
           onAgeConfirmedChange={(confirmed) => {
@@ -183,6 +183,7 @@ export function InviteRedeemForm({
             setPolicyError(null);
           }}
           policy={joinPolicy}
+          relayWsUrl={policyInvite.relayWsUrl}
         />
       ) : null}
 

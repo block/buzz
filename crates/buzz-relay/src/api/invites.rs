@@ -19,7 +19,7 @@ use std::time::Duration;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::Json,
+    response::{Html, Json},
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -84,6 +84,78 @@ pub async fn join_policy(State(state): State<Arc<AppState>>) -> Json<Value> {
         })),
         None => Json(serde_json::json!({})),
     }
+}
+
+/// `GET /api/join-policy/terms` — Terms of Service as a standalone HTML page.
+///
+/// Serves the operator-configured Markdown as a real browser page so desktop
+/// clients can hand the link to the system browser instead of rendering the
+/// document inside the webview (which requires app chrome the onboarding
+/// surfaces don't have). 404 when no terms document is configured.
+pub async fn join_policy_terms(
+    State(state): State<Arc<AppState>>,
+) -> Result<Html<String>, (StatusCode, Json<Value>)> {
+    policy_document_page(&state, "Terms of Service", |policy| {
+        policy.terms_markdown.as_deref()
+    })
+}
+
+/// `GET /api/join-policy/privacy` — Privacy Policy as a standalone HTML page.
+pub async fn join_policy_privacy(
+    State(state): State<Arc<AppState>>,
+) -> Result<Html<String>, (StatusCode, Json<Value>)> {
+    policy_document_page(&state, "Privacy Policy", |policy| {
+        policy.privacy_markdown.as_deref()
+    })
+}
+
+fn policy_document_page(
+    state: &AppState,
+    title: &str,
+    select: impl Fn(&crate::config::JoinPolicyConfig) -> Option<&str>,
+) -> Result<Html<String>, (StatusCode, Json<Value>)> {
+    let markdown = state
+        .config
+        .join_policy
+        .as_ref()
+        .and_then(select)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "join_policy_not_configured"))?;
+    Ok(Html(render_policy_document(title, markdown)))
+}
+
+/// Render operator Markdown into a minimal self-contained HTML page.
+///
+/// Raw HTML embedded in the Markdown is escaped and rendered as text — the
+/// operator authors a policy document, not a web page, and this keeps the
+/// endpoint from serving arbitrary operator-controlled markup.
+fn render_policy_document(title: &str, markdown: &str) -> String {
+    use pulldown_cmark::{html, Event, Parser};
+
+    let mut body = String::new();
+    html::push_html(
+        &mut body,
+        Parser::new(markdown).map(|event| match event {
+            Event::Html(raw) => Event::Text(raw.into_string().into()),
+            Event::InlineHtml(raw) => Event::Text(raw.into_string().into()),
+            other => other,
+        }),
+    );
+
+    // Titles are fixed literals today; escape anyway so a future caller
+    // can't accidentally inject markup through this seam.
+    let escaped_title = title
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{escaped_title}</title>\n\
+         <style>body{{max-width:42rem;margin:2rem auto;padding:0 1rem;\
+         font-family:system-ui,sans-serif;line-height:1.6}}</style>\n\
+         </head>\n<body>\n{body}</body>\n</html>\n"
+    )
 }
 
 /// Exchange explicit policy acceptance for a short-lived, invite-bound receipt.
@@ -899,5 +971,88 @@ mod tests {
         let body = serde_json::json!({ "code": code }).to_string();
         let response = post_json(state, &host_b, "/api/invites/claim", &joiner, body).await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn policy_document_renders_markdown_and_escapes_raw_html() {
+        let page = super::render_policy_document(
+            "Terms of Service",
+            "# Terms\n\nBe kind & honest.\n\n<script>alert(1)</script>",
+        );
+        assert!(page.contains("<title>Terms of Service</title>"), "{page}");
+        assert!(page.contains("<h1>Terms</h1>"), "{page}");
+        // `&` inside prose must be entity-encoded by the HTML writer.
+        assert!(page.contains("Be kind &amp; honest."), "{page}");
+        // Raw HTML in operator Markdown renders as escaped text, never markup.
+        assert!(!page.contains("<script>"), "{page}");
+        assert!(
+            page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "{page}"
+        );
+    }
+
+    /// The document routes are public (no NIP-98) and 404 until configured,
+    /// exactly like the JSON policy endpoint they sit beside.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn join_policy_document_pages_serve_configured_markdown() {
+        let host = format!("invites-docs-{}.example", Uuid::new_v4().simple());
+        let Some(state) = invite_test_state(&host).await else {
+            return;
+        };
+
+        let get_page = |state: Arc<crate::state::AppState>, path: &'static str| {
+            let host = host.clone();
+            async move {
+                build_router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri(path)
+                            .header(header::HOST, host)
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response")
+            }
+        };
+
+        // Unconfigured relay: both documents 404.
+        let response = get_page(state.clone(), "/api/join-policy/terms").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = get_page(state.clone(), "/api/join-policy/privacy").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // Configure terms only — terms serves HTML, privacy still 404s.
+        let mut state_inner = (*state).clone();
+        let mut config = state_inner.config.as_ref().clone();
+        config.join_policy = Some(crate::config::JoinPolicyConfig {
+            terms_markdown: Some("# Terms\n\nNo funny business.".to_string()),
+            privacy_markdown: None,
+            age_attestation_required: false,
+            version: "v".repeat(64),
+        });
+        state_inner.config = Arc::new(config);
+        let state = Arc::new(state_inner);
+
+        let response = get_page(state.clone(), "/api/join-policy/terms").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(content_type.starts_with("text/html"), "{content_type}");
+        let bytes = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read body");
+        let page = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(page.contains("<h1>Terms</h1>"), "{page}");
+        assert!(page.contains("No funny business."), "{page}");
+
+        let response = get_page(state, "/api/join-policy/privacy").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

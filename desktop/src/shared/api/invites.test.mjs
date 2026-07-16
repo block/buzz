@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getJoinPolicy } from "./invites.ts";
+import { getJoinPolicy, joinPolicyDocumentUrl } from "./invites.ts";
 
 function withFetch(response, run) {
   const originalFetch = globalThis.fetch;
@@ -50,5 +50,16 @@ test("getJoinPolicy preserves opt-in behavior for unconfigured and older relays"
 test("getJoinPolicy fails closed on a policy endpoint error", async () => {
   await withFetch(new Response(null, { status: 503 }), async () =>
     assert.rejects(getJoinPolicy("wss://relay.example"), /HTTP 503/),
+  );
+});
+
+test("joinPolicyDocumentUrl builds browser links for both documents", () => {
+  assert.equal(
+    joinPolicyDocumentUrl("wss://relay.example", "terms"),
+    "https://relay.example/api/join-policy/terms",
+  );
+  assert.equal(
+    joinPolicyDocumentUrl("ws://localhost:7000/", "privacy"),
+    "http://localhost:7000/api/join-policy/privacy",
   );
 });

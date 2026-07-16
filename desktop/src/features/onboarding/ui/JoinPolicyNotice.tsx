@@ -1,32 +1,32 @@
-import * as React from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
-import type { JoinPolicy } from "@/shared/api/invites";
+import { joinPolicyDocumentUrl, type JoinPolicy } from "@/shared/api/invites";
 import { Button } from "@/shared/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/dialog";
-import { Markdown } from "@/shared/ui/markdown";
 
 type JoinPolicyNoticeProps = {
   ageConfirmed: boolean;
   onAgeConfirmedChange: (confirmed: boolean) => void;
   policy: JoinPolicy;
+  /** Relay hosting the policy documents the links below point at. */
+  relayWsUrl: string;
 };
 
+/**
+ * Join-policy consent block shown on every join surface.
+ *
+ * The Terms/Privacy links open the relay-hosted document pages
+ * (`/api/join-policy/terms|privacy`) in the system browser via the OS
+ * opener. They must NOT navigate or render in-app: these surfaces exist
+ * before onboarding completes, where the router (required by the message
+ * Markdown component) is not mounted — an in-app render tears down the
+ * whole React tree.
+ */
 export function JoinPolicyNotice({
   ageConfirmed,
   onAgeConfirmedChange,
   policy,
+  relayWsUrl,
 }: JoinPolicyNoticeProps) {
-  const [openDocument, setOpenDocument] = React.useState<
-    "terms" | "privacy" | null
-  >(null);
-  const markdown =
-    openDocument === "terms" ? policy.termsMarkdown : policy.privacyMarkdown;
-
   return (
     <div className="space-y-3 rounded-md border p-3 text-left text-sm">
       {policy.ageAttestationRequired ? (
@@ -47,7 +47,9 @@ export function JoinPolicyNotice({
           {policy.termsMarkdown ? (
             <Button
               className="h-auto p-0 align-baseline"
-              onClick={() => setOpenDocument("terms")}
+              onClick={() =>
+                void openUrl(joinPolicyDocumentUrl(relayWsUrl, "terms"))
+              }
               type="button"
               variant="link"
             >
@@ -58,7 +60,9 @@ export function JoinPolicyNotice({
           {policy.privacyMarkdown ? (
             <Button
               className="h-auto p-0 align-baseline"
-              onClick={() => setOpenDocument("privacy")}
+              onClick={() =>
+                void openUrl(joinPolicyDocumentUrl(relayWsUrl, "privacy"))
+              }
               type="button"
               variant="link"
             >
@@ -68,22 +72,6 @@ export function JoinPolicyNotice({
           .
         </p>
       ) : null}
-
-      <Dialog
-        onOpenChange={(open) => {
-          if (!open) setOpenDocument(null);
-        }}
-        open={openDocument !== null}
-      >
-        <DialogContent className="max-h-[80vh] max-w-2xl overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>
-              {openDocument === "terms" ? "Terms of Service" : "Privacy Policy"}
-            </DialogTitle>
-          </DialogHeader>
-          {markdown ? <Markdown content={markdown} /> : null}
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

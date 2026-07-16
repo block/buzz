@@ -60,6 +60,7 @@ function NostrKeyImportPage({
   onAgeConfirmedChange,
   onBack,
   onImport,
+  relayWsUrl,
 }: {
   ageConfirmed: boolean;
   connectionError: string | null;
@@ -68,6 +69,7 @@ function NostrKeyImportPage({
   onAgeConfirmedChange: (confirmed: boolean) => void;
   onBack: () => void;
   onImport: (nsec: string) => Promise<void>;
+  relayWsUrl: string;
 }) {
   return (
     <OnboardingSlideTransition
@@ -92,6 +94,7 @@ function NostrKeyImportPage({
             ageConfirmed={ageConfirmed}
             onAgeConfirmedChange={onAgeConfirmedChange}
             policy={joinPolicy}
+            relayWsUrl={relayWsUrl}
           />
         </div>
       ) : null}
@@ -307,6 +310,7 @@ export function WelcomeSetup({
                   ageConfirmed={defaultAgeConfirmed}
                   onAgeConfirmedChange={setDefaultAgeConfirmed}
                   policy={defaultJoinPolicy}
+                  relayWsUrl={defaultRelayUrl}
                 />
               ) : null}
               {isLocalDevRelayUrl(defaultRelayUrl) ? null : (
@@ -467,6 +471,7 @@ export function WelcomeSetup({
             onAgeConfirmedChange={setDefaultAgeConfirmed}
             onBack={showWelcomePage}
             onImport={handleNostrImport}
+            relayWsUrl={defaultRelayUrl}
           />
         )}
       </div>

@@ -195,7 +195,7 @@ export function CommunityEditForm({
         />
       </div>
 
-      {joinPolicy ? (
+      {joinPolicy && policyRelayUrl ? (
         <JoinPolicyNotice
           ageConfirmed={ageConfirmed}
           onAgeConfirmedChange={(confirmed) => {
@@ -203,6 +203,7 @@ export function CommunityEditForm({
             setError(null);
           }}
           policy={joinPolicy}
+          relayWsUrl={policyRelayUrl}
         />
       ) : null}
 

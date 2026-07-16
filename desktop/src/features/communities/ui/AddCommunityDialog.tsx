@@ -243,7 +243,7 @@ export function AddCommunityDialog({
             {inviteError ? (
               <p className="text-xs text-destructive">{inviteError}</p>
             ) : null}
-            {joinPolicy ? (
+            {joinPolicy && relayUrl.trim() ? (
               <JoinPolicyNotice
                 ageConfirmed={ageConfirmed}
                 onAgeConfirmedChange={(confirmed) => {
@@ -251,6 +251,9 @@ export function AddCommunityDialog({
                   setInviteError(null);
                 }}
                 policy={joinPolicy}
+                // Editing the relay URL resets joinPolicy, so a visible
+                // notice always belongs to the URL currently in the field.
+                relayWsUrl={normalizeRelayUrl(relayUrl.trim())}
               />
             ) : null}
           </div>
