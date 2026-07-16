@@ -272,6 +272,46 @@ test("Enter with no matches jumps to create", async ({ page }) => {
   );
 });
 
+test("arrow keys reach the pinned create row and Enter activates it", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  // "desig" keeps a channel match (#design) AND the create row visible, so the
+  // create row is not the only actionable item — it must be reachable by
+  // keyboard, not just Tab.
+  await page.getByTestId("channel-browser-search").fill("desig");
+
+  const createRow = page.getByTestId("channel-browser-create-row");
+  await expect(createRow).toBeVisible();
+
+  // The create row is pinned at the top → first ArrowDown highlights it.
+  await page.keyboard.press("ArrowDown");
+  await expect(createRow).toHaveAttribute("data-selected", "true");
+
+  // Enter on the highlighted create row enters the prefilled create form.
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("create-channel-name")).toHaveValue("desig");
+});
+
+test("Enter selects a channel when create row is not highlighted", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  // With the create row present but NOT highlighted, Enter should still select
+  // the first channel match rather than jumping to create.
+  await page.getByTestId("channel-browser-search").fill("desig");
+  await expect(page.getByTestId("browse-channel-design")).toBeVisible();
+
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  await expect(page.getByTestId("chat-title")).toHaveText("design");
+});
+
 test("joining a channel from browser adds it to the sidebar", async ({
   page,
 }) => {

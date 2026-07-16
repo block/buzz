@@ -124,6 +124,10 @@ export function ChannelBrowserDialog({
   });
   const deferredQuery = React.useDeferredValue(query.trim().toLowerCase());
   const trimmedQuery = query.trim();
+  // Immediate (non-deferred) lowercased query. The create row's visibility
+  // (via hasExactMatch) and its label both read from the live query so they
+  // can never disagree for a frame while the fuzzy filter catches up.
+  const normalizedQuery = trimmedQuery.toLowerCase();
 
   const isForumMode = channelTypeFilter === "forum";
   const canCreate = Boolean(onCreateChannel);
@@ -228,12 +232,12 @@ export function ChannelBrowserDialog({
       channels.some(
         (channel) =>
           channel.channelType !== "dm" &&
-          channel.name.toLowerCase() === deferredQuery &&
+          channel.name.toLowerCase() === normalizedQuery &&
           (channelTypeFilter
             ? channel.channelType === channelTypeFilter
             : true),
       ),
-    [channels, channelTypeFilter, deferredQuery],
+    [channels, channelTypeFilter, normalizedQuery],
   );
 
   // The pinned create row (Are.na style) appears for any non-empty query that
@@ -244,6 +248,16 @@ export function ChannelBrowserDialog({
   // type. It only hides when the query is an exact match for an existing name
   // — creating a duplicate "#general" makes no sense.
   const showCreateRow = canCreate && !hasExactMatch;
+
+  // The create row participates in keyboard navigation as a virtual item so
+  // arrow keys reach it and Enter activates it — not just Tab. It's rendered
+  // pinned at the top, so it takes nav index 0 and channels shift down by one,
+  // keeping keyboard order identical to visual order.
+  const channelNavOffset = showCreateRow ? 1 : 0;
+  const createRowIndex = showCreateRow ? 0 : null;
+  const navItemCount = orderedVisibleChannels.length + channelNavOffset;
+  const isCreateRowSelected =
+    createRowIndex !== null && selectedIndex === createRowIndex;
 
   const updateTabIndicator = React.useCallback(() => {
     const list = tabListRef.current;
@@ -317,13 +331,13 @@ export function ChannelBrowserDialog({
 
   React.useEffect(() => {
     setSelectedIndex((current) => {
-      if (current === null || orderedVisibleChannels.length === 0) {
+      if (current === null || navItemCount === 0) {
         return null;
       }
 
-      return Math.min(current, orderedVisibleChannels.length - 1);
+      return Math.min(current, navItemCount - 1);
     });
-  }, [orderedVisibleChannels]);
+  }, [navItemCount]);
 
   async function handleJoin(channelId: string) {
     setJoiningChannelId(channelId);
@@ -355,8 +369,12 @@ export function ChannelBrowserDialog({
     });
   }
 
+  // Map the flat nav index back to a channel, accounting for the create row
+  // occupying index 0 when present.
   const selectedItem =
-    selectedIndex !== null ? orderedVisibleChannels[selectedIndex] : undefined;
+    selectedIndex !== null && !isCreateRowSelected
+      ? orderedVisibleChannels[selectedIndex - channelNavOffset]
+      : undefined;
   const emptyTitle =
     deferredQuery.length > 0
       ? `No ${entityLabel}s match your search`
@@ -426,30 +444,23 @@ export function ChannelBrowserDialog({
                       setSelectedIndex(null);
                     }}
                     onKeyDown={(event) => {
-                      if (
-                        event.key === "ArrowDown" &&
-                        orderedVisibleChannels.length > 0
-                      ) {
+                      // Arrow keys traverse the pinned create row (index 0)
+                      // and the channel list beneath it, in visual order.
+                      if (event.key === "ArrowDown" && navItemCount > 0) {
                         event.preventDefault();
                         setSelectedIndex((current) =>
                           current === null
                             ? 0
-                            : Math.min(
-                                current + 1,
-                                orderedVisibleChannels.length - 1,
-                              ),
+                            : Math.min(current + 1, navItemCount - 1),
                         );
                         return;
                       }
 
-                      if (
-                        event.key === "ArrowUp" &&
-                        orderedVisibleChannels.length > 0
-                      ) {
+                      if (event.key === "ArrowUp" && navItemCount > 0) {
                         event.preventDefault();
                         setSelectedIndex((current) =>
                           current === null
-                            ? orderedVisibleChannels.length - 1
+                            ? navItemCount - 1
                             : Math.max(current - 1, 0),
                         );
                         return;
@@ -459,11 +470,12 @@ export function ChannelBrowserDialog({
                         event.key === "Enter" &&
                         !event.nativeEvent.isComposing
                       ) {
-                        // With no result highlighted and a creatable query,
-                        // Enter jumps straight into create — the Are.na flow.
+                        // If the create row is highlighted — or it's the only
+                        // actionable item (no channel matches) — Enter creates.
                         if (
-                          orderedVisibleChannels.length === 0 &&
-                          showCreateRow
+                          showCreateRow &&
+                          (isCreateRowSelected ||
+                            orderedVisibleChannels.length === 0)
                         ) {
                           event.preventDefault();
                           enterCreateMode(trimmedQuery);
@@ -583,6 +595,7 @@ export function ChannelBrowserDialog({
                     <div className="mb-3">
                       <CreateChannelRow
                         entityLabel={entityLabel}
+                        isSelected={isCreateRowSelected}
                         onClick={() => enterCreateMode(trimmedQuery)}
                         query={trimmedQuery}
                       />
@@ -601,7 +614,9 @@ export function ChannelBrowserDialog({
                         <ChannelCard
                           channel={channel}
                           isJoining={joiningChannelId === channel.id}
-                          isSelected={index === selectedIndex}
+                          isSelected={
+                            index + channelNavOffset === selectedIndex
+                          }
                           key={channel.id}
                           onJoin={
                             !channel.isMember
@@ -627,18 +642,25 @@ export function ChannelBrowserDialog({
 
 function CreateChannelRow({
   entityLabel,
+  isSelected,
   onClick,
   query,
 }: {
   entityLabel: string;
+  isSelected: boolean;
   onClick: () => void;
   query: string;
 }) {
   const hasQuery = query.length > 0;
   return (
     <button
-      className="flex w-full items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-4 py-3 text-left transition-colors duration-150 ease-out hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+      className={
+        isSelected
+          ? "flex w-full items-center gap-3 rounded-xl border border-border/70 bg-muted/60 px-4 py-3 text-left transition-colors duration-150 ease-out focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+          : "flex w-full items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-4 py-3 text-left transition-colors duration-150 ease-out hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+      }
       data-testid="channel-browser-create-row"
+      data-selected={isSelected}
       onClick={onClick}
       type="button"
     >
