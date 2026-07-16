@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import type { Channel } from "@/shared/api/types";
+import { scoreChannelMatch } from "@/features/channels/lib/channelSearchScore";
 import { ListSortDescending } from "@/shared/ui/icons";
 import {
   Dialog,
@@ -147,6 +148,18 @@ export function ChannelBrowserDialog({
     onCreated: () => onOpenChange(false),
   });
 
+  // Fuzzy match score per channel id for the current query, so both filtering
+  // and relevance-ordering share one source of truth. Empty when no query.
+  const matchScoreById = React.useMemo(() => {
+    const scores = new Map<string, number>();
+    if (deferredQuery.length === 0) return scores;
+    for (const channel of channels) {
+      const score = scoreChannelMatch(channel, deferredQuery);
+      if (score !== null) scores.set(channel.id, score);
+    }
+    return scores;
+  }, [channels, deferredQuery]);
+
   const matchingChannels = React.useMemo(() => {
     const filtered = channels.filter(
       (channel) =>
@@ -161,12 +174,8 @@ export function ChannelBrowserDialog({
       return filtered;
     }
 
-    return filtered.filter(
-      (channel) =>
-        channel.name.toLowerCase().includes(deferredQuery) ||
-        channel.description.toLowerCase().includes(deferredQuery),
-    );
-  }, [channels, channelTypeFilter, deferredQuery]);
+    return filtered.filter((channel) => matchScoreById.has(channel.id));
+  }, [channels, channelTypeFilter, deferredQuery, matchScoreById]);
 
   const currentChannels = React.useMemo(
     () => matchingChannels.filter((channel) => channel.archivedAt === null),
@@ -190,15 +199,25 @@ export function ChannelBrowserDialog({
         ? joinedChannels
         : matchingChannels;
 
+  const isSearching = deferredQuery.length > 0;
+
   const orderedVisibleChannels = React.useMemo(() => {
     return [...visibleChannels].sort((a, b) => {
+      // While searching, best match wins so the channel you meant floats to
+      // the top; ties fall back to the user's chosen sort below.
+      if (isSearching) {
+        const scoreA = matchScoreById.get(a.id) ?? Number.POSITIVE_INFINITY;
+        const scoreB = matchScoreById.get(b.id) ?? Number.POSITIVE_INFINITY;
+        if (scoreA !== scoreB) return scoreA - scoreB;
+      }
+
       if (sort === "members" && b.memberCount !== a.memberCount) {
         return b.memberCount - a.memberCount;
       }
 
       return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
     });
-  }, [sort, visibleChannels]);
+  }, [isSearching, matchScoreById, sort, visibleChannels]);
 
   const allTabLabel = isForumMode ? "All forums" : "All channels";
 

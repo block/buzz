@@ -121,6 +121,46 @@ test("channel browser shows no results for unmatched search", async ({
   await expect(page.getByText("No channels match your search")).toBeVisible();
 });
 
+test("channel browser fuzzy-matches a subsequence", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  // "engr" is not a substring of "engineering", but it is an in-order
+  // subsequence — plain includes() would miss it, fuzzy matching finds it.
+  await page.getByTestId("channel-browser-search").fill("engr");
+
+  await expect(page.getByTestId("browse-channel-engineering")).toBeVisible();
+  await expect(page.getByTestId("browse-channel-general")).toHaveCount(0);
+});
+
+test("channel browser matches a scattered subsequence", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  // "sls" is neither a substring nor a prefix of "sales" — it only matches as
+  // an in-order subsequence (s·a·l·e·s). Proves fuzzy matching end-to-end.
+  await page.getByTestId("channel-browser-search").fill("sls");
+
+  await expect(page.getByTestId("browse-channel-sales")).toBeVisible();
+  await expect(page.getByTestId("browse-channel-general")).toHaveCount(0);
+});
+
+test("channel browser ranks the best match first", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  // "gen" is a prefix of "general" (strong match) but only a substring of
+  // "agents" and a subsequence of "engineering" (weaker). The prefix match
+  // should float to the top regardless of the alphabetical default sort.
+  await page.getByTestId("channel-browser-search").fill("gen");
+
+  const firstRow = page.getByTestId(/^browse-channel-/).first();
+  await expect(firstRow).toHaveAttribute(
+    "data-testid",
+    "browse-channel-general",
+  );
+});
+
 test("sidebar add-channel button opens the browser", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
