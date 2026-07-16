@@ -2549,6 +2549,7 @@ let mockPersonas: RawPersona[] = [];
 let mockTeams: RawTeam[] = [];
 // Listeners registered via the mock __TAURI_INTERNALS__.listen — keyed by event name.
 const tauriEventListeners = new Map<string, Set<() => void>>();
+const openedExternalUrls: string[] = [];
 const defaultMockRelayAgents: RawRelayAgent[] = [
   {
     pubkey: ALICE_PUBKEY,
@@ -9504,6 +9505,14 @@ export function maybeInstallE2eTauriMocks() {
         return sendToMockSocket(
           payload as Parameters<typeof sendToMockSocket>[0],
         );
+      case "plugin:opener|open_url":
+        openedExternalUrls.push(String((payload as { url: string | URL }).url));
+        return null;
+      case "get_e2e_opened_external_urls":
+        return [...openedExternalUrls];
+      case "clear_e2e_opened_external_urls":
+        openedExternalUrls.length = 0;
+        return null;
       case "plugin:window|show":
       case "plugin:window|unminimize":
       case "plugin:window|set_focus":

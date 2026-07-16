@@ -613,6 +613,72 @@ test("first-run default community handoff gives immediate stepper feedback", asy
   await expect(page.getByTestId("onboarding-back")).toBeVisible();
 });
 
+test("welcome join policy documents open externally and keep onboarding mounted", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "wss://default.example.com",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.route(
+    "https://default.example.com/api/join-policy",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          policy: {
+            terms_markdown: "# Terms",
+            privacy_markdown: "# Privacy",
+            age_attestation_required: false,
+            version: "policy-v1",
+          },
+        }),
+      });
+    },
+  );
+
+  await page.goto("/");
+  await expect(page.getByText("Welcome to Buzz")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Terms of Service" }),
+  ).toBeVisible();
+
+  await page.evaluate(async () => {
+    const invoke = (
+      window as Window & {
+        __TAURI_INTERNALS__?: {
+          invoke?: (command: string, payload?: unknown) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__?.invoke;
+    await invoke?.("clear_e2e_opened_external_urls");
+  });
+  await page.getByRole("button", { name: "Terms of Service" }).click();
+  await page.getByRole("button", { name: "Privacy Policy" }).click();
+
+  await expect(page.getByText("Welcome to Buzz")).toBeVisible();
+  await expect(page.locator("#root")).not.toBeEmpty();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+
+  const openedUrls = await page.evaluate(async () => {
+    const invoke = (
+      window as Window & {
+        __TAURI_INTERNALS__?: {
+          invoke?: (command: string, payload?: unknown) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__?.invoke;
+    return (await invoke?.("get_e2e_opened_external_urls")) as string[];
+  });
+  expect(openedUrls).toEqual([
+    "https://default.example.com/api/join-policy/terms",
+    "https://default.example.com/api/join-policy/privacy",
+  ]);
+});
+
 test("welcome can continue using an existing Nostr key", async ({ page }) => {
   await installMockBridge(page, undefined, {
     relayWsUrl: "wss://default.example.com",
