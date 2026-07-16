@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
+import 'package:buzz/features/pairing/pairing_socket.dart';
 import 'package:buzz/shared/auth/auth.dart';
 
 /// Tests for [PairingNotifier]'s legacy `buzz://` payload parsing and
@@ -42,6 +43,36 @@ void main() {
       expect(state.status, PairingStatus.idle);
       expect(state.errorMessage, isNull);
     });
+
+    test(
+      'disconnect during connect does not null-dereference the socket',
+      () async {
+        final notifier = PairingNotifier(
+          socketFactory:
+              ({
+                required wsUrl,
+                required ephemeralPrivkey,
+                required onMessage,
+                required void Function(Object? error) onDisconnected,
+              }) => _DisconnectingSocket(disconnectCallback: onDisconnected),
+        );
+        container = ProviderContainer(
+          overrides: [pairingProvider.overrideWith(() => notifier)],
+        );
+        const code =
+            'nostrpair://62287897da61e3fa294b4570575f7db8bea147d6631150f2e4656714c645fb1e'
+            '?secret=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'
+            '&relay=wss%3A%2F%2Fpairing.buzz.xyz&v=1';
+
+        await container.read(pairingProvider.notifier).pair(code);
+
+        expect(container.read(pairingProvider).status, PairingStatus.error);
+        expect(
+          container.read(pairingProvider).errorMessage,
+          contains('internal error'),
+        );
+      },
+    );
 
     test('payload missing nsec errors before contacting relay', () async {
       container = createContainer();
@@ -190,5 +221,23 @@ class FakeAuthNotifier extends AsyncNotifier<AuthState>
     state = AsyncData(
       AuthState(status: AuthStatus.authenticated, community: community),
     );
+  }
+}
+
+class _DisconnectingSocket extends PairingSocket {
+  final void Function(Object? error) disconnectCallback;
+
+  _DisconnectingSocket({required this.disconnectCallback})
+    : super(
+        wsUrl: 'ws://unused',
+        ephemeralPrivkey:
+            '09b3065e3570a3a4054660dccd66e12774a99a904fdb0ca02dbc6c3136249506',
+        onMessage: (_) {},
+        onDisconnected: (_) {},
+      );
+
+  @override
+  Future<void> connect() async {
+    disconnectCallback(Exception('Connection closed'));
   }
 }
