@@ -88,9 +88,9 @@ export function MachineOnboardingFlow({
 
   return (
     <div
-      className={`buzz-onboarding-neutral-theme buzz-startup-shell flex items-center justify-center px-4 py-8 text-foreground ${
-        page === "identity" ? "buzz-onboarding-welcome" : ""
-      }`}
+      className={`buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-y-auto px-4 text-foreground ${
+        page === "setup" ? "py-24" : "py-8"
+      } ${page === "identity" ? "buzz-onboarding-welcome" : ""}`}
       data-testid="machine-onboarding-gate"
     >
       <StartupWindowDragRegion />
@@ -98,7 +98,7 @@ export function MachineOnboardingFlow({
       {page !== "identity" ? (
         <OnboardingStepDots current={page === "setup" ? 3 : 2} />
       ) : null}
-      <div className="relative flex w-full max-w-[920px] flex-col items-center text-center">
+      <div className="relative my-auto flex w-full max-w-[920px] flex-col items-center text-center">
         {page === "identity" ? (
           <OnboardingSlideTransition
             className="flex w-full max-w-[720px] flex-col items-center text-center"

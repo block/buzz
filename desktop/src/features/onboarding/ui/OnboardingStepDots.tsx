@@ -20,7 +20,7 @@ export function OnboardingStepDots({
   return (
     <div
       aria-hidden
-      className="absolute left-6 top-12 z-10 flex items-center gap-2.5 text-foreground"
+      className="pointer-events-none fixed left-6 top-12 z-10 flex items-center gap-2.5 text-foreground"
       data-testid="onboarding-step-dots"
     >
       {Array.from({ length: total }, (_, i) => i + 1).map((position) =>
