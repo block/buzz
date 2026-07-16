@@ -75,7 +75,6 @@ import { useCommunities } from "@/features/communities/useCommunities";
 import { useAddCommunityDialogState } from "@/features/communities/addCommunityPrefill";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
-import { useFeatureEnabled } from "@/shared/features";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
@@ -103,7 +102,7 @@ export function AppShell() {
   useWebviewScrollBoundaryLock();
 
   const communitiesHook = useCommunities();
-  const communityRailEnabled = useFeatureEnabled("workspaceRail");
+  const hasCommunityRail = communitiesHook.communities.length > 1;
   const addCommunityDialog = useAddCommunityDialogState();
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
@@ -762,7 +761,7 @@ export function AppShell() {
                     isHuddleDrawerOpen && "buzz-huddle-app-surface-open",
                   )}
                 >
-                  {communityRailEnabled ? (
+                  {hasCommunityRail ? (
                     <CommunityRail
                       activeCommunityId={
                         communitiesHook.activeCommunity?.id ?? null
@@ -779,10 +778,7 @@ export function AppShell() {
                       <AppTopChrome
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
-                        hasCommunityRail={
-                          communityRailEnabled &&
-                          communitiesHook.communities.length > 1
-                        }
+                        hasCommunityRail={hasCommunityRail}
                         onGoBack={goBack}
                         onGoForward={goForward}
                       />
@@ -935,10 +931,7 @@ export function AppShell() {
                         <RelayConnectionOverlay
                           card={relayConnectionCard}
                           errorMessage={channelsErrorMessage}
-                          hasCommunityRail={
-                            communityRailEnabled &&
-                            communitiesHook.communities.length > 1
-                          }
+                          hasCommunityRail={hasCommunityRail}
                           isHuddleDrawerOpen={isHuddleDrawerOpen}
                         />
                       </div>
