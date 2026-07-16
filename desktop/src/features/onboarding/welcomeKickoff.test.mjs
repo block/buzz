@@ -6,6 +6,7 @@ import {
   buildWelcomeKickoffCloser,
   buildWelcomeKickoffOpener,
   resolveWelcomeAgentSet,
+  waitForWelcomeKickoffBeat,
   waitForWelcomeTeammatesOnline,
 } from "./welcomeKickoff.ts";
 
@@ -92,6 +93,22 @@ test("readiness wait cancels when Welcome loses focus", async () => {
   });
 
   assert.equal(ready, false);
+});
+
+test("kickoff beat waits for the configured pacing interval", async () => {
+  const startedAt = Date.now();
+  assert.equal(await waitForWelcomeKickoffBeat({ waitMs: 10 }), true);
+  assert.ok(Date.now() - startedAt >= 8);
+});
+
+test("kickoff beat cancels when Welcome loses focus", async () => {
+  const controller = new AbortController();
+  const beat = waitForWelcomeKickoffBeat({
+    signal: controller.signal,
+    waitMs: 1_000,
+  });
+  controller.abort();
+  assert.equal(await beat, false);
 });
 
 test("closer degrades coherently for partial and total startup failure", () => {
