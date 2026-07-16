@@ -279,7 +279,9 @@ const overrides = new Map([
   // +13: fetch_login_shell_path_inner Windows guard (POSIX PATH → None).
   // resolve_git_bash made pub(crate) for Windows test access.
   // +1: login_shell_candidates doc comment expanded for resolve_bash_path.
-  ["src-tauri/src/managed_agents/discovery.rs", 1366],
+  // Buzz-managed Node path helpers moved to managed_node_paths.rs,
+  // ratcheting 1366 -> 1377 after adding the managed-path probes to discovery.
+  ["src-tauri/src/managed_agents/discovery.rs", 1377],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
