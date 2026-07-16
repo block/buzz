@@ -97,6 +97,30 @@ async function invitePost<T>(
   return json as T;
 }
 
+/** Absolute URL of a relay-hosted policy document page (system-browser target). */
+export function joinPolicyDocumentUrl(
+  relayWsUrl: string,
+  document: "terms" | "privacy",
+): string {
+  const base = relayHttpFromWs(relayWsUrl);
+  return `${base.replace(/\/+$/, "")}/api/join-policy/${document}`;
+}
+
+/** Whether a normalized relay URL is complete enough for background policy discovery. */
+export function isJoinPolicyDiscoveryCandidate(relayWsUrl: string): boolean {
+  try {
+    const url = new URL(relayWsUrl);
+    if (url.protocol !== "ws:" && url.protocol !== "wss:") return false;
+    return (
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname.includes(".")
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Fetch relay-hosted policy content for any join surface. */
 export async function getJoinPolicy(
   relayWsUrl: string,
