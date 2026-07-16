@@ -273,6 +273,12 @@ fn read_repos_dir_map(nest_root: &Path) -> BTreeMap<String, String> {
 
 /// Persist the per-relay `repos_dir` map, removing the file when empty
 /// (mirrors [`write_persisted_repos_dir`]'s clear-by-removal).
+///
+/// The write goes through a temp file + rename so a crash mid-write cannot
+/// leave truncated JSON behind: [`read_repos_dir_map`] degrades a malformed
+/// file to an *empty* map, which would silently send every workspace's spawn
+/// back to the shared `REPOS` fallback — exactly the cross-workspace hazard
+/// the map exists to prevent.
 fn write_repos_dir_map(nest_root: &Path, map: &BTreeMap<String, String>) -> Result<(), String> {
     let path = nest_root.join(REPOS_DIR_MAP_FILE);
     if map.is_empty() {
@@ -284,7 +290,10 @@ fn write_repos_dir_map(nest_root: &Path, map: &BTreeMap<String, String>) -> Resu
     }
     let json = serde_json::to_string_pretty(map)
         .map_err(|e| format!("serialize {REPOS_DIR_MAP_FILE}: {e}"))?;
-    fs::write(&path, format!("{json}\n")).map_err(|e| format!("write {}: {e}", path.display()))
+    let tmp = nest_root.join(format!("{REPOS_DIR_MAP_FILE}.tmp"));
+    fs::write(&tmp, format!("{json}\n")).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path)
+        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))
 }
 
 /// Upsert (or clear, on `None`/empty) the applied workspace's `repos_dir` in

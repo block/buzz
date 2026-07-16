@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -13,8 +14,31 @@ const RELAY_B = "wss://relay-b.example.com";
 
 // ── normalizeRelayUrlForCompare ──────────────────────────────────────────────
 // Must agree with the Rust `normalize_relay_url` (desktop/src-tauri/src/relay.rs)
-// because record pins are stamped by the backend and compared here. These
-// vectors mirror the Rust unit tests.
+// because record pins are stamped by the backend and compared here. The
+// agreement contract is the shared fixture below, consumed by both this file
+// and the Rust unit tests (`normalize_agrees_with_shared_frontend_fixture`),
+// so an edit to either normalizer fails the other side's tests instead of
+// shipping a scoping skew.
+
+test("normalize_agreesWithSharedBackendFixture", () => {
+  const vectors = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../fixtures/relay-url-normalization.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.ok(vectors.length > 0, "fixture must not be empty");
+  for (const { input, canonical } of vectors) {
+    assert.equal(
+      normalizeRelayUrlForCompare(input),
+      canonical,
+      `input: ${JSON.stringify(input)}`,
+    );
+  }
+});
 
 test("normalize_stripsWhitespaceAndTrailingSlashes", () => {
   assert.equal(

@@ -13,7 +13,9 @@
  * `desktop/src-tauri/src/relay.rs`; the two must agree because record pins
  * are stamped by the backend and compared here: trim, strip trailing
  * slashes, lowercase scheme + authority (case-insensitive per RFC 3986),
- * preserve any path or query case-sensitively.
+ * preserve any path or query case-sensitively. The agreement is pinned by
+ * the shared fixture `desktop/fixtures/relay-url-normalization.json`,
+ * consumed by both sides' unit tests — extend it with any behavior change.
  *
  * Distinct from `normalizeRelayUrl` in `communityStorage.ts` (input
  * canonicalisation: prepends `wss://`) and in `selfProfileStorage.ts`

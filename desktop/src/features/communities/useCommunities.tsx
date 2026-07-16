@@ -238,33 +238,42 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
       );
 
       if (result.kind === "updated") {
+        const commit = () => {
+          setCommunitiesState((prev) => {
+            const next = prev.map((w) =>
+              w.id === id ? { ...w, ...updates } : w,
+            );
+            saveCommunities(next);
+            return next;
+          });
+
+          if (result.requiresReinit) {
+            setReinitKey((k) => k + 1);
+          }
+        };
+
         // Agent records are pinned to their home relay, so a relay-URL edit
         // must re-pin them onto the new URL or they orphan on the old one.
-        // Fire-and-forget: a failure leaves the pins on the old URL, which
-        // stays recoverable by re-editing the community.
+        // The commit — and the reinit-triggered applyCommunity it fires —
+        // waits for the rebind: apply_workspace on the new URL activates
+        // start-on-launch agents and marks that relay activated for the
+        // session, so if it raced ahead of the rebind, agents still pinned
+        // to the old URL would be silently skipped until app relaunch. A
+        // rebind failure still commits — the pins stay on the old URL,
+        // which is recoverable by re-editing the community.
         const previous = communitiesRef.current.find((w) => w.id === id);
         if (
           previous &&
           updates.relayUrl !== undefined &&
           updates.relayUrl !== previous.relayUrl
         ) {
-          rebindAgentRelay(previous.relayUrl, updates.relayUrl).catch(
-            (error) => {
+          rebindAgentRelay(previous.relayUrl, updates.relayUrl)
+            .catch((error) => {
               console.error("failed to rebind agents to edited relay:", error);
-            },
-          );
-        }
-
-        setCommunitiesState((prev) => {
-          const next = prev.map((w) =>
-            w.id === id ? { ...w, ...updates } : w,
-          );
-          saveCommunities(next);
-          return next;
-        });
-
-        if (result.requiresReinit) {
-          setReinitKey((k) => k + 1);
+            })
+            .finally(commit);
+        } else {
+          commit();
         }
       }
 

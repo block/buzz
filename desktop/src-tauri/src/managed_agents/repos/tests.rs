@@ -499,6 +499,30 @@ fn repos_dir_map_rejects_empty_relay_and_survives_malformed_file() {
 }
 
 #[test]
+fn repos_dir_map_write_leaves_no_temp_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    fs::create_dir_all(&root).unwrap();
+
+    // The map is written via temp file + rename so a crash mid-write can
+    // never leave truncated JSON (read degrades malformed to an empty map,
+    // silently dropping isolation). A stale temp file — e.g. from a crash
+    // between write and rename — must be overwritten, and no temp file may
+    // outlive a successful write.
+    fs::write(root.join(".repos-dirs.json.tmp"), "half-written{").unwrap();
+    persist_workspace_repos_dir(&root, "wss://relay-a.example", Some("/Users/me/DevA")).unwrap();
+
+    assert_eq!(
+        workspace_repos_dir_for_relay(&root, "wss://relay-a.example").as_deref(),
+        Some("/Users/me/DevA")
+    );
+    assert!(
+        !root.join(".repos-dirs.json.tmp").exists(),
+        "the temp file is renamed into place, not left behind"
+    );
+}
+
+#[test]
 fn rebind_workspace_repos_dir_moves_entry_to_new_relay() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".buzz");

@@ -187,11 +187,24 @@ pub async fn apply_workspace(
             // symlink re-point below when a later switch moves it. Must land
             // before the activation task spawned after this closure starts
             // this workspace's agents. A bad candidate clears the entry, same
-            // as the dotfile above.
-            if let Err(error) =
-                persist_workspace_repos_dir(nest, &relay_url, effective_repos_dir.as_deref())
-            {
-                eprintln!("buzz-desktop: persist per-relay repos dir failed: {error}");
+            // as the dotfile above. Serialized on the store lock: a community
+            // relay edit fires rebind_agent_relay (which moves this map's
+            // entries under that lock) nearly simultaneously with this apply,
+            // and both are read-modify-writes of the same file — unserialized,
+            // one side's update would be lost.
+            match state.managed_agents_store_lock.lock() {
+                Ok(_store_guard) => {
+                    if let Err(error) = persist_workspace_repos_dir(
+                        nest,
+                        &relay_url,
+                        effective_repos_dir.as_deref(),
+                    ) {
+                        eprintln!("buzz-desktop: persist per-relay repos dir failed: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("buzz-desktop: persist per-relay repos dir skipped: {error}");
+                }
             }
             if let Err(error) = ensure_repos_symlink(nest, effective_repos_dir.as_deref()) {
                 eprintln!("buzz-desktop: repos dir setup failed: {error}");

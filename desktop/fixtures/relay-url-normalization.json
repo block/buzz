@@ -1,0 +1,47 @@
+[
+  {
+    "input": "wss://relay.example.com",
+    "canonical": "wss://relay.example.com",
+    "note": "already canonical"
+  },
+  {
+    "input": "  wss://relay.example.com//  ",
+    "canonical": "wss://relay.example.com",
+    "note": "surrounding whitespace and trailing slashes are cosmetic"
+  },
+  {
+    "input": "WSS://Relay.Example.COM:3000/Path",
+    "canonical": "wss://relay.example.com:3000/Path",
+    "note": "scheme and authority are case-insensitive (RFC 3986); the path is not"
+  },
+  {
+    "input": "WS://RELAY-A.example.com:3000/",
+    "canonical": "ws://relay-a.example.com:3000",
+    "note": "ws scheme and port survive; case and trailing slash fold away"
+  },
+  {
+    "input": "wss://Relay.Example.com/Path?Query=Value",
+    "canonical": "wss://relay.example.com/Path?Query=Value",
+    "note": "path and query are preserved case-sensitively"
+  },
+  {
+    "input": "wss://relay.example.com/path//",
+    "canonical": "wss://relay.example.com/path",
+    "note": "trailing slashes after a path are cosmetic too"
+  },
+  {
+    "input": "not-a-url/",
+    "canonical": "not-a-url",
+    "note": "schemeless values pass through trim/slash cleanup only"
+  },
+  {
+    "input": "",
+    "canonical": "",
+    "note": "empty stays empty"
+  },
+  {
+    "input": "   ",
+    "canonical": "",
+    "note": "whitespace-only trims to empty"
+  }
+]
