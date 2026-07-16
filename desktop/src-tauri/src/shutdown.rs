@@ -54,9 +54,40 @@ pub(crate) fn install_signal_handler(
 }
 
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+fn updated_macos_binary(current_binary: &std::path::Path) -> Option<std::path::PathBuf> {
+    let macos_directory = current_binary.parent()?;
+    if macos_directory.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents_directory = macos_directory.parent()?;
+    if contents_directory.file_name()? != "Contents" {
+        return None;
+    }
+    let info_plist =
+        plist::from_file::<_, plist::Dictionary>(contents_directory.join("Info.plist")).ok()?;
+    let binary_name = info_plist.get("CFBundleExecutable")?.as_string()?;
+    Some(macos_directory.join(binary_name))
+}
+
+#[cfg(all(feature = "mesh-llm", target_os = "macos"))]
 pub(crate) fn relaunch_after_mesh_shutdown(app: &tauri::AppHandle) -> ! {
+    use std::process::Command;
+
     tauri_plugin_single_instance::destroy(app);
-    tauri::process::restart(&app.env());
+    let env = app.env();
+    match tauri::process::current_binary(&env) {
+        Ok(current_binary) => {
+            let binary = updated_macos_binary(&current_binary).unwrap_or(current_binary);
+            if let Err(error) = Command::new(binary)
+                .args(env.args_os.iter().skip(1))
+                .spawn()
+            {
+                eprintln!("buzz-desktop: failed to relaunch app: {error}");
+            }
+        }
+        Err(error) => eprintln!("buzz-desktop: failed to locate app for relaunch: {error}"),
+    }
+    hard_exit_after_mesh_shutdown();
 }
 
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]

@@ -1010,6 +1010,7 @@ dependencies = [
  "notify-rust",
  "objc2-app-kit",
  "opus",
+ "plist",
  "png 0.18.1",
  "regex",
  "reqwest 0.13.4",
