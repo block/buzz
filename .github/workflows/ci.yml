@@ -283,20 +283,44 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      # Reuse the compiled relay when no input that reaches the binary changed
+      # (desktop-only PRs hit this every time). Key must cover everything the
+      # binary embeds: crates/** plus migrations/** (sqlx migrate! in buzz-db).
+      - name: Restore relay binary cache
+        id: relay-bin-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            target/ci/buzz-relay
+            target/ci/git-credential-nostr
+          key: relay-bin-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+        if: steps.relay-bin-cache.outputs.cache-hit != 'true'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.relay-bin-cache.outputs.cache-hit != 'true'
         with:
           workspaces: |
             .
             desktop/src-tauri
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Build relay
-        run: cargo build --profile ci -p buzz-relay
+        if: steps.relay-bin-cache.outputs.cache-hit != 'true'
+        run: cargo build --profile ci -p buzz-relay -p git-credential-nostr
+      - name: Save relay binary cache
+        if: steps.relay-bin-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            target/ci/buzz-relay
+            target/ci/git-credential-nostr
+          key: relay-bin-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
       - name: Upload relay binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: desktop-e2e-relay
-          path: target/ci/buzz-relay
+          path: |
+            target/ci/buzz-relay
+            target/ci/git-credential-nostr
           if-no-files-found: error
           retention-days: 1
 
@@ -623,7 +647,7 @@ jobs:
     name: Relay E2E
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [changes]
+    needs: [changes, desktop-e2e-relay]
     if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     permissions:
       contents: read
@@ -633,8 +657,17 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
+      # Reuse the relay + git-credential-nostr built by Desktop E2E Relay
+      # instead of compiling them a second time.
+      - name: Download relay binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-e2e-relay
+          path: target/ci
       - name: Start relay
-        run: ./scripts/start-relay-for-tests.sh
+        run: |
+          chmod +x ./target/ci/buzz-relay ./target/ci/git-credential-nostr
+          ./scripts/start-relay-for-tests.sh --no-build
       - name: Relay E2E tests
         run: cargo test -p buzz-test-client --test e2e_persona --test e2e_nostr_interop -- --ignored --nocapture
         env:
