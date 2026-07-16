@@ -66,10 +66,10 @@ export function resolveEventAuthorPubkey(input: {
   const normalizedRelaySelf = normalizeValidPubkey(relaySelfPubkey);
 
   // `actor` and author-attributing `p` tags are delegated authorship claims.
-  // The relay creates these for REST-originated events, so they are only
-  // authoritative when the event is signed by the active relay advertised in
-  // NIP-11. Missing or malformed relay identity data must leave the signer as
-  // the visible author.
+  // The relay creates these for workflow-generated and legacy relay-signed
+  // attributed events, so they are only authoritative when the event is signed
+  // by the active relay advertised in NIP-11. Missing or malformed relay
+  // identity data must leave the signer as the visible author.
   if (!normalizedRelaySelf || signerPubkey !== normalizedRelaySelf) {
     return signerPubkey;
   }

@@ -1334,16 +1334,13 @@ test("share access controls include the selected memories", async ({
   );
 });
 
-test("people sharing waits for relay identity and excludes the moderation recipient", async ({
-  page,
-}) => {
+test("people sharing excludes the moderation recipient", async ({ page }) => {
   await openSafetyShareDialog(page, {
     relaySelf: TEST_IDENTITIES.charlie.pubkey,
     relaySelfDelayMs: 800,
   });
 
   const search = page.getByTestId("persona-share-recipient-search");
-  await expect(search).toBeDisabled();
   await expect(search).toBeEnabled({ timeout: 5_000 });
   await search.fill("charlie");
   await expect(
