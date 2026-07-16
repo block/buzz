@@ -28,7 +28,10 @@ use buzz_core::observer::{
     OBSERVER_MAX_PLAINTEXT_LEN,
 };
 use clap::Parser;
-use config::{Config, DedupMode, ModelsArgs, MultipleEventHandling, RespondTo, SubscribeMode};
+use config::{
+    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
+    MultipleEventHandling, RespondTo, SubscribeMode,
+};
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
@@ -46,7 +49,7 @@ use uuid::Uuid;
 ///
 /// This avoids clap rejecting harness flags (like `--private-key`) that aren't
 /// declared on the subcommand's `Parser`. The `models` path has its own
-/// `ModelsArgs` parser; the default path uses the existing `CliArgs`.
+/// dedicated parser; the default path uses the existing `CliArgs`.
 ///
 /// **Constraint**: subcommand must be argv[1] — flags before the subcommand
 /// name (e.g., `buzz-acp --verbose models`) are not supported.
@@ -54,8 +57,12 @@ fn is_subcommand(name: &str) -> bool {
     std::env::args().nth(1).map(|a| a == name).unwrap_or(false)
 }
 
-/// Timeout for the `buzz-acp models` subcommand (spawn + init + session/new).
+/// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
+/// human interaction, so it must not share the short probe timeout.
+const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
@@ -1076,8 +1083,8 @@ async fn tokio_main() -> Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
     if is_subcommand("models") {
-        // Strip the "models" token so clap doesn't reject it as a positional.
-        // Keeps argv[0] (binary name) and passes everything after "models".
+        // Strip the subcommand token so clap doesn't reject it as a positional.
+        // Keeps argv[0] (binary name) and passes everything after the subcommand.
         let filtered: Vec<String> = std::env::args()
             .enumerate()
             .filter(|(i, _)| *i != 1)
@@ -1085,6 +1092,26 @@ async fn tokio_main() -> Result<()> {
             .collect();
         let args = ModelsArgs::parse_from(&filtered);
         return run_models(args).await;
+    }
+
+    if is_subcommand("auth-methods") {
+        let filtered: Vec<String> = std::env::args()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, a)| a)
+            .collect();
+        let args = AuthMethodsArgs::parse_from(&filtered);
+        return run_auth_methods(args).await;
+    }
+
+    if is_subcommand("authenticate") {
+        let filtered: Vec<String> = std::env::args()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, a)| a)
+            .collect();
+        let args = AuthenticateArgs::parse_from(&filtered);
+        return run_authenticate(args).await;
     }
 
     tracing_subscriber::fmt()
@@ -3325,14 +3352,130 @@ async fn spawn_and_init(
     }
 }
 
-/// `buzz-acp models` — spawn an agent, query its available models, exit.
-///
+async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
+    let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
+    AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
+}
+
+fn extract_auth_methods(init_result: &serde_json::Value) -> Vec<serde_json::Value> {
+    init_result
+        .get("authMethods")
+        .and_then(|methods| methods.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// `buzz-acp auth-methods` — spawn an adapter, initialize it, print authMethods.
+async fn run_auth_methods(args: AuthMethodsArgs) -> Result<()> {
+    let mut client = match spawn_auth_client(&args.agent).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: failed to spawn agent: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
+            client.shutdown().await;
+            eprintln!("error: agent initialize failed: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            client.shutdown().await;
+            eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
+            std::process::exit(1);
+        }
+    };
+
+    let methods = extract_auth_methods(&init_result);
+    client.shutdown().await;
+
+    if args.json {
+        let output = serde_json::json!({ "methods": methods });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if methods.is_empty() {
+        println!("No auth methods advertised.");
+    } else {
+        for method in methods {
+            let id = method
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let name = method
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or(id);
+            println!("{id}\t{name}");
+        }
+    }
+    Ok(())
+}
+
+/// `buzz-acp authenticate` — invoke one adapter-owned auth method.
+async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
+    let mut client = match spawn_auth_client(&args.agent).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: failed to spawn agent: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
+            client.shutdown().await;
+            eprintln!("error: agent initialize failed: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            client.shutdown().await;
+            eprintln!("error: agent initialize timed out ({MODELS_TIMEOUT:?})");
+            std::process::exit(1);
+        }
+    };
+
+    let supports_method = extract_auth_methods(&init_result)
+        .iter()
+        .any(|method| method.get("id").and_then(|id| id.as_str()) == Some(args.method_id.as_str()));
+    if !supports_method {
+        client.shutdown().await;
+        eprintln!(
+            "error: auth method '{}' is not advertised by this adapter",
+            args.method_id
+        );
+        std::process::exit(1);
+    }
+
+    let result =
+        tokio::time::timeout(AUTHENTICATE_TIMEOUT, client.authenticate(&args.method_id)).await;
+
+    match result {
+        Ok(Ok(_)) => {
+            client.shutdown().await;
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            client.shutdown().await;
+            eprintln!("error: authenticate failed: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            client.shutdown().await;
+            eprintln!("error: authenticate timed out ({AUTHENTICATE_TIMEOUT:?})");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Flow: spawn → initialize → session/new → print models → shutdown.
 /// No relay connection, no MCP servers, no subscriptions. ~2-5s total.
 async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
-    let agent_args = config::normalize_agent_args(&args.agent_command, args.agent_args);
+    let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
     let cwd = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("/"))
         .to_string_lossy()
@@ -3340,13 +3483,14 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
-    let mut client = match AcpClient::spawn(&args.agent_command, &agent_args, &[], false).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: failed to spawn agent: {e}");
-            std::process::exit(1);
-        }
-    };
+    let mut client =
+        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: failed to spawn agent: {e}");
+                std::process::exit(1);
+            }
+        };
 
     // Initialize + session/new under a timeout. Client is owned above,
     // so shutdown() runs on all paths (success, error, timeout).

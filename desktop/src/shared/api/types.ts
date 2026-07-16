@@ -550,6 +550,24 @@ export type InstallRuntimeResult = {
   failedRestartCount: number;
 };
 
+export type AcpAuthMethod = {
+  id: string;
+  name: string;
+  description: string | null;
+  type: string | null;
+  args: string[];
+  command: string[];
+  meta: unknown | null;
+};
+
+export type AcpAuthMethodsResult = {
+  methods: AcpAuthMethod[];
+};
+
+export type ConnectAcpRuntimeResult = {
+  launched: boolean;
+};
+
 export type CommandAvailability = {
   command: string;
   resolvedPath: string | null;

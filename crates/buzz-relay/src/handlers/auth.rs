@@ -304,7 +304,11 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                         // Successfully materialized — this owner is authoritative.
                         auth_ctx.agent_owner_pubkey = Some(owner);
                         // Pre-warm the observer cache to avoid stale negatives.
-                        let cache_key = (pubkey.to_bytes().to_vec(), owner.to_bytes().to_vec());
+                        let cache_key = (
+                            conn.tenant.community(),
+                            pubkey.to_bytes().to_vec(),
+                            owner.to_bytes().to_vec(),
+                        );
                         state.observer_owner_cache.insert(cache_key, true);
                     }
                     Ok(false) => {

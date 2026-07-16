@@ -535,11 +535,12 @@ pub struct AppState {
     /// Current in-flight media uploads per (community, uploader pubkey).
     pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
     /// Cache for observer agent-owner authorization (kind 24200).
-    /// Key: (agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
-    /// agent_owner_pubkey is immutable so a long TTL (5 min) is safe.
+    /// Key: (community_id, agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
+    /// `agent_owner_pubkey` is immutable inside one community, so a long TTL
+    /// (5 min) is safe once the community label is part of the key.
     /// Prevents repeated DB lookups from bursty observer traffic.
     #[allow(clippy::type_complexity)]
-    pub observer_owner_cache: Arc<moka::sync::Cache<(Vec<u8>, Vec<u8>), bool>>,
+    pub observer_owner_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>, Vec<u8>), bool>>,
 
     /// Runtime conformance tracer. Production binds [`crate::conformance::NoopTracer`]
     /// (zero cost). Conformance tests bind [`crate::conformance::JsonlTracer`] to
