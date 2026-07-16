@@ -4,6 +4,7 @@ import { init, SearchIndex } from "emoji-mart";
 import data from "@emoji-mart/data";
 
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
+import { fuzzyStandardEmoji, rankByShortcode } from "@/shared/lib/emojiSearch";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import type { AutocompleteEdit } from "./useRichTextEditor";
 
@@ -75,17 +76,18 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
 
     let cancelled = false;
 
-    // Custom emoji match by shortcode prefix/substring (case-insensitive).
-    const q = emojiQuery.toLowerCase();
-    const customMatches: EmojiSuggestion[] = customEmojiRef.current
-      .filter((e) => e.shortcode.toLowerCase().includes(q))
-      .slice(0, MAX_RESULTS)
-      .map((e) => ({
-        id: e.shortcode,
-        name: e.shortcode,
-        native: "",
-        url: rewriteRelayUrl(e.url),
-      }));
+    // Custom emoji match by shortcode, separator-insensitive and fuzzy.
+    const customMatches: EmojiSuggestion[] = rankByShortcode(
+      emojiQuery,
+      customEmojiRef.current,
+      (e) => e.shortcode,
+      MAX_RESULTS,
+    ).map((e) => ({
+      id: e.shortcode,
+      name: e.shortcode,
+      native: "",
+      url: rewriteRelayUrl(e.url),
+    }));
 
     SearchIndex.search(emojiQuery)
       .then(
@@ -104,8 +106,22 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
               native: emoji.skins[0]?.native ?? "",
             }))
             .filter((e) => e.native !== "");
-          // Custom emoji first (community-specific), then standard, capped.
-          const merged = [...customMatches, ...standard].slice(0, MAX_RESULTS);
+          // Top up remaining slots with fuzzy shortcode matches emoji-mart
+          // missed — its token-prefix search can't cross `_` (so `pointup`
+          // finds nothing). Skip ids already shown to avoid duplicates.
+          const shown = new Set<string>(
+            [...customMatches, ...standard].map((e) => e.id),
+          );
+          const fuzzy: EmojiSuggestion[] = fuzzyStandardEmoji(
+            emojiQuery,
+            MAX_RESULTS - customMatches.length - standard.length,
+            shown,
+          ).map((e) => ({ id: e.id, name: e.name, native: e.native }));
+          // Custom emoji first (community-specific), then standard, then fuzzy.
+          const merged = [...customMatches, ...standard, ...fuzzy].slice(
+            0,
+            MAX_RESULTS,
+          );
           setSuggestions(merged);
           setEmojiSelectedIndex(0);
         },
