@@ -26,6 +26,7 @@ import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
+  WELCOME_SETUP_PAGE_HEADINGS,
   WelcomeSetup,
   type WelcomeSetupPage,
 } from "@/features/communities/ui/WelcomeSetup";
@@ -180,17 +181,6 @@ function CommunitySwitchGate() {
   );
 }
 
-// Headings for the connecting variant, matching the WelcomeSetup sub-page the
-// user pressed the button on so the gate reads as that page's loading state.
-const CONNECTING_GATE_HEADINGS: Record<
-  Exclude<WelcomeSetupPage, "welcome">,
-  string
-> = {
-  "create-community": "Join a community",
-  invite: "Redeem an invite",
-  "nostr-key": "Use your existing key",
-};
-
 // Shown while a first-run community handoff settles (config apply + relay
 // round trips). For the default-community path the user pressed a button on
 // the welcome page itself, so the gate keeps rendering that same page with
@@ -198,14 +188,10 @@ const CONNECTING_GATE_HEADINGS: Record<
 // sub-page (key import, invite, join community) instead gets a forward-motion
 // connecting view under its own heading; showing the welcome replica there
 // reads as being kicked back to step 1.
-function OnboardingLoadingGate({
-  source,
-}: {
-  source: WelcomeSetupPage | null;
-}) {
+function OnboardingLoadingGate({ source }: { source: WelcomeSetupPage }) {
   const systemColorScheme = useSystemColorScheme();
   const connectingHeading =
-    source && source !== "welcome" ? CONNECTING_GATE_HEADINGS[source] : null;
+    source !== "welcome" ? WELCOME_SETUP_PAGE_HEADINGS[source] : null;
 
   return (
     <div
@@ -291,6 +277,16 @@ function OnboardingLoadingGate({
               <Button
                 aria-disabled="true"
                 className="h-10 w-full"
+                tabIndex={-1}
+                type="button"
+                variant="ghost"
+              >
+                Have an invite?
+              </Button>
+
+              <Button
+                aria-disabled="true"
+                className="h-10 w-full"
                 data-testid="welcome-continue-nostr"
                 tabIndex={-1}
                 type="button"
@@ -333,13 +329,11 @@ function CommunityQueryProvider({ children }: { children: ReactNode }) {
 
 function AppReady({
   firstRunHandoffSource,
-  isCompletingFirstRunCommunity,
   isSharedIdentity,
   isCommunitySwitch,
   onFirstRunCommunitySettled,
 }: {
   firstRunHandoffSource: WelcomeSetupPage | null;
-  isCompletingFirstRunCommunity: boolean;
   isSharedIdentity: boolean;
   isCommunitySwitch: boolean;
   onFirstRunCommunitySettled: () => void;
@@ -347,14 +341,10 @@ function AppReady({
   const onboarding = useAppOnboardingState(isSharedIdentity);
 
   useEffect(() => {
-    if (isCompletingFirstRunCommunity && onboarding.stage !== "blocking") {
+    if (firstRunHandoffSource !== null && onboarding.stage !== "blocking") {
       onFirstRunCommunitySettled();
     }
-  }, [
-    isCompletingFirstRunCommunity,
-    onboarding.stage,
-    onFirstRunCommunitySettled,
-  ]);
+  }, [firstRunHandoffSource, onboarding.stage, onFirstRunCommunitySettled]);
 
   if (onboarding.stage === "reset-failed") {
     return <ResetFailedScreen />;
@@ -380,7 +370,7 @@ function AppReady({
   }
 
   if (onboarding.stage === "blocking") {
-    if (isCompletingFirstRunCommunity) {
+    if (firstRunHandoffSource !== null) {
       return <OnboardingLoadingGate source={firstRunHandoffSource} />;
     }
 
@@ -417,8 +407,8 @@ export function App() {
     switchCommunity,
     reconnectCommunity,
   } = useCommunities();
-  const [isCompletingFirstRunCommunity, setIsCompletingFirstRunCommunity] =
-    useState(false);
+  // Non-null while a first-run community handoff settles; the value is the
+  // WelcomeSetup sub-page it started from, which picks the loading gate.
   const [firstRunHandoffSource, setFirstRunHandoffSource] =
     useState<WelcomeSetupPage | null>(null);
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
@@ -460,7 +450,6 @@ export function App() {
 
   const handleSetupComplete = useCallback(
     (community: Community, source: WelcomeSetupPage) => {
-      setIsCompletingFirstRunCommunity(true);
       setFirstRunHandoffSource(source);
       const communityId = addCommunity(community);
       switchCommunity(communityId);
@@ -469,7 +458,6 @@ export function App() {
   );
 
   const handleFirstRunCommunitySettled = useCallback(() => {
-    setIsCompletingFirstRunCommunity(false);
     setFirstRunHandoffSource(null);
   }, []);
 
@@ -515,7 +503,7 @@ export function App() {
   // a one-render race where React sees the new active community while the Tauri
   // backend is still configured for the previous one.
   if (!community.isReady || community.appliedKey !== communityKey) {
-    if (isCompletingFirstRunCommunity) {
+    if (firstRunHandoffSource !== null) {
       return <OnboardingLoadingGate source={firstRunHandoffSource} />;
     }
 
@@ -528,13 +516,12 @@ export function App() {
   const showBootSplashOverlay =
     bootSplashPhase !== "done" &&
     !isCommunitySwitch &&
-    !isCompletingFirstRunCommunity;
+    firstRunHandoffSource === null;
 
   return (
     <CommunityQueryProvider key={communityKey}>
       <AppReady
         firstRunHandoffSource={firstRunHandoffSource}
-        isCompletingFirstRunCommunity={isCompletingFirstRunCommunity}
         isCommunitySwitch={isCommunitySwitch}
         key={communityKey}
         isSharedIdentity={sharedIdentity}

@@ -27,6 +27,18 @@ export type WelcomeSetupPage =
   | "create-community"
   | "invite"
   | "nostr-key";
+
+// Sub-page headings, also rendered by the first-run connecting gate in
+// App.tsx so the gate always matches the page the handoff started from.
+export const WELCOME_SETUP_PAGE_HEADINGS: Record<
+  Exclude<WelcomeSetupPage, "welcome">,
+  string
+> = {
+  "create-community": "Join a community",
+  invite: "Redeem an invite",
+  "nostr-key": "Use your existing key",
+};
+
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
@@ -70,7 +82,7 @@ function NostrKeyImportPage({
     >
       <div className="w-full max-w-[440px]">
         <h1 className="text-3xl font-semibold tracking-tight">
-          Use your existing key
+          {WELCOME_SETUP_PAGE_HEADINGS["nostr-key"]}
         </h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
           Import your Nostr private key to use that identity with Buzz. If this
@@ -332,7 +344,7 @@ export function WelcomeSetup({
           >
             <div className="w-full max-w-[440px]">
               <h1 className="text-3xl font-semibold tracking-tight">
-                Join a community
+                {WELCOME_SETUP_PAGE_HEADINGS["create-community"]}
               </h1>
               <p className="mt-3 text-sm leading-6 text-muted-foreground">
                 Communities are where teammates and agents collaborate across
@@ -367,7 +379,7 @@ export function WelcomeSetup({
           >
             <div className="w-full max-w-[440px]">
               <h1 className="text-3xl font-semibold tracking-tight">
-                Redeem an invite
+                {WELCOME_SETUP_PAGE_HEADINGS.invite}
               </h1>
               <p className="mt-3 text-sm leading-6 text-muted-foreground">
                 Paste an invite link or code from a relay admin to join their
