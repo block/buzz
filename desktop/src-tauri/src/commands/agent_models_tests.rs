@@ -260,3 +260,48 @@ fn is_databricks_provider_matches_both_variants() {
     assert!(!is_databricks_provider(Some("anthropic")));
     assert!(!is_databricks_provider(None));
 }
+
+// ---------------------------------------------------------------------------
+// OpenRouter provider
+// ---------------------------------------------------------------------------
+
+#[test]
+fn is_openrouter_provider_matches() {
+    assert!(is_openrouter_provider(Some("openrouter")));
+    assert!(is_openrouter_provider(Some("  OpenRouter  ")));
+    assert!(!is_openrouter_provider(Some("openai")));
+    assert!(!is_openrouter_provider(Some("anthropic")));
+    assert!(!is_openrouter_provider(None));
+}
+
+#[test]
+fn openrouter_models_url_uses_default_base_url() {
+    assert_eq!(
+        openrouter_models_url(&BTreeMap::new()),
+        "https://openrouter.ai/api/v1/models"
+    );
+}
+
+#[test]
+fn openrouter_models_url_respects_custom_base_url() {
+    let env = BTreeMap::from([(
+        "OPENROUTER_BASE_URL".to_string(),
+        "https://eu.openrouter.ai/api/v1".to_string(),
+    )]);
+    assert_eq!(
+        openrouter_models_url(&env),
+        "https://eu.openrouter.ai/api/v1/models"
+    );
+}
+
+#[test]
+fn openrouter_models_url_strips_trailing_slash() {
+    let env = BTreeMap::from([(
+        "OPENROUTER_BASE_URL".to_string(),
+        "https://proxy.example.com/api/v1/".to_string(),
+    )]);
+    assert_eq!(
+        openrouter_models_url(&env),
+        "https://proxy.example.com/api/v1/models"
+    );
+}

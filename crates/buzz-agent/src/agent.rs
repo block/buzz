@@ -213,6 +213,7 @@ impl RunCtx<'_> {
                 self.history.push(HistoryItem::Assistant {
                     text: response.text,
                     tool_calls: Vec::new(),
+                    reasoning_details: response.reasoning_details.clone(),
                 });
                 let stop = map_stop(response.stop);
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
@@ -249,6 +250,7 @@ impl RunCtx<'_> {
             self.history.push(HistoryItem::Assistant {
                 text: response.text,
                 tool_calls: calls.clone(),
+                reasoning_details: response.reasoning_details,
             });
 
             if let Some(stop) = self.execute_calls(&calls).await {
@@ -680,6 +682,7 @@ pub(crate) fn push_hook_outputs_as_tool_results(
                 name: tool_name,
                 arguments: serde_json::json!({}),
             }],
+            reasoning_details: None,
         });
         history.push(HistoryItem::ToolResult(ToolResult {
             provider_id,
