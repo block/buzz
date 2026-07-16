@@ -52,7 +52,7 @@ function AvatarCircle({
     >
       {emojiAvatar ? (
         <span
-          className="flex h-28 w-28 items-center justify-center overflow-hidden rounded-full text-[3.5rem] shadow-xs"
+          className="flex h-28 w-28 items-center justify-center overflow-hidden rounded-full text-5xl shadow-xs"
           style={{ backgroundColor: emojiAvatar.color }}
         >
           {emojiAvatar.emoji}
