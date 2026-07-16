@@ -193,21 +193,10 @@ export function GlobalAgentConfigEditor({
 
       {/* Save bar */}
       {!isLoading && !loadError && (
-        <div className="mt-4 flex items-center gap-3">
-          {secondaryAction}
-          <Button
-            disabled={!dirty || !configIsValid || saveState === "saving"}
-            onClick={() => void handleSave()}
-            size="sm"
-          >
-            {saveState === "saving" ? (
-              <Loader className="mr-1.5 size-3.5 animate-spin" />
-            ) : null}
-            Save defaults
-          </Button>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
           {saveState === "saved" && (
-            <span className="flex items-center gap-1 text-sm text-green-600 dark:text-green-400">
-              <Check className="size-3.5" />
+            <span className="flex min-w-0 items-center gap-1 text-sm text-green-600 dark:text-green-400">
+              <Check className="size-3.5 shrink-0" />
               {restartedCount > 0
                 ? `Saved. Restarted ${restartedCount} agent${restartedCount === 1 ? "" : "s"}.${failedRestartCount > 0 ? ` ${failedRestartCount} failed to restart — check the Agents tab.` : ""}`
                 : failedRestartCount > 0
@@ -216,11 +205,24 @@ export function GlobalAgentConfigEditor({
             </span>
           )}
           {saveState === "error" && saveError && (
-            <span className="flex items-center gap-1 text-sm text-destructive">
-              <AlertCircle className="size-3.5" />
+            <span className="flex min-w-0 items-center gap-1 text-sm text-destructive">
+              <AlertCircle className="size-3.5 shrink-0" />
               {saveError}
             </span>
           )}
+          <div className="ml-auto flex items-center gap-3">
+            {secondaryAction}
+            <Button
+              disabled={!dirty || !configIsValid || saveState === "saving"}
+              onClick={() => void handleSave()}
+              size="sm"
+            >
+              {saveState === "saving" ? (
+                <Loader className="mr-1.5 size-3.5 animate-spin" />
+              ) : null}
+              Save defaults
+            </Button>
+          </div>
         </div>
       )}
     </div>
