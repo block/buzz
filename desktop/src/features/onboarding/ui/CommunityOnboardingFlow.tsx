@@ -66,6 +66,12 @@ export function CommunityOnboardingFlow({
 
   const retryClaim = () => update({ stage: "claiming", error: undefined });
   const relayUrl = transaction?.relayUrl;
+  const finish = React.useCallback(async () => {
+    if (!relayUrl) return;
+    const identity = await getIdentity();
+    markCommunityOnboardingComplete(identity.pubkey, relayUrl);
+    clear();
+  }, [clear, relayUrl]);
   const finalize = React.useCallback(async () => {
     if (isPending || !relayUrl) return;
     setIsPending(true);
@@ -78,15 +84,14 @@ export function CommunityOnboardingFlow({
         communityScope: relayUrl,
       });
       if (!result.ok) throw new Error(result.reason);
-      markCommunityOnboardingComplete(identity.pubkey, relayUrl);
-      clear();
+      await finish();
     } catch (error) {
       update({
         error: error instanceof Error ? error.message : String(error),
       });
       setIsPending(false);
     }
-  }, [clear, isPending, queryClient, relayUrl, update]);
+  }, [finish, isPending, queryClient, relayUrl, update]);
 
   if (!transaction) return null;
 
@@ -126,14 +131,14 @@ export function CommunityOnboardingFlow({
                   ? "Accepting your invite…"
                   : "Connecting securely…")}
             </p>
-            {transaction.error ? (
-              <div className="mt-6 flex justify-center gap-3">
+            <div className="mt-6 flex justify-center gap-3">
+              {transaction.error ? (
                 <Button onClick={retryClaim}>Retry</Button>
-                <Button onClick={clear} variant="secondary">
-                  Cancel
-                </Button>
-              </div>
-            ) : null}
+              ) : null}
+              <Button onClick={clear} variant="secondary">
+                Cancel
+              </Button>
+            </div>
           </>
         ) : transaction.stage === "profile" ? (
           <>
@@ -207,15 +212,26 @@ export function CommunityOnboardingFlow({
                 {transaction.error}
               </p>
             ) : null}
-            <Button
-              className="mt-8 w-full"
-              disabled={isPending}
-              onClick={() => void finalize()}
-            >
-              {transaction.stage === "finalizing"
-                ? "Preparing Welcome…"
-                : `Enter ${transaction.communityName}`}
-            </Button>
+            <div className="mt-8 flex flex-col gap-3">
+              <Button
+                className="w-full"
+                disabled={isPending}
+                onClick={() => void finalize()}
+              >
+                {transaction.stage === "finalizing"
+                  ? "Preparing Welcome…"
+                  : `Enter ${transaction.communityName}`}
+              </Button>
+              {transaction.error ? (
+                <Button
+                  disabled={isPending}
+                  onClick={() => void finish()}
+                  variant="ghost"
+                >
+                  Enter without Welcome channel
+                </Button>
+              ) : null}
+            </div>
           </>
         )}
       </div>
