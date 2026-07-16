@@ -130,14 +130,13 @@ async function expectBuzzSidebarPalette(page: Page, mode: "light" | "dark") {
   );
   for (const rowBox of [primaryRowBox, activeRowBox, hoverRowBox]) {
     expect(Math.abs(rowBox.x - searchBox.x)).toBeLessThanOrEqual(0.5);
-    expect(
-      Math.abs(rowBox.x + rowBox.width - (searchBox.x + searchBox.width)),
-    ).toBeLessThanOrEqual(0.5);
+    // Linux CI reserves a classic scrollbar gutter while macOS uses an
+    // overlay scrollbar. Compare each row to its usable scroll area so the
+    // alignment check remains platform-independent.
+    const rowLeftSpacing = rowBox.x - scrollContentBox.left;
+    const rowRightSpacing = scrollContentBox.right - (rowBox.x + rowBox.width);
+    expect(Math.abs(rowLeftSpacing - rowRightSpacing)).toBeLessThanOrEqual(0.5);
   }
-  const rowLeftSpacing = activeRowBox.x - scrollContentBox.left;
-  const rowRightSpacing =
-    scrollContentBox.right - (activeRowBox.x + activeRowBox.width);
-  expect(Math.abs(rowLeftSpacing - rowRightSpacing)).toBeLessThanOrEqual(0.5);
   await expect(page.locator("[data-buzz-sidebar-secondary]").first()).toHaveCSS(
     "color",
     mutedColor,
