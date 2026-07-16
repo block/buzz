@@ -468,6 +468,10 @@ fn inbound_team_omitted_fields_preserve_local() {
     // Sietch Tabr wipe: an old-shaped (or genuinely field-omitting) event
     // must not blank out a team that has real membership/instructions.
     let mut teams = vec![local_team()];
+    // Give local_team real instructions so preservation is discriminating:
+    // the pre-fix blind-overwrite bug would collapse this to `None`, while
+    // the fix must leave it untouched on an omitted field.
+    teams[0].instructions = Some("local instructions".to_string());
     apply_inbound_team(
         &mut teams,
         TEAM_ID.to_string(),
@@ -481,8 +485,9 @@ fn inbound_team_omitted_fields_preserve_local() {
         "shared non-optional field still overwrites"
     );
     assert_eq!(
-        t.instructions, None,
-        "local had no instructions; omission preserves that (no-op)"
+        t.instructions,
+        Some("local instructions".to_string()),
+        "omitted instructions preserves local value rather than wiping it"
     );
     assert_eq!(
         t.persona_ids,
