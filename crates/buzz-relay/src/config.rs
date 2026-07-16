@@ -540,7 +540,6 @@ impl Config {
             .unwrap_or(30);
 
         let require_media_get_auth = std::env::var("BUZZ_REQUIRE_MEDIA_GET_AUTH")
-            .or_else(|_| std::env::var("BUZZ_REQUIRE_MEDIA_READ_AUTH"))
             .map(|v| {
                 v == "true"
                     || v == "1"
@@ -746,27 +745,6 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
-    }
-
-    #[test]
-    fn media_get_auth_accepts_read_auth_legacy_alias() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous_get = std::env::var_os("BUZZ_REQUIRE_MEDIA_GET_AUTH");
-        let previous_read = std::env::var_os("BUZZ_REQUIRE_MEDIA_READ_AUTH");
-        std::env::remove_var("BUZZ_REQUIRE_MEDIA_GET_AUTH");
-        std::env::set_var("BUZZ_REQUIRE_MEDIA_READ_AUTH", "on");
-
-        let config = Config::from_env().expect("config");
-        assert!(config.require_media_get_auth);
-
-        match previous_get {
-            Some(value) => std::env::set_var("BUZZ_REQUIRE_MEDIA_GET_AUTH", value),
-            None => std::env::remove_var("BUZZ_REQUIRE_MEDIA_GET_AUTH"),
-        }
-        match previous_read {
-            Some(value) => std::env::set_var("BUZZ_REQUIRE_MEDIA_READ_AUTH", value),
-            None => std::env::remove_var("BUZZ_REQUIRE_MEDIA_READ_AUTH"),
-        }
     }
 
     #[test]
