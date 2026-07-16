@@ -1,6 +1,6 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { nsecEncode } from "nostr-tools/nip19";
+import { npubEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import {
@@ -550,60 +550,16 @@ test("completed users skip the loading gate while profile is still settling", as
   await expectHomeView(page);
 });
 
-test("first-run default community handoff gives immediate stepper feedback", async ({
+test("first-community choices expose npub and invite input", async ({
   page,
 }) => {
-  // Use a blank-username identity so the profile has no display name and
-  // the auto-skip logic does not fire — we need to stay in onboarding to
-  // verify the stepper UX.
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(
-    page,
-    {
-      profileReadDelayMs: 2_000,
-    },
-    {
-      relayWsUrl: "wss://default.example.com",
-      skipOnboardingSeed: true,
-      skipCommunitySeed: true,
-    },
-  );
-  await page.goto("/");
-
-  await expect(page.getByText("Welcome to Buzz")).toBeVisible();
-  await page
-    .getByRole("button", { name: "Continue with default community" })
-    .click();
-
-  await page.waitForTimeout(80);
-  await expect(page.getByRole("button", { name: "Connecting..." })).toHaveCount(
-    0,
-  );
-  await expect(
-    page.getByRole("button", { name: "Continue with default community" }),
-  ).toBeVisible();
-  await expect(page.getByRole("progressbar")).toHaveAttribute(
-    "aria-valuenow",
-    "2",
-  );
-  await page.waitForTimeout(240);
-  await expect(page.getByTestId("welcome-continue-nostr")).toBeVisible();
-  await expect(page.getByRole("progressbar")).toHaveAttribute(
-    "aria-valuenow",
-    "2",
-  );
-
-  const nameInput = page.getByTestId("onboarding-display-name");
-  await expect(nameInput).toHaveValue("");
-  await expect(page.getByRole("progressbar")).toHaveAttribute(
-    "aria-valuenow",
-    "2",
-  );
-  await expect(nameInput).toHaveAttribute("autocomplete", "off");
-  await expect(page.getByTestId("onboarding-back")).toBeVisible();
-});
-
-test("welcome can continue using an existing Nostr key", async ({ page }) => {
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
   await installMockBridge(page, undefined, {
     relayWsUrl: "wss://default.example.com",
     skipOnboardingSeed: true,
@@ -611,53 +567,44 @@ test("welcome can continue using an existing Nostr key", async ({ page }) => {
   });
   await page.goto("/");
 
-  await page.getByTestId("welcome-continue-nostr").click();
-  await expect(
-    page.getByRole("heading", { name: "Use your existing key" }),
-  ).toBeVisible();
-
-  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
-  await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
-  await expect(page.getByTestId("nostr-import-npub-preview")).toBeVisible();
-  await page.getByTestId("nostr-import-submit").click();
-
-  // Alice already has a relay profile with a display name, so onboarding
-  // auto-completes after the identity swap.
-  await expect
-    .poll(() =>
-      page.evaluate(() => {
-        const rawCommunities = window.localStorage.getItem("buzz-communities");
-        const communities = rawCommunities
-          ? (JSON.parse(rawCommunities) as Array<{ pubkey?: string }>)
-          : [];
-        return communities[0]?.pubkey ?? null;
-      }),
-    )
-    .toBe(TEST_IDENTITIES.alice.pubkey);
-  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expectHomeView(page);
-});
-
-test("welcome presents custom community setup as joining a community", async ({
-  page,
-}) => {
-  await installMockBridge(page, undefined, {
-    skipOnboardingSeed: true,
-    skipCommunitySeed: true,
-  });
-  await page.goto("/");
-
-  await expect(
-    page.getByRole("button", { name: "Continue with default community" }),
-  ).toHaveCount(0);
-  await page.getByRole("button", { name: "Join a community" }).click();
-
-  await expect(
-    page.getByRole("heading", { name: "Join a community" }),
-  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Join a community" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "I have an invite link" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Create a community" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Create a community" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const log = (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: Array<{
+              command: string;
+              payload: unknown;
+            }>;
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__;
+        return log?.find((entry) => entry.command === "plugin:opener|open_url")
+          ?.payload;
+      }),
+    )
+    .toMatchObject({ url: "https://buzz.xyz" });
+
+  await page.getByRole("button", { name: "Join a community" }).click();
+  await expect(page.getByTestId("welcome-join-npub")).toHaveText(
+    npubEncode(BLANK_TYLER_IDENTITY.pubkey),
+  );
+  await page.getByRole("button", { name: "Back" }).click();
+
+  await page.getByRole("button", { name: "I have an invite link" }).click();
+  await expect(
+    page.getByRole("heading", { name: "I have an invite link" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("invite-redeem-input")).toBeVisible();
 });
 
 test("identity fallback text does not count as a real onboarding name", async ({

@@ -2,7 +2,6 @@ import { isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
-import { Hexagon } from "lucide-react";
 import {
   type ReactNode,
   useCallback,
@@ -21,12 +20,10 @@ import { useMachineOnboardingState } from "@/features/onboarding/machineOnboardi
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboardingFlow";
 import { MachineOnboardingFlow } from "@/features/onboarding/ui/MachineOnboardingFlow";
-import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSlideTransition";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
 import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
 import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequiredScreen";
 import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
-import type { Community } from "@/features/communities/types";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -36,14 +33,11 @@ import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChang
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { listenForDeepLinks } from "@/shared/deep-link";
-import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
-import { StepProgress } from "@/shared/ui/step-progress";
 
 const LOADING_TEXT = "Setting up your community...";
 
@@ -182,78 +176,6 @@ function CommunitySwitchGate() {
   );
 }
 
-function OnboardingLoadingGate() {
-  const systemColorScheme = useSystemColorScheme();
-
-  return (
-    <div
-      className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground"
-      data-system-color-scheme={systemColorScheme}
-    >
-      <StartupWindowDragRegion />
-      <div className="relative flex w-full max-w-[500px] flex-col items-center text-center">
-        <StepProgress
-          activeSegmentClassName="bg-primary"
-          className="fixed bottom-12 left-1/2 z-40 -translate-x-1/2"
-          completeSegmentClassName="bg-primary/35"
-          currentStep={2}
-          inactiveSegmentClassName="bg-muted-foreground/25"
-        />
-
-        <OnboardingSlideTransition
-          className="flex w-full flex-col items-center text-center"
-          direction="forward"
-          effect="none"
-          transitionKey="community-connecting"
-        >
-          <div className="flex h-14 w-14 items-center justify-center rounded-lg border border-border bg-background text-foreground shadow-xs">
-            <Hexagon className="h-7 w-7" aria-hidden="true" />
-          </div>
-
-          <h1 className="mt-6 text-3xl font-semibold tracking-tight">
-            Welcome to Buzz
-          </h1>
-          <p className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground">
-            Choose your first community to get started.
-          </p>
-
-          <div className="mt-8 flex w-full max-w-[500px] flex-col gap-3">
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              tabIndex={-1}
-              type="button"
-            >
-              Continue with default community
-            </Button>
-
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              tabIndex={-1}
-              type="button"
-              variant="secondary"
-            >
-              Join a community
-            </Button>
-
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              data-testid="welcome-continue-nostr"
-              tabIndex={-1}
-              type="button"
-              variant="ghost"
-            >
-              I already have a key
-            </Button>
-          </div>
-        </OnboardingSlideTransition>
-      </div>
-    </div>
-  );
-}
-
 function CommunityQueryProvider({ children }: { children: ReactNode }) {
   const [queryClient] = useState(createBuzzQueryClient);
 
@@ -280,27 +202,13 @@ function CommunityQueryProvider({ children }: { children: ReactNode }) {
 }
 
 function AppReady({
-  isCompletingFirstRunCommunity,
   isSharedIdentity,
   isCommunitySwitch,
-  onFirstRunCommunitySettled,
 }: {
-  isCompletingFirstRunCommunity: boolean;
   isSharedIdentity: boolean;
   isCommunitySwitch: boolean;
-  onFirstRunCommunitySettled: () => void;
 }) {
   const onboarding = useAppOnboardingState(isSharedIdentity);
-
-  useEffect(() => {
-    if (isCompletingFirstRunCommunity && onboarding.stage !== "blocking") {
-      onFirstRunCommunitySettled();
-    }
-  }, [
-    isCompletingFirstRunCommunity,
-    onboarding.stage,
-    onFirstRunCommunitySettled,
-  ]);
 
   if (onboarding.stage === "reset-failed") {
     return <ResetFailedScreen />;
@@ -326,10 +234,6 @@ function AppReady({
   }
 
   if (onboarding.stage === "blocking") {
-    if (isCompletingFirstRunCommunity) {
-      return <OnboardingLoadingGate />;
-    }
-
     return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
   }
 
@@ -348,8 +252,6 @@ function CommunityApp({ sharedIdentity }: { sharedIdentity: boolean }) {
     switchCommunity,
     reconnectCommunity,
   } = useCommunities();
-  const [isCompletingFirstRunCommunity, setIsCompletingFirstRunCommunity] =
-    useState(false);
   const communityOnboarding = useCommunityOnboarding();
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
 
@@ -385,23 +287,6 @@ function CommunityApp({ sharedIdentity }: { sharedIdentity: boolean }) {
     communityKey,
     sharedIdentity,
   );
-  const handleSetupComplete = useCallback(
-    (community: Community) => {
-      setIsCompletingFirstRunCommunity(true);
-      communityOnboarding.start({
-        source: "first-community",
-        relayUrl: community.relayUrl,
-        communityName: community.name,
-        token: community.token,
-        reposDir: community.reposDir,
-      });
-    },
-    [communityOnboarding.start],
-  );
-
-  const handleFirstRunCommunitySettled = useCallback(() => {
-    setIsCompletingFirstRunCommunity(false);
-  }, []);
 
   const handleCommunityOnboardingConnect = useCallback(() => {
     const transaction = communityOnboarding.transaction;
@@ -443,12 +328,7 @@ function CommunityApp({ sharedIdentity }: { sharedIdentity: boolean }) {
 
   // Show welcome setup for first-run users with no communities
   if (community.needsSetup) {
-    return (
-      <WelcomeSetup
-        defaultRelayUrl={community.defaultRelayUrl}
-        onComplete={handleSetupComplete}
-      />
-    );
+    return <WelcomeSetup defaultRelayUrl={community.defaultRelayUrl} />;
   }
 
   // Surface apply failures so the user can retry or change community.
@@ -474,29 +354,21 @@ function CommunityApp({ sharedIdentity }: { sharedIdentity: boolean }) {
   // a one-render race where React sees the new active community while the Tauri
   // backend is still configured for the previous one.
   if (!community.isReady || community.appliedKey !== communityKey) {
-    if (isCompletingFirstRunCommunity) {
-      return <OnboardingLoadingGate />;
-    }
-
     return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
   }
 
   // The app mounts (and starts loading data) beneath the splash overlay; the
   // overlay just keeps the bee on screen long enough to be seen, then fades.
-  // Community switches and first-run completion keep their quiet gates.
+  // Community switches keep their quiet gate.
   const showBootSplashOverlay =
-    bootSplashPhase !== "done" &&
-    !isCommunitySwitch &&
-    !isCompletingFirstRunCommunity;
+    bootSplashPhase !== "done" && !isCommunitySwitch;
 
   return (
     <CommunityQueryProvider key={communityKey}>
       <AppReady
-        isCompletingFirstRunCommunity={isCompletingFirstRunCommunity}
         isCommunitySwitch={isCommunitySwitch}
         key={communityKey}
         isSharedIdentity={sharedIdentity}
-        onFirstRunCommunitySettled={handleFirstRunCommunitySettled}
       />
       {showBootSplashOverlay ? (
         <div
