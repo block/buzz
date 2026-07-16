@@ -3,6 +3,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
+import '../invites/invite_join_provider.dart';
+import '../invites/invite_join_sheet.dart';
 import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channels_provider.dart';
@@ -20,11 +22,13 @@ typedef DeepLinkDestinationBuilder =
 class DeepLinkDispatcher extends ConsumerStatefulWidget {
   final Widget child;
   final DeepLinkDestinationBuilder? destinationBuilder;
+  final bool dispatchMessageLinks;
 
   const DeepLinkDispatcher({
     super.key,
     required this.child,
     this.destinationBuilder,
+    this.dispatchMessageLinks = true,
   });
 
   @override
@@ -32,6 +36,8 @@ class DeepLinkDispatcher extends ConsumerStatefulWidget {
 }
 
 class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
+  bool _preparingInvite = false;
+
   @override
   void initState() {
     super.initState();
@@ -44,18 +50,25 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   @override
   Widget build(BuildContext context) {
     // Re-evaluate dispatch when either a new link arrives or channels load.
-    ref.listen<MessageDeepLink?>(pendingDeepLinkProvider, (_, link) {
+    ref.listen<BuzzDeepLink?>(pendingDeepLinkProvider, (_, link) {
       _maybeDispatch(link);
     });
-    ref.listen<AsyncValue<List<Channel>>>(channelsProvider, (_, _) {
-      _maybeDispatch(ref.read(pendingDeepLinkProvider));
-    });
+    if (widget.dispatchMessageLinks) {
+      ref.listen<AsyncValue<List<Channel>>>(channelsProvider, (_, _) {
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      });
+    }
 
     return widget.child;
   }
 
-  void _maybeDispatch(MessageDeepLink? link) {
+  void _maybeDispatch(BuzzDeepLink? link) {
     if (link == null) return;
+    if (link is InviteDeepLink) {
+      _maybeDispatchInvite(link);
+      return;
+    }
+    if (link is! MessageDeepLink || !widget.dispatchMessageLinks) return;
 
     final channels = ref.read(channelsProvider).asData?.value;
     // Channels not loaded yet — keep the link parked; the channelsProvider
@@ -91,5 +104,40 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
             ),
       ),
     );
+  }
+
+  void _maybeDispatchInvite(InviteDeepLink link) {
+    if (_preparingInvite) return;
+    _preparingInvite = true;
+    final navigatorContext = context;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    Future.microtask(() async {
+      try {
+        await ref.read(inviteJoinProvider.notifier).prepare(link);
+        ref.read(pendingDeepLinkProvider.notifier).consume();
+        if (!navigatorContext.mounted) return;
+        final status = ref.read(inviteJoinProvider).status;
+        if (status == InviteJoinStatus.confirming) {
+          showInviteJoinSheet(navigatorContext, ref);
+        } else if (status == InviteJoinStatus.switchedExisting) {
+          messenger?.showSnackBar(
+            const SnackBar(content: Text('Switched to this community')),
+          );
+        }
+      } catch (error) {
+        debugPrint('deep-link: failed to prepare invite: $error');
+        if (navigatorContext.mounted) {
+          messenger?.showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Could not open this invite. Re-open the invite link to try again.',
+              ),
+            ),
+          );
+        }
+      } finally {
+        _preparingInvite = false;
+      }
+    });
   }
 }
