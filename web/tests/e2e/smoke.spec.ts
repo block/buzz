@@ -27,7 +27,47 @@ test("invite requires age and legal consent before opening Buzz", async ({
       }),
     });
   });
+  await page.route("https://api.github.com/**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify([
+        { draft: false, prerelease: false, assets: [] },
+        {
+          draft: false,
+          prerelease: false,
+          assets: [
+            {
+              name: "Buzz_0.4.9_aarch64.dmg",
+              browser_download_url:
+                "https://github.com/block/buzz/releases/download/v0.4.9/Buzz_0.4.9_aarch64.dmg",
+            },
+            {
+              name: "Buzz_0.4.9_x64.dmg",
+              browser_download_url:
+                "https://github.com/block/buzz/releases/download/v0.4.9/Buzz_0.4.9_x64.dmg",
+            },
+            {
+              name: "Buzz_0.4.9_amd64.AppImage",
+              browser_download_url:
+                "https://github.com/block/buzz/releases/download/v0.4.9/Buzz_0.4.9_amd64.AppImage",
+            },
+            {
+              name: "Buzz_0.4.9_x64-setup_alpha-unsigned.exe",
+              browser_download_url:
+                "https://github.com/block/buzz/releases/download/v0.4.9/Buzz_0.4.9_x64-setup_alpha-unsigned.exe",
+            },
+          ],
+        },
+      ]),
+    });
+  });
   await page.goto("/invite/demo-code");
+
+  await expect(
+    page.getByRole("link", { name: "Download it now" }),
+  ).toHaveAttribute("href", /releases\/download\/v0\.4\.9\/Buzz_0\.4\.9_/);
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
