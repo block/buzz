@@ -68,10 +68,7 @@ import {
 } from "./usePersonaModelDiscovery";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
-import {
-  AgentAiDefaultsNotice,
-  formatAiDefaultsSummary,
-} from "./AgentAiDefaults";
+import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentAiDefaultsDialog } from "./AgentAiDefaultsDialog";
 import {
   AgentAiConfigurationModeField,
@@ -343,11 +340,6 @@ export function AgentDefinitionDialog({
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ open });
-  const aiDefaultsSummary = formatAiDefaultsSummary({
-    provider: inheritedProviderDefault,
-    model: inheritedModelDefault,
-  });
-
   function handleAiConfigurationModeChange(nextMode: AgentAiConfigurationMode) {
     setAiConfigurationMode(nextMode);
     setIsCustomProviderEditing(false);
@@ -821,7 +813,6 @@ export function AgentDefinitionDialog({
 
             {llmProviderFieldVisible ? (
               <AgentAiConfigurationModeField
-                defaultsSummary={aiDefaultsSummary}
                 mode={aiConfigurationMode}
                 onModeChange={handleAiConfigurationModeChange}
               />

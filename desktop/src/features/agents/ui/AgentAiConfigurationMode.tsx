@@ -4,11 +4,9 @@ import type { AgentAiConfigurationMode } from "./agentAiConfigurationPolicy";
 export type { AgentAiConfigurationMode } from "./agentAiConfigurationPolicy";
 
 export function AgentAiConfigurationModeField({
-  defaultsSummary,
   mode,
   onModeChange,
 }: {
-  defaultsSummary: string;
   mode: AgentAiConfigurationMode;
   onModeChange: (mode: AgentAiConfigurationMode) => void;
 }) {
@@ -26,13 +24,11 @@ export function AgentAiConfigurationModeField({
           <TabsTrigger value="custom">Customize for this agent</TabsTrigger>
         </TabsList>
       </Tabs>
-      <p className="text-xs text-muted-foreground">
-        {mode === "defaults"
-          ? defaultsSummary === "Not configured"
-            ? "AI defaults aren’t configured yet."
-            : `${defaultsSummary}. Future default changes apply automatically.`
-          : "Provider and model changes apply only to this agent."}
-      </p>
+      {mode === "custom" ? (
+        <p className="text-xs text-muted-foreground">
+          Provider and model changes apply only to this agent.
+        </p>
+      ) : null}
     </div>
   );
 }
