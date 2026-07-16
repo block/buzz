@@ -6,6 +6,7 @@ import {
   buildWelcomeKickoffCloser,
   buildWelcomeKickoffOpener,
   resolveWelcomeAgentSet,
+  waitForWelcomeTeammatesOnline,
 } from "./welcomeKickoff.ts";
 
 function agent(name, personaId, pubkey) {
@@ -60,6 +61,37 @@ test("teammates are not ready until every harness publishes online presence", ()
     }),
     true,
   );
+});
+
+test("readiness wait observes agents becoming online without navigation", async () => {
+  let reads = 0;
+  const ready = await waitForWelcomeTeammatesOnline([honey, bumble], {
+    isCancelled: () => false,
+    loadPresence: async () => {
+      reads += 1;
+      return reads < 3
+        ? { [honey.pubkey]: "online", [bumble.pubkey]: "offline" }
+        : { [honey.pubkey]: "online", [bumble.pubkey]: "online" };
+    },
+    pollMs: 0,
+    waitMs: 1_000,
+  });
+
+  assert.equal(ready, true);
+  assert.equal(reads, 3);
+});
+
+test("readiness wait cancels when Welcome loses focus", async () => {
+  const ready = await waitForWelcomeTeammatesOnline([honey, bumble], {
+    isCancelled: () => true,
+    loadPresence: async () => {
+      throw new Error("cancelled waits must not query");
+    },
+    pollMs: 0,
+    waitMs: 1_000,
+  });
+
+  assert.equal(ready, false);
 });
 
 test("closer degrades coherently for partial and total startup failure", () => {

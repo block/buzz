@@ -6,7 +6,6 @@ import {
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
-import { usePresenceQuery } from "@/features/presence/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { welcomeKickoffMarker } from "@/features/onboarding/devFreshOnboarding";
 import { resolveAgentReadiness } from "@/features/onboarding/ui/agentReadiness";
@@ -20,6 +19,7 @@ import { isWelcomeChannel } from "@/features/onboarding/welcome";
 import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
 import { hasManagedAgentChannelMessageMarker } from "@/shared/api/tauriManagedAgentMessageMarkers";
 import { sendManagedAgentChannelMessage } from "@/shared/api/tauriManagedAgentMessages";
+import { getPresence } from "@/shared/api/tauri";
 import type { Channel, ManagedAgent, RelayEvent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
@@ -40,6 +40,8 @@ const WELCOME_KICKOFF_CTA =
   "What can we help you build? Bring us something you're working on, or give us a quick challenge to see how we work together.";
 const kickoffInFlight = new Set<string>();
 const closerInFlight = new Set<string>();
+const TEAMMATE_READY_POLL_MS = 250;
+const TEAMMATE_READY_WAIT_MS = 15_000;
 
 type WelcomeAgentSet = {
   lead: ManagedAgent;
@@ -81,6 +83,29 @@ export function areWelcomeTeammatesOnline(
   return teammates.every(
     (agent) => presence?.[normalizePubkey(agent.pubkey)] === "online",
   );
+}
+
+export async function waitForWelcomeTeammatesOnline(
+  teammates: readonly ManagedAgent[],
+  options: {
+    isCancelled: () => boolean;
+    loadPresence?: typeof getPresence;
+    pollMs?: number;
+    waitMs?: number;
+  },
+) {
+  const loadPresence = options.loadPresence ?? getPresence;
+  const pollMs = options.pollMs ?? TEAMMATE_READY_POLL_MS;
+  const deadline = Date.now() + (options.waitMs ?? TEAMMATE_READY_WAIT_MS);
+  const pubkeys = teammates.map((agent) => agent.pubkey);
+
+  while (!options.isCancelled() && Date.now() < deadline) {
+    if (areWelcomeTeammatesOnline(teammates, await loadPresence(pubkeys))) {
+      return true;
+    }
+    await new Promise((resolve) => globalThis.setTimeout(resolve, pollMs));
+  }
+  return false;
 }
 
 export function buildWelcomeKickoffCloser(failedNames: readonly string[]) {
@@ -151,14 +176,6 @@ export function useWelcomeKickoff(
     () => resolveAgentReadiness(runtimesQuery.data ?? [], globalConfig),
     [globalConfig, runtimesQuery.data],
   );
-  const teammatePubkeys = React.useMemo(
-    () => agentSet?.teammates.map((agent) => agent.pubkey) ?? [],
-    [agentSet],
-  );
-  const teammatePresence = usePresenceQuery(teammatePubkeys, {
-    enabled: isActiveWelcome,
-  });
-
   React.useEffect(() => {
     if (
       !channelId ||
@@ -170,6 +187,7 @@ export function useWelcomeKickoff(
       return;
     }
 
+    let cancelled = false;
     kickoffInFlight.add(channelId);
     void (async () => {
       try {
@@ -223,12 +241,14 @@ export function useWelcomeKickoff(
         });
         if (openerAlreadySent) return;
 
-        const allTeammatesReady = areWelcomeTeammatesOnline(
+        const allTeammatesReady = await waitForWelcomeTeammatesOnline(
           resolvedAgentSet.teammates,
-          teammatePresence.data,
+          { isCancelled: () => cancelled },
         );
-        if (!allTeammatesReady) {
-          await teammatePresence.refetch();
+        if (!allTeammatesReady || cancelled) {
+          console.warn(
+            "Welcome teammates did not become ready while the channel remained focused.",
+          );
           return;
         }
 
@@ -251,6 +271,9 @@ export function useWelcomeKickoff(
         kickoffInFlight.delete(channelId);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [
     activeCommunity?.relayUrl,
     agentSet,
@@ -260,8 +283,6 @@ export function useWelcomeKickoff(
     queryClient,
     readiness,
     runtimesQuery.isPending,
-    teammatePresence.data,
-    teammatePresence.refetch,
   ]);
 
   React.useEffect(() => {
