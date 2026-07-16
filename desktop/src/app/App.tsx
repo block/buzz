@@ -415,10 +415,19 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   // the invite is confirmed against its relay. On success the transaction
   // advances past `claiming` and the overlay auto-dismisses back into setup;
   // the remaining join steps run in CommunityOnboardingFlow afterwards.
+  // Claimless links (buzz://connect, or join without a code) start directly
+  // at `connecting` with nothing to confirm — for those the same gate shows
+  // a static acknowledgment until the user continues setup.
   const transaction = communityOnboarding.transaction;
+  const isDeepLink =
+    transaction?.source === "deep-link-join" ||
+    transaction?.source === "deep-link-connect";
   const isConfirmingInvite =
-    transaction?.source === "deep-link-join" &&
-    transaction.stage === "claiming";
+    isDeepLink &&
+    (transaction.stage === "claiming" ||
+      (transaction.stage === "connecting" &&
+        !transaction.inviteCode &&
+        !transaction.acknowledged));
 
   return (
     <>

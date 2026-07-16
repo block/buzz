@@ -38,12 +38,22 @@ export type CommunityOnboardingTransaction = {
   // identity steps can still swap in an imported key — CommunityOnboardingFlow
   // compares this against the final identity and re-claims on mismatch.
   claimedPubkey?: string;
+  // Claimless deep links (buzz://connect, or join without a code) have
+  // nothing to confirm against the relay, so during machine onboarding the
+  // gate shows a static acknowledgment instead of the loader. Set when the
+  // user dismisses it, so the gate doesn't reappear on relaunch mid-setup.
+  acknowledged?: boolean;
 };
 
 export type CommunityOnboardingTransactionPatch = Partial<
   Pick<
     CommunityOnboardingTransaction,
-    "stage" | "communityId" | "communityName" | "error" | "claimedPubkey"
+    | "stage"
+    | "communityId"
+    | "communityName"
+    | "error"
+    | "claimedPubkey"
+    | "acknowledged"
   >
 >;
 
@@ -131,6 +141,9 @@ export function startCommunityOnboarding(
       reposDir: input.reposDir ?? existing.reposDir,
       updatedAt: now.toISOString(),
       error: undefined,
+      // A freshly opened link deserves fresh feedback — re-present the gate
+      // even if a previous link for this relay was already dismissed.
+      acknowledged: undefined,
     };
     saveCommunityOnboardingTransaction(updated, storage);
     return updated;

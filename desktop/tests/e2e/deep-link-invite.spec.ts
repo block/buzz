@@ -19,6 +19,13 @@ const PENDING_JOIN_LINK = {
   code: "abc.def",
 };
 
+const PENDING_CONNECT_LINK = {
+  id: "dl-connect-1",
+  kind: "connect" as const,
+  relayUrl: "wss://hive.example.com",
+  code: null,
+};
+
 test("join deep link shows the invite loader and auto-advances into setup", async ({
   page,
 }) => {
@@ -64,6 +71,40 @@ test("join deep link shows the invite loader and auto-advances into setup", asyn
       ),
     )
     .toContain('"stage":"connecting"');
+});
+
+test("connect deep link shows a static acknowledgment during setup", async ({
+  page,
+}) => {
+  // No invite code means nothing to confirm against the relay — the gate
+  // acknowledges the link and waits for the user instead of auto-advancing.
+  await installMockBridge(
+    page,
+    { pendingCommunityDeepLinks: [PENDING_CONNECT_LINK] },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  const gate = page.getByTestId("pending-invite-gate");
+  await expect(gate).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Opening community link" }),
+  ).toBeVisible();
+  await expect(gate).toContainText("hive");
+
+  // Continue setup dismisses the gate but keeps the transaction: the
+  // connect resumes in CommunityOnboardingFlow after machine setup.
+  await page.getByTestId("pending-invite-continue").click();
+  await expect(gate).toHaveCount(0);
+  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        TRANSACTION_STORAGE_KEY,
+      ),
+    )
+    .toContain('"acknowledged":true');
 });
 
 test("failed invite confirmation offers Retry and Cancel returns to setup", async ({

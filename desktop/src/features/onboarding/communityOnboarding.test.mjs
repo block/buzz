@@ -99,6 +99,26 @@ test("claimed pubkey persists so a post-setup identity change can re-claim", () 
   assert.equal(persisted?.claimedPubkey, "boot-time-pubkey");
 });
 
+test("acknowledgment persists but resets when the same-relay link reopens", () => {
+  const storage = createMemoryStorage();
+  const transaction = startCommunityOnboarding(
+    { source: "deep-link-connect", relayUrl: "wss://relay.example" },
+    storage,
+  );
+  assert.equal(transaction.stage, "connecting");
+  updateCommunityOnboardingTransaction(
+    transaction,
+    { acknowledged: true },
+    storage,
+  );
+  assert.equal(loadCommunityOnboardingTransaction(storage)?.acknowledged, true);
+  const reopened = startCommunityOnboarding(
+    { source: "deep-link-connect", relayUrl: "wss://relay.example" },
+    storage,
+  );
+  assert.equal(reopened.acknowledged, undefined);
+});
+
 test("malformed persisted state is ignored and can be cleared", () => {
   const storage = createMemoryStorage({
     "buzz-community-onboarding-transaction.v1": '{"stage":"profile"}',
