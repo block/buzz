@@ -1750,6 +1750,9 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
   await page.getByTestId("invite-redeem-submit").click();
   await expect(page.getByText("I am 18 years of age or older.")).toBeVisible();
   await page.getByLabel("I am 18 years of age or older.").check();
+  await page
+    .getByLabel("I agree to the Buzz Terms of Service and Privacy Policy.")
+    .check();
   await page.getByTestId("invite-redeem-submit").click();
 
   // After successful claim, relay B is added and becomes active; relay A remains
