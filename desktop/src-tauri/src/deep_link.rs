@@ -1,8 +1,84 @@
+use std::{collections::VecDeque, sync::Mutex};
+
 use serde::Serialize;
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, State};
 use url::Url;
 
 use crate::nostr_bind;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingCommunityDeepLink {
+    id: String,
+    kind: String,
+    relay_url: String,
+    code: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingCommunityDeepLinks(Mutex<VecDeque<PendingCommunityDeepLink>>);
+
+impl PendingCommunityDeepLinks {
+    fn enqueue(&self, pending: PendingCommunityDeepLink) {
+        let mut queue = self.0.lock().expect("pending deep-link queue poisoned");
+        if queue.iter().any(|item| {
+            item.kind == pending.kind
+                && item.relay_url == pending.relay_url
+                && item.code == pending.code
+        }) {
+            return;
+        }
+        queue.push_back(pending);
+    }
+
+    fn first(&self) -> Option<PendingCommunityDeepLink> {
+        self.0
+            .lock()
+            .expect("pending deep-link queue poisoned")
+            .front()
+            .cloned()
+    }
+
+    fn acknowledge(&self, id: &str) -> bool {
+        let mut queue = self.0.lock().expect("pending deep-link queue poisoned");
+        if queue.front().is_some_and(|item| item.id == id) {
+            queue.pop_front();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) fn take_pending_community_deep_link(
+    pending: State<'_, PendingCommunityDeepLinks>,
+) -> Option<PendingCommunityDeepLink> {
+    pending.first()
+}
+
+#[tauri::command]
+pub(crate) fn acknowledge_pending_community_deep_link(
+    id: String,
+    pending: State<'_, PendingCommunityDeepLinks>,
+) -> bool {
+    pending.acknowledge(&id)
+}
+
+fn queue_community_deep_link(
+    app: &tauri::AppHandle,
+    kind: &str,
+    relay_url: String,
+    code: Option<String>,
+) {
+    app.state::<PendingCommunityDeepLinks>()
+        .enqueue(PendingCommunityDeepLink {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: kind.to_owned(),
+            relay_url,
+            code,
+        });
+}
 
 fn activate_main_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
@@ -221,6 +297,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 }
             }
             activate_main_window(app);
+            queue_community_deep_link(app, "connect", relay_url.clone(), None);
             let _ = app.emit("deep-link-connect", relay_url);
         }
         Some("join") => {
@@ -232,6 +309,9 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 return;
             };
             activate_main_window(app);
+            let relay_url = payload["relayUrl"].as_str().unwrap_or_default().to_owned();
+            let code = payload["code"].as_str().map(str::to_owned);
+            queue_community_deep_link(app, "join", relay_url, code);
             let _ = app.emit("deep-link-join", payload);
         }
         Some("message") => {
@@ -272,7 +352,39 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
 mod tests {
     use url::Url;
 
-    use super::{parse_join_deep_link, parse_message_deep_link, parse_nostr_bind_deep_link};
+    use super::{
+        parse_join_deep_link, parse_message_deep_link, parse_nostr_bind_deep_link,
+        PendingCommunityDeepLink, PendingCommunityDeepLinks,
+    };
+
+    fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDeepLink {
+        PendingCommunityDeepLink {
+            id: id.to_owned(),
+            kind: if code.is_some() { "join" } else { "connect" }.to_owned(),
+            relay_url: relay_url.to_owned(),
+            code: code.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn pending_community_links_are_fifo_and_acknowledged_in_order() {
+        let queue = PendingCommunityDeepLinks::default();
+        queue.enqueue(pending("first", "wss://one.example", Some("one")));
+        queue.enqueue(pending("second", "wss://two.example", Some("two")));
+        assert_eq!(queue.first().unwrap().id, "first");
+        assert!(!queue.acknowledge("second"));
+        assert!(queue.acknowledge("first"));
+        assert_eq!(queue.first().unwrap().id, "second");
+    }
+
+    #[test]
+    fn pending_community_links_dedupe_exact_intents() {
+        let queue = PendingCommunityDeepLinks::default();
+        queue.enqueue(pending("first", "wss://one.example", Some("one")));
+        queue.enqueue(pending("duplicate", "wss://one.example", Some("one")));
+        assert!(queue.acknowledge("first"));
+        assert!(queue.first().is_none());
+    }
 
     fn valid_nostr_bind_url() -> Url {
         Url::parse(

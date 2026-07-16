@@ -5,8 +5,7 @@ import {
   getIdentity,
   importIdentity as tauriImportIdentity,
 } from "@/shared/api/tauriIdentity";
-import { claimInvite } from "@/shared/api/invites";
-import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
+import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
 import { NostrKeyImportForm } from "@/features/onboarding/ui/NostrKeyImportForm";
 import {
@@ -95,8 +94,7 @@ export function WelcomeSetup({
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
   const [isConnecting, setIsConnecting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [isRedeeming, setIsRedeeming] = React.useState(false);
-  const [inviteError, setInviteError] = React.useState<string | null>(null);
+  const communityOnboarding = useCommunityOnboarding();
   const systemColorScheme = useSystemColorScheme();
 
   const handleConnect = React.useCallback(
@@ -159,19 +157,14 @@ export function WelcomeSetup({
   );
 
   const handleWelcomeInviteRedeem = React.useCallback(
-    async (relayWsUrl: string, code: string) => {
-      setIsRedeeming(true);
-      setInviteError(null);
-      try {
-        await claimInvite(relayWsUrl, code);
-        await handleConnect(relayWsUrl);
-      } catch (err) {
-        setInviteError(inviteErrorMessage(err));
-      } finally {
-        setIsRedeeming(false);
-      }
+    (relayWsUrl: string, code: string) => {
+      communityOnboarding.start({
+        source: "first-community",
+        relayUrl: relayWsUrl,
+        inviteCode: code,
+      });
     },
-    [handleConnect],
+    [communityOnboarding],
   );
 
   const showCreateCommunityPage = React.useCallback(() => {
@@ -181,7 +174,6 @@ export function WelcomeSetup({
   }, []);
 
   const showInvitePage = React.useCallback(() => {
-    setInviteError(null);
     setTransitionMode("forward");
     setPage("invite");
   }, []);
@@ -194,7 +186,6 @@ export function WelcomeSetup({
 
   const showWelcomePage = React.useCallback(() => {
     setError(null);
-    setInviteError(null);
     setTransitionMode("backward");
     setPage("welcome");
   }, []);
@@ -377,12 +368,10 @@ export function WelcomeSetup({
                     ? undefined
                     : defaultRelayUrl
                 }
-                error={inviteError}
-                isRedeeming={isRedeeming}
+                error={null}
+                isRedeeming={false}
                 onCancel={showWelcomePage}
-                onRedeem={(relayWsUrl, code) => {
-                  void handleWelcomeInviteRedeem(relayWsUrl, code);
-                }}
+                onRedeem={handleWelcomeInviteRedeem}
               />
             </div>
           </OnboardingSlideTransition>

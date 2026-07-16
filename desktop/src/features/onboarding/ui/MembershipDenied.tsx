@@ -1,8 +1,7 @@
 import * as React from "react";
 import { Check, Copy, KeyRound, ShieldX, Ticket } from "lucide-react";
 
-import { claimInvite } from "@/shared/api/invites";
-import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
+import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { nsecToNpub, pubkeyToNpub } from "@/shared/lib/nostrUtils";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
@@ -17,8 +16,6 @@ type MembershipDeniedProps = {
   onBack: () => void;
   onChangeCommunity: () => void;
   onImportKey: (nsec: string) => Promise<void>;
-  /** Called with the relay URL where membership was successfully claimed. */
-  onInviteRedeemed: (relayWsUrl: string) => void;
   onRetry: () => void;
   pubkey: string;
 };
@@ -28,7 +25,6 @@ export function MembershipDenied({
   onBack,
   onChangeCommunity,
   onImportKey,
-  onInviteRedeemed,
   onRetry,
   pubkey,
 }: MembershipDeniedProps) {
@@ -53,8 +49,7 @@ export function MembershipDenied({
   const isValidNsec = previewNpub !== null;
 
   const [isInviteFormOpen, setIsInviteFormOpen] = React.useState(false);
-  const [isRedeeming, setIsRedeeming] = React.useState(false);
-  const [inviteError, setInviteError] = React.useState<string | null>(null);
+  const communityOnboarding = useCommunityOnboarding();
 
   const handleCopy = React.useCallback(async () => {
     try {
@@ -89,19 +84,14 @@ export function MembershipDenied({
   }, [onImportKey, previewNpub, trimmedNsec]);
 
   const handleInviteRedeem = React.useCallback(
-    async (relayWsUrl: string, code: string) => {
-      setIsRedeeming(true);
-      setInviteError(null);
-      try {
-        await claimInvite(relayWsUrl, code);
-        onInviteRedeemed(relayWsUrl);
-      } catch (error) {
-        setInviteError(inviteErrorMessage(error));
-      } finally {
-        setIsRedeeming(false);
-      }
+    (relayWsUrl: string, code: string) => {
+      communityOnboarding.start({
+        source: "membership-recovery",
+        relayUrl: relayWsUrl,
+        inviteCode: code,
+      });
     },
-    [onInviteRedeemed],
+    [communityOnboarding],
   );
 
   return (
@@ -164,15 +154,10 @@ export function MembershipDenied({
           {isInviteFormOpen ? (
             <InviteRedeemForm
               defaultRelayUrl={activeRelayUrl}
-              error={inviteError}
-              isRedeeming={isRedeeming}
-              onCancel={() => {
-                setInviteError(null);
-                setIsInviteFormOpen(false);
-              }}
-              onRedeem={(relayWsUrl, code) => {
-                void handleInviteRedeem(relayWsUrl, code);
-              }}
+              error={null}
+              isRedeeming={false}
+              onCancel={() => setIsInviteFormOpen(false)}
+              onRedeem={handleInviteRedeem}
             />
           ) : isImportFormOpen ? (
             <form
@@ -284,10 +269,7 @@ export function MembershipDenied({
               <button
                 className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
                 data-testid="membership-denied-redeem-invite"
-                onClick={() => {
-                  setInviteError(null);
-                  setIsInviteFormOpen(true);
-                }}
+                onClick={() => setIsInviteFormOpen(true)}
                 type="button"
               >
                 <Ticket className="h-4 w-4" />

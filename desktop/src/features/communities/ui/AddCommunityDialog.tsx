@@ -1,16 +1,11 @@
 import * as React from "react";
 
-import type { Community } from "@/features/communities/types";
 import {
   deriveCommunityName,
   expandTilde,
   normalizeRelayUrl,
 } from "@/features/communities/communityStorage";
-import {
-  inviteErrorMessage,
-  isInviteExpiredError,
-} from "@/shared/api/inviteHelpers";
-import { claimInvite } from "@/shared/api/invites";
+import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { validateReposDir } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 import {
@@ -23,22 +18,23 @@ import {
 import { Input } from "@/shared/ui/input";
 
 type AddCommunityDialogProps = {
+  onSubmit?: (
+    community: import("@/features/communities/types").Community,
+  ) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSubmit: (community: Community) => void;
 };
 
 export function AddCommunityDialog({
   open,
   onOpenChange,
-  onSubmit,
 }: AddCommunityDialogProps) {
   const [name, setName] = React.useState("");
   const [relayUrl, setRelayUrl] = React.useState("");
   const [token, setToken] = React.useState("");
   const [inviteCode, setInviteCode] = React.useState("");
-  const [inviteError, setInviteError] = React.useState<string | null>(null);
   const [reposDir, setReposDir] = React.useState("");
+  const communityOnboarding = useCommunityOnboarding();
   const [reposDirError, setReposDirError] = React.useState<string | null>(null);
 
   const handleClose = React.useCallback(() => {
@@ -47,7 +43,6 @@ export function AddCommunityDialog({
     setRelayUrl("");
     setToken("");
     setInviteCode("");
-    setInviteError(null);
     setReposDir("");
     setReposDirError(null);
   }, [onOpenChange]);
@@ -71,36 +66,26 @@ export function AddCommunityDialog({
         return;
       }
 
-      // If the relay handed out an invite code, claim it before saving the
-      // community — a closed relay would otherwise reject the connection.
       const normalizedRelayUrl = normalizeRelayUrl(relayUrl.trim());
-      if (inviteCode.trim()) {
-        try {
-          await claimInvite(normalizedRelayUrl, inviteCode.trim());
-        } catch (error) {
-          const message = inviteErrorMessage(error);
-          setInviteError(
-            isInviteExpiredError(error)
-              ? "This invite code has expired — ask for a new one."
-              : `Invite rejected: ${message}`,
-          );
-          return;
-        }
-      }
-
-      const community: Community = {
-        id: crypto.randomUUID(),
-        name: name.trim() || deriveCommunityName(relayUrl.trim()),
+      communityOnboarding.start({
+        source: "add-community",
         relayUrl: normalizedRelayUrl,
+        inviteCode: inviteCode.trim() || undefined,
+        communityName: name.trim() || deriveCommunityName(normalizedRelayUrl),
         token: token.trim() || undefined,
         reposDir: expandedReposDir,
-        addedAt: new Date().toISOString(),
-      };
-
-      onSubmit(community);
+      });
       handleClose();
     },
-    [name, relayUrl, token, inviteCode, reposDir, onSubmit, handleClose],
+    [
+      name,
+      relayUrl,
+      token,
+      inviteCode,
+      reposDir,
+      communityOnboarding,
+      handleClose,
+    ],
   );
 
   return (
@@ -183,15 +168,11 @@ export function AddCommunityDialog({
               id="ws-invite-code"
               onChange={(e) => {
                 setInviteCode(e.target.value);
-                setInviteError(null);
               }}
               placeholder="Paste an invite code for a members-only relay"
               type="text"
               value={inviteCode}
             />
-            {inviteError ? (
-              <p className="text-xs text-destructive">{inviteError}</p>
-            ) : null}
           </div>
           <div className="flex flex-col gap-1.5">
             <label
