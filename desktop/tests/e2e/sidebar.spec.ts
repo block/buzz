@@ -57,6 +57,60 @@ async function dragSidebarRail(page: Page, deltaX: number) {
   await page.mouse.up();
 }
 
+test("automatically shows relay join requirements near the relay URL", async ({
+  page,
+}) => {
+  await page.route(
+    "https://policy.example.com/api/join-policy",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          policy: {
+            terms_markdown: "# Terms",
+            privacy_markdown: "# Privacy",
+            age_attestation_required: true,
+            version: "policy-v1",
+          },
+        }),
+      });
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("sidebar-profile-card").click();
+  await page.getByText("Add Community", { exact: true }).click();
+  await page.getByLabel("Relay URL").fill("wss://policy.example.com");
+
+  const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
+  const agreementConfirmation = page.getByLabel(
+    "I agree to the Buzz Terms of Service and Privacy Policy.",
+  );
+  await expect(ageConfirmation).toBeVisible();
+  await expect(agreementConfirmation).toBeVisible();
+  await expect(
+    page.getByText("Review this relay's join policy below."),
+  ).toHaveCount(0);
+  await expect(page.getByText(/By continuing, you agree/)).toHaveCount(0);
+
+  const addCommunityButton = page.getByRole("button", {
+    name: "Add Community",
+  });
+  await expect(addCommunityButton).toBeDisabled();
+  await ageConfirmation.check();
+  await expect(ageConfirmation.locator("svg path")).toBeVisible();
+  await expect(addCommunityButton).toBeDisabled();
+  await agreementConfirmation.check();
+  await expect(addCommunityButton).toBeEnabled();
+
+  const consentBox = await agreementConfirmation.boundingBox();
+  const reposInput = await page.locator("#ws-repos-dir").boundingBox();
+  const addButtonBox = await addCommunityButton.boundingBox();
+  expect(consentBox?.y).toBeGreaterThan(reposInput?.y ?? Number.MAX_VALUE);
+  expect(consentBox?.y).toBeLessThan(addButtonBox?.y ?? 0);
+});
+
 test("leaving a channel from the context menu never freezes the app", async ({
   page,
 }) => {

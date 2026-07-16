@@ -5,6 +5,8 @@ import * as React from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { InviteJoinPolicyNotice } from "./InviteJoinPolicyNotice";
+
 const DOWNLOAD_URL = "https://github.com/block/buzz/releases/latest";
 type JoinPolicy = {
   terms_markdown?: string;
@@ -24,6 +26,7 @@ export function InvitePage({ code }: { code: string }) {
   );
   const [document, setDocument] = React.useState<PolicyDocument | null>(null);
   const [ageConfirmed, setAgeConfirmed] = React.useState(false);
+  const [agreementConfirmed, setAgreementConfirmed] = React.useState(false);
   const [opening, setOpening] = React.useState(false);
 
   React.useEffect(() => {
@@ -64,7 +67,18 @@ export function InvitePage({ code }: { code: string }) {
   const disabled =
     policy === undefined ||
     opening ||
-    Boolean(policy?.age_attestation_required && !ageConfirmed);
+    Boolean(policy?.age_attestation_required && !ageConfirmed) ||
+    Boolean(
+      policy &&
+        (policy.terms_markdown || policy.privacy_markdown) &&
+        !agreementConfirmed,
+    );
+  const hasPolicyRequirements = Boolean(
+    policy &&
+      (policy.age_attestation_required ||
+        policy.terms_markdown ||
+        policy.privacy_markdown),
+  );
   const showDocument = (title: string, markdown: string) =>
     setDocument({ title, markdown });
 
@@ -88,23 +102,32 @@ export function InvitePage({ code }: { code: string }) {
           </h1>
           <p className="mt-9 font-mono text-lg text-black/70">{host}</p>
 
-          {policy?.age_attestation_required && (
-            <label className="mt-9 flex max-w-md cursor-pointer items-start gap-3 text-left text-sm text-black/70">
-              <input
-                className="mt-0.5 h-4 w-4 accent-black"
-                type="checkbox"
-                checked={ageConfirmed}
-                onChange={(event) => setAgeConfirmed(event.target.checked)}
-              />
-              <span>I am 18 years of age or older.</span>
-            </label>
-          )}
-          <div className={policy?.age_attestation_required ? "mt-5" : "mt-9"}>
+          <div
+            className={`grid w-full max-w-md overflow-hidden transition-[grid-template-rows,margin,opacity,transform] duration-[220ms] [transition-timing-function:cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none ${
+              hasPolicyRequirements
+                ? "mt-9 -mb-4 grid-rows-[1fr] opacity-100 translate-y-0"
+                : "m-0 grid-rows-[0fr] opacity-0 -translate-y-1"
+            }`}
+          >
+            <div className="min-h-0 overflow-hidden">
+              {policy && hasPolicyRequirements ? (
+                <InviteJoinPolicyNotice
+                  ageConfirmed={ageConfirmed}
+                  agreementConfirmed={agreementConfirmed}
+                  onAgeConfirmedChange={setAgeConfirmed}
+                  onAgreementConfirmedChange={setAgreementConfirmed}
+                  onShowDocument={showDocument}
+                  policy={policy}
+                />
+              ) : null}
+            </div>
+          </div>
+
+          <div className="mt-9 w-full max-w-md">
             {policy === null ? (
               <Button
                 asChild
-                className="bg-black text-white hover:bg-black/90 focus-visible:ring-black"
-                size="lg"
+                className="h-10 w-full bg-black text-white hover:bg-black/90 focus-visible:ring-black"
               >
                 <a
                   href={`buzz://join?relay=${encodeURIComponent(relay)}&code=${encodeURIComponent(code)}`}
@@ -114,8 +137,7 @@ export function InvitePage({ code }: { code: string }) {
               </Button>
             ) : (
               <Button
-                className="bg-black text-white hover:bg-black/90 focus-visible:ring-black disabled:cursor-not-allowed disabled:bg-black/30 disabled:text-white/70"
-                size="lg"
+                className="h-10 w-full bg-black text-white hover:bg-black/90 focus-visible:ring-black disabled:cursor-not-allowed disabled:bg-black/30 disabled:text-white/70"
                 disabled={disabled}
                 onClick={openInvite}
               >
@@ -123,41 +145,6 @@ export function InvitePage({ code }: { code: string }) {
               </Button>
             )}
           </div>
-          {policy && (policy.terms_markdown || policy.privacy_markdown) && (
-            <p className="mt-4 max-w-md text-xs text-black/60">
-              By proceeding you agree to the Buzz{" "}
-              {policy.terms_markdown && (
-                <button
-                  className="text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
-                  type="button"
-                  onClick={() =>
-                    showDocument(
-                      "Terms of Service",
-                      policy.terms_markdown ?? "",
-                    )
-                  }
-                >
-                  Terms of Service
-                </button>
-              )}
-              {policy.terms_markdown && policy.privacy_markdown && " and "}
-              {policy.privacy_markdown && (
-                <button
-                  className="text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
-                  type="button"
-                  onClick={() =>
-                    showDocument(
-                      "Privacy Policy",
-                      policy.privacy_markdown ?? "",
-                    )
-                  }
-                >
-                  Privacy Policy
-                </button>
-              )}
-              .
-            </p>
-          )}
         </div>
         <p className="flex h-[3.125rem] items-center justify-center rounded-2xl bg-white text-sm text-black/60">
           Don&apos;t have the app?{" "}

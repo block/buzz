@@ -550,70 +550,55 @@ test("completed users skip the loading gate while profile is still settling", as
   await expectHomeView(page);
 });
 
-test("first-run default community handoff gives immediate stepper feedback", async ({
-  page,
-}) => {
-  // Use a blank-username identity so the profile has no display name and
-  // the auto-skip logic does not fire — we need to stay in onboarding to
-  // verify the stepper UX.
+test("welcome requires an explicit community destination", async ({ page }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(
-    page,
-    {
-      profileReadDelayMs: 2_000,
-    },
-    {
-      relayWsUrl: "wss://default.example.com",
-      skipOnboardingSeed: true,
-      skipCommunitySeed: true,
-    },
-  );
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "wss://default.example.com",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  let policyRequestCount = 0;
   await page.route(
     "https://default.example.com/api/join-policy",
     async (route) => {
+      policyRequestCount += 1;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: "{}",
+        body: JSON.stringify({
+          policy: {
+            terms_markdown: "# Terms",
+            privacy_markdown: "# Privacy",
+            age_attestation_required: true,
+            version: "policy-v1",
+          },
+        }),
       });
     },
   );
   await page.goto("/");
 
   await expect(page.getByText("Welcome to Buzz")).toBeVisible();
-  await page
-    .getByRole("button", { name: "Continue with default community" })
-    .click();
-
-  await page.waitForTimeout(80);
-  await expect(page.getByRole("button", { name: "Connecting..." })).toHaveCount(
+  await expect(
+    page.getByRole("button", { name: "Continue with default community" }),
+  ).toHaveCount(0);
+  await expect(page.getByLabel("I am 18 years of age or older.")).toHaveCount(
     0,
   );
   await expect(
-    page.getByRole("button", { name: "Continue with default community" }),
+    page.getByLabel("I agree to the Buzz Terms of Service and Privacy Policy."),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Join a community" }),
   ).toBeVisible();
-  await expect(page.getByRole("progressbar")).toHaveAttribute(
-    "aria-valuenow",
-    "2",
-  );
-  await page.waitForTimeout(240);
+  await expect(
+    page.getByRole("button", { name: "Have an invite?" }),
+  ).toBeVisible();
   await expect(page.getByTestId("welcome-continue-nostr")).toBeVisible();
-  await expect(page.getByRole("progressbar")).toHaveAttribute(
-    "aria-valuenow",
-    "2",
-  );
-
-  const nameInput = page.getByTestId("onboarding-display-name");
-  await expect(nameInput).toHaveValue("");
-  await expect(page.getByRole("progressbar")).toHaveAttribute(
-    "aria-valuenow",
-    "2",
-  );
-  await expect(nameInput).toHaveAttribute("autocomplete", "off");
-  await expect(page.getByTestId("onboarding-back")).toBeVisible();
+  expect(policyRequestCount).toBe(0);
 });
 
-test("welcome join policy documents open externally and keep onboarding mounted", async ({
+test("destination policy documents open externally and keep onboarding mounted", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -623,7 +608,7 @@ test("welcome join policy documents open externally and keep onboarding mounted"
     skipCommunitySeed: true,
   });
   await page.route(
-    "https://default.example.com/api/join-policy",
+    "https://policy.example.com/api/join-policy",
     async (route) => {
       await route.fulfill({
         status: 200,
@@ -641,10 +626,21 @@ test("welcome join policy documents open externally and keep onboarding mounted"
   );
 
   await page.goto("/");
-  await expect(page.getByText("Welcome to Buzz")).toBeVisible();
+  await page.getByRole("button", { name: "Join a community" }).click();
+  await page.locator("#community-edit-url").fill("wss://policy.example.com");
   await expect(
     page.getByRole("button", { name: "Terms of Service" }),
   ).toBeVisible();
+
+  const termsLink = page.getByRole("button", { name: "Terms of Service" });
+  const privacyLink = page.getByRole("button", { name: "Privacy Policy" });
+  await expect(termsLink).toHaveCSS("text-decoration-line", "none");
+  await expect(privacyLink).toHaveCSS("text-decoration-line", "none");
+  await termsLink.hover();
+  await expect(termsLink).toHaveCSS("text-decoration-line", "underline");
+  await page.mouse.move(0, 0);
+  await privacyLink.hover();
+  await expect(privacyLink).toHaveCSS("text-decoration-line", "underline");
 
   await page.evaluate(async () => {
     const invoke = (
@@ -659,7 +655,9 @@ test("welcome join policy documents open externally and keep onboarding mounted"
   await page.getByRole("button", { name: "Terms of Service" }).click();
   await page.getByRole("button", { name: "Privacy Policy" }).click();
 
-  await expect(page.getByText("Welcome to Buzz")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Join a community" }),
+  ).toBeVisible();
   await expect(page.locator("#root")).not.toBeEmpty();
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
@@ -674,12 +672,14 @@ test("welcome join policy documents open externally and keep onboarding mounted"
     return (await invoke?.("get_e2e_opened_external_urls")) as string[];
   });
   expect(openedUrls).toEqual([
-    "https://default.example.com/api/join-policy/terms",
-    "https://default.example.com/api/join-policy/privacy",
+    "https://policy.example.com/api/join-policy/terms",
+    "https://policy.example.com/api/join-policy/privacy",
   ]);
 });
 
-test("welcome can continue using an existing Nostr key", async ({ page }) => {
+test("existing-key import returns to community selection without join consent", async ({
+  page,
+}) => {
   await installMockBridge(page, undefined, {
     relayWsUrl: "wss://default.example.com",
     skipOnboardingSeed: true,
@@ -691,37 +691,66 @@ test("welcome can continue using an existing Nostr key", async ({ page }) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: "{}",
+        body: JSON.stringify({
+          policy: {
+            terms_markdown: "# Terms",
+            privacy_markdown: "# Privacy",
+            age_attestation_required: true,
+            version: "policy-v1",
+          },
+        }),
       });
     },
   );
-  await page.goto("/");
 
+  await page.goto("/");
   await page.getByTestId("welcome-continue-nostr").click();
-  await expect(
-    page.getByRole("heading", { name: "Use your existing key" }),
-  ).toBeVisible();
 
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
   await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
-  await expect(page.getByTestId("nostr-import-npub-preview")).toBeVisible();
-  await page.getByTestId("nostr-import-submit").click();
 
-  // Alice already has a relay profile with a display name, so onboarding
-  // auto-completes after the identity swap.
+  const submit = page.getByTestId("nostr-import-submit");
+  await expect(submit).toBeEnabled();
+  await expect(submit).toHaveText("Continue with this key");
+  await expect(page.getByLabel("Importing key")).toHaveCount(0);
+  await expect(page.getByLabel("I am 18 years of age or older.")).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByLabel("I agree to the Buzz Terms of Service and Privacy Policy."),
+  ).toHaveCount(0);
+
+  await submit.click();
+
+  await expect(page.getByText("Welcome to Buzz")).toBeVisible();
+  await expect(
+    page.getByText("Your key is ready. Choose a community to continue."),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Join a community" }),
+  ).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(() => {
         const rawCommunities = window.localStorage.getItem("buzz-communities");
-        const communities = rawCommunities
-          ? (JSON.parse(rawCommunities) as Array<{ pubkey?: string }>)
-          : [];
-        return communities[0]?.pubkey ?? null;
+        return rawCommunities
+          ? (JSON.parse(rawCommunities) as unknown[]).length
+          : 0;
       }),
     )
-    .toBe(TEST_IDENTITIES.alice.pubkey);
-  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expectHomeView(page);
+    .toBe(0);
+
+  const activeIdentity = await page.evaluate(async () => {
+    const invoke = (
+      window as Window & {
+        __TAURI_INTERNALS__?: {
+          invoke?: (command: string, payload?: unknown) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__?.invoke;
+    return (await invoke?.("get_identity")) as { pubkey: string };
+  });
+  expect(activeIdentity.pubkey).toBe(TEST_IDENTITIES.alice.pubkey);
 });
 
 test("welcome presents custom community setup as joining a community", async ({
@@ -742,8 +771,52 @@ test("welcome presents custom community setup as joining a community", async ({
     page.getByRole("heading", { name: "Join a community" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Join a community" }),
+    page.getByRole("button", { name: "Join community" }),
   ).toBeVisible();
+});
+
+test("join community discovers policy from the pasted relay URL", async ({
+  page,
+}) => {
+  await installMockBridge(page, undefined, {
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.route(
+    "https://policy.example.com/api/join-policy",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          policy: {
+            terms_markdown: "# Terms",
+            privacy_markdown: "# Privacy",
+            age_attestation_required: true,
+            version: "policy-v1",
+          },
+        }),
+      });
+    },
+  );
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Join a community" }).click();
+  await page.locator("#community-edit-name").fill("Block");
+  await page.locator("#community-edit-url").fill("wss://policy.example.com");
+
+  const submit = page.getByRole("button", { name: "Join community" });
+  await expect(page.getByLabel("I am 18 years of age or older.")).toBeVisible();
+  await expect(
+    page.getByLabel("I agree to the Buzz Terms of Service and Privacy Policy."),
+  ).toBeVisible();
+  await expect(submit).toBeDisabled();
+
+  const communityConsentBox = await page
+    .getByLabel("I agree to the Buzz Terms of Service and Privacy Policy.")
+    .boundingBox();
+  const communitySubmitBox = await submit.boundingBox();
+  expect(communityConsentBox?.y).toBeLessThan(communitySubmitBox?.y ?? 0);
 });
 
 test("identity fallback text does not count as a real onboarding name", async ({
@@ -1962,10 +2035,21 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
   await page
     .getByTestId("invite-redeem-input")
     .fill(`${relayBHttpUrl}/invite/test-invite-code`);
-  await page.getByTestId("invite-redeem-submit").click();
-  await expect(page.getByText("I am 18 years of age or older.")).toBeVisible();
-  await page.getByLabel("I am 18 years of age or older.").check();
-  await page.getByTestId("invite-redeem-submit").click();
+  const inviteAgeConfirmation = page.getByLabel(
+    "I am 18 years of age or older.",
+  );
+  const inviteAgreementConfirmation = page.getByLabel(
+    "I agree to the Buzz Terms of Service and Privacy Policy.",
+  );
+  const redeemSubmit = page.getByTestId("invite-redeem-submit");
+  await expect(inviteAgeConfirmation).toBeVisible();
+  await expect(redeemSubmit).toBeDisabled();
+  const inviteConsentBox = await inviteAgreementConfirmation.boundingBox();
+  const redeemSubmitBox = await redeemSubmit.boundingBox();
+  expect(inviteConsentBox?.y).toBeLessThan(redeemSubmitBox?.y ?? 0);
+  await inviteAgeConfirmation.check();
+  await inviteAgreementConfirmation.check();
+  await redeemSubmit.click();
 
   // After successful claim, the community should switch to relay B's URL.
   await expect

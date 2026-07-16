@@ -5,14 +5,9 @@ import {
   getIdentity,
   importIdentity as tauriImportIdentity,
 } from "@/shared/api/tauriIdentity";
-import {
-  claimInvite,
-  getJoinPolicy,
-  type JoinPolicy,
-} from "@/shared/api/invites";
+import { claimInvite } from "@/shared/api/invites";
 import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
 import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
-import { JoinPolicyNotice } from "@/features/onboarding/ui/JoinPolicyNotice";
 import { NostrKeyImportForm } from "@/features/onboarding/ui/NostrKeyImportForm";
 import {
   type OnboardingTransitionDirection,
@@ -53,23 +48,15 @@ function wait(ms: number) {
 }
 
 function NostrKeyImportPage({
-  ageConfirmed,
   connectionError,
   disabled,
-  joinPolicy,
-  onAgeConfirmedChange,
   onBack,
   onImport,
-  relayWsUrl,
 }: {
-  ageConfirmed: boolean;
   connectionError: string | null;
   disabled: boolean;
-  joinPolicy: JoinPolicy | null | undefined;
-  onAgeConfirmedChange: (confirmed: boolean) => void;
   onBack: () => void;
   onImport: (nsec: string) => Promise<void>;
-  relayWsUrl: string;
 }) {
   return (
     <OnboardingSlideTransition
@@ -82,29 +69,13 @@ function NostrKeyImportPage({
           Use your existing key
         </h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Import your Nostr private key to use that identity with Buzz. If this
-          key already has a profile on the relay, your name and avatar are
-          restored automatically.
+          Import your Nostr private key to use that identity with Buzz. Your
+          profile can be restored after you choose a community.
         </p>
       </div>
 
-      {joinPolicy ? (
-        <div className="mt-6 w-full">
-          <JoinPolicyNotice
-            ageConfirmed={ageConfirmed}
-            onAgeConfirmedChange={onAgeConfirmedChange}
-            policy={joinPolicy}
-            relayWsUrl={relayWsUrl}
-          />
-        </div>
-      ) : null}
-
       <NostrKeyImportForm
-        disabled={
-          disabled ||
-          joinPolicy === undefined ||
-          Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed)
-        }
+        disabled={disabled}
         errorMessage={connectionError}
         onBack={onBack}
         onImport={onImport}
@@ -125,35 +96,8 @@ export function WelcomeSetup({
   const [error, setError] = React.useState<string | null>(null);
   const [isRedeeming, setIsRedeeming] = React.useState(false);
   const [inviteError, setInviteError] = React.useState<string | null>(null);
-  const [defaultJoinPolicy, setDefaultJoinPolicy] = React.useState<
-    JoinPolicy | null | undefined
-  >(undefined);
-  const [defaultAgeConfirmed, setDefaultAgeConfirmed] = React.useState(false);
+  const [identityImported, setIdentityImported] = React.useState(false);
   const systemColorScheme = useSystemColorScheme();
-
-  React.useEffect(() => {
-    let cancelled = false;
-    setDefaultAgeConfirmed(false);
-    if (isLocalDevRelayUrl(defaultRelayUrl)) {
-      setDefaultJoinPolicy(null);
-      return;
-    }
-    setDefaultJoinPolicy(undefined);
-    void getJoinPolicy(defaultRelayUrl)
-      .then((policy) => {
-        if (!cancelled) {
-          setDefaultJoinPolicy(policy);
-        }
-      })
-      .catch((policyError) => {
-        if (!cancelled) {
-          setError(inviteErrorMessage(policyError));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [defaultRelayUrl]);
 
   const handleConnect = React.useCallback(
     async (relayUrl: string, communityName?: string, pubkey?: string) => {
@@ -206,13 +150,13 @@ export function WelcomeSetup({
     [onComplete],
   );
 
-  const handleNostrImport = React.useCallback(
-    async (nsec: string) => {
-      const identity = await tauriImportIdentity(nsec);
-      await handleConnect(defaultRelayUrl, undefined, identity.pubkey);
-    },
-    [defaultRelayUrl, handleConnect],
-  );
+  const handleNostrImport = React.useCallback(async (nsec: string) => {
+    await tauriImportIdentity(nsec);
+    setIdentityImported(true);
+    setError(null);
+    setTransitionMode("backward");
+    setPage("welcome");
+  }, []);
 
   const handleWelcomeInviteRedeem = React.useCallback(
     async (relayWsUrl: string, code: string, policyReceipt?: string) => {
@@ -244,6 +188,7 @@ export function WelcomeSetup({
 
   const showNostrKeyPage = React.useCallback(() => {
     setError(null);
+    setIdentityImported(false);
     setTransitionMode("forward");
     setPage("nostr-key");
   }, []);
@@ -304,39 +249,16 @@ export function WelcomeSetup({
               Choose your first community to get started.
             </p>
 
-            <div className="mt-8 flex w-full flex-col gap-3">
-              {defaultJoinPolicy ? (
-                <JoinPolicyNotice
-                  ageConfirmed={defaultAgeConfirmed}
-                  onAgeConfirmedChange={setDefaultAgeConfirmed}
-                  policy={defaultJoinPolicy}
-                  relayWsUrl={defaultRelayUrl}
-                />
-              ) : null}
-              {isLocalDevRelayUrl(defaultRelayUrl) ? null : (
-                <Button
-                  className="h-10 w-full"
-                  aria-disabled={isConnecting}
-                  disabled={
-                    defaultJoinPolicy === undefined ||
-                    Boolean(
-                      defaultJoinPolicy?.ageAttestationRequired &&
-                        !defaultAgeConfirmed,
-                    )
-                  }
-                  onClick={() => {
-                    if (isConnecting) {
-                      return;
-                    }
-                    setError(null);
-                    void handleConnect(defaultRelayUrl);
-                  }}
-                  type="button"
-                >
-                  Continue with default community
-                </Button>
-              )}
+            {identityImported ? (
+              <p
+                className="mt-4 max-w-[440px] text-sm text-muted-foreground"
+                role="status"
+              >
+                Your key is ready. Choose a community to continue.
+              </p>
+            ) : null}
 
+            <div className="mt-8 flex w-full flex-col gap-3">
               <Button
                 className="h-10 w-full"
                 aria-disabled={isConnecting}
@@ -347,7 +269,6 @@ export function WelcomeSetup({
                   showCreateCommunityPage();
                 }}
                 type="button"
-                variant="secondary"
               >
                 Join a community
               </Button>
@@ -417,7 +338,7 @@ export function WelcomeSetup({
                 onSubmit={(name, url) => {
                   void handleConnect(url, name);
                 }}
-                submitLabel="Join a community"
+                submitLabel="Join community"
               />
               {error ? (
                 <p className="mt-2 text-center text-sm text-destructive">
@@ -464,14 +385,10 @@ export function WelcomeSetup({
           </OnboardingSlideTransition>
         ) : (
           <NostrKeyImportPage
-            ageConfirmed={defaultAgeConfirmed}
             connectionError={error}
             disabled={isConnecting}
-            joinPolicy={defaultJoinPolicy}
-            onAgeConfirmedChange={setDefaultAgeConfirmed}
             onBack={showWelcomePage}
             onImport={handleNostrImport}
-            relayWsUrl={defaultRelayUrl}
           />
         )}
       </div>

@@ -8562,6 +8562,11 @@ export function maybeInstallE2eTauriMocks() {
         return importMockIdentity(
           (payload as { nsec?: string } | null)?.nsec ?? "",
         );
+      case "validate_repos_dir":
+        // The browser harness has no host filesystem to validate. Treat the
+        // seeded empty/default path as valid so Add Community can continue to
+        // relay-policy discovery.
+        return;
       case "apply_workspace": {
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {

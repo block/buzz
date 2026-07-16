@@ -1,4 +1,5 @@
 import * as React from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import {
   inviteErrorMessage,
@@ -7,12 +8,16 @@ import {
 import {
   acceptJoinPolicy,
   getJoinPolicy,
+  isJoinPolicyDiscoveryCandidate,
   type JoinPolicy,
 } from "@/shared/api/invites";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { JoinPolicyNotice } from "./JoinPolicyNotice";
+
+const POLICY_DISCOVERY_DELAY_MS = 250;
+const POLICY_REVEAL_EASE = [0.23, 1, 0.32, 1] as const;
 
 type InviteRedeemFormProps = {
   /**
@@ -45,8 +50,10 @@ export function InviteRedeemForm({
     code: string;
   } | null>(null);
   const [ageConfirmed, setAgeConfirmed] = React.useState(false);
+  const [agreementConfirmed, setAgreementConfirmed] = React.useState(false);
   const [policyError, setPolicyError] = React.useState<string | null>(null);
   const [isLoadingPolicy, setIsLoadingPolicy] = React.useState(false);
+  const shouldReduceMotion = useReducedMotion();
 
   const parsed = React.useMemo(
     () => parseInviteInput(inviteInput),
@@ -54,6 +61,36 @@ export function InviteRedeemForm({
   );
   const isBareCode = parsed !== null && !("relayWsUrl" in parsed);
   const needsRelayField = isBareCode && defaultRelayUrl !== undefined;
+
+  React.useEffect(() => {
+    if (!parsed) return;
+
+    const relayWsUrl =
+      "relayWsUrl" in parsed ? parsed.relayWsUrl : bareCodeRelayUrl.trim();
+    if (!relayWsUrl || !isJoinPolicyDiscoveryCandidate(relayWsUrl)) return;
+
+    let cancelled = false;
+    const timeoutId = window.setTimeout(() => {
+      void getJoinPolicy(relayWsUrl)
+        .then((policy) => {
+          if (cancelled || !policy) return;
+          setJoinPolicy(policy);
+          setPolicyInvite({ relayWsUrl, code: parsed.code });
+          setAgeConfirmed(false);
+          setAgreementConfirmed(false);
+          setPolicyError(null);
+        })
+        .catch(() => {
+          // Background discovery is best-effort. A deliberate submit retries
+          // the request and surfaces any relay error to the user.
+        });
+    }, POLICY_DISCOVERY_DELAY_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [bareCodeRelayUrl, parsed]);
 
   const canSubmit =
     parsed !== null &&
@@ -87,11 +124,19 @@ export function InviteRedeemForm({
           setJoinPolicy(policy);
           setPolicyInvite({ relayWsUrl, code: parsed.code });
           setAgeConfirmed(false);
+          setAgreementConfirmed(false);
           return;
         }
 
         if (policy.ageAttestationRequired && !ageConfirmed) {
           setPolicyError("Confirm that you are at least 18 years old.");
+          return;
+        }
+        if (
+          (policy.termsMarkdown || policy.privacyMarkdown) &&
+          !agreementConfirmed
+        ) {
+          setPolicyError("Agree to the Terms of Service and Privacy Policy.");
           return;
         }
 
@@ -110,6 +155,7 @@ export function InviteRedeemForm({
     },
     [
       ageConfirmed,
+      agreementConfirmed,
       bareCodeRelayUrl,
       joinPolicy,
       onRedeem,
@@ -140,6 +186,7 @@ export function InviteRedeemForm({
             setJoinPolicy(null);
             setPolicyInvite(null);
             setAgeConfirmed(false);
+            setAgreementConfirmed(false);
             setPolicyError(null);
           }}
           placeholder="https://relay.example.com/invite/abc123 or paste a code"
@@ -166,6 +213,7 @@ export function InviteRedeemForm({
               setJoinPolicy(null);
               setPolicyInvite(null);
               setAgeConfirmed(false);
+              setAgreementConfirmed(false);
               setPolicyError(null);
             }}
             placeholder="wss://relay.example.com"
@@ -173,18 +221,6 @@ export function InviteRedeemForm({
             value={bareCodeRelayUrl}
           />
         </div>
-      ) : null}
-
-      {joinPolicy && policyInvite ? (
-        <JoinPolicyNotice
-          ageConfirmed={ageConfirmed}
-          onAgeConfirmedChange={(confirmed) => {
-            setAgeConfirmed(confirmed);
-            setPolicyError(null);
-          }}
-          policy={joinPolicy}
-          relayWsUrl={policyInvite.relayWsUrl}
-        />
       ) : null}
 
       {policyError ? (
@@ -195,6 +231,61 @@ export function InviteRedeemForm({
         <p className="text-center text-sm text-destructive">{error}</p>
       ) : null}
 
+      <AnimatePresence initial={false}>
+        {joinPolicy && policyInvite ? (
+          <motion.div
+            animate={{
+              height: "auto",
+              marginTop: 0,
+              opacity: 1,
+              transform: "translateY(0rem)",
+            }}
+            className="overflow-hidden"
+            exit={
+              shouldReduceMotion
+                ? { height: 0, marginTop: "-0.75rem", opacity: 0 }
+                : {
+                    height: 0,
+                    marginTop: "-0.75rem",
+                    opacity: 0,
+                    transform: "translateY(-0.25rem)",
+                  }
+            }
+            initial={
+              shouldReduceMotion
+                ? false
+                : {
+                    height: 0,
+                    marginTop: "-0.75rem",
+                    opacity: 0,
+                    transform: "translateY(-0.25rem)",
+                  }
+            }
+            key={`${policyInvite.relayWsUrl}:${joinPolicy.version}`}
+            transition={
+              shouldReduceMotion
+                ? { duration: 0 }
+                : { duration: 0.22, ease: POLICY_REVEAL_EASE }
+            }
+          >
+            <JoinPolicyNotice
+              ageConfirmed={ageConfirmed}
+              agreementConfirmed={agreementConfirmed}
+              onAgeConfirmedChange={(confirmed) => {
+                setAgeConfirmed(confirmed);
+                setPolicyError(null);
+              }}
+              onAgreementConfirmedChange={(confirmed) => {
+                setAgreementConfirmed(confirmed);
+                setPolicyError(null);
+              }}
+              policy={joinPolicy}
+              relayWsUrl={policyInvite.relayWsUrl}
+            />
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
       <Button
         className="h-10 w-full"
         data-testid="invite-redeem-submit"
@@ -202,7 +293,12 @@ export function InviteRedeemForm({
           !canSubmit ||
           isRedeeming ||
           isLoadingPolicy ||
-          Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed)
+          Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed) ||
+          Boolean(
+            joinPolicy &&
+              (joinPolicy.termsMarkdown || joinPolicy.privacyMarkdown) &&
+              !agreementConfirmed,
+          )
         }
         type="submit"
       >

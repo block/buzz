@@ -220,7 +220,7 @@ function OnboardingLoadingGate() {
               tabIndex={-1}
               type="button"
             >
-              Continue with default community
+              Join a community
             </Button>
 
             <Button
@@ -228,9 +228,9 @@ function OnboardingLoadingGate() {
               className="h-10 w-full"
               tabIndex={-1}
               type="button"
-              variant="secondary"
+              variant="ghost"
             >
-              Join a community
+              Have an invite?
             </Button>
 
             <Button
