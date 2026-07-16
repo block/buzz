@@ -48,7 +48,6 @@ test("join deep link shows the invite loader and auto-advances into setup", asyn
   await expect(
     page.getByRole("heading", { name: "Opening your invite" }),
   ).toBeVisible();
-  await expect(gate).toContainText("Connecting to hive to confirm your invite");
 
   // On success it auto-dismisses into the identity steps — no click needed.
   await expect(gate).toHaveCount(0);

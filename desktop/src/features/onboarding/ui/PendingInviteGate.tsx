@@ -5,7 +5,6 @@ import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
 import { claimInvite } from "@/shared/api/invites";
 import { Button } from "@/shared/ui/button";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
-import { cn } from "@/shared/lib/cn";
 
 /**
  * Full-screen loading state for an invite (`buzz://join`) deep link that
@@ -46,15 +45,11 @@ export function PendingInviteGate() {
         <h1 className="mt-6 text-3xl font-semibold tracking-tight">
           Opening your invite
         </h1>
-        <p
-          className={cn(
-            "mt-3 text-sm leading-6",
-            transaction.error ? "text-destructive" : "text-muted-foreground",
-          )}
-        >
-          {transaction.error ??
-            `Connecting to ${transaction.communityName} to confirm your invite…`}
-        </p>
+        {transaction.error ? (
+          <p className="mt-3 text-sm leading-6 text-destructive">
+            {transaction.error}
+          </p>
+        ) : null}
         <div className="mt-8 flex w-full flex-col gap-3">
           {transaction.error ? (
             <Button
