@@ -38,13 +38,14 @@ pub async fn start_coordinator(app: AppHandle) {
 
     let publisher_app = app.clone();
     let status_publisher = tokio::spawn(async move {
-        // Clear a stale serving status promptly after an app restart. Once the
-        // node is stopped, the explicit stopped event is sufficient; only a
-        // running node needs periodic freshness heartbeats.
+        // Clear a stale serving status promptly after an app restart. Keep
+        // publishing while stopped too: serving nodes build their admission
+        // allowlist from fresh member statuses, so consumer-only identities
+        // must remain fresh even though they advertise no serving targets.
         publish_current_status_once(&publisher_app, "startup").await;
         loop {
             tokio::time::sleep(STATUS_PUBLISH_INTERVAL).await;
-            publish_running_status_once(&publisher_app).await;
+            publish_current_status_once(&publisher_app, "heartbeat").await;
         }
     });
     let roster_app = app.clone();
@@ -118,13 +119,6 @@ pub(crate) async fn publish_stopped_status_once(app: &AppHandle, reason: &str) {
     }
 }
 
-async fn publish_running_status_once(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    if let Err(error) = publish_running_status_for_state(&state).await {
-        eprintln!("buzz-mesh: periodic status report failed: {error}");
-    }
-}
-
 async fn publish_current_status_for_state(state: &AppState) -> Result<(), String> {
     let identity = super::ensure_owner_identity()
         .map_err(|error| format!("failed to load mesh owner identity: {error}"))?;
@@ -146,23 +140,6 @@ async fn publish_stopped_status_for_state(state: &AppState) -> Result<(), String
     let identity = super::ensure_owner_identity()
         .map_err(|error| format!("failed to load mesh owner identity: {error}"))?;
     let mut payload = stopped_status_payload(&identity);
-    bind_payload_to_member(state, &identity, &mut payload)?;
-    publish_status_report(state, payload).await
-}
-
-async fn publish_running_status_for_state(state: &AppState) -> Result<(), String> {
-    let identity = super::ensure_owner_identity()
-        .map_err(|error| format!("failed to load mesh owner identity: {error}"))?;
-    let mut payload = {
-        let runtime = state.mesh_llm_runtime.lock().await;
-        let Some(runtime) = runtime.as_ref() else {
-            return Ok(());
-        };
-        runtime
-            .status_report_payload()
-            .await
-            .map_err(|error| error.to_string())?
-    };
     bind_payload_to_member(state, &identity, &mut payload)?;
     publish_status_report(state, payload).await
 }
@@ -234,7 +211,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn heartbeat_leaves_room_before_status_expires() {
+    fn member_heartbeat_leaves_room_before_admission_status_expires() {
         assert!(
             STATUS_PUBLISH_INTERVAL.as_secs() * 2 < super::super::discovery::STATUS_FRESHNESS_SECS
         );

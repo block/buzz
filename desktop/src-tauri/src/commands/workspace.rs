@@ -175,6 +175,14 @@ pub async fn apply_workspace(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
+    // The coordinator starts before React applies the selected workspace, so
+    // its startup publication may have used the fallback relay and placeholder
+    // identity. Republish immediately with the now-active relay and member key.
+    // This also makes a consumer-only MeshLLM owner visible for admission
+    // without waiting for the next heartbeat.
+    #[cfg(feature = "mesh-llm")]
+    crate::mesh_llm::publish_current_status_once(&restore_app, "workspace apply").await;
+
     let state = restore_app.state::<AppState>();
     if state
         .managed_agent_restore_pending
