@@ -2738,27 +2738,69 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
 /// with the same `relay_url`/`keys`/`auth_tag` would reproduce it — rather
 /// than transient (the network dropping bytes on a spotty link).
 ///
-/// `Http` covers the local URL/tag parsing failures `do_connect` can produce
-/// (never actual network I/O — see its callers). `WebSocket(Error::Url(_))`
-/// is a malformed/unsupported `relay_url` (bad scheme, missing host) that
-/// `connect_async` rejects before any network I/O, so it is just as
-/// deterministic as `Http`. `Json`/`UnexpectedMessage` mean the relay sent a
-/// frame `parse_relay_message` can't understand; TCP/WebSocket framing
-/// guarantees byte-for-byte delivery of complete messages, so a malformed or
-/// unrecognized frame reflects a protocol mismatch or server defect — not
-/// link noise — and retrying would very likely reproduce it. `AuthFailed` is
-/// split by [`is_terminal_auth_failure`] — see there for why a relay-side
-/// denial isn't uniformly terminal. Everything else (closed connection,
-/// timeout, I/O error) is exactly the class of failure a bad link produces,
-/// so it is retried.
+/// **Terminal (fail fast):**
+/// - `Http`/`Json`/`UnexpectedMessage` — local parsing or relay protocol
+///   mismatch; deterministic given the same relay.
+/// - `WebSocket` inner variants `Url`, `Capacity`, `Utf8`, `HttpFormat`,
+///   `AttackAttempt` — deterministic pre-connect or handshake-shape failures.
+/// - `WebSocket(Protocol(…))` — most variants indicate a stable HTTP/WS
+///   upgrade mismatch (wrong method, missing headers, accept-key mismatch).
+///   Two exceptions are transient: `HandshakeIncomplete` (connection dropped
+///   mid-handshake) and `ResetWithoutClosingHandshake` (abrupt reset).
+/// - `WebSocket(Http(resp))` — non-101 HTTP response; terminal unless the
+///   status is `408`, `429`, or `5xx` (server-side transient conditions).
+/// - `AuthFailed` — split by [`is_terminal_auth_failure`].
+///
+/// **Transient (retry):**
+/// - `WebSocket(Io)`, `WebSocket(ConnectionClosed)` — link-level failures.
+/// - `WebSocket(Tls)` — TLS resets on a bad link are plausible.
+/// - `WebSocket(AlreadyClosed)`, `WebSocket(WriteBufferFull)` — unreachable
+///   during `connect_async`; kept fail-safe transient.
+/// - `NoAuthChallenge`, `ConnectionClosed`, `Timeout` — timing/link noise.
 fn is_terminal_connect_error(err: &RelayError) -> bool {
     match err {
         RelayError::Http(_) | RelayError::Json(_) | RelayError::UnexpectedMessage(_) => true,
-        RelayError::WebSocket(e) => {
-            matches!(e.as_ref(), tokio_tungstenite::tungstenite::Error::Url(_))
-        }
+        RelayError::WebSocket(e) => is_terminal_ws_error(e.as_ref()),
         RelayError::AuthFailed(message) => is_terminal_auth_failure(message),
-        _ => false,
+        RelayError::NoAuthChallenge | RelayError::ConnectionClosed | RelayError::Timeout => false,
+    }
+}
+
+/// Exhaustive classification of `tungstenite::Error` inner variants for
+/// startup connect retry. No wildcard — a tungstenite upgrade forces
+/// reclassification at compile time.
+fn is_terminal_ws_error(err: &tokio_tungstenite::tungstenite::Error) -> bool {
+    use tokio_tungstenite::tungstenite::error::ProtocolError;
+    use tokio_tungstenite::tungstenite::Error as WsError;
+
+    match err {
+        // Deterministic pre-connect / handshake-shape failures.
+        WsError::Url(_)
+        | WsError::Capacity(_)
+        | WsError::Utf8(_)
+        | WsError::HttpFormat(_)
+        | WsError::AttackAttempt => true,
+
+        // Non-101 HTTP: terminal unless 408/429/5xx.
+        WsError::Http(resp) => {
+            let status = resp.status().as_u16();
+            !(status == 408 || status == 429 || (500..600).contains(&status))
+        }
+
+        // Protocol errors: most are deterministic upgrade mismatches.
+        WsError::Protocol(p) => !matches!(
+            p,
+            ProtocolError::HandshakeIncomplete | ProtocolError::ResetWithoutClosingHandshake
+        ),
+
+        // Link-level / timing failures.
+        WsError::Io(_) | WsError::ConnectionClosed => false,
+
+        // TLS resets on a bad link are plausible; don't expand scope.
+        WsError::Tls(_) => false,
+
+        // Unreachable during connect_async; kept fail-safe transient.
+        WsError::AlreadyClosed | WsError::WriteBufferFull(_) => false,
     }
 }
 
@@ -3829,16 +3871,24 @@ mod tests {
 
     // ── startup connect retry ────────────────────────────────────────────
 
-    /// Table-driven coverage of every `RelayError` variant's terminal/transient
-    /// classification, including the two cases the initial classifier got
-    /// wrong: a syntactically valid but unsupported-scheme URL (`WebSocket`
-    /// wrapping `tungstenite::Error::Url`) must be terminal like `Http`, not
-    /// transient like a dropped connection.
+    /// Table-driven coverage of every `RelayError` variant and every
+    /// `tungstenite::Error` inner variant. Exhaustive — adding a new
+    /// tungstenite variant without updating this table is a compile error
+    /// in `is_terminal_ws_error` (no wildcard), and a missing row here
+    /// is a code-review gap, not a silent misclassification.
     #[test]
     fn connect_error_classification_matches_every_relay_error_variant() {
-        use tokio_tungstenite::tungstenite::error::{Error as WsError, UrlError};
+        use tokio_tungstenite::tungstenite::error::{
+            CapacityError, Error as WsError, ProtocolError, SubProtocolError, UrlError,
+        };
+        use tokio_tungstenite::tungstenite::http;
+
+        fn ws(e: WsError) -> RelayError {
+            RelayError::WebSocket(Box::new(e))
+        }
 
         let cases: Vec<(&str, RelayError, bool)> = vec![
+            // ── outer RelayError variants ──
             ("Http: bad URL", RelayError::Http("bad url".into()), true),
             (
                 "Json: malformed relay frame",
@@ -3849,21 +3899,6 @@ mod tests {
                 "UnexpectedMessage: unknown frame type",
                 RelayError::UnexpectedMessage("unknown message type: WAT".into()),
                 true,
-            ),
-            (
-                "WebSocket(Url): unsupported scheme — deterministic, never touches the network",
-                RelayError::WebSocket(Box::new(WsError::Url(UrlError::UnsupportedUrlScheme))),
-                true,
-            ),
-            (
-                "WebSocket(Url): missing host",
-                RelayError::WebSocket(Box::new(WsError::Url(UrlError::NoHostName))),
-                true,
-            ),
-            (
-                "WebSocket(Io): dropped connection is link noise, not config",
-                RelayError::WebSocket(Box::new(WsError::Io(std::io::Error::other("reset")))),
-                false,
             ),
             (
                 "AuthFailed: relay dependency fault (NIP-01 `error:` prefix)",
@@ -3902,6 +3937,316 @@ mod tests {
             ),
             ("ConnectionClosed", RelayError::ConnectionClosed, false),
             ("Timeout", RelayError::Timeout, false),
+            // ── WebSocket inner: terminal ──
+            (
+                "WebSocket(Url): unsupported scheme",
+                ws(WsError::Url(UrlError::UnsupportedUrlScheme)),
+                true,
+            ),
+            (
+                "WebSocket(Url): missing host",
+                ws(WsError::Url(UrlError::NoHostName)),
+                true,
+            ),
+            (
+                "WebSocket(Url): empty host",
+                ws(WsError::Url(UrlError::EmptyHostName)),
+                true,
+            ),
+            (
+                "WebSocket(Url): TLS feature not enabled",
+                ws(WsError::Url(UrlError::TlsFeatureNotEnabled)),
+                true,
+            ),
+            (
+                "WebSocket(Url): unable to connect",
+                ws(WsError::Url(UrlError::UnableToConnect("addr".into()))),
+                true,
+            ),
+            (
+                "WebSocket(Url): no path or query",
+                ws(WsError::Url(UrlError::NoPathOrQuery)),
+                true,
+            ),
+            (
+                "WebSocket(Capacity): message too long",
+                ws(WsError::Capacity(CapacityError::MessageTooLong {
+                    size: 100,
+                    max_size: 50,
+                })),
+                true,
+            ),
+            (
+                "WebSocket(Capacity): too many headers",
+                ws(WsError::Capacity(CapacityError::TooManyHeaders)),
+                true,
+            ),
+            (
+                "WebSocket(Utf8): encoding error",
+                ws(WsError::Utf8("invalid utf-8".into())),
+                true,
+            ),
+            (
+                "WebSocket(HttpFormat): malformed HTTP",
+                ws(WsError::HttpFormat(
+                    http::Response::builder().status(9999).body(()).unwrap_err(),
+                )),
+                true,
+            ),
+            ("WebSocket(AttackAttempt)", ws(WsError::AttackAttempt), true),
+            // ── WebSocket inner: Http status split ──
+            (
+                "WebSocket(Http): 200 = plain HTTPS endpoint → terminal",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(200).body(None).unwrap(),
+                ))),
+                true,
+            ),
+            (
+                "WebSocket(Http): 301 redirect → terminal",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(301).body(None).unwrap(),
+                ))),
+                true,
+            ),
+            (
+                "WebSocket(Http): 404 not found → terminal",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(404).body(None).unwrap(),
+                ))),
+                true,
+            ),
+            (
+                "WebSocket(Http): 403 forbidden → terminal",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(403).body(None).unwrap(),
+                ))),
+                true,
+            ),
+            (
+                "WebSocket(Http): 408 request timeout → transient",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(408).body(None).unwrap(),
+                ))),
+                false,
+            ),
+            (
+                "WebSocket(Http): 429 too many requests → transient",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(429).body(None).unwrap(),
+                ))),
+                false,
+            ),
+            (
+                "WebSocket(Http): 500 internal server error → transient",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(500).body(None).unwrap(),
+                ))),
+                false,
+            ),
+            (
+                "WebSocket(Http): 502 bad gateway → transient",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(502).body(None).unwrap(),
+                ))),
+                false,
+            ),
+            (
+                "WebSocket(Http): 503 service unavailable → transient",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(503).body(None).unwrap(),
+                ))),
+                false,
+            ),
+            // ── WebSocket inner: Protocol variants ──
+            (
+                "Protocol(WrongHttpMethod): deterministic upgrade mismatch",
+                ws(WsError::Protocol(ProtocolError::WrongHttpMethod)),
+                true,
+            ),
+            (
+                "Protocol(WrongHttpVersion): deterministic upgrade mismatch",
+                ws(WsError::Protocol(ProtocolError::WrongHttpVersion)),
+                true,
+            ),
+            (
+                "Protocol(MissingConnectionUpgradeHeader)",
+                ws(WsError::Protocol(
+                    ProtocolError::MissingConnectionUpgradeHeader,
+                )),
+                true,
+            ),
+            (
+                "Protocol(MissingUpgradeWebSocketHeader)",
+                ws(WsError::Protocol(
+                    ProtocolError::MissingUpgradeWebSocketHeader,
+                )),
+                true,
+            ),
+            (
+                "Protocol(MissingSecWebSocketVersionHeader)",
+                ws(WsError::Protocol(
+                    ProtocolError::MissingSecWebSocketVersionHeader,
+                )),
+                true,
+            ),
+            (
+                "Protocol(MissingSecWebSocketKey)",
+                ws(WsError::Protocol(ProtocolError::MissingSecWebSocketKey)),
+                true,
+            ),
+            (
+                "Protocol(SecWebSocketAcceptKeyMismatch)",
+                ws(WsError::Protocol(
+                    ProtocolError::SecWebSocketAcceptKeyMismatch,
+                )),
+                true,
+            ),
+            (
+                "Protocol(SecWebSocketSubProtocolError)",
+                ws(WsError::Protocol(
+                    ProtocolError::SecWebSocketSubProtocolError(
+                        SubProtocolError::ServerSentSubProtocolNoneRequested,
+                    ),
+                )),
+                true,
+            ),
+            (
+                "Protocol(JunkAfterRequest)",
+                ws(WsError::Protocol(ProtocolError::JunkAfterRequest)),
+                true,
+            ),
+            (
+                "Protocol(CustomResponseSuccessful)",
+                ws(WsError::Protocol(ProtocolError::CustomResponseSuccessful)),
+                true,
+            ),
+            (
+                "Protocol(InvalidHeader)",
+                ws(WsError::Protocol(ProtocolError::InvalidHeader(Box::new(
+                    http::header::UPGRADE,
+                )))),
+                true,
+            ),
+            (
+                "Protocol(HttparseError)",
+                ws(WsError::Protocol(ProtocolError::HttparseError(
+                    httparse::Error::TooManyHeaders,
+                ))),
+                true,
+            ),
+            (
+                "Protocol(SendAfterClosing)",
+                ws(WsError::Protocol(ProtocolError::SendAfterClosing)),
+                true,
+            ),
+            (
+                "Protocol(ReceivedAfterClosing)",
+                ws(WsError::Protocol(ProtocolError::ReceivedAfterClosing)),
+                true,
+            ),
+            (
+                "Protocol(NonZeroReservedBits)",
+                ws(WsError::Protocol(ProtocolError::NonZeroReservedBits)),
+                true,
+            ),
+            (
+                "Protocol(UnmaskedFrameFromClient)",
+                ws(WsError::Protocol(ProtocolError::UnmaskedFrameFromClient)),
+                true,
+            ),
+            (
+                "Protocol(MaskedFrameFromServer)",
+                ws(WsError::Protocol(ProtocolError::MaskedFrameFromServer)),
+                true,
+            ),
+            (
+                "Protocol(FragmentedControlFrame)",
+                ws(WsError::Protocol(ProtocolError::FragmentedControlFrame)),
+                true,
+            ),
+            (
+                "Protocol(ControlFrameTooBig)",
+                ws(WsError::Protocol(ProtocolError::ControlFrameTooBig)),
+                true,
+            ),
+            (
+                "Protocol(UnknownControlFrameType)",
+                ws(WsError::Protocol(ProtocolError::UnknownControlFrameType(
+                    0xF,
+                ))),
+                true,
+            ),
+            (
+                "Protocol(UnknownDataFrameType)",
+                ws(WsError::Protocol(ProtocolError::UnknownDataFrameType(0xF))),
+                true,
+            ),
+            (
+                "Protocol(UnexpectedContinueFrame)",
+                ws(WsError::Protocol(ProtocolError::UnexpectedContinueFrame)),
+                true,
+            ),
+            (
+                "Protocol(ExpectedFragment)",
+                ws(WsError::Protocol(ProtocolError::ExpectedFragment(
+                    tokio_tungstenite::tungstenite::protocol::frame::coding::Data::Text,
+                ))),
+                true,
+            ),
+            (
+                "Protocol(InvalidOpcode)",
+                ws(WsError::Protocol(ProtocolError::InvalidOpcode(0xF))),
+                true,
+            ),
+            (
+                "Protocol(InvalidCloseSequence)",
+                ws(WsError::Protocol(ProtocolError::InvalidCloseSequence)),
+                true,
+            ),
+            // ── Protocol: transient exceptions ──
+            (
+                "Protocol(HandshakeIncomplete): connection dropped mid-handshake",
+                ws(WsError::Protocol(ProtocolError::HandshakeIncomplete)),
+                false,
+            ),
+            (
+                "Protocol(ResetWithoutClosingHandshake): abrupt reset",
+                ws(WsError::Protocol(
+                    ProtocolError::ResetWithoutClosingHandshake,
+                )),
+                false,
+            ),
+            // ── WebSocket inner: transient ──
+            (
+                "WebSocket(Io): dropped connection is link noise",
+                ws(WsError::Io(std::io::Error::other("reset"))),
+                false,
+            ),
+            (
+                "WebSocket(ConnectionClosed): link-level closure",
+                ws(WsError::ConnectionClosed),
+                false,
+            ),
+            (
+                "WebSocket(Tls): TLS reset on a bad link",
+                ws(WsError::Tls(
+                    rustls::Error::General("tls handshake failed".into()).into(),
+                )),
+                false,
+            ),
+            (
+                "WebSocket(AlreadyClosed): unreachable at connect, fail-safe transient",
+                ws(WsError::AlreadyClosed),
+                false,
+            ),
+            (
+                "WebSocket(WriteBufferFull): unreachable at connect, fail-safe transient",
+                ws(WsError::WriteBufferFull(Box::new(
+                    tokio_tungstenite::tungstenite::Message::Text("x".into()),
+                ))),
+                false,
+            ),
         ];
 
         for (label, err, want_terminal) in cases {
@@ -3911,6 +4256,23 @@ mod tests {
                 "{label}: expected terminal={want_terminal}"
             );
         }
+    }
+
+    /// A literal `https://…` URL through production `do_connect()` must fail
+    /// fast as terminal — the relay endpoint is a plain HTTPS server, not a
+    /// WebSocket endpoint, and tungstenite returns `Error::Http` (non-101
+    /// response) or `Error::Url(UnsupportedUrlScheme)` depending on how far
+    /// the handshake gets. Either way it must not be retried.
+    #[tokio::test]
+    async fn do_connect_wrong_scheme_is_terminal() {
+        let keys = nostr::Keys::generate();
+        let err = do_connect("https://example.com", &keys, None)
+            .await
+            .unwrap_err();
+        assert!(
+            is_terminal_connect_error(&err),
+            "wrong-scheme URL should be terminal, got: {err}"
+        );
     }
 
     /// A transient failure (e.g. connection dropped mid-handshake on a spotty
