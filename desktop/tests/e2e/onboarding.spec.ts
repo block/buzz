@@ -1072,8 +1072,10 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
       wash instanceof HTMLElement ? window.getComputedStyle(wash) : null;
     return {
       animateElementCount: element.querySelectorAll("animate").length,
-      // The document itself must not flash white before the gate mounts
-      // (inline <style> in index.html; black fallback when no cached theme).
+      // The document must match the OS scheme before the gate mounts (inline
+      // <style> + script in index.html; with no cached theme the first-launch
+      // default is Buzz following the OS scheme — white here because
+      // Playwright's default color scheme is light).
       documentBackgroundColor: window.getComputedStyle(document.documentElement)
         .backgroundColor,
       grainientAnimation: washStyles?.animationName,
@@ -1088,7 +1090,7 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   });
   expect(gateTreatment).toEqual({
     animateElementCount: 0,
-    documentBackgroundColor: "rgb(0, 0, 0)",
+    documentBackgroundColor: "rgb(255, 255, 255)",
     grainientAnimation: "buzz-grainient-orbit",
     grainientUsesRadialGradients: true,
     markSvgsUseCurrentColor: true,

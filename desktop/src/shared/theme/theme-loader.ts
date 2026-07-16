@@ -124,16 +124,6 @@ export const SYNTAX_THEMES = [
 
 export type SyntaxThemeName = (typeof SYNTAX_THEMES)[number];
 
-const ONBOARDING_THEME_FALLBACK: SyntaxThemeName = "github-light-default";
-const ONBOARDING_THEME_PREFERENCES = [
-  "neutral",
-  ONBOARDING_THEME_FALLBACK,
-] as const;
-
-export const ONBOARDING_DEFAULT_THEME_NAME = (ONBOARDING_THEME_PREFERENCES.find(
-  (name) => (SYNTAX_THEMES as readonly string[]).includes(name),
-) ?? ONBOARDING_THEME_FALLBACK) as SyntaxThemeName;
-
 // Known light themes — used by the theme picker to show sun/moon icons
 // for themes that haven't been loaded yet.
 export const LIGHT_THEMES: ReadonlySet<SyntaxThemeName> = new Set([

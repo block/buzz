@@ -1350,10 +1350,11 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
   ).toBeVisible();
   await page.getByTestId("settings-nav-appearance").click();
 
-  // Default theme is catppuccin-macchiato (dark)
+  // Default is Buzz in System mode; Playwright's default color scheme is
+  // light, so the app boots with the light Buzz theme.
   await expect
     .poll(() =>
-      page.evaluate(() => document.documentElement.classList.contains("dark")),
+      page.evaluate(() => document.documentElement.classList.contains("light")),
     )
     .toBe(true);
 

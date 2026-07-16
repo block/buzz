@@ -12,19 +12,11 @@ import {
   importIdentity,
   persistCurrentIdentity,
 } from "@/shared/api/tauriIdentity";
-import {
-  ACCENT_STORAGE_KEY,
-  NEUTRAL_ACCENT,
-  THEME_STORAGE_KEY,
-  useTheme,
-} from "@/shared/theme/ThemeProvider";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
-import { ONBOARDING_DEFAULT_THEME_NAME } from "@/shared/theme/theme-loader";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 import { AvatarStep } from "./AvatarStep";
-import { BackupStep } from "./BackupStep";
 import { MembershipDenied } from "./MembershipDenied";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -34,8 +26,6 @@ import {
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
 import { ProfileStep } from "./ProfileStep";
-import { SetupStep } from "./SetupStep";
-import { ThemeStep, preloadThemePreviewVars } from "./ThemeStep";
 import type {
   OnboardingActions,
   OnboardingPage,
@@ -190,36 +180,6 @@ export function OnboardingFlow({
   const [transitionDirection, setTransitionDirection] =
     React.useState<OnboardingTransitionDirection>("forward");
   const systemColorScheme = useSystemColorScheme();
-  const { accentColor, setAccentColor, setTheme, themeName } = useTheme();
-
-  const ensureThemeStepDefaults = React.useCallback(() => {
-    const hasStoredTheme =
-      window.localStorage.getItem(THEME_STORAGE_KEY) !== null;
-    const hasStoredAccent =
-      window.localStorage.getItem(ACCENT_STORAGE_KEY) !== null;
-
-    if (!hasStoredTheme && themeName !== ONBOARDING_DEFAULT_THEME_NAME) {
-      setTheme(ONBOARDING_DEFAULT_THEME_NAME);
-    }
-
-    if (!hasStoredAccent && accentColor !== NEUTRAL_ACCENT) {
-      setAccentColor(NEUTRAL_ACCENT);
-    }
-  }, [accentColor, setAccentColor, setTheme, themeName]);
-
-  React.useEffect(() => {
-    if (
-      currentPage === "profile" ||
-      currentPage === "backup" ||
-      currentPage === "avatar"
-    ) {
-      void preloadThemePreviewVars().catch(() => undefined);
-    }
-
-    if (currentPage === "avatar") {
-      ensureThemeStepDefaults();
-    }
-  }, [currentPage, ensureThemeStepDefaults]);
 
   const resetProfileSaveError = React.useCallback(() => {
     profileUpdateMutation.reset();
@@ -234,20 +194,6 @@ export function OnboardingFlow({
       }));
     },
     [resetProfileSaveError],
-  );
-
-  const showSetupPage = React.useCallback(() => {
-    setTransitionDirection("forward");
-    setCurrentPage("setup");
-  }, []);
-
-  const showThemePage = React.useCallback(
-    (direction: OnboardingTransitionDirection = "forward") => {
-      ensureThemeStepDefaults();
-      setTransitionDirection(direction);
-      setCurrentPage("theme");
-    },
-    [ensureThemeStepDefaults],
   );
 
   const showAvatarPage = React.useCallback(
@@ -430,8 +376,7 @@ export function OnboardingFlow({
   const pageIndex = activeSteps.indexOf(normalizedPage);
   const currentStep = pageIndex >= 0 ? pageIndex + STEP_OFFSET : STEP_OFFSET;
   const totalOnboardingSteps = activeSteps.length;
-  const hideFixedProgressOnCompact =
-    currentPage === "avatar" || currentPage === "theme";
+  const hideFixedProgressOnCompact = currentPage === "avatar";
 
   // Swapping the identity changes the pubkey, which remounts this flow
   // (keyed on pubkey in App.tsx) and re-runs the onboarding gate: the new
@@ -502,27 +447,14 @@ export function OnboardingFlow({
   return (
     <>
       <div
-        className={`buzz-startup-shell flex items-start justify-center overflow-y-auto bg-background px-4 py-8 text-foreground ${
-          currentPage === "profile" ||
-          currentPage === "backup" ||
-          currentPage === "avatar" ||
-          currentPage === "key-import"
-            ? "buzz-onboarding-neutral-theme"
-            : ""
-        }`}
+        className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-start justify-center overflow-y-auto bg-background px-4 py-8 text-foreground"
         data-testid="onboarding-gate"
         data-system-color-scheme={systemColorScheme}
       >
         <StartupWindowDragRegion />
         <div
           className={`relative my-auto flex w-full flex-col items-center text-center ${
-            currentPage === "theme"
-              ? "max-w-[1180px]"
-              : currentPage === "avatar"
-                ? "max-w-[1080px]"
-                : currentPage === "setup"
-                  ? "max-w-[920px]"
-                  : "max-w-[500px]"
+            currentPage === "avatar" ? "max-w-[1080px]" : "max-w-[500px]"
           }`}
         >
           <OnboardingSlideTransition
@@ -643,15 +575,7 @@ export function OnboardingFlow({
                 onImport={importExistingKey}
               />
             </OnboardingSlideTransition>
-          ) : currentPage === "backup" ? (
-            <BackupStep
-              currentStep={currentStep}
-              direction={transitionDirection}
-              onBack={showProfilePage}
-              onNext={() => showAvatarPage()}
-              totalSteps={totalOnboardingSteps}
-            />
-          ) : currentPage === "avatar" ? (
+          ) : (
             <AvatarStep
               actions={{
                 advanceWithoutSaving: complete,
@@ -668,22 +592,6 @@ export function OnboardingFlow({
               showAlwaysSkip={true}
               state={avatarStepState}
               totalSteps={totalOnboardingSteps}
-            />
-          ) : currentPage === "theme" ? (
-            <ThemeStep
-              actions={{
-                skip: showSetupPage,
-                submit: showSetupPage,
-              }}
-              direction={transitionDirection}
-            />
-          ) : (
-            <SetupStep
-              actions={{
-                back: () => showThemePage("backward"),
-                complete,
-              }}
-              direction={transitionDirection}
             />
           )}
         </div>

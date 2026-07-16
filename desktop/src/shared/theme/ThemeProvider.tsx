@@ -452,7 +452,7 @@ async function applyTheme(name: SyntaxThemeName): Promise<{ isDark: boolean }> {
 
 export function ThemeProvider({
   children,
-  defaultTheme = "houston",
+  defaultTheme = "buzz",
 }: ThemeProviderProps) {
   // Apply cached vars synchronously before first render
   const [selectedTheme, setSelectedTheme] = useState<string>(() => {
@@ -468,7 +468,12 @@ export function ThemeProvider({
     return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
   });
   const [followSystem, setFollowSystemState] = useState<boolean>(() => {
-    return window.localStorage.getItem(FOLLOW_SYSTEM_KEY) === "true";
+    const stored = window.localStorage.getItem(FOLLOW_SYSTEM_KEY);
+    if (stored !== null) return stored === "true";
+    // Fresh profiles (no saved theme) default to System mode so the Buzz
+    // default tracks the OS light/dark scheme. Profiles that picked a theme
+    // before this toggle existed keep their fixed theme until they opt in.
+    return window.localStorage.getItem(THEME_STORAGE_KEY) === null;
   });
   const [systemIsDark, setSystemIsDark] = useState<boolean>(() => {
     return window.matchMedia("(prefers-color-scheme: dark)").matches;
