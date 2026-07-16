@@ -86,6 +86,35 @@ test("setup page Re-check button triggers runtimes refetch", async ({
   await expect(recheckBtn).toBeVisible();
 });
 
+test("Finish opens the display-only starter team page before completing setup", async ({
+  page,
+}) => {
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await page.getByTestId("onboarding-finish").click();
+
+  await expect(
+    page.getByRole("heading", { name: "Meet your team" }),
+  ).toBeVisible();
+  const cards = page.getByTestId("starter-team-cards");
+  await expect(cards.getByText("Fizz", { exact: true })).toBeVisible();
+  await expect(cards.getByText("Honey", { exact: true })).toBeVisible();
+  await expect(cards.getByText("Bumble", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
+
+  await page.getByTestId("onboarding-team-continue").click();
+
+  await expect(page.getByTestId("machine-onboarding-gate")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Join a community" }),
+  ).toBeVisible();
+});
+
 test("Finish button is always enabled on setup page regardless of readiness", async ({
   page,
 }) => {

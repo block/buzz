@@ -9,14 +9,12 @@ import {
 import { initializeWelcomeChannel } from "@/features/onboarding/hooks";
 import { useClaimInvite } from "@/features/onboarding/useClaimInvite";
 import { AvatarUpload } from "@/features/profile/ui/AvatarUpload";
-import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { updateProfile } from "@/shared/api/tauriProfiles";
 import { getIdentity } from "@/shared/api/tauriIdentity";
-import { listPersonas } from "@/shared/api/tauriPersonas";
-import type { AgentPersona } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
+import { StarterTeamCards } from "./StarterTeamCards";
 
 export function CommunityOnboardingFlow({
   onConnect,
@@ -28,26 +26,7 @@ export function CommunityOnboardingFlow({
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
-  const [starterPersonas, setStarterPersonas] = React.useState<AgentPersona[]>(
-    [],
-  );
   const [isPending, setIsPending] = React.useState(false);
-
-  React.useEffect(() => {
-    if (transaction?.stage !== "team-intro") return;
-    void listPersonas()
-      .then((personas) =>
-        setStarterPersonas(
-          ["Fizz", "Honey", "Bumble"].flatMap((name) => {
-            const persona = personas.find(
-              (candidate) => candidate.displayName === name,
-            );
-            return persona ? [persona] : [];
-          }),
-        ),
-      )
-      .catch(() => setStarterPersonas([]));
-  }, [transaction?.stage]);
 
   useClaimInvite();
 
@@ -179,25 +158,9 @@ export function CommunityOnboardingFlow({
               Fizz helps you build, Honey helps you communicate, and Bumble
               helps you research. They’ll be ready when you need them.
             </p>
-            {starterPersonas.length > 0 ? (
-              <div className="mt-7 flex justify-center gap-5">
-                {starterPersonas.map((persona) => (
-                  <div
-                    className="flex w-20 flex-col items-center gap-2"
-                    key={persona.id}
-                  >
-                    <ProfileAvatar
-                      avatarUrl={persona.avatarUrl}
-                      className="h-14 w-14"
-                      label={persona.displayName}
-                    />
-                    <span className="text-sm font-medium">
-                      {persona.displayName}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : null}
+            <div className="mt-7">
+              <StarterTeamCards />
+            </div>
             {transaction.error ? (
               <p className="mt-4 text-sm text-destructive">
                 {transaction.error}

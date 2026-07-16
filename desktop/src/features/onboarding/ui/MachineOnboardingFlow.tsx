@@ -12,8 +12,14 @@ import { BackupStep } from "./BackupStep";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
+import { StarterTeamCards } from "./StarterTeamCards";
 
-type MachinePage = "identity" | "key-import" | "backup" | "setup";
+type MachinePage =
+  | "identity"
+  | "key-import"
+  | "backup"
+  | "setup"
+  | "team-intro";
 
 export function MachineOnboardingFlow({
   complete,
@@ -166,15 +172,50 @@ export function MachineOnboardingFlow({
             onNext={() => setPage("setup")}
             totalSteps={3}
           />
-        ) : (
+        ) : page === "setup" ? (
           <SetupStep
             actions={{
               back: () =>
                 setPage(identityWasImported ? "key-import" : "backup"),
-              complete: () => complete(selectedPubkey ?? undefined),
+              complete: () => setPage("team-intro"),
             }}
             direction="forward"
           />
+        ) : (
+          <OnboardingSlideTransition
+            className="flex w-full max-w-[500px] flex-col items-center text-center"
+            direction="forward"
+            transitionKey="machine-team-intro"
+          >
+            <h1 className="text-3xl font-semibold tracking-tight">
+              Meet your team
+            </h1>
+            <p className="mt-3 text-sm leading-6 text-muted-foreground">
+              Fizz helps you build, Honey helps you communicate, and Bumble
+              helps you research. They’ll be ready when you need them.
+            </p>
+            <div className="mt-7">
+              <StarterTeamCards />
+            </div>
+            <div className="mt-8 flex w-full flex-col gap-3">
+              <Button
+                className="h-10 w-full"
+                data-testid="onboarding-team-continue"
+                onClick={() => complete(selectedPubkey ?? undefined)}
+                type="button"
+              >
+                Continue
+              </Button>
+              <Button
+                className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
+                onClick={() => setPage("setup")}
+                type="button"
+                variant="ghost"
+              >
+                Back
+              </Button>
+            </div>
+          </OnboardingSlideTransition>
         )}
       </div>
     </div>
