@@ -24,20 +24,16 @@ import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { PageHeader } from "@/shared/ui/PageHeader";
-import { formatAiDefaultsSummary } from "./AgentAiDefaults";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
 export function AgentsView() {
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
-  const { goSettings } = useAppNavigation();
   const { globalConfig } = useGlobalAgentConfig();
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
-  const aiDefaultsSummary = formatAiDefaultsSummary(inheritedDefaults);
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -105,10 +101,7 @@ export function AgentsView() {
           />
           <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
-              aiDefaultsSummary={aiDefaultsSummary}
-              onEditAiDefaults={() => {
-                void goSettings("agents");
-              }}
+              defaultModel={inheritedDefaults.model.value}
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}

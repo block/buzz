@@ -24,7 +24,6 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
-import { SectionHeader } from "@/shared/ui/PageHeader";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
@@ -32,7 +31,7 @@ import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
-  aiDefaultsSummary: string;
+  defaultModel: string;
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
@@ -42,7 +41,6 @@ type UnifiedAgentsSectionProps = {
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
   onBulkStopRunning: () => void;
-  onEditAiDefaults: () => void;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
@@ -76,8 +74,8 @@ const AGENT_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} grid grid-cols-[repeat
 export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   const {
     actionErrorMessage,
-    aiDefaultsSummary,
     actionNoticeMessage,
+    defaultModel,
     agents,
     agentsError,
     isActionPending,
@@ -85,7 +83,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     startingAgentPubkey,
     startingPersonaIds,
     onBulkStopRunning,
-    onEditAiDefaults,
     onOpenAgentProfile,
     onOpenPersonaProfile,
     onStartAgent,
@@ -162,15 +159,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
         </div>
       ) : null}
 
-      <AgentsListHeader
+      <AgentsListActions
         agentCount={agents.length}
-        aiDefaultsSummary={aiDefaultsSummary}
         fileInputRef={fileInputRef}
         handleFileChange={handleFileChange}
         isActionPending={isActionPending}
         runningCount={runningCount}
         onBulkStopRunning={onBulkStopRunning}
-        onEditAiDefaults={onEditAiDefaults}
       />
 
       {isLoading ? <LoadingSkeleton /> : null}
@@ -196,6 +191,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                     />
                   }
                   agent={profileAgent}
+                  defaultModel={defaultModel}
                   key={group.persona.id}
                   persona={group.persona}
                   startingAgentPubkey={startingAgentPubkey}
@@ -220,6 +216,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
             <CollapsibleAgentGroup
               agents={additionalPersonaAgents}
               collapsed={collapsed}
+              defaultModel={defaultModel}
               groupKey="__additional_persona_agents__"
               label="Additional agent instances"
               startingAgentPubkey={startingAgentPubkey}
@@ -232,6 +229,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
             <CollapsibleAgentGroup
               agents={unknown}
               collapsed={collapsed}
+              defaultModel={defaultModel}
               groupKey="__unknown__"
               label="Unknown Agent"
               startingAgentPubkey={startingAgentPubkey}
@@ -244,6 +242,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
             <CollapsibleAgentGroup
               agents={ungrouped}
               collapsed={collapsed}
+              defaultModel={defaultModel}
               groupKey="__ungrouped__"
               label="Custom agents"
               startingAgentPubkey={startingAgentPubkey}
@@ -276,6 +275,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 function AgentPersonaCard({
   actions,
   agent,
+  defaultModel,
   persona,
   startingAgentPubkey,
   startingPersonaIds,
@@ -286,6 +286,7 @@ function AgentPersonaCard({
 }: {
   actions?: React.ReactNode;
   agent: ManagedAgent | undefined;
+  defaultModel: string;
   persona: AgentPersona;
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
@@ -298,7 +299,10 @@ function AgentPersonaCard({
   onStartPersona: (persona: AgentPersona) => void;
 }) {
   const title = persona.displayName;
-  const modelLabel = formatAgentModelLabel(agent?.model ?? persona.model);
+  const explicitModel = agent?.model ?? persona.model;
+  const modelLabel = explicitModel?.trim()
+    ? formatAgentModelLabel(explicitModel)
+    : formatDefaultModelLabel(defaultModel);
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
   const avatarUrl = agent
@@ -344,7 +348,7 @@ function AgentPersonaCard({
       avatarUrl={avatarUrl}
       dataTestId={`persona-agent-row-${persona.id}`}
       label={title}
-      modelLabel={agent && isActive ? modelLabel : null}
+      modelLabel={modelLabel}
       onClick={() => {
         if (agent) {
           onOpenAgentProfile(
@@ -369,11 +373,13 @@ function AgentPersonaCard({
 
 function StandaloneAgentCard({
   agent,
+  defaultModel,
   startingAgentPubkey,
   onOpenAgentProfile,
   onStartAgent,
 }: {
   agent: ManagedAgent;
+  defaultModel: string;
   startingAgentPubkey: string | null;
   onOpenAgentProfile: (
     pubkey: string,
@@ -412,7 +418,11 @@ function StandaloneAgentCard({
       avatarUrl={profileQuery.data?.avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
       label={title}
-      modelLabel={isActive ? formatAgentModelLabel(agent.model) : null}
+      modelLabel={
+        agent.model?.trim()
+          ? formatAgentModelLabel(agent.model)
+          : formatDefaultModelLabel(defaultModel)
+      }
       onClick={() => {
         onOpenAgentProfile(
           agent.pubkey,
@@ -431,6 +441,11 @@ function StandaloneAgentCard({
   );
 }
 
+function formatDefaultModelLabel(defaultModel: string) {
+  const model = defaultModel.trim();
+  return model ? `Default model (${model})` : "Default model";
+}
+
 function firstAvatarUrl(
   ...candidates: Array<string | null | undefined>
 ): string | null {
@@ -441,27 +456,23 @@ function firstAvatarUrl(
   return null;
 }
 
-function AgentsListHeader({
+function AgentsListActions({
   agentCount,
-  aiDefaultsSummary,
   fileInputRef,
   handleFileChange,
   isActionPending,
   runningCount,
   onBulkStopRunning,
-  onEditAiDefaults,
 }: {
   agentCount: number;
-  aiDefaultsSummary: string;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   handleFileChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   isActionPending: boolean;
   runningCount: number;
   onBulkStopRunning: () => void;
-  onEditAiDefaults: () => void;
 }) {
   return (
-    <div className={AGENT_CARD_COLUMN_CLASS}>
+    <>
       <input
         accept=".agent.json,.agent.png"
         className="hidden"
@@ -469,54 +480,35 @@ function AgentsListHeader({
         ref={fileInputRef}
         type="file"
       />
-      <SectionHeader
-        title="Agents"
-        description={
-          <>
-            <span>Agents in this community.</span>
-            <span className="mt-1 flex flex-wrap items-center gap-x-1 text-xs">
-              <span>AI defaults: {aiDefaultsSummary}</span>
+      {agentCount > 0 ? (
+        <div className={`${AGENT_CARD_COLUMN_CLASS} flex justify-end`}>
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
               <Button
-                onClick={onEditAiDefaults}
-                size="xs"
-                type="button"
-                variant="link"
+                aria-label="Bulk actions"
+                className="h-7 w-7"
+                size="icon"
+                variant="ghost"
               >
-                Edit defaults
+                <Ellipsis className="h-4 w-4" />
               </Button>
-            </span>
-          </>
-        }
-        action={
-          agentCount > 0 ? (
-            <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  aria-label="Bulk actions"
-                  className="h-7 w-7"
-                  size="icon"
-                  variant="ghost"
-                >
-                  <Ellipsis className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="end"
-                onCloseAutoFocus={(event) => event.preventDefault()}
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              onCloseAutoFocus={(event) => event.preventDefault()}
+            >
+              <DropdownMenuItem
+                disabled={isActionPending || runningCount === 0}
+                onClick={onBulkStopRunning}
               >
-                <DropdownMenuItem
-                  disabled={isActionPending || runningCount === 0}
-                  onClick={onBulkStopRunning}
-                >
-                  <OctagonX className="h-4 w-4" />
-                  Stop all running ({runningCount})
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : undefined
-        }
-      />
-    </div>
+                <OctagonX className="h-4 w-4" />
+                Stop all running ({runningCount})
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -595,6 +587,7 @@ function CollapsibleAgentGroup({
   label,
   agents,
   collapsed,
+  defaultModel,
   startingAgentPubkey,
   onToggle,
   onOpenAgentProfile,
@@ -604,6 +597,7 @@ function CollapsibleAgentGroup({
   label: string;
   agents: ManagedAgent[];
   collapsed: ReadonlySet<string>;
+  defaultModel: string;
   startingAgentPubkey: string | null;
   onToggle: (key: string) => void;
   onOpenAgentProfile: (
@@ -633,6 +627,7 @@ function CollapsibleAgentGroup({
           {agents.map((agent) => (
             <StandaloneAgentCard
               agent={agent}
+              defaultModel={defaultModel}
               key={agent.pubkey}
               startingAgentPubkey={startingAgentPubkey}
               onOpenAgentProfile={onOpenAgentProfile}
