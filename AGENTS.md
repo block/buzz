@@ -104,7 +104,9 @@ commit. **Pre-push hooks** run clippy (workspace + Tauri) and fast unit tests
 in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter) — no overlap with
 pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix all formatting
 in one shot. Run `just ci` for the full local gate. Run `just hooks` to
-re-install hooks after env changes.
+re-install hooks after env changes. Before agents run Git or hooks, activate the
+repo's Hermit environment (`. ./bin/activate-hermit`); do not rewrite hook
+commands to compensate for an unconfigured shell `PATH`.
 
 Additional rules:
 - No `unsafe` code
