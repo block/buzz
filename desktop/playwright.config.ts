@@ -107,6 +107,7 @@ export default defineConfig({
         "**/agent-lifecycle-feedback.spec.ts",
         "**/inbox-live-update.spec.ts",
         "**/mesh-compute.spec.ts",
+        "**/observer-archive-policy.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

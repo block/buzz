@@ -169,6 +169,10 @@ jobs:
         run: just desktop-tauri-test
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      - name: Desktop Tauri compiled-flag verification
+        run: just desktop-tauri-test-compiled-flags
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
       - name: Upload desktop e2e artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

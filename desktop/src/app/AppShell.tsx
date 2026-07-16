@@ -54,7 +54,7 @@ import {
 } from "@/features/user-status/hooks";
 import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
 import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
-import { useObserverArchiveSeed } from "@/features/local-archive/useObserverArchiveSeed";
+import { useObserverArchiveReconciliation } from "@/features/local-archive/useObserverArchiveSeed";
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { SendFeedbackController } from "@/features/settings/ui/SendFeedbackController";
@@ -72,6 +72,7 @@ import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { useAddCommunityDialogState } from "@/features/communities/addCommunityPrefill";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
 import { useFeatureEnabled } from "@/shared/features";
@@ -103,7 +104,7 @@ export function AppShell() {
 
   const communitiesHook = useCommunities();
   const communityRailEnabled = useFeatureEnabled("workspaceRail");
-  const [isAddCommunityOpen, setIsAddCommunityOpen] = React.useState(false);
+  const addCommunityDialog = useAddCommunityDialogState();
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
   const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
@@ -186,15 +187,18 @@ export function AppShell() {
   // relay-owned agents join automatically once identity arrives. Adding a
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
-  useArchiveSync();
-  // Defer the archive *seeds* until startup is idle: they're first-run catch-up
-  // config (a one-shot mergeSaveSubscriptionKinds), not live-ingest — that's
-  // useArchiveSync's job, which stays eager above. Passing deferredPubkey makes
-  // each seed hook wait on its own `if (!pubkey) return` guard until the shell
-  // is interactive, so their IPC + sqlite archive open doesn't compete with
-  // first paint. The explicit-choice guard inside each hook is unchanged.
+  // Kind 24200 is relay-ephemeral, so reconciliation runs eagerly (not
+  // deferred) and unconditionally repairs the DB subscription on internal
+  // builds — otherwise frames emitted before the listener opens are lost.
+  const observerReconciled = useObserverArchiveReconciliation(
+    identityQuery.data?.pubkey,
+  );
+  // useArchiveSync must wait for reconciliation, or listeners could open
+  // before kind 24200 is guaranteed present in the subscription.
+  useArchiveSync(observerReconciled);
+  // Kind 44200 is relay-persisted (durable) and stays deferred: missed
+  // startup frames can be replayed, so there's no ordering constraint.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
-  useObserverArchiveSeed(deferredPubkey);
   useAgentMetricArchiveSeed(deferredPubkey);
   const profileQuery = useProfileQuery();
   useRelayAutoHeal();
@@ -763,7 +767,7 @@ export function AppShell() {
                       activeCommunityId={
                         communitiesHook.activeCommunity?.id ?? null
                       }
-                      onAddCommunity={() => setIsAddCommunityOpen(true)}
+                      onAddCommunity={addCommunityDialog.openDialog}
                       onRemoveCommunity={communitiesHook.removeCommunity}
                       onSwitchCommunity={handleSwitchCommunity}
                       onUpdateCommunity={communitiesHook.updateCommunity}
@@ -834,7 +838,8 @@ export function AppShell() {
                           errorMessage={channelsErrorMessage}
                           fallbackDisplayName={identityQuery.data?.displayName}
                           homeBadgeCount={homeBadgeCount + dueReminderBadge}
-                          isAddCommunityOpen={isAddCommunityOpen}
+                          addCommunityPrefill={addCommunityDialog.prefill}
+                          isAddCommunityOpen={addCommunityDialog.open}
                           relayConnectionCard={relayConnectionCard}
                           isCreatingChannel={createChannelMutation.isPending}
                           isCreatingForum={createForumMutation.isPending}
@@ -845,10 +850,12 @@ export function AppShell() {
                             const id = communitiesHook.addCommunity(community);
                             handleSwitchCommunity(id);
                           }}
-                          onAddCommunityOpenChange={setIsAddCommunityOpen}
+                          onAddCommunityOpenChange={
+                            addCommunityDialog.onOpenChange
+                          }
                           onNewMessage={handleOpenNewDm}
                           onCreateChannelOpenChange={setIsCreateChannelOpen}
-                          onOpenAddCommunity={() => setIsAddCommunityOpen(true)}
+                          onOpenAddCommunity={addCommunityDialog.openDialog}
                           onSendFeedback={() => setIsSendFeedbackOpen(true)}
                           onUpdateCommunity={communitiesHook.updateCommunity}
                           onRemoveCommunity={communitiesHook.removeCommunity}

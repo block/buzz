@@ -240,6 +240,8 @@ type E2eConfig = {
     // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
     // snake_case wire shape the Rust backend returns so tests can drive the
     // LocalArchiveSettingsCard without a real SQLite database.
+    observerArchiveDefaultEnabled?: boolean;
+    agentMetricArchiveDefaultEnabled?: boolean;
     saveSubscriptions?: Array<{
       scope_type: string;
       scope_value: string;
@@ -248,16 +250,17 @@ type E2eConfig = {
     // Event IDs that `get_event` should report as definitively not found.
     // Causes `useDraftRootStatus` to classify as `deleted`.
     deletedEventIds?: string[];
-    // Pending community deep links (buzz://join / buzz://connect) seeded into
+    // Pending community deep links (buzz://join / buzz://connect / buzz://add-community) seeded into
     // the mocked Rust-side queue. Mirrors the real queue's semantics:
     // `take_pending_community_deep_link` peeks the head and
     // `acknowledge_pending_community_deep_link` removes by id. Drives the
     // pending-invite gate and deep-link drain path in tests.
     pendingCommunityDeepLinks?: Array<{
       id: string;
-      kind: "connect" | "join";
+      kind: "connect" | "join" | "add-community";
       relayUrl: string;
       code?: string | null;
+      name?: string | null;
     }>;
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
@@ -3594,12 +3597,17 @@ let mockPendingCommunityDeepLinks: Array<{
   kind: string;
   relayUrl: string;
   code: string | null;
+  name: string | null;
 }> = [];
 
 function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
   mockPendingCommunityDeepLinks = (
     config?.mock?.pendingCommunityDeepLinks ?? []
-  ).map((pending) => ({ ...pending, code: pending.code ?? null }));
+  ).map((pending) => ({
+    ...pending,
+    code: pending.code ?? null,
+    name: pending.name ?? null,
+  }));
 }
 
 function recordMockUserStatus(event: RelayEvent) {
@@ -9782,6 +9790,16 @@ export function maybeInstallE2eTauriMocks() {
       // seeds the initial list; create/delete return success shapes so the
       // component's reload path behaves correctly.
       case "list_save_subscriptions": {
+        const win = window as unknown as Record<string, unknown>;
+        if (!win.__BUZZ_E2E_IPC_COUNTERS__) {
+          win.__BUZZ_E2E_IPC_COUNTERS__ = {};
+        }
+        const ipcCounters = win.__BUZZ_E2E_IPC_COUNTERS__ as Record<
+          string,
+          number
+        >;
+        ipcCounters.list_save_subscriptions =
+          (ipcCounters.list_save_subscriptions ?? 0) + 1;
         const ident = activeConfig?.identity ?? DEFAULT_MOCK_IDENTITY;
         return (activeConfig?.mock?.saveSubscriptions ?? []).map((s) => ({
           identity_pubkey: ident.pubkey,
@@ -9802,6 +9820,14 @@ export function maybeInstallE2eTauriMocks() {
       case "archive_events":
         // Returns the ArchiveBatchResult shape the UI expects.
         return { persisted: 0, dropped: 0 };
+      case "observer_archive_default_enabled":
+        return activeConfig?.mock?.observerArchiveDefaultEnabled ?? false;
+      case "agent_metric_archive_default_enabled":
+        return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;
+      case "merge_save_subscription_kinds":
+        return null;
+      case "remove_save_subscription_kind":
+        return null;
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }

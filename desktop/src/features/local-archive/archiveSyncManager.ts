@@ -303,16 +303,19 @@ export class ArchiveSyncManager {
 import * as React from "react";
 
 /**
- * Starts the ArchiveSyncManager at app-shell mount and tears it down when the
- * component unmounts (community switch). No return value needed — the manager
- * runs entirely in the background.
+ * Starts the ArchiveSyncManager once `ready` is true and tears it down on
+ * unmount. The `ready` gate ensures observer reconciliation completes before
+ * any relay listeners open — kind 24200 is relay-ephemeral, so frames emitted
+ * before the listener opens are permanently lost.
  */
-export function useArchiveSync(): void {
+export function useArchiveSync(ready: boolean): void {
   React.useEffect(() => {
+    if (!ready) return;
+
     const manager = new ArchiveSyncManager();
     void manager.start();
     return () => {
       manager.destroy();
     };
-  }, []);
+  }, [ready]);
 }
