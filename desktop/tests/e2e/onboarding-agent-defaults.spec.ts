@@ -5,7 +5,7 @@ import { passThroughBackupStep } from "../helpers/onboarding";
 
 const SHOTS = "test-results/screenshots-onboarding";
 
-/** Drive to the setup page (page 2) via the full onboarding flow. */
+/** Drive to the harness setup page (page 3) via the full onboarding flow. */
 async function navigateToSetupPage(
   page: Parameters<typeof installMockBridge>[0],
 ) {
@@ -14,7 +14,16 @@ async function navigateToSetupPage(
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 }
 
-test("setup page shows Agent defaults section with readiness badge", async ({
+/** Drive to the default config page (page 4), past the harness page. */
+async function navigateToConfigPage(
+  page: Parameters<typeof installMockBridge>[0],
+) {
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+}
+
+test("config page shows Agent defaults section with readiness badge", async ({
   page,
 }) => {
   await installMockBridge(page, undefined, {
@@ -23,20 +32,20 @@ test("setup page shows Agent defaults section with readiness badge", async ({
   });
   await page.goto("/");
 
-  await navigateToSetupPage(page);
+  await navigateToConfigPage(page);
 
   const badge = page.getByTestId("agent-readiness-badge");
   await expect(badge).toBeVisible();
 
-  // Take a screenshot of the entire setup page to capture the readiness badge.
+  // Take a screenshot of the entire config page to capture the readiness badge.
   await waitForAnimations(page);
-  const setupPage = page.locator('[data-testid="onboarding-page-2"]');
-  await setupPage.screenshot({
+  const configPage = page.locator('[data-testid="onboarding-page-config"]');
+  await configPage.screenshot({
     path: `${SHOTS}/04-setup-readiness-badge.png`,
   });
 });
 
-test("setup page shows Not configured badge when no CLI runtime or buzz-agent config", async ({
+test("config page shows Not configured badge when no CLI runtime or buzz-agent config", async ({
   page,
 }) => {
   // Seed empty ACP runtimes so no CLI harness is available.
@@ -47,7 +56,7 @@ test("setup page shows Not configured badge when no CLI runtime or buzz-agent co
   );
   await page.goto("/");
 
-  await navigateToSetupPage(page);
+  await navigateToConfigPage(page);
 
   const badge = page.getByTestId("agent-readiness-badge");
   await expect(badge).toBeVisible();
@@ -60,13 +69,13 @@ test("setup page shows Not configured badge when no CLI runtime or buzz-agent co
 
   // Take a screenshot showing the not-configured state.
   await waitForAnimations(page);
-  const setupPage = page.locator('[data-testid="onboarding-page-2"]');
-  await setupPage.screenshot({
+  const configPage = page.locator('[data-testid="onboarding-page-config"]');
+  await configPage.screenshot({
     path: `${SHOTS}/05-setup-not-configured.png`,
   });
 });
 
-test("setup page Re-check button triggers runtimes refetch", async ({
+test("config page Re-check button triggers runtimes refetch", async ({
   page,
 }) => {
   await installMockBridge(page, undefined, {
@@ -75,18 +84,18 @@ test("setup page Re-check button triggers runtimes refetch", async ({
   });
   await page.goto("/");
 
-  await navigateToSetupPage(page);
+  await navigateToConfigPage(page);
 
   const recheckBtn = page.getByTestId("agent-readiness-recheck");
   await expect(recheckBtn).toBeVisible();
   await expect(recheckBtn).toBeEnabled();
   await recheckBtn.click();
 
-  // After click the button should still be there (page stays on setup).
+  // After click the button should still be there (page stays on config).
   await expect(recheckBtn).toBeVisible();
 });
 
-test("Finish button is always enabled on setup page regardless of readiness", async ({
+test("Finish button is always enabled on config page regardless of readiness", async ({
   page,
 }) => {
   await installMockBridge(
@@ -96,7 +105,7 @@ test("Finish button is always enabled on setup page regardless of readiness", as
   );
   await page.goto("/");
 
-  await navigateToSetupPage(page);
+  await navigateToConfigPage(page);
 
   const finishBtn = page.getByTestId("onboarding-finish");
   await expect(finishBtn).toBeVisible();
@@ -116,7 +125,7 @@ test("provider credentials are first-class and drive model discovery", async ({
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
-  await navigateToSetupPage(page);
+  await navigateToConfigPage(page);
 
   await page.locator("#global-agent-provider").selectOption("openai");
   const apiKey = page.getByLabel("OpenAI API Key");
@@ -165,7 +174,7 @@ test("rapid consecutive provider changes both survive — later change wins", as
   );
   await page.goto("/");
 
-  await navigateToSetupPage(page);
+  await navigateToConfigPage(page);
 
   const providerSelect = page.locator("#global-agent-provider");
   await expect(providerSelect).toBeVisible();

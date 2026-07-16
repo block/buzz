@@ -9,13 +9,14 @@ import {
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
+import { DefaultConfigStep } from "./DefaultConfigStep";
 import { LandingBees } from "./LandingBees";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { OnboardingStepDots } from "./OnboardingStepDots";
 import { SetupStep } from "./SetupStep";
 
-type MachinePage = "identity" | "key-import" | "backup" | "setup";
+type MachinePage = "identity" | "key-import" | "backup" | "setup" | "config";
 
 export function MachineOnboardingFlow({
   complete,
@@ -89,14 +90,16 @@ export function MachineOnboardingFlow({
   return (
     <div
       className={`buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-y-auto px-4 text-foreground ${
-        page === "setup" ? "py-24" : "py-8"
+        page === "setup" || page === "config" ? "py-24" : "py-8"
       } ${page === "identity" ? "buzz-onboarding-welcome" : ""}`}
       data-testid="machine-onboarding-gate"
     >
       <StartupWindowDragRegion />
       {page === "identity" ? <LandingBees /> : null}
       {page !== "identity" ? (
-        <OnboardingStepDots current={page === "setup" ? 3 : 2} />
+        <OnboardingStepDots
+          current={page === "config" ? 4 : page === "setup" ? 3 : 2}
+        />
       ) : null}
       <div className="relative my-auto flex w-full max-w-[920px] flex-col items-center text-center">
         {page === "identity" ? (
@@ -168,11 +171,19 @@ export function MachineOnboardingFlow({
             onBack={() => setPage("identity")}
             onNext={() => setPage("setup")}
           />
-        ) : (
+        ) : page === "setup" ? (
           <SetupStep
             actions={{
               back: () =>
                 setPage(identityWasImported ? "key-import" : "backup"),
+              next: () => setPage("config"),
+            }}
+            direction="forward"
+          />
+        ) : (
+          <DefaultConfigStep
+            actions={{
+              back: () => setPage("setup"),
               complete: () => complete(selectedPubkey ?? undefined),
             }}
             direction="forward"

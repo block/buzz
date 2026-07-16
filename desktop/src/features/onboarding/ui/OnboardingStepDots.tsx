@@ -1,10 +1,10 @@
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 
 /**
- * Positions in the first-launch flow: landing, identity/key, provider setup,
- * community choice, community profile, meet the team.
+ * Positions in the first-launch flow: landing, identity/key, harness setup,
+ * default config, community choice, community profile, meet the team.
  */
-export const TOTAL_ONBOARDING_PAGES = 6;
+export const TOTAL_ONBOARDING_PAGES = 7;
 
 /**
  * Top-left paging indicator for the first-launch flow. The bee marks the
