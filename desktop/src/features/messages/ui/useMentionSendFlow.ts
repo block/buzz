@@ -104,6 +104,7 @@ type UseMentionSendFlowOptions = {
     expectedRevision: number | null;
     explicitAgentPubkeys: string[];
   }) => void;
+  resolvePostSendContent?: (effectiveExplicitAgentPubkeys: string[]) => string;
 };
 
 function mergeOutgoingTagsWithReferenceMentions(
@@ -159,6 +160,7 @@ export function useMentionSendFlow({
   setPendingImeta,
   setSpoileredAttachmentUrls,
   onSuccessfulExplicitAgentAudience,
+  resolvePostSendContent,
 }: UseMentionSendFlowOptions) {
   const [pendingNonMemberSend, setPendingNonMemberSend] =
     React.useState<PendingNonMemberMentionSend | null>(null);
@@ -382,29 +384,34 @@ export function useMentionSendFlow({
     ],
   );
 
-  const clearComposer = React.useCallback(() => {
-    setPendingNonMemberSend(null);
-    setNonMemberPromptError(null);
-    setContent("");
-    contentRef.current = "";
-    richText.clearContent();
-    setPendingImeta([]);
-    setSpoileredAttachmentUrls?.(new Set());
-    mentions.clearMentions();
-    channelLinks.clearChannels();
-    emojiAutocomplete.clearEmojis();
-    setIsEmojiPickerOpen(false);
-  }, [
-    channelLinks.clearChannels,
-    contentRef,
-    emojiAutocomplete.clearEmojis,
-    mentions.clearMentions,
-    richText.clearContent,
-    setContent,
-    setIsEmojiPickerOpen,
-    setPendingImeta,
-    setSpoileredAttachmentUrls,
-  ]);
+  const clearComposer = React.useCallback(
+    (postSendContent = "") => {
+      setPendingNonMemberSend(null);
+      setNonMemberPromptError(null);
+      setContent(postSendContent);
+      contentRef.current = postSendContent;
+      if (postSendContent) richText.setContent(postSendContent);
+      else richText.clearContent();
+      setPendingImeta([]);
+      setSpoileredAttachmentUrls?.(new Set());
+      if (!postSendContent) mentions.clearMentions();
+      channelLinks.clearChannels();
+      emojiAutocomplete.clearEmojis();
+      setIsEmojiPickerOpen(false);
+    },
+    [
+      channelLinks.clearChannels,
+      contentRef,
+      emojiAutocomplete.clearEmojis,
+      mentions.clearMentions,
+      richText.clearContent,
+      richText.setContent,
+      setContent,
+      setIsEmojiPickerOpen,
+      setPendingImeta,
+      setSpoileredAttachmentUrls,
+    ],
+  );
 
   React.useEffect(() => {
     if (previousChannelIdRef.current === channelId) {
@@ -486,11 +493,19 @@ export function useMentionSendFlow({
           return;
         }
 
-        // Only clear the composer if the user has not switched channels since
-        // submit. If they have, the composer they see belongs to the new channel
-        // and we must not wipe it.
+        const effectiveExplicitAgentPubkeys =
+          filterEffectiveExplicitAgentPubkeys(
+            draft.explicitAgentPubkeys,
+            mentionPubkeys,
+          );
+
+        // Replace the sent body directly with its final post-send state before
+        // the async network send starts. This avoids an intermediate blank frame
+        // for persistent audiences while preserving the ordinary empty state.
         if (draft.capturedChannelId === channelIdRef.current) {
-          clearComposer();
+          clearComposer(
+            resolvePostSendContent?.(effectiveExplicitAgentPubkeys),
+          );
         }
 
         try {
@@ -501,11 +516,6 @@ export function useMentionSendFlow({
             sendChannelId,
             draft.capturedThreadContext,
           );
-          const effectiveExplicitAgentPubkeys =
-            filterEffectiveExplicitAgentPubkeys(
-              draft.explicitAgentPubkeys,
-              mentionPubkeys,
-            );
           if (effectiveExplicitAgentPubkeys.length > 0) {
             // Promote only explicitly authored agents that remained effective
             // for this successful send. "Send without inviting" removes its
@@ -556,6 +566,7 @@ export function useMentionSendFlow({
       onPrepareSendChannel,
       onSendRef,
       onSuccessfulExplicitAgentAudience,
+      resolvePostSendContent,
       richText.setContent,
       setContent,
       setPendingImeta,

@@ -401,6 +401,7 @@ function MessageComposerImpl({
             persistentAudience.promotePubkeys({ ...promotion, scope });
           }
         : undefined,
+    resolvePostSendContent: persistentMentionHydration.resolvePostSendContent,
   });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger

@@ -31,8 +31,12 @@ async function openGeneral(page: Page) {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 }
 
-async function installAudienceFixtures(page: Page) {
+async function installAudienceFixtures(
+  page: Page,
+  options: { sendMessageDelayMs?: number } = {},
+) {
   await installMockBridge(page, {
+    ...options,
     managedAgents: [
       {
         pubkey: AGENT_A,
@@ -49,6 +53,74 @@ async function installAudienceFixtures(page: Page) {
     ],
   });
 }
+
+test("persistent agents transition atomically before Enter-send resolves", async ({
+  page,
+}) => {
+  await seedAudience(page, [AGENT_B, AGENT_A]);
+  await installAudienceFixtures(page, { sendMessageDelayMs: 1_500 });
+  await openGeneral(page);
+
+  const input = page.getByTestId("message-input");
+  const send = page.getByTestId("send-message");
+  await input.fill("@Morgarita hello");
+  await input.press("Enter");
+
+  // The network send is still pending, so this is the first observable
+  // post-submit editor state rather than the later success hydration pass.
+  await expect(input).toHaveText("@Morgarita ", { timeout: 500 });
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1, {
+    timeout: 500,
+  });
+  await expect(input).toBeFocused();
+
+  await expect(send).toBeEnabled();
+  await expect
+    .poll(() =>
+      input.evaluate((element) => {
+        const selection = window.getSelection();
+        return {
+          collapsed: selection?.isCollapsed ?? false,
+          inside: Boolean(
+            selection?.anchorNode && element.contains(selection.anchorNode),
+          ),
+        };
+      }),
+    )
+    .toEqual({ collapsed: true, inside: true });
+});
+
+test("ordinary Enter send transitions directly to the placeholder-ready document", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page, { sendMessageDelayMs: 1_500 });
+  await openGeneral(page);
+
+  const input = page.getByTestId("message-input");
+  await input.fill("hello");
+  await input.press("Enter");
+
+  await expect(input).toHaveText("", { timeout: 500 });
+  await expect(input.locator("[data-placeholder]").first()).toHaveAttribute(
+    "data-placeholder",
+    "Message #general",
+    { timeout: 500 },
+  );
+  await expect(input).toBeFocused();
+  await expect
+    .poll(() =>
+      input.evaluate((element) => {
+        const selection = window.getSelection();
+        return {
+          collapsed: selection?.isCollapsed ?? false,
+          inside: Boolean(
+            selection?.anchorNode && element.contains(selection.anchorNode),
+          ),
+        };
+      }),
+    )
+    .toEqual({ collapsed: true, inside: true });
+});
 
 test("persistent agents restore through the native inline mention UI", async ({
   page,

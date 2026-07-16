@@ -108,6 +108,37 @@ export function usePersistentAgentMentionHydration({
     return () => cancelAnimationFrame(frame);
   }, [hydrationKey, scheduleHydration]);
 
+  const resolvePostSendContent = React.useCallback(
+    (explicitAgentPubkeys: string[]) => {
+      if (!audience.enabled || !audienceScope || isEditingRef.current)
+        return "";
+      const orderedPubkeys = [
+        ...new Set([...explicitAgentPubkeys, ...audience.pubkeys]),
+      ];
+      const targets = orderedPubkeys
+        .map((pubkey) => ({
+          pubkey,
+          displayName: mentions.getMentionDisplayName(pubkey),
+        }))
+        .filter((target): target is { pubkey: string; displayName: string } =>
+          Boolean(target.displayName),
+        );
+      mentions.clearMentions();
+      for (const target of targets) {
+        mentions.registerMentionPubkey(target.displayName, target.pubkey, {
+          isAgent: true,
+        });
+      }
+      isRestoringRef.current = true;
+      hydratedRef.current = true;
+      return (
+        targets.map((target) => `@${target.displayName}`).join(" ") +
+        (targets.length > 0 ? " " : "")
+      );
+    },
+    [audience.enabled, audience.pubkeys, audienceScope, mentions],
+  );
+
   return {
     audience,
     beginSubmit: () => {
@@ -118,6 +149,7 @@ export function usePersistentAgentMentionHydration({
       scheduleHydration();
     },
     reconcile,
+    resolvePostSendContent,
     scheduleHydration,
   };
 }
