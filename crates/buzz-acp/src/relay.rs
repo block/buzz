@@ -7,6 +7,10 @@
 //!
 //! ## Architecture
 //!
+//! `HarnessRelay::connect()` retries a transient initial connect/auth failure
+//! (e.g. a dropped handshake on a spotty link) with bounded jittered backoff
+//! before giving up; a terminal configuration/auth error fails immediately.
+//!
 //! A background tokio task owns the WebSocket stream. It:
 //! - Responds to Ping frames with Pong (preventing relay disconnect on long turns)
 //! - Forwards `BuzzEvent`s through an `mpsc` channel
@@ -56,6 +60,24 @@ const SINCE_SKEW_SECS: u64 = 5;
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout for the TCP + WebSocket handshake in `do_connect`.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Backoff delay values shared by the initial-connect retry in
+/// `HarnessRelay::connect()` and `try_autonomous_reconnect`'s post-start
+/// reconnect loop — a spotty link should get consistent retry pacing whether
+/// the failure happens at agent startup or later. Bounded so a dead relay
+/// can't hang either path forever.
+///
+/// The two callers consume this differently: `retry_initial_connect` sleeps
+/// before every entry (1 immediate attempt + up to 5 delayed retries, all 5
+/// values used), while `try_autonomous_reconnect` skips the sleep after its
+/// final attempt (5 attempts total, only the first 4 values used) — so
+/// "shared values," not "identical schedule."
+const STARTUP_CONNECT_BACKOFFS: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
 
 use std::time::Instant;
 
@@ -517,10 +539,15 @@ impl HarnessRelay {
         agent_pubkey_hex: &str,
         auth_tag: Option<nostr::Tag>,
     ) -> Result<Self, RelayError> {
-        // Perform the initial connection and auth handshake.
+        // Perform the initial connection and auth handshake, retrying
+        // transient failures (dropped handshake, timeout) with bounded
+        // jittered backoff. A terminal error (bad URL, bad auth tag,
+        // rejected/invalid signing key) fails immediately — see
+        // `is_terminal_connect_error`.
         // Finding #8: capture the handshake buffer and pass it to the background
         // task so buffered messages aren't silently discarded.
-        let (ws, handshake_buffer) = do_connect(relay_url, keys, auth_tag.as_ref()).await?;
+        let (ws, handshake_buffer) =
+            retry_initial_connect(|| do_connect(relay_url, keys, auth_tag.as_ref())).await?;
 
         let (event_tx, event_rx) = mpsc::channel::<Option<BuzzEvent>>(event_channel_capacity());
         let (observer_control_tx, observer_control_rx) =
@@ -2123,14 +2150,11 @@ async fn try_autonomous_reconnect(
     observer_control_tx: &mpsc::Sender<Event>,
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
-    // Finding #42: 5 attempts, up to 16s base backoff.
-    let backoffs = [
-        Duration::from_secs(1),
-        Duration::from_secs(2),
-        Duration::from_secs(4),
-        Duration::from_secs(8),
-        Duration::from_secs(16),
-    ];
+    // Finding #42: 5 attempts, up to 16s base backoff. Shares delay values
+    // with the initial-connect retry in `HarnessRelay::connect()`
+    // (STARTUP_CONNECT_BACKOFFS) — see its doc comment for how the two
+    // loops consume the array differently.
+    let backoffs = STARTUP_CONNECT_BACKOFFS;
 
     for (attempt, delay) in backoffs.iter().enumerate() {
         info!(
@@ -2708,6 +2732,204 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
             "unknown message type: {other}"
         ))),
     }
+}
+
+/// Whether an initial connect/auth-handshake error is terminal — retrying
+/// with the same `relay_url`/`keys`/`auth_tag` would reproduce it — rather
+/// than transient (the network dropping bytes on a spotty link).
+///
+/// **Terminal (fail fast):**
+/// - `Http`/`Json`/`UnexpectedMessage` — local parsing or relay protocol
+///   mismatch; deterministic given the same relay.
+/// - `WebSocket` inner variants `Url`, `Capacity`, `Utf8`, `HttpFormat`,
+///   `AttackAttempt` — deterministic pre-connect or handshake-shape failures.
+/// - `WebSocket(Protocol(…))` — most variants indicate a stable HTTP/WS
+///   upgrade mismatch (wrong method, missing headers, accept-key mismatch).
+///   Two exceptions are transient: `HandshakeIncomplete` (connection dropped
+///   mid-handshake) and `ResetWithoutClosingHandshake` (abrupt reset).
+/// - `WebSocket(Http(resp))` — non-101 HTTP response; terminal unless the
+///   status is `408`, `429`, or `5xx` (server-side transient conditions).
+/// - `WebSocket(Tls)` — deterministic TLS config failures. On our rustls
+///   build the only connect-time `Tls` is `InvalidDnsName`.
+/// - `WebSocket(Io)` with a deterministic `rustls::Error` in the source
+///   chain — terminal. `tokio-rustls` wraps all rustls handshake failures
+///   as `io::Error` with the `rustls::Error` as source; `tokio-tungstenite`
+///   then surfaces them as `Error::Io`. Only deterministic cert/config/
+///   incompatibility variants (allowlist) are terminal; ambiguous protocol,
+///   decrypt, and server-alert shapes stay transient under the bounded budget.
+/// - `AuthFailed` — split by [`is_terminal_auth_failure`].
+///
+/// **Transient (retry):**
+/// - `WebSocket(Io)` without a rustls source, or with an ambiguous rustls
+///   error (alerts, protocol, decrypt) — plain transport failures (reset,
+///   EOF, timeout, refused) and ambiguous TLS errors stay retryable.
+/// - `WebSocket(ConnectionClosed)` — link-level closure.
+/// - `WebSocket(AlreadyClosed)`, `WebSocket(WriteBufferFull)` — unreachable
+///   during `connect_async`; kept fail-safe transient.
+/// - `NoAuthChallenge`, `ConnectionClosed`, `Timeout` — timing/link noise.
+fn is_terminal_connect_error(err: &RelayError) -> bool {
+    match err {
+        RelayError::Http(_) | RelayError::Json(_) | RelayError::UnexpectedMessage(_) => true,
+        RelayError::WebSocket(e) => is_terminal_ws_error(e.as_ref()),
+        RelayError::AuthFailed(message) => is_terminal_auth_failure(message),
+        RelayError::NoAuthChallenge | RelayError::ConnectionClosed | RelayError::Timeout => false,
+    }
+}
+
+/// Exhaustive classification of `tungstenite::Error` inner variants for
+/// startup connect retry. No wildcard — a tungstenite upgrade forces
+/// reclassification at compile time.
+fn is_terminal_ws_error(err: &tokio_tungstenite::tungstenite::Error) -> bool {
+    use tokio_tungstenite::tungstenite::error::ProtocolError;
+    use tokio_tungstenite::tungstenite::Error as WsError;
+
+    match err {
+        // Deterministic pre-connect / handshake-shape failures.
+        WsError::Url(_)
+        | WsError::Capacity(_)
+        | WsError::Utf8(_)
+        | WsError::HttpFormat(_)
+        | WsError::AttackAttempt => true,
+
+        // Non-101 HTTP: terminal unless 408/429/5xx.
+        WsError::Http(resp) => {
+            let status = resp.status().as_u16();
+            !(status == 408 || status == 429 || (500..600).contains(&status))
+        }
+
+        // Protocol errors: most are deterministic upgrade mismatches.
+        WsError::Protocol(p) => !matches!(
+            p,
+            ProtocolError::HandshakeIncomplete | ProtocolError::ResetWithoutClosingHandshake
+        ),
+
+        // Io: split by error source and rustls variant. tokio-rustls wraps
+        // rustls errors as io::Error(InvalidData, rustls_err). Deterministic
+        // cert/config/incompatibility failures (allowlist) are terminal;
+        // ambiguous protocol, decrypt, and server-alert shapes stay transient
+        // under the bounded retry budget. Plain transport Io (reset, EOF,
+        // timeout, refused) also stays transient.
+        // Relies on a single rustls version in the dep tree (0.23.40);
+        // a version split would break the downcast.
+        WsError::Io(e) => is_terminal_rustls_io_error(e),
+
+        WsError::ConnectionClosed => false,
+
+        // Deterministic TLS config failures. On our rustls build the only
+        // connect-time Tls variant is InvalidDnsName; certificate validation
+        // failures arrive wrapped inside Io (terminal via source-chain
+        // downcast above).
+        WsError::Tls(_) => true,
+
+        // Unreachable during connect_async; kept fail-safe transient.
+        WsError::AlreadyClosed | WsError::WriteBufferFull(_) => false,
+    }
+}
+
+/// Walks an `io::Error` for a `rustls::Error` and inspects its variant.
+/// Returns `true` (terminal) only for deterministic cert/config/incompatibility
+/// failures that retry cannot fix. Ambiguous protocol, decrypt, and server-alert
+/// shapes return `false` (transient) — retries are bounded and the feature's
+/// purpose is resilience.
+///
+/// Relies on a single rustls version in the dep tree (0.23.40); a version split
+/// would break the downcast.
+fn is_terminal_rustls_io_error(err: &std::io::Error) -> bool {
+    use std::error::Error as _;
+
+    fn find_rustls_error(err: &std::io::Error) -> Option<&rustls::Error> {
+        // First check the direct inner payload (io::Error stores it via
+        // get_ref — source() skips to *its* source).
+        if let Some(inner) = err.get_ref() {
+            if let Some(re) = inner.downcast_ref::<rustls::Error>() {
+                return Some(re);
+            }
+        }
+        // Walk the source chain for deeper wrapping.
+        let mut source = err.source();
+        while let Some(e) = source {
+            if let Some(re) = e.downcast_ref::<rustls::Error>() {
+                return Some(re);
+            }
+            source = e.source();
+        }
+        None
+    }
+
+    let Some(rustls_err) = find_rustls_error(err) else {
+        return false;
+    };
+
+    matches!(
+        rustls_err,
+        rustls::Error::InvalidCertificate(_)
+            | rustls::Error::InvalidCertRevocationList(_)
+            | rustls::Error::NoCertificatesPresented
+            | rustls::Error::UnsupportedNameType
+            | rustls::Error::PeerIncompatible(_)
+    )
+}
+
+/// Whether a relay's `OK false <message>` denial during NIP-42 auth is
+/// terminal, per the NIP-01 machine-readable prefixes the relay actually
+/// sends (`crates/buzz-relay/src/handlers/auth.rs`).
+///
+/// `error:` marks the relay's own dependency failures (e.g. a ban-state DB
+/// lookup that couldn't run) — the relay is failing closed on itself, not
+/// rejecting the caller, and a later attempt can succeed once the
+/// dependency recovers. `invalid:`, `auth-required:`, `restricted:`, and
+/// `blocked:` are explicit rejections of this identity/config (bad
+/// signature, ban, non-member, allowlist denial) that retrying without
+/// changing anything cannot fix. An unrecognized prefix is treated as
+/// terminal — failing fast on an unknown denial is safer than retrying one
+/// that might be a real rejection.
+fn is_terminal_auth_failure(message: &str) -> bool {
+    !message.trim_start().starts_with("error:")
+}
+
+/// Retry `op` with bounded jittered backoff, stopping immediately on a
+/// terminal error (see [`is_terminal_connect_error`]). Used by
+/// `HarnessRelay::connect()` so a transient failure during the initial
+/// WebSocket/NIP-42 handshake — e.g. a dropped connection on a spotty link —
+/// doesn't fail agent startup outright.
+///
+/// Generic over the success type so the backoff/classification logic can be
+/// exercised in tests without a real socket. Returns the last transient
+/// error if all attempts are exhausted.
+async fn retry_initial_connect<F, Fut, T>(mut op: F) -> Result<T, RelayError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, RelayError>>,
+{
+    let mut last_err = None;
+
+    for (attempt, delay) in std::iter::once(None)
+        .chain(STARTUP_CONNECT_BACKOFFS.iter().map(|d| Some(*d)))
+        .enumerate()
+    {
+        if let Some(base) = delay {
+            let jittered = jittered_duration(base);
+            info!(
+                "retrying initial relay connect (attempt {attempt}) in {:.1}s",
+                jittered.as_secs_f64()
+            );
+            tokio::time::sleep(jittered).await;
+        }
+
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) if is_terminal_connect_error(&e) => {
+                warn!("initial relay connect failed with terminal error: {e}");
+                return Err(e);
+            }
+            Err(e) => {
+                warn!("initial relay connect attempt {attempt} failed: {e}");
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or(RelayError::ConnectionClosed))
 }
 
 /// Perform a single WebSocket connect + NIP-42 auth handshake.
@@ -3711,5 +3933,640 @@ mod tests {
             !resubscribed.contains(&channel_id),
             "the dropped channel must not be resubscribed — the loop cannot re-form"
         );
+    }
+
+    // ── startup connect retry ────────────────────────────────────────────
+
+    /// Table-driven coverage of every `RelayError` variant and every
+    /// `tungstenite::Error` inner variant. Exhaustive — adding a new
+    /// tungstenite variant without updating this table is a compile error
+    /// in `is_terminal_ws_error` (no wildcard), and a missing row here
+    /// is a code-review gap, not a silent misclassification.
+    #[test]
+    fn connect_error_classification_matches_every_relay_error_variant() {
+        use tokio_tungstenite::tungstenite::error::{
+            CapacityError, Error as WsError, ProtocolError, SubProtocolError, TlsError, UrlError,
+        };
+        use tokio_tungstenite::tungstenite::http;
+
+        fn ws(e: WsError) -> RelayError {
+            RelayError::WebSocket(Box::new(e))
+        }
+
+        let cases: Vec<(&str, RelayError, bool)> = vec![
+            // ── outer RelayError variants ──
+            ("Http: bad URL", RelayError::Http("bad url".into()), true),
+            (
+                "Json: malformed relay frame",
+                RelayError::Json(serde_json::from_str::<()>("not json").unwrap_err()),
+                true,
+            ),
+            (
+                "UnexpectedMessage: unknown frame type",
+                RelayError::UnexpectedMessage("unknown message type: WAT".into()),
+                true,
+            ),
+            (
+                "AuthFailed: relay dependency fault (NIP-01 `error:` prefix)",
+                RelayError::AuthFailed("error: internal error checking restriction state".into()),
+                false,
+            ),
+            (
+                "AuthFailed: bad signature (`invalid:` prefix)",
+                RelayError::AuthFailed("invalid: bad signature".into()),
+                true,
+            ),
+            (
+                "AuthFailed: banned (`blocked:` prefix)",
+                RelayError::AuthFailed("blocked: you are banned from this community".into()),
+                true,
+            ),
+            (
+                "AuthFailed: not a member (`restricted:` prefix)",
+                RelayError::AuthFailed("restricted: not a relay member".into()),
+                true,
+            ),
+            (
+                "AuthFailed: allowlist denial (`auth-required:` prefix)",
+                RelayError::AuthFailed("auth-required: verification failed".into()),
+                true,
+            ),
+            (
+                "AuthFailed: unrecognized prefix fails safe as terminal",
+                RelayError::AuthFailed("some new denial reason".into()),
+                true,
+            ),
+            (
+                "NoAuthChallenge: relay silence is link/relay-timing noise",
+                RelayError::NoAuthChallenge,
+                false,
+            ),
+            ("ConnectionClosed", RelayError::ConnectionClosed, false),
+            ("Timeout", RelayError::Timeout, false),
+            // ── WebSocket inner: terminal ──
+            (
+                "WebSocket(Url): unsupported scheme",
+                ws(WsError::Url(UrlError::UnsupportedUrlScheme)),
+                true,
+            ),
+            (
+                "WebSocket(Url): missing host",
+                ws(WsError::Url(UrlError::NoHostName)),
+                true,
+            ),
+            (
+                "WebSocket(Url): empty host",
+                ws(WsError::Url(UrlError::EmptyHostName)),
+                true,
+            ),
+            (
+                "WebSocket(Url): TLS feature not enabled",
+                ws(WsError::Url(UrlError::TlsFeatureNotEnabled)),
+                true,
+            ),
+            (
+                "WebSocket(Url): unable to connect",
+                ws(WsError::Url(UrlError::UnableToConnect("addr".into()))),
+                true,
+            ),
+            (
+                "WebSocket(Url): no path or query",
+                ws(WsError::Url(UrlError::NoPathOrQuery)),
+                true,
+            ),
+            (
+                "WebSocket(Capacity): message too long",
+                ws(WsError::Capacity(CapacityError::MessageTooLong {
+                    size: 100,
+                    max_size: 50,
+                })),
+                true,
+            ),
+            (
+                "WebSocket(Capacity): too many headers",
+                ws(WsError::Capacity(CapacityError::TooManyHeaders)),
+                true,
+            ),
+            (
+                "WebSocket(Utf8): encoding error",
+                ws(WsError::Utf8("invalid utf-8".into())),
+                true,
+            ),
+            (
+                "WebSocket(HttpFormat): malformed HTTP",
+                ws(WsError::HttpFormat(
+                    http::Response::builder().status(9999).body(()).unwrap_err(),
+                )),
+                true,
+            ),
+            ("WebSocket(AttackAttempt)", ws(WsError::AttackAttempt), true),
+            // ── WebSocket inner: Http status split ──
+            (
+                "WebSocket(Http): 200 = plain HTTPS endpoint → terminal",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(200).body(None).unwrap(),
+                ))),
+                true,
+            ),
+            (
+                "WebSocket(Http): 301 redirect → terminal",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(301).body(None).unwrap(),
+                ))),
+                true,
+            ),
+            (
+                "WebSocket(Http): 404 not found → terminal",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(404).body(None).unwrap(),
+                ))),
+                true,
+            ),
+            (
+                "WebSocket(Http): 403 forbidden → terminal",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(403).body(None).unwrap(),
+                ))),
+                true,
+            ),
+            (
+                "WebSocket(Http): 408 request timeout → transient",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(408).body(None).unwrap(),
+                ))),
+                false,
+            ),
+            (
+                "WebSocket(Http): 429 too many requests → transient",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(429).body(None).unwrap(),
+                ))),
+                false,
+            ),
+            (
+                "WebSocket(Http): 500 internal server error → transient",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(500).body(None).unwrap(),
+                ))),
+                false,
+            ),
+            (
+                "WebSocket(Http): 502 bad gateway → transient",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(502).body(None).unwrap(),
+                ))),
+                false,
+            ),
+            (
+                "WebSocket(Http): 503 service unavailable → transient",
+                ws(WsError::Http(Box::new(
+                    http::Response::builder().status(503).body(None).unwrap(),
+                ))),
+                false,
+            ),
+            // ── WebSocket inner: Protocol variants ──
+            (
+                "Protocol(WrongHttpMethod): deterministic upgrade mismatch",
+                ws(WsError::Protocol(ProtocolError::WrongHttpMethod)),
+                true,
+            ),
+            (
+                "Protocol(WrongHttpVersion): deterministic upgrade mismatch",
+                ws(WsError::Protocol(ProtocolError::WrongHttpVersion)),
+                true,
+            ),
+            (
+                "Protocol(MissingConnectionUpgradeHeader)",
+                ws(WsError::Protocol(
+                    ProtocolError::MissingConnectionUpgradeHeader,
+                )),
+                true,
+            ),
+            (
+                "Protocol(MissingUpgradeWebSocketHeader)",
+                ws(WsError::Protocol(
+                    ProtocolError::MissingUpgradeWebSocketHeader,
+                )),
+                true,
+            ),
+            (
+                "Protocol(MissingSecWebSocketVersionHeader)",
+                ws(WsError::Protocol(
+                    ProtocolError::MissingSecWebSocketVersionHeader,
+                )),
+                true,
+            ),
+            (
+                "Protocol(MissingSecWebSocketKey)",
+                ws(WsError::Protocol(ProtocolError::MissingSecWebSocketKey)),
+                true,
+            ),
+            (
+                "Protocol(SecWebSocketAcceptKeyMismatch)",
+                ws(WsError::Protocol(
+                    ProtocolError::SecWebSocketAcceptKeyMismatch,
+                )),
+                true,
+            ),
+            (
+                "Protocol(SecWebSocketSubProtocolError)",
+                ws(WsError::Protocol(
+                    ProtocolError::SecWebSocketSubProtocolError(
+                        SubProtocolError::ServerSentSubProtocolNoneRequested,
+                    ),
+                )),
+                true,
+            ),
+            (
+                "Protocol(JunkAfterRequest)",
+                ws(WsError::Protocol(ProtocolError::JunkAfterRequest)),
+                true,
+            ),
+            (
+                "Protocol(CustomResponseSuccessful)",
+                ws(WsError::Protocol(ProtocolError::CustomResponseSuccessful)),
+                true,
+            ),
+            (
+                "Protocol(InvalidHeader)",
+                ws(WsError::Protocol(ProtocolError::InvalidHeader(Box::new(
+                    http::header::UPGRADE,
+                )))),
+                true,
+            ),
+            (
+                "Protocol(HttparseError)",
+                ws(WsError::Protocol(ProtocolError::HttparseError(
+                    httparse::Error::TooManyHeaders,
+                ))),
+                true,
+            ),
+            (
+                "Protocol(SendAfterClosing)",
+                ws(WsError::Protocol(ProtocolError::SendAfterClosing)),
+                true,
+            ),
+            (
+                "Protocol(ReceivedAfterClosing)",
+                ws(WsError::Protocol(ProtocolError::ReceivedAfterClosing)),
+                true,
+            ),
+            (
+                "Protocol(NonZeroReservedBits)",
+                ws(WsError::Protocol(ProtocolError::NonZeroReservedBits)),
+                true,
+            ),
+            (
+                "Protocol(UnmaskedFrameFromClient)",
+                ws(WsError::Protocol(ProtocolError::UnmaskedFrameFromClient)),
+                true,
+            ),
+            (
+                "Protocol(MaskedFrameFromServer)",
+                ws(WsError::Protocol(ProtocolError::MaskedFrameFromServer)),
+                true,
+            ),
+            (
+                "Protocol(FragmentedControlFrame)",
+                ws(WsError::Protocol(ProtocolError::FragmentedControlFrame)),
+                true,
+            ),
+            (
+                "Protocol(ControlFrameTooBig)",
+                ws(WsError::Protocol(ProtocolError::ControlFrameTooBig)),
+                true,
+            ),
+            (
+                "Protocol(UnknownControlFrameType)",
+                ws(WsError::Protocol(ProtocolError::UnknownControlFrameType(
+                    0xF,
+                ))),
+                true,
+            ),
+            (
+                "Protocol(UnknownDataFrameType)",
+                ws(WsError::Protocol(ProtocolError::UnknownDataFrameType(0xF))),
+                true,
+            ),
+            (
+                "Protocol(UnexpectedContinueFrame)",
+                ws(WsError::Protocol(ProtocolError::UnexpectedContinueFrame)),
+                true,
+            ),
+            (
+                "Protocol(ExpectedFragment)",
+                ws(WsError::Protocol(ProtocolError::ExpectedFragment(
+                    tokio_tungstenite::tungstenite::protocol::frame::coding::Data::Text,
+                ))),
+                true,
+            ),
+            (
+                "Protocol(InvalidOpcode)",
+                ws(WsError::Protocol(ProtocolError::InvalidOpcode(0xF))),
+                true,
+            ),
+            (
+                "Protocol(InvalidCloseSequence)",
+                ws(WsError::Protocol(ProtocolError::InvalidCloseSequence)),
+                true,
+            ),
+            // ── Protocol: transient exceptions ──
+            (
+                "Protocol(HandshakeIncomplete): connection dropped mid-handshake",
+                ws(WsError::Protocol(ProtocolError::HandshakeIncomplete)),
+                false,
+            ),
+            (
+                "Protocol(ResetWithoutClosingHandshake): abrupt reset",
+                ws(WsError::Protocol(
+                    ProtocolError::ResetWithoutClosingHandshake,
+                )),
+                false,
+            ),
+            // ── WebSocket(Io): transport (transient) ──
+            (
+                "Io(other): plain transport failure is transient",
+                ws(WsError::Io(std::io::Error::other("reset"))),
+                false,
+            ),
+            (
+                "Io(ConnectionReset): transport reset is transient",
+                ws(WsError::Io(std::io::ErrorKind::ConnectionReset.into())),
+                false,
+            ),
+            (
+                "Io(UnexpectedEof): transport EOF is transient",
+                ws(WsError::Io(std::io::ErrorKind::UnexpectedEof.into())),
+                false,
+            ),
+            (
+                "Io(TimedOut): transport timeout is transient",
+                ws(WsError::Io(std::io::ErrorKind::TimedOut.into())),
+                false,
+            ),
+            // ── WebSocket(Io): rustls-sourced, variant-inspected ──
+            // Production shape: tokio-rustls wraps rustls errors as
+            // io::Error(InvalidData, rustls::Error). Only deterministic
+            // cert/config/incompatibility variants are terminal.
+            (
+                "Io(rustls InvalidCertificate(Expired)): production-shaped expired cert is terminal",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::Expired),
+                ))),
+                true,
+            ),
+            (
+                "Io(rustls InvalidCertificate(NotValidForName)): hostname mismatch is terminal",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::NotValidForName,
+                    ),
+                ))),
+                true,
+            ),
+            (
+                "Io(rustls NoCertificatesPresented): missing cert is terminal",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::NoCertificatesPresented,
+                ))),
+                true,
+            ),
+            // ── WebSocket(Io): rustls-sourced, ambiguous (transient) ──
+            // Protocol, decrypt, alert, and general errors may be caused by
+            // network conditions or transient server failures — retryable
+            // under the bounded budget.
+            (
+                "Io(rustls General): ambiguous general error is transient",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::General("protocol error".into()),
+                ))),
+                false,
+            ),
+            (
+                "Io(rustls AlertReceived(InternalError)): server alert is transient",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::AlertReceived(rustls::AlertDescription::InternalError),
+                ))),
+                false,
+            ),
+            (
+                "Io(rustls DecryptError): corrupted record is transient",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::DecryptError,
+                ))),
+                false,
+            ),
+            (
+                "WebSocket(ConnectionClosed): link-level closure",
+                ws(WsError::ConnectionClosed),
+                false,
+            ),
+            // ── WebSocket(Tls): deterministic config (terminal, pins the arm) ──
+            // These shapes are constructible but not reachable through our
+            // rustls production connector — cert failures arrive as Io above.
+            // Kept to pin the Tls(_) => true arm.
+            (
+                "Tls(Rustls(General)): pins Tls arm terminal",
+                ws(WsError::Tls(
+                    rustls::Error::General("tls handshake failed".into()).into(),
+                )),
+                true,
+            ),
+            (
+                "Tls(InvalidDnsName): only reachable connect-time Tls variant",
+                ws(WsError::Tls(TlsError::InvalidDnsName)),
+                true,
+            ),
+            (
+                "Tls(Rustls(InvalidCertificate(Expired))): pins Tls arm terminal",
+                ws(WsError::Tls(
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::Expired).into(),
+                )),
+                true,
+            ),
+            (
+                "WebSocket(AlreadyClosed): unreachable at connect, fail-safe transient",
+                ws(WsError::AlreadyClosed),
+                false,
+            ),
+            (
+                "WebSocket(WriteBufferFull): unreachable at connect, fail-safe transient",
+                ws(WsError::WriteBufferFull(Box::new(
+                    tokio_tungstenite::tungstenite::Message::Text("x".into()),
+                ))),
+                false,
+            ),
+        ];
+
+        for (label, err, want_terminal) in cases {
+            assert_eq!(
+                is_terminal_connect_error(&err),
+                want_terminal,
+                "{label}: expected terminal={want_terminal}"
+            );
+        }
+    }
+
+    /// A literal `https://…` URL through production `do_connect()` must fail
+    /// fast as terminal — the relay endpoint is a plain HTTPS server, not a
+    /// WebSocket endpoint, and tungstenite returns `Error::Http` (non-101
+    /// response) or `Error::Url(UnsupportedUrlScheme)` depending on how far
+    /// the handshake gets. Either way it must not be retried.
+    #[tokio::test]
+    async fn do_connect_wrong_scheme_is_terminal() {
+        let keys = nostr::Keys::generate();
+        let err = do_connect("https://example.com", &keys, None)
+            .await
+            .unwrap_err();
+        assert!(
+            is_terminal_connect_error(&err),
+            "wrong-scheme URL should be terminal, got: {err}"
+        );
+    }
+
+    /// A transient failure (e.g. connection dropped mid-handshake on a spotty
+    /// link) must be retried and can still succeed once the link recovers.
+    #[tokio::test(start_paused = true)]
+    async fn retry_initial_connect_retries_transient_failure_then_succeeds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: Result<&'static str, RelayError> = retry_initial_connect(|| {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    Err(RelayError::ConnectionClosed)
+                } else {
+                    Ok("connected")
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), "connected");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "should succeed on the 3rd attempt (2 transient failures + 1 success)"
+        );
+    }
+
+    /// A terminal error (bad auth, bad config) must not be retried — the
+    /// same call would fail identically every time, so retrying just delays
+    /// surfacing a real problem to the caller.
+    #[tokio::test(start_paused = true)]
+    async fn retry_initial_connect_does_not_retry_terminal_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: Result<(), RelayError> = retry_initial_connect(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Err(RelayError::AuthFailed("invalid: bad signature".into())) }
+        })
+        .await;
+
+        assert!(matches!(result, Err(RelayError::AuthFailed(_))));
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "a terminal error must fail on the first attempt with no retries"
+        );
+    }
+
+    /// A relay-side dependency fault (NIP-01 `error:` prefix) is transient —
+    /// the relay is failing closed on itself, not rejecting this identity —
+    /// so it must be retried rather than surfaced immediately like a real
+    /// auth rejection.
+    #[tokio::test(start_paused = true)]
+    async fn retry_initial_connect_retries_relay_dependency_fault() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: Result<&'static str, RelayError> = retry_initial_connect(|| {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 1 {
+                    Err(RelayError::AuthFailed(
+                        "error: internal error checking restriction state".into(),
+                    ))
+                } else {
+                    Ok("connected")
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), "connected");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "a relay dependency fault must be retried, not surfaced immediately"
+        );
+    }
+
+    /// Once every attempt (1 initial + N backoff retries) is exhausted, the
+    /// last transient error is returned rather than retrying forever — a
+    /// dead relay must not hang agent startup indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn retry_initial_connect_exhausts_and_returns_last_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: Result<(), RelayError> = retry_initial_connect(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Err(RelayError::Timeout) }
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(RelayError::Timeout)),
+            "must surface the last attempt's error, not a generic one"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            STARTUP_CONNECT_BACKOFFS.len() + 1,
+            "must attempt exactly once plus one retry per backoff entry"
+        );
+    }
+
+    /// Backoff sleeps must actually elapse (not be skipped) — this pins the
+    /// bounded-but-real-delay contract using `tokio::time::pause` so the
+    /// test itself stays fast (virtual time, not wall-clock sleeps).
+    #[tokio::test(start_paused = true)]
+    async fn retry_initial_connect_sleeps_between_attempts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let call = retry_initial_connect(|| {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 1 {
+                    Err(RelayError::ConnectionClosed)
+                } else {
+                    Ok(())
+                }
+            }
+        });
+        tokio::pin!(call);
+
+        // Before the first backoff elapses, the retry must still be pending
+        // (i.e. it actually slept rather than immediately retrying).
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+            _ = &mut call => panic!("must not resolve before the backoff sleep elapses"),
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        // Advancing past the (jittered, ≤1.2x) first backoff lets it proceed.
+        let result = call.await;
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }

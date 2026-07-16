@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.4.9
+
+- Restyle onboarding: branded landing screen, yellow/gradient backgrounds, new starter avatars ([#1982](https://github.com/block/buzz/pull/1982)) ([`831c80c1a`](https://github.com/block/buzz/commit/831c80c1a5d0811c7ac6ae832a95b2fd4ddc4e89))
+- Guide CLI installation and subscription sign-in ([#1980](https://github.com/block/buzz/pull/1980)) ([`8d3666c5f`](https://github.com/block/buzz/commit/8d3666c5f8ea07abe65355a1afe7de95ea247441))
+- unify channel add + search into one entry point ([#1964](https://github.com/block/buzz/pull/1964)) ([`3dd236eb6`](https://github.com/block/buzz/commit/3dd236eb6fd7c0dd86a9174d2852bc9ae9861912))
+- Apply optional relay join policy across join flows ([#1894](https://github.com/block/buzz/pull/1894)) ([`6c2d66757`](https://github.com/block/buzz/commit/6c2d667575cbc372ba42d26134448660fb1d2ee9))
+- fix(desktop): preserve relaunch through mesh shutdown ([#1966](https://github.com/block/buzz/pull/1966)) ([`a1626f96c`](https://github.com/block/buzz/commit/a1626f96cea57e415dad72558df04494ab4c2596))
+- Persist agent audiences with native inline mentions ([#1949](https://github.com/block/buzz/pull/1949)) ([`19dc33bda`](https://github.com/block/buzz/commit/19dc33bda6e9e7f09703c4efcd721235de644ce9))
+
+
+## v0.4.8
+
+- fix(desktop): restore default community join option ([#1969](https://github.com/block/buzz/pull/1969)) ([`a84fe13a8`](https://github.com/block/buzz/commit/a84fe13a8c419f3d2d6ff3b577b431629b8e3e07))
+- feat(desktop): refine Projects navigation and overview hierarchy ([#1956](https://github.com/block/buzz/pull/1956)) ([`158259d95`](https://github.com/block/buzz/commit/158259d953dd56ec82cdb121b2caf075df573458))
+- Log handoff token counts ([#1954](https://github.com/block/buzz/pull/1954)) ([`ca8324d2c`](https://github.com/block/buzz/commit/ca8324d2cf696f35a553b9a561dd608881920b85))
+- fix(onboarding): add Welcome finalize skip escape hatch ([#1960](https://github.com/block/buzz/pull/1960)) ([`7ed6422c1`](https://github.com/block/buzz/commit/7ed6422c1a6e26d9c13bd9c0eb5783d8e784d173))
+- Welcome channel: Browse channels card, browser sorting, shortcut hint placement ([#1948](https://github.com/block/buzz/pull/1948)) ([`f20d79658`](https://github.com/block/buzz/commit/f20d79658c7106d2d87b4513260a594a647569b7))
+
+
 ## v0.4.7
 
 - feat(desktop): confirm invites with an Opening-invite loading gate before machine onboarding ([#1950](https://github.com/block/buzz/pull/1950)) ([`2510a4b4c`](https://github.com/block/buzz/commit/2510a4b4c91b54db5a3aad852c391f3974f48ebd))

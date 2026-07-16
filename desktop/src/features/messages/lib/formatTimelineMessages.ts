@@ -135,11 +135,12 @@ function formatMessageAuthor(
   channel: Channel | null,
   currentPubkey: string | undefined,
   profiles: UserProfileLookup | undefined,
+  relaySelfPubkey: string | null | undefined,
 ) {
   const authorPubkey = resolveEventAuthorPubkey({
-    pubkey: event.pubkey,
-    tags: event.tags,
+    event,
     preferActorTag: true,
+    relaySelfPubkey,
     requireChannelTagForPTags: true,
   });
   const fallbackName =
@@ -190,6 +191,8 @@ export function formatTimelineMessages(
   personaLookup?: Map<string, string>,
   /** Map from lowercase pubkey → respond-to mode for bot messages. */
   respondToLookup?: Map<string, RespondToMode>,
+  /** Active relay identity from NIP-11 `self`; absent or malformed fails closed to the signer. */
+  relaySelfPubkey?: string | null,
 ): TimelineMessage[] {
   const currentPubkeyLower = currentPubkey?.toLowerCase();
   const roleByPubkey = new Map<string, string>();
@@ -271,9 +274,9 @@ export function formatTimelineMessages(
     }
 
     const actorPubkey = resolveEventAuthorPubkey({
-      pubkey: event.pubkey,
-      tags: event.tags,
+      event,
       preferActorTag: true,
+      relaySelfPubkey,
       requireChannelTagForPTags: true,
     }).toLowerCase();
     const emoji = event.content.trim() || "+";
@@ -358,12 +361,18 @@ export function formatTimelineMessages(
     }
 
     const authorPubkey = resolveEventAuthorPubkey({
-      pubkey: event.pubkey,
-      tags: event.tags,
+      event,
       preferActorTag: true,
+      relaySelfPubkey,
       requireChannelTagForPTags: true,
     });
-    const author = formatMessageAuthor(event, channel, currentPubkey, profiles);
+    const author = formatMessageAuthor(
+      event,
+      channel,
+      currentPubkey,
+      profiles,
+      relaySelfPubkey,
+    );
 
     authorPubkeyByEventId.set(event.id, authorPubkey);
     authorLabelByEventId.set(event.id, author);
@@ -406,9 +415,9 @@ export function formatTimelineMessages(
     const authorPubkey =
       authorPubkeyByEventId.get(event.id) ??
       resolveEventAuthorPubkey({
-        pubkey: event.pubkey,
-        tags: event.tags,
+        event,
         preferActorTag: true,
+        relaySelfPubkey,
         requireChannelTagForPTags: true,
       });
     const thread = getThreadReference(event.tags);
@@ -487,7 +496,10 @@ function extractSystemMessagePubkeys(event: RelayEvent): string[] {
   }
 }
 
-export function collectReactionActorPubkeys(events: RelayEvent[]) {
+export function collectReactionActorPubkeys(
+  events: RelayEvent[],
+  relaySelfPubkey?: string | null,
+) {
   const deletedEventIds = new Set<string>();
   for (const event of events) {
     if (
@@ -511,9 +523,9 @@ export function collectReactionActorPubkeys(events: RelayEvent[]) {
     }
     pubkeys.add(
       resolveEventAuthorPubkey({
-        pubkey: event.pubkey,
-        tags: event.tags,
+        event,
         preferActorTag: true,
+        relaySelfPubkey,
         requireChannelTagForPTags: true,
       }).toLowerCase(),
     );
@@ -521,7 +533,10 @@ export function collectReactionActorPubkeys(events: RelayEvent[]) {
   return [...pubkeys];
 }
 
-export function collectMessageAuthorPubkeys(events: RelayEvent[]) {
+export function collectMessageAuthorPubkeys(
+  events: RelayEvent[],
+  relaySelfPubkey?: string | null,
+) {
   const pubkeys = new Set<string>();
 
   for (const event of events) {
@@ -537,9 +552,9 @@ export function collectMessageAuthorPubkeys(events: RelayEvent[]) {
       pubkeys.add(event.pubkey.toLowerCase());
       pubkeys.add(
         resolveEventAuthorPubkey({
-          pubkey: event.pubkey,
-          tags: event.tags,
+          event,
           preferActorTag: true,
+          relaySelfPubkey,
           requireChannelTagForPTags: true,
         }).toLowerCase(),
       );

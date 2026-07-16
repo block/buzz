@@ -74,6 +74,14 @@ function formatSearchUserSecondaryLabel(user: UserSearchResult) {
   return null;
 }
 
+function appendUniqueName(current: string[], name: string): string[] {
+  return current.some(
+    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+  )
+    ? current
+    : [...current, name];
+}
+
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -694,33 +702,41 @@ export function useMentions(
       personaMentionMapRef.current.delete(trimmedName);
       trimMapToSize(mentionMapRef.current, 200);
 
-      setSelectedMentionNames((current) => {
-        if (
-          current.some(
-            (name) => name.toLowerCase() === trimmedName.toLowerCase(),
-          )
-        ) {
-          return current;
-        }
-
-        return [...current, trimmedName];
-      });
+      setSelectedMentionNames((current) =>
+        appendUniqueName(current, trimmedName),
+      );
 
       if (options?.isAgent) {
-        setSelectedAgentMentionNames((current) => {
-          if (
-            current.some(
-              (name) => name.toLowerCase() === trimmedName.toLowerCase(),
-            )
-          ) {
-            return current;
-          }
-
-          return [...current, trimmedName];
-        });
+        setSelectedAgentMentionNames((current) =>
+          appendUniqueName(current, trimmedName),
+        );
       }
     },
     [],
+  );
+
+  const insertResolvedMention = React.useCallback(
+    ({
+      displayName,
+      pubkey,
+      replaceFromOffset,
+      replaceToOffset,
+      isAgent = false,
+    }: {
+      displayName: string;
+      pubkey: string;
+      replaceFromOffset: number;
+      replaceToOffset: number;
+      isAgent?: boolean;
+    }): AutocompleteEdit => {
+      registerMentionPubkey(displayName, pubkey, { isAgent });
+      return {
+        replaceFromOffset,
+        replaceToOffset,
+        insertText: `@${displayName.trim()} `,
+      };
+    },
+    [registerMentionPubkey],
   );
 
   const getMentionDisplayName = React.useCallback(
@@ -956,6 +972,7 @@ export function useMentions(
     handleMentionKeyDown,
     hasResolvedMembers: members !== undefined,
     insertMention,
+    insertResolvedMention,
     agentKnownNames: agentHighlightNames,
     isAgentPubkey,
     isManagedAgentPubkey,

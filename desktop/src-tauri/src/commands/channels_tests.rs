@@ -240,3 +240,64 @@ fn pending_owner_mark_uses_signer_captured_before_identity_swap() {
     let post_swap_pubkey = state.keys.lock().expect("lock keys").public_key().to_hex();
     assert!(!state.is_pending_owned_channel(&post_swap_pubkey, "chan-1"));
 }
+
+#[test]
+fn starter_channel_uuid_is_stable_and_scoped() {
+    let first = starter_channel_uuid("https://relay-a.example", "general");
+    let second = starter_channel_uuid("https://relay-a.example", "general");
+    let other_slug = starter_channel_uuid("https://relay-a.example", "welcome-everyone");
+    let other_relay = starter_channel_uuid("https://relay-b.example", "general");
+
+    assert_eq!(first, second);
+    assert_ne!(first, other_slug);
+    assert_ne!(first, other_relay);
+}
+
+#[test]
+fn duplicate_channel_rejection_is_ensure_success_only() {
+    assert!(is_duplicate_channel_rejection(
+        "relay rejected event: duplicate: channel already exists"
+    ));
+    assert!(!is_duplicate_channel_rejection(
+        "relay rejected event: auth: not authorized"
+    ));
+    assert!(!is_duplicate_channel_rejection(
+        "duplicate: unrelated local error"
+    ));
+}
+
+#[test]
+fn starter_match_requires_open_unarchived_stream_by_normalized_name() {
+    let spec = &STARTER_CHANNELS[0];
+    let mut channel = ChannelInfo {
+        id: "chan-1".to_string(),
+        name: " General ".to_string(),
+        channel_type: "stream".to_string(),
+        visibility: "open".to_string(),
+        description: "".to_string(),
+        topic: None,
+        purpose: None,
+        member_count: 0,
+        member_pubkeys: Vec::new(),
+        last_message_at: None,
+        archived_at: None,
+        participants: Vec::new(),
+        participant_pubkeys: Vec::new(),
+        is_member: true,
+        ttl_seconds: None,
+        ttl_deadline: None,
+    };
+
+    assert!(is_matching_starter_channel(&channel, spec));
+
+    channel.visibility = "private".to_string();
+    assert!(!is_matching_starter_channel(&channel, spec));
+
+    channel.visibility = "open".to_string();
+    channel.channel_type = "forum".to_string();
+    assert!(!is_matching_starter_channel(&channel, spec));
+
+    channel.channel_type = "stream".to_string();
+    channel.archived_at = Some("2026-07-16T00:00:00Z".to_string());
+    assert!(!is_matching_starter_channel(&channel, spec));
+}

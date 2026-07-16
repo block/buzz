@@ -251,17 +251,17 @@ async function expectWelcomePersonaMention(page: Page) {
 
 async function expectWelcomeView(page: Page) {
   await expect(page).toHaveURL(/#\/channels\/[^/?#]+$/);
-  await expect(page.getByTestId("channel-Welcome")).toBeVisible();
-  await expect(page.getByTestId("chat-title")).toContainText("Welcome");
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+  await expect(page.getByTestId("channel-welcome-everyone")).toBeVisible();
+  await expect(page.getByTestId("chat-title")).toContainText(
+    "welcome-everyone",
+  );
   await expect(page.getByTestId("channel-ephemeral-Welcome")).toHaveCount(0);
   await expect(page.getByTestId("chat-ephemeral-badge")).toHaveCount(0);
   await expect(page.getByTestId("message-unread-pill")).toHaveCount(0);
   await expect(page.getByTestId("message-channel-intro")).toBeVisible();
   await expect(page.getByTestId("message-channel-intro")).toContainText(
-    "This is the beginning of the private welcome channel.",
-  );
-  await expect(page.getByTestId("message-channel-intro")).not.toContainText(
-    "A few good first steps",
+    "This is the beginning of the regular channel.",
   );
   await expect(
     page.getByTestId("message-channel-intro").getByRole("button"),
@@ -419,39 +419,48 @@ async function getWelcomeChannelId(page: Page) {
   return (
     channels.find(
       (channel) =>
-        channel.name === "Welcome" && channel.visibility === "private",
+        channel.name === "welcome-everyone" && channel.visibility === "open",
     )?.id ?? null
   );
 }
 
-async function expectPrivateWelcomeChannel(page: Page) {
+async function expectStarterChannels(page: Page) {
   await expect
     .poll(async () => {
       const channels = await getMockChannels(page);
-      const welcomeChannel = channels.find(
-        (channel) =>
-          channel.name === "Welcome" && channel.visibility === "private",
-      );
-
-      if (!welcomeChannel) {
-        return null;
-      }
-
-      return {
-        channelType: welcomeChannel.channel_type,
-        isMember: welcomeChannel.is_member,
-        memberCount: welcomeChannel.member_count,
-        ttlSeconds: welcomeChannel.ttl_seconds,
-        visibility: welcomeChannel.visibility,
-      };
+      return ["general", "welcome-everyone"].map((name) => {
+        const channel = channels.find(
+          (candidate) =>
+            candidate.name === name && candidate.visibility === "open",
+        );
+        if (!channel) {
+          return null;
+        }
+        return {
+          channelType: channel.channel_type,
+          isMember: channel.is_member,
+          memberCountAtLeastOne: channel.member_count >= 1,
+          ttlSeconds: channel.ttl_seconds,
+          visibility: channel.visibility,
+        };
+      });
     })
-    .toEqual({
-      channelType: "stream",
-      isMember: true,
-      memberCount: 2,
-      ttlSeconds: null,
-      visibility: "private",
-    });
+    .toEqual([
+      {
+        channelType: "stream",
+        isMember: true,
+        memberCountAtLeastOne: true,
+        ttlSeconds: null,
+        visibility: "open",
+      },
+      {
+        channelType: "stream",
+        isMember: true,
+        memberCountAtLeastOne: true,
+        ttlSeconds: null,
+        visibility: "open",
+      },
+    ]);
 }
 
 async function expectWelcomeGuideIntro(
@@ -578,8 +587,21 @@ test("first-community choices expose npub and invite input", async ({
     skipOnboardingSeed: true,
     skipCommunitySeed: true,
   });
+  await page.route(
+    "https://default.example.com/api/join-policy",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "{}",
+      });
+    },
+  );
   await page.goto("/");
 
+  await expect(
+    page.getByRole("button", { name: "Join default community" }),
+  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Join a community" }),
   ).toBeVisible();
@@ -618,6 +640,31 @@ test("first-community choices expose npub and invite input", async ({
     page.getByRole("heading", { name: "I have an invite link" }),
   ).toBeVisible();
   await expect(page.getByTestId("invite-redeem-input")).toBeVisible();
+});
+
+test("first-community hides the default option for localhost", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "ws://localhost:3000",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("button", { name: "Join default community" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Join a community" }),
+  ).toBeVisible();
 });
 
 test("identity fallback text does not count as a real onboarding name", async ({
@@ -896,7 +943,7 @@ test("avatar upload accepts a file whose server-detected MIME is an image", asyn
   await expect(page.getByTestId("onboarding-avatar-error")).toHaveCount(0);
 });
 
-test("first-run onboarding keeps the shell hidden and lands on Welcome after profile setup", async ({
+test("first-run onboarding keeps the shell hidden and lands on welcome-everyone after profile setup", async ({
   page,
 }) => {
   await seedActiveIdentity(page, FIRST_RUN_ALICE);
@@ -912,7 +959,7 @@ test("first-run onboarding keeps the shell hidden and lands on Welcome after pro
   await completeProfileOnboarding(page);
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectWelcomeView(page);
-  await expectPrivateWelcomeChannel(page);
+  await expectStarterChannels(page);
   await expectWelcomeGuideIntro(page);
 });
 
@@ -989,17 +1036,15 @@ async function expectRetrySuccessDismissesToast(
   await expect(activeToast).toHaveCount(0);
 }
 
-test("failed Welcome and general retries recreate actionable toasts", async ({
+test("failed starter channel retries recreate actionable toasts", async ({
   page,
 }) => {
-  const welcomeError = "Mock Welcome create failed.";
-  const generalError = "Mock general join failed.";
+  const starterError = "Mock starter channel setup failed.";
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
     {
-      createChannelErrors: [welcomeError, welcomeError],
-      joinChannelErrors: [generalError, generalError],
+      ensureStarterChannelsErrors: [starterError, starterError],
     },
     { skipOnboardingSeed: true },
   );
@@ -1009,28 +1054,21 @@ test("failed Welcome and general retries recreate actionable toasts", async ({
   await completeProfileOnboarding(page);
 
   await expectRetryFailureRecreatesActionableToast(page, {
-    command: "create_channel",
-    error: welcomeError,
-    title: "Couldn't set up the Welcome channel",
-  });
-  await expectRetryFailureRecreatesActionableToast(page, {
-    command: "join_channel",
-    error: generalError,
-    title: "Couldn't join #general",
+    command: "ensure_starter_channels",
+    error: starterError,
+    title: "Couldn't set up starter channels",
   });
 });
 
-test("successful Welcome and general retries clear their actionable toasts", async ({
+test("successful starter channel retry clears its actionable toast", async ({
   page,
 }) => {
-  const welcomeError = "Mock Welcome create failed.";
-  const generalError = "Mock general join failed.";
+  const starterError = "Mock starter channel setup failed.";
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
     {
-      createChannelErrors: [welcomeError],
-      joinChannelErrors: [generalError],
+      ensureStarterChannelsErrors: [starterError],
     },
     { skipOnboardingSeed: true },
   );
@@ -1040,18 +1078,14 @@ test("successful Welcome and general retries clear their actionable toasts", asy
   await completeProfileOnboarding(page);
 
   await expectRetrySuccessDismissesToast(page, {
-    command: "create_channel",
-    title: "Couldn't set up the Welcome channel",
-  });
-  await expectRetrySuccessDismissesToast(page, {
-    command: "join_channel",
-    title: "Couldn't join #general",
+    command: "ensure_starter_channels",
+    title: "Couldn't set up starter channels",
   });
   await expectWelcomeView(page);
   await expect(page.getByTestId("channel-general")).toBeVisible();
 });
 
-test("first-run onboarding shows setup loading until Welcome bootstrap completes", async ({
+test("first-run onboarding shows setup loading until starter channel bootstrap completes", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -1126,7 +1160,7 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   await expect(mark).toBeVisible();
 
   await expectWelcomeView(page);
-  await expectPrivateWelcomeChannel(page);
+  await expectStarterChannels(page);
   await expectWelcomeGuideIntro(page);
 });
 
@@ -1183,7 +1217,7 @@ test("onboarding can import an existing key when the community is already set up
   await expectHomeView(page);
 });
 
-test("completed onboarding backfills a missing private Welcome channel", async ({
+test("completed onboarding backfills missing starter channels", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -1193,12 +1227,13 @@ test("completed onboarding backfills a missing private Welcome channel", async (
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectHomeView(page);
-  await expect(page.getByTestId("channel-Welcome")).toBeVisible();
-  await expectPrivateWelcomeChannel(page);
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+  await expect(page.getByTestId("channel-welcome-everyone")).toBeVisible();
+  await expectStarterChannels(page);
   await expectWelcomeGuideIntro(page, { expectVisible: false });
 });
 
-test("finishing onboarding creates and focuses a private Welcome channel for a new member", async ({
+test("finishing onboarding creates starter channels and focuses welcome-everyone for a new member", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -1210,7 +1245,7 @@ test("finishing onboarding creates and focuses a private Welcome channel for a n
 
   await expectWelcomeView(page);
   await expect(page.getByTestId("channel-general")).toBeVisible();
-  await expectPrivateWelcomeChannel(page);
+  await expectStarterChannels(page);
   await expectWelcomeGuideIntro(page);
   await expectWelcomeComposerBannerCompletesAfterPersonaMention(page);
 });
@@ -1685,7 +1720,41 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
   // Intercept the claimInvite POST to relay B so it succeeds.
   const relayBUrl = "wss://relay-b.example.com";
   const relayBHttpUrl = "https://relay-b.example.com";
+  const policyReceipt = "relay-signed-policy-receipt";
+  await page.route(`${relayBHttpUrl}/api/join-policy`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        policy: {
+          terms_markdown: "# Terms",
+          privacy_markdown: "# Privacy",
+          age_attestation_required: true,
+          version: "policy-v1",
+        },
+      }),
+    });
+  });
+  await page.route(
+    `${relayBHttpUrl}/api/invites/accept-policy`,
+    async (route) => {
+      expect(route.request().postDataJSON()).toEqual({
+        code: "test-invite-code",
+        policy_version: "policy-v1",
+        age_confirmed: true,
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ receipt: policyReceipt }),
+      });
+    },
+  );
   await page.route(`${relayBHttpUrl}/api/invites/claim`, async (route) => {
+    expect(route.request().postDataJSON()).toMatchObject({
+      code: "test-invite-code",
+      policy_receipt: policyReceipt,
+    });
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1703,6 +1772,12 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
   await page
     .getByTestId("invite-redeem-input")
     .fill(`${relayBHttpUrl}/invite/test-invite-code`);
+  await page.getByTestId("invite-redeem-submit").click();
+  await expect(page.getByText("I am 18 years of age or older.")).toBeVisible();
+  await page.getByLabel("I am 18 years of age or older.").check();
+  await page
+    .getByLabel("I agree to the Buzz Terms of Service and Privacy Policy.")
+    .check();
   await page.getByTestId("invite-redeem-submit").click();
 
   // After successful claim, relay B is added and becomes active; relay A remains

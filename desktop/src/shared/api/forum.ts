@@ -24,6 +24,7 @@ type RawForumPost = {
   created_at: number;
   channel_id: string;
   tags: string[][];
+  sig: string;
   thread_summary: RawThreadSummary | null;
   reactions: unknown;
 };
@@ -41,6 +42,7 @@ type RawThreadReply = {
   created_at: number;
   channel_id: string;
   tags: string[][];
+  sig: string;
   parent_event_id: string | null;
   root_event_id: string | null;
   depth: number;
@@ -55,12 +57,23 @@ type RawForumThreadResponse = {
   next_cursor: string | null;
 };
 
-function fromRawForumPost(post: RawForumPost): ForumPost {
+function fromRawForumPost(
+  post: RawForumPost,
+  relaySelfPubkey?: string | null,
+): ForumPost {
   return {
     eventId: post.event_id,
     pubkey: resolveEventAuthorPubkey({
-      pubkey: post.pubkey,
-      tags: post.tags,
+      event: {
+        id: post.event_id,
+        pubkey: post.pubkey,
+        created_at: post.created_at,
+        kind: post.kind,
+        tags: post.tags,
+        content: post.content,
+        sig: post.sig,
+      },
+      relaySelfPubkey,
     }),
     content: post.content,
     kind: post.kind,
@@ -78,12 +91,23 @@ function fromRawForumPost(post: RawForumPost): ForumPost {
   };
 }
 
-function fromRawThreadReply(reply: RawThreadReply): ThreadReply {
+function fromRawThreadReply(
+  reply: RawThreadReply,
+  relaySelfPubkey?: string | null,
+): ThreadReply {
   return {
     eventId: reply.event_id,
     pubkey: resolveEventAuthorPubkey({
-      pubkey: reply.pubkey,
-      tags: reply.tags,
+      event: {
+        id: reply.event_id,
+        pubkey: reply.pubkey,
+        created_at: reply.created_at,
+        kind: reply.kind,
+        tags: reply.tags,
+        content: reply.content,
+        sig: reply.sig,
+      },
+      relaySelfPubkey,
     }),
     content: reply.content,
     kind: reply.kind,
@@ -100,6 +124,7 @@ export async function getForumPosts(
   channelId: string,
   limit?: number,
   before?: number,
+  relaySelfPubkey?: string | null,
 ): Promise<ForumPostsResponse> {
   const response = await invokeTauri<RawForumPostsResponse>("get_forum_posts", {
     channelId,
@@ -110,7 +135,7 @@ export async function getForumPosts(
   return {
     posts: response.messages
       .filter((m) => m.kind === KIND_FORUM_POST)
-      .map(fromRawForumPost),
+      .map((post) => fromRawForumPost(post, relaySelfPubkey)),
     nextCursor: response.next_cursor,
   };
 }
@@ -120,6 +145,7 @@ export async function getForumThread(
   eventId: string,
   limit?: number,
   cursor?: string,
+  relaySelfPubkey?: string | null,
 ): Promise<ForumThreadResponse> {
   const response = await invokeTauri<RawForumThreadResponse>(
     "get_forum_thread",
@@ -132,8 +158,10 @@ export async function getForumThread(
   );
 
   return {
-    post: fromRawForumPost(response.root),
-    replies: response.replies.map(fromRawThreadReply),
+    post: fromRawForumPost(response.root, relaySelfPubkey),
+    replies: response.replies.map((reply) =>
+      fromRawThreadReply(reply, relaySelfPubkey),
+    ),
     totalReplies: response.total_replies,
     nextCursor: response.next_cursor,
   };

@@ -460,7 +460,10 @@ const overrides = new Map([
   // +3: onLinkShortcutRef wiring (ref decl + editor option + assignment) for
   // the ⌘K link-editor shortcut, mirroring the existing onEditLinkRef
   // pattern. Queued to split with the rest of this list.
-  ["src/features/messages/ui/MessageComposer.tsx", 1036],
+  // +35: persistent audience scope/hook wiring and chip component handoff. The
+  // chip markup lives separately; remaining lines connect existing composer
+  // send state to the audience store. Queued with the existing split.
+  ["src/features/messages/ui/MessageComposer.tsx", 1091],
   // global-agent-config: model-tuning section (BuzzAgentModelTuningFields via
   // EditAgentAdvancedFields) + providerValid gate + effectiveProvider derivation
   // + globalProvider threading into getPersonaProviderOptions. All load-bearing
