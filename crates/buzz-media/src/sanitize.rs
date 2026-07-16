@@ -398,7 +398,7 @@ pub async fn sanitize(
         ),
     };
 
-    verify_forbidden_metadata(file.path(), config).await?;
+    verify_forbidden_metadata(file.path(), expected_class, config).await?;
     verify_embedded_icc(file.path(), expected_class, config).await?;
     let sniff = read_sniff(file.path()).await?;
     let output_probe = probe_media(file.path(), &sniff, config)
@@ -1025,6 +1025,7 @@ async fn sanitize_video(
     if can_copy {
         args.extend(strings(&["-c:v", "copy", "-c:a", "copy"]));
     } else {
+        args.extend(strings(&["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]));
         match video_encoder()? {
             "libopenh264" => args.extend(strings(&[
                 "-c:v",
@@ -1119,7 +1120,11 @@ async fn sanitize_audio(
     Ok(output)
 }
 
-async fn verify_forbidden_metadata(path: &Path, config: &MediaConfig) -> Result<(), MediaError> {
+async fn verify_forbidden_metadata(
+    path: &Path,
+    class: MediaClass,
+    config: &MediaConfig,
+) -> Result<(), MediaError> {
     let selectors = [
         "-GPS*",
         "-Location*",
@@ -1162,7 +1167,11 @@ async fn verify_forbidden_metadata(path: &Path, config: &MediaConfig) -> Result<
     let output = run_tool(
         &config.exiftool_path,
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
-        Duration::from_secs(config.av_process_timeout_secs),
+        Duration::from_secs(icc_verification_timeout_secs(
+            class,
+            config.image_process_timeout_secs,
+            config.av_process_timeout_secs,
+        )),
     )
     .await?;
     if !output.status.success() {
@@ -1388,6 +1397,9 @@ async fn ffprobe_json(
 fn validate_media_limits(probe: &MediaProbe) -> Result<(), MediaError> {
     match probe.class {
         MediaClass::Image => {
+            if probe.ext == "tiff" && probe.frame_count.is_some_and(|frames| frames > 1) {
+                return Err(MediaError::UnsupportedMedia("multi-page TIFF".to_string()));
+            }
             if let (Some(width), Some(height)) = (probe.width, probe.height) {
                 let pixels = u64::from(width) * u64::from(height);
                 if pixels > MAX_IMAGE_PIXELS {
@@ -1947,6 +1959,12 @@ mod tests {
         assert!(matches!(
             validate_media_limits(&probe),
             Err(MediaError::ImageTooLarge)
+        ));
+        probe.ext = "tiff".to_string();
+        probe.frame_count = Some(2);
+        assert!(matches!(
+            validate_media_limits(&probe),
+            Err(MediaError::UnsupportedMedia(format)) if format == "multi-page TIFF"
         ));
     }
 }

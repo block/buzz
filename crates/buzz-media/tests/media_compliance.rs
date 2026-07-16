@@ -393,11 +393,16 @@ async fn realistic_media_matrix_strips_location_and_descriptive_metadata() {
 
     for ext in ["mp4", "mov", "webm", "mkv"] {
         let fixture = temp.path().join(format!("location.{ext}"));
+        let video_source = if ext == "webm" {
+            "testsrc=size=95x63:rate=10:duration=1,format=yuv444p"
+        } else {
+            "testsrc2=size=96x64:rate=10:duration=1"
+        };
         let mut args = vec![
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=96x64:rate=10:duration=1",
+            video_source,
             "-f",
             "lavfi",
             "-i",
