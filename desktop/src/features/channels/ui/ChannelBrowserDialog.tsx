@@ -1,7 +1,8 @@
 import * as React from "react";
-import { ArrowUpDown, Compass, Search, X, type LucideIcon } from "lucide-react";
+import { Compass, Search, X, type LucideIcon } from "lucide-react";
 
 import type { Channel } from "@/shared/api/types";
+import { ListSortAscending } from "@/shared/ui/icons";
 import {
   Dialog,
   DialogClose,
@@ -369,7 +370,7 @@ export function ChannelBrowserDialog({
                   type="button"
                   variant="ghost"
                 >
-                  <ArrowUpDown />
+                  <ListSortAscending />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
