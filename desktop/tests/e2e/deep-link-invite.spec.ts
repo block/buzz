@@ -24,6 +24,14 @@ const PENDING_CONNECT_LINK = {
   code: null,
 };
 
+const PENDING_ADD_COMMUNITY_LINK = {
+  id: "dl-add-community-1",
+  kind: "add-community" as const,
+  relayUrl: "wss://acme.communities.buzz.xyz",
+  code: null,
+  name: "Acme Team",
+};
+
 test("join deep link is acknowledged without claiming before setup", async ({
   page,
 }) => {
@@ -90,6 +98,44 @@ test("connect deep link shows a static acknowledgment during setup", async ({
       ),
     )
     .toContain('"acknowledged":true');
+});
+
+test("add-community deep link opens one editable prefill and acknowledges the queue", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { pendingCommunityDeepLinks: [PENDING_ADD_COMMUNITY_LINK] },
+    { seedPreviewFeatures: true },
+  );
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("heading", { name: "Add Community" }),
+  ).toBeVisible();
+  const relayInput = page.locator("#ws-relay-url");
+  const nameInput = page.locator("#ws-name");
+  await expect(relayInput).toHaveValue(PENDING_ADD_COMMUNITY_LINK.relayUrl);
+  await expect(nameInput).toHaveValue(PENDING_ADD_COMMUNITY_LINK.name);
+
+  await nameInput.fill("Edited Team");
+  await expect(nameInput).toHaveValue("Edited Team");
+
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Add Community" }),
+  ).toHaveCount(0);
+  const acknowledgements = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+      (entry) => entry.command === "acknowledge_pending_community_deep_link",
+    ),
+  );
+  expect(acknowledgements).toEqual([
+    {
+      command: "acknowledge_pending_community_deep_link",
+      payload: { id: PENDING_ADD_COMMUNITY_LINK.id },
+    },
+  ]);
 });
 
 test("Welcome failure can be skipped without abandoning community onboarding", async ({

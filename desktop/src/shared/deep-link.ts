@@ -2,8 +2,16 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type { StartCommunityOnboardingInput } from "@/features/onboarding/communityOnboarding";
 
+export type AddCommunityDeepLinkPayload = {
+  relayUrl: string;
+  name?: string;
+};
+
 export interface DeepLinkDeps {
   startCommunityOnboarding: (input: StartCommunityOnboardingInput) => boolean;
+  openAddCommunity: (
+    payload: AddCommunityDeepLinkPayload & { requestId: string },
+  ) => boolean;
 }
 
 /**
@@ -42,9 +50,10 @@ export type JoinDeepLinkPayload = {
 
 type PendingCommunityDeepLink = {
   id: string;
-  kind: "connect" | "join";
+  kind: "connect" | "join" | "add-community";
   relayUrl: string;
   code: string | null;
+  name: string | null;
   policyReceipt: string | null;
 };
 
@@ -52,12 +61,20 @@ function acceptPendingCommunityDeepLink(
   pending: PendingCommunityDeepLink,
   deps: DeepLinkDeps,
 ) {
-  const accepted = deps.startCommunityOnboarding({
-    source: pending.kind === "join" ? "deep-link-join" : "deep-link-connect",
-    relayUrl: pending.relayUrl,
-    inviteCode: pending.code ?? undefined,
-    policyReceipt: pending.policyReceipt ?? undefined,
-  });
+  const accepted =
+    pending.kind === "add-community"
+      ? deps.openAddCommunity({
+          requestId: pending.id,
+          relayUrl: pending.relayUrl,
+          name: pending.name ?? undefined,
+        })
+      : deps.startCommunityOnboarding({
+          source:
+            pending.kind === "join" ? "deep-link-join" : "deep-link-connect",
+          relayUrl: pending.relayUrl,
+          inviteCode: pending.code ?? undefined,
+          policyReceipt: pending.policyReceipt ?? undefined,
+        });
   return accepted
     ? invoke<boolean>("acknowledge_pending_community_deep_link", {
         id: pending.id,
@@ -101,7 +118,15 @@ export async function listenForDeepLinks(
   };
   const connectPromise = listen<string>("deep-link-connect", drain);
   const joinPromise = listen<JoinDeepLinkPayload>("deep-link-join", drain);
-  const unlistens = await Promise.all([connectPromise, joinPromise]);
+  const addCommunityPromise = listen<AddCommunityDeepLinkPayload>(
+    "deep-link-add-community",
+    drain,
+  );
+  const unlistens = await Promise.all([
+    connectPromise,
+    joinPromise,
+    addCommunityPromise,
+  ]);
   drain();
   return () => {
     for (const unlisten of unlistens) unlisten();

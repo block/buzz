@@ -242,16 +242,17 @@ type E2eConfig = {
     // Event IDs that `get_event` should report as definitively not found.
     // Causes `useDraftRootStatus` to classify as `deleted`.
     deletedEventIds?: string[];
-    // Pending community deep links (buzz://join / buzz://connect) seeded into
+    // Pending community deep links (buzz://join / buzz://connect / buzz://add-community) seeded into
     // the mocked Rust-side queue. Mirrors the real queue's semantics:
     // `take_pending_community_deep_link` peeks the head and
     // `acknowledge_pending_community_deep_link` removes by id. Drives the
     // pending-invite gate and deep-link drain path in tests.
     pendingCommunityDeepLinks?: Array<{
       id: string;
-      kind: "connect" | "join";
+      kind: "connect" | "join" | "add-community";
       relayUrl: string;
       code?: string | null;
+      name?: string | null;
     }>;
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
@@ -3562,12 +3563,17 @@ let mockPendingCommunityDeepLinks: Array<{
   kind: string;
   relayUrl: string;
   code: string | null;
+  name: string | null;
 }> = [];
 
 function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
   mockPendingCommunityDeepLinks = (
     config?.mock?.pendingCommunityDeepLinks ?? []
-  ).map((pending) => ({ ...pending, code: pending.code ?? null }));
+  ).map((pending) => ({
+    ...pending,
+    code: pending.code ?? null,
+    name: pending.name ?? null,
+  }));
 }
 
 function recordMockUserStatus(event: RelayEvent) {
