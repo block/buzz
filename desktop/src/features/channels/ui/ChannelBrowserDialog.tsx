@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Compass, Search, X, type LucideIcon } from "lucide-react";
+import { ArrowUpDown, Compass, Search, X, type LucideIcon } from "lucide-react";
 
 import type { Channel } from "@/shared/api/types";
 import {
@@ -16,9 +16,23 @@ import {
   MODAL_SEARCH_SHELL_CLASS,
 } from "@/shared/ui/modalSearchStyles";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 
 const BROWSE_CHANNELS_SHORTCUT_HINT = "\u21E7\u2318O";
 type BrowserTab = "all" | "joined" | "archived";
+type ChannelSort = "alphabetical" | "members";
+
+const CHANNEL_SORT_OPTIONS: { label: string; value: ChannelSort }[] = [
+  { label: "Alphabetical", value: "alphabetical" },
+  { label: "Most members", value: "members" },
+];
 
 function BrowseState({
   icon: Icon,
@@ -61,6 +75,7 @@ export function ChannelBrowserDialog({
 }: ChannelBrowserDialogProps) {
   const [query, setQuery] = React.useState("");
   const [activeTab, setActiveTab] = React.useState<BrowserTab>("all");
+  const [sort, setSort] = React.useState<ChannelSort>("alphabetical");
   const [selectedIndex, setSelectedIndex] = React.useState<number | null>(null);
   const [joiningChannelId, setJoiningChannelId] = React.useState<string | null>(
     null,
@@ -130,13 +145,15 @@ export function ChannelBrowserDialog({
         ? joinedChannels
         : matchingChannels;
 
-  const orderedVisibleChannels = React.useMemo(
-    () => [
-      ...visibleChannels.filter((channel) => !channel.isMember),
-      ...visibleChannels.filter((channel) => channel.isMember),
-    ],
-    [visibleChannels],
-  );
+  const orderedVisibleChannels = React.useMemo(() => {
+    return [...visibleChannels].sort((a, b) => {
+      if (sort === "members" && b.memberCount !== a.memberCount) {
+        return b.memberCount - a.memberCount;
+      }
+
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+  }, [sort, visibleChannels]);
 
   const allTabLabel = isForumMode ? "All forums" : "All channels";
 
@@ -201,6 +218,7 @@ export function ChannelBrowserDialog({
     if (!open) {
       setQuery("");
       setActiveTab("all");
+      setSort("alphabetical");
       setSelectedIndex(null);
       setJoiningChannelId(null);
       return;
@@ -275,10 +293,7 @@ export function ChannelBrowserDialog({
               <span className="sr-only">Close</span>
             </DialogClose>
           </div>
-          <label
-            className={MODAL_SEARCH_SHELL_CLASS}
-            htmlFor="channel-browser-search"
-          >
+          <div className={MODAL_SEARCH_SHELL_CLASS}>
             <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
             <input
               autoCapitalize="none"
@@ -342,7 +357,43 @@ export function ChannelBrowserDialog({
             >
               {BROWSE_CHANNELS_SHORTCUT_HINT}
             </span>
-          </label>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label={`Sort ${entityLabel}s: ${
+                    sort === "alphabetical" ? "Alphabetical" : "Most members"
+                  }`}
+                  data-testid="channel-browser-sort"
+                  onClick={(event) => event.preventDefault()}
+                  size="icon-xs"
+                  type="button"
+                  variant="ghost"
+                >
+                  <ArrowUpDown />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+                <DropdownMenuRadioGroup
+                  onValueChange={(value) => {
+                    setSort(value as ChannelSort);
+                    setSelectedIndex(null);
+                  }}
+                  value={sort}
+                >
+                  {CHANNEL_SORT_OPTIONS.map((option) => (
+                    <DropdownMenuRadioItem
+                      data-testid={`channel-browser-sort-${option.value}`}
+                      key={option.value}
+                      value={option.value}
+                    >
+                      {option.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </DialogHeader>
 
         <div className="h-[min(60vh,30rem)] overflow-hidden">
