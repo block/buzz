@@ -289,11 +289,24 @@ fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+
     let mut command = Command::new("cmd");
+    // Keep argv separate so Rust applies Windows command-line quoting. Joining
+    // with POSIX shell escaping breaks paths such as `C:\Program Files\...`.
     command
-        .args(["/C", "start", "", "cmd", "/K"])
-        .arg(shell_join(argv));
+        .args(windows_terminal_args(argv))
+        .creation_flags(CREATE_NEW_CONSOLE);
     spawn_without_stdio(command)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_terminal_args(argv: &[String]) -> Vec<String> {
+    std::iter::once("/K".to_string())
+        .chain(argv.iter().cloned())
+        .collect()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -326,7 +339,9 @@ fn applescript_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{adapter_terminal_argv, shell_escape, shell_join, AcpAuthMethod};
+    use super::{
+        adapter_terminal_argv, shell_escape, shell_join, windows_terminal_args, AcpAuthMethod,
+    };
 
     #[test]
     fn shell_join_escapes_spaces_and_quotes() {
@@ -339,6 +354,24 @@ mod tests {
     #[test]
     fn shell_escape_leaves_simple_args_unquoted() {
         assert_eq!(shell_escape("--claudeai"), "--claudeai");
+    }
+
+    #[test]
+    fn windows_terminal_keeps_argv_separate() {
+        let argv = vec![
+            r"C:\Program Files\Codex\codex.exe".to_string(),
+            "login".to_string(),
+            "subscription name".to_string(),
+        ];
+        assert_eq!(
+            windows_terminal_args(&argv),
+            vec![
+                "/K",
+                r"C:\Program Files\Codex\codex.exe",
+                "login",
+                "subscription name"
+            ]
+        );
     }
 
     #[test]

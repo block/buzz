@@ -3352,9 +3352,6 @@ async fn spawn_and_init(
     }
 }
 
-/// `buzz-acp models` — spawn an agent, query its available models, exit.
-///
-
 async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
     let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
     AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
