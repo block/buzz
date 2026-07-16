@@ -388,18 +388,43 @@ fn signed_reporter_target(reporter_secret: &str, model: &str, endpoint: &str) ->
 }
 
 #[test]
-fn stale_status_is_excluded_from_admission_and_availability() {
+fn stale_status_keeps_member_admitted_but_excluded_from_routing() {
     let secret = "8".repeat(64);
     let member = nostr::Keys::parse(&secret).unwrap().public_key().to_hex();
     let stale = signed_reporter_target_at(&secret, "stale-model", &test_endpoint_token(), 1_000);
-    // No newer event is required to age this status out. Freshness is measured
-    // against wall clock, so an entirely offline mesh cannot remain live forever.
+    // Membership is the trust boundary: a current member whose device went
+    // offline (stale status) must stay admitted, otherwise every app
+    // open/close in the community churns the allowlist and restarts serving
+    // nodes. Freshness still gates routing: a stale node is never selected as
+    // a serve target.
     let membership = signed_membership_event_at(std::slice::from_ref(&member), 900);
     let events = vec![stale, membership];
 
-    assert!(super::owner_ids_from_events(&events).is_empty());
+    assert_eq!(super::owner_ids_from_events(&events).len(), 1);
     let availability = super::availability_from_events(events);
     assert!(availability.serve_targets.is_empty());
+}
+
+#[test]
+fn removed_member_is_dropped_from_admission_despite_fresh_status() {
+    // Revocation path: freshness must never resurrect trust. A reporter with a
+    // perfectly fresh status who is absent from the latest NIP-43 roster gets
+    // no admission entry.
+    let member_secret = "8".repeat(64);
+    let outsider_secret = "9".repeat(64);
+    let member = nostr::Keys::parse(&member_secret)
+        .unwrap()
+        .public_key()
+        .to_hex();
+    let now = nostr::Timestamp::now().as_secs();
+    let fresh_outsider =
+        signed_reporter_target_at(&outsider_secret, "model", &test_endpoint_token(), now);
+    // Latest roster lists only `member`; the outsider was removed (or never
+    // admitted).
+    let membership = signed_membership_event_at(std::slice::from_ref(&member), now);
+    let events = vec![fresh_outsider, membership];
+
+    assert!(super::owner_ids_from_events(&events).is_empty());
 }
 
 #[test]
