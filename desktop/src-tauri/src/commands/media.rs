@@ -153,6 +153,22 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
     }
 }
 
+fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec<u8>, String> {
+    let format = match mime {
+        "image/jpeg" => image::ImageFormat::Jpeg,
+        "image/png" => image::ImageFormat::Png,
+        "image/webp" => image::ImageFormat::WebP,
+        _ => return Ok(body),
+    };
+    let image = image::load_from_memory_with_format(&body, format)
+        .map_err(|_| "failed to decode image for metadata removal".to_string())?;
+    let mut output = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut output, format)
+        .map_err(|_| "failed to encode image without metadata".to_string())?;
+    Ok(output.into_inner())
+}
+
 pub(crate) fn detect_and_validate_mime(body: &[u8]) -> Result<String, String> {
     let mime = infer::get(body)
         .map(|t| t.mime_type().to_string())
@@ -362,6 +378,7 @@ pub async fn upload_media(
     }
 
     let mime = detect_and_validate_mime(&body)?;
+    let body = sanitize_image_for_upload(body, &mime)?;
     do_upload(body, &mime, &state, None).await
 }
 
@@ -432,6 +449,7 @@ async fn process_picked_path(
         .map_err(|e| format!("transcode task failed: {e}"))??;
 
     let mime = detect_and_validate_mime(&body)?;
+    let body = sanitize_image_for_upload(body, &mime)?;
 
     // Image-only surfaces (e.g. "Send feedback"): reject anything that didn't
     // sniff as an image, BEFORE the upload leaves the client.
@@ -598,6 +616,7 @@ pub async fn upload_media_bytes(
     };
 
     let mime = detect_and_validate_mime(&body)?;
+    let body = sanitize_image_for_upload(body, &mime)?;
 
     // Upload video first, then poster (best-effort).
     let progress = progress_id.map(|id| (app, id));

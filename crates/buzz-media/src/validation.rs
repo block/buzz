@@ -127,6 +127,10 @@ pub fn validate_file_content(
     match infer::get(bytes) {
         Some(kind) => {
             let mime = kind.mime_type().to_string();
+            // Media signatures must use the media path, where metadata policy is enforced.
+            if mime.starts_with("image/") || mime.starts_with("video/") {
+                return Err(MediaError::DisallowedContentType(mime));
+            }
             // 3. Deny dangerous active-content / executable types.
             if BLOCKED_FILE_MIME_TYPES.contains(&mime.as_str()) {
                 return Err(MediaError::DisallowedContentType(mime));
@@ -193,7 +197,10 @@ pub fn validate_content(bytes: &[u8], config: &MediaConfig) -> Result<String, Me
         });
     }
 
-    // 4. Image bomb — check pixel dimensions before full decode.
+    // 4. Reject metadata-bearing or non-canonical container structures.
+    validate_image_metadata_free(bytes, &mime)?;
+
+    // 5. Image bomb — check pixel dimensions before full decode.
     //    Fail closed: imagesize supports JPEG, PNG, GIF, WebP. If dimensions
     //    can't be parsed, reject — don't let unknown-geometry images reach the
     //    full decoder in thumbnail generation.
@@ -235,6 +242,8 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
             max: config.max_video_bytes,
         });
     }
+
+    validate_mp4_metadata_free(path)?;
 
     let reader = BufReader::new(file);
     let mp4 = mp4::Mp4Reader::read_header(reader, size).map_err(|_| MediaError::InvalidVideo)?;
@@ -301,7 +310,7 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
             mp4::TrackType::Audio => {
                 has_audio = true;
             }
-            _ => {}
+            _ => return Err(MediaError::MetadataForbidden),
         }
     }
 
@@ -394,6 +403,370 @@ fn check_moov_before_mdat(path: &Path) -> Result<(), MediaError> {
     Ok(())
 }
 
+/// Reject metadata-bearing image structures without decoding pixel data.
+///
+/// This is deliberately a structural allowlist rather than an EXIF-tag denylist:
+/// location can also live in XMP, comments, PNG text, ICC descriptions, or
+/// private chunks. Client encoders remove these before upload.
+fn validate_image_metadata_free(bytes: &[u8], mime: &str) -> Result<(), MediaError> {
+    match mime {
+        "image/jpeg" => validate_jpeg_metadata_free(bytes),
+        "image/png" => validate_png_metadata_free(bytes),
+        "image/webp" => validate_webp_metadata_free(bytes),
+        "image/gif" => validate_gif_metadata_free(bytes),
+        _ => Ok(()),
+    }
+}
+
+fn validate_jpeg_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
+    if !bytes.starts_with(&[0xff, 0xd8]) {
+        return Err(MediaError::InvalidImage);
+    }
+    let mut i = 2usize;
+    let mut in_scan = false;
+    while i < bytes.len() {
+        if bytes[i] != 0xff {
+            if in_scan {
+                i += 1;
+                continue;
+            }
+            return Err(MediaError::InvalidImage);
+        }
+        while i < bytes.len() && bytes[i] == 0xff {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return Err(MediaError::InvalidImage);
+        }
+        let marker = bytes[i];
+        i += 1;
+        if in_scan && marker == 0x00 {
+            continue;
+        }
+        if (0xd0..=0xd7).contains(&marker) || marker == 0x01 {
+            continue;
+        }
+        if marker == 0xd9 {
+            return (i == bytes.len())
+                .then_some(())
+                .ok_or(MediaError::MetadataForbidden);
+        }
+        if marker == 0xd8 {
+            return Err(MediaError::InvalidImage);
+        }
+        if i + 2 > bytes.len() {
+            return Err(MediaError::InvalidImage);
+        }
+        let len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
+        if len < 2 {
+            return Err(MediaError::InvalidImage);
+        }
+        let end = i
+            .checked_add(len)
+            .filter(|&end| end <= bytes.len())
+            .ok_or(MediaError::InvalidImage)?;
+        // Only canonical JFIF/Adobe colour headers are allowed. Their lengths and
+        // identifiers are fixed; accepting arbitrary APP0/APP14 payloads would
+        // leave a metadata side channel.
+        if marker == 0xe0 {
+            let payload = &bytes[i + 2..end];
+            let canonical_jfif = payload.len() >= 14
+                && &payload[..5] == b"JFIF\0"
+                && payload.len() == 14 + 3 * payload[12] as usize * payload[13] as usize;
+            if !canonical_jfif {
+                return Err(MediaError::MetadataForbidden);
+            }
+        } else if marker == 0xee {
+            let payload = &bytes[i + 2..end];
+            if payload.len() != 12 || &payload[..5] != b"Adobe" {
+                return Err(MediaError::MetadataForbidden);
+            }
+        } else if (0xe1..=0xed).contains(&marker) || marker == 0xef || marker == 0xfe {
+            return Err(MediaError::MetadataForbidden);
+        }
+        i = end;
+        in_scan = marker == 0xda;
+    }
+    Err(MediaError::InvalidImage)
+}
+
+fn validate_png_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
+    const SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if !bytes.starts_with(SIG) {
+        return Err(MediaError::InvalidImage);
+    }
+    let mut i = SIG.len();
+    let mut saw_iend = false;
+    while i < bytes.len() {
+        if i + 12 > bytes.len() {
+            return Err(MediaError::InvalidImage);
+        }
+        let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+        let kind: [u8; 4] = bytes[i + 4..i + 8].try_into().unwrap();
+        let end = i
+            .checked_add(12)
+            .and_then(|v| v.checked_add(len))
+            .filter(|&v| v <= bytes.len())
+            .ok_or(MediaError::InvalidImage)?;
+        if matches!(&kind, b"eXIf" | b"tEXt" | b"zTXt" | b"iTXt" | b"iCCP") {
+            return Err(MediaError::MetadataForbidden);
+        }
+        // Unknown ancillary chunks are private metadata channels. Keep only
+        // rendering chunks that client encoders may legitimately emit; pHYs is
+        // deliberately excluded because arbitrary values are an identity channel.
+        let ancillary = kind[0] & 0x20 != 0;
+        let known_rendering = matches!(
+            &kind,
+            b"cHRM"
+                | b"gAMA"
+                | b"sBIT"
+                | b"sRGB"
+                | b"bKGD"
+                | b"hIST"
+                | b"tRNS"
+                | b"sPLT"
+                | b"acTL"
+                | b"fcTL"
+                | b"fdAT"
+        );
+        if ancillary && !known_rendering {
+            return Err(MediaError::MetadataForbidden);
+        }
+        i = end;
+        if &kind == b"IEND" {
+            saw_iend = true;
+            break;
+        }
+    }
+    if !saw_iend || i != bytes.len() {
+        return Err(MediaError::MetadataForbidden);
+    }
+    Ok(())
+}
+
+fn validate_webp_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return Err(MediaError::InvalidImage);
+    }
+    let declared = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    if declared.checked_add(8) != Some(bytes.len()) {
+        return Err(MediaError::MetadataForbidden);
+    }
+    let mut i = 12usize;
+    while i < bytes.len() {
+        if i + 8 > bytes.len() {
+            return Err(MediaError::InvalidImage);
+        }
+        let kind: [u8; 4] = bytes[i..i + 4].try_into().unwrap();
+        let len = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().unwrap()) as usize;
+        let payload_start = i + 8;
+        let padded = len.checked_add(len & 1).ok_or(MediaError::InvalidImage)?;
+        i = payload_start
+            .checked_add(padded)
+            .filter(|&v| v <= bytes.len())
+            .ok_or(MediaError::InvalidImage)?;
+        if !matches!(
+            &kind,
+            b"VP8 " | b"VP8L" | b"VP8X" | b"ALPH" | b"ANIM" | b"ANMF"
+        ) {
+            return Err(MediaError::MetadataForbidden);
+        }
+        if &kind == b"VP8X" {
+            let flags = *bytes.get(payload_start).ok_or(MediaError::InvalidImage)?;
+            // ICC, EXIF, and XMP presence flags are metadata even if a malformed
+            // file omits their corresponding chunks.
+            if flags & (0x20 | 0x08 | 0x04) != 0 {
+                return Err(MediaError::MetadataForbidden);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_gif_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
+    if !(bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) || bytes.len() < 13 {
+        return Err(MediaError::InvalidImage);
+    }
+
+    fn skip_sub_blocks(bytes: &[u8], i: &mut usize) -> Result<(), MediaError> {
+        loop {
+            let len = *bytes.get(*i).ok_or(MediaError::InvalidImage)? as usize;
+            *i += 1;
+            if len == 0 {
+                return Ok(());
+            }
+            *i = i
+                .checked_add(len)
+                .filter(|&end| end <= bytes.len())
+                .ok_or(MediaError::InvalidImage)?;
+        }
+    }
+
+    let packed = bytes[10];
+    let mut i = 13usize;
+    if packed & 0x80 != 0 {
+        let table_len = 3usize << ((packed & 0x07) as usize + 1);
+        i = i
+            .checked_add(table_len)
+            .filter(|&end| end <= bytes.len())
+            .ok_or(MediaError::InvalidImage)?;
+    }
+
+    loop {
+        match *bytes.get(i).ok_or(MediaError::InvalidImage)? {
+            0x2c => {
+                // Image descriptor, optional local colour table, LZW code size,
+                // then length-prefixed image-data sub-blocks.
+                if i + 10 > bytes.len() {
+                    return Err(MediaError::InvalidImage);
+                }
+                let image_packed = bytes[i + 9];
+                i += 10;
+                if image_packed & 0x80 != 0 {
+                    let table_len = 3usize << ((image_packed & 0x07) as usize + 1);
+                    i = i
+                        .checked_add(table_len)
+                        .filter(|&end| end <= bytes.len())
+                        .ok_or(MediaError::InvalidImage)?;
+                }
+                i = i
+                    .checked_add(1)
+                    .filter(|&v| v <= bytes.len())
+                    .ok_or(MediaError::InvalidImage)?;
+                skip_sub_blocks(bytes, &mut i)?;
+            }
+            0x21 => {
+                let label = *bytes.get(i + 1).ok_or(MediaError::InvalidImage)?;
+                i += 2;
+                match label {
+                    // Graphic Control Extension carries rendering/animation state,
+                    // not descriptive metadata. Its shape is fixed by the spec.
+                    0xf9 => {
+                        if bytes.get(i) != Some(&4) || i + 6 > bytes.len() || bytes[i + 5] != 0 {
+                            return Err(MediaError::InvalidImage);
+                        }
+                        i += 6;
+                    }
+                    // Preserve only the standard looping application extensions.
+                    // Other application, comment, and plain-text extensions are
+                    // unrestricted metadata channels.
+                    0xff => {
+                        if bytes.get(i) != Some(&11) || i + 12 > bytes.len() {
+                            return Err(MediaError::InvalidImage);
+                        }
+                        let app = &bytes[i + 1..i + 12];
+                        if app != b"NETSCAPE2.0" && app != b"ANIMEXTS1.0" {
+                            return Err(MediaError::MetadataForbidden);
+                        }
+                        i += 12;
+                        skip_sub_blocks(bytes, &mut i)?;
+                    }
+                    _ => return Err(MediaError::MetadataForbidden),
+                }
+            }
+            0x3b => {
+                return (i + 1 == bytes.len())
+                    .then_some(())
+                    .ok_or(MediaError::MetadataForbidden);
+            }
+            _ => return Err(MediaError::InvalidImage),
+        }
+    }
+}
+
+fn validate_mp4_metadata_free(path: &Path) -> Result<(), MediaError> {
+    const MAX_BOXES: usize = 100_000;
+    const EMPTY_FFMPEG_UDTA: &[u8] = &[
+        0, 0, 0, 0x35, b'm', b'e', b't', b'a', 0, 0, 0, 0, 0, 0, 0, 0x21, b'h', b'd', b'l', b'r',
+        0, 0, 0, 0, 0, 0, 0, 0, b'm', b'd', b'i', b'r', b'a', b'p', b'p', b'l', 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 8, b'i', b'l', b's', b't',
+    ];
+    const FORBIDDEN: &[[u8; 4]] = &[
+        *b"meta",
+        *b"ilst",
+        *b"keys",
+        *b"data",
+        *b"uuid",
+        *b"xml ",
+        *b"bxml",
+        *b"loci",
+        *b"\xa9xyz",
+        *b"name",
+        *b"chap",
+    ];
+    const CONTAINERS: &[[u8; 4]] = &[
+        *b"moov", *b"trak", *b"mdia", *b"minf", *b"stbl", *b"edts", *b"dinf", *b"sinf", *b"schi",
+    ];
+    // Constrained H.264/AAC MP4 produced by our client encoders. Unknown boxes
+    // are rejected rather than guessed safe because private boxes can carry GPS.
+    const ALLOWED: &[[u8; 4]] = &[
+        *b"ftyp", *b"moov", *b"mdat", *b"free", *b"skip", *b"wide", *b"trak", *b"mdia", *b"minf",
+        *b"stbl", *b"edts", *b"dinf", *b"sinf", *b"schi", *b"udta", *b"mvhd", *b"tkhd", *b"mdhd",
+        *b"hdlr", *b"vmhd", *b"smhd", *b"dref", *b"url ", *b"urn ", *b"stsd", *b"stts", *b"stss",
+        *b"ctts", *b"stsc", *b"stsz", *b"stco", *b"co64", *b"sgpd", *b"sbgp", *b"elst",
+    ];
+    fn walk(
+        file: &mut std::fs::File,
+        start: u64,
+        end: u64,
+        count: &mut usize,
+    ) -> Result<(), MediaError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut off = start;
+        while off < end {
+            *count += 1;
+            if *count > MAX_BOXES || end - off < 8 {
+                return Err(MediaError::InvalidVideo);
+            }
+            file.seek(SeekFrom::Start(off))
+                .map_err(|e| MediaError::Io(e.to_string()))?;
+            let mut h = [0u8; 8];
+            file.read_exact(&mut h)
+                .map_err(|_| MediaError::InvalidVideo)?;
+            let compact = u32::from_be_bytes(h[..4].try_into().unwrap()) as u64;
+            let kind: [u8; 4] = h[4..8].try_into().unwrap();
+            let (size, header) = if compact == 1 {
+                let mut ext = [0u8; 8];
+                file.read_exact(&mut ext)
+                    .map_err(|_| MediaError::InvalidVideo)?;
+                (u64::from_be_bytes(ext), 16)
+            } else if compact == 0 {
+                (end - off, 8)
+            } else {
+                (compact, 8)
+            };
+            if size < header || off.checked_add(size).filter(|&v| v <= end).is_none() {
+                return Err(MediaError::InvalidVideo);
+            }
+            if FORBIDDEN.contains(&kind) || !ALLOWED.contains(&kind) {
+                return Err(MediaError::MetadataForbidden);
+            }
+            if kind == *b"udta" {
+                if size != header + EMPTY_FFMPEG_UDTA.len() as u64 {
+                    return Err(MediaError::MetadataForbidden);
+                }
+                let mut body = vec![0; EMPTY_FFMPEG_UDTA.len()];
+                file.read_exact(&mut body)
+                    .map_err(|_| MediaError::InvalidVideo)?;
+                if body != EMPTY_FFMPEG_UDTA {
+                    return Err(MediaError::MetadataForbidden);
+                }
+            } else if CONTAINERS.contains(&kind) {
+                walk(file, off + header, off + size, count)?;
+            }
+            off += size;
+        }
+        Ok(())
+    }
+    let mut file = std::fs::File::open(path).map_err(|e| MediaError::Io(e.to_string()))?;
+    let end = file
+        .metadata()
+        .map_err(|e| MediaError::Io(e.to_string()))?
+        .len();
+    let mut count = 0;
+    walk(&mut file, 0, end, &mut count)
+}
+
 /// Map MIME type to file extension.
 pub fn mime_to_ext(mime: &str) -> &'static str {
     match mime {
@@ -444,7 +817,8 @@ mod tests {
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
         0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
         0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
-        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, // IEND chunk
+        0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
     ];
 
     #[test]
@@ -461,6 +835,151 @@ mod tests {
         let result = validate_content(TINY_PNG, &config);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "image/png");
+    }
+
+    fn png_chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        // The policy parser is structural; the image decoder validates CRC later.
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn test_rejects_png_metadata_and_trailing_payload() {
+        let config = test_config();
+        for kind in [
+            b"eXIf", b"tEXt", b"zTXt", b"iTXt", b"iCCP", b"pHYs", b"vpAg",
+        ] {
+            let mut png = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+            png.extend_from_slice(&png_chunk(kind, b"GPS=37.7,-122.4"));
+            png.extend_from_slice(&TINY_PNG[TINY_PNG.len() - 12..]);
+            assert!(
+                matches!(
+                    validate_content(&png, &config),
+                    Err(MediaError::MetadataForbidden)
+                ),
+                "accepted {kind:?}"
+            );
+        }
+        let mut trailing = TINY_PNG.to_vec();
+        trailing.extend_from_slice(b"hidden location");
+        assert!(matches!(
+            validate_content(&trailing, &config),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
+    #[test]
+    fn test_rejects_jpeg_app_metadata_comments_and_trailing_payload() {
+        let config = test_config();
+        for marker in [0xe1, 0xec, 0xed, 0xef, 0xfe] {
+            let mut jpeg = vec![0xff, 0xd8, 0xff, marker, 0x00, 0x08];
+            jpeg.extend_from_slice(b"secret");
+            jpeg.extend_from_slice(&TINY_JPEG[2..]);
+            assert!(
+                matches!(
+                    validate_content(&jpeg, &config),
+                    Err(MediaError::MetadataForbidden)
+                ),
+                "accepted marker {marker:#x}"
+            );
+        }
+        for marker in [0xe0, 0xee] {
+            let mut jpeg = vec![0xff, 0xd8, 0xff, marker, 0x00, 0x08];
+            jpeg.extend_from_slice(b"secret");
+            jpeg.extend_from_slice(&TINY_JPEG[2..]);
+            assert!(matches!(
+                validate_content(&jpeg, &config),
+                Err(MediaError::MetadataForbidden)
+            ));
+        }
+        let mut trailing = TINY_JPEG.to_vec();
+        trailing.extend_from_slice(b"motion photo payload");
+        assert!(matches!(
+            validate_content(&trailing, &config),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
+    #[test]
+    fn test_rejects_webp_metadata_unknown_chunks_and_trailing_payload() {
+        fn webp(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+            let mut body = b"WEBP".to_vec();
+            for (kind, payload) in chunks {
+                body.extend_from_slice(*kind);
+                body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                body.extend_from_slice(payload);
+                if payload.len() % 2 != 0 {
+                    body.push(0);
+                }
+            }
+            let mut out = b"RIFF".to_vec();
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            out.extend_from_slice(&body);
+            out
+        }
+
+        for kind in [b"EXIF", b"XMP ", b"ICCP", b"priv"] {
+            let bytes = webp(&[(kind, b"GPS=37.7,-122.4")]);
+            assert!(matches!(
+                validate_webp_metadata_free(&bytes),
+                Err(MediaError::MetadataForbidden)
+            ));
+        }
+        for flag in [0x20, 0x08, 0x04] {
+            let mut payload = vec![0; 10];
+            payload[0] = flag;
+            let bytes = webp(&[(b"VP8X", &payload)]);
+            assert!(matches!(
+                validate_webp_metadata_free(&bytes),
+                Err(MediaError::MetadataForbidden)
+            ));
+        }
+        let mut trailing = webp(&[(b"VP8 ", b"pixels")]);
+        trailing.extend_from_slice(b"hidden");
+        assert!(matches!(
+            validate_webp_metadata_free(&trailing),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
+    #[test]
+    fn test_rejects_gif_metadata_extensions_and_trailing_payload() {
+        for extension in [
+            &[0x21, 0xfe, 1, b'x', 0][..],
+            &[0x21, 0x01, 0][..],
+            &[
+                0x21, 0xff, 11, b'P', b'R', b'I', b'V', b'A', b'T', b'E', b'A', b'P', b'P', b'0', 0,
+            ][..],
+        ] {
+            let mut gif = TINY_GIF[..TINY_GIF.len() - 1].to_vec();
+            gif.extend_from_slice(extension);
+            gif.push(0x3b);
+            assert!(matches!(
+                validate_gif_metadata_free(&gif),
+                Err(MediaError::MetadataForbidden)
+            ));
+        }
+        let mut trailing = TINY_GIF.to_vec();
+        trailing.extend_from_slice(b"hidden");
+        assert!(matches!(
+            validate_gif_metadata_free(&trailing),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
+    #[test]
+    fn test_generic_file_path_cannot_bypass_media_validation() {
+        let config = test_config();
+        assert!(
+            matches!(validate_file_content(TINY_JPEG, &config), Err(MediaError::DisallowedContentType(m)) if m == "image/jpeg")
+        );
+        assert!(
+            matches!(validate_file_content(MP4_FTYP_MAGIC, &config), Err(MediaError::DisallowedContentType(m)) if m == "video/mp4")
+        );
     }
 
     #[test]
@@ -1200,6 +1719,31 @@ mod tests {
             }
             Err(e) => panic!("expected Ok, got {e:?}"),
         }
+    }
+
+    #[test]
+    fn test_rejects_mp4_metadata_boxes_and_trailing_payload() {
+        let config = test_config();
+        for kind in [
+            b"udta", b"meta", b"ilst", b"keys", b"data", b"uuid", b"xml ", b"\xa9xyz",
+        ] {
+            let mut bytes = build_minimal_mp4_moov_first();
+            bytes.extend_from_slice(&box_wrap(kind, b"GPS=37.7,-122.4"));
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tmp.path(), &bytes).unwrap();
+            assert!(
+                matches!(
+                    validate_video_file(tmp.path(), &config),
+                    Err(MediaError::MetadataForbidden)
+                ),
+                "accepted {kind:?}"
+            );
+        }
+        let mut bytes = build_minimal_mp4_moov_first();
+        bytes.extend_from_slice(b"trailing");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &bytes).unwrap();
+        assert!(validate_video_file(tmp.path(), &config).is_err());
     }
 
     #[test]

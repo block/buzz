@@ -16,6 +16,8 @@ pub enum MediaError {
     ImageTooLarge,
     #[error("invalid image data")]
     InvalidImage,
+    #[error("media contains metadata or a non-canonical metadata channel")]
+    MetadataForbidden,
     #[error("invalid signature")]
     InvalidSignature,
     #[error("invalid auth event kind")]
@@ -146,7 +148,7 @@ impl IntoResponse for MediaError {
             | Self::ResolutionTooHigh
             | Self::MoovNotAtFront
             | Self::InvalidVideo => (StatusCode::BAD_REQUEST, self.to_string()),
-            Self::UnknownContentType | Self::InvalidImage => {
+            Self::UnknownContentType | Self::InvalidImage | Self::MetadataForbidden => {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
             Self::Io(_) | Self::StorageError(_) | Self::Internal => {

@@ -173,6 +173,22 @@ pub(super) fn transcode_to_mp4(
             .arg("-i")
             .arg(source) // OsStr — handles non-UTF-8 paths on Unix
             .args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-map_metadata",
+                "-1",
+                "-map_chapters",
+                "-1",
+                "-sn",
+                "-dn",
+                "-fflags",
+                "+bitexact",
+                "-flags:v",
+                "+bitexact",
+                "-flags:a",
+                "+bitexact",
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -187,6 +203,8 @@ pub(super) fn transcode_to_mp4(
                 "128k",
                 "-movflags",
                 "+faststart",
+                "-metadata",
+                "encoder=",
             ])
             .arg(&output)
             .stdout(std::process::Stdio::null())
@@ -232,7 +250,16 @@ pub(super) fn transcode_heic_to_jpeg(
             .args(["-y", "-loglevel", "error"]) // suppress progress spam — prevents stderr pipe deadlock
             .arg("-i")
             .arg(source) // OsStr — handles non-UTF-8 paths on Unix
-            .args(["-frames:v", "1", "-q:v", "2"])
+            .args([
+                "-map",
+                "0:v:0",
+                "-map_metadata",
+                "-1",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+            ])
             .arg(&output)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped()),
@@ -489,6 +516,48 @@ mod tests {
         assert!(!has_heic_extension(Path::new("photo.jpg")));
         assert!(!has_heic_extension(Path::new("photo.png")));
         assert!(!has_heic_extension(Path::new("noextension")));
+    }
+
+    #[test]
+    fn test_transcode_to_mp4_drops_source_metadata() {
+        let Ok(ffmpeg) = find_ffmpeg() else {
+            eprintln!("skipping metadata round-trip: ffmpeg not found");
+            return;
+        };
+        let source =
+            std::env::temp_dir().join(format!("buzz-metadata-test-{}.mp4", uuid::Uuid::new_v4()));
+        let generated = std::process::Command::new(&ffmpeg)
+            .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=64x64:rate=1")
+            .args([
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-metadata",
+                "location=+37.7-122.4/",
+                "-metadata:s:v:0",
+                "title=private camera stream",
+            ])
+            .arg(&source)
+            .output()
+            .expect("run ffmpeg fixture generation");
+        if !generated.status.success() {
+            eprintln!("skipping metadata round-trip: ffmpeg cannot encode H.264");
+            let _ = std::fs::remove_file(&source);
+            return;
+        }
+
+        let output = transcode_to_mp4(&source, &ffmpeg).expect("transcode fixture");
+        let bytes = std::fs::read(&output).expect("read transcoded video");
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&output);
+        for secret in [b"+37.7-122.4/".as_slice(), b"private camera stream"] {
+            assert!(
+                !bytes.windows(secret.len()).any(|window| window == secret),
+                "source metadata survived transcode"
+            );
+        }
     }
 
     /// Round-trip transcode test, gated on ffmpeg being present so CI without

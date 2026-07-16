@@ -978,58 +978,6 @@ void main() {
     });
   });
 
-  group('_isAlreadyMp4Container', () {
-    // ftyp box: [size(4 bytes)][ftyp(4 bytes)][major_brand(4 bytes)]...
-    Uint8List buildFtypHeader(String brand) {
-      final bytes = Uint8List(32);
-      // Box size = 32
-      bytes[0] = 0;
-      bytes[1] = 0;
-      bytes[2] = 0;
-      bytes[3] = 32;
-      // 'ftyp'
-      bytes[4] = 0x66; // f
-      bytes[5] = 0x74; // t
-      bytes[6] = 0x79; // y
-      bytes[7] = 0x70; // p
-      // Major brand
-      final brandBytes = ascii.encode(brand);
-      for (var i = 0; i < 4 && i < brandBytes.length; i++) {
-        bytes[8 + i] = brandBytes[i];
-      }
-      return bytes;
-    }
-
-    test('returns true for isom brand', () {
-      expect(isAlreadyMp4Container(buildFtypHeader('isom')), isTrue);
-    });
-
-    test('returns true for mp41 brand', () {
-      expect(isAlreadyMp4Container(buildFtypHeader('mp41')), isTrue);
-    });
-
-    test('returns true for mp42 brand', () {
-      expect(isAlreadyMp4Container(buildFtypHeader('mp42')), isTrue);
-    });
-
-    test('returns false for QuickTime qt brand', () {
-      expect(isAlreadyMp4Container(buildFtypHeader('qt  ')), isFalse);
-    });
-
-    test('returns false for too-short header', () {
-      expect(isAlreadyMp4Container(Uint8List(8)), isFalse);
-    });
-
-    test('returns false when no ftyp box', () {
-      final bytes = Uint8List(32);
-      bytes[4] = 0x6D; // m
-      bytes[5] = 0x6F; // o
-      bytes[6] = 0x6F; // o
-      bytes[7] = 0x76; // v
-      expect(isAlreadyMp4Container(bytes), isFalse);
-    });
-  });
-
   group('pickAndUploadVideo', () {
     // Helper: build ftyp header bytes for a given brand.
     Uint8List buildFtypHeader(String brand) {
@@ -1054,7 +1002,7 @@ void main() {
       return (XFile(file.path), file);
     }
 
-    test('uploads MP4 container directly without transcoding', () async {
+    test('rebuilds an existing MP4 container before upload', () async {
       final keychain = nostr.Keys.generate();
       final nsec = keychain.nsec;
       var transcodeCalled = false;
@@ -1083,7 +1031,10 @@ void main() {
           pickGalleryImage: () async => null,
           transcodeVideoToMp4: (path) async {
             transcodeCalled = true;
-            return path;
+            final outDir = await Directory.systemTemp.createTemp('transcode_');
+            final outFile = File('${outDir.path}/out.mp4');
+            await outFile.writeAsBytes(buildFtypHeader('isom'));
+            return outFile.path;
           },
           now: () => DateTime.fromMillisecondsSinceEpoch(1_700_000_000_000),
         );
@@ -1091,7 +1042,7 @@ void main() {
         final descriptor = await service.pickAndUploadVideo();
         expect(descriptor, isNotNull);
         expect(descriptor!.type, 'video/mp4');
-        expect(transcodeCalled, isFalse);
+        expect(transcodeCalled, isTrue);
       } finally {
         await tempFile.parent.delete(recursive: true);
       }
