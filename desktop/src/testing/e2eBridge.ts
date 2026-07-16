@@ -8619,6 +8619,10 @@ export function maybeInstallE2eTauriMocks() {
           },
           activeConfig,
         );
+      case "get_os_idle_seconds":
+        // e2e runs headless with no OS idle API; the presence hook falls back
+        // to in-app activity tracking.
+        return null;
       case "get_git_identity":
         // Matches the "Thomas P" author on a mock snapshot commit so the
         // viewer-identity avatar attribution is exercised in e2e.

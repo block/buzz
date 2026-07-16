@@ -760,6 +760,7 @@ pub fn run() {
             open_project_terminal,
             search_users,
             get_presence,
+            get_os_idle_seconds,
             get_default_relay_url,
             get_legacy_workspace_storage,
             is_shared_identity,
