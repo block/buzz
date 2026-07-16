@@ -1,4 +1,4 @@
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import type * as React from "react";
 import type { InheritedDefault } from "./bakedEnvHelpers";
 import { getPersonaProviderOptions } from "./personaDialogPickers";
 import { Button } from "@/shared/ui/button";
@@ -26,19 +26,20 @@ export function formatAiDefaultsSummary({
 }
 
 export function AgentAiDefaultsNotice({
-  confirmNavigation = false,
+  onEditDefaults,
+  triggerRef,
   explicitModel,
   explicitProvider,
   inheritedModel,
   inheritedProvider,
 }: {
-  confirmNavigation?: boolean;
+  onEditDefaults: () => void;
+  triggerRef?: React.Ref<HTMLButtonElement>;
   explicitModel: string;
   explicitProvider: string;
   inheritedModel: InheritedDefault;
   inheritedProvider: InheritedDefault;
 }) {
-  const { goSettings } = useAppNavigation();
   const inheritsProvider = explicitProvider.trim().length === 0;
   const inheritsModel = explicitModel.trim().length === 0;
 
@@ -82,17 +83,9 @@ export function AgentAiDefaultsNotice({
         </p>
       </div>
       <Button
-        onClick={() => {
-          if (
-            confirmNavigation &&
-            !window.confirm(
-              "Leave this agent without saving? Your changes will be discarded.",
-            )
-          ) {
-            return;
-          }
-          void goSettings("agents");
-        }}
+        onClick={onEditDefaults}
+        ref={triggerRef}
+        data-testid="edit-ai-defaults"
         size="xs"
         type="button"
         variant="link"

@@ -72,6 +72,7 @@ import {
   AgentAiDefaultsNotice,
   formatAiDefaultsSummary,
 } from "./AgentAiDefaults";
+import { AgentAiDefaultsDialog } from "./AgentAiDefaultsDialog";
 import {
   AgentAiConfigurationModeField,
   type AgentAiConfigurationMode,
@@ -125,6 +126,8 @@ export function AgentDefinitionDialog({
   createSubmitBlocked = false,
 }: AgentDefinitionDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
+  const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
+  const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [runtime, setRuntime] = React.useState("");
@@ -916,13 +919,20 @@ export function AgentDefinitionDialog({
 
             {aiConfigurationMode === "defaults" ? (
               <AgentAiDefaultsNotice
-                confirmNavigation
+                onEditDefaults={() => setAiDefaultsOpen(true)}
+                triggerRef={aiDefaultsTriggerRef}
                 explicitModel=""
                 explicitProvider=""
                 inheritedModel={inheritedModelDefault}
                 inheritedProvider={inheritedProviderDefault}
               />
             ) : null}
+
+            <AgentAiDefaultsDialog
+              onOpenChange={setAiDefaultsOpen}
+              open={aiDefaultsOpen}
+              returnFocusRef={aiDefaultsTriggerRef}
+            />
 
             {isCreateMode ? createRunSection : null}
 
