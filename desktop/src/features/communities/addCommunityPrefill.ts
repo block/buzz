@@ -33,7 +33,7 @@ export function onAddCommunityPrefillAvailable(
   return () => availableListeners.delete(listener);
 }
 
-export function useAddCommunityPrefill(): AddCommunityPrefillRequest | null {
+function useAddCommunityPrefill(): AddCommunityPrefillRequest | null {
   return React.useSyncExternalStore(
     (listener) => {
       listeners.add(listener);
@@ -42,4 +42,23 @@ export function useAddCommunityPrefill(): AddCommunityPrefillRequest | null {
     () => currentRequest,
     () => null,
   );
+}
+
+export function useAddCommunityDialogState() {
+  const prefill = useAddCommunityPrefill();
+  const [open, setOpen] = React.useState(false);
+
+  React.useEffect(() => {
+    if (prefill) setOpen(true);
+  }, [prefill]);
+
+  const onOpenChange = React.useCallback(
+    (nextOpen: boolean) => {
+      setOpen(nextOpen);
+      if (!nextOpen && prefill) clearAddCommunityPrefill(prefill.requestId);
+    },
+    [prefill],
+  );
+
+  return { prefill, open, onOpenChange, openDialog: () => setOpen(true) };
 }

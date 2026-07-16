@@ -72,10 +72,7 @@ import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useCommunities } from "@/features/communities/useCommunities";
-import {
-  clearAddCommunityPrefill,
-  useAddCommunityPrefill,
-} from "@/features/communities/addCommunityPrefill";
+import { useAddCommunityDialogState } from "@/features/communities/addCommunityPrefill";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
 import { useFeatureEnabled } from "@/shared/features";
@@ -107,12 +104,7 @@ export function AppShell() {
 
   const communitiesHook = useCommunities();
   const communityRailEnabled = useFeatureEnabled("workspaceRail");
-  const [isAddCommunityOpen, setIsAddCommunityOpen] = React.useState(false);
-  const addCommunityPrefill = useAddCommunityPrefill();
-
-  React.useEffect(() => {
-    if (addCommunityPrefill) setIsAddCommunityOpen(true);
-  }, [addCommunityPrefill]);
+  const addCommunityDialog = useAddCommunityDialogState();
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
   const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
@@ -772,7 +764,7 @@ export function AppShell() {
                       activeCommunityId={
                         communitiesHook.activeCommunity?.id ?? null
                       }
-                      onAddCommunity={() => setIsAddCommunityOpen(true)}
+                      onAddCommunity={addCommunityDialog.openDialog}
                       onRemoveCommunity={communitiesHook.removeCommunity}
                       onSwitchCommunity={handleSwitchCommunity}
                       onUpdateCommunity={communitiesHook.updateCommunity}
@@ -843,8 +835,8 @@ export function AppShell() {
                           errorMessage={channelsErrorMessage}
                           fallbackDisplayName={identityQuery.data?.displayName}
                           homeBadgeCount={homeBadgeCount + dueReminderBadge}
-                          addCommunityPrefill={addCommunityPrefill}
-                          isAddCommunityOpen={isAddCommunityOpen}
+                          addCommunityPrefill={addCommunityDialog.prefill}
+                          isAddCommunityOpen={addCommunityDialog.open}
                           relayConnectionCard={relayConnectionCard}
                           isCreatingChannel={createChannelMutation.isPending}
                           isCreatingForum={createForumMutation.isPending}
@@ -855,17 +847,12 @@ export function AppShell() {
                             const id = communitiesHook.addCommunity(community);
                             handleSwitchCommunity(id);
                           }}
-                          onAddCommunityOpenChange={(open) => {
-                            setIsAddCommunityOpen(open);
-                            if (!open && addCommunityPrefill) {
-                              clearAddCommunityPrefill(
-                                addCommunityPrefill.requestId,
-                              );
-                            }
-                          }}
+                          onAddCommunityOpenChange={
+                            addCommunityDialog.onOpenChange
+                          }
                           onNewMessage={handleOpenNewDm}
                           onCreateChannelOpenChange={setIsCreateChannelOpen}
-                          onOpenAddCommunity={() => setIsAddCommunityOpen(true)}
+                          onOpenAddCommunity={addCommunityDialog.openDialog}
                           onSendFeedback={() => setIsSendFeedbackOpen(true)}
                           onUpdateCommunity={communitiesHook.updateCommunity}
                           onRemoveCommunity={communitiesHook.removeCommunity}
