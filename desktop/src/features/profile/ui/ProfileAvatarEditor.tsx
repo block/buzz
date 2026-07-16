@@ -70,6 +70,7 @@ type ProfileAvatarEditorProps = {
   avatarUrl: string;
   previewName: string;
   onUrlChange: (url: string) => void;
+  visibleModes?: readonly AvatarMode[];
   emojiPickerTheme?: "auto" | "dark" | "light";
   emojiPickerThemeVars?: React.CSSProperties;
   onEmojiAvatarChange?: () => void;
@@ -132,6 +133,7 @@ export function ProfileAvatarEditor({
   modeTabsContainer,
   onAnimatedPreviewActiveChange,
   onAnimatedPreviewCaptionChange,
+  visibleModes = MODE_TAB_ORDER,
 }: ProfileAvatarEditorProps) {
   const { burstEmoji } = useEmojiBurst();
   const shouldReduceMotion = useReducedMotion();
@@ -485,37 +487,29 @@ export function ProfileAvatarEditor({
     >
       <TabsList
         aria-label="Avatar type"
-        className="relative isolate grid h-14 w-full grid-cols-3 overflow-hidden rounded-full bg-muted p-1 text-muted-foreground"
+        className="relative isolate grid h-14 w-full overflow-hidden rounded-full bg-muted p-1 text-muted-foreground"
+        style={{
+          gridTemplateColumns: `repeat(${visibleModes.length}, minmax(0, 1fr))`,
+        }}
       >
         <div
           aria-hidden="true"
           className="absolute bottom-1 left-1 top-1 z-0 rounded-full bg-background shadow transition-transform duration-[250ms] ease-out"
           style={{
-            transform: `translateX(${MODE_TAB_ORDER.indexOf(mode) * 100}%)`,
-            width: "calc((100% - 8px) / 3)",
+            transform: `translateX(${visibleModes.indexOf(mode) * 100}%)`,
+            width: `calc((100% - 8px) / ${visibleModes.length})`,
           }}
         />
-        <TabsTrigger
-          className="relative z-10 h-full rounded-full bg-transparent text-sm font-medium shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
-          disabled={isInputDisabled}
-          value="image"
-        >
-          Image
-        </TabsTrigger>
-        <TabsTrigger
-          className="relative z-10 h-full rounded-full bg-transparent text-sm font-medium shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
-          disabled={isInputDisabled}
-          value="emoji"
-        >
-          Emoji
-        </TabsTrigger>
-        <TabsTrigger
-          className="relative z-10 h-full rounded-full bg-transparent text-sm font-medium shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
-          disabled={isInputDisabled}
-          value="animated"
-        >
-          Animated
-        </TabsTrigger>
+        {visibleModes.map((visibleMode) => (
+          <TabsTrigger
+            className="relative z-10 h-full rounded-full bg-transparent text-sm font-medium capitalize shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+            disabled={isInputDisabled}
+            key={visibleMode}
+            value={visibleMode}
+          >
+            {visibleMode[0].toUpperCase() + visibleMode.slice(1)}
+          </TabsTrigger>
+        ))}
       </TabsList>
     </Tabs>
   );

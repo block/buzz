@@ -719,7 +719,12 @@ test("avatar step reveals preset backgrounds after the first emoji pick", async 
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
 
-  await page.getByRole("tab", { name: "Emoji" }).click();
+  const avatarTypeTabs = page.getByRole("tablist", { name: "Avatar type" });
+  await expect(avatarTypeTabs.getByRole("tab")).toHaveText(["Image", "Emoji"]);
+  await expect(
+    avatarTypeTabs.getByRole("tab", { name: "Animated" }),
+  ).toHaveCount(0);
+  await avatarTypeTabs.getByRole("tab", { name: "Emoji" }).click();
 
   const colorGridShell = page.getByTestId("onboarding-avatar-color-grid-shell");
   await expect(colorGridShell).toHaveAttribute("aria-hidden", "true");
@@ -732,6 +737,18 @@ test("avatar step reveals preset backgrounds after the first emoji pick", async 
     "background-color",
     "rgb(255, 255, 255)",
   );
+
+  await page.getByTestId("onboarding-next").click();
+  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
+  await expect
+    .poll(async () => {
+      const profile = await invokeMockCommand<{ avatar_url: string | null }>(
+        page,
+        "get_profile",
+      );
+      return profile.avatar_url;
+    })
+    .toMatch(/^data:image\/svg\+xml,/);
 });
 
 test("avatar step accepts an avatar URL before completing onboarding", async ({

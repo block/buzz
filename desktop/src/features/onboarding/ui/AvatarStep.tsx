@@ -1,6 +1,5 @@
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
-  type AvatarMode,
   parseEmojiAvatarDataUrl,
   ProfileAvatarEditor,
 } from "@/features/profile/ui/ProfileAvatarEditor";
@@ -271,60 +270,15 @@ export function AvatarStep({
   } = actions;
   const { avatar, isSaving, isUploadingAvatar, name, saveRecovery } = state;
   const [avatarSquishKey, setAvatarSquishKey] = React.useState(0);
-  const [avatarEditorMode, setAvatarEditorMode] =
-    React.useState<AvatarMode>("image");
-  const [animatedPreviewEl, setAnimatedPreviewEl] =
-    React.useState<HTMLDivElement | null>(null);
-  const [isAnimatedPreviewActive, setIsAnimatedPreviewActive] =
-    React.useState(false);
-  const [animatedPreviewCaption, setAnimatedPreviewCaption] = React.useState<
-    string | null
-  >(null);
-  const [pendingAnimatedAvatarUrl, setPendingAnimatedAvatarUrl] =
-    React.useState<string | null>(null);
   const [isCustomColorPickerOpen, setIsCustomColorPickerOpen] =
     React.useState(false);
   const hasAvatarDraft = avatar.draftUrl.trim().length > 0;
   const canSubmit = hasAvatarDraft && !isSaving && !isUploadingAvatar;
-  const isAutoAdvancingAnimatedAvatar = pendingAnimatedAvatarUrl !== null;
-  const shouldHideActionsForAnimatedAvatar =
-    avatarEditorMode === "animated" &&
-    (!hasAvatarDraft || isAutoAdvancingAnimatedAvatar);
-  const areActionsHidden =
-    isCustomColorPickerOpen || shouldHideActionsForAnimatedAvatar;
   const previewName =
     name.draftValue.trim() || name.savedValue.trim() || "Your avatar";
   const animateEmojiAvatarChange = React.useCallback(() => {
     setAvatarSquishKey((key) => key + 1);
   }, []);
-  const handleAnimatedAvatarApply = React.useCallback((url: string) => {
-    setPendingAnimatedAvatarUrl(url);
-  }, []);
-
-  React.useEffect(() => {
-    if (!pendingAnimatedAvatarUrl) {
-      return;
-    }
-    if (avatar.draftUrl !== pendingAnimatedAvatarUrl) {
-      return;
-    }
-    if (saveRecovery.errorMessage) {
-      setPendingAnimatedAvatarUrl(null);
-      return;
-    }
-    if (isSaving || isUploadingAvatar) {
-      return;
-    }
-
-    submit();
-  }, [
-    avatar.draftUrl,
-    isSaving,
-    isUploadingAvatar,
-    pendingAnimatedAvatarUrl,
-    saveRecovery.errorMessage,
-    submit,
-  ]);
 
   return (
     <OnboardingSlideTransition
@@ -336,7 +290,7 @@ export function AvatarStep({
       <motion.div
         className="grid w-full max-w-[1080px] items-start gap-12 lg:grid-cols-[minmax(300px,420px)_minmax(0,500px)] lg:gap-16"
         layout="position"
-        layoutDependency={`${avatarEditorMode}-${isCustomColorPickerOpen}`}
+        layoutDependency={isCustomColorPickerOpen}
         transition={AVATAR_POSITION_MOTION_TRANSITION}
       >
         <div className="flex w-full flex-col items-center text-center lg:items-start lg:text-left">
@@ -350,59 +304,32 @@ export function AvatarStep({
           </div>
 
           <div className="mt-12 grid justify-items-center gap-3 lg:justify-items-start">
-            <div className="relative h-48 w-48">
-              <div
-                className="pointer-events-none absolute inset-0 z-10"
-                data-testid="onboarding-avatar-animated-preview-slot"
-                ref={setAnimatedPreviewEl}
-              />
-              {isAnimatedPreviewActive ? null : (
-                <AvatarPreview
-                  avatarSquishKey={avatarSquishKey}
-                  avatarUrl={avatar.draftUrl}
-                  previewName={previewName}
-                />
-              )}
-            </div>
-
-            <AnimatePresence initial={false}>
-              {animatedPreviewCaption ? (
-                <motion.p
-                  animate={{ opacity: 1, y: 0 }}
-                  className="w-48 text-center text-sm font-medium text-muted-foreground"
-                  exit={{ opacity: 0, y: -4 }}
-                  initial={{ opacity: 0, y: 4 }}
-                  transition={AVATAR_ACTIONS_MOTION_TRANSITION}
-                >
-                  {animatedPreviewCaption}
-                </motion.p>
-              ) : null}
-            </AnimatePresence>
+            <AvatarPreview
+              avatarSquishKey={avatarSquishKey}
+              avatarUrl={avatar.draftUrl}
+              previewName={previewName}
+            />
           </div>
         </div>
 
         <motion.div
           className="w-full"
           layout="position"
-          layoutDependency={`${avatarEditorMode}-${isCustomColorPickerOpen}`}
+          layoutDependency={isCustomColorPickerOpen}
           transition={AVATAR_POSITION_MOTION_TRANSITION}
         >
           <ProfileAvatarEditor
-            animatedPreviewContainer={animatedPreviewEl}
             avatarUrl={avatar.draftUrl}
             disabled={isSaving}
             emojiPickerTheme="auto"
             emojiPickerThemeVars={NEUTRAL_EMOJI_PICKER_THEME_VARS}
-            onAnimatedAvatarApply={handleAnimatedAvatarApply}
-            onAnimatedPreviewActiveChange={setIsAnimatedPreviewActive}
-            onAnimatedPreviewCaptionChange={setAnimatedPreviewCaption}
             onCustomColorPickerOpenChange={setIsCustomColorPickerOpen}
             onEmojiAvatarChange={animateEmojiAvatarChange}
-            onModeChange={setAvatarEditorMode}
             onUploadingChange={onUploadingChange}
             onUrlChange={updateAvatarUrl}
             previewName={previewName}
             testIdPrefix="onboarding-avatar"
+            visibleModes={["image", "emoji"]}
           />
 
           {saveRecovery.errorMessage ? (
@@ -412,7 +339,7 @@ export function AvatarStep({
           <AvatarStepActions
             canSubmit={canSubmit}
             currentStep={currentStep}
-            hidden={areActionsHidden}
+            hidden={isCustomColorPickerOpen}
             isSaving={isSaving}
             isUploadingAvatar={isUploadingAvatar}
             onBack={back}
