@@ -13,6 +13,7 @@ import {
   persistCurrentIdentity,
 } from "@/shared/api/tauriIdentity";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
+import { forceFreshOnboarding } from "@/features/onboarding/devFreshOnboarding";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { AvatarStep } from "./AvatarStep";
@@ -512,6 +513,7 @@ export function OnboardingFlow({
                 }}
                 direction={transitionDirection}
                 state={profileStepState}
+                usesExistingIdentity={forceFreshOnboarding}
               />
             ) : currentPage === "key-import" ? (
               <OnboardingSlideTransition

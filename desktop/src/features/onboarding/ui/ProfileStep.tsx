@@ -22,6 +22,7 @@ type ProfileStepProps = {
   direction: OnboardingTransitionDirection;
   transitionEffect?: OnboardingTransitionEffect;
   state: ProfileStepState;
+  usesExistingIdentity?: boolean;
 };
 
 const ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 2_500;
@@ -190,6 +191,7 @@ export function ProfileStep({
   direction,
   transitionEffect = "line-slide",
   state,
+  usesExistingIdentity = false,
 }: ProfileStepProps) {
   const {
     advanceWithoutSaving,
@@ -287,6 +289,8 @@ export function ProfileStep({
         >
           {isSaving ? (
             <Spinner aria-label="Saving profile" className="h-4 w-4 border-2" />
+          ) : usesExistingIdentity ? (
+            "Continue"
           ) : (
             "Create an identity key"
           )}
@@ -305,16 +309,18 @@ export function ProfileStep({
           </Button>
         ) : null}
 
-        <Button
-          className="text-muted-foreground hover:text-accent-foreground"
-          data-testid="onboarding-import-key"
-          disabled={isSaving}
-          onClick={importExistingKey}
-          type="button"
-          variant="ghost"
-        >
-          I already have a key
-        </Button>
+        {!usesExistingIdentity ? (
+          <Button
+            className="text-muted-foreground hover:text-accent-foreground"
+            data-testid="onboarding-import-key"
+            disabled={isSaving}
+            onClick={importExistingKey}
+            type="button"
+            variant="ghost"
+          >
+            I already have a key
+          </Button>
+        ) : null}
 
         <div className="flex min-h-8 items-center gap-2">
           <div className="flex-1" />
