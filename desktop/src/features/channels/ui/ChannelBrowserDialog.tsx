@@ -1,5 +1,12 @@
 import * as React from "react";
-import { Compass, Search, X, type LucideIcon } from "lucide-react";
+import {
+  ArrowLeft,
+  Compass,
+  Plus,
+  Search,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 
 import type { Channel } from "@/shared/api/types";
 import { ListSortDescending } from "@/shared/ui/icons";
@@ -25,6 +32,16 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+
+import {
+  type CreateChannelInput,
+  useCreateChannelForm,
+} from "@/features/sidebar/lib/useCreateChannelForm";
+import {
+  CREATE_CHANNEL_FORM_ID,
+  CreateChannelFormFields,
+  CreateChannelFormFooter,
+} from "@/features/sidebar/ui/CreateChannelFormFields";
 
 type BrowserTab = "all" | "joined" | "archived";
 type ChannelSort = "alphabetical" | "members";
@@ -63,6 +80,13 @@ type ChannelBrowserDialogProps = {
   onOpenChange: (open: boolean) => void;
   onJoinChannel: (channelId: string) => Promise<void>;
   onSelectChannel: (channelId: string) => void;
+  /**
+   * Create a new channel/forum from within the browser. When provided, the
+   * dialog surfaces a "Create …" affordance (Are.na style) so search and
+   * create live behind a single entry point.
+   */
+  onCreateChannel?: (input: CreateChannelInput) => Promise<void>;
+  isCreatingChannel?: boolean;
 };
 
 export function ChannelBrowserDialog({
@@ -72,6 +96,8 @@ export function ChannelBrowserDialog({
   onOpenChange,
   onJoinChannel,
   onSelectChannel,
+  onCreateChannel,
+  isCreatingChannel = false,
 }: ChannelBrowserDialogProps) {
   const [query, setQuery] = React.useState("");
   const [activeTab, setActiveTab] = React.useState<BrowserTab>("all");
@@ -80,6 +106,8 @@ export function ChannelBrowserDialog({
   const [joiningChannelId, setJoiningChannelId] = React.useState<string | null>(
     null,
   );
+  const [mode, setMode] = React.useState<"browse" | "create">("browse");
+  const [createInitialName, setCreateInitialName] = React.useState("");
   const inputRef = React.useRef<HTMLInputElement>(null);
   const tabListRef = React.useRef<HTMLDivElement>(null);
   const tabTriggerRefs = React.useRef<
@@ -94,13 +122,30 @@ export function ChannelBrowserDialog({
     width: 0,
   });
   const deferredQuery = React.useDeferredValue(query.trim().toLowerCase());
+  const trimmedQuery = query.trim();
 
   const isForumMode = channelTypeFilter === "forum";
-  const browseTitle = isForumMode ? "Browse Forums" : "Browse Channels";
-  const searchPlaceholder = isForumMode
-    ? "Search forums by name or description"
-    : "Search channels by name or description";
+  const canCreate = Boolean(onCreateChannel);
+  const createKind = isForumMode ? "forum" : "stream";
+  const browseTitle = isForumMode ? "Add a forum" : "Add a channel";
+  const searchPlaceholder = canCreate
+    ? isForumMode
+      ? "Search or create a forum"
+      : "Search or create a channel"
+    : isForumMode
+      ? "Search forums by name or description"
+      : "Search channels by name or description";
   const entityLabel = isForumMode ? "forum" : "channel";
+
+  const noopCreate = React.useCallback(async () => {}, []);
+  const createForm = useCreateChannelForm({
+    channelKind: createKind,
+    active: open && mode === "create",
+    initialName: createInitialName,
+    isCreating: isCreatingChannel,
+    onCreate: onCreateChannel ?? noopCreate,
+    onCreated: () => onOpenChange(false),
+  });
 
   const matchingChannels = React.useMemo(() => {
     const filtered = channels.filter(
@@ -157,11 +202,31 @@ export function ChannelBrowserDialog({
 
   const allTabLabel = isForumMode ? "All forums" : "All channels";
 
+  // Whether an exact name match already exists — if so we don't offer to
+  // create a duplicate, mirroring how you'd never make two "#general"s.
+  const hasExactMatch = React.useMemo(
+    () =>
+      channels.some(
+        (channel) =>
+          channel.channelType !== "dm" &&
+          channel.name.toLowerCase() === deferredQuery &&
+          (channelTypeFilter
+            ? channel.channelType === channelTypeFilter
+            : true),
+      ),
+    [channels, channelTypeFilter, deferredQuery],
+  );
+
+  // The pinned create row (Are.na style) appears for any non-empty query that
+  // isn't already an exact channel name — covering both partial-match and
+  // no-match cases, so a dedicated empty-state button would be redundant.
+  const showCreateRow = canCreate && trimmedQuery.length > 0 && !hasExactMatch;
+
   const updateTabIndicator = React.useCallback(() => {
     const list = tabListRef.current;
     const trigger = tabTriggerRefs.current[activeTab];
 
-    if (!open || !list || !trigger) {
+    if (!open || mode !== "browse" || !list || !trigger) {
       return;
     }
 
@@ -176,12 +241,12 @@ export function ChannelBrowserDialog({
         ? current
         : nextIndicator,
     );
-  }, [activeTab, open]);
+  }, [activeTab, mode, open]);
 
   React.useLayoutEffect(() => {
     updateTabIndicator();
 
-    if (!open) {
+    if (!open || mode !== "browse") {
       return;
     }
 
@@ -212,7 +277,7 @@ export function ChannelBrowserDialog({
       window.cancelAnimationFrame(frameId);
       observer.disconnect();
     };
-  }, [open, updateTabIndicator]);
+  }, [mode, open, updateTabIndicator]);
 
   React.useEffect(() => {
     if (!open) {
@@ -221,6 +286,8 @@ export function ChannelBrowserDialog({
       setSort("alphabetical");
       setSelectedIndex(null);
       setJoiningChannelId(null);
+      setMode("browse");
+      setCreateInitialName("");
       return;
     }
   }, [open]);
@@ -252,6 +319,19 @@ export function ChannelBrowserDialog({
     onSelectChannel(channel.id);
   }
 
+  function enterCreateMode(prefillName: string) {
+    setCreateInitialName(prefillName);
+    setMode("create");
+  }
+
+  function exitCreateMode() {
+    setMode("browse");
+    // Return focus to the search field so keyboard users stay oriented.
+    window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+    });
+  }
+
   const selectedItem =
     selectedIndex !== null ? orderedVisibleChannels[selectedIndex] : undefined;
   const emptyTitle =
@@ -264,7 +344,9 @@ export function ChannelBrowserDialog({
           : `No ${entityLabel}s to browse`;
   const emptyDescription =
     deferredQuery.length > 0
-      ? "Try a different name or keyword."
+      ? canCreate
+        ? `No ${entityLabel} by that name yet — create it to get started.`
+        : "Try a different name or keyword."
       : activeTab === "archived"
         ? `Archived ${entityLabel}s you have joined will appear here.`
         : activeTab === "joined"
@@ -281,203 +363,329 @@ export function ChannelBrowserDialog({
         }
         onOpenAutoFocus={(event) => {
           event.preventDefault();
-          inputRef.current?.focus({ preventScroll: true });
+          if (mode === "browse") {
+            inputRef.current?.focus({ preventScroll: true });
+          }
         }}
         showCloseButton={false}
       >
-        <DialogHeader className="space-y-0 pb-5">
-          <div className="flex items-center justify-between gap-4">
-            <DialogTitle>{browseTitle}</DialogTitle>
-            <DialogClose className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus:ring-1 focus:ring-ring">
-              <X className="h-4 w-4" />
-              <span className="sr-only">Close</span>
-            </DialogClose>
-          </div>
-          <div className={MODAL_SEARCH_SHELL_CLASS}>
-            <label
-              className="flex min-w-0 flex-1 cursor-text items-center gap-3"
-              htmlFor="channel-browser-search"
-            >
-              <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
-              <input
-                autoCapitalize="none"
-                autoCorrect="off"
-                className={MODAL_SEARCH_INPUT_CLASS}
-                data-testid="channel-browser-search"
-                id="channel-browser-search"
-                onChange={(event) => {
-                  setQuery(event.target.value);
-                  setSelectedIndex(null);
-                }}
-                onKeyDown={(event) => {
-                  if (
-                    event.key === "ArrowDown" &&
-                    orderedVisibleChannels.length > 0
-                  ) {
-                    event.preventDefault();
-                    setSelectedIndex((current) =>
-                      current === null
-                        ? 0
-                        : Math.min(
-                            current + 1,
-                            orderedVisibleChannels.length - 1,
-                          ),
-                    );
-                    return;
-                  }
-
-                  if (
-                    event.key === "ArrowUp" &&
-                    orderedVisibleChannels.length > 0
-                  ) {
-                    event.preventDefault();
-                    setSelectedIndex((current) =>
-                      current === null
-                        ? orderedVisibleChannels.length - 1
-                        : Math.max(current - 1, 0),
-                    );
-                    return;
-                  }
-
-                  if (
-                    event.key === "Enter" &&
-                    !event.nativeEvent.isComposing &&
-                    orderedVisibleChannels.length > 0
-                  ) {
-                    event.preventDefault();
-                    handleSelect(selectedItem ?? orderedVisibleChannels[0]);
-                  }
-                }}
-                placeholder={searchPlaceholder}
-                ref={inputRef}
-                spellCheck={false}
-                type="text"
-                value={query}
-              />
-            </label>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  aria-label={`Sort ${entityLabel}s: ${
-                    sort === "alphabetical" ? "Alphabetical" : "Most members"
-                  }`}
-                  data-testid="channel-browser-sort"
-                  size="icon-xs"
-                  type="button"
-                  variant="ghost"
+        {mode === "create" ? (
+          <ChannelCreateView
+            entityLabel={entityLabel}
+            form={createForm}
+            onBack={exitCreateMode}
+            onClose={() => onOpenChange(false)}
+          />
+        ) : (
+          <>
+            <DialogHeader className="space-y-0 pb-5">
+              <div className="flex items-center justify-between gap-4">
+                <DialogTitle>{browseTitle}</DialogTitle>
+                <DialogClose className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus:ring-1 focus:ring-ring">
+                  <X className="h-4 w-4" />
+                  <span className="sr-only">Close</span>
+                </DialogClose>
+              </div>
+              <div className={MODAL_SEARCH_SHELL_CLASS}>
+                <label
+                  className="flex min-w-0 flex-1 cursor-text items-center gap-3"
+                  htmlFor="channel-browser-search"
                 >
-                  <ListSortDescending />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuLabel>Sort by</DropdownMenuLabel>
-                <DropdownMenuRadioGroup
+                  <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
+                  <input
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    className={MODAL_SEARCH_INPUT_CLASS}
+                    data-testid="channel-browser-search"
+                    id="channel-browser-search"
+                    onChange={(event) => {
+                      setQuery(event.target.value);
+                      setSelectedIndex(null);
+                    }}
+                    onKeyDown={(event) => {
+                      if (
+                        event.key === "ArrowDown" &&
+                        orderedVisibleChannels.length > 0
+                      ) {
+                        event.preventDefault();
+                        setSelectedIndex((current) =>
+                          current === null
+                            ? 0
+                            : Math.min(
+                                current + 1,
+                                orderedVisibleChannels.length - 1,
+                              ),
+                        );
+                        return;
+                      }
+
+                      if (
+                        event.key === "ArrowUp" &&
+                        orderedVisibleChannels.length > 0
+                      ) {
+                        event.preventDefault();
+                        setSelectedIndex((current) =>
+                          current === null
+                            ? orderedVisibleChannels.length - 1
+                            : Math.max(current - 1, 0),
+                        );
+                        return;
+                      }
+
+                      if (
+                        event.key === "Enter" &&
+                        !event.nativeEvent.isComposing
+                      ) {
+                        // With no result highlighted and a creatable query,
+                        // Enter jumps straight into create — the Are.na flow.
+                        if (
+                          orderedVisibleChannels.length === 0 &&
+                          showCreateRow
+                        ) {
+                          event.preventDefault();
+                          enterCreateMode(trimmedQuery);
+                          return;
+                        }
+
+                        if (orderedVisibleChannels.length > 0) {
+                          event.preventDefault();
+                          handleSelect(
+                            selectedItem ?? orderedVisibleChannels[0],
+                          );
+                        }
+                      }
+                    }}
+                    placeholder={searchPlaceholder}
+                    ref={inputRef}
+                    spellCheck={false}
+                    type="text"
+                    value={query}
+                  />
+                </label>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      aria-label={`Sort ${entityLabel}s: ${
+                        sort === "alphabetical"
+                          ? "Alphabetical"
+                          : "Most members"
+                      }`}
+                      data-testid="channel-browser-sort"
+                      size="icon-xs"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <ListSortDescending />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+                    <DropdownMenuRadioGroup
+                      onValueChange={(value) => {
+                        setSort(value as ChannelSort);
+                        setSelectedIndex(null);
+                      }}
+                      value={sort}
+                    >
+                      {CHANNEL_SORT_OPTIONS.map((option) => (
+                        <DropdownMenuRadioItem
+                          data-testid={`channel-browser-sort-${option.value}`}
+                          key={option.value}
+                          value={option.value}
+                        >
+                          {option.label}
+                        </DropdownMenuRadioItem>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            </DialogHeader>
+
+            <div className="h-[min(60vh,30rem)] overflow-hidden">
+              <div className="flex h-full flex-col">
+                <Tabs
+                  className="shrink-0"
                   onValueChange={(value) => {
-                    setSort(value as ChannelSort);
+                    setActiveTab(value as BrowserTab);
                     setSelectedIndex(null);
                   }}
-                  value={sort}
+                  value={activeTab}
                 >
-                  {CHANNEL_SORT_OPTIONS.map((option) => (
-                    <DropdownMenuRadioItem
-                      data-testid={`channel-browser-sort-${option.value}`}
-                      key={option.value}
-                      value={option.value}
-                    >
-                      {option.label}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </DialogHeader>
-
-        <div className="h-[min(60vh,30rem)] overflow-hidden">
-          <div className="flex h-full flex-col">
-            <Tabs
-              className="shrink-0"
-              onValueChange={(value) => {
-                setActiveTab(value as BrowserTab);
-                setSelectedIndex(null);
-              }}
-              value={activeTab}
-            >
-              <TabsList
-                className="relative h-auto w-full justify-start gap-6 rounded-none border-b border-border/70 bg-transparent p-0 text-muted-foreground"
-                ref={tabListRef}
-              >
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute bottom-[-1px] left-0 h-0.5 w-px origin-left rounded-full bg-foreground opacity-0 transition-[transform,opacity] duration-[180ms] ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none data-[ready=true]:opacity-100"
-                  data-ready={tabIndicator.width > 0}
-                  data-testid="channel-browser-tab-indicator"
-                  style={{
-                    transform: `translate3d(${tabIndicator.left}px, 0, 0) scaleX(${tabIndicator.width})`,
-                  }}
-                />
-                <TabsTrigger
-                  className="rounded-none border-b-2 border-transparent bg-transparent px-0 py-2 text-sm font-medium shadow-none transition-colors duration-150 ease-out data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
-                  ref={(element) => {
-                    tabTriggerRefs.current.all = element;
-                  }}
-                  value="all"
-                >
-                  {allTabLabel}
-                </TabsTrigger>
-                <TabsTrigger
-                  className="rounded-none border-b-2 border-transparent bg-transparent px-0 py-2 text-sm font-medium shadow-none transition-colors duration-150 ease-out data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
-                  ref={(element) => {
-                    tabTriggerRefs.current.joined = element;
-                  }}
-                  value="joined"
-                >
-                  Joined
-                </TabsTrigger>
-                <TabsTrigger
-                  className="rounded-none border-b-2 border-transparent bg-transparent px-0 py-2 text-sm font-medium shadow-none transition-colors duration-150 ease-out data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
-                  ref={(element) => {
-                    tabTriggerRefs.current.archived = element;
-                  }}
-                  value="archived"
-                >
-                  Archived
-                </TabsTrigger>
-              </TabsList>
-            </Tabs>
-
-            <div className="min-h-0 flex-1 overflow-y-auto pb-6 pt-4">
-              {orderedVisibleChannels.length === 0 ? (
-                <BrowseState
-                  description={emptyDescription}
-                  icon={deferredQuery.length > 0 ? Search : Compass}
-                  title={emptyTitle}
-                />
-              ) : (
-                <div className="overflow-hidden rounded-xl border border-border/70 bg-background/70 shadow-xs divide-y divide-border/55">
-                  {orderedVisibleChannels.map((channel, index) => (
-                    <ChannelCard
-                      channel={channel}
-                      isJoining={joiningChannelId === channel.id}
-                      isSelected={index === selectedIndex}
-                      key={channel.id}
-                      onJoin={
-                        !channel.isMember
-                          ? () => {
-                              void handleJoin(channel.id);
-                            }
-                          : undefined
-                      }
-                      onSelect={() => handleSelect(channel)}
+                  <TabsList
+                    className="relative h-auto w-full justify-start gap-6 rounded-none border-b border-border/70 bg-transparent p-0 text-muted-foreground"
+                    ref={tabListRef}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute bottom-[-1px] left-0 h-0.5 w-px origin-left rounded-full bg-foreground opacity-0 transition-[transform,opacity] duration-[180ms] ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none data-[ready=true]:opacity-100"
+                      data-ready={tabIndicator.width > 0}
+                      data-testid="channel-browser-tab-indicator"
+                      style={{
+                        transform: `translate3d(${tabIndicator.left}px, 0, 0) scaleX(${tabIndicator.width})`,
+                      }}
                     />
-                  ))}
+                    <TabsTrigger
+                      className="rounded-none border-b-2 border-transparent bg-transparent px-0 py-2 text-sm font-medium shadow-none transition-colors duration-150 ease-out data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                      ref={(element) => {
+                        tabTriggerRefs.current.all = element;
+                      }}
+                      value="all"
+                    >
+                      {allTabLabel}
+                    </TabsTrigger>
+                    <TabsTrigger
+                      className="rounded-none border-b-2 border-transparent bg-transparent px-0 py-2 text-sm font-medium shadow-none transition-colors duration-150 ease-out data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                      ref={(element) => {
+                        tabTriggerRefs.current.joined = element;
+                      }}
+                      value="joined"
+                    >
+                      Joined
+                    </TabsTrigger>
+                    <TabsTrigger
+                      className="rounded-none border-b-2 border-transparent bg-transparent px-0 py-2 text-sm font-medium shadow-none transition-colors duration-150 ease-out data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                      ref={(element) => {
+                        tabTriggerRefs.current.archived = element;
+                      }}
+                      value="archived"
+                    >
+                      Archived
+                    </TabsTrigger>
+                  </TabsList>
+                </Tabs>
+
+                <div className="min-h-0 flex-1 overflow-y-auto pb-6 pt-4">
+                  {showCreateRow ? (
+                    <div className="mb-3">
+                      <CreateChannelRow
+                        entityLabel={entityLabel}
+                        onClick={() => enterCreateMode(trimmedQuery)}
+                        query={trimmedQuery}
+                      />
+                    </div>
+                  ) : null}
+
+                  {orderedVisibleChannels.length === 0 ? (
+                    <BrowseState
+                      description={emptyDescription}
+                      icon={deferredQuery.length > 0 ? Search : Compass}
+                      title={emptyTitle}
+                    />
+                  ) : (
+                    <div className="overflow-hidden rounded-xl border border-border/70 bg-background/70 shadow-xs divide-y divide-border/55">
+                      {orderedVisibleChannels.map((channel, index) => (
+                        <ChannelCard
+                          channel={channel}
+                          isJoining={joiningChannelId === channel.id}
+                          isSelected={index === selectedIndex}
+                          key={channel.id}
+                          onJoin={
+                            !channel.isMember
+                              ? () => {
+                                  void handleJoin(channel.id);
+                                }
+                              : undefined
+                          }
+                          onSelect={() => handleSelect(channel)}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
-          </div>
-        </div>
+          </>
+        )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function CreateChannelRow({
+  entityLabel,
+  onClick,
+  query,
+}: {
+  entityLabel: string;
+  onClick: () => void;
+  query: string;
+}) {
+  return (
+    <button
+      className="flex w-full items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-4 py-3 text-left transition-colors duration-150 ease-out hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+      data-testid="channel-browser-create-row"
+      onClick={onClick}
+      type="button"
+    >
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <Plus className="h-4 w-4" />
+      </span>
+      <span className="min-w-0 text-sm">
+        <span className="font-medium text-foreground">
+          Create {entityLabel}{" "}
+        </span>
+        <span className="font-semibold text-foreground">“{query}”</span>
+      </span>
+    </button>
+  );
+}
+
+function ChannelCreateView({
+  entityLabel,
+  form,
+  onBack,
+  onClose,
+}: {
+  entityLabel: string;
+  form: ReturnType<typeof useCreateChannelForm>;
+  onBack: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="flex h-[min(72vh,38rem)] flex-col">
+      <DialogHeader className="space-y-0 pb-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-2">
+            <button
+              aria-label="Back to search"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus:ring-1 focus:ring-ring"
+              data-testid="channel-browser-create-back"
+              onClick={onBack}
+              type="button"
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </button>
+            <DialogTitle className="truncate">
+              {`New ${entityLabel}`}
+            </DialogTitle>
+          </div>
+          <button
+            aria-label="Close"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus:ring-1 focus:ring-ring"
+            onClick={onClose}
+            type="button"
+          >
+            <X className="h-4 w-4" />
+            <span className="sr-only">Close</span>
+          </button>
+        </div>
+      </DialogHeader>
+
+      <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+        <form
+          className="space-y-5"
+          id={CREATE_CHANNEL_FORM_ID}
+          onSubmit={form.handleSubmit}
+        >
+          <CreateChannelFormFields form={form} />
+        </form>
+      </div>
+
+      <div className="shrink-0 pb-6 pt-4">
+        <CreateChannelFormFooter form={form} />
+      </div>
+    </div>
   );
 }
 
