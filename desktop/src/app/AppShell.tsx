@@ -857,9 +857,9 @@ export function AppShell() {
                           }}
                           onAddCommunityOpenChange={(open) => {
                             setIsAddCommunityOpen(open);
-                            if (!open) {
+                            if (!open && addCommunityPrefill) {
                               clearAddCommunityPrefill(
-                                addCommunityPrefill?.requestId,
+                                addCommunityPrefill.requestId,
                               );
                             }
                           }}

@@ -125,6 +125,13 @@ test("add-community deep link opens one editable prefill and acknowledges the qu
   await expect(
     page.getByRole("heading", { name: "Add Community" }),
   ).toHaveCount(0);
+
+  await page.getByTestId("sidebar-profile-avatar-button").click();
+  await page.getByTestId("community-switcher").click();
+  await page.getByRole("menuitem", { name: "Add Community" }).click();
+  await expect(relayInput).toHaveValue("");
+  await expect(nameInput).toHaveValue("");
+
   const acknowledgements = await page.evaluate(() =>
     (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
       (entry) => entry.command === "acknowledge_pending_community_deep_link",

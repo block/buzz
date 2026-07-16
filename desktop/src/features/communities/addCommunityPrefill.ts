@@ -17,9 +17,8 @@ export function requestAddCommunityPrefill(
   return true;
 }
 
-export function clearAddCommunityPrefill(requestId?: string): void {
-  if (!currentRequest || (requestId && currentRequest.requestId !== requestId))
-    return;
+export function clearAddCommunityPrefill(requestId: string): void {
+  if (!currentRequest || currentRequest.requestId !== requestId) return;
   currentRequest = null;
   for (const listener of listeners) listener();
 }
