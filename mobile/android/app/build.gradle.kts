@@ -19,6 +19,28 @@ val uploadSigningValues =
 val missingUploadSigningValues = uploadSigningValues.filterValues { it.isNullOrBlank() }.keys
 val hasUploadSigning = missingUploadSigningValues.isEmpty()
 
+// Release signing modes:
+//   - "upload-keystore" (default): sign with the CI-vended upload keystore;
+//     release builds fail loudly when any credential is missing.
+//   - "external": deliberately produce an UNSIGNED release bundle for a
+//     pipeline that signs through the central APK Signer service (Cashkite,
+//     BOT-1234). No keystore material may be present in this mode.
+val releaseSigningMode =
+    providers.environmentVariable("BUZZ_ANDROID_RELEASE_SIGNING").orNull ?: "upload-keystore"
+val externalReleaseSigning = releaseSigningMode == "external"
+if (releaseSigningMode !in setOf("upload-keystore", "external")) {
+    throw GradleException(
+        "BUZZ_ANDROID_RELEASE_SIGNING must be \"upload-keystore\" or \"external\", got: " +
+            releaseSigningMode,
+    )
+}
+if (externalReleaseSigning && uploadSigningValues.values.any { !it.isNullOrBlank() }) {
+    throw GradleException(
+        "BUZZ_ANDROID_RELEASE_SIGNING=external must not be combined with " +
+            "BUZZ_ANDROID_UPLOAD_* credentials; unset one of them.",
+    )
+}
+
 android {
     namespace = "xyz.block.buzz.mobile"
     compileSdk = flutter.compileSdkVersion
@@ -67,10 +89,17 @@ gradle.taskGraph.whenReady {
     val buildsRelease = allTasks.any { task ->
         task.project == project && task.name in setOf("assembleRelease", "bundleRelease")
     }
+    if (buildsRelease && externalReleaseSigning) {
+        // External signing: the unsigned bundle goes to the central APK
+        // Signer. All keystore checks are intentionally skipped; the
+        // guard above already rejected any BUZZ_ANDROID_UPLOAD_* values.
+        return@whenReady
+    }
     if (buildsRelease && !hasUploadSigning) {
         throw GradleException(
             "Release builds require Android upload signing credentials. Missing: " +
-                missingUploadSigningValues.sorted().joinToString(", "),
+                missingUploadSigningValues.sorted().joinToString(", ") +
+                ". For central APK Signer pipelines set BUZZ_ANDROID_RELEASE_SIGNING=external.",
         )
     }
     if (buildsRelease) {

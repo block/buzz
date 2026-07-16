@@ -116,6 +116,10 @@ export type MockAgentMemoryListing = {
 
 type MockBridgeOptions = {
   acpRuntimesCatalog?: Record<string, unknown>[];
+  acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
+  connectAcpRuntimeResult?: { launched: boolean };
+  connectAcpRuntimeDelayMs?: number;
+  connectAcpRuntimeError?: string;
   /** Override the result returned by the `install_acp_runtime` mock command.
    *  Pass `{ success: false, steps: [...] }` to exercise error/Retry states. */
   installAcpRuntimeResult?: {

@@ -41,6 +41,10 @@ import {
   KIND_USER_STATUS,
 } from "@/shared/constants/kinds";
 import type {
+  RawAcpAuthMethodsResult,
+  RawConnectAcpRuntimeResult,
+} from "@/shared/api/tauriAgentAuth";
+import type {
   RawAcpRuntimeCatalogEntry,
   RawInstallRuntimeResult,
 } from "@/shared/api/tauri";
@@ -118,6 +122,10 @@ type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
+    acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
+    connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
+    connectAcpRuntimeDelayMs?: number;
+    connectAcpRuntimeError?: string;
     activePersonaIds?: string[];
     installAcpRuntimeResult?: RawInstallRuntimeResult;
     /** Sequence of results for successive `install_acp_runtime` calls.
@@ -6580,6 +6588,33 @@ async function handleDiscoverAcpRuntimes(
   ];
 }
 
+async function handleDiscoverAcpAuthMethods(
+  args: { runtimeId?: string },
+  config: E2eConfig | undefined,
+): Promise<RawAcpAuthMethodsResult> {
+  const runtimeId = args.runtimeId ?? "";
+  const configured = config?.mock?.acpAuthMethods?.[runtimeId];
+  if (configured) {
+    return configured;
+  }
+  return { methods: [] };
+}
+
+async function handleConnectAcpRuntime(
+  _args: { request?: { runtimeId?: string; methodId?: string } },
+  config: E2eConfig | undefined,
+): Promise<RawConnectAcpRuntimeResult> {
+  const error = config?.mock?.connectAcpRuntimeError;
+  if (error) {
+    throw new Error(error);
+  }
+  const delayMs = config?.mock?.connectAcpRuntimeDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+  return config?.mock?.connectAcpRuntimeResult ?? { launched: true };
+}
+
 // Per-page install call counter. Reset each test run because this module is
 // re-evaluated via addInitScript, so the counter starts at 0 for every test.
 let installCallCount = 0;
@@ -8930,6 +8965,16 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayHttpUrl(activeConfig);
       case "discover_acp_providers":
         return handleDiscoverAcpRuntimes(activeConfig);
+      case "discover_acp_auth_methods":
+        return handleDiscoverAcpAuthMethods(
+          payload as { runtimeId?: string },
+          activeConfig,
+        );
+      case "connect_acp_runtime":
+        return handleConnectAcpRuntime(
+          payload as { request?: { runtimeId?: string; methodId?: string } },
+          activeConfig,
+        );
       case "install_acp_runtime":
         return handleInstallAcpRuntime(
           payload as { runtimeId?: string },
