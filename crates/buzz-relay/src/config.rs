@@ -815,6 +815,10 @@ mod tests {
             "require_media_get_auth should default to false for staged client rollout"
         );
         assert!(
+            config.join_policy.is_none(),
+            "join_policy should default to None so policy prompts and acceptance receipts are opt-in"
+        );
+        assert!(
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
