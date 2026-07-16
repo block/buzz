@@ -16,8 +16,8 @@ test("supported conversation hosts opt into explicit audience contexts", async (
     ],
   );
 
-  assert.match(channelPane, /audienceContext=\{\{ type: "timeline" \}\}/);
-  assert.match(newMessage, /audienceContext=\{\{ type: "timeline" \}\}/);
+  assert.doesNotMatch(channelPane, /audienceContext=/);
+  assert.doesNotMatch(newMessage, /audienceContext=/);
   assert.match(
     threadPanel,
     /type: "thread"[\s\S]*threadRootId: threadHead\.id/,
@@ -43,5 +43,5 @@ test("composer never derives audience context from draft keys", async () => {
   const composer = await source("./MessageComposer.tsx");
 
   assert.doesNotMatch(composer, /draftKey\?\.startsWith\("thread:"\)/);
-  assert.match(composer, /audienceContext\?\.type === "thread"/);
+  assert.match(composer, /audienceContext\?\.threadRootId/);
 });

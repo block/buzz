@@ -631,6 +631,11 @@ jobs:
           done
           cat /tmp/buzz-relay.log
           exit 1
+      - name: Invite claim security tests
+        run: |
+          cargo test --profile ci -p buzz-relay claim_ -- --ignored --nocapture
+        env:
+          DATABASE_URL: postgres://buzz:buzz_dev@localhost:5432/buzz
       - name: NIP-ER reminder e2e
         # Feature e2e for NIP-ER (Event Reminders, kind:30300): write-path
         # validation, author-only read filtering, and scheduler delivery against
@@ -673,7 +678,9 @@ jobs:
           chmod +x ./target/ci/buzz-relay ./target/ci/git-credential-nostr
           ./scripts/start-relay-for-tests.sh --no-build
       - name: Relay E2E tests
-        run: cargo test -p buzz-test-client --test e2e_persona --test e2e_nostr_interop -- --ignored --nocapture
+        run: |
+          cargo test -p buzz-test-client --test e2e_persona --test e2e_nostr_interop -- --ignored --nocapture
+          cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture
         env:
           RELAY_URL: ws://localhost:3000
           GIT_CREDENTIAL_NOSTR_BIN: ${{ github.workspace }}/target/ci/git-credential-nostr

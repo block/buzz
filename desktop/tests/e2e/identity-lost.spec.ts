@@ -26,7 +26,9 @@ test("normal first launch uses the already-persisted identity", async ({
   await page.getByRole("button", { name: "Get started" }).click();
 
   await expect(
-    page.getByRole("heading", { name: "Save your private key" }),
+    page.getByRole("heading", {
+      name: "Your unique identity has been created",
+    }),
   ).toBeVisible();
   await expect(gate).toHaveCSS(
     "background-image",

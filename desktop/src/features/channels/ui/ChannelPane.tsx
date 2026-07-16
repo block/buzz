@@ -757,7 +757,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                   <WelcomeComposerBanner state={welcomeComposerBannerState} />
                 ) : null}
                 <MessageComposer
-                  audienceContext={{ type: "timeline" }}
                   channelId={activeChannel?.id ?? null}
                   channelName={activeChannel?.name ?? "channel"}
                   channelType={activeChannel?.channelType ?? null}

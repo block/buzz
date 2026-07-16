@@ -202,6 +202,11 @@ const overrides = new Map([
   // mapper. This is the existing API boundary; split remains queued.
   // team-instructions-first-class: createManagedAgent Tauri bridge threads the
   // new teamId input through to the backend (+1 line).
+  // #1970 merge-skew: add-community deep-link wiring (+4) was based before
+  // #1923 (+3) landed, so PR CI was green while the merged total crossed the
+  // cap (996 -> 1003). Pre-existing red on main, not one PR's feature debt.
+  // Queued to split with the rest of this list.
+  ["src/app/AppShell.tsx", 1003],
   ["src/shared/api/tauri.ts", 1305],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
   // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).

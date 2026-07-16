@@ -17,11 +17,16 @@ function escapeRegExp(str: string): string {
  *
  * Exported separately so it can be unit-tested without importing React.
  */
-export function hasMention(text: string, name: string): boolean {
+export function getMentionOffset(text: string, name: string): number | null {
   const escaped = escapeRegExp(name);
   const pattern = new RegExp(
-    `(?:^|\\s|\\(|[*_]{1,3}|\\|\\|)@${escaped}(?=\\|\\||[\\s,;.!?:)\\]}*_]|$)`,
+    `(^|\\s|\\(|[*_]{1,3}|\\|\\|)(@${escaped})(?=\\|\\||[\\s,;.!?:)\\]}*_]|$)`,
     "i",
   );
-  return pattern.test(text);
+  const match = pattern.exec(text);
+  return match ? match.index + match[1].length : null;
+}
+
+export function hasMention(text: string, name: string): boolean {
+  return getMentionOffset(text, name) !== null;
 }

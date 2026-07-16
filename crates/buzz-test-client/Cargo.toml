@@ -33,6 +33,7 @@ base64 = "0.22"
 hex = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+sqlx = { workspace = true }
 chrono = { workspace = true }
 s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
 buzz-sdk = { workspace = true }
