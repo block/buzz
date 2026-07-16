@@ -25,9 +25,9 @@ type PersistentAgentAudienceScopeInput = {
 };
 
 function normalizePubkeys(pubkeys: Iterable<string>): string[] {
-  return [...new Set([...pubkeys].map((pubkey) => pubkey.trim().toLowerCase()))]
-    .filter((pubkey) => /^[0-9a-f]{64}$/.test(pubkey))
-    .sort();
+  return [
+    ...new Set([...pubkeys].map((pubkey) => pubkey.trim().toLowerCase())),
+  ].filter((pubkey) => /^[0-9a-f]{64}$/.test(pubkey));
 }
 
 function readEnabled(): boolean {

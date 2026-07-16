@@ -149,6 +149,21 @@ test("invalid, duplicate, and differently-cased pubkeys normalize", async () => 
   assert.deepEqual(savedAudiences(), { [scope]: [agentA] });
 });
 
+test("new recipients retain explicit mention order", async () => {
+  const store = await loadStore(9);
+  const scope = `${ownerA}:channel-a:timeline`;
+  store.setPersistentAgentAudienceEnabled(true);
+
+  store.promotePersistentAgentAudience({
+    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
+    scope,
+    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
+    explicitAgentPubkeys: [agentB, agentA],
+  });
+
+  assert.deepEqual(savedAudiences(), { [scope]: [agentB, agentA] });
+});
+
 test("first new-message send resolves its destination after capturing generation", async () => {
   const store = await loadStore(7);
   const capturedGeneration = store.getPersistentAgentAudienceGeneration();

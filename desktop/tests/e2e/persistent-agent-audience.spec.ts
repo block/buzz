@@ -53,13 +53,12 @@ async function installAudienceFixtures(page: Page) {
 test("persistent agents restore through the native inline mention UI", async ({
   page,
 }) => {
-  await seedAudience(page, [AGENT_A, AGENT_B]);
+  await seedAudience(page, [AGENT_B, AGENT_A]);
   await installAudienceFixtures(page);
   await openGeneral(page);
 
   const input = page.getByTestId("message-input");
-  await expect(input).toContainText("@Morgarita");
-  await expect(input).toContainText("@Vogue");
+  await expect(input).toHaveText("@Vogue @Morgarita ");
   await expect(page.getByText("Talking to", { exact: true })).toHaveCount(0);
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(2);
 
