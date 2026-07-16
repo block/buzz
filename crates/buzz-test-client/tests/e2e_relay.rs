@@ -39,6 +39,27 @@ fn relay_http_url() -> String {
         .to_string()
 }
 
+/// Query the HTTP bridge's pure kind:0 people-directory path.
+async fn query_people(search: &str, requester_pubkey: &str) -> Vec<serde_json::Value> {
+    let response = reqwest::Client::new()
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", requester_pubkey)
+        .json(&serde_json::json!([{
+            "kinds": [0],
+            "search": search,
+            "limit": 20,
+        }]))
+        .send()
+        .await
+        .expect("query people directory");
+    assert!(
+        response.status().is_success(),
+        "people-directory query failed: {}",
+        response.status()
+    );
+    response.json().await.expect("people-directory JSON")
+}
+
 /// Create a real channel via a signed kind:9007 event submitted to POST /events.
 async fn create_test_channel(keys: &Keys) -> String {
     let client = reqwest::Client::new();
@@ -856,6 +877,56 @@ async fn test_kind0_nip05_sync() {
     assert!(
         nip05_body2["names"][&unique_name].is_null(),
         "NIP-05 should not resolve after handle was cleared"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// A deleted kind:0 must not be reconstructed from stale denormalized user fields.
+#[tokio::test]
+#[ignore]
+async fn test_people_search_does_not_resurrect_deleted_kind0() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let pubkey_hex = keys.public_key().to_hex();
+    let unique_name = format!("deleted-profile-{}", uuid::Uuid::new_v4().simple());
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let profile = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({ "display_name": unique_name }).to_string(),
+    )
+    .sign_with_keys(&keys)
+    .expect("sign profile");
+    let profile_id = profile.id.to_hex();
+    let published = client.send_event(profile).await.expect("publish profile");
+    assert!(
+        published.accepted,
+        "profile rejected: {}",
+        published.message
+    );
+
+    let before = query_people(&unique_name, &pubkey_hex).await;
+    assert!(
+        before.iter().any(|event| event["pubkey"] == pubkey_hex),
+        "published profile should be returned by people search"
+    );
+
+    let deletion = EventBuilder::new(Kind::EventDeletion, "")
+        .tags([Tag::parse(["e", &profile_id]).expect("deletion e tag")])
+        .sign_with_keys(&keys)
+        .expect("sign deletion");
+    let deleted = client.send_event(deletion).await.expect("delete profile");
+    assert!(
+        deleted.accepted,
+        "profile deletion rejected: {}",
+        deleted.message
+    );
+
+    let after = query_people(&unique_name, &pubkey_hex).await;
+    assert!(
+        after.iter().all(|event| event["pubkey"] != pubkey_hex),
+        "deleted profile must not be synthesized from stale users fields"
     );
 
     client.disconnect().await.expect("disconnect");

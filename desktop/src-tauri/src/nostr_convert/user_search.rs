@@ -164,6 +164,7 @@ fn match_score(q: &str, display_name: &str, nip05: &str, pubkey_hex: &str) -> u3
     const NIP05_PREFIX: u32 = 600;
     const NIP05_CONTAINS: u32 = 500;
     const PUBKEY_PREFIX: u32 = 400;
+    const PUBKEY_CONTAINS: u32 = 300;
 
     let score_field = |field: &str, exact: u32, prefix: u32, contains: u32| -> u32 {
         if field.is_empty() {
@@ -186,11 +187,7 @@ fn match_score(q: &str, display_name: &str, nip05: &str, pubkey_hex: &str) -> u3
         DISPLAY_CONTAINS,
     );
     let nip05_score = score_field(nip05, NIP05_EXACT, NIP05_PREFIX, NIP05_CONTAINS);
-    let pubkey_score = if !pubkey_hex.is_empty() && pubkey_hex.starts_with(q) {
-        PUBKEY_PREFIX
-    } else {
-        0
-    };
+    let pubkey_score = score_field(pubkey_hex, PUBKEY_PREFIX, PUBKEY_PREFIX, PUBKEY_CONTAINS);
 
     display_score.max(nip05_score).max(pubkey_score)
 }
@@ -318,6 +315,19 @@ mod tests {
         );
         let r = rank_user_search_results(&[e], "alice", 10);
         assert!(r.users.is_empty());
+    }
+
+    #[test]
+    fn rank_matches_mid_string_pubkey_hex() {
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        let needle = &pubkey[8..16];
+        let e = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Bob"}"#)
+            .sign_with_keys(&keys)
+            .unwrap();
+        let r = rank_user_search_results(&[e], needle, 10);
+        assert_eq!(r.users.len(), 1);
+        assert_eq!(r.users[0].pubkey, pubkey);
     }
 
     #[test]

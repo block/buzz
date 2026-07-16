@@ -1263,8 +1263,191 @@ fn search_hit_accepted(
     true
 }
 
+/// True when this filter is a pure people-directory search: only kind:0, no
+/// authors / time / tag constraints. Those queries should hit the `users`
+/// table (display name, NIP-05 handle, pubkey hex) rather than FTS over kind:0
+/// JSON content — FTS never indexes the author pubkey, so searching by hex
+/// always returned zero results and aliases only matched when they happened to
+/// appear as whole tokens inside the content blob.
+fn is_people_directory_search(filter: &nostr::Filter) -> bool {
+    let Some(kinds) = filter.kinds.as_ref() else {
+        return false;
+    };
+    if kinds.len() != 1 || kinds.iter().next().map(|k| k.as_u16()) != Some(0) {
+        return false;
+    }
+    if filter.authors.as_ref().is_some_and(|a| !a.is_empty()) {
+        return false;
+    }
+    if filter.ids.as_ref().is_some_and(|i| !i.is_empty()) {
+        return false;
+    }
+    if filter.since.is_some() || filter.until.is_some() {
+        return false;
+    }
+    // Any single-letter tag constraint means this is not a directory listing.
+    if !filter.generic_tags.is_empty() {
+        return false;
+    }
+    true
+}
+
+/// Build a synthetic kind:0 profile event from a `users` row so existing
+/// desktop/mobile parsers (`user_search_result_from_event`, mobile
+/// `DirectoryUser`) keep working without a new response shape.
+///
+/// The event is **not** re-signed as the subject — HTTP bridge clients
+/// deserialize without verifying (see desktop `query_relay` / mobile
+/// fetchHistory). The `pubkey` field must be the subject so typeahead
+/// ranking and add-member target the right identity. Id/sig are
+/// deterministic placeholders derived from the subject pubkey.
+fn synthetic_kind0_from_user(user: &buzz_db::user::UserSearchProfile) -> Option<nostr::Event> {
+    if user.pubkey.len() != 32 {
+        return None;
+    }
+
+    let mut content = serde_json::Map::new();
+    if let Some(name) = user
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        content.insert("display_name".to_string(), Value::String(name.to_string()));
+        content.insert("name".to_string(), Value::String(name.to_string()));
+    }
+    if let Some(picture) = user
+        .avatar_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        content.insert("picture".to_string(), Value::String(picture.to_string()));
+    }
+    if let Some(nip05) = user
+        .nip05_handle
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        content.insert("nip05".to_string(), Value::String(nip05.to_string()));
+    }
+
+    // Deterministic 32-byte id/sig placeholders so clients can dedupe and
+    // deserialize. Not cryptographically meaningful — never submitted.
+    let mut id_bytes = [0u8; 32];
+    id_bytes[0] = 0x5a; // marker: synthetic people-directory row
+    id_bytes[1..].copy_from_slice(&user.pubkey[..31]);
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(&user.pubkey);
+    sig_bytes[32..].copy_from_slice(&user.pubkey);
+
+    let event_json = serde_json::json!({
+        "id": hex::encode(id_bytes),
+        "pubkey": hex::encode(&user.pubkey),
+        "created_at": 0,
+        "kind": 0,
+        "tags": [],
+        "content": Value::Object(content).to_string(),
+        "sig": hex::encode(sig_bytes),
+    });
+
+    serde_json::from_value(event_json).ok()
+}
+
+/// People-directory path: search the `users` table and return synthetic kind:0
+/// events. Prefer real stored kind:0 events when present so NIP-OA auth tags
+/// (agent ownership) survive; fall back to the synthetic event otherwise.
+async fn handle_people_directory_search(
+    state: &AppState,
+    tenant: &buzz_core::tenant::TenantContext,
+    search_text: &str,
+    limit: u32,
+    page: u32,
+    seen_ids: &mut std::collections::HashSet<[u8; 32]>,
+    events: &mut Vec<Value>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let offset = page.saturating_sub(1).saturating_mul(limit);
+    let rows = state
+        .db
+        .search_users(tenant.community(), search_text, limit, offset)
+        .await
+        .map_err(|e| internal_error(&format!("people directory search error: {e}")))?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    // Prefer real kind:0 events when they exist so agent auth tags remain.
+    let authors: Vec<Vec<u8>> = rows.iter().map(|u| u.pubkey.clone()).collect();
+    let mut query = buzz_db::event::EventQuery::for_community(tenant.community());
+    query.kinds = Some(vec![0]);
+    query.authors = Some(authors);
+    query.global_only = true;
+    // One latest profile per author is enough; pull a bit of headroom.
+    query.limit = Some((rows.len() as i64).saturating_mul(2).max(limit as i64));
+
+    let stored = state
+        .db
+        .query_events(&query)
+        .await
+        .map_err(|e| internal_error(&format!("people directory profile fetch error: {e}")))?;
+
+    // Keep the newest kind:0 per author.
+    let mut latest_by_author: std::collections::HashMap<Vec<u8>, &buzz_core::StoredEvent> =
+        std::collections::HashMap::new();
+    for se in &stored {
+        let key = se.event.pubkey.to_bytes().to_vec();
+        match latest_by_author.get(&key) {
+            Some(prev) if prev.event.created_at >= se.event.created_at => {}
+            _ => {
+                latest_by_author.insert(key, se);
+            }
+        }
+    }
+
+    for user in &rows {
+        if let Some(se) = latest_by_author.get(&user.pubkey) {
+            let id = se.event.id.to_bytes();
+            if !seen_ids.insert(id) {
+                continue;
+            }
+            if let Ok(v) = serde_json::to_value(&se.event) {
+                events.push(v);
+            }
+            continue;
+        }
+
+        // A user with kind:0 history but no live stored profile deleted it.
+        // Do not resurrect the soft-deleted fields still cached in `users`.
+        // Users who never published kind:0 remain eligible for synthesis.
+        if user.has_metadata_history {
+            continue;
+        }
+
+        // No stored kind:0 — synthesize from the users-table row so pubkey /
+        // alias / display_name search still surfaces the person.
+        let Some(event) = synthetic_kind0_from_user(user) else {
+            continue;
+        };
+        let id = event.id.to_bytes();
+        if !seen_ids.insert(id) {
+            continue;
+        }
+        if let Ok(v) = serde_json::to_value(&event) {
+            events.push(v);
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle search filters by routing to Postgres FTS, then fetching full events
 /// from DB. Supports a bridge-only `page` extension over the FTS result set.
+///
+/// Pure kind:0 people-directory filters take a dedicated path through the
+/// `users` table so display name / NIP-05 / pubkey-hex typeahead works even
+/// when the author has no searchable kind:0 content blob.
 async fn handle_bridge_search(
     state: &AppState,
     raw_filters: &[Value],
@@ -1298,6 +1481,23 @@ async fn handle_bridge_search(
 
         let limit = filter.limit.unwrap_or(100).min(500) as u32;
         if limit == 0 {
+            continue;
+        }
+
+        // People directory (member picker / DM / @mention / topbar people):
+        // only kind:0, no other NIP-01 constraints. Route to the users table
+        // so pubkey hex and aliases resolve even without a content FTS hit.
+        if is_people_directory_search(filter) {
+            handle_people_directory_search(
+                state,
+                tenant,
+                &search_text,
+                limit,
+                search_page,
+                &mut seen_ids,
+                &mut events,
+            )
+            .await?;
             continue;
         }
 
@@ -2847,5 +3047,39 @@ mod tests {
             search_hit_accepted(&filter, &stored, &[], &viewer),
             "owner must still receive their own snapshot"
         );
+    }
+
+    #[test]
+    fn people_directory_search_detects_pure_kind0() {
+        let pure = nostr::Filter::new().kind(Kind::Metadata).search("alice");
+        assert!(is_people_directory_search(&pure));
+
+        let with_author = nostr::Filter::new()
+            .kind(Kind::Metadata)
+            .author(Keys::generate().public_key())
+            .search("alice");
+        assert!(!is_people_directory_search(&with_author));
+
+        let messages = nostr::Filter::new().kind(Kind::Custom(9)).search("alice");
+        assert!(!is_people_directory_search(&messages));
+    }
+
+    #[test]
+    fn synthetic_kind0_uses_subject_pubkey_and_profile_fields() {
+        let pubkey = Keys::generate().public_key().to_bytes().to_vec();
+        let user = buzz_db::user::UserSearchProfile {
+            pubkey: pubkey.clone(),
+            display_name: Some("Alice".into()),
+            avatar_url: Some("https://example.com/a.png".into()),
+            nip05_handle: Some("alice@example.com".into()),
+            has_metadata_history: false,
+        };
+        let event = synthetic_kind0_from_user(&user).expect("synthetic event");
+        assert_eq!(event.kind, Kind::Metadata);
+        assert_eq!(event.pubkey.to_bytes().to_vec(), pubkey);
+        let content: Value = serde_json::from_str(&event.content).expect("json content");
+        assert_eq!(content["display_name"], "Alice");
+        assert_eq!(content["nip05"], "alice@example.com");
+        assert_eq!(content["picture"], "https://example.com/a.png");
     }
 }

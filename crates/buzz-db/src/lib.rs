@@ -1629,8 +1629,9 @@ impl Db {
         community_id: CommunityId,
         query: &str,
         limit: u32,
+        offset: u32,
     ) -> Result<Vec<user::UserSearchProfile>> {
-        user::search_users(&self.pool, community_id, query, limit).await
+        user::search_users(&self.pool, community_id, query, limit, offset).await
     }
 
     /// Atomically set agent owner — only if no owner is currently assigned.
