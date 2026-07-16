@@ -4,10 +4,7 @@ import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
-import {
-  seedActiveIdentity,
-  passThroughBackupStep,
-} from "../helpers/onboarding";
+import { seedActiveIdentity } from "../helpers/onboarding";
 
 const BLANK_TYLER_IDENTITY = {
   ...TEST_IDENTITIES.tyler,
@@ -25,7 +22,6 @@ test("avatar step always shows Skip for now button without an error", async ({
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
 
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
 
@@ -43,20 +39,20 @@ test("avatar step always shows Skip for now button without an error", async ({
   });
 });
 
-test("avatar step skip button routes to theme step", async ({ page }) => {
+test("avatar step skip button completes community profile setup", async ({
+  page,
+}) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
   await page.goto("/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
 
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page.getByTestId("onboarding-skip").click();
 
-  // Skip routes to theme (advanceWithoutSaving → showThemePage).
-  await expect(page.getByTestId("onboarding-page-theme")).toBeVisible();
+  await expect(page.getByTestId("onboarding-gate")).not.toBeVisible();
 });
 
 test("avatar Next button still requires an avatar to be chosen", async ({
@@ -68,7 +64,6 @@ test("avatar Next button still requires an avatar to be chosen", async ({
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
 
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
 
@@ -118,18 +113,18 @@ test("import-key path skips backup and goes directly to avatar", async ({
   await expect(page.getByTestId("onboarding-page-backup")).not.toBeVisible();
 });
 
-test("fresh path Back from avatar returns to backup", async ({ page }) => {
+test("Back from the community avatar step returns to profile", async ({
+  page,
+}) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
   await page.goto("/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
 
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page.getByTestId("onboarding-back").click();
 
-  // On the fresh-key path, Back from avatar goes to backup.
-  await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
+  await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
 });

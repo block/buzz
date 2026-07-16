@@ -35,7 +35,8 @@ import { SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   type RepoSourceHeaderControls,
-  RepoSourceToggle,
+  RepoSourceDropdown,
+  RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
 
@@ -718,6 +719,7 @@ export function RepositoryFilesPanel({
     return (
       <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
         <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
+          <RepoSourceDropdown controls={sourceControls} />
           <RepositoryBranchDropdown
             branch={sourceControls.branch}
             branchOptions={sourceControls.branchOptions}
@@ -725,7 +727,7 @@ export function RepositoryFilesPanel({
             onBranchChange={sourceControls.onBranchChange}
           />
           <div className="ml-auto flex shrink-0 items-center">
-            <RepoSourceToggle controls={sourceControls} />
+            <RepoSyncActionButton controls={sourceControls} />
           </div>
         </div>
         <div className="p-4 text-sm text-muted-foreground">{stateMessage}</div>
@@ -749,12 +751,15 @@ export function RepositoryFilesPanel({
     <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
       <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
         {sourceControls ? (
-          <RepositoryBranchDropdown
-            branch={sourceControls.branch}
-            branchOptions={sourceControls.branchOptions}
-            compact
-            onBranchChange={sourceControls.onBranchChange}
-          />
+          <>
+            <RepoSourceDropdown controls={sourceControls} />
+            <RepositoryBranchDropdown
+              branch={sourceControls.branch}
+              branchOptions={sourceControls.branchOptions}
+              compact
+              onBranchChange={sourceControls.onBranchChange}
+            />
+          </>
         ) : (
           <BreadcrumbButton onClick={() => setCurrentPath("")}>
             Files
@@ -781,7 +786,7 @@ export function RepositoryFilesPanel({
         })}
         {sourceControls ? (
           <div className="ml-auto flex shrink-0 items-center">
-            <RepoSourceToggle controls={sourceControls} />
+            <RepoSyncActionButton controls={sourceControls} />
           </div>
         ) : null}
       </div>

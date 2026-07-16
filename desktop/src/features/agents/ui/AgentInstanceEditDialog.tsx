@@ -78,6 +78,8 @@ import {
 } from "./bakedEnvHelpers";
 import { getProviderApiKeyEnvVar } from "./personaDialogPickers";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
+import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
+import { AgentAiDefaultsDialog } from "./AgentAiDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -110,6 +112,8 @@ export function AgentInstanceEditDialog({
   const runtimes = runtimesQuery.data ?? [];
 
   const [name, setName] = React.useState(agent.name);
+  const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
+  const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [relayUrl, setRelayUrl] = React.useState(agent.relayUrl);
   const [acpCommand, setAcpCommand] = React.useState(agent.acpCommand);
   const [agentCommand, setAgentCommand] = React.useState(agent.agentCommand);
@@ -356,7 +360,6 @@ export function AgentInstanceEditDialog({
   );
 
   const {
-    advancedInheritedSummary,
     globalConfig,
     inheritedDefaults: {
       provider: inheritedProviderDefault,
@@ -1087,6 +1090,21 @@ export function AgentInstanceEditDialog({
               </p>
             </div>
 
+            <AgentAiDefaultsNotice
+              onEditDefaults={() => setAiDefaultsOpen(true)}
+              triggerRef={aiDefaultsTriggerRef}
+              explicitModel={inheritedSubmission.model ?? ""}
+              explicitProvider={inheritedSubmission.provider ?? ""}
+              inheritedModel={inheritedModelDefault}
+              inheritedProvider={inheritedProviderDefault}
+            />
+
+            <AgentAiDefaultsDialog
+              onOpenChange={setAiDefaultsOpen}
+              open={aiDefaultsOpen}
+              returnFocusRef={aiDefaultsTriggerRef}
+            />
+
             {/* Advanced settings */}
             <div className="space-y-3">
               <button
@@ -1103,12 +1121,6 @@ export function AgentInstanceEditDialog({
                   )}
                 />
               </button>
-              {!showAdvancedFields && advancedInheritedSummary ? (
-                <p className="text-xs text-muted-foreground">
-                  {advancedInheritedSummary}
-                </p>
-              ) : null}
-
               <AnimatePresence initial={false}>
                 {showAdvancedFields ? (
                   <motion.div

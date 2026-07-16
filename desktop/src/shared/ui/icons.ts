@@ -8,3 +8,9 @@ export const HashSearch = createLucideIcon("hash-search", [
   ["path", { d: "m21 21-1.9-1.9", key: "1g2n9r" }],
   ["circle", { cx: "17", cy: "17", r: "3", key: "18b49y" }],
 ]);
+
+export const ListSortDescending = createLucideIcon("list-sort-descending", [
+  ["path", { d: "M15 12H3", key: "1d0spu" }],
+  ["path", { d: "M3 5h18", key: "d7x3do" }],
+  ["path", { d: "M9 19H3", key: "11jz4a" }],
+]);

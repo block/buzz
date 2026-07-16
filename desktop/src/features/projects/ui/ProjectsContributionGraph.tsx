@@ -4,16 +4,41 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 const WEEK_COUNT = 26;
 const DAYS_PER_WEEK = 7;
 
-// Intensity ramp shared by the cells and the "Less … More" legend.
-// Grayscale on the theme's foreground token: the most active cells are
-// near-black in light mode and near-white in dark mode.
+// Intensity ramp shared by the cells and the legend dots.
+// Tints of the theme's primary token: the most active cells are fully
+// saturated primary, quieter days fade toward the muted background.
 const LEVEL_CLASSES = [
-  "bg-muted/60 dark:bg-muted/40",
-  "bg-foreground/25",
-  "bg-foreground/50",
-  "bg-foreground/75",
-  "bg-foreground",
+  "bg-muted/40 dark:bg-muted/30",
+  "bg-primary/25",
+  "bg-primary/50",
+  "bg-primary/75",
+  "bg-primary",
 ];
+
+// Descriptors matching the thresholds in `levelFor`.
+const LEVEL_LABELS = [
+  "No activity",
+  "1–2 events",
+  "3–5 events",
+  "6–9 events",
+  "10+ events",
+];
+
+/** Activity intensity legend shared with the contribution graph header. */
+export function ProjectsContributionLegend() {
+  return (
+    <div className="flex items-center gap-1.5">
+      {LEVEL_CLASSES.map((levelClass, level) => (
+        <Tooltip key={levelClass}>
+          <TooltipTrigger asChild>
+            <span className={cn("h-2.5 w-2.5 rounded", levelClass)} />
+          </TooltipTrigger>
+          <TooltipContent>{LEVEL_LABELS[level]}</TooltipContent>
+        </Tooltip>
+      ))}
+    </div>
+  );
+}
 
 function dayKeyOf(date: Date) {
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
@@ -46,13 +71,17 @@ function buildWeeks(today: Date) {
   );
 }
 
+// Minimum columns between labels so adjacent months never overlap.
+const MIN_LABEL_GAP = 3;
+
 function monthLabels(weeks: Date[][]) {
+  let lastLabeledIndex = -MIN_LABEL_GAP;
   return weeks.map((week, index) => {
-    if (index === 0) return "";
-    const month = week[0].getMonth();
-    return month !== weeks[index - 1][0].getMonth()
-      ? week[0].toLocaleDateString(undefined, { month: "short" })
-      : "";
+    const isNewMonth =
+      index === 0 || week[0].getMonth() !== weeks[index - 1][0].getMonth();
+    if (!isNewMonth || index - lastLabeledIndex < MIN_LABEL_GAP) return "";
+    lastLabeledIndex = index;
+    return week[0].toLocaleDateString(undefined, { month: "short" });
   });
 }
 
@@ -72,15 +101,6 @@ export function ProjectsContributionGraph({
   const labels = monthLabels(weeks);
   const gridTemplateColumns = `repeat(${weeks.length}, minmax(0, 1fr))`;
   const todayKey = dayKeyOf(today);
-
-  let totalContributions = 0;
-  for (const week of weeks) {
-    for (const day of week) {
-      const key = dayKeyOf(day);
-      if (key > todayKey) continue;
-      totalContributions += activityByDay[key] ?? 0;
-    }
-  }
 
   return (
     <div className={cn("space-y-2", className)}>
@@ -104,7 +124,13 @@ export function ProjectsContributionGraph({
           week.map((day) => {
             const key = dayKeyOf(day);
             if (key > todayKey) {
-              return <span aria-hidden className="aspect-square" key={key} />;
+              return (
+                <span
+                  aria-hidden
+                  className="aspect-square rounded-[22%] border border-border/40 dark:border-border/30"
+                  key={key}
+                />
+              );
             }
             const count = activityByDay[key] ?? 0;
             const dateLabel = day.toLocaleDateString(undefined, {
@@ -116,7 +142,7 @@ export function ProjectsContributionGraph({
                 <TooltipTrigger asChild>
                   <span
                     className={cn(
-                      "aspect-square w-full rounded-[3px]",
+                      "aspect-square w-full rounded-[22%]",
                       LEVEL_CLASSES[levelFor(count)],
                     )}
                   />
@@ -130,22 +156,6 @@ export function ProjectsContributionGraph({
             );
           }),
         )}
-      </div>
-      <div className="flex items-center justify-between gap-2 pt-1">
-        <p className="text-xs text-muted-foreground">
-          {totalContributions} {totalContributions === 1 ? "event" : "events"}{" "}
-          in the last 6 months
-        </p>
-        <div className="flex items-center gap-1.5 text-2xs text-muted-foreground">
-          Less
-          {LEVEL_CLASSES.map((levelClass) => (
-            <span
-              className={cn("h-2.5 w-2.5 rounded-[3px]", levelClass)}
-              key={levelClass}
-            />
-          ))}
-          More
-        </div>
       </div>
     </div>
   );

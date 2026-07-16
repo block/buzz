@@ -1,24 +1,22 @@
 import { expect, test } from "@playwright/test";
-import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
-import { seedActiveIdentity } from "../helpers/onboarding";
 
-const BLANK_TYLER_IDENTITY = {
-  ...TEST_IDENTITIES.tyler,
-  username: "",
-};
+async function enterMachineBackup(page: import("@playwright/test").Page) {
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Get started" }).click();
+}
 
 const SHOTS = "test-results/screenshots-onboarding";
 
 test("backup step appears on fresh-key path after profile submit", async ({
   page,
 }) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await page.getByTestId("onboarding-next").click();
+  await enterMachineBackup(page);
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(
@@ -27,12 +25,7 @@ test("backup step appears on fresh-key path after profile submit", async ({
 });
 
 test("backup step shows masked nsec from mock bridge", async ({ page }) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await page.getByTestId("onboarding-next").click();
+  await enterMachineBackup(page);
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   const nsecDisplay = page.getByTestId("nsec-value");
@@ -65,12 +58,7 @@ test("backup step shows masked nsec from mock bridge", async ({ page }) => {
 test("backup step Next is disabled until checkbox is checked", async ({
   page,
 }) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await page.getByTestId("onboarding-next").click();
+  await enterMachineBackup(page);
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("nsec-value")).toBeVisible();
@@ -83,34 +71,28 @@ test("backup step Next is disabled until checkbox is checked", async ({
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
 });
 
-test("backup step advances to avatar on Next click", async ({ page }) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await page.getByTestId("onboarding-next").click();
+test("backup step advances to machine setup on Next click", async ({
+  page,
+}) => {
+  await enterMachineBackup(page);
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("nsec-value")).toBeVisible();
   await page.getByTestId("backup-acknowledge").check();
   await page.getByTestId("onboarding-next").click();
 
-  await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });
 
-test("backup step back button returns to profile", async ({ page }) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await page.getByTestId("onboarding-next").click();
+test("backup step back button returns to machine identity choice", async ({
+  page,
+}) => {
+  await enterMachineBackup(page);
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await page.getByTestId("onboarding-back").click();
 
-  await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
 });
 
 // ---------------------------------------------------------------------------
@@ -120,16 +102,13 @@ test("backup step back button returns to profile", async ({ page }) => {
 test("backup step shows error banner and retry button when get_nsec fails", async ({
   page,
 }) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
     { nsecError: "Keychain locked" },
-    { skipOnboardingSeed: true },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await page.getByTestId("onboarding-next").click();
+  await page.getByRole("button", { name: "Get started" }).click();
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("backup-load-error")).toBeVisible();
@@ -138,25 +117,22 @@ test("backup step shows error banner and retry button when get_nsec fails", asyn
   await expect(page.getByTestId("onboarding-next")).toBeDisabled();
   await expect(page.getByTestId("backup-skip")).toBeVisible();
 
-  // Skip for now still advances to avatar.
+  // Skip for now still advances to machine setup.
   await page.getByTestId("backup-skip").click();
-  await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });
 
 test("backup step retry succeeds and shows key after initial failure", async ({
   page,
 }) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   // First call fails, second succeeds (sequenced via nsecErrors).
   await installMockBridge(
     page,
     { nsecErrors: ["Keychain locked", null] },
-    { skipOnboardingSeed: true },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await page.getByTestId("onboarding-next").click();
+  await page.getByRole("button", { name: "Get started" }).click();
 
   await expect(page.getByTestId("backup-load-error")).toBeVisible();
 

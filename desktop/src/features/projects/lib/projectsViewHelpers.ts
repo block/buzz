@@ -90,6 +90,34 @@ export function pluralize(
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+/**
+ * Flatten Markdown source into a clean single-line-friendly plain-text string
+ * for compact previews (activity feed, list excerpts). This is intentionally
+ * lightweight — it strips the common syntax that would otherwise leak as raw
+ * characters (`##`, `**`, backticks, links) rather than rendering rich
+ * Markdown, which is inappropriate inside a clamped one/two-line preview.
+ */
+export function markdownToPlainText(input: string): string {
+  return (
+    input
+      // Fenced code blocks: drop the fences, keep the inner code text.
+      .replace(/```[^\n]*\n?/g, "")
+      .replace(/```/g, "")
+      // Images `![alt](url)` -> alt text.
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+      // Links `[text](url)` -> text.
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+      // Line-leading markers: headings, blockquotes, list bullets/numbers.
+      .replace(/^[ \t]{0,3}(?:#{1,6}|>|[-*+]|\d+[.)])[ \t]+/gm, "")
+      // Emphasis: bold/italic/strikethrough — keep the inner text.
+      .replace(/(\*\*|__)(.+?)\1/g, "$2")
+      .replace(/([*_])(.+?)\1/g, "$2")
+      .replace(/~~(.+?)~~/g, "$1")
+      // Inline code — keep the inner text.
+      .replace(/`([^`]+)`/g, "$1")
+  );
+}
+
 export function formatCreatedDate(createdAt: number) {
   return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
     month: "short",
@@ -209,7 +237,9 @@ export function getProjectUpdatedAt(
   project: Project,
   summary: ProjectActivitySummary | undefined,
 ) {
-  return summary?.updatedAt ?? project.createdAt;
+  // A summary with no recorded activity has `updatedAt: 0` — fall back to
+  // the announcement's creation time rather than rendering the Unix epoch.
+  return summary?.updatedAt || project.createdAt;
 }
 
 export function isProjectMine(

@@ -36,6 +36,22 @@ export function mergePresenceUpdate(
   return { ...old, [pubkey]: status };
 }
 
+// Away means "human not at the machine" (Slack/Discord semantics), never
+// "Buzz is not the focused window". OS-wide idle is authoritative when the
+// platform exposes it; otherwise fall back to in-app activity.
+export const PRESENCE_IDLE_TIMEOUT_MS = 10 * 60_000;
+
+export function resolveAutomaticPresenceStatus(
+  osIdleSeconds: number | null,
+  lastActivityAt: number,
+  now: number,
+): PresenceStatus {
+  if (osIdleSeconds !== null) {
+    return osIdleSeconds * 1000 >= PRESENCE_IDLE_TIMEOUT_MS ? "away" : "online";
+  }
+  return now - lastActivityAt >= PRESENCE_IDLE_TIMEOUT_MS ? "away" : "online";
+}
+
 export function getPresenceLabel(status: PresenceStatus) {
   switch (status) {
     case "online":

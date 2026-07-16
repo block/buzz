@@ -12,6 +12,11 @@ import { getRelayHttpUrl, signRelayEvent } from "@/shared/api/tauri";
 
 const NIP98_KIND = 27235;
 
+// Bound invite requests so an unreachable relay surfaces as an error in the
+// invite-loading UI within seconds instead of hanging for the OS-level
+// connect timeout (a minute or more on macOS).
+const INVITE_REQUEST_TIMEOUT_MS = 15_000;
+
 export type MintedInvite = {
   code: string;
   expiresAt: number;
@@ -78,6 +83,7 @@ async function invitePost<T>(
       "Content-Type": "application/json",
     },
     body,
+    signal: AbortSignal.timeout(INVITE_REQUEST_TIMEOUT_MS),
   });
   const json = (await response.json().catch(() => ({}))) as Record<
     string,

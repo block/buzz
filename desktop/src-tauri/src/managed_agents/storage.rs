@@ -384,7 +384,7 @@ fn persist_agent_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRec
 /// after the service-name change.
 #[cfg(debug_assertions)]
 pub fn migrate_agent_keys_to_dev_service(app: &tauri::AppHandle) {
-    if !cfg!(feature = "system-keyring") {
+    if !cfg!(feature = "system-keyring") || keyring_service() != "buzz-desktop-dev" {
         return;
     }
 

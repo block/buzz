@@ -1,109 +1,55 @@
 /**
- * Tests for the onboarding step-count and routing logic that was added for the
- * key-backup feature. These are pure-logic tests — no React rendering needed.
+ * Tests for the onboarding step-count logic and the BackupStep gating helper
+ * (BackupStep now runs in the machine onboarding flow). These are pure-logic
+ * tests — no React rendering needed.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import { backupNextDisabled } from "./BackupStep.tsx";
 
-// Mirrors the FRESH_STEPS / IMPORT_STEPS arrays in OnboardingFlow.tsx.
-// key-import is normalised to "profile" before the indexOf lookup.
-const FRESH_STEPS = ["profile", "backup", "avatar", "theme", "setup"];
-const IMPORT_STEPS = ["profile", "avatar", "theme", "setup"];
-const STEP_OFFSET = 2;
+// Mirrors the activeSteps array in OnboardingFlow.tsx. The relay-scoped flow
+// owns only the community profile: profile → avatar. key-import is normalised
+// to "profile" before the indexOf lookup.
+const ACTIVE_STEPS = ["profile", "avatar"];
+const STEP_OFFSET = 1;
 
 /**
- * Mirrors the currentStep derivation in OnboardingFlow.tsx.
- * Fresh path: profile(2) → backup(3) → avatar(4) → theme(5) → setup(6)
- * Imported path: profile(2) → avatar(3) → theme(4) → setup(5)
+ * Mirrors the currentStep derivation in OnboardingFlow.tsx:
+ * profile(1) → avatar(2).
  */
-function computeCurrentStep(page, identityWasImported) {
-  const steps = identityWasImported ? IMPORT_STEPS : FRESH_STEPS;
+function computeCurrentStep(page) {
   const normalizedPage = page === "key-import" ? "profile" : page;
-  const idx = steps.indexOf(normalizedPage);
+  const idx = ACTIVE_STEPS.indexOf(normalizedPage);
   return idx >= 0 ? idx + STEP_OFFSET : STEP_OFFSET;
 }
 
-function computeTotalSteps(identityWasImported) {
-  const steps = identityWasImported ? IMPORT_STEPS : FRESH_STEPS;
-  return steps.length + 1;
+function computeTotalSteps() {
+  return ACTIVE_STEPS.length;
 }
 
 // ---------------------------------------------------------------------------
-// Total step count
+// Step count and numbering
 // ---------------------------------------------------------------------------
 
-test("totalSteps_is_5_when_identity_was_imported", () => {
-  assert.equal(computeTotalSteps(true), 5);
+test("totalSteps_is_2", () => {
+  assert.equal(computeTotalSteps(), 2);
 });
 
-test("totalSteps_is_6_on_fresh_key_path", () => {
-  assert.equal(computeTotalSteps(false), 6);
+test("currentStep_profile_is_1", () => {
+  assert.equal(computeCurrentStep("profile"), 1);
 });
 
-// ---------------------------------------------------------------------------
-// Step numbers — fresh path (6 steps)
-// ---------------------------------------------------------------------------
-
-test("currentStep_profile_is_2_on_fresh_path", () => {
-  assert.equal(computeCurrentStep("profile", false), 2);
+test("currentStep_key_import_is_1", () => {
+  assert.equal(computeCurrentStep("key-import"), 1);
 });
 
-test("currentStep_key_import_is_2_on_fresh_path", () => {
-  assert.equal(computeCurrentStep("key-import", false), 2);
+test("currentStep_avatar_is_2", () => {
+  assert.equal(computeCurrentStep("avatar"), 2);
 });
 
-test("currentStep_backup_is_3_on_fresh_path", () => {
-  assert.equal(computeCurrentStep("backup", false), 3);
-});
-
-test("currentStep_avatar_is_4_on_fresh_path", () => {
-  assert.equal(computeCurrentStep("avatar", false), 4);
-});
-
-test("currentStep_theme_is_5_on_fresh_path", () => {
-  assert.equal(computeCurrentStep("theme", false), 5);
-});
-
-test("currentStep_setup_is_6_on_fresh_path", () => {
-  assert.equal(computeCurrentStep("setup", false), 6);
-});
-
-// ---------------------------------------------------------------------------
-// Step numbers — imported key path (5 steps)
-// ---------------------------------------------------------------------------
-
-test("currentStep_profile_is_2_on_imported_path", () => {
-  assert.equal(computeCurrentStep("profile", true), 2);
-});
-
-test("currentStep_avatar_is_3_on_imported_path", () => {
-  assert.equal(computeCurrentStep("avatar", true), 3);
-});
-
-test("currentStep_theme_is_4_on_imported_path", () => {
-  assert.equal(computeCurrentStep("theme", true), 4);
-});
-
-test("currentStep_setup_is_5_on_imported_path", () => {
-  assert.equal(computeCurrentStep("setup", true), 5);
-});
-
-// ---------------------------------------------------------------------------
-// Routing: profile submit goes to backup (fresh) or avatar (imported)
-// ---------------------------------------------------------------------------
-
-test("profile_submit_routes_to_backup_on_fresh_path", () => {
-  const identityWasImported = false;
-  const nextPage = identityWasImported ? "avatar" : "backup";
-  assert.equal(nextPage, "backup");
-});
-
-test("profile_submit_routes_to_avatar_on_imported_path", () => {
-  const identityWasImported = true;
-  const nextPage = identityWasImported ? "avatar" : "backup";
-  assert.equal(nextPage, "avatar");
+test("currentStep_falls_back_to_1_for_pages_outside_the_step_list", () => {
+  assert.equal(computeCurrentStep("membership-denied"), 1);
 });
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@ import type {
   ProjectLocalRepository,
   ProjectLocalRepoSnapshot,
   ProjectRepoDiff,
+  ProjectRepoPullResult,
   ProjectRepoPushResult,
   ProjectRepoSnapshot,
   ProjectRepoSyncStatus,
@@ -75,10 +76,17 @@ type RawProjectRepoSyncStatus = {
   has_untracked_files: boolean;
   can_push: boolean;
   push_block_reason: string | null;
+  can_pull: boolean;
+  pull_block_reason: string | null;
 };
 
 type RawProjectRepoPushResult = {
   pushed: boolean;
+  message: string;
+};
+
+type RawProjectRepoPullResult = {
+  pulled: boolean;
   message: string;
 };
 
@@ -271,6 +279,8 @@ function fromRawProjectRepoSyncStatus(
     hasUntrackedFiles: status.has_untracked_files,
     canPush: status.can_push,
     pushBlockReason: status.push_block_reason,
+    canPull: status.can_pull,
+    pullBlockReason: status.pull_block_reason,
   };
 }
 
@@ -335,6 +345,27 @@ export async function pushProjectLocalRepository(input: {
   );
   return {
     pushed: result.pushed,
+    message: result.message,
+  };
+}
+
+export async function pullProjectLocalRepository(input: {
+  reposDir?: string | null;
+  projectDtag: string;
+  cloneUrl: string;
+  defaultBranch?: string | null;
+}): Promise<ProjectRepoPullResult> {
+  const result = await invokeTauri<RawProjectRepoPullResult>(
+    "pull_project_local_repository",
+    {
+      reposDir: input.reposDir ?? null,
+      projectDtag: input.projectDtag,
+      cloneUrl: input.cloneUrl,
+      defaultBranch: input.defaultBranch ?? null,
+    },
+  );
+  return {
+    pulled: result.pulled,
     message: result.message,
   };
 }

@@ -137,7 +137,7 @@ export function parseAgentManagementRequest(
 export function requestTargetsEditablePersona(
   persona: AgentPersona | undefined,
 ): persona is AgentPersona {
-  return Boolean(persona && !persona.isBuiltIn && !persona.sourceTeam);
+  return Boolean(persona && !persona.sourceTeam);
 }
 
 export function createInputFromRequest(

@@ -5,6 +5,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:video_player/video_player.dart';
 
+import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 
 const _imageViewerPushDuration = Duration(milliseconds: 280);
@@ -275,6 +276,10 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
                         tag: widget.heroTag,
                         child: Image.network(
                           widget.imageUrl,
+                          headers: mediaGetHeadersForContext(
+                            context,
+                            widget.imageUrl,
+                          ),
                           fit: BoxFit.contain,
                           semanticLabel: widget.semanticLabel,
                           errorBuilder: (_, _, _) => const _MediaLoadFailure(
@@ -348,7 +353,10 @@ class _MediaVideoViewerPageState extends State<MediaVideoViewerPage> {
   @override
   void initState() {
     super.initState();
-    _controller = VideoPlayerController.networkUrl(Uri.parse(widget.videoUrl));
+    _controller = VideoPlayerController.networkUrl(
+      Uri.parse(widget.videoUrl),
+      httpHeaders: mediaGetHeadersForContext(context, widget.videoUrl),
+    );
     _initializeFuture = _controller
         .initialize()
         .then((_) async {
@@ -451,6 +459,7 @@ class _VideoLoadingPoster extends StatelessWidget {
           if (posterUrl != null)
             Image.network(
               posterUrl!,
+              headers: mediaGetHeadersForContext(context, posterUrl!),
               fit: BoxFit.cover,
               errorBuilder: (_, _, _) => _videoPlaceholder(context),
             )

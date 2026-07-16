@@ -4,7 +4,11 @@ import type {
   ProjectsFilter,
   ProjectsViewMode,
 } from "@/features/projects/lib/projectsViewHelpers";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+
+const SELECTED_MENU_ITEM_CLASSES =
+  "bg-sidebar-active text-sidebar-active-foreground shadow-xs hover:bg-sidebar-active hover:text-sidebar-active-foreground";
 
 type ProjectsToolbarProps = {
   filter: ProjectsFilter;
@@ -19,7 +23,7 @@ export function ProjectsViewModeToggle({
   onViewModeChange: (viewMode: ProjectsViewMode) => void;
 }) {
   return (
-    <fieldset className="flex items-center rounded-lg border border-border/60 bg-muted/30 p-0.5">
+    <fieldset className="flex items-center rounded-lg bg-muted/30 p-0.5">
       <legend className="sr-only">Project layout</legend>
       <Button
         aria-label="Grid layout"
@@ -51,38 +55,57 @@ export function ProjectsToolbar({
   filter,
   onFilterChange,
 }: ProjectsToolbarProps) {
-  const filterOptions: Array<{ label: string; value: ProjectsFilter }> = [
+  const filterOptions: Array<{
+    compactLabel?: string;
+    label: string;
+    value: ProjectsFilter;
+  }> = [
     { label: "Overview", value: "all" },
-    { label: "Mine", value: "mine" },
-    { label: "Local", value: "local" },
-    { label: "Repositories", value: "repositories" },
-    { label: "PRs", value: "prs" },
+    {
+      compactLabel: "Repos",
+      label: "Repositories",
+      value: "repositories",
+    },
+    { compactLabel: "PRs", label: "Pull Requests", value: "prs" },
     { label: "Issues", value: "issues" },
-    { label: "Agents", value: "agents" },
-    { label: "Users", value: "users" },
+    { compactLabel: "Mine", label: "My Repositories", value: "mine" },
+    { label: "Local", value: "local" },
   ];
 
   return (
     <div
-      className="pointer-events-auto flex min-h-[3.25rem] flex-wrap items-center justify-between gap-3 px-5 py-2"
+      className="pointer-events-auto flex min-h-[3.25rem] min-w-0 items-center px-4 py-2"
       data-tauri-drag-region
     >
-      <fieldset className="flex min-w-0 flex-wrap items-center gap-0.5">
-        <legend className="sr-only">Project owner filter</legend>
-        {filterOptions.map((option) => (
-          <Button
-            aria-pressed={filter === option.value}
-            className="h-8 gap-1.5 px-3 text-sm"
-            key={option.value}
-            onClick={() => onFilterChange(option.value)}
-            size="sm"
-            type="button"
-            variant={filter === option.value ? "secondary" : "ghost"}
-          >
-            {option.label}
-          </Button>
-        ))}
-      </fieldset>
+      <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+        <fieldset className="flex min-w-0 flex-1 flex-nowrap items-center gap-1 overflow-x-auto scrollbar-none [&::-webkit-scrollbar]:hidden">
+          <legend className="sr-only">Project owner filter</legend>
+          {filterOptions.map((option) => (
+            <Button
+              aria-label={option.label}
+              aria-pressed={filter === option.value}
+              className={cn(
+                "h-8 shrink-0 gap-1.5 rounded-full px-3 text-xs xl:px-3.5 xl:text-sm",
+                filter === option.value && SELECTED_MENU_ITEM_CLASSES,
+              )}
+              key={option.value}
+              onClick={() => onFilterChange(option.value)}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              {option.compactLabel ? (
+                <>
+                  <span className="xl:hidden">{option.compactLabel}</span>
+                  <span className="hidden xl:inline">{option.label}</span>
+                </>
+              ) : (
+                option.label
+              )}
+            </Button>
+          ))}
+        </fieldset>
+      </div>
     </div>
   );
 }

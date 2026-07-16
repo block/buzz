@@ -582,7 +582,7 @@ const MessageTimelineBase = React.forwardRef<
     () =>
       activeChannelIntro ? (
         <div
-          className="flex w-full max-w-2xl flex-col items-start px-3 pb-4 pt-2 text-left"
+          className="flex w-full flex-col items-start px-3 pb-4 pt-2 text-left"
           data-testid="message-channel-intro"
         >
           <div className="flex h-[60px] w-[60px] items-center justify-center rounded-2xl border border-border/70 bg-muted/40 text-muted-foreground">
@@ -590,10 +590,10 @@ const MessageTimelineBase = React.forwardRef<
               <Hash aria-hidden className="h-7 w-7" />
             )}
           </div>
-          <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
+          <p className="mt-4 max-w-2xl truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
             #{activeChannelIntro.channelName}
           </p>
-          <p className="mt-1 max-w-full text-sm leading-5 text-muted-foreground">
+          <p className="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
             This is the beginning of the{" "}
             <span className="font-medium text-foreground">
               {activeChannelIntro.channelKindLabel}
@@ -839,7 +839,7 @@ const MessageTimelineBase = React.forwardRef<
 
                 {activeChannelIntro ? (
                   <div
-                    className="mt-auto flex w-full max-w-2xl flex-col items-start px-3 py-2 text-left"
+                    className="mt-auto flex w-full flex-col items-start px-3 py-2 text-left"
                     data-testid="message-channel-intro"
                   >
                     <div
@@ -850,10 +850,10 @@ const MessageTimelineBase = React.forwardRef<
                         <Hash aria-hidden className="h-7 w-7" />
                       )}
                     </div>
-                    <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
+                    <p className="mt-4 max-w-2xl truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
                       #{activeChannelIntro.channelName}
                     </p>
-                    <p className="mt-1 max-w-full text-sm leading-5 text-muted-foreground">
+                    <p className="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
                       This is the beginning of the{" "}
                       <span className="font-medium text-foreground">
                         {activeChannelIntro.channelKindLabel}

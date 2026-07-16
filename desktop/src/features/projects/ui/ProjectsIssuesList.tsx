@@ -9,11 +9,9 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type ProjectsIssuesListProps = {
   isLoading: boolean;
@@ -69,34 +67,28 @@ function IssueHeader({
   project: Project;
 }) {
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
-  const authorProfile = profiles?.[normalizePubkey(issue.author)];
   const status = issueStatusVisual(issue.status);
 
   return (
-    <>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="relative z-10 inline-flex shrink-0">
-            <UserAvatar
-              accent={authorProfile?.isAgent === true}
-              avatarUrl={authorProfile?.avatarUrl ?? null}
-              displayName={authorLabel}
-              size="md"
-            />
-          </span>
-        </TooltipTrigger>
-        <TooltipContent>{authorLabel}</TooltipContent>
-      </Tooltip>
-      <div className="min-w-0 flex-1 space-y-1">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <p className="truncate text-sm font-semibold text-foreground">
-            {issue.title}
-          </p>
-          <status.icon className={`h-3.5 w-3.5 shrink-0 ${status.className}`} />
-        </div>
-        <p className="truncate text-xs text-muted-foreground">{project.name}</p>
+    <div className="min-w-0 flex-1 space-y-1">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <p className="truncate text-sm font-semibold text-foreground">
+          {issue.title}
+        </p>
+        <status.icon className={`h-3.5 w-3.5 shrink-0 ${status.className}`} />
       </div>
-    </>
+      <p className="truncate text-xs text-muted-foreground">
+        {project.name} · created {formatRelativeTime(issue.createdAt)} by{" "}
+        <UserProfilePopover pubkey={issue.author} triggerElement="span">
+          <button
+            className="relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+            type="button"
+          >
+            {authorLabel}
+          </button>
+        </UserProfilePopover>
+      </p>
+    </div>
   );
 }
 
@@ -111,8 +103,6 @@ function IssueGridCard({
   profiles?: UserProfileLookup;
   project: Project;
 }) {
-  const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
-
   return (
     <Card className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-card p-4 shadow-none transition-colors duration-150 hover:bg-muted/20">
       <button
@@ -133,7 +123,7 @@ function IssueGridCard({
             }}
             size="xs"
             type="button"
-            variant="default"
+            variant="outline"
           >
             {nextStepLabel(issue.status)}
           </Button>
@@ -150,9 +140,6 @@ function IssueGridCard({
             <span className="font-mono text-foreground">
               #{issue.id.slice(0, 8)}
             </span>
-            <span className="font-medium text-foreground">{issue.status}</span>
-            <span>opened {formatRelativeTime(issue.createdAt)}</span>
-            <span>by {authorLabel}</span>
             {issue.comments.length > 0 ? (
               <span className="flex items-center gap-1">
                 <MessageSquare className="h-3.5 w-3.5" />
@@ -177,8 +164,6 @@ function IssueListRow({
   profiles?: UserProfileLookup;
   project: Project;
 }) {
-  const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
-
   return (
     <div className="group relative px-4 py-2.5 transition-colors duration-150 hover:bg-muted/20">
       <button
@@ -191,10 +176,6 @@ function IssueListRow({
       <div className="flex min-w-0 items-start gap-3">
         <IssueHeader issue={issue} profiles={profiles} project={project} />
         <div className="relative z-10 flex shrink-0 items-center gap-2">
-          <span className="text-xs text-muted-foreground">
-            {issue.status} · opened {formatRelativeTime(issue.createdAt)} by{" "}
-            {authorLabel}
-          </span>
           <Button
             className="h-7 px-2.5"
             onClick={(event) => {
@@ -203,7 +184,7 @@ function IssueListRow({
             }}
             size="xs"
             type="button"
-            variant="default"
+            variant="outline"
           >
             {nextStepLabel(issue.status)}
           </Button>

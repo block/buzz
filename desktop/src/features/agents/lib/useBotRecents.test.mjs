@@ -32,6 +32,20 @@ test("pickQuickBotPersonas prefers recents before defaults", () => {
   );
 });
 
+test("pickQuickBotPersonas seeds the three starter agents", () => {
+  const personas = [
+    createPersona("builtin:bumble", "Bumble"),
+    createPersona("builtin:honey", "Honey"),
+    createPersona("builtin:fizz", "Fizz"),
+    createPersona("builtin:reviewer", "Reviewer"),
+  ];
+
+  assert.deepEqual(
+    pickQuickBotPersonas(personas, []).map((persona) => persona.id),
+    ["builtin:fizz", "builtin:honey", "builtin:bumble"],
+  );
+});
+
 test("pickQuickBotPersonas falls back to any active personas when defaults are missing", () => {
   const personas = [
     createPersona("builtin:reviewer", "Reviewer"),

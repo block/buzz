@@ -5,6 +5,8 @@ import {
   mergePresenceUpdate,
   parseLivePresenceEvent,
   presenceQueryWantsPubkey,
+  PRESENCE_IDLE_TIMEOUT_MS,
+  resolveAutomaticPresenceStatus,
 } from "./presence.ts";
 
 const WILL = "8e39cba681211b3782d0e4483e9343719b9b7be66515252da5491f26421896b1";
@@ -76,4 +78,38 @@ test("live event lowercases the author pubkey", () => {
     content: "away",
   });
   assert.equal(parsed.pubkey, WILL);
+});
+
+test("OS idle below the threshold is online even with stale in-app activity", () => {
+  const now = 1_000_000_000;
+  const staleActivity = now - 60 * 60_000;
+  assert.equal(
+    resolveAutomaticPresenceStatus(30, staleActivity, now),
+    "online",
+  );
+});
+
+test("OS idle at the threshold is away even with fresh in-app activity", () => {
+  const now = 1_000_000_000;
+  assert.equal(resolveAutomaticPresenceStatus(600, now, now), "away");
+});
+
+test("without OS idle, fresh in-app activity is online", () => {
+  const now = 1_000_000_000;
+  assert.equal(
+    resolveAutomaticPresenceStatus(null, now - 1_000, now),
+    "online",
+  );
+});
+
+test("without OS idle, in-app inactivity past the threshold is away", () => {
+  const now = 1_000_000_000;
+  assert.equal(
+    resolveAutomaticPresenceStatus(null, now - PRESENCE_IDLE_TIMEOUT_MS, now),
+    "away",
+  );
+});
+
+test("OS idle of zero is online", () => {
+  assert.equal(resolveAutomaticPresenceStatus(0, 0, 1_000_000_000), "online");
 });

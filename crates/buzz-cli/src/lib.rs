@@ -209,6 +209,9 @@ enum Cmd {
     /// Open, update, list, and set status on git pull requests (NIP-34)
     #[command(subcommand)]
     Pr(PrCmd),
+    /// Upload and download relay Blossom media
+    #[command(subcommand)]
+    Media(MediaCmd),
     /// Upload files to the relay's Blossom store
     #[command(subcommand)]
     Upload(UploadCmd),
@@ -1392,6 +1395,18 @@ pub enum UploadCmd {
     },
 }
 
+#[derive(Subcommand)]
+pub enum MediaCmd {
+    /// Download relay media with Blossom get auth
+    Get {
+        /// Relay media URL or sha256[.ext] path segment
+        input: String,
+        /// Output path. Omit or use '-' to write raw bytes to stdout.
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+}
+
 /// Subcommands for `buzz mem`.
 #[derive(Subcommand)]
 pub enum MemCmd {
@@ -1640,6 +1655,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
         Cmd::Issues(sub) => commands::issues::dispatch(sub, &client).await,
         Cmd::Pr(sub) => commands::pr::dispatch(sub, &client).await,
+        Cmd::Media(sub) => commands::upload::dispatch_media(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
@@ -1668,6 +1684,7 @@ mod tests {
             "emoji",
             "feed",
             "issues",
+            "media",
             "mem",
             "messages",
             "moderation",
@@ -1801,6 +1818,7 @@ mod tests {
             names(&cmd, "issues"),
             vec!["create", "get", "list", "status"]
         );
+        assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
         assert_eq!(
@@ -1828,6 +1846,7 @@ mod tests {
             ("emoji", 5),
             ("feed", 1),
             ("issues", 4),
+            ("media", 1),
             ("messages", 8),
             ("pack", 2),
             ("patches", 4),

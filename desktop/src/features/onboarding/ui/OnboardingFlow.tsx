@@ -12,19 +12,11 @@ import {
   importIdentity,
   persistCurrentIdentity,
 } from "@/shared/api/tauriIdentity";
-import {
-  ACCENT_STORAGE_KEY,
-  NEUTRAL_ACCENT,
-  THEME_STORAGE_KEY,
-  useTheme,
-} from "@/shared/theme/ThemeProvider";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
-import { ONBOARDING_DEFAULT_THEME_NAME } from "@/shared/theme/theme-loader";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 import { AvatarStep } from "./AvatarStep";
-import { BackupStep } from "./BackupStep";
 import { MembershipDenied } from "./MembershipDenied";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -34,8 +26,6 @@ import {
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
 import { ProfileStep } from "./ProfileStep";
-import { SetupStep } from "./SetupStep";
-import { ThemeStep, preloadThemePreviewVars } from "./ThemeStep";
 import type {
   OnboardingActions,
   OnboardingPage,
@@ -158,8 +148,7 @@ export function OnboardingFlow({
   initialProfile,
 }: OnboardingFlowProps) {
   const { complete, skipForNow } = actions;
-  const { activeCommunity, communities, updateCommunity, switchCommunity } =
-    useCommunities();
+  const { activeCommunity } = useCommunities();
   const queryClient = useQueryClient();
   const savedProfile = resolveSavedProfile(initialProfile);
   const profileUpdateMutation = useUpdateProfileMutation();
@@ -177,11 +166,9 @@ export function OnboardingFlow({
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
   const [isProfileAdvancePending, setIsProfileAdvancePending] =
     React.useState(false);
-  // Track whether the user imported an existing key. The fresh-key path shows
-  // the backup step; the imported-key path skips it (user already has a backup).
-  const [identityWasImported, setIdentityWasImported] = React.useState(false);
-  const [membershipRetryPage, setMembershipRetryPage] =
-    React.useState<OnboardingPage>("avatar");
+  const [membershipRetryPage, setMembershipRetryPage] = React.useState<
+    OnboardingPage | "complete"
+  >("avatar");
   const [deniedFromPage, setDeniedFromPage] =
     React.useState<OnboardingPage>("profile");
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] =
@@ -193,36 +180,6 @@ export function OnboardingFlow({
   const [transitionDirection, setTransitionDirection] =
     React.useState<OnboardingTransitionDirection>("forward");
   const systemColorScheme = useSystemColorScheme();
-  const { accentColor, setAccentColor, setTheme, themeName } = useTheme();
-
-  const ensureThemeStepDefaults = React.useCallback(() => {
-    const hasStoredTheme =
-      window.localStorage.getItem(THEME_STORAGE_KEY) !== null;
-    const hasStoredAccent =
-      window.localStorage.getItem(ACCENT_STORAGE_KEY) !== null;
-
-    if (!hasStoredTheme && themeName !== ONBOARDING_DEFAULT_THEME_NAME) {
-      setTheme(ONBOARDING_DEFAULT_THEME_NAME);
-    }
-
-    if (!hasStoredAccent && accentColor !== NEUTRAL_ACCENT) {
-      setAccentColor(NEUTRAL_ACCENT);
-    }
-  }, [accentColor, setAccentColor, setTheme, themeName]);
-
-  React.useEffect(() => {
-    if (
-      currentPage === "profile" ||
-      currentPage === "backup" ||
-      currentPage === "avatar"
-    ) {
-      void preloadThemePreviewVars().catch(() => undefined);
-    }
-
-    if (currentPage === "avatar") {
-      ensureThemeStepDefaults();
-    }
-  }, [currentPage, ensureThemeStepDefaults]);
 
   const resetProfileSaveError = React.useCallback(() => {
     profileUpdateMutation.reset();
@@ -237,20 +194,6 @@ export function OnboardingFlow({
       }));
     },
     [resetProfileSaveError],
-  );
-
-  const showSetupPage = React.useCallback(() => {
-    setTransitionDirection("forward");
-    setCurrentPage("setup");
-  }, []);
-
-  const showThemePage = React.useCallback(
-    (direction: OnboardingTransitionDirection = "forward") => {
-      ensureThemeStepDefaults();
-      setTransitionDirection(direction);
-      setCurrentPage("theme");
-    },
-    [ensureThemeStepDefaults],
   );
 
   const showAvatarPage = React.useCallback(
@@ -272,13 +215,8 @@ export function OnboardingFlow({
     setCurrentPage("key-import");
   }, []);
 
-  const showBackupPage = React.useCallback(() => {
-    setTransitionDirection("forward");
-    setCurrentPage("backup");
-  }, []);
-
   const saveProfileAndContinue = React.useCallback(
-    async (nextPage: OnboardingPage) => {
+    async (nextPage: OnboardingPage | "complete") => {
       if (isProfileAdvancePending) {
         return;
       }
@@ -353,13 +291,11 @@ export function OnboardingFlow({
           }
         }
 
-        const showNextPage: Partial<Record<OnboardingPage, () => void>> = {
-          backup: showBackupPage,
-          avatar: () => showAvatarPage(),
-          theme: showThemePage,
-          setup: showSetupPage,
-        };
-        (showNextPage[nextPage] ?? showSetupPage)();
+        if (nextPage === "complete") {
+          complete();
+          return;
+        }
+        showAvatarPage();
       } finally {
         setIsProfileAdvancePending(false);
       }
@@ -370,10 +306,8 @@ export function OnboardingFlow({
       profileDraft,
       profileUpdateMutation,
       savedProfile,
+      complete,
       showAvatarPage,
-      showBackupPage,
-      showSetupPage,
-      showThemePage,
     ],
   );
 
@@ -432,33 +366,17 @@ export function OnboardingFlow({
         }
       : profileStepState.saveRecovery,
   };
-  // Page sequences by path — step 1 is the community-picker that precedes
-  // onboarding, so these pages start at step 2 (STEP_OFFSET below).
-  // Fresh-key path: profile(2) → backup(3) → avatar(4) → theme(5) → setup(6)
-  // Imported-key path: profile(2) → avatar(3) → theme(4) → setup(5)
-  const FRESH_STEPS: OnboardingPage[] = [
-    "profile",
-    "backup",
-    "avatar",
-    "theme",
-    "setup",
-  ];
-  const IMPORT_STEPS: OnboardingPage[] = [
-    "profile",
-    "avatar",
-    "theme",
-    "setup",
-  ];
-  const STEP_OFFSET = 2;
-  const activeSteps = identityWasImported ? IMPORT_STEPS : FRESH_STEPS;
+  // Machine-level identity, backup, and provider setup have already completed.
+  // This relay-scoped flow now owns only the community profile.
+  const activeSteps: OnboardingPage[] = ["profile", "avatar"];
+  const STEP_OFFSET = 1;
   // key-import occupies the same position as profile.
   const normalizedPage: OnboardingPage =
     currentPage === "key-import" ? "profile" : currentPage;
   const pageIndex = activeSteps.indexOf(normalizedPage);
   const currentStep = pageIndex >= 0 ? pageIndex + STEP_OFFSET : STEP_OFFSET;
-  const totalOnboardingSteps = activeSteps.length + 1; // +1 for step 1 (community picker)
-  const hideFixedProgressOnCompact =
-    currentPage === "avatar" || currentPage === "theme";
+  const totalOnboardingSteps = activeSteps.length;
+  const hideFixedProgressOnCompact = currentPage === "avatar";
 
   // Swapping the identity changes the pubkey, which remounts this flow
   // (keyed on pubkey in App.tsx) and re-runs the onboarding gate: the new
@@ -472,7 +390,6 @@ export function OnboardingFlow({
       queryClient.removeQueries({ queryKey: profileQueryKey });
       profileUpdateMutation.reset();
       setDeniedPubkey("");
-      setIdentityWasImported(true);
       setTransitionDirection("backward");
       setCurrentPage("profile");
     },
@@ -502,38 +419,6 @@ export function OnboardingFlow({
     }
   }, [queryClient]);
 
-  const handleInviteRedeemed = React.useCallback(
-    (relayWsUrl: string) => {
-      if (!activeCommunity) return;
-      // Same-relay: membership claim updated this relay — just retry.
-      if (relayWsUrl === activeCommunity.relayUrl) {
-        void saveProfileAndContinue(membershipRetryPage);
-        return;
-      }
-      // Cross-relay: point the active community at the invite's relay.
-      // If that relay already exists as another community, switch to it.
-      const result = updateCommunity(activeCommunity.id, {
-        relayUrl: relayWsUrl,
-      });
-      if (result.kind === "duplicate-relay") {
-        const existing = communities.find((w) => w.relayUrl === relayWsUrl);
-        if (existing) {
-          switchCommunity(existing.id);
-        }
-      }
-      // On "updated", the reinitKey bump triggers a remount that re-runs the
-      // membership gate automatically.
-    },
-    [
-      activeCommunity,
-      communities,
-      membershipRetryPage,
-      saveProfileAndContinue,
-      switchCommunity,
-      updateCommunity,
-    ],
-  );
-
   if (currentPage === "membership-denied") {
     return (
       <>
@@ -545,7 +430,6 @@ export function OnboardingFlow({
           }}
           onChangeCommunity={() => setIsCommunityChangeOpen(true)}
           onImportKey={importExistingKey}
-          onInviteRedeemed={handleInviteRedeemed}
           onRetry={() => {
             void saveProfileAndContinue(membershipRetryPage);
           }}
@@ -563,27 +447,14 @@ export function OnboardingFlow({
   return (
     <>
       <div
-        className={`buzz-startup-shell flex items-start justify-center overflow-y-auto bg-background px-4 py-8 text-foreground ${
-          currentPage === "profile" ||
-          currentPage === "backup" ||
-          currentPage === "avatar" ||
-          currentPage === "key-import"
-            ? "buzz-onboarding-neutral-theme"
-            : ""
-        }`}
+        className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-start justify-center overflow-y-auto bg-background px-4 py-8 text-foreground"
         data-testid="onboarding-gate"
         data-system-color-scheme={systemColorScheme}
       >
         <StartupWindowDragRegion />
         <div
           className={`relative my-auto flex w-full flex-col items-center text-center ${
-            currentPage === "theme"
-              ? "max-w-[1180px]"
-              : currentPage === "avatar"
-                ? "max-w-[1080px]"
-                : currentPage === "setup"
-                  ? "max-w-[920px]"
-                  : "max-w-[500px]"
+            currentPage === "avatar" ? "max-w-[1080px]" : "max-w-[500px]"
           }`}
         >
           <OnboardingSlideTransition
@@ -651,9 +522,7 @@ export function OnboardingFlow({
                 onUploadingChange: setIsUploadingAvatar,
                 skipForNow,
                 submit: () => {
-                  void saveProfileAndContinue(
-                    identityWasImported ? "avatar" : "backup",
-                  );
+                  void saveProfileAndContinue("avatar");
                 },
                 updateAvatarUrl: updateAvatarUrlDraft,
                 updateDisplayName: updateDisplayNameDraft,
@@ -706,23 +575,15 @@ export function OnboardingFlow({
                 onImport={importExistingKey}
               />
             </OnboardingSlideTransition>
-          ) : currentPage === "backup" ? (
-            <BackupStep
-              currentStep={currentStep}
-              direction={transitionDirection}
-              onBack={showProfilePage}
-              onNext={() => showAvatarPage()}
-              totalSteps={totalOnboardingSteps}
-            />
-          ) : currentPage === "avatar" ? (
+          ) : (
             <AvatarStep
               actions={{
-                advanceWithoutSaving: () => showThemePage(),
-                back: identityWasImported ? showProfilePage : showBackupPage,
+                advanceWithoutSaving: complete,
+                back: showProfilePage,
                 onUploadingChange: setIsUploadingAvatar,
                 skipForNow,
                 submit: () => {
-                  void saveProfileAndContinue("theme");
+                  void saveProfileAndContinue("complete");
                 },
                 updateAvatarUrl: updateAvatarUrlDraft,
               }}
@@ -731,22 +592,6 @@ export function OnboardingFlow({
               showAlwaysSkip={true}
               state={avatarStepState}
               totalSteps={totalOnboardingSteps}
-            />
-          ) : currentPage === "theme" ? (
-            <ThemeStep
-              actions={{
-                skip: showSetupPage,
-                submit: showSetupPage,
-              }}
-              direction={transitionDirection}
-            />
-          ) : (
-            <SetupStep
-              actions={{
-                back: () => showThemePage("backward"),
-                complete,
-              }}
-              direction={transitionDirection}
             />
           )}
         </div>

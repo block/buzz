@@ -96,14 +96,17 @@ class _AttachmentStrip extends StatelessWidget {
                             ),
                           ),
                         )
-                      : Image.network(
-                          previewUrl,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, _, _) => ColoredBox(
-                            color: context.colors.surface,
-                            child: Icon(
-                              LucideIcons.image,
-                              color: context.colors.onSurfaceVariant,
+                      : Consumer(
+                          builder: (context, ref, _) => Image.network(
+                            previewUrl,
+                            headers: mediaGetHeadersFor(ref, previewUrl),
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => ColoredBox(
+                              color: context.colors.surface,
+                              child: Icon(
+                                LucideIcons.image,
+                                color: context.colors.onSurfaceVariant,
+                              ),
                             ),
                           ),
                         ),

@@ -277,7 +277,7 @@ export function SettingsView({
           data-tauri-drag-region
         />
         <div className="relative z-10 ml-px mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-tl-xl bg-background pt-11 shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
-          <section className="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-4 sm:px-6">
+          <section className="min-h-0 flex-1 overflow-y-auto px-5 pb-12 pt-4 sm:px-6">
             <div
               className="mx-auto flex h-full w-full max-w-4xl flex-col gap-4"
               data-testid={`settings-panel-${section}`}

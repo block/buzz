@@ -99,6 +99,7 @@ test("loads the app shell with mocked channels", async ({ page }) => {
 async function chooseSharedComputeProvider(
   page: import("@playwright/test").Page,
 ) {
+  await page.getByRole("tab", { name: "Customize for this agent" }).click();
   const provider = page.locator("#persona-llm-provider");
   await expect(provider).toBeVisible({ timeout: 10_000 });
   await provider.press("Enter");
@@ -125,7 +126,7 @@ test("creates a new mocked stream", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toContainText(channelName);
 });
 
-test("Buzz shared compute explains the empty state without blocking Default auto", async ({
+test("Buzz shared compute explains automatic model selection", async ({
   page,
 }) => {
   await page.goto("/");
@@ -152,13 +153,12 @@ test("Buzz shared compute explains the empty state without blocking Default auto
       ),
     )
     .toContain("discover_agent_models");
-  await expect(page.locator("#persona-model")).toContainText("Default (auto)");
+  await expect(page.locator("#persona-model")).toContainText("Automatic");
   await expect(
-    page.getByTestId("persona-model-discovery-status"),
-  ).toContainText("No members are sharing compute right now");
-  await expect(
-    page.getByTestId("persona-model-discovery-status"),
-  ).toContainText("Settings > Compute");
+    page.getByText(
+      "Buzz will choose an available shared model when the agent starts.",
+    ),
+  ).toBeVisible();
   await expect(page.locator("#persona-custom-model")).toHaveCount(0);
 });
 
@@ -176,7 +176,7 @@ test("create agent persists Buzz shared compute with auto model", async ({
   await chooseSharedComputeProvider(page);
 
   const model = page.locator("#persona-model");
-  await expect(model).toContainText("Default (auto)");
+  await expect(model).toContainText("Automatic");
   await page.getByTestId("persona-dialog-submit").click();
   await expect(
     page.getByRole("heading", { name: "Agent created" }),
@@ -222,7 +222,8 @@ test("create agent supports parallelism and system prompt overrides", async ({
     .fill("You are concise and parallelize independent work.");
 
   // The buzz-agent runtime auto-selects once the ACP runtime catalog loads;
-  // the LLM provider field renders after that.
+  // Customize reveals the per-agent LLM provider and model fields.
+  await page.getByRole("tab", { name: "Customize for this agent" }).click();
   const llmProvider = page.locator("#persona-llm-provider");
   await expect(llmProvider).toBeVisible({ timeout: 10_000 });
   await llmProvider.press("Enter");

@@ -271,21 +271,19 @@ export function getDefaultLlmProviderLabel(
 ) {
   const trimmedGlobal = (globalProvider ?? "").trim();
   return trimmedGlobal
-    ? `Inherit global default (${providerDisplayLabel(trimmedGlobal)})`
+    ? `Use AI defaults (${providerDisplayLabel(trimmedGlobal)})`
     : "Select a provider\u2026";
 }
 
 /** Returns the zero-value model option label.
  *
  * When a global model is configured, the empty-model option reads
- * `Inherit global default (<model>)` so users can see which model will run.
+ * `Use AI defaults (<model>)` so users can see which model will run.
  * Otherwise falls back to the generic `"Default model"` placeholder.
  */
 export function getDefaultLlmModelLabel(globalModel?: string) {
   const trimmedGlobal = (globalModel ?? "").trim();
-  return trimmedGlobal
-    ? `Inherit global default (${trimmedGlobal})`
-    : "Default model";
+  return trimmedGlobal ? `Use AI defaults (${trimmedGlobal})` : "Default model";
 }
 
 /**
@@ -294,7 +292,7 @@ export function getDefaultLlmModelLabel(globalModel?: string) {
  *
  * Explicit-model providers (e.g. anthropic) have their zero-value option
  * filtered out by `getPersonaModelOptions`, so a relabel-only map would never
- * produce the `Inherit global default (<model>)` entry.  This helper prepends
+ * produce the `Use AI defaults (<model>)` entry.  This helper prepends
  * it when `globalModel` is non-empty AND no zero-value option already exists,
  * making the inherited global model visible and selectable in the dropdown.
  *

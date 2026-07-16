@@ -92,6 +92,13 @@ type MockPersonaSeed = {
   envVars?: Record<string, string>;
 };
 
+type MockTeamSeed = {
+  id?: string;
+  name: string;
+  description?: string | null;
+  personaIds: string[];
+};
+
 export type MockEngramEntry = {
   slug: string;
   body: string;
@@ -150,6 +157,7 @@ type MockBridgeOptions = {
   };
   managedAgents?: MockManagedAgentSeed[];
   personas?: MockPersonaSeed[];
+  teams?: MockTeamSeed[];
   relayAgents?: MockRelayAgentSeed[];
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
@@ -282,6 +290,17 @@ type MockBridgeOptions = {
    * invoked. Drives the keyring-locked screen in tests.
    */
   identityLocked?: boolean;
+  /**
+   * Pending community deep links (buzz://join / buzz://connect) seeded into
+   * the mocked Rust-side queue. The frontend drains these on boot into a
+   * community-onboarding transaction — drives the pending-invite gate.
+   */
+  pendingCommunityDeepLinks?: Array<{
+    id: string;
+    kind: "connect" | "join";
+    relayUrl: string;
+    code?: string | null;
+  }>;
   /**
    * Global agent config returned by `get_global_agent_config`. Defaults to
    * an empty config (no provider, model, or env vars) if not specified.

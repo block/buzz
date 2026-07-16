@@ -40,6 +40,7 @@ async function openNewPersonaDialog(page: import("@playwright/test").Page) {
 
   const dialog = page.getByTestId("persona-dialog");
   await expect(dialog).toBeVisible({ timeout: 8_000 });
+  await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
   return dialog;
 }
 

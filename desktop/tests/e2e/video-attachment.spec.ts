@@ -11,6 +11,10 @@ const CONSTRAINED_LANDSCAPE_VIDEO_SHA = "d".repeat(64);
 const CONSTRAINED_LANDSCAPE_VIDEO_URL = `http://localhost:3000/media/${CONSTRAINED_LANDSCAPE_VIDEO_SHA}.mp4`;
 const VIDEO_REVIEW_NEUTRAL_ACCENT = "neutral";
 const VIDEO_REVIEW_LIGHT_THEME = "catppuccin-latte";
+// The fresh-profile default is the Buzz theme, which pins the neutral accent
+// regardless of the stored accent color. Accent-driven review foreground
+// assertions must run on a non-Buzz theme for the seeded accent to apply.
+const VIDEO_REVIEW_ACCENT_THEME = "houston";
 const VIDEO_REVIEW_ACCENT = "#ec4899";
 const VIDEO_REVIEW_ACCENT_FOREGROUND_RGB = "rgb(240, 115, 177)";
 const VIDEO_REVIEW_INDIGO_ACCENT = "#6366f1";
@@ -211,7 +215,9 @@ async function openReviewWithPostedTimecode(
 test("video upload previews use poster frames and inline videos open review mode", async ({
   page,
 }) => {
-  await installVideoReviewHarness(page);
+  await installVideoReviewHarness(page, {
+    themeName: VIDEO_REVIEW_ACCENT_THEME,
+  });
 
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -871,6 +877,7 @@ test("neutral accent uses the forced-dark review foreground", async ({
 test("dark accent uses a contrast-safe review foreground", async ({ page }) => {
   await installVideoReviewHarness(page, {
     accentColor: VIDEO_REVIEW_INDIGO_ACCENT,
+    themeName: VIDEO_REVIEW_ACCENT_THEME,
   });
 
   const reviewDialog = await openReviewWithPostedTimecode(

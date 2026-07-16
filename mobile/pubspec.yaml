@@ -1,7 +1,7 @@
 name: buzz
 description: Buzz mobile client
 publish_to: 'none'
-version: 0.4.4+1
+version: 0.4.5+1
 
 environment:
   sdk: ^3.11.4
@@ -43,6 +43,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/images/buzz-icon.png
   fonts:
     - family: Inter
       fonts:

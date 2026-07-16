@@ -533,7 +533,9 @@ export function ProjectDiffFilesPanel({
   headerLabel: string;
   subjectLabel: string;
 }) {
-  const outerBorderClass = embedded ? "" : "border border-border/60 bg-card";
+  const outerBorderClass = embedded
+    ? ""
+    : "rounded-xl border border-border/60 bg-card";
   const [query, setQuery] = React.useState("");
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const files = diff?.files ?? [];

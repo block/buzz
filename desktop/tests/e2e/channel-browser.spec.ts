@@ -46,6 +46,46 @@ test("channel browser shows channels not yet joined", async ({ page }) => {
   await expect(page.getByTestId("browse-channel-general")).toBeVisible();
 });
 
+test("channel browser sorts alphabetically or by member count", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  const rows = page.locator('[data-testid^="browse-channel-"]');
+
+  await expect(rows).toHaveText([
+    /#agents/,
+    /#all-replies/,
+    /#deep-history/,
+    /#design/,
+    /#engineering/,
+    /#general/,
+    /#random/,
+    /#sales/,
+    /#secret-projects/,
+  ]);
+
+  await page.getByTestId("channel-browser-sort").click();
+  await page.getByTestId("channel-browser-sort-members").click();
+
+  await expect(rows).toHaveText([
+    /#general/,
+    /#agents/,
+    /#engineering/,
+    /#random/,
+    /#all-replies/,
+    /#deep-history/,
+    /#design/,
+    /#sales/,
+    /#secret-projects/,
+  ]);
+  await expect(page.getByTestId("channel-browser-sort")).toHaveAttribute(
+    "aria-label",
+    "Sort channels: Most members",
+  );
+});
+
 test("channel browser search filters by name", async ({ page }) => {
   await page.goto("/");
 

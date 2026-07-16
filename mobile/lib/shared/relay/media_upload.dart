@@ -9,6 +9,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
+import 'media_auth.dart';
 import 'relay_provider.dart';
 
 const _mediaUploadPath = '/media/upload';
@@ -311,7 +312,7 @@ class MediaUploadService {
       ['t', 'upload'],
       ['x', sha256],
       ['expiration', '$expiration'],
-      if (_extractServerAuthority(_baseUrl) case final authority?)
+      if (extractServerAuthority(_baseUrl) case final authority?)
         ['server', authority],
     ];
 
@@ -618,13 +619,6 @@ Future<String> _transcodePickedVideoToMp4(String filePath) async {
     throw Exception('Failed to convert video to MP4.');
   }
   return result;
-}
-
-String? _extractServerAuthority(String baseUrl) {
-  final uri = Uri.parse(baseUrl);
-  if (uri.host.isEmpty) return null;
-  final host = uri.host.contains(':') ? '[${uri.host}]' : uri.host;
-  return uri.hasPort ? '$host:${uri.port}' : host;
 }
 
 Future<Uint8List> _transcodePickedImageToJpeg(Uint8List bytes) async {

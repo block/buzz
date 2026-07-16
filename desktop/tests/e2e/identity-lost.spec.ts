@@ -4,6 +4,35 @@ import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
+test("normal first launch uses the already-persisted identity", async ({
+  page,
+}) => {
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
+  await page.getByRole("button", { name: "Get started" }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "Save your private key" }),
+  ).toBeVisible();
+  const commands = await page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{ command: string }>;
+        }
+      ).__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [],
+  );
+  expect(commands.some((entry) => entry.command === "get_identity")).toBe(true);
+  expect(
+    commands.some((entry) => entry.command === "persist_current_identity"),
+  ).toBe(false);
+});
+
 test("lost boot opens onboarding gate directly on the key-import page", async ({
   page,
 }) => {
@@ -14,7 +43,7 @@ test("lost boot opens onboarding gate directly on the key-import page", async ({
   );
   await page.goto("/");
 
-  await expect(page.getByTestId("onboarding-gate")).toBeVisible();
+  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Re-import your key" }),
   ).toBeVisible();

@@ -108,6 +108,212 @@ fn sign_nip98(
     Ok(format!("Nostr {}", B64.encode(json.as_bytes())))
 }
 
+fn relay_server_tag(relay_url: &str) -> Option<String> {
+    let authority = buzz_core::tenant::relay_url_authority(relay_url);
+    if authority.is_empty() {
+        None
+    } else {
+        Some(authority)
+    }
+}
+
+fn is_safe_media_path_segment(sha256_ext: &str) -> bool {
+    let segments: Vec<&str> = sha256_ext.split('.').collect();
+    match segments.as_slice() {
+        [hash] => is_lower_hex_sha256(hash),
+        [hash, ext] => is_lower_hex_sha256(hash) && is_safe_media_ext(ext),
+        [hash, "thumb", "jpg"] => is_lower_hex_sha256(hash),
+        _ => false,
+    }
+}
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+fn is_safe_media_ext(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 8
+        && value.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9'))
+}
+
+fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError> {
+    let input = input.trim();
+    if input.starts_with("http://") || input.starts_with("https://") {
+        let parsed = url::Url::parse(input)
+            .map_err(|e| CliError::Usage(format!("invalid media URL: {e}")))?;
+        if !parsed.path().starts_with("/media/") {
+            return Err(CliError::Usage(
+                "media URL must point at a /media/ path".to_string(),
+            ));
+        }
+        let Some(sha256_ext) = parsed.path().strip_prefix("/media/") else {
+            return Err(CliError::Usage(
+                "media URL must point at a /media/ path".to_string(),
+            ));
+        };
+        if !is_safe_media_path_segment(sha256_ext) {
+            return Err(CliError::Usage(
+                "media path must be sha256, sha256.ext, or sha256.thumb.jpg".to_string(),
+            ));
+        }
+        let relay = url::Url::parse(relay_url)
+            .map_err(|e| CliError::Usage(format!("invalid relay URL: {e}")))?;
+        if parsed.scheme() != relay.scheme()
+            || parsed.host_str() != relay.host_str()
+            || parsed.port_or_known_default() != relay.port_or_known_default()
+        {
+            return Err(CliError::Usage(
+                "refusing to sign media GET for a non-relay origin".to_string(),
+            ));
+        }
+        return Ok(input.to_string());
+    }
+    if input.contains("://") {
+        return Err(CliError::Usage(
+            "media URL must use http:// or https://".to_string(),
+        ));
+    }
+
+    let sha256_ext = input.trim_start_matches("/media/");
+    if sha256_ext.is_empty() {
+        return Err(CliError::Usage(
+            "media input must be a URL or sha256[.ext]".to_string(),
+        ));
+    }
+    if !is_safe_media_path_segment(sha256_ext) {
+        return Err(CliError::Usage(
+            "media input must be sha256, sha256.ext, or sha256.thumb.jpg".to_string(),
+        ));
+    }
+    Ok(format!(
+        "{}/media/{sha256_ext}",
+        relay_url.trim_end_matches('/')
+    ))
+}
+
+fn sign_blossom_get(keys: &Keys, media_url: &str) -> Result<String, CliError> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use nostr::Timestamp;
+
+    let now = Timestamp::now().as_secs();
+    let exp_str = (now + 600).to_string();
+    let domain = relay_server_tag(media_url)
+        .ok_or_else(|| CliError::Usage(format!("invalid media URL: {media_url}")))?;
+    let tags = vec![
+        Tag::parse(["t", "get"]).map_err(|e| CliError::Other(e.to_string()))?,
+        Tag::parse(["expiration", &exp_str]).map_err(|e| CliError::Other(e.to_string()))?,
+        Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?,
+    ];
+
+    let auth_event = EventBuilder::new(Kind::from(24242), "Get media")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+
+    Ok(format!(
+        "Nostr {}",
+        URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
+    ))
+}
+
+#[cfg(test)]
+mod media_download_tests {
+    use super::*;
+
+    #[test]
+    fn media_url_from_sha_uses_relay_media_path() {
+        let hash = "a".repeat(64);
+        assert_eq!(
+            media_url_from_input("https://relay.example", &format!("{hash}.jpg")).unwrap(),
+            format!("https://relay.example/media/{hash}.jpg")
+        );
+        assert_eq!(
+            media_url_from_input("https://relay.example/", &format!("/media/{hash}.jpg")).unwrap(),
+            format!("https://relay.example/media/{hash}.jpg")
+        );
+    }
+
+    #[test]
+    fn media_url_accepts_only_same_relay_media_urls() {
+        let hash = "a".repeat(64);
+        assert!(media_url_from_input(
+            "https://relay.example:443",
+            &format!("https://relay.example/media/{hash}.jpg")
+        )
+        .is_ok());
+        assert!(media_url_from_input(
+            "https://relay.example",
+            &format!("http://relay.example/media/{hash}.jpg")
+        )
+        .is_err());
+        assert!(media_url_from_input(
+            "https://relay.example",
+            &format!("https://evil.example/media/{hash}.jpg")
+        )
+        .is_err());
+        assert!(media_url_from_input(
+            "https://relay.example",
+            &format!("https://relay.example/media-evil/{hash}.jpg")
+        )
+        .is_err());
+        assert!(media_url_from_input(
+            "https://relay.example",
+            &format!("ftp://relay.example/media/{hash}.jpg")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_url_rejects_path_confusion_and_non_hash_inputs() {
+        for input in [
+            "abc123.jpg",
+            "../evil",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/evil.jpg",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.JPG",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eviltoolong",
+            "https://relay.example/media/abc123.jpg",
+            "https://relay.example/media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.JPG",
+        ] {
+            assert!(
+                media_url_from_input("https://relay.example", input).is_err(),
+                "input should be rejected: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn media_get_auth_header_is_server_scoped() {
+        let keys = Keys::generate();
+        let hash = "a".repeat(64);
+        let header = sign_blossom_get(
+            &keys,
+            &format!("https://relay.example:443/media/{hash}.jpg"),
+        )
+        .unwrap();
+        let encoded = header.strip_prefix("Nostr ").unwrap();
+        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .unwrap();
+        let event = nostr::Event::from_json(std::str::from_utf8(&json).unwrap()).unwrap();
+        event.verify().unwrap();
+        assert_eq!(event.kind, Kind::from(24242));
+
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert!(tags.iter().any(|tag| tag.as_slice() == ["t", "get"]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["server", "relay.example"]));
+        assert!(!tags
+            .iter()
+            .any(|tag| tag.first().map(String::as_str) == Some("x")));
+    }
+}
+
 pub struct BuzzClient {
     http: reqwest::Client,
     relay_url: String, // base URL, no trailing slash, e.g. "https://relay.buzz.place"
@@ -358,16 +564,9 @@ impl BuzzClient {
             Tag::parse(["expiration", &exp_str]).map_err(|e| CliError::Other(e.to_string()))?,
         ];
         // Extract server domain from relay URL for BUD-11 server tag
-        if let Ok(parsed) = url::Url::parse(&self.relay_url) {
-            if let Some(host) = parsed.host_str() {
-                let domain = match parsed.port() {
-                    Some(port) => format!("{host}:{port}"),
-                    None => host.to_string(),
-                };
-                blossom_tags.push(
-                    Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?,
-                );
-            }
+        if let Some(domain) = relay_server_tag(&self.relay_url) {
+            blossom_tags
+                .push(Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?);
         }
 
         let auth_event = EventBuilder::new(Kind::from(24242), "Upload file")
@@ -407,6 +606,28 @@ impl BuzzClient {
         resp.json::<BlobDescriptor>()
             .await
             .map_err(|e| CliError::Other(format!("invalid upload response: {e}")))
+    }
+
+    /// Download a Blossom media blob using BUD-01 `t=get` auth.
+    pub async fn download_media(&self, input: &str) -> Result<bytes::Bytes, CliError> {
+        let url = media_url_from_input(&self.relay_url, input)?;
+        let auth_header = sign_blossom_get(&self.keys, &url)?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            // Do not forward Authorization or x-auth-tag to redirect targets.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| CliError::Other(format!("http client init failed: {e}")))?;
+        let req = client.get(&url).header("Authorization", auth_header);
+
+        let resp = self.with_auth_tag(req).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CliError::Relay { status, body });
+        }
+
+        resp.bytes().await.map_err(CliError::Network)
     }
 
     async fn handle_response(&self, resp: reqwest::Response) -> Result<String, CliError> {

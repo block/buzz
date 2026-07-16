@@ -20,6 +20,8 @@ pre-commit:
 pre-push:
   parallel: true
   commands:
+    branch-skew:
+      run: ./scripts/check-branch-skew.sh
     rust-tests:
       run: just test-unit
     desktop-check:

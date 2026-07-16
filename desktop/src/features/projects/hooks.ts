@@ -7,11 +7,9 @@ import { getIdentity } from "@/shared/api/tauriIdentity";
 import {
   getProjectLocalRepoDiff,
   getProjectRepoDiff,
-  getProjectRepoSyncStatus,
   getProjectLocalRepoSnapshot,
   getProjectRepoSnapshot,
   listProjectLocalRepositories,
-  pushProjectLocalRepository,
 } from "@/shared/api/projectGit";
 import {
   KIND_DELETION,
@@ -162,7 +160,7 @@ function isDeletedByA(project: Project, deletionEvents: RelayEvent[]): boolean {
   );
 }
 
-function eventToProject(event: RelayEvent): Project {
+export function eventToProject(event: RelayEvent): Project {
   const d = getTag(event, "d") ?? event.id;
   const name = getTag(event, "name") || d;
   const description = getTag(event, "description") || event.content || "";
@@ -212,7 +210,7 @@ function dedup(events: RelayEvent[]): RelayEvent[] {
   return [...best.values()];
 }
 
-async function fetchProjects(): Promise<Project[]> {
+export async function fetchProjects(): Promise<Project[]> {
   const [events, deletionEvents] = await Promise.all([
     relayClient.fetchEvents({
       kinds: [KIND_REPO_ANNOUNCEMENT],
@@ -740,36 +738,6 @@ export function useProjectLocalRepositoriesQuery(reposDir?: string | null) {
   });
 }
 
-export function useProjectRepoSyncStatusQuery(
-  project: Project | null | undefined,
-  reposDir?: string | null,
-  branchName?: string | null,
-) {
-  const selectedBranch = branchName ?? project?.defaultBranch ?? null;
-
-  return useQuery({
-    enabled: Boolean(project?.cloneUrls[0]),
-    queryKey: [
-      "project",
-      project?.id ?? "none",
-      "repo-sync-status",
-      reposDir ?? "default",
-      selectedBranch ?? "default",
-    ],
-    queryFn: () => {
-      if (!project?.cloneUrls[0]) throw new Error("No project selected.");
-      return getProjectRepoSyncStatus({
-        reposDir,
-        projectDtag: project.dtag,
-        cloneUrl: project.cloneUrls[0],
-        defaultBranch: selectedBranch,
-      });
-    },
-    staleTime: 10_000,
-    retry: 1,
-  });
-}
-
 export function useProjectIssuesQuery(project: Project | null | undefined) {
   return useQuery({
     enabled: Boolean(project),
@@ -947,33 +915,6 @@ export function useDeleteProjectMutation() {
       void queryClient.invalidateQueries({
         queryKey: ["project", project.id],
       });
-    },
-  });
-}
-
-export function usePushProjectLocalRepositoryMutation(
-  project: Project | null | undefined,
-  reposDir?: string | null,
-  branchName?: string | null,
-) {
-  const queryClient = useQueryClient();
-  const selectedBranch = branchName ?? project?.defaultBranch ?? null;
-
-  return useMutation({
-    mutationFn: () => {
-      if (!project?.cloneUrls[0]) throw new Error("No project selected.");
-      return pushProjectLocalRepository({
-        reposDir,
-        projectDtag: project.dtag,
-        cloneUrl: project.cloneUrls[0],
-        defaultBranch: selectedBranch,
-      });
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ["project", project?.id ?? "none"],
-      });
-      void queryClient.invalidateQueries({ queryKey: ["projects"] });
     },
   });
 }

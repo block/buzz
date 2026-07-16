@@ -18,17 +18,17 @@ import {
   useProjectLocalRepoDiffQuery,
   useProjectLocalRepoSnapshotQuery,
   useProjectRepoDiffQuery,
-  useProjectRepoSyncStatusQuery,
-  usePushProjectLocalRepositoryMutation,
   useProjectPullRequestsQuery,
   useProjectRepoSnapshotQuery,
   useRepoStateQuery,
 } from "@/features/projects/hooks";
-import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import {
-  mergeCurrentProfileIntoLookup,
-  resolveUserLabel,
-} from "@/features/profile/lib/identity";
+  useProjectRepoSyncStatusQuery,
+  usePullProjectLocalRepositoryMutation,
+  usePushProjectLocalRepositoryMutation,
+} from "@/features/projects/repoSyncHooks";
+import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
+import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import {
   type ProfilePanelTab,
   type ProfilePanelView,
@@ -53,6 +53,7 @@ import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { Button } from "@/shared/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useProjectCommitDiffQuery } from "@/features/projects/useProjectCommitDiff";
 import { useGitIdentityQuery } from "@/features/projects/useGitIdentity";
@@ -63,7 +64,17 @@ import {
   projectTerminalLabel,
   useOpenProjectTerminal,
 } from "./useOpenProjectTerminal";
-import { ProfileIdentityButton } from "./ProjectProfileIdentity";
+import { CopyTextButton } from "./ProjectCommitCopyButton";
+
+/** Tooltip for the push/pull sync buttons, e.g. "Pull 2 remote commits". */
+function pushPullTitle(
+  verb: "Push" | "Pull",
+  count: number | undefined,
+  side: "local" | "remote",
+) {
+  if (!count) return `${verb} ${side} commits`;
+  return `${verb} ${count} ${side} ${count === 1 ? "commit" : "commits"}`;
+}
 
 function projectPeople(project: Project) {
   return [
@@ -86,6 +97,7 @@ function snapshotHasContent(snapshot: ProjectRepoSnapshot | null | undefined) {
 }
 
 type ProjectDetailScreenProps = {
+  commitHash?: string;
   projectId: string;
   pullRequestId?: string;
   issueId?: string;
@@ -98,7 +110,7 @@ const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
 ] as const;
 
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
-  const { projectId, pullRequestId, issueId } = props;
+  const { commitHash, projectId, pullRequestId, issueId } = props;
   const { goChannel, goProjects } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const mainInsetRef = useMainInsetRef();
@@ -143,22 +155,17 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   React.useEffect(() => setSelectedIssueId(issueId ?? null), [issueId]);
   const [selectedCommitHash, setSelectedCommitHash] = React.useState<
     string | null
-  >(null);
+  >(commitHash ?? null);
+  React.useEffect(
+    () => setSelectedCommitHash(commitHash ?? null),
+    [commitHash],
+  );
   // Bumped when breadcrumb navigation should land on the project Overview
   // tab; remounts WorkspaceTabs, which owns the selected-tab state.
   const [tabsResetKey, setTabsResetKey] = React.useState(0);
   // Mirror of the WorkspaceTabs selection so the breadcrumb can name the
   // active sub-tab. The Overview (readme) tab is "home" and gets no crumb.
   const [activeTab, setActiveTab] = React.useState("overview");
-  // Commit selection has no URL param, so reset it when navigating to a
-  // different project within the same mounted route.
-  const commitProjectIdRef = React.useRef(projectId);
-  React.useEffect(() => {
-    if (commitProjectIdRef.current !== projectId) {
-      commitProjectIdRef.current = projectId;
-      setSelectedCommitHash(null);
-    }
-  }, [projectId]);
   // Commit, PR, and issue details are mutually exclusive views, so opening
   // one clears the others.
   const handleSelectedPullRequestIdChange = React.useCallback(
@@ -235,6 +242,11 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     activeCommunity?.reposDir,
     activeBranch,
   );
+  const pullLocalRepoMutation = usePullProjectLocalRepositoryMutation(
+    project,
+    activeCommunity?.reposDir,
+    activeBranch,
+  );
   const hasLocalCheckout = Boolean(
     localRepoSnapshotQuery.data || repoSyncStatusQuery.data?.localPath,
   );
@@ -273,7 +285,26 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       pushLocalRepoMutation.isPending || !repoSyncStatusQuery.data?.canPush,
     pushPending: pushLocalRepoMutation.isPending,
     pushTitle:
-      repoSyncStatusQuery.data?.pushBlockReason ?? "Push local commits",
+      repoSyncStatusQuery.data?.pushBlockReason ??
+      pushPullTitle("Push", repoSyncStatusQuery.data?.aheadCount, "local"),
+    canPull: repoSyncStatusQuery.data?.canPull ?? false,
+    onPull: () => {
+      void handlePullLocalRepo();
+    },
+    pullDisabled:
+      pullLocalRepoMutation.isPending || !repoSyncStatusQuery.data?.canPull,
+    pullPending: pullLocalRepoMutation.isPending,
+    pullTitle:
+      repoSyncStatusQuery.data?.pullBlockReason ??
+      pushPullTitle("Pull", repoSyncStatusQuery.data?.behindCount, "remote"),
+    aheadCount: repoSyncStatusQuery.data?.aheadCount ?? null,
+    behindCount: repoSyncStatusQuery.data?.behindCount ?? null,
+    onFetch: () => {
+      void repoSyncStatusQuery.refetch();
+    },
+    fetchPending: repoSyncStatusQuery.isFetching,
+    fetchTitle:
+      repoSyncStatusQuery.data?.pullBlockReason ?? "Check for remote changes",
   };
   const projectPending = projectQuery.isPending;
   React.useEffect(() => {
@@ -316,10 +347,24 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       (pullRequest) => [
         pullRequest.author,
         ...pullRequest.updates.map((update) => update.author),
+        ...pullRequest.comments.map((comment) => comment.author),
+        ...pullRequest.reviewers,
+        ...pullRequest.approvals.map((approval) => approval.author),
       ],
     );
-    return [...new Set([...projectPeople(project), ...pullRequestPubkeys])];
-  }, [project, pullRequestsQuery.data]);
+    const issuePubkeys = (issuesQuery.data ?? []).flatMap((issue) => [
+      issue.author,
+      ...issue.recipients,
+      ...issue.comments.map((comment) => comment.author),
+    ]);
+    return [
+      ...new Set([
+        ...projectPeople(project),
+        ...pullRequestPubkeys,
+        ...issuePubkeys,
+      ]),
+    ];
+  }, [issuesQuery.data, project, pullRequestsQuery.data]);
   const profilesQuery = useUsersBatchQuery(peoplePubkeys, {
     enabled: peoplePubkeys.length > 0,
   });
@@ -399,6 +444,28 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repoStateQuery,
     repoSyncStatusQuery,
   ]);
+  const handlePullLocalRepo = React.useCallback(async () => {
+    try {
+      const result = await pullLocalRepoMutation.mutateAsync();
+      toast.success(result.message);
+      await Promise.all([
+        repoSnapshotQuery.refetch(),
+        localRepoSnapshotQuery.refetch(),
+        repoSyncStatusQuery.refetch(),
+        repoStateQuery.refetch(),
+      ]);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to pull repository",
+      );
+    }
+  }, [
+    localRepoSnapshotQuery,
+    pullLocalRepoMutation,
+    repoSnapshotQuery,
+    repoStateQuery,
+    repoSyncStatusQuery,
+  ]);
 
   const openTerminal = useOpenProjectTerminal(activeCommunity?.reposDir);
   const handleOpenTerminal = React.useCallback(() => {
@@ -460,8 +527,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     );
   }
 
-  const ownerProfile = profiles?.[normalizePubkey(project.owner)];
-  const ownerLabel = resolveUserLabel({ pubkey: project.owner, profiles });
   const repoContributors = repoSnapshotQuery.data?.contributors ?? [];
   const safeWebUrl =
     project.webUrl && isSafeUrl(project.webUrl) ? project.webUrl : null;
@@ -535,7 +600,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
             ref={projectDetailHeaderChromeRef}
           >
             <div
-              className="pointer-events-auto flex min-h-[3.25rem] items-center justify-between gap-3 px-4 py-2"
+              className="pointer-events-auto flex min-h-[2.75rem] items-center justify-between gap-3 px-4 py-1.5"
               data-tauri-drag-region
             >
               <nav
@@ -606,7 +671,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
               </nav>
               {project.projectChannelId ? (
                 <Button
-                  className="h-9 shrink-0 gap-1.5"
+                  className="h-8 shrink-0 gap-1.5"
                   onClick={() => {
                     if (project.projectChannelId) {
                       void goChannel(project.projectChannelId);
@@ -650,6 +715,18 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                       ) : null}
                     </div>
                   </div>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="inline-flex shrink-0">
+                        <CopyTextButton
+                          ariaLabel="Copy repo address"
+                          className="h-6 w-6"
+                          text={project.repoAddress}
+                        />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>Copy repo address</TooltipContent>
+                  </Tooltip>
                 </div>
               </section>
 
@@ -691,26 +768,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 sourceControls={filesSourceControls}
                 viewerGitIdentity={viewerGitIdentity}
               />
-
-              <section className="flex min-w-0 items-center gap-2 border border-border/60 bg-card px-4 py-3 text-sm text-muted-foreground">
-                <span className="shrink-0 font-medium text-foreground">
-                  Details:
-                </span>
-                <span className="min-w-0 truncate">
-                  Repo: {project.repoAddress}
-                </span>
-                <span className="shrink-0 text-border">•</span>
-                <span className="shrink-0">Creator:</span>
-                <ProfileIdentityButton
-                  align="center"
-                  avatarClassName="mt-0.5"
-                  avatarSize="xs"
-                  avatarUrl={ownerProfile?.avatarUrl ?? null}
-                  isAgent={ownerProfile?.isAgent === true}
-                  label={ownerLabel}
-                  pubkey={project.owner}
-                />
-              </section>
             </div>
           </div>
         </div>

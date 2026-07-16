@@ -36,6 +36,8 @@ import {
   countNonSecretInheritedEnvVars,
   getBakedModelInheritLabel,
   getAdvancedInheritedSummary,
+  getGlobalModelFallback,
+  getInheritedAgentDefaults,
   getBakedProviderInheritLabel,
   resolveInheritedDefault,
 } from "./bakedEnvHelpers.ts";
@@ -840,8 +842,8 @@ test("providerDefaultLabel_globalSet_returnsInheritLabel", () => {
   const label = getDefaultLlmProviderLabel("buzz-agent", "anthropic");
   assert.equal(
     label,
-    "Inherit global default (anthropic)",
-    "global provider set must return 'Inherit global default (<provider>)'",
+    "Use AI defaults (anthropic)",
+    "global provider set must return 'Use AI defaults (<provider>)'",
   );
 });
 
@@ -850,7 +852,7 @@ test("providerDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () =
   const label = getDefaultLlmProviderLabel("buzz-agent", "  openai  ");
   assert.equal(
     label,
-    "Inherit global default (openai)",
+    "Use AI defaults (openai)",
     "global provider with surrounding whitespace must be trimmed in label",
   );
 });
@@ -858,7 +860,7 @@ test("providerDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () =
 test("providerDefaultLabel_sharedCompute_neverLeaksInternalId", () => {
   assert.equal(
     getDefaultLlmProviderLabel("buzz-agent", "relay-mesh"),
-    "Inherit global default (Buzz shared compute)",
+    "Use AI defaults (Buzz shared compute)",
   );
 });
 
@@ -972,8 +974,8 @@ test("modelDefaultLabel_globalSet_returnsInheritLabel", () => {
   const label = getDefaultLlmModelLabel("claude-opus-4-5");
   assert.equal(
     label,
-    "Inherit global default (claude-opus-4-5)",
-    "global model set must return 'Inherit global default (<model>)'",
+    "Use AI defaults (claude-opus-4-5)",
+    "global model set must return 'Use AI defaults (<model>)'",
   );
 });
 
@@ -982,7 +984,7 @@ test("modelDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () => {
   const label = getDefaultLlmModelLabel("  gpt-4o  ");
   assert.equal(
     label,
-    "Inherit global default (gpt-4o)",
+    "Use AI defaults (gpt-4o)",
     "global model with surrounding whitespace must be trimmed in label",
   );
 });
@@ -1131,11 +1133,11 @@ test("f3_templateDialog_localProviderBlankGlobalAnthropicNoModel_saveBlocked", (
 
 test("f3_templateDialog_globalModelSet_zeroValueLabelIsInherit", () => {
   // Case 3: global model set → the zero-value model dropdown option must show
-  // "Inherit global default (<model>)" not the generic "Default model".
+  // "Use AI defaults (<model>)" not the generic "Default model".
   // getDefaultLlmModelLabel is what AgentDefinitionDialog now uses for that slot.
   assert.equal(
     getDefaultLlmModelLabel("claude-opus-4-5"),
-    "Inherit global default (claude-opus-4-5)",
+    "Use AI defaults (claude-opus-4-5)",
     "zero-value model option label must show the global model name when set",
   );
   assert.equal(
@@ -1175,7 +1177,7 @@ test("f3b_buildTemplateModelDropdownOptions_anthropicGlobalModelSet_containsInhe
   );
   assert.equal(
     inheritEntry.label,
-    "Inherit global default (claude-opus-4-5)",
+    "Use AI defaults (claude-opus-4-5)",
     "inherit entry must carry the global model name",
   );
 });
@@ -1215,7 +1217,7 @@ test("f3b_buildTemplateModelDropdownOptions_blankProviderGlobalModelSet_noDouble
   );
   assert.equal(
     autoEntries[0].label,
-    "Inherit global default (claude-opus-4-5)",
+    "Use AI defaults (claude-opus-4-5)",
     "existing zero-value entry must be relabeled with the global model name",
   );
 });
@@ -1389,4 +1391,54 @@ test("localMode_globalEnvSatisfied_agentLocalKeyAbsent_silenced", () => {
     true,
     "gate must be satisfied when global key is not shadowed by an explicit empty",
   );
+});
+
+test("global model fallback resolves the selected provider model env", () => {
+  const bakedEnv = [
+    {
+      key: "DATABRICKS_MODEL",
+      value: "goose-claude-opus-4-8",
+      masked: false,
+    },
+  ];
+  assert.equal(
+    getGlobalModelFallback(bakedEnv, "databricks_v2"),
+    "goose-claude-opus-4-8",
+  );
+});
+
+test("global model fallback gives saved provider env precedence over build env", () => {
+  const bakedEnv = [
+    { key: "ANTHROPIC_MODEL", value: "build-model", masked: false },
+  ];
+  assert.equal(
+    getGlobalModelFallback(bakedEnv, "anthropic", {
+      ANTHROPIC_MODEL: "saved-model",
+    }),
+    "saved-model",
+  );
+});
+
+test("global model fallback never uses another provider's model", () => {
+  const bakedEnv = [
+    { key: "DATABRICKS_MODEL", value: "databricks-model", masked: false },
+  ];
+  assert.equal(getGlobalModelFallback(bakedEnv, "anthropic"), null);
+});
+
+test("inherited defaults expose a provider-specific model fallback to agent dialogs", () => {
+  const defaults = getInheritedAgentDefaults(
+    { env_vars: {}, provider: "databricks_v2", model: null },
+    [
+      {
+        key: "DATABRICKS_MODEL",
+        value: "goose-claude-opus-4-8",
+        masked: false,
+      },
+    ],
+  );
+  assert.deepEqual(defaults.model, {
+    source: "build",
+    value: "goose-claude-opus-4-8",
+  });
 });

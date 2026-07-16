@@ -64,7 +64,7 @@ function labelForPubkey(pubkey: string, profiles?: UserProfileLookup) {
   );
 }
 
-function relativeOpenedAt(createdAt: number) {
+function relativeCreatedAt(createdAt: number) {
   const elapsedSeconds = Math.max(
     1,
     Math.floor(Date.now() / 1_000 - createdAt),
@@ -127,10 +127,12 @@ function pullRequestMembers(
 }
 
 function AuthorIdentity({
+  avatarSize = "md",
   profiles,
   pubkey,
   role,
 }: {
+  avatarSize?: "xs" | "sm" | "md";
   profiles?: UserProfileLookup;
   pubkey: string;
   role?: React.ReactNode;
@@ -139,13 +141,41 @@ function AuthorIdentity({
   return (
     <ProfileIdentityButton
       align="center"
-      avatarSize="xs"
+      avatarSize={avatarSize}
       avatarUrl={profile?.avatarUrl ?? null}
       isAgent={profile?.isAgent === true}
       label={labelForPubkey(pubkey, profiles)}
       pubkey={pubkey}
       role={role}
     />
+  );
+}
+
+/** Commit hash chip that jumps to the commit detail when a handler is given. */
+function CommitHashChip({
+  hash,
+  onOpenCommit,
+}: {
+  hash: string;
+  onOpenCommit?: (commitHash: string) => void;
+}) {
+  const short = hash.slice(0, 7);
+  if (!onOpenCommit) {
+    return (
+      <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
+        {short}
+      </code>
+    );
+  }
+  return (
+    <button
+      aria-label={`View commit ${short}`}
+      className="shrink-0 rounded-md bg-background/55 px-2 py-1 font-mono text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+      onClick={() => onOpenCommit(hash)}
+      type="button"
+    >
+      {short}
+    </button>
   );
 }
 
@@ -182,7 +212,7 @@ function PullRequestRow({
           <span className="truncate font-medium text-foreground/80">
             {authorLabel}
           </span>
-          <span>opened {relativeOpenedAt(pullRequest.createdAt)}</span>
+          <span>created {relativeCreatedAt(pullRequest.createdAt)}</span>
           <span className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs">
             Member
           </span>
@@ -427,7 +457,7 @@ function PullRequestReviewCard({
       : null;
 
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-2.5 pt-3">
       <PullRequestReviewersRow
         canRequest={canRequestReview}
         profiles={profiles}
@@ -435,12 +465,12 @@ function PullRequestReviewCard({
         pullRequest={pullRequest}
       />
       <div
-        className={`min-w-0 space-y-2.5 px-3 py-2.5 ${
+        className={`min-w-0 space-y-2.5 rounded-xl px-3 py-2.5 ${
           isDraft
             ? "bg-muted/40"
             : approvalCount > 0
               ? "bg-green-600/10 dark:bg-green-500/10"
-              : "border-green-600/35 border-l-2 bg-green-600/[0.04] pl-3 dark:border-green-500/35 dark:bg-green-500/[0.06]"
+              : "bg-muted/40"
         }`}
       >
         <div className="flex min-w-0 items-start gap-2">
@@ -538,38 +568,26 @@ export function PullRequestDetailHeader({
   profiles?: UserProfileLookup;
   pullRequest: ProjectPullRequest;
 }) {
-  const authorProfile = profileForPubkey(pullRequest.author, profiles);
   const authorLabel = labelForPubkey(pullRequest.author, profiles);
 
   return (
-    <header className="min-w-0 space-y-2 p-4 pb-2">
+    <header className="min-w-0 space-y-1.5 p-4 pb-2">
+      <h3 className="line-clamp-2 min-w-0 text-base font-semibold text-foreground">
+        {pullRequest.title}{" "}
+        <span className="font-normal text-muted-foreground">
+          #{pullRequest.id.slice(0, 8)}
+        </span>
+      </h3>
       <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
         <GitPullRequest className="h-3.5 w-3.5" />
-        Pull request from {authorLabel}
+        Created {compactDate(pullRequest.createdAt)} by {authorLabel}
       </p>
-      <div className="flex min-w-0 items-center gap-3">
-        <ProfileIdentityButton
-          avatarClassName="shrink-0"
-          avatarSize="md"
-          avatarUrl={authorProfile?.avatarUrl ?? null}
-          isAgent={authorProfile?.isAgent === true}
-          label={authorLabel}
-          pubkey={pullRequest.author}
-          showLabel={false}
-        />
-        <h3 className="line-clamp-2 min-w-0 flex-1 text-base font-semibold text-foreground">
-          {pullRequest.title}{" "}
-          <span className="font-normal text-muted-foreground">
-            #{pullRequest.id.slice(0, 8)}
-          </span>
-        </h3>
-      </div>
     </header>
   );
 }
 
 /** Right-hand meta column for the PR detail view: status, author, branches,
- * dates, and review actions — keeps the conversation column focused. */
+ * and dates. Review actions live inline in the conversation column. */
 export function PullRequestMetaRail({
   profiles,
   project,
@@ -626,7 +644,7 @@ export function PullRequestMetaRail({
       <OverviewRailSection title="Activity">
         <dl className="space-y-1.5 text-xs text-muted-foreground">
           <div className="flex items-center justify-between gap-3">
-            <dt>Opened</dt>
+            <dt>Created</dt>
             <dd className="font-medium text-foreground">
               {compactDate(pullRequest.createdAt)}
             </dd>
@@ -639,24 +657,19 @@ export function PullRequestMetaRail({
           </div>
         </dl>
       </OverviewRailSection>
-      <OverviewRailSection title="Review">
-        <PullRequestReviewCard
-          profiles={profiles}
-          project={project}
-          pullRequest={pullRequest}
-        />
-      </OverviewRailSection>
     </aside>
   );
 }
 
 function PullRequestDetail({
   mode,
+  onOpenCommit,
   profiles,
   project,
   pullRequest,
 }: {
   mode: PullRequestPanelMode;
+  onOpenCommit?: (commitHash: string) => void;
   profiles?: UserProfileLookup;
   project: Project;
   pullRequest: ProjectPullRequest;
@@ -694,9 +707,7 @@ function PullRequestDetail({
     return (
       <div className="divide-y divide-border/50">
         <section className="space-y-3 p-4">
-          <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Commits
-          </h4>
+          <h4 className="text-sm font-semibold text-foreground">Commits</h4>
           <article className="space-y-1">
             <div className="flex min-w-0 items-center justify-between gap-3">
               <AuthorIdentity
@@ -705,9 +716,10 @@ function PullRequestDetail({
                 role={compactDate(pullRequest.createdAt)}
               />
               {pullRequest.commit ? (
-                <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
-                  {pullRequest.commit.slice(0, 7)}
-                </code>
+                <CommitHashChip
+                  hash={pullRequest.commit}
+                  onOpenCommit={onOpenCommit}
+                />
               ) : null}
             </div>
             <p className="text-sm text-muted-foreground">{pullRequest.title}</p>
@@ -721,9 +733,10 @@ function PullRequestDetail({
                   role={compactDate(update.createdAt)}
                 />
                 {update.commit ? (
-                  <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
-                    {update.commit.slice(0, 7)}
-                  </code>
+                  <CommitHashChip
+                    hash={update.commit}
+                    onOpenCommit={onOpenCommit}
+                  />
                 ) : null}
               </div>
               {update.content ? (
@@ -760,9 +773,7 @@ function PullRequestDetail({
 
       {pullRequest.updates.length > 0 ? (
         <section className="space-y-3 p-4">
-          <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Updates
-          </h4>
+          <h4 className="text-sm font-semibold text-foreground">Updates</h4>
           {pullRequest.updates.map((update) => (
             <article className="space-y-1" key={update.id}>
               <div className="flex min-w-0 items-center justify-between gap-3">
@@ -772,9 +783,10 @@ function PullRequestDetail({
                   role={compactDate(update.createdAt)}
                 />
                 {update.commit ? (
-                  <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
-                    {update.commit.slice(0, 7)}
-                  </code>
+                  <CommitHashChip
+                    hash={update.commit}
+                    onOpenCommit={onOpenCommit}
+                  />
                 ) : null}
               </div>
               {update.content ? (
@@ -788,9 +800,9 @@ function PullRequestDetail({
       ) : null}
 
       <section className="space-y-3 p-4">
-        <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        <h4 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
           <MessageSquare className="h-3.5 w-3.5" />
-          Discussion
+          Add Your Comment
         </h4>
         {pullRequest.comments.length > 0 ? (
           <div className="space-y-3">
@@ -841,6 +853,11 @@ function PullRequestDetail({
         ) : (
           <p className="text-sm text-muted-foreground">No comments yet.</p>
         )}
+        <PullRequestReviewCard
+          profiles={profiles}
+          project={project}
+          pullRequest={pullRequest}
+        />
         <ForumComposer
           className="border border-border/60 bg-background/45"
           disabled={commentMutation.isPending}
@@ -859,6 +876,7 @@ export function PullRequestsPanel({
   error,
   isLoading,
   mode = "conversation",
+  onOpenCommit,
   onSelectedPullRequestIdChange,
   profiles,
   project,
@@ -868,6 +886,7 @@ export function PullRequestsPanel({
   error: unknown;
   isLoading: boolean;
   mode?: PullRequestPanelMode;
+  onOpenCommit?: (commitHash: string) => void;
   onSelectedPullRequestIdChange: (id: string | null) => void;
   profiles?: UserProfileLookup;
   project: Project;
@@ -908,6 +927,7 @@ export function PullRequestsPanel({
     return (
       <PullRequestDetail
         mode={mode}
+        onOpenCommit={onOpenCommit}
         profiles={profiles}
         project={project}
         pullRequest={selectedPullRequest}

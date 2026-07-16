@@ -1,4 +1,4 @@
-import { TerminalSquare } from "lucide-react";
+import { SquareTerminal } from "lucide-react";
 import * as React from "react";
 
 import type {
@@ -191,31 +191,34 @@ export function WorkspaceTabs({
             title={terminalTitle ?? "Open terminal"}
             variant="ghost"
           >
-            <TerminalSquare className="h-3.5 w-3.5" />
+            <SquareTerminal className="h-[1.125rem] w-[1.125rem]" />
           </Button>
         ) : null}
       </div>
 
       {selectedPullRequest ? (
         <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-          <PullRequestDetailHeader
-            profiles={profiles}
-            pullRequest={selectedPullRequest}
-          />
-          <div className="border-b border-border/60 px-4">
-            <PullRequestTabsList
-              filesCount={repoDiff?.files.length ?? files.length}
-              pullRequest={selectedPullRequest}
-            />
-          </div>
-          {(["conversation", "commits", "checks"] as const).map((mode) => (
-            <TabsContent className="m-0" key={mode} value={`pr-${mode}`}>
-              <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem]">
-                <div className="min-w-0">
+          {/* Two full-height columns: the meta rail runs all the way to the
+              top of the card, alongside the header and tabs. */}
+          <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem]">
+            <div className="min-w-0">
+              <PullRequestDetailHeader
+                profiles={profiles}
+                pullRequest={selectedPullRequest}
+              />
+              <div className="border-b border-border/60 px-4">
+                <PullRequestTabsList
+                  filesCount={repoDiff?.files.length ?? files.length}
+                  pullRequest={selectedPullRequest}
+                />
+              </div>
+              {(["conversation", "commits", "checks"] as const).map((mode) => (
+                <TabsContent className="m-0" key={mode} value={`pr-${mode}`}>
                   <PullRequestsPanel
                     error={pullRequestsError}
                     isLoading={pullRequestsLoading}
                     mode={mode}
+                    onOpenCommit={onSelectedCommitHashChange}
                     onSelectedPullRequestIdChange={
                       onSelectedPullRequestIdChange
                     }
@@ -224,23 +227,23 @@ export function WorkspaceTabs({
                     pullRequests={pullRequests}
                     selectedPullRequestId={selectedPullRequestId}
                   />
-                </div>
-                <PullRequestMetaRail
-                  profiles={profiles}
-                  project={project}
+                </TabsContent>
+              ))}
+              <TabsContent className="m-0" value="pr-files">
+                <ProjectPullRequestFilesChangedPanel
+                  diff={repoDiff}
+                  error={repoDiffError}
+                  isLoading={repoDiffLoading}
                   pullRequest={selectedPullRequest}
                 />
-              </div>
-            </TabsContent>
-          ))}
-          <TabsContent className="m-0" value="pr-files">
-            <ProjectPullRequestFilesChangedPanel
-              diff={repoDiff}
-              error={repoDiffError}
-              isLoading={repoDiffLoading}
+              </TabsContent>
+            </div>
+            <PullRequestMetaRail
+              profiles={profiles}
+              project={project}
               pullRequest={selectedPullRequest}
             />
-          </TabsContent>
+          </div>
         </div>
       ) : null}
 
@@ -295,6 +298,7 @@ export function WorkspaceTabs({
         <PullRequestsPanel
           error={pullRequestsError}
           isLoading={pullRequestsLoading}
+          onOpenCommit={onSelectedCommitHashChange}
           onSelectedPullRequestIdChange={onSelectedPullRequestIdChange}
           profiles={profiles}
           project={project}
@@ -318,7 +322,7 @@ export function WorkspaceTabs({
       <TabsContent className="m-0" value="files">
         {repoSource === "local" && !localSnapshot && !localSnapshotLoading ? (
           <div className="mb-3">
-            <div className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+            <div className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
               No local checkout found.
             </div>
           </div>

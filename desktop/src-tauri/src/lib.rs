@@ -35,7 +35,10 @@ use mesh_llm_stubs::*;
 
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use commands::*;
-use deep_link::handle_deep_link_url;
+use deep_link::{
+    acknowledge_pending_community_deep_link, handle_deep_link_url,
+    take_pending_community_deep_link, PendingCommunityDeepLinks,
+};
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
 };
@@ -449,6 +452,7 @@ pub fn run() {
             });
         })
         .manage(build_app_state())
+        .manage(PendingCommunityDeepLinks::default())
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -739,6 +743,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            take_pending_community_deep_link,
+            acknowledge_pending_community_deep_link,
             title_bar_double_click,
             get_identity,
             get_nsec,
@@ -757,9 +763,11 @@ pub fn run() {
             get_project_repo_sync_status,
             list_project_local_repositories,
             push_project_local_repository,
+            pull_project_local_repository,
             open_project_terminal,
             search_users,
             get_presence,
+            get_os_idle_seconds,
             get_default_relay_url,
             get_legacy_workspace_storage,
             is_shared_identity,

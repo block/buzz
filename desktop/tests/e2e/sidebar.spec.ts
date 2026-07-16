@@ -80,7 +80,15 @@ test("leaving a channel from the context menu never freezes the app", async ({
   await expectAppClickable(page);
 });
 
-test("fades the pinned sidebar chrome edges", async ({ page }) => {
+test("fades the pinned sidebar chrome edges outside the Buzz theme", async ({
+  page,
+}) => {
+  // The Buzz default theme repaints the pinned header/footer with the
+  // sidebar gradient and drops the edge-fade pseudo-elements, so the fade
+  // treatment under test only exists on non-Buzz themes.
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "github-light");
+  });
   await page.goto("/");
 
   const pinnedHeader = page.getByTestId("sidebar-pinned-header");

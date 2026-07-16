@@ -1,5 +1,12 @@
 # Changelog
 
+## mobile-v0.4.5
+
+- fix(mobile): support open pairing relays ([#1939](https://github.com/block/buzz/pull/1939)) ([`a0081944`](https://github.com/block/buzz/commit/a0081944edbb3d33a2bcee0b4890ae5ef8ad4966))
+- fix(mobile): replace pairing placeholder with Buzz icon ([#1952](https://github.com/block/buzz/pull/1952)) ([`7eea924f`](https://github.com/block/buzz/commit/7eea924f3d7cf9ee816ae5f206c88762274fd7c6))
+- feat(media): require auth for relay media reads ([#1926](https://github.com/block/buzz/pull/1926)) ([`f3087628`](https://github.com/block/buzz/commit/f3087628524951de91028c9d263bcd0d0a727fab))
+
+
 ## mobile-v0.4.4
 
 - fix(mobile): surface non-member people and owned agents in @mention autocomplete ([#1877](https://github.com/block/buzz/pull/1877)) ([`54f41659`](https://github.com/block/buzz/commit/54f4165942ab5b3e2cf1fa1b47bbb907587cd5f4))

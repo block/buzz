@@ -120,3 +120,22 @@ test("rankMentionCandidates: active persona-backed non-members outrank other non
     ["5".repeat(64), OTHER_BRAIN_PUBKEY],
   );
 });
+
+test("rankMentionCandidates: owned teams rank with runnable personas", () => {
+  const remoteAgent = candidate({
+    displayName: "Launch Agent",
+    isAgent: true,
+  });
+  const team = candidate({
+    kind: "team",
+    displayName: "Launch Team",
+    pubkey: undefined,
+  });
+
+  assert.deepEqual(
+    rankMentionCandidates([remoteAgent, team], "launch").map(
+      (item) => item.candidate.kind,
+    ),
+    ["team", "identity"],
+  );
+});

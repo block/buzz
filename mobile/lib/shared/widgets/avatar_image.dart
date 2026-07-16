@@ -3,6 +3,9 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../relay/relay.dart';
 
 /// A circular avatar that supports both remote URLs and inline image data.
 ///
@@ -97,10 +100,13 @@ class _AvatarImageContentState extends State<AvatarImageContent> {
         fit: widget.fit,
         errorBuilder: (_, _, _) => centeredFallback,
       ),
-      _NetworkAvatarSource(:final url) => Image.network(
-        url,
-        fit: widget.fit,
-        errorBuilder: (_, _, _) => centeredFallback,
+      _NetworkAvatarSource(:final url) => Consumer(
+        builder: (context, ref, _) => Image.network(
+          url,
+          headers: mediaGetHeadersFor(ref, url),
+          fit: widget.fit,
+          errorBuilder: (_, _, _) => centeredFallback,
+        ),
       ),
       null => centeredFallback,
     };

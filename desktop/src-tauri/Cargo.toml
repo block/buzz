@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.4.6"
+version = "0.4.7"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -46,10 +46,12 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHa
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
 security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
 window-vibrancy = "0.6"
+user-idle = { version = "0.6", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
+user-idle = { version = "0.6", default-features = false }
 
 [dependencies]
 atomic-write-file = "0.3"
@@ -80,7 +82,7 @@ serde_yaml = "0.9"
 toml = "0.8"
 nostr = { version = "0.44", features = ["nip44"] }
 zeroize = "1"
-reqwest = { version = "0.13", features = ["json", "query", "stream"] }
+reqwest = { version = "0.13", features = ["json", "query", "stream", "blocking"] }
 url = "2"
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
@@ -107,6 +109,7 @@ png = "0.18"
 arboard = "3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 zip = "8"
+flate2 = "1"
 sherpa-onnx = "1.12"
 regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
