@@ -6,7 +6,7 @@ import { TabsList, TabsTrigger } from "@/shared/ui/tabs";
 const PROJECT_TAB_TRIGGER_BASE_CLASS =
   "rounded-full text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-sidebar-active data-[state=active]:text-sidebar-active-foreground data-[state=active]:shadow-xs data-[state=active]:hover:bg-sidebar-active data-[state=active]:hover:text-sidebar-active-foreground";
 
-const PROJECT_TAB_TRIGGER_CLASS = `${PROJECT_TAB_TRIGGER_BASE_CLASS} h-7 gap-1.5 px-2 text-xs xl:px-2.5 xl:text-sm`;
+const PROJECT_TAB_TRIGGER_CLASS = `${PROJECT_TAB_TRIGGER_BASE_CLASS} h-8 gap-1.5 px-3 text-xs xl:px-3.5 xl:text-sm`;
 
 const PROJECT_ICON_TAB_TRIGGER_CLASS = `${PROJECT_TAB_TRIGGER_BASE_CLASS} h-8 w-8 shrink-0 border border-border/60 p-2 data-[state=active]:border-transparent`;
 

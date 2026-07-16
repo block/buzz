@@ -30,7 +30,6 @@ import { ProjectsIssuesList } from "@/features/projects/ui/ProjectsIssuesList";
 import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPanel";
 import { ProjectsOverviewRail } from "@/features/projects/ui/ProjectsOverviewRail";
 import { ProjectsPullRequestsList } from "@/features/projects/ui/ProjectsPullRequestsList";
-import { ProjectsAgentPromptPage } from "@/features/projects/ui/ProjectsAgentPromptPage";
 import {
   ProjectsToolbar,
   ProjectsViewModeToggle,
@@ -58,13 +57,7 @@ import { useOpenProjectTerminal } from "@/features/projects/ui/useOpenProjectTer
 import { useCommunities } from "@/features/communities/useCommunities";
 import { CommunityEmojiIcon } from "@/features/communities/ui/CommunitySwitcher";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
-import {
-  channelChrome,
-  channelContentTopPaddingMeasurement,
-  topChromeInset,
-} from "@/shared/layout/chromeLayout";
-import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
+import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
@@ -113,11 +106,6 @@ export function ProjectsView() {
     },
     [],
   );
-  const mainInsetRef = useMainInsetRef();
-  const projectsHeaderChromeRef = useMeasuredCssVariable({
-    targetRef: mainInsetRef,
-    ...channelContentTopPaddingMeasurement,
-  });
   const projectsQuery = useProjectsQuery();
   const identityQuery = useIdentityQuery();
   const projects = projectsQuery.data ?? [];
@@ -142,7 +130,6 @@ export function ProjectsView() {
     snapshotProjects,
     activeCommunity?.reposDir,
   );
-  const [searchOpen, setSearchOpen] = React.useState(false);
   const [createProjectOpen, setCreateProjectOpen] = React.useState(false);
   const createProjectMutation = useCreateProjectMutation();
   const [storedViewMode, setStoredViewMode] =
@@ -203,8 +190,6 @@ export function ProjectsView() {
   const handleFilterChange = React.useCallback((nextFilter: ProjectsFilter) => {
     setFilter(nextFilter);
     writeStoredFilter(nextFilter);
-    // Picking a tab exits the full-page search state.
-    setSearchOpen(false);
   }, []);
 
   const handleSortChange = React.useCallback((nextSort: ProjectsSort) => {
@@ -527,14 +512,8 @@ export function ProjectsView() {
     </div>
   );
 
-  const renderProjectsToolbar = (timeline: boolean) => (
-    <ProjectsToolbar
-      filter={filter}
-      onFilterChange={handleFilterChange}
-      onSearchOpenChange={setSearchOpen}
-      searchOpen={searchOpen}
-      timeline={timeline}
-    />
+  const renderProjectsToolbar = () => (
+    <ProjectsToolbar filter={filter} onFilterChange={handleFilterChange} />
   );
 
   return (
@@ -580,99 +559,75 @@ export function ProjectsView() {
         onOpenChange={setCreateProjectOpen}
         open={createProjectOpen}
       />
-      {searchOpen ? (
-        <>
-          <div
-            className={cn(
-              "pointer-events-none relative z-30 overflow-hidden bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
-              channelChrome.negativeMargin,
-            )}
-            ref={projectsHeaderChromeRef}
-          >
-            {projectsHeader}
-            {renderProjectsToolbar(false)}
+      <div
+        className="buzz-content-scrollbar flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto"
+        onScroll={handleContentScroll}
+      >
+        {projectsHeader}
+        {filter === "all" ? null : (
+          <div className="sticky top-0 z-30 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55">
+            {renderProjectsToolbar()}
           </div>
-          <ProjectsAgentPromptPage
-            onClose={() => setSearchOpen(false)}
-            projects={projects}
-            workspaceId={activeCommunity?.id ?? null}
-          />
-        </>
-      ) : (
-        <div
-          className="buzz-content-scrollbar flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto"
-          onScroll={handleContentScroll}
-        >
-          {projectsHeader}
-          {filter === "all" ? null : (
-            <div className="sticky top-0 z-30 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55">
-              {renderProjectsToolbar(false)}
-            </div>
+        )}
+        <div className="w-full min-w-0 px-4 pb-4 pt-4">
+          {filter === "all" ? (
+            <ProjectsOverviewPanel
+              localRepositoryCount={localProjectCount}
+              metadata={
+                <ProjectsOverviewRail
+                  profiles={profiles}
+                  projects={projects}
+                  snapshots={repoSnapshotsQuery.data}
+                  snapshotsLoading={repoSnapshotsQuery.isLoading}
+                  summaries={activitySummariesQuery.data}
+                >
+                  {mostActiveRepositoryItems}
+                </ProjectsOverviewRail>
+              }
+              onSelectSection={handleFilterChange}
+              projects={projects}
+              summaries={activitySummariesQuery.data}
+            >
+              <div className="sticky top-0 z-30 -mx-4 mb-4 mt-2 bg-card/80 backdrop-blur-md supports-backdrop-filter:bg-card/70">
+                {renderProjectsToolbar()}
+              </div>
+              <section className="space-y-3">{activityFeed}</section>
+            </ProjectsOverviewPanel>
+          ) : (
+            <section className="space-y-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <h3 className="text-base font-semibold text-foreground">
+                  {filter === "prs"
+                    ? "Pull requests"
+                    : filter === "issues"
+                      ? "Issues"
+                      : "Repositories"}
+                </h3>
+                {listControls}
+              </div>
+              {filter === "prs" ? (
+                <ProjectsPullRequestsList
+                  isLoading={projectPullRequestsQuery.isLoading}
+                  onOpen={handleOpenPullRequest}
+                  profiles={profiles}
+                  pullRequests={visiblePullRequests}
+                  viewMode={viewMode}
+                />
+              ) : filter === "issues" ? (
+                <ProjectsIssuesList
+                  isLoading={projectIssuesQuery.isLoading}
+                  issues={visibleIssues}
+                  onOpen={handleOpenIssue}
+                  profiles={profiles}
+                  viewMode={viewMode}
+                />
+              ) : (
+                repositoryItems
+              )}
+            </section>
           )}
-          <div className="w-full min-w-0 px-4 pb-4 pt-4">
-            {filter === "all" ? (
-              <ProjectsOverviewPanel
-                localRepositoryCount={localProjectCount}
-                metadata={
-                  <ProjectsOverviewRail
-                    profiles={profiles}
-                    projects={projects}
-                    snapshots={repoSnapshotsQuery.data}
-                    snapshotsLoading={repoSnapshotsQuery.isLoading}
-                    summaries={activitySummariesQuery.data}
-                  >
-                    {mostActiveRepositoryItems}
-                  </ProjectsOverviewRail>
-                }
-                onSelectSection={handleFilterChange}
-                projects={projects}
-                summaries={activitySummariesQuery.data}
-              >
-                <div className="sticky top-0 z-30 -mx-4 mb-4 mt-2 bg-card/80 backdrop-blur-md supports-backdrop-filter:bg-card/70">
-                  <div
-                    aria-hidden="true"
-                    className="pointer-events-none absolute -bottom-6 left-[23px] top-[2.625rem] z-0 w-px bg-border/45"
-                  />
-                  {renderProjectsToolbar(true)}
-                </div>
-                <section className="space-y-3">{activityFeed}</section>
-              </ProjectsOverviewPanel>
-            ) : (
-              <section className="space-y-3">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <h3 className="text-base font-semibold text-foreground">
-                    {filter === "prs"
-                      ? "Pull requests"
-                      : filter === "issues"
-                        ? "Issues"
-                        : "Repositories"}
-                  </h3>
-                  {listControls}
-                </div>
-                {filter === "prs" ? (
-                  <ProjectsPullRequestsList
-                    isLoading={projectPullRequestsQuery.isLoading}
-                    onOpen={handleOpenPullRequest}
-                    profiles={profiles}
-                    pullRequests={visiblePullRequests}
-                    viewMode={viewMode}
-                  />
-                ) : filter === "issues" ? (
-                  <ProjectsIssuesList
-                    isLoading={projectIssuesQuery.isLoading}
-                    issues={visibleIssues}
-                    onOpen={handleOpenIssue}
-                    profiles={profiles}
-                    viewMode={viewMode}
-                  />
-                ) : (
-                  repositoryItems
-                )}
-              </section>
-            )}
-          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

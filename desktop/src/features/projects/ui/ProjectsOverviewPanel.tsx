@@ -79,7 +79,7 @@ function StatPill({
         </span>
         <Icon className="h-3.5 w-3.5 text-muted-foreground/70" />
       </span>
-      <span className="mt-4 text-3xl font-semibold leading-none tracking-tight text-foreground">
+      <span className="mt-auto pt-4 text-4xl font-semibold leading-none tracking-tight text-foreground">
         {count}
       </span>
     </button>
