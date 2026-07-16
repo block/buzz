@@ -14,6 +14,7 @@ import {
   notifyWelcomeChannelReady,
   rememberPendingWelcomeChannel,
 } from "@/features/onboarding/welcome";
+import { forceFreshOnboarding } from "@/features/onboarding/devFreshOnboarding";
 import { ensureWelcomeGuideIntro } from "@/features/onboarding/welcomeGuide";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -116,6 +117,9 @@ function onboardingCompletionStorageKey(pubkey: string) {
 }
 
 function readOnboardingCompletion(pubkey: string | null) {
+  if (forceFreshOnboarding) {
+    return false;
+  }
   if (typeof window === "undefined" || !pubkey) {
     return false;
   }
@@ -236,6 +240,7 @@ export function useFirstRunOnboardingGate({
     // main checkout. Skip unconditionally without waiting for the relay
     // profile query. Guarded by !hasCompletedCurrentPubkey so it fires once.
     if (
+      !forceFreshOnboarding &&
       isSharedIdentity &&
       currentPubkey &&
       identityStatus === "success" &&
@@ -292,7 +297,9 @@ export function useFirstRunOnboardingGate({
     // still exists, so onboarding is skipped. A missing event (new user, or no
     // kind:0 on the relay) always shows onboarding regardless of display_name.
     const hasExistingProfile =
-      profileStatus === "success" && profileHasEvent === true;
+      !forceFreshOnboarding &&
+      profileStatus === "success" &&
+      profileHasEvent === true;
 
     setGateState((current) =>
       updateActiveGateState(current, currentPubkey, (activeGateState) => {

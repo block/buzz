@@ -7,6 +7,7 @@ import {
 } from "@/features/agents/hooks";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { welcomeKickoffMarker } from "@/features/onboarding/devFreshOnboarding";
 import { resolveAgentReadiness } from "@/features/onboarding/ui/agentReadiness";
 import {
   pickWelcomeTeamStarterAgentForRelay,
@@ -25,6 +26,10 @@ export const WELCOME_KICKOFF_OPENER_MARKER = "buzz-welcome-kickoff.opener.v1";
 export const WELCOME_KICKOFF_CLOSER_MARKER = "buzz-welcome-kickoff.closer.v1";
 export const WELCOME_KICKOFF_PROVIDER_MARKER =
   "buzz-welcome-kickoff.provider-required.v1";
+
+const openerMarker = welcomeKickoffMarker(WELCOME_KICKOFF_OPENER_MARKER);
+const closerMarker = welcomeKickoffMarker(WELCOME_KICKOFF_CLOSER_MARKER);
+const providerMarker = welcomeKickoffMarker(WELCOME_KICKOFF_PROVIDER_MARKER);
 
 export const WELCOME_KICKOFF_PROVIDER_MESSAGE =
   "To get started with agents, connect to an AI provider in Settings. Once you're connected, come back here and we'll introduce the team.";
@@ -151,7 +156,7 @@ export function useWelcomeKickoff(
     kickoffInFlight.add(channelId);
     void (async () => {
       try {
-        if (await markerExists(channelId, WELCOME_KICKOFF_CLOSER_MARKER)) {
+        if (await markerExists(channelId, closerMarker)) {
           return;
         }
         if (!readiness.ready) {
@@ -159,15 +164,12 @@ export function useWelcomeKickoff(
             agentPubkey: agentSet.lead.pubkey,
             channelId,
             content: WELCOME_KICKOFF_PROVIDER_MESSAGE,
-            marker: WELCOME_KICKOFF_PROVIDER_MARKER,
+            marker: providerMarker,
             markerScope: "channel",
           });
           return;
         }
-        const openerAlreadySent = await markerExists(
-          channelId,
-          WELCOME_KICKOFF_OPENER_MARKER,
-        );
+        const openerAlreadySent = await markerExists(channelId, openerMarker);
 
         // Start before publishing the mention. buzz-acp replays events from its
         // startup watermark, so no separate subscription-ready wait is needed.
@@ -191,7 +193,7 @@ export function useWelcomeKickoff(
           agentPubkey: agentSet.lead.pubkey,
           channelId,
           content: buildWelcomeKickoffOpener(agentSet.lead, agentSet.teammates),
-          marker: WELCOME_KICKOFF_OPENER_MARKER,
+          marker: openerMarker,
           markerScope: "channel",
           mentionPubkeys: agentSet.teammates.map((agent) => agent.pubkey),
         });
@@ -219,8 +221,8 @@ export function useWelcomeKickoff(
       closerInFlight.has(channelId)
     )
       return;
-    const opener = markerEvent(channelEvents, WELCOME_KICKOFF_OPENER_MARKER);
-    if (!opener || markerEvent(channelEvents, WELCOME_KICKOFF_CLOSER_MARKER)) {
+    const opener = markerEvent(channelEvents, openerMarker);
+    if (!opener || markerEvent(channelEvents, closerMarker)) {
       return;
     }
 
@@ -244,7 +246,7 @@ export function useWelcomeKickoff(
       agentPubkey: agentSet.lead.pubkey,
       channelId,
       content: buildWelcomeKickoffCloser(failed.map((agent) => agent.name)),
-      marker: WELCOME_KICKOFF_CLOSER_MARKER,
+      marker: closerMarker,
       markerScope: "channel",
     })
       .catch((error) => {
