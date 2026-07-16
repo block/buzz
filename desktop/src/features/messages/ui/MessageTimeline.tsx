@@ -270,6 +270,7 @@ const MessageTimelineBase = React.forwardRef<
 
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
+    hasPersistentIntro: channelIntro !== null || directMessageIntro !== null,
     isLoading: isLoading || isDeferredSnapshotStale,
     liveCount: messages.length,
   });
@@ -415,6 +416,7 @@ const MessageTimelineBase = React.forwardRef<
     activeDirectMessageIntro !== null || activeChannelIntro !== null;
   const showGenericEmpty = timelineBodySurface === "empty" && !showIntro;
   const showMessageList = timelineBodySurface === "list";
+  const showChannelIntroOnly = activeChannelIntro !== null && !showMessageList;
 
   const prepareForOwnMessage = React.useCallback(() => {
     // The user's own send is the deliberate Zulip exception: release buffered
@@ -714,20 +716,25 @@ const MessageTimelineBase = React.forwardRef<
             <div
               className={cn(
                 "flex w-full flex-col gap-2",
-                channelChrome.contentPadding,
+                showChannelIntroOnly
+                  ? "pt-[var(--channel-top-chrome-height,4.5rem)]"
+                  : channelChrome.contentPadding,
                 (showIntro || showGenericEmpty || showMessageList) &&
                   "min-h-full",
               )}
               ref={contentRef}
             >
-              <div ref={topSentinelRef} aria-hidden className="h-px" />
+              {showChannelIntroOnly ? null : (
+                <div ref={topSentinelRef} aria-hidden className="h-px" />
+              )}
 
-              {/* Fixed-height slot: an always-mounted height keeps the virtual
-                  spacer's offset stable across the load-older fetch toggle, so
-                  `scrollMargin` doesn't shift mid-fetch and yank the restore. The
-                  visible fetch spinner lives in the absolute overlay above, which
-                  does not occupy inline flow. */}
-              <div aria-hidden className="h-8" />
+              {/* Fixed-height history slot keeps the virtual spacer's offset
+                  stable across load-older fetches. The intro-only state has no
+                  history to anchor, so omitting it matches the virtualized
+                  leading row's top geometry when the first message arrives. */}
+              {showChannelIntroOnly ? null : (
+                <div aria-hidden className="h-8" />
+              )}
 
               <div
                 className={cn(
