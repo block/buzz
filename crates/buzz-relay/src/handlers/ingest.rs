@@ -703,10 +703,12 @@ fn count_e_tags(event: &Event) -> usize {
         .count()
 }
 
-/// Extract the effective author of a stored event (handles relay-signed REST events).
+/// Extract the effective author of a stored event (handles workflow-generated and
+/// legacy relay-signed attributed events).
 pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::PublicKey) -> Vec<u8> {
     if event.pubkey == *relay_pubkey {
-        // Relay-signed REST event — real author in "actor" or "p" tag.
+        // Workflow-generated or legacy relay-signed attributed event — real author
+        // in "actor" or "p" tag.
         if let Some(hex) = event.tags.iter().find_map(|t| {
             if t.kind().to_string() == "actor" {
                 t.content().map(|s| s.to_string())

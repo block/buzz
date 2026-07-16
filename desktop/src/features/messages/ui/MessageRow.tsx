@@ -343,8 +343,8 @@ export const MessageRow = React.memo(
               )}
               // Only pass the author pubkey for agent-authored messages so
               // config-nudge cards can authenticate the sender. Uses the
-              // raw event signer (signerPubkey) — not the tag-attributed
-              // display author — to prevent actor/p-tag spoofing.
+              // raw event signer (signerPubkey), not a relay-delegated display
+              // author, because the agent itself must have signed the card.
               configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
                 message,
                 isKnownAgentPubkey,

@@ -317,7 +317,7 @@ test("inbox mappings preserve kind and signerPubkey so the nudge gate can pass",
   );
 });
 
-test("inbox mappings keep the raw signer distinct from a spoofed actor tag", () => {
+test("inbox mappings ignore a spoofed actor tag", () => {
   const message = mapThroughInboxPipeline(
     makeNudgeEvent({
       pubkey: NUDGE_HUMAN_SIGNER,
@@ -328,9 +328,9 @@ test("inbox mappings keep the raw signer distinct from a spoofed actor tag", () 
     }),
   );
 
-  // The attributed display author resolves to the agent (actor tag), but the
-  // signer stays human — the gate must reject.
-  assert.equal(message.pubkey?.toLowerCase(), NUDGE_AGENT_SIGNER);
+  // An untrusted actor tag cannot replace the display author. The signer also
+  // stays human, so the config-nudge gate rejects the message.
+  assert.equal(message.pubkey?.toLowerCase(), NUDGE_HUMAN_SIGNER);
   assert.equal(message.signerPubkey, NUDGE_HUMAN_SIGNER);
   assert.equal(
     getConfigNudgeAuthorPubkey(
