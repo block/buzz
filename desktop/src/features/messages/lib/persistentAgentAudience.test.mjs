@@ -11,13 +11,19 @@ function createStorage() {
 
 const agentA = "a".repeat(64);
 const agentB = "b".repeat(64);
+const agentC = "c".repeat(64);
 const ownerA = "1".repeat(64);
 const ownerB = "2".repeat(64);
 const storageKey = "buzz:persistent-agent-audiences:v2";
 
+let loadSequence = 0;
+
 async function loadStore(offset = 0) {
   globalThis.window = { localStorage: createStorage() };
-  return import(`./persistentAgentAudience.ts?test=${Date.now() + offset}`);
+  loadSequence += 1;
+  return import(
+    `./persistentAgentAudience.ts?test=${Date.now()}-${offset}-${loadSequence}`
+  );
 }
 
 function savedAudiences() {
@@ -90,6 +96,42 @@ test("explicit recipients merge and dedupe after successful send", async () => {
   });
 
   assert.deepEqual(savedAudiences(), { [scope]: [agentA, agentB] });
+});
+
+test("successful send makes authored mention order authoritative", async () => {
+  const store = await loadStore(100);
+  const scope = `${ownerA}:channel-a:timeline`;
+  store.setPersistentAgentAudienceEnabled(true);
+  store.setPersistentAgentAudience(scope, [agentA, agentB]);
+
+  store.promotePersistentAgentAudience({
+    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
+    scope,
+    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
+    explicitAgentPubkeys: [agentB, agentA, agentC],
+  });
+
+  assert.deepEqual(savedAudiences(), {
+    [scope]: [agentB, agentA, agentC],
+  });
+});
+
+test("successful send retains saved targets absent from the draft", async () => {
+  const store = await loadStore(101);
+  const scope = `${ownerA}:channel-a:timeline`;
+  store.setPersistentAgentAudienceEnabled(true);
+  store.setPersistentAgentAudience(scope, [agentA, agentC]);
+
+  store.promotePersistentAgentAudience({
+    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
+    scope,
+    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
+    explicitAgentPubkeys: [agentB, agentA],
+  });
+
+  assert.deepEqual(savedAudiences(), {
+    [scope]: [agentB, agentA, agentC],
+  });
 });
 
 test("removal while send awaits wins over late success", async () => {

@@ -167,8 +167,8 @@ export function promotePersistentAgentAudience({
     return;
   }
   setPersistentAgentAudience(scope, [
-    ...(audiences[scope] ?? []),
     ...explicitAgentPubkeys,
+    ...(audiences[scope] ?? []),
   ]);
 }
 
