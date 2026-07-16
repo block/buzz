@@ -35,6 +35,7 @@ class InviteJoinState {
   final String? host;
   final String? communityName;
   final String? errorMessage;
+  final bool requiresFreshInvite;
 
   const InviteJoinState({
     this.status = InviteJoinStatus.idle,
@@ -42,6 +43,7 @@ class InviteJoinState {
     this.host,
     this.communityName,
     this.errorMessage,
+    this.requiresFreshInvite = false,
   });
 
   InviteJoinState copyWith({
@@ -50,12 +52,14 @@ class InviteJoinState {
     String? host,
     String? communityName,
     String? errorMessage,
+    bool? requiresFreshInvite,
   }) => InviteJoinState(
     status: status ?? this.status,
     invite: invite ?? this.invite,
     host: host ?? this.host,
     communityName: communityName ?? this.communityName,
     errorMessage: errorMessage ?? this.errorMessage,
+    requiresFreshInvite: requiresFreshInvite ?? this.requiresFreshInvite,
   );
 }
 
@@ -90,6 +94,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
   Future<void> confirmJoin() async {
     final invite = state.invite;
     if (invite == null ||
+        state.requiresFreshInvite ||
         (state.status != InviteJoinStatus.confirming &&
             state.status != InviteJoinStatus.error)) {
       return;
@@ -158,9 +163,11 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         communityName: community.name,
       );
     } catch (error) {
+      final requiresFreshInvite = _requiresFreshInvite(error);
       state = state.copyWith(
         status: InviteJoinStatus.error,
         errorMessage: _friendlyInviteError(error),
+        requiresFreshInvite: requiresFreshInvite,
       );
     }
   }
@@ -248,10 +255,17 @@ String _communityNameFromClaim(Map<String, dynamic> claim, String relayUrl) {
   return Community.nameFromUrl(relayUrl);
 }
 
+bool _requiresFreshInvite(Object error) {
+  return error.toString().contains('join_policy_required');
+}
+
 String _friendlyInviteError(Object error) {
   final message = error.toString();
   if (message.contains('invite_expired')) return 'This invite has expired.';
   if (message.contains('invite_invalid')) return 'This invite is not valid.';
+  if (message.contains('join_policy_required')) {
+    return 'This invite approval has expired. Re-open the invite link to try again.';
+  }
   if (message.contains('SocketException') ||
       message.contains('Connection refused') ||
       message.contains('Network is unreachable') ||

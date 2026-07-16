@@ -139,6 +139,50 @@ void main() {
     },
   );
 
+  test('join_policy_required requires a fresh link and cannot retry', () async {
+    final keys = nostr.Keys.generate();
+    var attempts = 0;
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final container = ProviderContainer(
+      overrides: [
+        communityStorageProvider.overrideWithValue(storage),
+        inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+        inviteJoinHttpClientProvider.overrideWithValue(
+          http_testing.MockClient((request) async {
+            attempts++;
+            return http.Response(
+              jsonEncode({'error': 'join_policy_required'}),
+              403,
+            );
+          }),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container
+        .read(inviteJoinProvider.notifier)
+        .prepare(
+          const InviteDeepLink(
+            relayUrl: 'wss://relay.example.com',
+            code: 'code',
+            policyReceipt: 'expired.receipt',
+          ),
+        );
+    await container.read(inviteJoinProvider.notifier).confirmJoin();
+
+    final state = container.read(inviteJoinProvider);
+    expect(state.status, InviteJoinStatus.error);
+    expect(state.requiresFreshInvite, isTrue);
+    expect(
+      state.errorMessage,
+      'This invite approval has expired. Re-open the invite link to try again.',
+    );
+
+    await container.read(inviteJoinProvider.notifier).confirmJoin();
+    expect(attempts, 1);
+  });
+
   test('failed claim can be retried and preserves policy receipt', () async {
     final keys = nostr.Keys.generate();
     var attempts = 0;

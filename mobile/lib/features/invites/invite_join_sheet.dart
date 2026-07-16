@@ -107,7 +107,7 @@ class InviteJoinSheet extends ConsumerWidget {
                 const SizedBox(width: Grid.sm),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: isClaiming
+                    onPressed: isClaiming || state.requiresFreshInvite
                         ? null
                         : () => ref
                               .read(inviteJoinProvider.notifier)

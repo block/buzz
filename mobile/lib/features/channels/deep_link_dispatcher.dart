@@ -36,6 +36,8 @@ class DeepLinkDispatcher extends ConsumerStatefulWidget {
 }
 
 class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
+  bool _preparingInvite = false;
+
   @override
   void initState() {
     super.initState();
@@ -105,19 +107,36 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   }
 
   void _maybeDispatchInvite(InviteDeepLink link) {
-    ref.read(pendingDeepLinkProvider.notifier).consume();
+    if (_preparingInvite) return;
+    _preparingInvite = true;
     final navigatorContext = context;
     final messenger = ScaffoldMessenger.maybeOf(context);
     Future.microtask(() async {
-      await ref.read(inviteJoinProvider.notifier).prepare(link);
-      if (!navigatorContext.mounted) return;
-      final status = ref.read(inviteJoinProvider).status;
-      if (status == InviteJoinStatus.confirming) {
-        showInviteJoinSheet(navigatorContext, ref);
-      } else if (status == InviteJoinStatus.switchedExisting) {
-        messenger?.showSnackBar(
-          const SnackBar(content: Text('Switched to this community')),
-        );
+      try {
+        await ref.read(inviteJoinProvider.notifier).prepare(link);
+        ref.read(pendingDeepLinkProvider.notifier).consume();
+        if (!navigatorContext.mounted) return;
+        final status = ref.read(inviteJoinProvider).status;
+        if (status == InviteJoinStatus.confirming) {
+          showInviteJoinSheet(navigatorContext, ref);
+        } else if (status == InviteJoinStatus.switchedExisting) {
+          messenger?.showSnackBar(
+            const SnackBar(content: Text('Switched to this community')),
+          );
+        }
+      } catch (error) {
+        debugPrint('deep-link: failed to prepare invite: $error');
+        if (navigatorContext.mounted) {
+          messenger?.showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Could not open this invite. Re-open the invite link to try again.',
+              ),
+            ),
+          );
+        }
+      } finally {
+        _preparingInvite = false;
       }
     });
   }
