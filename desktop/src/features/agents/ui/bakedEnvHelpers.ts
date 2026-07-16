@@ -58,6 +58,43 @@ export function getBakedModelInheritLabel(bakedModelId: string): string {
   return `Inherit build default (${bakedModelId})`;
 }
 
+function providerModelEnvKey(provider: string): string | null {
+  switch (provider.trim().toLowerCase()) {
+    case "databricks":
+    case "databricks_v2":
+    case "databricks-v2":
+      return "DATABRICKS_MODEL";
+    case "anthropic":
+      return "ANTHROPIC_MODEL";
+    case "openai":
+    case "openai-compat":
+      return "OPENAI_COMPAT_MODEL";
+    default:
+      return null;
+  }
+}
+
+/** Resolve the concrete model beneath the structured global model override. */
+export function getGlobalModelFallback(
+  bakedEnv: readonly BakedEnvEntry[] | undefined,
+  provider: string,
+  globalEnv: Readonly<Record<string, string>> = {},
+): string | null {
+  const universal = bakedEnv?.find(
+    (entry) => entry.key === "BUZZ_AGENT_MODEL" && !entry.masked,
+  )?.value;
+  if (universal?.trim()) return universal.trim();
+
+  const providerKey = providerModelEnvKey(provider);
+  if (!providerKey) return provider === "relay-mesh" ? "auto" : null;
+  const globalProviderModel = globalEnv[providerKey]?.trim();
+  if (globalProviderModel) return globalProviderModel;
+  const providerModel = bakedEnv?.find(
+    (entry) => entry.key === providerKey && !entry.masked,
+  )?.value;
+  return providerModel?.trim() || null;
+}
+
 /**
  * Global env keys are arbitrary user input. Count only ordinary configuration
  * names in the collapsed summary so it never calls attention to credentials.
@@ -117,11 +154,27 @@ export function getInheritedAgentDefaults(
       bakedEnv,
       "BUZZ_AGENT_PROVIDER",
     ),
-    model: resolveInheritedDefault(
-      globalConfig.model,
-      bakedEnv,
-      "BUZZ_AGENT_MODEL",
-    ),
+    model: (() => {
+      const structured = resolveInheritedDefault(
+        globalConfig.model,
+        bakedEnv,
+        "BUZZ_AGENT_MODEL",
+      );
+      if (structured.value) return structured;
+      const provider = resolveInheritedDefault(
+        globalConfig.provider,
+        bakedEnv,
+        "BUZZ_AGENT_PROVIDER",
+      );
+      const fallback = getGlobalModelFallback(
+        bakedEnv,
+        provider.value,
+        globalConfig.env_vars,
+      );
+      return fallback
+        ? { source: "build", value: fallback }
+        : { source: null, value: "" };
+    })(),
     effort: resolveInheritedDefault(
       globalConfig.env_vars.BUZZ_AGENT_THINKING_EFFORT,
       bakedEnv,

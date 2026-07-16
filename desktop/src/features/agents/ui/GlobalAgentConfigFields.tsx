@@ -14,7 +14,10 @@ import type {
 } from "@/shared/api/types";
 import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
 import type { InheritedEnvRow } from "@/features/agents/ui/EnvVarsEditor";
-import { getBakedProviderInheritLabel } from "@/features/agents/ui/bakedEnvHelpers";
+import {
+  getBakedProviderInheritLabel,
+  getGlobalModelFallback,
+} from "@/features/agents/ui/bakedEnvHelpers";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
@@ -47,42 +50,6 @@ const BAKED_STRUCTURED_KEYS = new Set([
   "BUZZ_AGENT_MODEL",
   BUZZ_AGENT_THINKING_EFFORT,
 ]);
-
-function providerModelEnvKey(provider: string): string | null {
-  switch (provider.trim().toLowerCase()) {
-    case "databricks":
-    case "databricks_v2":
-    case "databricks-v2":
-      return "DATABRICKS_MODEL";
-    case "anthropic":
-      return "ANTHROPIC_MODEL";
-    case "openai":
-    case "openai-compat":
-      return "OPENAI_COMPAT_MODEL";
-    default:
-      return null;
-  }
-}
-
-export function getGlobalModelFallback(
-  bakedEnv: readonly BakedEnvEntry[],
-  provider: string,
-  globalEnv: Readonly<Record<string, string>> = {},
-): string | null {
-  const universal = bakedEnv.find(
-    (entry) => entry.key === "BUZZ_AGENT_MODEL" && !entry.masked,
-  )?.value;
-  if (universal?.trim()) return universal.trim();
-
-  const providerKey = providerModelEnvKey(provider);
-  if (!providerKey) return provider === "relay-mesh" ? "auto" : null;
-  const globalProviderModel = globalEnv[providerKey]?.trim();
-  if (globalProviderModel) return globalProviderModel;
-  const providerModel = bakedEnv.find(
-    (entry) => entry.key === providerKey && !entry.masked,
-  )?.value;
-  return providerModel?.trim() || null;
-}
 
 export type GlobalAgentConfigFieldsProps = {
   bakedEnv: BakedEnvEntry[];

@@ -36,6 +36,8 @@ import {
   countNonSecretInheritedEnvVars,
   getBakedModelInheritLabel,
   getAdvancedInheritedSummary,
+  getGlobalModelFallback,
+  getInheritedAgentDefaults,
   getBakedProviderInheritLabel,
   resolveInheritedDefault,
 } from "./bakedEnvHelpers.ts";
@@ -1389,4 +1391,54 @@ test("localMode_globalEnvSatisfied_agentLocalKeyAbsent_silenced", () => {
     true,
     "gate must be satisfied when global key is not shadowed by an explicit empty",
   );
+});
+
+test("global model fallback resolves the selected provider model env", () => {
+  const bakedEnv = [
+    {
+      key: "DATABRICKS_MODEL",
+      value: "goose-claude-opus-4-8",
+      masked: false,
+    },
+  ];
+  assert.equal(
+    getGlobalModelFallback(bakedEnv, "databricks_v2"),
+    "goose-claude-opus-4-8",
+  );
+});
+
+test("global model fallback gives saved provider env precedence over build env", () => {
+  const bakedEnv = [
+    { key: "ANTHROPIC_MODEL", value: "build-model", masked: false },
+  ];
+  assert.equal(
+    getGlobalModelFallback(bakedEnv, "anthropic", {
+      ANTHROPIC_MODEL: "saved-model",
+    }),
+    "saved-model",
+  );
+});
+
+test("global model fallback never uses another provider's model", () => {
+  const bakedEnv = [
+    { key: "DATABRICKS_MODEL", value: "databricks-model", masked: false },
+  ];
+  assert.equal(getGlobalModelFallback(bakedEnv, "anthropic"), null);
+});
+
+test("inherited defaults expose a provider-specific model fallback to agent dialogs", () => {
+  const defaults = getInheritedAgentDefaults(
+    { env_vars: {}, provider: "databricks_v2", model: null },
+    [
+      {
+        key: "DATABRICKS_MODEL",
+        value: "goose-claude-opus-4-8",
+        masked: false,
+      },
+    ],
+  );
+  assert.deepEqual(defaults.model, {
+    source: "build",
+    value: "goose-claude-opus-4-8",
+  });
 });
