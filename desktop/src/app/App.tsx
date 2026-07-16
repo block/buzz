@@ -28,6 +28,10 @@ import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
+import {
+  onAddCommunityPrefillAvailable,
+  requestAddCommunityPrefill,
+} from "@/features/communities/addCommunityPrefill";
 import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
@@ -396,6 +400,8 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   useEffect(() => {
     const unlisten = listenForDeepLinks({
       startCommunityOnboarding: communityOnboarding.start,
+      openAddCommunity: requestAddCommunityPrefill,
+      onAddCommunityAvailable: onAddCommunityPrefillAvailable,
     });
     return () => {
       void unlisten.then((fn) => fn());

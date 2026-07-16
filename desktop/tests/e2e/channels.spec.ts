@@ -1581,13 +1581,13 @@ test("scrollable channel with recent messages hides intro actions until top", as
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await page.getByTestId(`channel-${channelName}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
-  await expect(page.getByTestId("message-channel-intro")).toHaveCount(0);
+  await expect(page.getByTestId("message-channel-intro")).not.toBeInViewport();
   await expect(
     page.getByTestId("channel-intro-action-create-agent"),
-  ).toHaveCount(0);
-  await expect(page.getByTestId("channel-intro-action-add-people")).toHaveCount(
-    0,
-  );
+  ).not.toBeInViewport();
+  await expect(
+    page.getByTestId("channel-intro-action-add-people"),
+  ).not.toBeInViewport();
   await expect(page.getByTestId("message-timeline")).toContainText(
     messages[messages.length - 1],
   );

@@ -789,6 +789,7 @@ pub fn run() {
             nip44_decrypt_from_self,
             get_channels,
             create_channel,
+            ensure_starter_channels,
             open_dm,
             hide_dm,
             get_channel_details,

@@ -5,6 +5,7 @@ import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
 import type { Community } from "@/features/communities/types";
 import { AddCommunityDialog } from "@/features/communities/ui/AddCommunityDialog";
+import type { AddCommunityPrefillRequest } from "@/features/communities/addCommunityPrefill";
 import { useIsMobile } from "@/shared/hooks/use-mobile";
 import { useDeferredLoad } from "@/shared/hooks/useDeferredStartup";
 import {
@@ -76,6 +77,7 @@ type CollapsibleSidebarGroup =
 type CreateChannelKind = "stream" | "forum";
 
 type AppSidebarProps = {
+  addCommunityPrefill?: AddCommunityPrefillRequest | null;
   activeCommunity: Community | null;
   channels: Channel[];
   currentPubkey?: string;
@@ -167,6 +169,7 @@ type AppSidebarProps = {
 };
 
 export function AppSidebar({
+  addCommunityPrefill,
   activeCommunity,
   channels,
   currentPubkey,
@@ -871,6 +874,7 @@ export function AppSidebar({
       />
 
       <AddCommunityDialog
+        prefill={addCommunityPrefill}
         onOpenChange={onAddCommunityOpenChange ?? (() => {})}
         onSubmit={onAddCommunity}
         open={isAddCommunityOpen ?? false}

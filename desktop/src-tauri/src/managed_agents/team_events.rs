@@ -24,10 +24,27 @@ pub struct TeamEventContent {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Runtime-layered instructions. `Option` is PERMANENT wire semantics
+    /// (not a transitional shim): absent = publisher predates always-publish
+    /// (true value unknown — reconcile must preserve local), `null` =
+    /// explicitly cleared, a string = set. New clients always publish this
+    /// field (outer always `Some`), using `null` for "no instructions" so
+    /// that state round-trips instead of being read back as "unknown".
+    #[serde(
+        default,
+        deserialize_with = "crate::util::double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub instructions: Option<Option<String>>,
+    /// Pack persona members. `Option` is PERMANENT wire semantics, not a
+    /// transitional shim: `None` = publisher predates always-publish (its
+    /// true membership is unknown — reconcile must preserve local), while
+    /// `Some(vec![])` = explicitly emptied. New clients always publish
+    /// `Some(...)`, even when empty. "Cleaning up" the Option later
+    /// reintroduces the bug where an old client's event silently wipes team
+    /// membership (see the Sietch Tabr incident).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub persona_ids: Vec<String>,
+    pub persona_ids: Option<Vec<String>>,
 }
 
 /// Project a `TeamRecord` onto the content fields published in team events.
@@ -37,8 +54,11 @@ pub fn team_event_content(record: &TeamRecord) -> TeamEventContent {
     TeamEventContent {
         name: record.name.clone(),
         description: record.description.clone(),
-        instructions: record.instructions.clone(),
-        persona_ids: record.persona_ids.clone(),
+        // Always `Some`, even when the inner value is absent — `None` is
+        // reserved for events from clients that predate always-publish (see
+        // the struct doc comments).
+        instructions: Some(record.instructions.clone()),
+        persona_ids: Some(record.persona_ids.clone()),
     }
 }
 
@@ -150,6 +170,75 @@ mod tests {
         let json = serde_json::to_string(&event_content).unwrap();
         let restored: TeamEventContent = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, event_content);
+    }
+
+    // ── persona_ids wire semantics (omission must not wipe membership) ────
+
+    #[test]
+    fn content_from_old_clients_without_persona_ids_parses_none() {
+        // Events published before always-publish must still parse. The
+        // field reads back `None` — NOT an empty list — so the reconcile
+        // can distinguish "publisher predates always-publish" from
+        // "explicitly emptied" and preserve local membership (see
+        // apply_inbound_team). This is the exact shape of the Sietch Tabr
+        // wipe event.
+        let legacy = r#"{"name":"Old Team"}"#;
+        let restored: TeamEventContent = serde_json::from_str(legacy).unwrap();
+        assert_eq!(restored.name, "Old Team");
+        assert_eq!(restored.persona_ids, None);
+    }
+
+    #[test]
+    fn content_publishes_some_even_when_persona_ids_empty() {
+        // New clients must always publish `Some`, even for an empty list —
+        // `Some(vec![])` is the explicit "no persona members" signal that a
+        // pre-fix client can never produce.
+        let mut team = sample_team();
+        team.persona_ids = vec![];
+        let event_content = team_event_content(&team);
+        assert_eq!(event_content.persona_ids, Some(vec![]));
+        let json = serde_json::to_string(&event_content).unwrap();
+        assert!(json.contains("\"persona_ids\":[]"));
+    }
+
+    // ── instructions wire semantics (tri-state: absent/null/value) ────────
+    //
+    // Deserialized from raw JSON strings, not constructed enum states
+    // directly — the bug is specifically in how serde maps JSON shapes onto
+    // the tri-state, so the test must exercise that mapping (mirrors
+    // `double_option_tristate` in `util.rs`).
+
+    #[test]
+    fn content_from_old_clients_without_instructions_parses_none() {
+        let legacy = r#"{"name":"Old Team","persona_ids":["p1"]}"#;
+        let restored: TeamEventContent = serde_json::from_str(legacy).unwrap();
+        assert_eq!(restored.instructions, None);
+    }
+
+    #[test]
+    fn content_with_explicit_null_instructions_parses_some_none() {
+        let json = r#"{"name":"Team","persona_ids":["p1"],"instructions":null}"#;
+        let restored: TeamEventContent = serde_json::from_str(json).unwrap();
+        assert_eq!(restored.instructions, Some(None));
+    }
+
+    #[test]
+    fn content_with_instructions_value_parses_some_some() {
+        let json = r#"{"name":"Team","persona_ids":["p1"],"instructions":"Coordinate."}"#;
+        let restored: TeamEventContent = serde_json::from_str(json).unwrap();
+        assert_eq!(restored.instructions, Some(Some("Coordinate.".to_string())));
+    }
+
+    #[test]
+    fn content_publishes_some_none_when_instructions_absent_locally() {
+        // New clients must always publish the field — `null` is the explicit
+        // "no instructions" signal that a pre-fix client can never produce.
+        let mut team = sample_team();
+        team.instructions = None;
+        let event_content = team_event_content(&team);
+        assert_eq!(event_content.instructions, Some(None));
+        let json = serde_json::to_string(&event_content).unwrap();
+        assert!(json.contains("\"instructions\":null"));
     }
 
     #[test]

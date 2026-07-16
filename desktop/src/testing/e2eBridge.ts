@@ -150,6 +150,8 @@ type E2eConfig = {
     channelsReadError?: string;
     /** Reject successive mock `create_channel` calls, then resume. */
     createChannelErrors?: string[];
+    /** Reject successive mock `ensure_starter_channels` calls, then resume. */
+    ensureStarterChannelsErrors?: string[];
     /** Reject successive mock `join_channel` calls, then resume. */
     joinChannelErrors?: string[];
     channelsReadDelayMs?: number;
@@ -187,6 +189,10 @@ type E2eConfig = {
      *  Linux .deb install where Tauri's updater cannot swap the binary).
      *  Defaults to true for all existing tests. */
     autoUpdateSupported?: boolean;
+    /** Reject `plugin:opener|open_url` to exercise browser-return fallback UI. */
+    openerError?: string;
+    /** Delay binding signatures so specs can exercise request supersession. */
+    nostrBindSignDelayMs?: number;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -234,6 +240,8 @@ type E2eConfig = {
     // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
     // snake_case wire shape the Rust backend returns so tests can drive the
     // LocalArchiveSettingsCard without a real SQLite database.
+    observerArchiveDefaultEnabled?: boolean;
+    agentMetricArchiveDefaultEnabled?: boolean;
     saveSubscriptions?: Array<{
       scope_type: string;
       scope_value: string;
@@ -242,16 +250,17 @@ type E2eConfig = {
     // Event IDs that `get_event` should report as definitively not found.
     // Causes `useDraftRootStatus` to classify as `deleted`.
     deletedEventIds?: string[];
-    // Pending community deep links (buzz://join / buzz://connect) seeded into
+    // Pending community deep links (buzz://join / buzz://connect / buzz://add-community) seeded into
     // the mocked Rust-side queue. Mirrors the real queue's semantics:
     // `take_pending_community_deep_link` peeks the head and
     // `acknowledge_pending_community_deep_link` removes by id. Drives the
     // pending-invite gate and deep-link drain path in tests.
     pendingCommunityDeepLinks?: Array<{
       id: string;
-      kind: "connect" | "join";
+      kind: "connect" | "join" | "add-community";
       relayUrl: string;
       code?: string | null;
+      name?: string | null;
     }>;
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
@@ -1018,6 +1027,10 @@ const PROFILE_ONLY_AGENT_PUBKEY =
 const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 const MOCK_IDENTITY_PUBKEY = DEFAULT_MOCK_IDENTITY.pubkey;
+const STARTER_GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const STARTER_WELCOME_CHANNEL_ID = "5f0b1b3c-2a37-5366-9b8c-31a4b21d8e77";
+const STARTER_GENERAL_CHANNEL_NAME = "general";
+const STARTER_WELCOME_CHANNEL_NAME = "welcome-everyone";
 
 // Tracks whether `persist_current_identity` or `import_identity` has cleared
 // the lost flag set by `mock.identityLost`. Reset to false on each fresh page
@@ -2088,8 +2101,8 @@ function createCurrentMember(
 
 const mockChannels: MockChannel[] = [
   createMockChannel({
-    id: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
-    name: "general",
+    id: STARTER_GENERAL_CHANNEL_ID,
+    name: STARTER_GENERAL_CHANNEL_NAME,
     channel_type: "stream",
     visibility: "open",
     description: "General discussion for everyone",
@@ -2113,6 +2126,28 @@ const mockChannels: MockChannel[] = [
       createMockMember(BOB_PUBKEY, "member", 960),
       createMockMember(PROFILE_ONLY_AGENT_PUBKEY, "member", 840),
     ],
+  }),
+  createMockChannel({
+    id: STARTER_WELCOME_CHANNEL_ID,
+    name: STARTER_WELCOME_CHANNEL_NAME,
+    channel_type: "stream",
+    visibility: "open",
+    description: "Say hi, ask a question, or share what brought you here.",
+    topic: null,
+    purpose: null,
+    last_message_at: null,
+    archived_at: null,
+    created_by: MOCK_IDENTITY_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 1440,
+    updated_minutes_ago: 1440,
+    members: [createMockMember(MOCK_IDENTITY_PUBKEY, "owner", 1440)],
   }),
   createMockChannel({
     id: "9dae0116-799b-5071-a0a8-fdd30a91a35d",
@@ -3562,12 +3597,17 @@ let mockPendingCommunityDeepLinks: Array<{
   kind: string;
   relayUrl: string;
   code: string | null;
+  name: string | null;
 }> = [];
 
 function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
   mockPendingCommunityDeepLinks = (
     config?.mock?.pendingCommunityDeepLinks ?? []
-  ).map((pending) => ({ ...pending, code: pending.code ?? null }));
+  ).map((pending) => ({
+    ...pending,
+    code: pending.code ?? null,
+    name: pending.name ?? null,
+  }));
 }
 
 function recordMockUserStatus(event: RelayEvent) {
@@ -5295,6 +5335,51 @@ async function handleGetPresence(
     }
   }
   return result;
+}
+
+async function handleEnsureStarterChannels(
+  config: E2eConfig | undefined,
+): Promise<RawChannelWithMembership[]> {
+  const starterChannelError =
+    config?.mock?.ensureStarterChannelsErrors?.shift();
+  if (starterChannelError) {
+    throw new Error(starterChannelError);
+  }
+
+  const currentPubkey = getMockMemberPubkey(config);
+  const ensureMember = (channel: MockChannel) => {
+    if (
+      channel.members.some(
+        (member) =>
+          normalizePubkey(member.pubkey) === normalizePubkey(currentPubkey),
+      )
+    ) {
+      return;
+    }
+
+    channel.members.push(createCurrentMember(config, "member"));
+    syncMockChannel(channel);
+    touchMockChannel(channel);
+  };
+
+  for (const channelName of [
+    STARTER_GENERAL_CHANNEL_NAME,
+    STARTER_WELCOME_CHANNEL_NAME,
+  ]) {
+    const channel = mockChannels.find(
+      (candidate) =>
+        candidate.name === channelName &&
+        candidate.channel_type === "stream" &&
+        candidate.visibility === "open" &&
+        candidate.archived_at === null,
+    );
+    if (!channel) {
+      throw new Error(`Starter channel ${channelName} not found.`);
+    }
+    ensureMember(channel);
+  }
+
+  return listMockChannels(config);
 }
 
 async function handleCreateChannel(
@@ -8568,6 +8653,10 @@ export function maybeInstallE2eTauriMocks() {
           origin: string;
           verificationCode: string;
         };
+        const signDelayMs = activeConfig?.mock?.nostrBindSignDelayMs ?? 0;
+        if (signDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, signDelayMs));
+        }
         const activeIdentity = identity ?? DEFAULT_MOCK_IDENTITY;
         return JSON.stringify({
           id: "e2e-signed-nostr-binding",
@@ -9324,6 +9413,8 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleCreateChannel>[0],
           activeConfig,
         );
+      case "ensure_starter_channels":
+        return handleEnsureStarterChannels(activeConfig);
       case "open_dm":
         return handleOpenDm(
           payload as Parameters<typeof handleOpenDm>[0],
@@ -9579,6 +9670,9 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof sendToMockSocket>[0],
         );
       case "plugin:opener|open_url":
+        if (activeConfig?.mock?.openerError) {
+          throw new Error(activeConfig.mock.openerError);
+        }
         openedExternalUrls.push(String((payload as { url: string | URL }).url));
         return null;
       case "get_e2e_opened_external_urls":
@@ -9696,6 +9790,16 @@ export function maybeInstallE2eTauriMocks() {
       // seeds the initial list; create/delete return success shapes so the
       // component's reload path behaves correctly.
       case "list_save_subscriptions": {
+        const win = window as unknown as Record<string, unknown>;
+        if (!win.__BUZZ_E2E_IPC_COUNTERS__) {
+          win.__BUZZ_E2E_IPC_COUNTERS__ = {};
+        }
+        const ipcCounters = win.__BUZZ_E2E_IPC_COUNTERS__ as Record<
+          string,
+          number
+        >;
+        ipcCounters.list_save_subscriptions =
+          (ipcCounters.list_save_subscriptions ?? 0) + 1;
         const ident = activeConfig?.identity ?? DEFAULT_MOCK_IDENTITY;
         return (activeConfig?.mock?.saveSubscriptions ?? []).map((s) => ({
           identity_pubkey: ident.pubkey,
@@ -9716,6 +9820,14 @@ export function maybeInstallE2eTauriMocks() {
       case "archive_events":
         // Returns the ArchiveBatchResult shape the UI expects.
         return { persisted: 0, dropped: 0 };
+      case "observer_archive_default_enabled":
+        return activeConfig?.mock?.observerArchiveDefaultEnabled ?? false;
+      case "agent_metric_archive_default_enabled":
+        return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;
+      case "merge_save_subscription_kinds":
+        return null;
+      case "remove_save_subscription_kind":
+        return null;
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }

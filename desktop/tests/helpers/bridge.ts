@@ -172,6 +172,8 @@ type MockBridgeOptions = {
   channelsReadError?: string;
   /** Reject successive mock `create_channel` calls, then resume. */
   createChannelErrors?: string[];
+  /** Reject successive mock `ensure_starter_channels` calls, then resume. */
+  ensureStarterChannelsErrors?: string[];
   /** Reject successive mock `join_channel` calls, then resume. */
   joinChannelErrors?: string[];
   /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
@@ -204,8 +206,18 @@ type MockBridgeOptions = {
   /** Set to false to simulate a Linux .deb install where auto-update is not
    *  supported. Defaults to true. See e2eBridge mock.autoUpdateSupported. */
   autoUpdateSupported?: boolean;
+  /** Reject browser opener calls to exercise manual pairing fallback UI. */
+  openerError?: string;
+  /** Delay binding signatures so specs can exercise request supersession. */
+  nostrBindSignDelayMs?: number;
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
+  /**
+   * Value returned by the `observer_archive_default_enabled` mock command.
+   * `true` = internal-policy build (toggle locked ON); `false`/omitted = OSS
+   * build (toggle functional). Drives LocalArchiveSettingsCard policy state.
+   */
+  observerArchiveDefaultEnabled?: boolean;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
   // tests/e2e/identity-archive.spec.ts.
   /**
@@ -295,15 +307,16 @@ type MockBridgeOptions = {
    */
   identityLocked?: boolean;
   /**
-   * Pending community deep links (buzz://join / buzz://connect) seeded into
-   * the mocked Rust-side queue. The frontend drains these on boot into a
-   * community-onboarding transaction — drives the pending-invite gate.
+   * Pending community deep links seeded into the mocked Rust-side queue.
+   * The frontend drains these on boot into onboarding or an editable Add
+   * Community prefill.
    */
   pendingCommunityDeepLinks?: Array<{
     id: string;
-    kind: "connect" | "join";
+    kind: "connect" | "join" | "add-community";
     relayUrl: string;
     code?: string | null;
+    name?: string | null;
   }>;
   /**
    * Global agent config returned by `get_global_agent_config`. Defaults to

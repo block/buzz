@@ -57,7 +57,10 @@ import { Button } from "@/shared/ui/button";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
-import { isWelcomeChannel } from "@/features/onboarding/welcome";
+import {
+  isWelcomeChannel,
+  isWelcomeExperienceChannel as isWelcomeExperience,
+} from "@/features/onboarding/welcome";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
@@ -203,7 +206,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   const huddleMemberPubkeysPending =
     agentPubkeysPending && hasOtherDmParticipant(activeChannel, currentPubkey);
   const isActiveWelcomeChannel =
-    activeChannel !== null && isWelcomeChannel(activeChannel);
+    activeChannel !== null && isWelcomeExperience(activeChannel);
   useComposerHeightPadding(
     timelineScrollRef,
     composerWrapperRef,
@@ -438,7 +441,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     }
 
     const actions = [];
-    if (isWelcomeChannel(activeChannel)) {
+    if (isWelcomeExperience(activeChannel)) {
       if (onBrowseChannels) {
         actions.push({
           icon: <HashSearch aria-hidden className="h-6 w-6" />,
@@ -447,7 +450,6 @@ export const ChannelPane = React.memo(function ChannelPane({
           testId: "welcome-intro-action-browse-channels",
         });
       }
-
       if (onCreateChannel) {
         actions.push({
           icon: <Plus aria-hidden className="h-6 w-6" />,
@@ -456,7 +458,6 @@ export const ChannelPane = React.memo(function ChannelPane({
           testId: "welcome-intro-action-create-channel",
         });
       }
-
       if (onAddAgent) {
         actions.push({
           icon: <Bot aria-hidden className="h-6 w-6" />,
@@ -469,12 +470,15 @@ export const ChannelPane = React.memo(function ChannelPane({
           testId: "welcome-intro-action-create-agent",
         });
       }
-
       return {
         actions,
-        channelKindLabel: "private welcome channel",
+        channelKindLabel: isWelcomeChannel(activeChannel)
+          ? "private welcome channel"
+          : getChannelIntroKind(activeChannel),
         channelName: activeChannel.name,
-        description: null,
+        description: isWelcomeChannel(activeChannel)
+          ? null
+          : getChannelIntroDescription(activeChannel),
         icon: <Sparkles aria-hidden className="h-7 w-7" />,
       };
     }
@@ -514,9 +518,8 @@ export const ChannelPane = React.memo(function ChannelPane({
     onCreateChannel,
     onOpenMembers,
   ]);
-
   const visibleMessages = React.useMemo(() => {
-    if (!isWelcomeChannel(activeChannel)) {
+    if (!isWelcomeExperience(activeChannel)) {
       return messages;
     }
 

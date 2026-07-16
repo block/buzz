@@ -1,6 +1,7 @@
 import * as React from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
+import type { AddCommunityPrefillRequest } from "@/features/communities/addCommunityPrefill";
 import {
   deriveCommunityName,
   expandTilde,
@@ -30,6 +31,7 @@ const POLICY_DISCOVERY_DELAY_MS = 250;
 const POLICY_REVEAL_EASE = [0.23, 1, 0.32, 1] as const;
 
 type AddCommunityDialogProps = {
+  prefill?: AddCommunityPrefillRequest | null;
   onSubmit?: (
     community: import("@/features/communities/types").Community,
   ) => void;
@@ -38,6 +40,7 @@ type AddCommunityDialogProps = {
 };
 
 export function AddCommunityDialog({
+  prefill,
   open,
   onOpenChange,
 }: AddCommunityDialogProps) {
@@ -53,6 +56,18 @@ export function AddCommunityDialog({
   const communityOnboarding = useCommunityOnboarding();
   const [reposDirError, setReposDirError] = React.useState<string | null>(null);
   const shouldReduceMotion = useReducedMotion();
+  const appliedPrefillId = React.useRef<string | null>(null);
+
+  React.useEffect(() => {
+    if (!prefill || appliedPrefillId.current === prefill.requestId) return;
+    appliedPrefillId.current = prefill.requestId;
+    setName(prefill.name ?? deriveCommunityName(prefill.relayUrl));
+    setRelayUrl(prefill.relayUrl);
+    setToken("");
+    setInviteCode("");
+    setReposDir("");
+    setReposDirError(null);
+  }, [prefill]);
 
   React.useEffect(() => {
     if (!open || !relayUrl.trim()) return;
@@ -181,7 +196,13 @@ export function AddCommunityDialog({
   );
 
   return (
-    <Dialog onOpenChange={onOpenChange} open={open}>
+    <Dialog
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) handleClose();
+        else onOpenChange(true);
+      }}
+      open={open}
+    >
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>Add Community</DialogTitle>
