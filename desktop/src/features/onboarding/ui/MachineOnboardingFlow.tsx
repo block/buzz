@@ -86,7 +86,9 @@ export function MachineOnboardingFlow({
 
   return (
     <div
-      className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground"
+      className={`buzz-onboarding-neutral-theme buzz-startup-shell flex items-center justify-center px-4 py-8 text-foreground ${
+        page === "identity" ? "buzz-onboarding-welcome" : ""
+      }`}
       data-testid="machine-onboarding-gate"
     >
       <StartupWindowDragRegion />
