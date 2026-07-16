@@ -80,7 +80,10 @@ function RuntimeIcon({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   }
 
   return (
-    <TerminalSquare className="h-12 w-12 text-muted-foreground" strokeWidth={1.25} />
+    <TerminalSquare
+      className="h-12 w-12 text-muted-foreground"
+      strokeWidth={1.25}
+    />
   );
 }
 
@@ -122,8 +125,12 @@ function RuntimeStatus({
       <div
         aria-label={`${runtime.label} available`}
         className="flex h-6 w-6 items-center justify-center rounded-full bg-primary shadow-sm"
+        role="img"
       >
-        <Check className="h-3.5 w-3.5 text-primary-foreground" strokeWidth={3} />
+        <Check
+          className="h-3.5 w-3.5 text-primary-foreground"
+          strokeWidth={3}
+        />
       </div>
     );
   }
