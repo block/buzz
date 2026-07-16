@@ -80,7 +80,7 @@ serde_yaml = "0.9"
 toml = "0.8"
 nostr = { version = "0.44", features = ["nip44"] }
 zeroize = "1"
-reqwest = { version = "0.13", features = ["json", "query", "stream"] }
+reqwest = { version = "0.13", features = ["json", "query", "stream", "blocking"] }
 url = "2"
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
@@ -107,6 +107,7 @@ png = "0.18"
 arboard = "3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 zip = "8"
+flate2 = "1"
 sherpa-onnx = "1.12"
 regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }

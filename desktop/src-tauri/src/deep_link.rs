@@ -155,8 +155,13 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
     // Expired links still reach the consent surface so the user gets an explicit
     // failure instead of a silent stderr-only rejection from a launched app.
     nostr_bind::validate_expires_at_format(&expires_at)?;
-    if return_mode != nostr_bind::RETURN_MODE {
-        return Err("unsupported return mode".into());
+    match return_mode.as_str() {
+        nostr_bind::RETURN_MODE_CLIPBOARD => {}
+        nostr_bind::RETURN_MODE_BROWSER_FRAGMENT_V1 if callback_url.is_some() => {}
+        nostr_bind::RETURN_MODE_BROWSER_FRAGMENT_V1 => {
+            return Err("browser_fragment_v1 requires callback_url".into());
+        }
+        _ => return Err("unsupported return mode".into()),
     }
     if let Some(callback_url) = callback_url.as_deref() {
         validate_nostr_bind_callback_url(callback_url, &origin)?;
@@ -386,6 +391,28 @@ mod tests {
         assert_eq!(
             payload.callback_url.as_deref(),
             Some("https://example.com/buzz?mockSession=1")
+        );
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_accepts_browser_fragment_return() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=browser_fragment_v1&callback_url=https%3A%2F%2Fexample.com%2Fbuzz").unwrap();
+        let payload = parse_nostr_bind_deep_link(&url).unwrap();
+
+        assert_eq!(payload.return_mode, "browser_fragment_v1");
+        assert_eq!(
+            payload.callback_url.as_deref(),
+            Some("https://example.com/buzz")
+        );
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_requires_callback_for_browser_fragment_return() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=browser_fragment_v1").unwrap();
+
+        assert_eq!(
+            parse_nostr_bind_deep_link(&url).unwrap_err(),
+            "browser_fragment_v1 requires callback_url"
         );
     }
 

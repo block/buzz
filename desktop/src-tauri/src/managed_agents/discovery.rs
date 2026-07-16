@@ -1,9 +1,11 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::managed_agents::{
+    buzz_managed_command_path, buzz_managed_node_bin_dir, buzz_managed_npm_bin_dir,
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
 };
 
@@ -94,7 +96,6 @@ const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
 fn common_binary_paths() -> &'static [PathBuf] {
-    use std::sync::OnceLock;
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     PATHS.get_or_init(|| {
         let mut paths = vec![
@@ -103,6 +104,12 @@ fn common_binary_paths() -> &'static [PathBuf] {
             PathBuf::from("/usr/bin"),
             PathBuf::from("/home/linuxbrew/.linuxbrew/bin"),
         ];
+        if let Some(managed_node_bin) = buzz_managed_node_bin_dir() {
+            paths.insert(0, managed_node_bin);
+        }
+        if let Some(managed_bin) = buzz_managed_npm_bin_dir() {
+            paths.insert(0, managed_bin);
+        }
         if let Some(home) = dirs::home_dir() {
             paths.extend([
                 home.join(".local/share/mise/shims"),
@@ -514,6 +521,10 @@ fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String
 /// The cache eliminates redundant login-shell spawns when multiple agents share
 /// the same binaries (e.g. `npx`, `uvx`).
 pub fn resolve_command(command: &str) -> Option<PathBuf> {
+    if let Some(managed) = resolve_buzz_managed_command(command) {
+        return Some(managed);
+    }
+
     let cache = resolve_cache();
 
     // Fast path: return cached result without allocating a key.
@@ -628,14 +639,27 @@ fn command_basenames(command: &str) -> Vec<String> {
     candidates
 }
 
+fn resolve_buzz_managed_command(command: &str) -> Option<PathBuf> {
+    let basenames = command_basenames(command);
+    basenames
+        .iter()
+        .find_map(|basename| buzz_managed_command_path(command, basename))
+}
+
 fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     if let Some(path) = resolve_workspace_command(command) {
         return Some(path);
     }
 
+    let basenames = command_basenames(command);
+
     if command_looks_like_path(command) {
         let path = PathBuf::from(command);
         return path.exists().then_some(path);
+    }
+
+    if let Some(managed) = resolve_buzz_managed_command(command) {
+        return Some(managed);
     }
 
     for candidate in path_candidates_from_env(command) {
@@ -659,7 +683,6 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     if let Some(path) = find_via_login_shell(command) {
         return Some(path);
     }
-    let basenames = command_basenames(command);
     for dir in common_binary_paths() {
         for basename in &basenames {
             let candidate = dir.join(basename);
@@ -937,13 +960,16 @@ fn runtime_needs_npm(runtime: &KnownAcpRuntime) -> bool {
         .any(|cmd| is_npm_global_install(cmd))
 }
 
-/// Returns `true` when `cmd` is an `npm install -g` invocation.
+/// Returns `true` when `cmd` is an npm global install/uninstall invocation.
 ///
-/// Used by Doctor to determine whether Node.js is required before running an
-/// install step, and by the npm EACCES preflight in the install command path.
+/// Buzz rewrites these catalog commands to an app-private npm prefix before
+/// execution; the global shape remains in the catalog so existing install plans
+/// and Doctor's Node.js-required detection stay simple.
 pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
     let t = cmd.trim_start();
-    t.starts_with("npm install -g ") || t.starts_with("npm i -g ")
+    t.starts_with("npm install -g ")
+        || t.starts_with("npm i -g ")
+        || t.starts_with("npm uninstall -g ")
 }
 
 /// Run a CLI auth probe with a 10-second process-level timeout.
@@ -1270,11 +1296,14 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 }
             };
 
-            // node_required: an npm adapter step is pending AND node/npm are absent.
+            // node_required now means Buzz cannot provide npm for this platform.
+            // On supported desktop platforms, Buzz downloads a private Node/npm
+            // runtime into app data before running npm-backed adapter installs.
             let node_required = matches!(
                 availability,
                 AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
             ) && runtime_needs_npm(runtime)
+                && buzz_managed_node_bin_dir().is_none()
                 && resolve_command("npm").is_none()
                 && resolve_command("node").is_none();
 

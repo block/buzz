@@ -279,7 +279,10 @@ const overrides = new Map([
   // +13: fetch_login_shell_path_inner Windows guard (POSIX PATH → None).
   // resolve_git_bash made pub(crate) for Windows test access.
   // +1: login_shell_candidates doc comment expanded for resolve_bash_path.
-  ["src-tauri/src/managed_agents/discovery.rs", 1366],
+  // Buzz-managed Node path helpers and resolution tests moved to
+  // managed_node_paths.rs and discovery/tests/managed_path_resolution.rs;
+  // ratcheting 1366 -> 1392 after adding the managed-path probes to discovery.
+  ["src-tauri/src/managed_agents/discovery.rs", 1393],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
@@ -289,9 +292,8 @@ const overrides = new Map([
   // candidates, cli_install_commands_for_os PowerShell selection, login_shell_path
   // None regression, .cmd shim resolution, no-git-bash error hint.
   // +32: deterministic .cmd resolver + no-registry + install_shell_from tests.
-  // team-instructions-first-class: record_with test fixture gained the new
-  // ManagedAgentRecord.team_id field (+1 line) alongside persona_team_dir.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1271],
+  // Managed-path resolution test split to discovery/tests/managed_path_resolution.rs.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1273],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode

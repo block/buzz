@@ -25,11 +25,9 @@ pub(super) fn requirements(
         .map(|cli| find_command(cli).is_some())
         .unwrap_or(false);
 
-    let (availability, cmd, adapter_path) =
+    let (availability, _cmd, adapter_path) =
         classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
-    let availability = if runtime.id == "codex"
-        && availability == AcpAvailabilityStatus::Available
-        && cmd.as_deref() == Some("codex-acp")
+    let availability = if runtime.id == "codex" && availability == AcpAvailabilityStatus::Available
     {
         adapter_path
             .as_deref()

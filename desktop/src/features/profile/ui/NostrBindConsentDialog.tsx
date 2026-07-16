@@ -9,6 +9,7 @@ import type { Identity } from "@/shared/api/types";
 import type { NostrBindDeepLinkPayload } from "@/shared/deep-link";
 import { listenForNostrBindDeepLinks } from "@/shared/deep-link";
 import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSlideTransition";
+import { buildNostrBindCallbackUrl } from "@/features/profile/lib/nostrBindCallback";
 import { signNostrIdentityBinding } from "@/features/profile/lib/nostrIdentityBinding";
 import { cn } from "@/shared/lib/cn";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
@@ -118,6 +119,19 @@ async function notifySignedResponseReady(callbackUrl: string | undefined) {
     await openUrl(appendCallbackStatus(callbackUrl));
   } catch (error) {
     console.warn("open nostr bind callback failed:", error);
+  }
+}
+
+async function returnSignedResponseToBrowser(
+  callbackUrl: string,
+  signedResponse: string,
+): Promise<string | null> {
+  try {
+    await openUrl(buildNostrBindCallbackUrl(callbackUrl, signedResponse));
+    return null;
+  } catch (error) {
+    console.warn("return signed nostr binding response failed:", error);
+    return "Could not open the browser. Copy the response below to finish manually.";
   }
 }
 
@@ -448,6 +462,11 @@ export function NostrBindConsentDialog() {
             expiresAt: payload.expiresAt,
           });
       setSignedResponse(signed);
+      if (payload.returnMode === "browser_fragment_v1" && payload.callbackUrl) {
+        setError(
+          await returnSignedResponseToBrowser(payload.callbackUrl, signed),
+        );
+      }
     } catch (error) {
       setError(formatError(error) || "Failed to sign binding response.");
     } finally {
@@ -473,14 +492,22 @@ export function NostrBindConsentDialog() {
     setCopyFailed(!copied);
     if (copied) {
       showCopiedState();
-      await notifySignedResponseReady(payload?.callbackUrl);
+      if (payload?.returnMode === "clipboard") {
+        await notifySignedResponseReady(payload.callbackUrl);
+      }
       toast.success(
         isPreview ? PREVIEW_COPY_SUCCESS_MESSAGE : COPY_SUCCESS_MESSAGE,
       );
     } else {
       toast.warning(COPY_FAILURE_MESSAGE);
     }
-  }, [isPreview, payload?.callbackUrl, showCopiedState, signedResponse]);
+  }, [
+    isPreview,
+    payload?.callbackUrl,
+    payload?.returnMode,
+    showCopiedState,
+    signedResponse,
+  ]);
 
   return (
     <DialogPrimitive.Root
@@ -512,15 +539,24 @@ export function NostrBindConsentDialog() {
                   transitionKey="nostr-bind-finish"
                 >
                   <DialogPrimitive.Title className="mt-6 text-3xl font-semibold tracking-tight">
-                    Finish on the Buzz website
+                    {payload.returnMode === "browser_fragment_v1"
+                      ? "Continue in your browser"
+                      : "Finish on the Buzz website"}
                   </DialogPrimitive.Title>
                   <DialogPrimitive.Description
                     className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground"
                     id="nostr-bind-description"
                   >
-                    Copy the response below, then paste it into the Buzz website
-                    to finish verification.
+                    {payload.returnMode === "browser_fragment_v1"
+                      ? "Buzz opened your browser to finish verification. If it did not open, copy the response below."
+                      : "Copy the response below, then paste it into the Buzz website to finish verification."}
                   </DialogPrimitive.Description>
+
+                  {error ? (
+                    <p className="mt-4 w-full rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-left text-sm text-destructive">
+                      {error}
+                    </p>
+                  ) : null}
 
                   <pre
                     className="mt-10 max-h-56 w-full overflow-auto rounded-2xl border border-border/70 bg-muted/60 p-4 text-left shadow-xs"
