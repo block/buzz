@@ -224,6 +224,11 @@ desktop-e2e-smoke:
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
+# Run only the e2e specs changed vs origin/main (both projects) before pushing
+desktop-e2e-pre-push: _ensure-migrations
+    git fetch origin main
+    cd {{desktop_dir}} && pnpm build && pnpm exec playwright test --only-changed=origin/main
+
 # Run all checks suitable for CI / pre-push (no infra needed)
 ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
