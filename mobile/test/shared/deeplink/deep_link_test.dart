@@ -160,5 +160,29 @@ void _inviteTests() {
         isNull,
       );
     });
+
+    test('rejects buzz join with dangerous relay schemes', () {
+      // The `relay=` param is an allowlist — only `ws` / `wss` are safe to
+      // hand to a Nostr relay session. Anything else must be dropped by the
+      // parser so a hostile QR / share link can't smuggle a browser scheme
+      // (`javascript:`, `data:`), a local resource (`file:`), or an
+      // unrelated transport (`ftp:`, `chrome:`) into the join flow.
+      for (final hostile in [
+        'javascript:alert(1)',
+        'data:text/html,evil',
+        'file:///etc/passwd',
+        'ftp://relay.example.com',
+        'chrome://settings',
+        'about:blank',
+        'ssh://relay.example.com',
+      ]) {
+        final encoded = Uri.encodeQueryComponent(hostile);
+        expect(
+          parseInviteDeepLink(Uri.parse('buzz://join?relay=$encoded&code=abc')),
+          isNull,
+          reason: 'must reject relay scheme in $hostile',
+        );
+      }
+    });
   });
 }
