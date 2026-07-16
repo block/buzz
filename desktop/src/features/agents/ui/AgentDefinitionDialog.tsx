@@ -332,7 +332,6 @@ export function AgentDefinitionDialog({
   const { data: runtimeFileConfig, isLoading: fileConfigLoading } =
     useRuntimeFileConfigQuery(runtime, { enabled: open });
   const {
-    advancedInheritedSummary,
     globalConfig,
     inheritedDefaults: {
       provider: inheritedProviderDefault,
@@ -942,12 +941,6 @@ export function AgentDefinitionDialog({
                   )}
                 />
               </button>
-              {!showAdvancedFields && advancedInheritedSummary ? (
-                <p className="text-xs text-muted-foreground">
-                  {advancedInheritedSummary}
-                </p>
-              ) : null}
-
               <AnimatePresence initial={false}>
                 {showAdvancedFields ? (
                   <motion.div

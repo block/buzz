@@ -360,7 +360,6 @@ export function AgentInstanceEditDialog({
   );
 
   const {
-    advancedInheritedSummary,
     globalConfig,
     inheritedDefaults: {
       provider: inheritedProviderDefault,
@@ -1122,12 +1121,6 @@ export function AgentInstanceEditDialog({
                   )}
                 />
               </button>
-              {!showAdvancedFields && advancedInheritedSummary ? (
-                <p className="text-xs text-muted-foreground">
-                  {advancedInheritedSummary}
-                </p>
-              ) : null}
-
               <AnimatePresence initial={false}>
                 {showAdvancedFields ? (
                   <motion.div
