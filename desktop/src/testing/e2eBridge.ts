@@ -8465,8 +8465,6 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
-      case "plugin:opener|open_url":
-        return null;
       case "mesh_installed_models":
         return mockMeshState.models;
       case "mesh_node_status":
