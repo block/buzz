@@ -72,20 +72,9 @@ test.describe("welcome and channel agent entry points", () => {
     await page.getByTestId("create-channel-private-toggle").click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toHaveText("Welcome");
-    const agentCard = await page
-      .getByTestId("welcome-intro-action-create-agent")
-      .boundingBox();
-    const channelCard = await page
-      .getByTestId("welcome-intro-action-create-channel")
-      .boundingBox();
-    expect(agentCard).not.toBeNull();
-    expect(channelCard).not.toBeNull();
-    if (agentCard && channelCard) {
-      const sameRow = Math.abs(agentCard.y - channelCard.y) < 1;
-      expect(sameRow ? agentCard.x : agentCard.y).toBeLessThan(
-        sameRow ? channelCard.x : channelCard.y,
-      );
-    }
+    await expect(
+      page.getByTestId("message-channel-intro").getByRole("button"),
+    ).toHaveText(["Browse channels", "Create a channel", "Create an agent"]);
     await page.getByTestId("welcome-intro-action-create-agent").click();
     const dialog = page.getByRole("dialog");
     await expect(
