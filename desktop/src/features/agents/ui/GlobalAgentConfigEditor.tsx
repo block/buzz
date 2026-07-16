@@ -55,6 +55,7 @@ export function GlobalAgentConfigEditor({
   const [failedRestartCount, setFailedRestartCount] = React.useState(0);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState(false);
+  const [configIsValid, setConfigIsValid] = React.useState(true);
   const [isCustomProvider, setIsCustomProvider] = React.useState(false);
   const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const savedTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
@@ -186,6 +187,7 @@ export function GlobalAgentConfigEditor({
           onConfigChange={handleConfigChange}
           onCustomModelEditingChange={setIsCustomModelEditing}
           onIsCustomProviderChange={setIsCustomProvider}
+          onValidityChange={setConfigIsValid}
         />
       )}
 
@@ -194,7 +196,7 @@ export function GlobalAgentConfigEditor({
         <div className="mt-4 flex items-center gap-3">
           {secondaryAction}
           <Button
-            disabled={!dirty || saveState === "saving"}
+            disabled={!dirty || !configIsValid || saveState === "saving"}
             onClick={() => void handleSave()}
             size="sm"
           >

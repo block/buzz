@@ -48,6 +48,42 @@ const BAKED_STRUCTURED_KEYS = new Set([
   BUZZ_AGENT_THINKING_EFFORT,
 ]);
 
+function providerModelEnvKey(provider: string): string | null {
+  switch (provider.trim().toLowerCase()) {
+    case "databricks":
+    case "databricks_v2":
+    case "databricks-v2":
+      return "DATABRICKS_MODEL";
+    case "anthropic":
+      return "ANTHROPIC_MODEL";
+    case "openai":
+    case "openai-compat":
+      return "OPENAI_COMPAT_MODEL";
+    default:
+      return null;
+  }
+}
+
+export function getGlobalModelFallback(
+  bakedEnv: readonly BakedEnvEntry[],
+  provider: string,
+  globalEnv: Readonly<Record<string, string>> = {},
+): string | null {
+  const universal = bakedEnv.find(
+    (entry) => entry.key === "BUZZ_AGENT_MODEL" && !entry.masked,
+  )?.value;
+  if (universal?.trim()) return universal.trim();
+
+  const providerKey = providerModelEnvKey(provider);
+  if (!providerKey) return provider === "relay-mesh" ? "auto" : null;
+  const globalProviderModel = globalEnv[providerKey]?.trim();
+  if (globalProviderModel) return globalProviderModel;
+  const providerModel = bakedEnv.find(
+    (entry) => entry.key === providerKey && !entry.masked,
+  )?.value;
+  return providerModel?.trim() || null;
+}
+
 export type GlobalAgentConfigFieldsProps = {
   bakedEnv: BakedEnvEntry[];
   buzzAgentRuntime: AcpRuntimeCatalogEntry | undefined;
@@ -57,6 +93,7 @@ export type GlobalAgentConfigFieldsProps = {
   onConfigChange: (next: GlobalAgentConfig) => void;
   onCustomModelEditingChange: (value: boolean) => void;
   onIsCustomProviderChange: (value: boolean) => void;
+  onValidityChange?: (valid: boolean) => void;
 };
 
 export function GlobalAgentConfigFields({
@@ -68,15 +105,22 @@ export function GlobalAgentConfigFields({
   onConfigChange,
   onCustomModelEditingChange,
   onIsCustomProviderChange,
+  onValidityChange,
 }: GlobalAgentConfigFieldsProps) {
   const bakedProvider = React.useMemo(
     () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
     [bakedEnv],
   );
-  const bakedModel = React.useMemo(
-    () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_MODEL")?.value ?? null,
-    [bakedEnv],
+  const effectiveProvider = config.provider?.trim() || bakedProvider || "";
+  const fallbackModel = React.useMemo(
+    () => getGlobalModelFallback(bakedEnv, effectiveProvider, config.env_vars),
+    [bakedEnv, config.env_vars, effectiveProvider],
   );
+  const modelIsValid =
+    (config.model?.trim().length ?? 0) > 0 || fallbackModel !== null;
+  React.useEffect(() => {
+    onValidityChange?.(modelIsValid);
+  }, [modelIsValid, onValidityChange]);
   const bakedEffort = React.useMemo(
     () =>
       bakedEnv.find((e) => e.key === BUZZ_AGENT_THINKING_EFFORT)?.value ?? null,
@@ -229,12 +273,16 @@ export function GlobalAgentConfigFields({
       {/* Model field */}
       <div className="space-y-1.5 p-3">
         <AgentModelField
+          allowDefaultModel={fallbackModel !== null}
+          defaultModelLabel={
+            fallbackModel ? `Default model (${fallbackModel})` : undefined
+          }
           disabled={false}
           discoveredModelOptions={discoveredModelOptions}
-          globalModel={bakedModel ?? undefined}
+          globalModel={fallbackModel ?? undefined}
           id="global-agent-model"
           isCustomModelEditing={isCustomModelEditing}
-          isRequired={false}
+          isRequired={fallbackModel === null}
           model={config.model ?? ""}
           modelDiscoveryLoading={modelDiscoveryLoading}
           modelDiscoveryStatus={modelDiscoveryStatus}
