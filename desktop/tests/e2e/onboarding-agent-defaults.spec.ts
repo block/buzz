@@ -107,6 +107,52 @@ test("Finish button is always enabled on setup page regardless of readiness", as
 // B1 regression: rapid consecutive edits must not lose the later change
 // ---------------------------------------------------------------------------
 
+test("provider credentials are first-class and drive model discovery", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { acpRuntimesCatalog: undefined },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await page.locator("#global-agent-provider").selectOption("openai");
+  const apiKey = page.getByLabel("OpenAI API Key");
+  await expect(apiKey).toBeVisible();
+  await apiKey.fill("test-openai-key");
+  await expect(
+    page
+      .locator("#global-agent-model")
+      .getByRole("option", { name: "GPT-5.5" }),
+  ).toBeAttached();
+
+  await page.locator("#global-agent-provider").selectOption("openai-compat");
+  await expect(page.getByLabel("OpenAI API Key")).toHaveValue(
+    "test-openai-key",
+  );
+
+  await page
+    .locator("#global-agent-provider")
+    .selectOption("__custom_provider__");
+  await expect(page.getByLabel("OpenAI API Key")).not.toBeVisible();
+  await expect(page.locator('input[value="test-openai-key"]')).toHaveCount(0);
+
+  await page.locator("#global-agent-provider").selectOption("anthropic");
+  await expect(page.getByLabel("Anthropic API Key")).toBeVisible();
+
+  const databricksOption = page
+    .locator("#global-agent-provider")
+    .locator('option[value^="databricks"]')
+    .first();
+  await page
+    .locator("#global-agent-provider")
+    .selectOption(await databricksOption.getAttribute("value"));
+  await expect(page.getByLabel("Value for DATABRICKS_HOST")).toBeVisible();
+  await expect(page.getByLabel("OpenAI API Key")).not.toBeVisible();
+});
+
 test("rapid consecutive provider changes both survive — later change wins", async ({
   page,
 }) => {

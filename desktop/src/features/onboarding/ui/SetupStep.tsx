@@ -576,11 +576,11 @@ function RuntimeProvidersSection({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-1">
           <h1 className="text-3xl font-semibold tracking-tight text-foreground">
-            Agent harnesses
+            Detected agent harnesses
           </h1>
           <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-            Buzz can launch local ACP-compatible agent harnesses. Install or
-            verify the runtimes this desktop app can see.
+            These cards show which local ACP-compatible harnesses Buzz can use.
+            You choose a harness when creating each agent.
           </p>
         </div>
       </div>
