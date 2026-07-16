@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, ChevronRight, OctagonX, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 
 import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
@@ -10,7 +10,6 @@ import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelConte
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
 import { Badge } from "@/shared/ui/badge";
-import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,8 +25,6 @@ import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
   defaultModel: string;
-  globalModel: string | null;
-  globalModelTriggerRef: React.RefObject<HTMLButtonElement | null>;
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
@@ -36,8 +33,6 @@ type UnifiedAgentsSectionProps = {
   isAgentsLoading: boolean;
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
-  onBulkStopRunning: () => void;
-  onEditGlobalModel: () => void;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
@@ -79,10 +74,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     isAgentsLoading,
     startingAgentPubkey,
     startingPersonaIds,
-    onBulkStopRunning,
-    globalModel,
-    globalModelTriggerRef,
-    onEditGlobalModel,
     onOpenAgentProfile,
     onOpenPersonaProfile,
     onStartAgent,
@@ -104,9 +95,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     onImportSnapshotFile,
   } = props;
 
-  const runningCount = agents.filter((agent) =>
-    isManagedAgentActive(agent),
-  ).length;
   const { groups, ungrouped, unknown } = React.useMemo(
     () => buildUnifiedGroups(personas, agents),
     [personas, agents],
@@ -159,15 +147,12 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
         </div>
       ) : null}
 
-      <AgentsListActions
-        fileInputRef={fileInputRef}
-        globalModel={globalModel}
-        globalModelTriggerRef={globalModelTriggerRef}
-        handleFileChange={handleFileChange}
-        isActionPending={isActionPending}
-        runningCount={runningCount}
-        onBulkStopRunning={onBulkStopRunning}
-        onEditGlobalModel={onEditGlobalModel}
+      <input
+        accept=".agent.json,.agent.png"
+        className="hidden"
+        onChange={handleFileChange}
+        ref={fileInputRef}
+        type="file"
       />
 
       {isLoading ? <LoadingSkeleton /> : null}
@@ -456,61 +441,6 @@ function firstAvatarUrl(
     if (trimmed) return trimmed;
   }
   return null;
-}
-
-function AgentsListActions({
-  fileInputRef,
-  globalModel,
-  globalModelTriggerRef,
-  handleFileChange,
-  isActionPending,
-  runningCount,
-  onBulkStopRunning,
-  onEditGlobalModel,
-}: {
-  fileInputRef: React.RefObject<HTMLInputElement | null>;
-  globalModel: string | null;
-  globalModelTriggerRef: React.RefObject<HTMLButtonElement | null>;
-  handleFileChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  isActionPending: boolean;
-  runningCount: number;
-  onBulkStopRunning: () => void;
-  onEditGlobalModel: () => void;
-}) {
-  const model = globalModel?.trim();
-
-  return (
-    <>
-      <input
-        accept=".agent.json,.agent.png"
-        className="hidden"
-        onChange={handleFileChange}
-        ref={fileInputRef}
-        type="file"
-      />
-      <div className={`${AGENT_CARD_COLUMN_CLASS} flex flex-wrap gap-2`}>
-        <Button
-          onClick={onEditGlobalModel}
-          ref={globalModelTriggerRef}
-          size="sm"
-          variant="outline"
-        >
-          {model ? `Global model: ${model}` : "Set global model"}
-        </Button>
-        {runningCount > 0 ? (
-          <Button
-            disabled={isActionPending}
-            onClick={onBulkStopRunning}
-            size="sm"
-            variant="outline"
-          >
-            <OctagonX />
-            Stop all running agents
-          </Button>
-        ) : null}
-      </div>
-    </>
-  );
 }
 
 function NewAgentCard({

@@ -1,4 +1,5 @@
 import * as React from "react";
+import { OctagonX } from "lucide-react";
 import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
@@ -26,7 +27,9 @@ import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
+import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
+import { Button } from "@/shared/ui/button";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
@@ -65,6 +68,10 @@ export function AgentsView() {
     teamActions.createTeamMutation.isPending ||
     teamActions.updateTeamMutation.isPending ||
     teamActions.deleteTeamMutation.isPending;
+  const runningAgentCount = agents.managedAgents.filter((agent) =>
+    isManagedAgentActive(agent),
+  ).length;
+  const configuredGlobalModel = globalConfig.model?.trim();
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile and teamActions.handleImportTeamSnapshotFile are stable
   React.useEffect(() => {
@@ -99,14 +106,39 @@ export function AgentsView() {
       <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8">
         <div className="mx-auto flex w-full max-w-6xl flex-col gap-8">
           <PageHeader
+            action={
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button
+                  onClick={() => setIsAiDefaultsOpen(true)}
+                  ref={aiDefaultsTriggerRef}
+                  size="sm"
+                  variant="outline"
+                >
+                  {configuredGlobalModel
+                    ? `Global model: ${configuredGlobalModel}`
+                    : "Set global model"}
+                </Button>
+                {runningAgentCount > 0 ? (
+                  <Button
+                    disabled={isActionPending}
+                    onClick={() => {
+                      void agents.handleBulkStopRunning();
+                    }}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <OctagonX />
+                    Stop running agents
+                  </Button>
+                ) : null}
+              </div>
+            }
             description="Set up and manage your agents."
             title="Agents"
           />
           <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
               defaultModel={inheritedDefaults.model.value}
-              globalModel={globalConfig.model}
-              globalModelTriggerRef={aiDefaultsTriggerRef}
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
@@ -119,10 +151,6 @@ export function AgentsView() {
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
               startingAgentPubkey={agents.startingAgentPubkey}
               startingPersonaIds={agents.startingPersonaIds}
-              onBulkStopRunning={() => {
-                void agents.handleBulkStopRunning();
-              }}
-              onEditGlobalModel={() => setIsAiDefaultsOpen(true)}
               onOpenAgentProfile={(pubkey, options) => {
                 openProfilePanel?.(pubkey, options);
               }}
