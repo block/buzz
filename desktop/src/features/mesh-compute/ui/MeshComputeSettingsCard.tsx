@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, Cpu } from "lucide-react";
+import { ChevronDown, Cpu, Users } from "lucide-react";
 
 import { Input } from "@/shared/ui/input";
 import { Switch } from "@/shared/ui/switch";
@@ -23,6 +23,7 @@ import {
 } from "@/features/settings/ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { classifyModelRef } from "../classifyModelRef";
+import { isSharedModelRef, sharedModelShortName } from "../sharedModel";
 import {
   downloadPercent,
   formatDownloadBytes,
@@ -56,9 +57,13 @@ function writeDraft(key: string, value: string): void {
 /**
  * Settings → Compute → Share compute.
  *
- * One toggle, one model field, an "Already installed" picklist, an Advanced
- * group. User-facing copy describes the shared-compute behavior without
- * exposing implementation protocols or raw mesh controls.
+ * A "Recommended" solo picker (models that fit this machine) plus an
+ * "Advanced" group that adds a free-text model field, the installed picklist,
+ * a VRAM cap, and a "Join a shared model" section. Shared models are curated
+ * `meshllm/…-layers` layer-packages that are too big for one machine — serving
+ * one does nothing until enough members join, then the mesh auto-splits it
+ * across the group. All copy describes behavior without exposing raw mesh
+ * protocol controls.
  */
 export function MeshComputeSettingsCard() {
   const { status, error, refresh } = useMeshNodeStatus();
@@ -137,6 +142,12 @@ export function MeshComputeSettingsCard() {
     refClass.kind !== "unknown" &&
     !actionInFlight &&
     status?.state !== "starting";
+  const selectedIsShared = isSharedModelRef(modelInput, catalog);
+
+  const pick = React.useCallback((name: string) => {
+    setModelInput(name);
+    writeDraft(MODEL_DRAFT_STORAGE_KEY, name);
+  }, []);
 
   async function handleToggle(next: boolean) {
     setActionError(null);
@@ -166,6 +177,9 @@ export function MeshComputeSettingsCard() {
       resetDownloadProgress();
     }
   }
+
+  const soloEntries = catalog?.entries ?? [];
+  const sharedEntries = catalog?.shared ?? [];
 
   return (
     <section className="min-w-0" data-testid="settings-mesh-share-compute">
@@ -202,7 +216,11 @@ export function MeshComputeSettingsCard() {
             >
               Share this machine
             </label>
-            <StatusLine pendingAction={pendingAction} status={status} />
+            <StatusLine
+              isSharedModel={selectedIsShared}
+              pendingAction={pendingAction}
+              status={status}
+            />
           </div>
           <Switch
             checked={isOn}
@@ -213,70 +231,28 @@ export function MeshComputeSettingsCard() {
           />
         </SettingsOptionRow>
 
+        {/* Recommended: solo models that fit this machine. This is the common
+            path — pick one and share. */}
         <div className="px-4 pb-4 pt-5">
           <label
             className="mb-3 flex items-center gap-2 text-sm font-medium"
             htmlFor="mesh-share-compute-model"
           >
             <Cpu className="h-4 w-4 text-muted-foreground" />
-            Model
+            Recommended model
           </label>
-          <div className="flex flex-col gap-2">
-            <Input
-              data-testid="mesh-share-compute-model"
+          {catalog && soloEntries.length > 0 ? (
+            <CatalogPicker
+              catalog={catalog}
               disabled={controlsDisabled}
-              id="mesh-share-compute-model"
-              onChange={(e) => {
-                const next = e.target.value;
-                setModelInput(next);
-                writeDraft(MODEL_DRAFT_STORAGE_KEY, next);
-              }}
-              placeholder="Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
-              value={modelInput}
+              onPick={pick}
+              selected={modelInput.trim()}
             />
+          ) : (
             <p className="text-sm font-normal text-muted-foreground">
-              Choose a suggested model below, or enter a model reference or
-              local file. Buzz downloads remote models when sharing starts.
+              Open Advanced to enter a model reference to share.
             </p>
-            {catalog && catalog.entries.length > 0 ? (
-              <CatalogPicker
-                catalog={catalog}
-                disabled={controlsDisabled}
-                onPick={(name) => {
-                  setModelInput(name);
-                  writeDraft(MODEL_DRAFT_STORAGE_KEY, name);
-                }}
-                selected={modelInput.trim()}
-              />
-            ) : null}
-            {installedModels.length > 0 ? (
-              <div className="mt-1">
-                <p className="text-sm font-normal text-muted-foreground">
-                  Already installed on this machine:
-                </p>
-                <ul
-                  className="mt-1 flex flex-wrap gap-1.5"
-                  data-testid="mesh-share-compute-installed-list"
-                >
-                  {installedModels.map((m) => (
-                    <li key={m.id}>
-                      <button
-                        className="rounded border border-border/60 bg-muted/20 px-2 py-0.5 text-sm hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
-                        disabled={controlsDisabled}
-                        onClick={() => {
-                          setModelInput(m.id);
-                          writeDraft(MODEL_DRAFT_STORAGE_KEY, m.id);
-                        }}
-                        type="button"
-                      >
-                        {m.name ?? m.id}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </div>
+          )}
         </div>
 
         <details
@@ -295,35 +271,100 @@ export function MeshComputeSettingsCard() {
             />
             Advanced
           </summary>
-          <div className="mt-3 flex flex-col gap-2">
-            <label className="text-sm font-medium" htmlFor="mesh-vram">
-              Max VRAM (GB)
-            </label>
-            <Input
-              data-testid="mesh-share-compute-vram"
-              id="mesh-vram"
-              inputMode="decimal"
-              onChange={(e) => {
-                const next = e.target.value;
-                setMaxVramGb(next);
-                writeDraft(MAX_VRAM_DRAFT_STORAGE_KEY, next);
-              }}
-              placeholder="No limit"
-              value={maxVramGb}
-            />
-            {status?.consoleUrl ? (
+
+          <div className="mt-3 flex flex-col gap-5">
+            {/* Serve a specific model solo (free text + installed picklist). */}
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium" htmlFor="mesh-model-input">
+                Serve a model solo
+              </label>
+              <Input
+                data-testid="mesh-share-compute-model"
+                disabled={controlsDisabled}
+                id="mesh-model-input"
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setModelInput(next);
+                  writeDraft(MODEL_DRAFT_STORAGE_KEY, next);
+                }}
+                placeholder="Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
+                value={modelInput}
+              />
               <p className="text-sm font-normal text-muted-foreground">
-                Debug console:{" "}
-                <a
-                  className="underline"
-                  href={status.consoleUrl}
-                  rel="noreferrer"
-                  target="_blank"
-                >
-                  {status.consoleUrl}
-                </a>
+                Enter a model reference or local file. Buzz downloads remote
+                models when sharing starts.
               </p>
+              {installedModels.length > 0 ? (
+                <div className="mt-1">
+                  <p className="text-sm font-normal text-muted-foreground">
+                    Already installed on this machine:
+                  </p>
+                  <ul
+                    className="mt-1 flex flex-wrap gap-1.5"
+                    data-testid="mesh-share-compute-installed-list"
+                  >
+                    {installedModels.map((m) => (
+                      <li key={m.id}>
+                        <button
+                          className="rounded border border-border/60 bg-muted/20 px-2 py-0.5 text-sm hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={controlsDisabled}
+                          onClick={() => pick(m.id)}
+                          type="button"
+                        >
+                          {m.name ?? m.id}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+
+            {/* Join a shared model: layer-packages too big for one machine. */}
+            {catalog && sharedEntries.length > 0 ? (
+              <SharedModelPicker
+                catalog={catalog}
+                disabled={controlsDisabled}
+                onPick={pick}
+                selected={modelInput.trim()}
+              />
             ) : null}
+
+            {/* VRAM cap. */}
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium" htmlFor="mesh-vram">
+                Max VRAM (GB)
+              </label>
+              <Input
+                data-testid="mesh-share-compute-vram"
+                id="mesh-vram"
+                inputMode="decimal"
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setMaxVramGb(next);
+                  writeDraft(MAX_VRAM_DRAFT_STORAGE_KEY, next);
+                }}
+                placeholder="No limit"
+                value={maxVramGb}
+              />
+              <p className="text-sm font-normal text-muted-foreground">
+                Limit how much of this machine's memory to contribute. For
+                shared models, a lower limit means you host a smaller slice.
+              </p>
+              {status?.consoleUrl ? (
+                <p className="text-sm font-normal text-muted-foreground">
+                  Debug console:{" "}
+                  <a
+                    className="underline"
+                    href={status.consoleUrl}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    {status.consoleUrl}
+                  </a>
+                </p>
+              ) : null}
+            </div>
           </div>
         </details>
       </SettingsOptionGroup>
@@ -335,11 +376,6 @@ export function MeshComputeSettingsCard() {
   );
 }
 
-/**
- * Renders the lifecycle/health text under the toggle. Maps Max's `state` ×
- * `health` matrix to honest copy — no "starting…" stuck forever when mesh
- * is actually downloading weights or has failed.
- */
 /**
  * Live model-download progress: name, bytes, percent bar. Rendered above the
  * option group while the backend streams mesh-download-progress events —
@@ -399,9 +435,10 @@ const FIT_CLASS: Record<MeshCatalogEntry["fit"], string> = {
 };
 
 /**
- * Hardware-ranked curated model list (mesh-console's diagnose pattern).
+ * Hardware-ranked curated solo model list (mesh-console's diagnose pattern).
  * Click a row to fill the model field. Models too large for this machine are
- * listed but disabled — honest about why, instead of hiding them.
+ * listed but disabled — honest about why (and directs to the shared section
+ * for models that genuinely can't run on one box).
  */
 function CatalogPicker({
   catalog,
@@ -483,10 +520,85 @@ function CatalogPicker({
   );
 }
 
+/**
+ * Shared/split model picker. These are curated `meshllm/…-layers` packages
+ * that are too big for one machine and run split across several members.
+ * Unlike the solo picker, "too large" is expected — the fit story here is
+ * "how many members", and the honest cost is speed.
+ */
+function SharedModelPicker({
+  catalog,
+  disabled,
+  onPick,
+  selected,
+}: {
+  catalog: MeshModelCatalog;
+  disabled: boolean;
+  onPick: (name: string) => void;
+  selected: string;
+}) {
+  return (
+    <div className="flex flex-col gap-2" data-testid="mesh-shared-model-picker">
+      <p className="flex items-center gap-2 text-sm font-medium">
+        <Users className="h-4 w-4 text-muted-foreground" />
+        Join a shared model
+      </p>
+      <p className="text-sm font-normal text-muted-foreground">
+        These models are too big for one machine. Buzz runs them split across
+        members who host them together — sharing starts once enough members
+        join. They run slower than a single-machine model: the group trades
+        speed for size.
+      </p>
+      <ul className="mt-1 flex flex-col gap-1">
+        {catalog.shared.map((entry) => {
+          const isSelected = entry.name === selected;
+          return (
+            <li key={entry.name}>
+              <button
+                className={cn(
+                  "flex w-full flex-col gap-0.5 rounded border px-2 py-1.5 text-left",
+                  isSelected
+                    ? "border-primary/60 bg-primary/10"
+                    : "border-border/60 bg-muted/20 hover:bg-muted/40",
+                  "disabled:cursor-not-allowed disabled:opacity-50",
+                )}
+                data-testid={`mesh-shared-${entry.name}`}
+                disabled={disabled}
+                onClick={() => onPick(entry.name)}
+                title={entry.description}
+                type="button"
+              >
+                <span className="flex items-baseline gap-2 text-sm">
+                  <span className="min-w-0 truncate font-medium">
+                    {sharedModelShortName(entry.name)}
+                  </span>
+                  <span className="shrink-0 text-muted-foreground">
+                    {entry.size}
+                  </span>
+                  {entry.estimatedMembers != null ? (
+                    <span className="shrink-0 rounded bg-primary/15 px-1.5 text-2xs font-medium text-primary">
+                      ~{entry.estimatedMembers} members
+                    </span>
+                  ) : null}
+                </span>
+                <span className="text-2xs font-normal text-muted-foreground">
+                  {entry.description}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function StatusLine({
+  isSharedModel,
   pendingAction,
   status,
 }: {
+  isSharedModel: boolean;
   pendingAction: "start" | "stop" | null;
   status: MeshNodeStatus | null;
 }) {
@@ -508,11 +620,21 @@ function StatusLine({
     );
   }
   if (state === "starting") {
-    const reason =
-      health.status === "degraded" || health.status === "failed"
-        ? health.reason
-        : "Starting…";
-    return <p className="text-sm text-muted-foreground">{reason}</p>;
+    if (health.status === "degraded" || health.status === "failed") {
+      return <p className="text-sm text-muted-foreground">{health.reason}</p>;
+    }
+    // Shared models spend "starting" waiting for a quorum of members to join
+    // before the mesh can split and serve. Say so plainly instead of a
+    // solo-flavored "Starting…" that looks stuck. (Coarse by design: we don't
+    // yet have a member count from the SDK — just "needs more members".)
+    if (isSharedModel) {
+      return (
+        <p className="text-sm text-muted-foreground">
+          Waiting for more members to join before this shared model can run.
+        </p>
+      );
+    }
+    return <p className="text-sm text-muted-foreground">Starting…</p>;
   }
   if (state === "running") {
     if (health.status === "failed") {
@@ -526,6 +648,14 @@ function StatusLine({
       return (
         <p className="text-sm text-amber-600 dark:text-amber-400">
           Active{modelLabel ? ` — ${modelLabel}` : ""}. {health.reason}
+        </p>
+      );
+    }
+    if (isSharedModel) {
+      return (
+        <p className="text-sm text-muted-foreground">
+          Running{modelLabel ? ` ${modelLabel}` : ""} with the group. You're
+          hosting part of it.
         </p>
       );
     }

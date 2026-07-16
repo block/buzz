@@ -2514,7 +2514,7 @@ const mockMeshState: {
   admitted: boolean;
   models: Array<{ id: string; name: string | null }>;
   denyReason: string;
-  nodeState: "off" | "running";
+  nodeState: "off" | "starting" | "running";
   nodeMode: "serve" | "client" | null;
 } = {
   admitted: true,
@@ -8459,7 +8459,7 @@ export function maybeInstallE2eTauriMocks() {
     injectObserverEventsForE2E(agentPubkey, events);
   };
   const meshNodeStatus = (
-    state: "off" | "running",
+    state: "off" | "starting" | "running",
     mode: "serve" | "client" | null,
   ) => ({
     state,
@@ -8498,9 +8498,15 @@ export function maybeInstallE2eTauriMocks() {
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       case "mesh_start_node": {
         const req = (
-          payload as { request?: { mode?: "serve" | "client" } } | null
+          payload as {
+            request?: { mode?: "serve" | "client"; modelId?: string };
+          } | null
         )?.request;
-        mockMeshState.nodeState = "running";
+        // Shared models (layer packages) hold in "starting" — the mesh is
+        // waiting for enough members to join before it can split and serve.
+        // Solo models go straight to "running".
+        const isSharedModel = (req?.modelId ?? "").includes("-layers");
+        mockMeshState.nodeState = isSharedModel ? "starting" : "running";
         mockMeshState.nodeMode = req?.mode ?? "serve";
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       }
@@ -8508,6 +8514,63 @@ export function maybeInstallE2eTauriMocks() {
         mockMeshState.nodeState = "off";
         mockMeshState.nodeMode = null;
         return meshNodeStatus("off", null);
+      case "mesh_model_catalog":
+        return {
+          gpuName: "Apple M-series",
+          vramDisplay: "24 GB",
+          vramGb: 24,
+          recommended: "Qwen3-8B-Q4_K_M",
+          entries: [
+            {
+              name: "Qwen3-8B-Q4_K_M",
+              size: "5.0GB",
+              sizeGb: 5,
+              description: "Fast general model.",
+              fit: "comfortable",
+              installed: false,
+              recommended: true,
+              shared: false,
+              estimatedMembers: null,
+            },
+            {
+              name: "Qwen3-32B-UD-Q4_K_XL",
+              size: "20GB",
+              sizeGb: 20,
+              description: "Larger general model.",
+              fit: "tight",
+              installed: false,
+              recommended: false,
+              shared: false,
+              estimatedMembers: null,
+            },
+          ],
+          shared: [
+            {
+              name: "meshllm/Qwen3-8B-Q4_K_M-layers",
+              size: "5.0GB",
+              sizeGb: 5,
+              description:
+                "Small demo split — runs across two machines. Good for trying shared compute.",
+              fit: "too_large",
+              installed: false,
+              recommended: false,
+              shared: true,
+              estimatedMembers: 2,
+            },
+            {
+              name: "meshllm/Qwen3-235B-A22B-UD-Q4_K_XL-layers",
+              size: "134GB",
+              sizeGb: 134,
+              description:
+                "Large 235B model. Too big for one machine — the group hosts it.",
+              fit: "too_large",
+              installed: false,
+              recommended: false,
+              shared: true,
+              estimatedMembers: 7,
+            },
+          ],
+        };
       case "get_identity": {
         const isLost =
           !mockIdentityLostCleared && activeConfig?.mock?.identityLost === true;
