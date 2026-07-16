@@ -234,6 +234,17 @@ type E2eConfig = {
     // Event IDs that `get_event` should report as definitively not found.
     // Causes `useDraftRootStatus` to classify as `deleted`.
     deletedEventIds?: string[];
+    // Pending community deep links (buzz://join / buzz://connect) seeded into
+    // the mocked Rust-side queue. Mirrors the real queue's semantics:
+    // `take_pending_community_deep_link` peeks the head and
+    // `acknowledge_pending_community_deep_link` removes by id. Drives the
+    // pending-invite gate and deep-link drain path in tests.
+    pendingCommunityDeepLinks?: Array<{
+      id: string;
+      kind: "connect" | "join";
+      relayUrl: string;
+      code?: string | null;
+    }>;
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
     identityLost?: boolean;
@@ -3534,6 +3545,20 @@ function recordMockMessage(channelId: string, event: RelayEvent) {
 
 function resetMockUserStatuses() {
   mockUserStatuses.length = 0;
+}
+
+// Mocked Rust-side pending deep-link queue (see desktop/src-tauri/src/deep_link.rs).
+let mockPendingCommunityDeepLinks: Array<{
+  id: string;
+  kind: string;
+  relayUrl: string;
+  code: string | null;
+}> = [];
+
+function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
+  mockPendingCommunityDeepLinks = (
+    config?.mock?.pendingCommunityDeepLinks ?? []
+  ).map((pending) => ({ ...pending, code: pending.code ?? null }));
 }
 
 function recordMockUserStatus(event: RelayEvent) {
@@ -8215,6 +8240,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockWorkflows();
   resetMockMesh();
   resetMockUserStatuses();
+  resetMockPendingCommunityDeepLinks(config);
   mockWebsocketSendMutexWedged = false;
   mockWindows("main");
   window.__BUZZ_E2E_COMMANDS__ = [];
@@ -8807,6 +8833,20 @@ export function maybeInstallE2eTauriMocks() {
           activeWorkspaceId: null,
           onboardingCompletions: [],
         };
+      case "take_pending_community_deep_link":
+        // Mirrors the Rust queue: peek the head; acknowledge removes it.
+        return mockPendingCommunityDeepLinks[0] ?? null;
+      case "acknowledge_pending_community_deep_link": {
+        const { id } = payload as { id: string };
+        const index = mockPendingCommunityDeepLinks.findIndex(
+          (pending) => pending.id === id,
+        );
+        if (index === -1) {
+          return false;
+        }
+        mockPendingCommunityDeepLinks.splice(index, 1);
+        return true;
+      }
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
       case "discover_acp_providers":

@@ -291,6 +291,17 @@ type MockBridgeOptions = {
    */
   identityLocked?: boolean;
   /**
+   * Pending community deep links (buzz://join / buzz://connect) seeded into
+   * the mocked Rust-side queue. The frontend drains these on boot into a
+   * community-onboarding transaction — drives the pending-invite gate.
+   */
+  pendingCommunityDeepLinks?: Array<{
+    id: string;
+    kind: "connect" | "join";
+    relayUrl: string;
+    code?: string | null;
+  }>;
+  /**
    * Global agent config returned by `get_global_agent_config`. Defaults to
    * an empty config (no provider, model, or env vars) if not specified.
    * Pass a config with a provider to test Inherit-from-global behavior.

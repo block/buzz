@@ -21,6 +21,7 @@ import { useCommunityOnboarding } from "@/features/onboarding/communityOnboardin
 import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboardingFlow";
 import { MachineOnboardingFlow } from "@/features/onboarding/ui/MachineOnboardingFlow";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
+import { PendingInviteGate } from "@/features/onboarding/ui/PendingInviteGate";
 import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
 import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequiredScreen";
 import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
@@ -255,14 +256,6 @@ function CommunityApp({ sharedIdentity }: { sharedIdentity: boolean }) {
   const communityOnboarding = useCommunityOnboarding();
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
 
-  useEffect(() => {
-    const unlisten = listenForDeepLinks({
-      startCommunityOnboarding: communityOnboarding.start,
-    });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
-  }, [communityOnboarding.start]);
   // Surface nest-related backend events (repos-dir errors, legacy migration)
   // as toasts. Mounted before useCommunityInit so the listeners are registered
   // ahead of the first apply_workspace call.
@@ -389,10 +382,28 @@ function CommunityApp({ sharedIdentity }: { sharedIdentity: boolean }) {
 
 function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   const { activeCommunity } = useCommunities();
+  const communityOnboarding = useCommunityOnboarding();
   const machine = useMachineOnboardingState({
     hasConfiguredCommunity: activeCommunity !== null,
     isSharedIdentity: sharedIdentity,
   });
+  const [dismissedInviteId, setDismissedInviteId] = useState<string | null>(
+    null,
+  );
+
+  // Deep links are captured here — above the machine-onboarding gate — not in
+  // CommunityApp. The Rust side queues them; draining into the persisted
+  // community-onboarding transaction immediately means an invite opened on a
+  // fresh install is acknowledged on screen while the identity steps are
+  // still pending, and survives a relaunch in between.
+  useEffect(() => {
+    const unlisten = listenForDeepLinks({
+      startCommunityOnboarding: communityOnboarding.start,
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [communityOnboarding.start]);
 
   if (machine.stage === "reset-failed") return <ResetFailedScreen />;
   if (machine.stage === "keyring-locked") return <KeyringLockedScreen />;
@@ -402,12 +413,33 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     return <CommunityApp sharedIdentity={sharedIdentity} />;
   }
 
+  // A deep-link invite that arrived before machine onboarding finished:
+  // overlay an acknowledgment above the identity steps. The claim itself
+  // runs in CommunityOnboardingFlow once machine onboarding completes.
+  const transaction = communityOnboarding.transaction;
+  const pendingInvite =
+    transaction &&
+    (transaction.source === "deep-link-join" ||
+      transaction.source === "deep-link-connect") &&
+    transaction.id !== dismissedInviteId
+      ? transaction
+      : null;
+
   return (
-    <MachineOnboardingFlow
-      complete={machine.complete}
-      identityLost={machine.identityLost}
-      queryClient={machine.queryClient}
-    />
+    <>
+      <MachineOnboardingFlow
+        complete={machine.complete}
+        identityLost={machine.identityLost}
+        queryClient={machine.queryClient}
+      />
+      {pendingInvite ? (
+        <PendingInviteGate
+          communityName={pendingInvite.communityName}
+          hasInviteCode={Boolean(pendingInvite.inviteCode)}
+          onContinue={() => setDismissedInviteId(pendingInvite.id)}
+        />
+      ) : null}
+    </>
   );
 }
 
