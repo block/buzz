@@ -9,6 +9,7 @@ use super::{dedupe_models, MeshAvailability, MeshModelOption, MeshServeTarget, M
 /// than two minutes so crashed/offline devices stop contributing compute or
 /// admission identities without requiring a relay-side cleanup job.
 pub(super) const STATUS_FRESHNESS_SECS: u64 = 120;
+pub(crate) const MESH_STATUS_PAGE_SIZE: usize = 100;
 
 fn status_is_fresh(event: &nostr::Event, now: u64) -> bool {
     event
@@ -77,6 +78,13 @@ fn latest_membership_list(events: &[nostr::Event]) -> Option<BTreeSet<String>> {
                 .filter(|pubkey| !pubkey.is_empty())
                 .collect()
         })
+}
+
+pub(crate) fn current_member_pubkeys(events: &[nostr::Event]) -> Vec<String> {
+    latest_membership_list(events)
+        .map(BTreeSet::into_iter)
+        .map(Iterator::collect)
+        .unwrap_or_default()
 }
 
 fn owner_id_from_status_event(event: &nostr::Event) -> Option<String> {
@@ -246,7 +254,8 @@ pub fn mesh_status_filter() -> serde_json::Value {
     serde_json::json!({
         "kinds": [MESH_STATUS_KIND],
         "#k": ["buzz-mesh-status"],
-        "limit": 100
+        "since": nostr::Timestamp::now().as_secs().saturating_sub(STATUS_FRESHNESS_SECS),
+        "limit": MESH_STATUS_PAGE_SIZE
     })
 }
 

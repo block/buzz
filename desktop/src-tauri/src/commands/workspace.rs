@@ -175,27 +175,46 @@ pub async fn apply_workspace(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
+    let state = restore_app.state::<AppState>();
+    let restore_pending = state
+        .managed_agent_restore_pending
+        .swap(false, Ordering::AcqRel);
+
     // The coordinator starts before React applies the selected workspace, so
     // its startup publication may have used the fallback relay and placeholder
-    // identity. Republish immediately with the now-active relay and member key.
-    // This also makes a consumer-only MeshLLM owner visible for admission
-    // without waiting for the next heartbeat.
+    // identity. Correct it off the command path so an unavailable relay cannot
+    // hold the frontend on its loading gate. On initial launch, restore MeshLLM
+    // first so a slow stopped-status request cannot overwrite a newly restored
+    // serving status, then restore managed agents after the admission identity
+    // has been published (or the bounded publication attempt has timed out).
     #[cfg(feature = "mesh-llm")]
-    crate::mesh_llm::publish_current_status_once(&restore_app, "workspace apply").await;
-
-    let state = restore_app.state::<AppState>();
-    if state
-        .managed_agent_restore_pending
-        .swap(false, Ordering::AcqRel)
     {
         let app = restore_app.clone();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
-            #[cfg(feature = "mesh-llm")]
-            if let Err(error) = crate::commands::mesh_llm::restore_mesh_sharing(&app, &state).await
-            {
-                eprintln!("buzz-desktop: failed to restore Share Compute: {error}");
+            if restore_pending {
+                if let Err(error) =
+                    crate::commands::mesh_llm::restore_mesh_sharing(&app, &state).await
+                {
+                    eprintln!("buzz-desktop: failed to restore Share Compute: {error}");
+                }
             }
+            crate::mesh_llm::publish_current_status_once(&app, "workspace apply").await;
+            if restore_pending {
+                if let Err(error) =
+                    restore_managed_agents_on_launch(&app, &state.shutdown_started).await
+                {
+                    eprintln!("buzz-desktop: failed to restore managed agents: {error}");
+                }
+            }
+        });
+    }
+
+    #[cfg(not(feature = "mesh-llm"))]
+    if restore_pending {
+        let app = restore_app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
             if let Err(error) =
                 restore_managed_agents_on_launch(&app, &state.shutdown_started).await
             {

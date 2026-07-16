@@ -21,6 +21,7 @@ pub const KIND_BUZZ_MESH_MEMBER_STATUS: u16 = buzz_core_pkg::kind::KIND_BOOKMARK
 const STATUS_D_TAG_PREFIX: &str = "buzz-mesh-member-status";
 const ROSTER_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_PUBLISH_INTERVAL: Duration = Duration::from_secs(45);
+const STATUS_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct MeshCoordinator {
     _status_publisher: tokio::task::JoinHandle<()>,
@@ -107,15 +108,31 @@ async fn reconcile_roster(state: &AppState) -> Result<(), String> {
 
 pub(crate) async fn publish_current_status_once(app: &AppHandle, reason: &str) {
     let state = app.state::<AppState>();
-    if let Err(error) = publish_current_status_for_state(&state).await {
-        eprintln!("buzz-mesh: status report after {reason} failed: {error}");
+    match tokio::time::timeout(
+        STATUS_PUBLISH_TIMEOUT,
+        publish_current_status_for_state(&state),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("buzz-mesh: status report after {reason} failed: {error}"),
+        Err(_) => eprintln!("buzz-mesh: status report after {reason} timed out"),
     }
 }
 
 pub(crate) async fn publish_stopped_status_once(app: &AppHandle, reason: &str) {
     let state = app.state::<AppState>();
-    if let Err(error) = publish_stopped_status_for_state(&state).await {
-        eprintln!("buzz-mesh: stopped status report after {reason} failed: {error}");
+    match tokio::time::timeout(
+        STATUS_PUBLISH_TIMEOUT,
+        publish_stopped_status_for_state(&state),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            eprintln!("buzz-mesh: stopped status report after {reason} failed: {error}");
+        }
+        Err(_) => eprintln!("buzz-mesh: stopped status report after {reason} timed out"),
     }
 }
 
@@ -215,6 +232,7 @@ mod tests {
         assert!(
             STATUS_PUBLISH_INTERVAL.as_secs() * 2 < super::super::discovery::STATUS_FRESHNESS_SECS
         );
+        assert!(STATUS_PUBLISH_TIMEOUT < STATUS_PUBLISH_INTERVAL);
     }
 
     #[test]
