@@ -26,7 +26,6 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 
-const BROWSE_CHANNELS_SHORTCUT_HINT = "\u21E7\u2318O";
 type BrowserTab = "all" | "joined" | "archived";
 type ChannelSort = "alphabetical" | "members";
 
@@ -351,13 +350,6 @@ export function ChannelBrowserDialog({
               type="text"
               value={query}
             />
-            <span
-              className={`hidden shrink-0 text-xs text-muted-foreground/50 transition-opacity duration-150 ease-out group-focus-within/search:opacity-0 sm:block ${
-                query.length > 0 ? "opacity-0" : "opacity-100"
-              }`}
-            >
-              {BROWSE_CHANNELS_SHORTCUT_HINT}
-            </span>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button

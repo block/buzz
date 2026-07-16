@@ -28,6 +28,7 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -200,6 +201,7 @@ export function SectionActionsMenu({
           <DropdownMenuItem onSelect={() => deferMenuAction(onBrowse)}>
             <HashSearch className="h-4 w-4" />
             <span>{browseLabel ?? "Browse channels"}</span>
+            <DropdownMenuShortcut>⇧⌘O</DropdownMenuShortcut>
           </DropdownMenuItem>
         ) : null}
         {onCreate ? (
