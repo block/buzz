@@ -92,19 +92,9 @@ pub async fn start_pairing(
     // own NIP-11 declaration of NIP-43 support rather than `auth_required`,
     // which is also true for plain NIP-42 / NIP-OA relays where the main
     // relay is reachable.
-    let qr_relay_url = match probe_pairing_relay(&ws_url).await {
-        PairingRelay::Configured(url) => url,
-        PairingRelay::LegacyPath => {
-            let mut url =
-                url::Url::parse(&ws_url).map_err(|e| format!("invalid relay URL: {e}"))?;
-            let path = url.path().trim_end_matches('/').to_string();
-            url.set_path(&format!("{path}/pair"));
-            url.to_string()
-        }
-        PairingRelay::MainRelay => ws_url.clone(),
-    };
+    let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await)?;
 
-    let (session, qr_payload) = PairingSession::new_source(qr_relay_url);
+    let (session, qr_payload) = PairingSession::new_source(pairing_relay_url.clone());
     let qr_uri = encode_qr(&qr_payload);
 
     let payload_json = serde_json::json!({
@@ -128,7 +118,7 @@ pub async fn start_pairing(
 
     let session_arc = Arc::clone(&pairing.session);
     tauri::async_runtime::spawn(pairing_ws_task(
-        ws_url,
+        pairing_relay_url,
         session_arc,
         cancel,
         outbound_rx,
@@ -459,6 +449,23 @@ async fn probe_pairing_relay(relay_url: &str) -> PairingRelay {
     pairing_relay_from_nip11(&json)
 }
 
+fn resolve_pairing_relay_url(
+    main_relay_url: &str,
+    pairing_relay: PairingRelay,
+) -> Result<String, String> {
+    match pairing_relay {
+        PairingRelay::Configured(url) => Ok(url),
+        PairingRelay::LegacyPath => {
+            let mut url =
+                url::Url::parse(main_relay_url).map_err(|e| format!("invalid relay URL: {e}"))?;
+            let path = url.path().trim_end_matches('/').to_string();
+            url.set_path(&format!("{path}/pair"));
+            Ok(url.to_string())
+        }
+        PairingRelay::MainRelay => Ok(main_relay_url.to_string()),
+    }
+}
+
 fn pairing_relay_from_nip11(json: &serde_json::Value) -> PairingRelay {
     if let Some(value) = json
         .get("pairing_relay_url")
@@ -522,7 +529,9 @@ where
 
 #[cfg(test)]
 mod pairing_relay_tests {
-    use super::{pairing_relay_from_nip11, probe_pairing_relay, PairingRelay};
+    use super::{
+        pairing_relay_from_nip11, probe_pairing_relay, resolve_pairing_relay_url, PairingRelay,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -590,5 +599,38 @@ mod pairing_relay_tests {
         let document = serde_json::json!({ "supported_nips": [1, 11] });
 
         assert_eq!(pairing_relay_from_nip11(&document), PairingRelay::MainRelay);
+    }
+
+    #[test]
+    fn configured_pairing_relay_resolves_to_configured_url() {
+        let resolved = resolve_pairing_relay_url(
+            "wss://flint.communities.buzz.xyz",
+            PairingRelay::Configured("wss://pairing.buzz.xyz".to_string()),
+        )
+        .expect("resolve configured pairing relay");
+
+        assert_eq!(resolved, "wss://pairing.buzz.xyz");
+    }
+
+    #[test]
+    fn legacy_pairing_relay_appends_pair_path() {
+        let resolved = resolve_pairing_relay_url(
+            "wss://flint.communities.buzz.xyz/community",
+            PairingRelay::LegacyPath,
+        )
+        .expect("resolve legacy pairing relay");
+
+        assert_eq!(resolved, "wss://flint.communities.buzz.xyz/community/pair");
+    }
+
+    #[test]
+    fn main_relay_pairing_uses_main_relay_url() {
+        let resolved = resolve_pairing_relay_url(
+            "wss://sprout-oss.stage.blox.sqprod.co",
+            PairingRelay::MainRelay,
+        )
+        .expect("resolve main pairing relay");
+
+        assert_eq!(resolved, "wss://sprout-oss.stage.blox.sqprod.co");
     }
 }
