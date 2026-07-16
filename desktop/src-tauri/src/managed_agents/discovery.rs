@@ -5,8 +5,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::managed_agents::{
-    buzz_managed_node_bin_dir, buzz_managed_npm_bin_dir, AcpAvailabilityStatus,
-    AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
+    buzz_managed_command_path, buzz_managed_node_bin_dir, buzz_managed_npm_bin_dir,
+    AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
 };
 
 pub(crate) struct KnownAcpRuntime {
@@ -521,6 +521,10 @@ fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String
 /// The cache eliminates redundant login-shell spawns when multiple agents share
 /// the same binaries (e.g. `npx`, `uvx`).
 pub fn resolve_command(command: &str) -> Option<PathBuf> {
+    if let Some(managed) = resolve_buzz_managed_command(command) {
+        return Some(managed);
+    }
+
     let cache = resolve_cache();
 
     // Fast path: return cached result without allocating a key.
@@ -635,14 +639,27 @@ fn command_basenames(command: &str) -> Vec<String> {
     candidates
 }
 
+fn resolve_buzz_managed_command(command: &str) -> Option<PathBuf> {
+    let basenames = command_basenames(command);
+    basenames
+        .iter()
+        .find_map(|basename| buzz_managed_command_path(command, basename))
+}
+
 fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     if let Some(path) = resolve_workspace_command(command) {
         return Some(path);
     }
 
+    let basenames = command_basenames(command);
+
     if command_looks_like_path(command) {
         let path = PathBuf::from(command);
         return path.exists().then_some(path);
+    }
+
+    if let Some(managed) = resolve_buzz_managed_command(command) {
+        return Some(managed);
     }
 
     for candidate in path_candidates_from_env(command) {
@@ -666,7 +683,6 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     if let Some(path) = find_via_login_shell(command) {
         return Some(path);
     }
-    let basenames = command_basenames(command);
     for dir in common_binary_paths() {
         for basename in &basenames {
             let candidate = dir.join(basename);

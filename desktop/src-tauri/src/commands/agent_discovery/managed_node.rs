@@ -1,4 +1,6 @@
 use sha2::{Digest, Sha256};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use std::{io::Read, io::Write};
 
 use crate::managed_agents::{is_npm_global_install, InstallStepResult};
@@ -104,6 +106,15 @@ fn managed_node_runtime_ready() -> bool {
         .unwrap_or(false)
 }
 
+fn managed_node_install_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub(super) fn managed_node_runtime_supported() -> bool {
+    MANAGED_NODE_ARTIFACT.is_some() && crate::managed_agents::buzz_managed_node_bin_dir().is_some()
+}
+
 pub(super) fn ensure_managed_node_runtime_blocking() -> Result<(), Box<InstallStepResult>> {
     if managed_node_runtime_ready() {
         return Ok(());
@@ -117,6 +128,16 @@ pub(super) fn ensure_managed_node_runtime_blocking() -> Result<(), Box<InstallSt
             "failed to resolve Buzz app-data directory for private Node.js runtime".to_string(),
         )));
     };
+
+    let _guard = managed_node_install_lock().lock().map_err(|_| {
+        Box::new(managed_node_failed_step(
+            "managed Node.js install lock poisoned".to_string(),
+        ))
+    })?;
+
+    if managed_node_runtime_ready() {
+        return Ok(());
+    }
 
     install_managed_node_runtime(&root, artifact)
         .map_err(|err| Box::new(managed_node_failed_step(err)))?;
@@ -190,8 +211,14 @@ fn download_managed_node_archive(
     dest: &std::path::Path,
     expected_sha256: &str,
 ) -> Result<(), String> {
-    let response =
-        reqwest::blocking::get(url).map_err(|e| format!("download Node.js request failed: {e}"))?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5 * 60))
+        .build()
+        .map_err(|e| format!("build Node.js download client: {e}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("download Node.js request failed: {e}"))?;
     if !response.status().is_success() {
         return Err(format!(
             "download Node.js HTTP {}: {}",

@@ -609,6 +609,8 @@ fn apply_agent_command_update_concrete_pin_keeps_materialized_runtime() {
 
 // ── probe_codex_acp_major_version ─────────────────────────────────────────────
 
+mod managed_path_resolution;
+
 #[cfg(unix)]
 #[test]
 fn probe_codex_acp_major_version_parses_1x_output() {

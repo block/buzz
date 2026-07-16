@@ -41,3 +41,46 @@ pub(crate) fn buzz_managed_npm_bin_dir() -> Option<PathBuf> {
         }
     })
 }
+
+pub(crate) fn buzz_managed_command_path(command: &str, basename: &str) -> Option<PathBuf> {
+    if command.contains(std::path::MAIN_SEPARATOR)
+        || !matches!(
+            command,
+            "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "node" | "npm"
+        )
+    {
+        return None;
+    }
+
+    let mut dirs = Vec::new();
+    if let Some(managed_bin) = buzz_managed_npm_bin_dir() {
+        dirs.push(managed_bin);
+    }
+    if let Some(managed_node_bin) = buzz_managed_node_bin_dir() {
+        dirs.push(managed_node_bin);
+    }
+
+    dirs.into_iter()
+        .map(|dir| dir.join(basename))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}

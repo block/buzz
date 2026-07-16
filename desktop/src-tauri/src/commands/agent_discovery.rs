@@ -179,7 +179,9 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
         adapter_path.as_deref(),
         runtime.adapter_install_commands,
     ) {
-        if cmds.iter().any(|cmd| is_npm_global_install(cmd)) {
+        let use_managed_npm =
+            cmds.iter().any(|cmd| is_npm_global_install(cmd)) && managed_node_runtime_supported();
+        if use_managed_npm {
             if let Err(step) = ensure_managed_node_runtime_blocking() {
                 steps.push(*step);
                 return Ok(InstallRuntimeResult {
@@ -192,7 +194,11 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
         }
 
         for cmd in cmds {
-            let planned = match managed_npm_command(cmd) {
+            let planned = match if use_managed_npm {
+                managed_npm_command(cmd)
+            } else {
+                Ok(None)
+            } {
                 Ok(Some(command)) => command,
                 Ok(None) => cmd.to_string(),
                 Err(step) => {
@@ -828,7 +834,10 @@ fn floor_char_boundary(s: &str, mut index: usize) -> usize {
 
 // ── managed Node/npm runtime ──────────────────────────────────────────────────
 mod managed_node;
-use managed_node::{ensure_managed_node_runtime_blocking, managed_npm_command, npm_eacces_hint};
+use managed_node::{
+    ensure_managed_node_runtime_blocking, managed_node_runtime_supported, managed_npm_command,
+    npm_eacces_hint,
+};
 
 #[tauri::command]
 pub async fn discover_managed_agent_prereqs(
