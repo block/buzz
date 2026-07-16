@@ -170,6 +170,18 @@ test("sidebar add-channel button opens the browser", async ({ page }) => {
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
 });
 
+test("create affordance is visible on open before typing", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+
+  // The create row is present from the get-go so it's clear you can browse OR
+  // create — not just after you start typing.
+  const createRow = page.getByTestId("channel-browser-create-row");
+  await expect(createRow).toBeVisible();
+  await expect(createRow).toContainText("Create a new channel");
+});
+
 test("typing a partial match surfaces a persistent create row", async ({
   page,
 }) => {

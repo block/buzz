@@ -239,7 +239,11 @@ export function ChannelBrowserDialog({
   // The pinned create row (Are.na style) appears for any non-empty query that
   // isn't already an exact channel name — covering both partial-match and
   // no-match cases, so a dedicated empty-state button would be redundant.
-  const showCreateRow = canCreate && trimmedQuery.length > 0 && !hasExactMatch;
+  // The create row is present from the moment the dialog opens (so it's clear
+  // you can browse *or* create), then specializes to "Create «query»" as you
+  // type. It only hides when the query is an exact match for an existing name
+  // — creating a duplicate "#general" makes no sense.
+  const showCreateRow = canCreate && !hasExactMatch;
 
   const updateTabIndicator = React.useCallback(() => {
     const list = tabListRef.current;
@@ -630,6 +634,7 @@ function CreateChannelRow({
   onClick: () => void;
   query: string;
 }) {
+  const hasQuery = query.length > 0;
   return (
     <button
       className="flex w-full items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-4 py-3 text-left transition-colors duration-150 ease-out hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
@@ -640,12 +645,18 @@ function CreateChannelRow({
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
         <Plus className="h-4 w-4" />
       </span>
-      <span className="min-w-0 text-sm">
-        <span className="font-medium text-foreground">
-          Create {entityLabel}{" "}
+      {hasQuery ? (
+        <span className="min-w-0 text-sm">
+          <span className="font-medium text-foreground">
+            Create {entityLabel}{" "}
+          </span>
+          <span className="font-semibold text-foreground">“{query}”</span>
         </span>
-        <span className="font-semibold text-foreground">“{query}”</span>
-      </span>
+      ) : (
+        <span className="min-w-0 text-sm font-medium text-foreground">
+          Create a new {entityLabel}
+        </span>
+      )}
     </button>
   );
 }
