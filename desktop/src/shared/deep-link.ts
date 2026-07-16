@@ -26,7 +26,7 @@ export type NostrBindDeepLinkPayload = {
   version: "1";
   origin: string;
   expiresAt: string;
-  returnMode: "clipboard";
+  returnMode: "clipboard" | "browser_fragment_v1";
   callbackUrl?: string;
 };
 
