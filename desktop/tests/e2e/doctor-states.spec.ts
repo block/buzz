@@ -328,4 +328,93 @@ test.describe("Doctor panel state screenshots", () => {
     await waitForAnimations(page);
     await row.screenshot({ path: `${SHOTS}/05-retry-success.png` });
   });
+
+  /**
+   * 06 — logged-out runtime with adapter-advertised auth methods: Doctor shows
+   * adapter-provided labels/descriptions and clicking one launches the
+   * vendor-owned flow through the mocked connect command.
+   */
+  test("06-connect-account-methods", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        {
+          ...CODEX_NOT_INSTALLED,
+          availability: "available",
+          command: "codex-acp",
+          binary_path: "/usr/local/bin/codex-acp",
+          underlying_cli_path: "/usr/local/bin/codex",
+          auth_status: { status: "logged_out" },
+          login_hint: "Run `codex login` to authenticate.",
+        },
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      connectAcpRuntimeDelayMs: 250,
+      acpAuthMethods: {
+        codex: {
+          methods: [
+            {
+              id: "chat-gpt",
+              name: "Sign in with ChatGPT",
+              description: "Use your Codex subscription in the browser.",
+              type: "browser",
+            },
+          ],
+        },
+      },
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "doctor");
+
+    const row = page.getByTestId("doctor-runtime-codex");
+    await expect(row).toBeVisible({ timeout: 10_000 });
+    await expect(row).toContainText("Not authenticated");
+    await expect(row).toContainText("Sign in with ChatGPT");
+    await expect(row).toContainText(
+      "Use your Codex subscription in the browser.",
+    );
+    await expect(row).toContainText("Credentials stay with Codex.");
+
+    await row.getByRole("button", { name: "Sign in with ChatGPT" }).click();
+    await expect(
+      row.getByRole("button", { name: "Connecting..." }),
+    ).toBeVisible({
+      timeout: 5_000,
+    });
+  });
+
+  /**
+   * 07 — old or constrained adapter with no advertised auth methods: Doctor
+   * falls back to manual instructions instead of inventing a login command.
+   */
+  test("07-connect-account-no-methods", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        GOOSE_AVAILABLE,
+        {
+          ...CLAUDE_AVAILABLE_LOGGED_IN,
+          auth_status: { status: "logged_out" },
+          login_hint: "Run the Claude CLI to complete authentication.",
+        },
+        CODEX_NOT_INSTALLED,
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      acpAuthMethods: {
+        claude: { methods: [] },
+      },
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "doctor");
+
+    const row = page.getByTestId("doctor-runtime-claude");
+    await expect(row).toBeVisible({ timeout: 10_000 });
+    await expect(row).toContainText("Not authenticated");
+    await expect(row).toContainText(
+      "This adapter did not advertise a built-in login flow.",
+    );
+    await expect(row).not.toContainText("Connect account");
+  });
 });

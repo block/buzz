@@ -176,6 +176,18 @@ impl std::fmt::Display for PermissionMode {
 )]
 pub struct ModelsArgs {
     /// Agent binary to spawn (e.g. "goose", "claude-agent-acp", "codex-acp").
+    #[command(flatten)]
+    pub agent: AuthAgentArgs,
+
+    /// Output structured JSON instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Shared agent-spawn flags for lightweight local ACP helper subcommands.
+#[derive(Debug, Parser)]
+pub struct AuthAgentArgs {
+    /// Agent binary to spawn (e.g. "goose", "claude-agent-acp", "codex-acp").
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
 
@@ -187,10 +199,36 @@ pub struct ModelsArgs {
         value_delimiter = ','
     )]
     pub agent_args: Vec<String>,
+}
+
+/// CLI args for `buzz-acp auth-methods` — query adapter-advertised login methods.
+#[derive(Debug, Parser)]
+#[command(
+    name = "buzz-acp auth-methods",
+    about = "Query adapter-advertised ACP authentication methods"
+)]
+pub struct AuthMethodsArgs {
+    #[command(flatten)]
+    pub agent: AuthAgentArgs,
 
     /// Output structured JSON instead of human-readable text.
     #[arg(long)]
     pub json: bool,
+}
+
+/// CLI args for `buzz-acp authenticate` — start an adapter-owned login flow.
+#[derive(Debug, Parser)]
+#[command(
+    name = "buzz-acp authenticate",
+    about = "Start an adapter-owned ACP authentication flow"
+)]
+pub struct AuthenticateArgs {
+    #[command(flatten)]
+    pub agent: AuthAgentArgs,
+
+    /// Adapter-advertised auth method id to invoke.
+    #[arg(long)]
+    pub method_id: String,
 }
 
 #[derive(Debug, Parser)]

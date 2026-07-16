@@ -14,8 +14,10 @@ import {
 } from "@/features/channels/hooks";
 import { evictUsersBatchEntries } from "@/features/profile/hooks";
 import {
+  connectAcpRuntime,
   createManagedAgent,
   deleteManagedAgent,
+  discoverAcpAuthMethods,
   discoverAcpRuntimes,
   discoverBackendProviders,
   discoverGitBashPrerequisite,
@@ -101,6 +103,7 @@ export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
 export const teamsQueryKey = ["teams"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
+export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
 export const gitBashPrerequisiteQueryKey = ["git-bash-prerequisite"] as const;
@@ -194,6 +197,31 @@ export function useAvailableAcpRuntimes(options?: { enabled?: boolean }) {
     [query.data],
   );
   return { ...query, data: available };
+}
+
+export function useAcpAuthMethodsQuery(
+  runtimeId: string,
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    enabled: (options?.enabled ?? true) && runtimeId.trim().length > 0,
+    queryKey: [...acpAuthMethodsQueryKey, runtimeId],
+    queryFn: () => discoverAcpAuthMethods(runtimeId),
+    staleTime: 30_000,
+  });
+}
+
+export function useConnectAcpRuntimeMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { runtimeId: string; methodId: string }) =>
+      connectAcpRuntime(input.runtimeId, input.methodId),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      void queryClient.invalidateQueries({ queryKey: acpAuthMethodsQueryKey });
+      void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+    },
+  });
 }
 
 export function useInstallAcpRuntimeMutation() {

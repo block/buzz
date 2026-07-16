@@ -11,12 +11,18 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
+  useAcpAuthMethodsQuery,
   useAcpRuntimesQuery,
-  useInstallAcpRuntimeMutation,
+  useConnectAcpRuntimeMutation,
   useGitBashPrerequisiteQuery,
+  useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
-import type { AcpRuntimeCatalogEntry, AuthStatus } from "@/shared/api/types";
+import type {
+  AcpAuthMethod,
+  AcpRuntimeCatalogEntry,
+  AuthStatus,
+} from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -69,6 +75,125 @@ function AuthStatusBadge({ authStatus }: { authStatus: AuthStatus }) {
     case "unknown":
       return null;
   }
+}
+
+function AuthMethodButtonLabel({ method }: { method: AcpAuthMethod }) {
+  return <>{method.name || method.id}</>;
+}
+
+function ConnectAccountActions({
+  runtime,
+}: {
+  runtime: AcpRuntimeCatalogEntry;
+}) {
+  const authMethodsQuery = useAcpAuthMethodsQuery(runtime.id, {
+    enabled:
+      runtime.availability === "available" &&
+      runtime.authStatus.status === "logged_out",
+  });
+  const connectMutation = useConnectAcpRuntimeMutation();
+  const [terminalLaunchMethodId, setTerminalLaunchMethodId] = React.useState<
+    string | null
+  >(null);
+
+  if (runtime.authStatus.status !== "logged_out") {
+    return null;
+  }
+
+  const methods = authMethodsQuery.data?.methods ?? [];
+  const isConnecting = connectMutation.isPending;
+
+  function connect(method: AcpAuthMethod) {
+    connectMutation.mutate(
+      { runtimeId: runtime.id, methodId: method.id },
+      {
+        onSuccess: (result) => {
+          if (result.launched && method.type === "terminal") {
+            setTerminalLaunchMethodId(method.id);
+          }
+        },
+      },
+    );
+  }
+
+  if (authMethodsQuery.isLoading) {
+    return (
+      <p className="mt-2 text-sm text-muted-foreground">
+        Looking for account connection options...
+      </p>
+    );
+  }
+
+  if (authMethodsQuery.error instanceof Error) {
+    return (
+      <p className="mt-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
+        Couldn&apos;t load account connection options:{" "}
+        {authMethodsQuery.error.message}
+      </p>
+    );
+  }
+
+  if (methods.length === 0) {
+    return (
+      <p className="mt-2 text-sm text-muted-foreground">
+        This adapter did not advertise a built-in login flow. Use the manual
+        instructions above, then click Re-run.
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-2 space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        {methods.map((method) => {
+          const pending =
+            isConnecting && connectMutation.variables?.methodId === method.id;
+          return (
+            <Button
+              disabled={isConnecting}
+              key={method.id}
+              onClick={() => connect(method)}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              {pending ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
+              {pending ? (
+                "Connecting..."
+              ) : (
+                <AuthMethodButtonLabel method={method} />
+              )}
+            </Button>
+          );
+        })}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Buzz launches the adapter&apos;s own login flow and then re-checks the{" "}
+        {runtime.label} CLI. Credentials stay with {runtime.label}.
+      </p>
+      {terminalLaunchMethodId ? (
+        <p className="text-xs text-muted-foreground">
+          Finish signing in from the Terminal window, then click Re-run to
+          re-check {runtime.label}.
+        </p>
+      ) : null}
+      {methods.map((method) =>
+        method.description ? (
+          <p className="text-xs text-muted-foreground" key={method.id}>
+            <span className="font-medium text-foreground/80">
+              {method.name || method.id}:
+            </span>{" "}
+            {method.description}
+          </p>
+        ) : null,
+      )}
+      {connectMutation.error instanceof Error ? (
+        <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
+          {connectMutation.error.message}
+        </p>
+      ) : null}
+    </div>
+  );
 }
 
 function InstallActions({
@@ -258,6 +383,7 @@ function RuntimeRow({
                   : runtime.loginHint}
               </p>
             ) : null}
+            <ConnectAccountActions runtime={runtime} />
           </>
         ) : runtime.availability === "adapter_missing" ? (
           <>
