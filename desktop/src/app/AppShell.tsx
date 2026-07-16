@@ -4,14 +4,12 @@ import { Outlet, useLocation } from "@tanstack/react-router";
 
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { AppShellProvider } from "@/app/AppShellContext";
-import {
-  AppShellOverlays,
-  type BrowseDialogType,
-} from "@/app/AppShellOverlays";
+import { AppShellOverlays } from "@/app/AppShellOverlays";
 import { AppTopChrome } from "@/app/AppTopChrome";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
 import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
+import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
@@ -111,8 +109,6 @@ export function AppShell() {
     null,
   );
   const [searchFocusRequest, setSearchFocusRequest] = React.useState(0);
-  const [browseDialogType, setBrowseDialogType] =
-    React.useState<BrowseDialogType>(null);
   const [isCreateChannelOpen, setIsCreateChannelOpen] = React.useState(false);
   const [isSendFeedbackOpen, setIsSendFeedbackOpen] = React.useState(false);
   const [isHuddleDrawerOpen, setIsHuddleDrawerOpen] = React.useState(false);
@@ -416,26 +412,21 @@ export function AppShell() {
     [unfollowThread, muteThread],
   );
 
-  const createChannelMutation = useCreateChannelMutation();
-  const createForumMutation = useCreateChannelMutation();
+  const createChannelMutation = useCreateChannelMutation(),
+    createForumMutation = useCreateChannelMutation();
   const { applyCanvas, applyAgents } = useApplyTemplate();
-
   const openDmMutation = useOpenDmMutation();
   const hideDmMutation = useHideDmMutation();
-  const handleOpenBrowseChannels = React.useCallback(() => {
-    setBrowseDialogType("stream");
-    void refetchChannels();
-  }, [refetchChannels]);
+  const {
+    browseDialogType,
+    openBrowseChannels: handleOpenBrowseChannels,
+    onBrowseDialogOpenChange: handleBrowseDialogOpenChange,
+    getCreateSuccess,
+  } = useChannelBrowserDialog(() => void refetchChannels());
   const handleOpenSearch = React.useCallback(() => {
     setSearchFocusRequest((request) => request + 1);
     void refetchChannels();
   }, [refetchChannels]);
-
-  const handleBrowseDialogOpenChange = React.useCallback((open: boolean) => {
-    if (!open) {
-      setBrowseDialogType(null);
-    }
-  }, []);
 
   const handleBrowseChannelJoin = React.useCallback(
     async (channelId: string) => {
@@ -446,19 +437,22 @@ export function AppShell() {
   );
 
   const handleCreateChannel = React.useCallback(
-    async ({
-      description,
-      name,
-      visibility,
-      ttlSeconds,
-      templateId,
-    }: {
-      name: string;
-      description?: string;
-      visibility: ChannelVisibility;
-      ttlSeconds?: number;
-      templateId?: string;
-    }) => {
+    async (
+      {
+        description,
+        name,
+        visibility,
+        ttlSeconds,
+        templateId,
+      }: {
+        name: string;
+        description?: string;
+        visibility: ChannelVisibility;
+        ttlSeconds?: number;
+        templateId?: string;
+      },
+      onCreated?: (channelId: string) => void,
+    ) => {
       const createdChannel = await createChannelMutation.mutateAsync({
         name,
         description,
@@ -469,6 +463,7 @@ export function AppShell() {
 
       await applyCanvas(templateId, createdChannel.id, name);
       await goChannel(createdChannel.id);
+      onCreated?.(createdChannel.id);
       void applyAgents(templateId, createdChannel.id);
     },
     [applyAgents, applyCanvas, createChannelMutation, goChannel],
@@ -516,10 +511,15 @@ export function AppShell() {
       if (browseDialogType === "forum") {
         await handleCreateForum(input);
       } else {
-        await handleCreateChannel(input);
+        await handleCreateChannel(input, getCreateSuccess() ?? undefined);
       }
     },
-    [browseDialogType, handleCreateChannel, handleCreateForum],
+    [
+      browseDialogType,
+      handleCreateChannel,
+      handleCreateForum,
+      getCreateSuccess,
+    ],
   );
 
   const handleHideDm = React.useCallback(
