@@ -4,7 +4,7 @@ export type MentionCandidateForRanking = {
   displayName: string | null;
   isAgent: boolean;
   isMember: boolean;
-  kind: "identity" | "persona";
+  kind: "identity" | "persona" | "team";
   personaId?: string | null;
   personaName?: string | null;
   pubkey?: string;
@@ -26,6 +26,7 @@ function getMentionCandidateGroupRank(
   if (candidate.isMember) return 0;
 
   const isRunnablePersona =
+    candidate.kind === "team" ||
     candidate.kind === "persona" ||
     (candidate.personaId ? activePersonaIds.has(candidate.personaId) : false);
   if (isRunnablePersona) return 1;

@@ -164,25 +164,22 @@ test("built-in personas are used from the catalog dialog", async ({ page }) => {
   await expect(page.getByTestId("persona-catalog-dialog")).toContainText(
     "Fizz",
   );
-  const previewPersonas = [
-    ["builtin:product-strategist", "Product Strategist"],
-    ["builtin:implementation-partner", "Implementation Partner"],
-    ["builtin:qa-reviewer", "QA Reviewer"],
-    ["builtin:work-coordinator", "Work Coordinator"],
-    ["builtin:support-guide", "Support Guide"],
-    ["builtin:experiment-designer", "Experiment Designer"],
-  ] as const;
-  for (const [, personaName] of previewPersonas) {
+  for (const personaName of ["Fizz", "Honey", "Bumble"]) {
     await expect(page.getByTestId("persona-catalog-dialog")).toContainText(
       personaName,
     );
   }
-  for (const [personaId, personaName] of previewPersonas) {
-    await expect(
-      page
-        .getByTestId(`persona-catalog-list-item-${personaId}`)
-        .getByRole("img", { name: `${personaName} avatar` }),
-    ).toHaveAttribute("src", /.+/);
+  for (const retiredPersonaName of [
+    "Product Strategist",
+    "Implementation Partner",
+    "QA Reviewer",
+    "Work Coordinator",
+    "Support Guide",
+    "Experiment Designer",
+  ]) {
+    await expect(page.getByTestId("persona-catalog-dialog")).not.toContainText(
+      retiredPersonaName,
+    );
   }
   await expect(page.getByTestId("persona-catalog-dialog-header")).toBeVisible();
   await expect(
@@ -229,6 +226,45 @@ test("built-in personas are used from the catalog dialog", async ({ page }) => {
     "Delete",
   );
   await expect.poll(() => getCatalogOrder(page)).toEqual(initialCatalogOrder);
+});
+
+test("built-in persona edits persist", async ({ page }) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+    globalAgentConfig: {
+      env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
+      provider: "anthropic",
+      model: "claude-opus-4-5",
+    },
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  await page.getByLabel("Open actions for Fizz").click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+
+  const dialog = page.getByTestId("persona-dialog");
+  await dialog.getByLabel("Agent name").fill("My Fizz");
+  await dialog.getByLabel("Agent instruction").fill("User-edited instructions");
+  await dialog.getByRole("button", { name: "LLM provider" }).click();
+  await page
+    .getByRole("menuitemradio", { name: "Anthropic", exact: true })
+    .click();
+  await dialog.getByRole("button", { name: "Save changes" }).click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTestId("agents-library-personas")).toContainText(
+    "My Fizz",
+  );
+  const personas = await invokeTauri<
+    Array<{ id: string; display_name: string; system_prompt: string }>
+  >(page, "list_personas");
+  expect(
+    personas.find((persona) => persona.id === "builtin:fizz"),
+  ).toMatchObject({
+    display_name: "My Fizz",
+    system_prompt: "User-edited instructions",
+  });
 });
 
 test("agent avatar emoji picker scrolls inside its popover", async ({

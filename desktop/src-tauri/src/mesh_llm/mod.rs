@@ -228,7 +228,9 @@ async fn initialize_mesh_native_runtime() -> anyhow::Result<()> {
     // requiring a separate `mesh-llm runtime install` command.
     mesh_llm_host_runtime::initialize_host_runtime()
         .await
-        .map_err(|error| anyhow::anyhow!("mesh native runtime failed to install or load: {error}"))
+        .map_err(|error| {
+            anyhow::anyhow!("mesh native runtime failed to install or load: {error:#}")
+        })
 }
 
 /// Tokio worker stack size for the runtime that polls mesh-llm futures.

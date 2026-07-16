@@ -1,4 +1,5 @@
 export 'app_lifecycle_provider.dart';
+export 'media_auth.dart';
 export 'media_upload.dart';
 export 'nostr_filters.dart';
 export 'nostr_models.dart';

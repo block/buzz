@@ -92,6 +92,13 @@ type MockPersonaSeed = {
   envVars?: Record<string, string>;
 };
 
+type MockTeamSeed = {
+  id?: string;
+  name: string;
+  description?: string | null;
+  personaIds: string[];
+};
+
 export type MockEngramEntry = {
   slug: string;
   body: string;
@@ -150,6 +157,7 @@ type MockBridgeOptions = {
   };
   managedAgents?: MockManagedAgentSeed[];
   personas?: MockPersonaSeed[];
+  teams?: MockTeamSeed[];
   relayAgents?: MockRelayAgentSeed[];
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;

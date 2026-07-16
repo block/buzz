@@ -4,6 +4,7 @@ import { installMockBridge } from "../helpers/bridge";
 type NostrBindPayload = {
   action: string;
   audience: string;
+  callbackUrl?: string;
   challengeId: string;
   expiresAt: string;
   nonce: string;
@@ -295,6 +296,60 @@ test("signs a valid request, shows the response, and copies it", async ({
       ),
     )
     .toBe(signedResponse);
+});
+
+test("returns a signed response in the callback fragment after consent", async ({
+  page,
+}) => {
+  await openNostrBind(page, {
+    ...VALID_REQUEST,
+    callbackUrl: "https://admin.example.com/buzz?source=bind#stale",
+    returnMode: "browser_fragment_v1",
+  });
+
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          (
+            (
+              window as Window & {
+                __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+              }
+            ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+          ).filter(({ command }) => command === "plugin:opener|open_url")
+            .length,
+      ),
+    )
+    .toBe(0);
+  await pasteCode(
+    page.getByTestId("nostr-bind-code-digit-1"),
+    VALID_REQUEST.verificationCode,
+  );
+  await page.getByTestId("nostr-bind-sign-and-copy").click();
+
+  await expect(
+    page.getByRole("heading", { name: "Continue in your browser" }),
+  ).toBeVisible();
+  const callback = await page.evaluate(() => {
+    const command = (
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: { url?: string };
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+    ).find(({ command }) => command === "plugin:opener|open_url");
+    return command?.payload.url;
+  });
+  const callbackUrl = new URL(callback ?? "");
+  expect(callbackUrl.origin).toBe("https://admin.example.com");
+  expect(callbackUrl.pathname).toBe("/buzz");
+  expect(callbackUrl.search).toBe("?source=bind");
+  expect(callbackUrl.searchParams.has("buzz_bind")).toBe(false);
+  expect(callbackUrl.hash).toMatch(/^#buzz_bind=v1\.[A-Za-z0-9_-]+$/);
 });
 
 test("keeps the signed response available when clipboard access fails", async ({

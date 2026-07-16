@@ -887,6 +887,7 @@ dependencies = [
  "buzz-persona",
  "buzz-sdk",
  "buzz-ws-client",
+ "bytes",
  "chrono",
  "clap",
  "diffy",
@@ -958,6 +959,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "buzz-cli",
+ "buzz-core",
  "git-credential-nostr",
  "git-sign-nostr",
  "ignore",

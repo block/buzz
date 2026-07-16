@@ -19,7 +19,7 @@ mod identity;
 mod identity_archive;
 mod legacy_storage;
 mod link_preview;
-mod media;
+pub(crate) mod media;
 mod media_download;
 mod media_transcode;
 #[cfg(feature = "mesh-llm")]

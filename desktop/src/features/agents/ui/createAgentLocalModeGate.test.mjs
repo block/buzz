@@ -840,8 +840,8 @@ test("providerDefaultLabel_globalSet_returnsInheritLabel", () => {
   const label = getDefaultLlmProviderLabel("buzz-agent", "anthropic");
   assert.equal(
     label,
-    "Inherit global default (anthropic)",
-    "global provider set must return 'Inherit global default (<provider>)'",
+    "Use AI defaults (anthropic)",
+    "global provider set must return 'Use AI defaults (<provider>)'",
   );
 });
 
@@ -850,7 +850,7 @@ test("providerDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () =
   const label = getDefaultLlmProviderLabel("buzz-agent", "  openai  ");
   assert.equal(
     label,
-    "Inherit global default (openai)",
+    "Use AI defaults (openai)",
     "global provider with surrounding whitespace must be trimmed in label",
   );
 });
@@ -858,7 +858,7 @@ test("providerDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () =
 test("providerDefaultLabel_sharedCompute_neverLeaksInternalId", () => {
   assert.equal(
     getDefaultLlmProviderLabel("buzz-agent", "relay-mesh"),
-    "Inherit global default (Buzz shared compute)",
+    "Use AI defaults (Buzz shared compute)",
   );
 });
 
@@ -972,8 +972,8 @@ test("modelDefaultLabel_globalSet_returnsInheritLabel", () => {
   const label = getDefaultLlmModelLabel("claude-opus-4-5");
   assert.equal(
     label,
-    "Inherit global default (claude-opus-4-5)",
-    "global model set must return 'Inherit global default (<model>)'",
+    "Use AI defaults (claude-opus-4-5)",
+    "global model set must return 'Use AI defaults (<model>)'",
   );
 });
 
@@ -982,7 +982,7 @@ test("modelDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () => {
   const label = getDefaultLlmModelLabel("  gpt-4o  ");
   assert.equal(
     label,
-    "Inherit global default (gpt-4o)",
+    "Use AI defaults (gpt-4o)",
     "global model with surrounding whitespace must be trimmed in label",
   );
 });
@@ -1131,11 +1131,11 @@ test("f3_templateDialog_localProviderBlankGlobalAnthropicNoModel_saveBlocked", (
 
 test("f3_templateDialog_globalModelSet_zeroValueLabelIsInherit", () => {
   // Case 3: global model set → the zero-value model dropdown option must show
-  // "Inherit global default (<model>)" not the generic "Default model".
+  // "Use AI defaults (<model>)" not the generic "Default model".
   // getDefaultLlmModelLabel is what AgentDefinitionDialog now uses for that slot.
   assert.equal(
     getDefaultLlmModelLabel("claude-opus-4-5"),
-    "Inherit global default (claude-opus-4-5)",
+    "Use AI defaults (claude-opus-4-5)",
     "zero-value model option label must show the global model name when set",
   );
   assert.equal(
@@ -1175,7 +1175,7 @@ test("f3b_buildTemplateModelDropdownOptions_anthropicGlobalModelSet_containsInhe
   );
   assert.equal(
     inheritEntry.label,
-    "Inherit global default (claude-opus-4-5)",
+    "Use AI defaults (claude-opus-4-5)",
     "inherit entry must carry the global model name",
   );
 });
@@ -1215,7 +1215,7 @@ test("f3b_buildTemplateModelDropdownOptions_blankProviderGlobalModelSet_noDouble
   );
   assert.equal(
     autoEntries[0].label,
-    "Inherit global default (claude-opus-4-5)",
+    "Use AI defaults (claude-opus-4-5)",
     "existing zero-value entry must be relabeled with the global model name",
   );
 });

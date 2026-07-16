@@ -121,6 +121,24 @@ test("inbox reaction on a thread-reply mention persists after refetch", async ({
   await expect(detail).toContainText("please react to this");
 
   const selectedMessage = page.getByTestId("home-inbox-selected-message");
+
+  // Deliver a live reaction with the real add_reaction wire shape: `e` target,
+  // no `h` channel tag. The Inbox must render it without waiting for another
+  // message or a context refetch.
+  await page.evaluate(async (eventId) => {
+    const invoke = (
+      window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload?: Record<string, unknown>,
+        ) => Promise<unknown>;
+      }
+    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+    if (!invoke) throw new Error("Mock Tauri invoke bridge is unavailable.");
+    await invoke("add_reaction", { eventId, emoji: "❤️" });
+  }, replyEvent.id);
+  await expect(selectedMessage.getByLabel("Toggle ❤️ reaction")).toBeVisible();
+
   await selectedMessage.hover();
   await selectedMessage
     .getByRole("button", { name: "React with :+1:" })

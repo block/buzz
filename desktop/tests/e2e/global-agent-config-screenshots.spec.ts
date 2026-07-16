@@ -12,17 +12,19 @@ async function settleAnimations(page: import("@playwright/test").Page) {
 }
 
 /**
- * Navigate to the Agents view (where GlobalAgentConfigSettingsCard lives) and
- * wait for the card to finish loading.
+ * Open Settings → Agents through the app UI and wait for the defaults card to
+ * load. CI serves the built SPA with a static file server, so navigating to
+ * `/settings` directly returns a 404 before the client router can start.
  */
-async function openAgentsView(page: import("@playwright/test").Page) {
-  await page.goto("/");
-  await page.getByTestId("open-agents-view").click();
-  // Wait for the global agent config card to mount and finish its load effect.
+async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await page.getByTestId("settings-nav-agents").click();
   await expect(page.getByTestId("settings-global-agent-config")).toBeVisible({
     timeout: 10_000,
   });
-  // The card shows a spinner while loading; wait for it to disappear.
   await expect(page.locator(".animate-spin").first()).not.toBeVisible({
     timeout: 5_000,
   });
@@ -65,7 +67,7 @@ test.describe("global agent config screenshots", () => {
       },
     });
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
     await card.scrollIntoViewIfNeeded();
@@ -187,14 +189,12 @@ test.describe("global agent config screenshots", () => {
     await openCreateDialog(page);
 
     await expect(page.locator("#persona-llm-provider")).toHaveText(
-      "Inherit global default (anthropic)",
+      "Use AI defaults (anthropic)",
     );
     await expect(page.locator("#persona-model")).toHaveText(
-      "Inherit global default (claude-opus-4-5)",
+      "Use AI defaults (claude-opus-4-5)",
     );
-    await expect(
-      page.getByText("Using global defaults: effort low"),
-    ).toBeVisible();
+    await expect(page.getByText("Using AI defaults: effort low")).toBeVisible();
   });
 
   // Shot 04: Create gate BLOCKED — no per-agent provider, no global provider

@@ -74,6 +74,7 @@ import {
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
+import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 
@@ -863,6 +864,14 @@ export function AgentDefinitionDialog({
                 />
               ) : null}
             </AnimatePresence>
+
+            <AgentAiDefaultsNotice
+              confirmNavigation
+              explicitModel={model}
+              explicitProvider={provider}
+              inheritedModel={inheritedModelDefault}
+              inheritedProvider={inheritedProviderDefault}
+            />
 
             {isCreateMode ? createRunSection : null}
 

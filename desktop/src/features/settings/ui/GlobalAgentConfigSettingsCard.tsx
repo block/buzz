@@ -138,8 +138,8 @@ export function GlobalAgentConfigSettingsCard() {
       data-testid="settings-global-agent-config"
     >
       <SectionHeader
-        title="Agent defaults"
-        description="Default settings for every agent running on this computer. You can override them for any individual agent or persona."
+        title="AI defaults"
+        description="Provider, model, effort, and environment settings inherited by local agents. Agent-specific settings always take priority."
       />
 
       {isLoading ? (

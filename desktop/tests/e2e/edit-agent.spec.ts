@@ -202,14 +202,12 @@ test.describe("edit agent dialog", () => {
     await openEditDialog(page);
 
     await expect(page.locator("#edit-agent-llm-provider")).toHaveText(
-      "Inherit global default (anthropic)",
+      "Use AI defaults (anthropic)",
     );
     await expect(page.locator("#edit-agent-model")).toHaveText(
-      "Inherit global default (claude-opus-4-5)",
+      "Use AI defaults (claude-opus-4-5)",
     );
-    await expect(
-      page.getByText("Using global defaults: effort low"),
-    ).toBeVisible();
+    await expect(page.getByText("Using AI defaults: effort low")).toBeVisible();
   });
 
   test("profile Edit routes persona-linked agents to the definition editor", async ({

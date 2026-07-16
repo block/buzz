@@ -322,8 +322,7 @@ export function UserProfilePanel({
   // covering both locally managed agents and declared-owned relay agents.
   const canEditAgent =
     isOwner === true &&
-    (managedAgent !== undefined ||
-      (resolvedPersona !== undefined && !resolvedPersona.isBuiltIn));
+    (managedAgent !== undefined || resolvedPersona !== undefined);
   const memoryQuery = useAgentMemoryQuery(effectivePubkey, {
     enabled: viewerIsOwner && Boolean(effectivePubkey),
   });
@@ -395,7 +394,7 @@ export function UserProfilePanel({
   });
 
   const handleEditAgent = React.useCallback(() => {
-    if (resolvedPersona && !resolvedPersona.isBuiltIn) {
+    if (resolvedPersona) {
       setPersonaDialogState(editPersonaDialogState(resolvedPersona));
       return;
     }
@@ -567,7 +566,7 @@ export function UserProfilePanel({
   );
 
   const handleEditPersona = React.useCallback(() => {
-    if (!resolvedPersona || resolvedPersona.isBuiltIn) return;
+    if (!resolvedPersona) return;
     setPersonaDialogState(editPersonaDialogState(resolvedPersona));
   }, [resolvedPersona]);
 
@@ -737,8 +736,7 @@ export function UserProfilePanel({
     resolvedPersona,
   );
   const canManagePersona = isOwner === true && resolvedPersona !== undefined;
-  const canEditPersona =
-    canManagePersona && resolvedPersona?.isBuiltIn !== true;
+  const canEditPersona = canManagePersona;
   const canDeletePersona = canManagePersona && !resolvedPersona?.sourceTeam;
   const archiveActions = useIdentityArchive(effectivePubkey);
   const agentSettingsMenu = (

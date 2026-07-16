@@ -26,16 +26,25 @@ const CASCADE_AGENT_A_PUBKEY = "aa".repeat(32);
 const CASCADE_AGENT_B_PUBKEY = "bb".repeat(32);
 
 /**
- * Navigate to the Agents view and wait for the global agent config card to
- * finish loading (spinner gone). The card lives at the bottom of the view.
+ * Navigate to the Agents view and wait for its unified list to mount.
  */
 async function openAgentsView(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
+  await expect(page.getByTestId("unified-agents-groups")).toBeVisible({
+    timeout: 10_000,
+  });
+}
+
+async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await page.getByTestId("settings-nav-agents").click();
   await expect(page.getByTestId("settings-global-agent-config")).toBeVisible({
     timeout: 10_000,
   });
-  // Spinner disappears once the load effect resolves.
   await expect(page.locator(".animate-spin").first()).not.toBeVisible({
     timeout: 5_000,
   });
@@ -120,7 +129,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalConfigRestartedCount: 2,
     });
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
 
@@ -150,7 +159,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
   test("03-save-plain", async ({ page }) => {
     await installMockBridge(page);
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
 
@@ -264,7 +273,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalConfigRestartedCount: 1,
     });
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
 
@@ -287,7 +296,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalConfigFailedRestartCount: 1,
     });
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
 
@@ -319,7 +328,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
       globalConfigSaveDelayMs: 2_000,
     });
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
     const provider = page.locator("#global-agent-provider");

@@ -174,6 +174,10 @@ pub struct Config {
     /// Maximum media upload starts accepted from one pubkey per minute.
     pub media_uploads_per_minute: u32,
 
+    /// Require Blossom kind:24242 `t=get` auth plus relay membership before
+    /// serving media GET/HEAD. Default off for staged client rollout.
+    pub require_media_get_auth: bool,
+
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
     /// of the client-provided one. Useful for testing ephemeral expiry quickly.
@@ -569,6 +573,15 @@ impl Config {
             .filter(|&v| v > 0)
             .unwrap_or(30);
 
+        let require_media_get_auth = std::env::var("BUZZ_REQUIRE_MEDIA_GET_AUTH")
+            .map(|v| {
+                v == "true"
+                    || v == "1"
+                    || v.eq_ignore_ascii_case("yes")
+                    || v.eq_ignore_ascii_case("on")
+            })
+            .unwrap_or(false);
+
         let ephemeral_ttl_override = std::env::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
@@ -735,6 +748,7 @@ impl Config {
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
+            require_media_get_auth,
             ephemeral_ttl_override,
             git_repo_path,
             git_max_pack_bytes,
@@ -795,6 +809,10 @@ mod tests {
         assert!(
             !config.serve_git_web_gui,
             "serve_git_web_gui should default to false"
+        );
+        assert!(
+            !config.require_media_get_auth,
+            "require_media_get_auth should default to false for staged client rollout"
         );
         assert!(
             config.huddle_audio_available,

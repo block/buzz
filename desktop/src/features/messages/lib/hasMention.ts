@@ -8,7 +8,8 @@ function escapeRegExp(str: string): string {
 /**
  * Check whether `text` contains an @mention of `name`.
  *
- * Matches `@Name` preceded by start-of-string, whitespace, markdown
+ * Matches `@Name` preceded by start-of-string, whitespace, an opening
+ * parenthesis (for team expansions), markdown
  * bold/italic markers (`*`, `**`, `***`, `_`, `__`, `___`), or spoiler
  * delimiters (`||`). This handles the case where a mention is pasted from the
  * chat area and TipTap's Bold extension wraps it in bold marks (font-weight >=
@@ -19,7 +20,7 @@ function escapeRegExp(str: string): string {
 export function hasMention(text: string, name: string): boolean {
   const escaped = escapeRegExp(name);
   const pattern = new RegExp(
-    `(?:^|\\s|[*_]{1,3}|\\|\\|)@${escaped}(?=\\|\\||[\\s,;.!?:)\\]}*_]|$)`,
+    `(?:^|\\s|\\(|[*_]{1,3}|\\|\\|)@${escaped}(?=\\|\\||[\\s,;.!?:)\\]}*_]|$)`,
     "i",
   );
   return pattern.test(text);
