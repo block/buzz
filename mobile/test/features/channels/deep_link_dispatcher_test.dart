@@ -1,11 +1,14 @@
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/deep_link_dispatcher.dart';
+import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../../shared/community/community_storage_test.dart';
 
 void main() {
   testWidgets('dispatches a link that is already ready on mount', (
@@ -46,6 +49,75 @@ void main() {
     expect(destination.link.messageId, 'message-2');
     expect(destination.link.threadRootId, 'message-1');
   });
+
+  testWidgets(
+    'dispatches invite before auth while leaving message links parked',
+    (tester) async {
+      final inviteStorage = CommunityStorage(secure: FakeSecureStorage());
+      final inviteContainer = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(inviteStorage),
+          pendingDeepLinkProvider.overrideWith(
+            () => _FakePendingDeepLinkNotifier(
+              const InviteDeepLink(
+                relayUrl: 'wss://relay.example.com',
+                code: 'invite-code',
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(inviteContainer.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: inviteContainer,
+          child: const MaterialApp(
+            home: DeepLinkDispatcher(
+              dispatchMessageLinks: false,
+              child: Scaffold(body: Text('Pairing')),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Join this Buzz community?'), findsOneWidget);
+      expect(inviteContainer.read(pendingDeepLinkProvider), isNull);
+
+      final messageContainer = ProviderContainer(
+        overrides: [
+          pendingDeepLinkProvider.overrideWith(
+            () => _FakePendingDeepLinkNotifier(
+              const MessageDeepLink(
+                channelId: 'channel-1',
+                messageId: 'message-1',
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(messageContainer.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: messageContainer,
+          child: const MaterialApp(
+            home: DeepLinkDispatcher(
+              dispatchMessageLinks: false,
+              child: Scaffold(body: Text('Pairing')),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        messageContainer.read(pendingDeepLinkProvider),
+        isA<MessageDeepLink>(),
+      );
+      expect(find.text('Pairing'), findsOneWidget);
+    },
+  );
 }
 
 final _channel = Channel(

@@ -24,19 +24,28 @@ class InviteDeepLink extends BuzzDeepLink {
   /// Invite code from the link.
   final String code;
 
-  const InviteDeepLink({required this.relayUrl, required this.code});
+  /// Optional receipt proving acceptance of the relay's current join policy.
+  final String? policyReceipt;
+
+  const InviteDeepLink({
+    required this.relayUrl,
+    required this.code,
+    this.policyReceipt,
+  });
 
   @override
   bool operator ==(Object other) =>
       other is InviteDeepLink &&
       other.relayUrl == relayUrl &&
-      other.code == code;
+      other.code == code &&
+      other.policyReceipt == policyReceipt;
 
   @override
-  int get hashCode => Object.hash(relayUrl, code);
+  int get hashCode => Object.hash(relayUrl, code, policyReceipt);
 
   @override
-  String toString() => 'InviteDeepLink(relay: $relayUrl, code: $code)';
+  String toString() =>
+      'InviteDeepLink(relay: $relayUrl, code: $code, policyReceipt: $policyReceipt)';
 }
 
 /// A parsed `buzz://message` deep link.
@@ -127,7 +136,14 @@ InviteDeepLink? parseInviteDeepLink(Uri uri) {
       host: relayUri.host,
       port: relayUri.hasPort ? relayUri.port : null,
     ).toString();
-    return InviteDeepLink(relayUrl: normalizedRelay, code: code);
+    final policyReceipt = uri.queryParameters['policy_receipt'];
+    return InviteDeepLink(
+      relayUrl: normalizedRelay,
+      code: code,
+      policyReceipt: policyReceipt == null || policyReceipt.isEmpty
+          ? null
+          : policyReceipt,
+    );
   }
 
   if (uri.scheme == 'https' || uri.scheme == 'http') {

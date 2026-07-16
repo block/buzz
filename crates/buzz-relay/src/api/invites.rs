@@ -945,9 +945,9 @@ mod tests {
     async fn claim_rejects_expired_code() {
         let host = format!("invites-{}.example", Uuid::new_v4().simple());
         let joiner = Keys::generate();
-        let Some(state) = invite_test_state(&host).await else {
-            return;
-        };
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
         let community = state
             .db
             .lookup_community_by_host(&host)
@@ -1017,9 +1017,9 @@ mod tests {
         let host = format!("invites-{}.example", Uuid::new_v4().simple());
         let owner = Keys::generate();
         let joiner = Keys::generate();
-        let Some(state_arc) = invite_test_state(&host).await else {
-            return;
-        };
+        let state_arc = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
         // Swap the always-fresh guard for one that fires the second time the
         // same event id is presented — the code path we're pinning.
         let mut state_owned =
@@ -1103,9 +1103,9 @@ mod tests {
     async fn claim_rate_limit_fires_on_repeat_pubkey() {
         let host = format!("invites-{}.example", Uuid::new_v4().simple());
         let joiner = Keys::generate();
-        let Some(state_arc) = invite_test_state(&host).await else {
-            return;
-        };
+        let state_arc = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
         // Fresh limiter with the production limit so the assertion pins the
         // in-endpoint threshold, not a test-only budget.
         let mut state_owned =

@@ -104,6 +104,22 @@ void _inviteTests() {
       );
     });
 
+    test('preserves policy receipt in buzz join handoff', () {
+      final link = parseInviteDeepLink(
+        Uri.parse(
+          'buzz://join?relay=wss%3A%2F%2Frelay.example.com&code=abc123&policy_receipt=receipt.value',
+        ),
+      );
+      expect(
+        link,
+        const InviteDeepLink(
+          relayUrl: 'wss://relay.example.com',
+          code: 'abc123',
+          policyReceipt: 'receipt.value',
+        ),
+      );
+    });
+
     test('rejects non-invite HTTPS paths', () {
       expect(
         parseInviteDeepLink(Uri.parse('https://relay.example.com/api/invites')),

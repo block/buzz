@@ -22,11 +22,13 @@ typedef DeepLinkDestinationBuilder =
 class DeepLinkDispatcher extends ConsumerStatefulWidget {
   final Widget child;
   final DeepLinkDestinationBuilder? destinationBuilder;
+  final bool dispatchMessageLinks;
 
   const DeepLinkDispatcher({
     super.key,
     required this.child,
     this.destinationBuilder,
+    this.dispatchMessageLinks = true,
   });
 
   @override
@@ -49,9 +51,11 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     ref.listen<BuzzDeepLink?>(pendingDeepLinkProvider, (_, link) {
       _maybeDispatch(link);
     });
-    ref.listen<AsyncValue<List<Channel>>>(channelsProvider, (_, _) {
-      _maybeDispatch(ref.read(pendingDeepLinkProvider));
-    });
+    if (widget.dispatchMessageLinks) {
+      ref.listen<AsyncValue<List<Channel>>>(channelsProvider, (_, _) {
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      });
+    }
 
     return widget.child;
   }
@@ -62,7 +66,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
       _maybeDispatchInvite(link);
       return;
     }
-    if (link is! MessageDeepLink) return;
+    if (link is! MessageDeepLink || !widget.dispatchMessageLinks) return;
 
     final channels = ref.read(channelsProvider).asData?.value;
     // Channels not loaded yet — keep the link parked; the channelsProvider

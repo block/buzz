@@ -627,6 +627,13 @@ jobs:
           done
           cat /tmp/buzz-relay.log
           exit 1
+      - name: Invite claim security tests
+        run: |
+          cargo test --profile ci -p buzz-relay claim_rejects_expired_code -- --ignored --nocapture
+          cargo test --profile ci -p buzz-relay claim_rejects_replayed_nip98_auth -- --ignored --nocapture
+          cargo test --profile ci -p buzz-relay claim_rate_limit_fires_on_repeat_pubkey -- --ignored --nocapture
+        env:
+          DATABASE_URL: postgres://buzz:buzz_dev@localhost:5432/buzz
       - name: NIP-ER reminder e2e
         # Feature e2e for NIP-ER (Event Reminders, kind:30300): write-path
         # validation, author-only read filtering, and scheduler delivery against

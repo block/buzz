@@ -138,6 +138,63 @@ void main() {
       expect(auth.authenticatedCommunities.single.nsec, keys.nsec);
     },
   );
+
+  test('failed claim can be retried and preserves policy receipt', () async {
+    final keys = nostr.Keys.generate();
+    var attempts = 0;
+    final bodies = <String>[];
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final auth = _RecordingAuthNotifier();
+    final container = ProviderContainer(
+      overrides: [
+        communityStorageProvider.overrideWithValue(storage),
+        authProvider.overrideWith(() => auth),
+        inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+        inviteJoinHttpClientProvider.overrideWithValue(
+          http_testing.MockClient((request) async {
+            attempts++;
+            bodies.add(request.body);
+            if (attempts == 1) {
+              return http.Response(jsonEncode({'error': 'temporary'}), 503);
+            }
+            return http.Response(
+              jsonEncode({
+                'status': 'joined',
+                'host': 'relay.example.com',
+                'role': 'member',
+              }),
+              200,
+            );
+          }),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container
+        .read(inviteJoinProvider.notifier)
+        .prepare(
+          const InviteDeepLink(
+            relayUrl: 'wss://relay.example.com',
+            code: 'code',
+            policyReceipt: 'receipt.value',
+          ),
+        );
+    await container.read(inviteJoinProvider.notifier).confirmJoin();
+    expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
+
+    await container.read(inviteJoinProvider.notifier).confirmJoin();
+
+    expect(container.read(inviteJoinProvider).status, InviteJoinStatus.success);
+    expect(attempts, 2);
+    expect(
+      bodies,
+      everyElement(
+        jsonEncode({'code': 'code', 'policy_receipt': 'receipt.value'}),
+      ),
+    );
+    expect(auth.authenticatedCommunities, hasLength(1));
+  });
 }
 
 class _RecordingAuthNotifier extends AuthNotifier {

@@ -89,7 +89,11 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
 
   Future<void> confirmJoin() async {
     final invite = state.invite;
-    if (invite == null || state.status != InviteJoinStatus.confirming) return;
+    if (invite == null ||
+        (state.status != InviteJoinStatus.confirming &&
+            state.status != InviteJoinStatus.error)) {
+      return;
+    }
 
     state = state.copyWith(status: InviteJoinStatus.claiming);
     try {
@@ -107,7 +111,11 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       }
 
       final keys = ref.read(inviteKeyGeneratorProvider)();
-      final body = jsonEncode({'code': invite.code});
+      final body = jsonEncode({
+        'code': invite.code,
+        if (invite.policyReceipt != null)
+          'policy_receipt': invite.policyReceipt,
+      });
       final url = _claimUrlFromRelay(invite.relayUrl);
       final response = await ref
           .read(inviteJoinHttpClientProvider)
