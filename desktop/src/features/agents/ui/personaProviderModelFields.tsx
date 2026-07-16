@@ -48,6 +48,8 @@ export function AgentModelField({
   disabled,
   discoveredModelOptions,
   globalModel,
+  allowDefaultModel = true,
+  defaultModelLabel,
   id = "agent-model",
   isCustomModelEditing,
   isRequired,
@@ -60,8 +62,12 @@ export function AgentModelField({
 }: {
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
-  /** Global model default; when set, the zero-value option reads `Inherit global default (<model>)`. */
+  /** Known lower-precedence model used when this field is left empty. */
   globalModel?: string;
+  /** Hide the empty/default option when no valid lower-precedence model exists. */
+  allowDefaultModel?: boolean;
+  /** Source-aware label for the empty/default option. */
+  defaultModelLabel?: string;
   /** DOM id for the model select. Defaults to `"agent-model"`. Override in
    *  contexts where multiple instances coexist on the same page (e.g. the
    *  global-config settings card) to avoid duplicate DOM ids. */
@@ -80,20 +86,23 @@ export function AgentModelField({
 
   // Buzz shared compute always has an automatic routing choice, even when
   // discovery is empty or returns only explicit live model ids.
-  const staticModelOptions: readonly PersonaModelOption[] = [
-    {
-      id: "",
-      label: isSharedCompute
+  const defaultOption: PersonaModelOption = {
+    id: "",
+    label:
+      defaultModelLabel ??
+      (isSharedCompute
         ? "Default (auto)"
-        : getDefaultLlmModelLabel(globalModel),
-    },
-  ];
+        : getDefaultLlmModelLabel(globalModel)),
+  };
   const discoveredWithoutDefault = (discoveredModelOptions ?? []).filter(
     (option) => option.id.trim() !== "",
   );
   const effectiveModelOptions = isSharedCompute
-    ? [...staticModelOptions, ...discoveredWithoutDefault]
-    : (discoveredModelOptions ?? staticModelOptions);
+    ? [defaultOption, ...discoveredWithoutDefault]
+    : [
+        ...(allowDefaultModel ? [defaultOption] : []),
+        ...discoveredWithoutDefault,
+      ];
 
   // isModelCustom: true when the current model isn't in any known option set.
   // We check discovered options (when available) or runtime-static options so

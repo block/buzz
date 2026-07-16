@@ -50,6 +50,13 @@ async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
   });
 }
 
+async function makeGlobalDefaultsDirty(
+  page: import("@playwright/test").Page,
+  effort = "high",
+) {
+  await page.locator("#global-agent-thinking-effort").selectOption(effort);
+}
+
 test.describe("agent lifecycle feedback screenshots", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
@@ -126,6 +133,11 @@ test.describe("agent lifecycle feedback screenshots", () => {
   // restart-count feedback.
   test("02-save-restarted", async ({ page }) => {
     await installMockBridge(page, {
+      globalAgentConfig: {
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: {},
+      },
       globalConfigRestartedCount: 2,
     });
 
@@ -134,7 +146,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
     const card = page.getByTestId("settings-global-agent-config");
 
     // Change the provider to make the card dirty (enables "Save defaults").
-    await page.locator("#global-agent-provider").selectOption("anthropic");
+    await makeGlobalDefaultsDirty(page);
     await expect(
       page.getByRole("button", { name: "Save defaults" }),
     ).toBeEnabled({ timeout: 5_000 });
@@ -157,14 +169,20 @@ test.describe("agent lifecycle feedback screenshots", () => {
   // The default mock returns restarted_count=0. The old text
   // "Running agents keep their current settings until restarted." must be absent.
   test("03-save-plain", async ({ page }) => {
-    await installMockBridge(page);
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: {},
+      },
+    });
 
     await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
 
     // Change the provider to make the card dirty.
-    await page.locator("#global-agent-provider").selectOption("anthropic");
+    await makeGlobalDefaultsDirty(page);
     await expect(
       page.getByRole("button", { name: "Save defaults" }),
     ).toBeEnabled({ timeout: 5_000 });
@@ -270,6 +288,11 @@ test.describe("agent lifecycle feedback screenshots", () => {
   // Shot 06: global config save — singular "Saved. Restarted 1 agent."
   test("06-save-restarted-singular", async ({ page }) => {
     await installMockBridge(page, {
+      globalAgentConfig: {
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: {},
+      },
       globalConfigRestartedCount: 1,
     });
 
@@ -277,7 +300,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
 
     const card = page.getByTestId("settings-global-agent-config");
 
-    await page.locator("#global-agent-provider").selectOption("anthropic");
+    await makeGlobalDefaultsDirty(page);
     await expect(
       page.getByRole("button", { name: "Save defaults" }),
     ).toBeEnabled({ timeout: 5_000 });
@@ -293,6 +316,11 @@ test.describe("agent lifecycle feedback screenshots", () => {
   // Shot 07: global config save — partial failure "M failed to restart".
   test("07-save-failed-restart", async ({ page }) => {
     await installMockBridge(page, {
+      globalAgentConfig: {
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: {},
+      },
       globalConfigFailedRestartCount: 1,
     });
 
@@ -300,7 +328,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
 
     const card = page.getByTestId("settings-global-agent-config");
 
-    await page.locator("#global-agent-provider").selectOption("anthropic");
+    await makeGlobalDefaultsDirty(page);
     await expect(
       page.getByRole("button", { name: "Save defaults" }),
     ).toBeEnabled({ timeout: 5_000 });
@@ -325,28 +353,33 @@ test.describe("agent lifecycle feedback screenshots", () => {
   // clobbering it with the older response.
   test("08-save-race-keeps-newer-edit", async ({ page }) => {
     await installMockBridge(page, {
+      globalAgentConfig: {
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: {},
+      },
       globalConfigSaveDelayMs: 2_000,
     });
 
     await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
-    const provider = page.locator("#global-agent-provider");
+    const effort = page.locator("#global-agent-thinking-effort");
     const saveButton = page.getByRole("button", { name: "Save defaults" });
 
-    await provider.selectOption("anthropic");
+    await makeGlobalDefaultsDirty(page, "high");
     await expect(saveButton).toBeEnabled({ timeout: 5_000 });
     await saveButton.click();
 
     // While the save is held open by the mock delay, make a newer edit.
-    await provider.selectOption("openai");
+    await effort.selectOption("low");
 
     // The save resolves with the OLD submitted config; the newer edit must
     // survive and the card must stay dirty so it can be saved again.
     await expect(card.getByText("Saved.", { exact: true })).toBeVisible({
       timeout: 10_000,
     });
-    await expect(provider).toHaveValue("openai");
+    await expect(effort).toHaveValue("low");
     await expect(saveButton).toBeEnabled();
   });
 });

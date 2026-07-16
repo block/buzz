@@ -14,7 +14,10 @@ import type {
 } from "@/shared/api/types";
 import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
 import type { InheritedEnvRow } from "@/features/agents/ui/EnvVarsEditor";
-import { getBakedProviderInheritLabel } from "@/features/agents/ui/bakedEnvHelpers";
+import {
+  getBakedProviderInheritLabel,
+  getGlobalModelFallback,
+} from "@/features/agents/ui/bakedEnvHelpers";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
@@ -57,6 +60,7 @@ export type GlobalAgentConfigFieldsProps = {
   onConfigChange: (next: GlobalAgentConfig) => void;
   onCustomModelEditingChange: (value: boolean) => void;
   onIsCustomProviderChange: (value: boolean) => void;
+  onValidityChange?: (valid: boolean) => void;
 };
 
 export function GlobalAgentConfigFields({
@@ -68,15 +72,22 @@ export function GlobalAgentConfigFields({
   onConfigChange,
   onCustomModelEditingChange,
   onIsCustomProviderChange,
+  onValidityChange,
 }: GlobalAgentConfigFieldsProps) {
   const bakedProvider = React.useMemo(
     () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
     [bakedEnv],
   );
-  const bakedModel = React.useMemo(
-    () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_MODEL")?.value ?? null,
-    [bakedEnv],
+  const effectiveProvider = config.provider?.trim() || bakedProvider || "";
+  const fallbackModel = React.useMemo(
+    () => getGlobalModelFallback(bakedEnv, effectiveProvider, config.env_vars),
+    [bakedEnv, config.env_vars, effectiveProvider],
   );
+  const modelIsValid =
+    (config.model?.trim().length ?? 0) > 0 || fallbackModel !== null;
+  React.useEffect(() => {
+    onValidityChange?.(modelIsValid);
+  }, [modelIsValid, onValidityChange]);
   const bakedEffort = React.useMemo(
     () =>
       bakedEnv.find((e) => e.key === BUZZ_AGENT_THINKING_EFFORT)?.value ?? null,
@@ -229,12 +240,16 @@ export function GlobalAgentConfigFields({
       {/* Model field */}
       <div className="space-y-1.5 p-3">
         <AgentModelField
+          allowDefaultModel={fallbackModel !== null}
+          defaultModelLabel={
+            fallbackModel ? `Default model (${fallbackModel})` : undefined
+          }
           disabled={false}
           discoveredModelOptions={discoveredModelOptions}
-          globalModel={bakedModel ?? undefined}
+          globalModel={fallbackModel ?? undefined}
           id="global-agent-model"
           isCustomModelEditing={isCustomModelEditing}
-          isRequired={false}
+          isRequired={fallbackModel === null}
           model={config.model ?? ""}
           modelDiscoveryLoading={modelDiscoveryLoading}
           modelDiscoveryStatus={modelDiscoveryStatus}

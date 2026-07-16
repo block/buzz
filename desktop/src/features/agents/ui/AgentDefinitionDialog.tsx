@@ -38,13 +38,11 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
-  getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
   getRuntimePersonaModelOptions,
   NO_RUNTIME_DROPDOWN_VALUE,
-  providerRequiresExplicitModel,
   runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -69,12 +67,18 @@ import {
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
-import {
-  getBakedModelInheritLabel,
-  getBakedProviderInheritLabel,
-} from "./bakedEnvHelpers";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
+import { AgentAiDefaultsDialog } from "./AgentAiDefaultsDialog";
+import {
+  AgentAiConfigurationModeField,
+  type AgentAiConfigurationMode,
+} from "./AgentAiConfigurationMode";
+import {
+  agentAiConfigurationModeSatisfied,
+  agentAiConfigurationPairForMode,
+  initialAgentAiConfigurationMode,
+} from "./agentAiConfigurationPolicy";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 
@@ -119,12 +123,16 @@ export function AgentDefinitionDialog({
   createSubmitBlocked = false,
 }: AgentDefinitionDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
+  const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
+  const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [runtime, setRuntime] = React.useState("");
   const [model, setModel] = React.useState("");
   const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [provider, setProvider] = React.useState("");
+  const [aiConfigurationMode, setAiConfigurationMode] =
+    React.useState<AgentAiConfigurationMode>("defaults");
   const [isCustomProviderEditing, setIsCustomProviderEditing] =
     React.useState(false);
   const [namePoolText, setNamePoolText] = React.useState("");
@@ -172,6 +180,12 @@ export function AgentDefinitionDialog({
     setModel(initialValues.model ?? "");
     setIsCustomModelEditing(false);
     setProvider(initialValues.provider ?? "");
+    setAiConfigurationMode(
+      initialAgentAiConfigurationMode({
+        provider: initialValues.provider ?? "",
+        model: initialValues.model ?? "",
+      }),
+    );
     setIsCustomProviderEditing(false);
     const nextNamePoolText =
       "namePool" in initialValues
@@ -226,6 +240,7 @@ export function AgentDefinitionDialog({
       setModel("");
       setIsCustomModelEditing(false);
       setProvider("");
+      setAiConfigurationMode("defaults");
       setIsCustomProviderEditing(false);
       setNamePoolText("");
       setEnvVars({});
@@ -251,8 +266,8 @@ export function AgentDefinitionDialog({
       provider: providerForSubmit,
     } = buildRuntimeModelProviderPayload({
       runtime,
-      model,
-      provider,
+      model: aiConfigurationMode === "defaults" ? "" : model,
+      provider: aiConfigurationMode === "defaults" ? "" : provider,
       isEditMode: "id" in initialValues,
       isAutoSeeded: isRuntimeAutoSeededRef.current,
       initialPreviousRuntime: initialValues.runtime?.trim() ?? "",
@@ -317,7 +332,6 @@ export function AgentDefinitionDialog({
   const { data: runtimeFileConfig, isLoading: fileConfigLoading } =
     useRuntimeFileConfigQuery(runtime, { enabled: open });
   const {
-    advancedInheritedSummary,
     globalConfig,
     inheritedDefaults: {
       provider: inheritedProviderDefault,
@@ -325,6 +339,21 @@ export function AgentDefinitionDialog({
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ open });
+  function handleAiConfigurationModeChange(nextMode: AgentAiConfigurationMode) {
+    setAiConfigurationMode(nextMode);
+    setIsCustomProviderEditing(false);
+    setIsCustomModelEditing(false);
+    const nextPair = agentAiConfigurationPairForMode({
+      current: { provider, model },
+      inherited: {
+        provider: inheritedProviderDefault.value,
+        model: inheritedModelDefault.value,
+      },
+      mode: nextMode,
+    });
+    setProvider(nextPair.provider);
+    setModel(nextPair.model);
+  }
   const { data: bakedEnvKeys, isLoading: bakedLoading } =
     useBakedBuildEnvKeysQuery({ enabled: open });
   const credentialSettled = !fileConfigLoading && !bakedLoading;
@@ -391,13 +420,18 @@ export function AgentDefinitionDialog({
   // missingNormalizedFields check would flip the asterisk off once a value is
   // selected, which is incoherent (required means required, not "required until
   // satisfied"). runtimeSupportsLlmProviderSelection is the authoritative gate.
-  const providerIsRequired = runtimeSupportsLlmProviderSelection(runtime);
+  const providerIsRequired =
+    aiConfigurationMode === "custom" &&
+    runtimeSupportsLlmProviderSelection(runtime);
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
-  // Static asterisk on the model label: uses effectiveProvider so a globally-
-  // set provider correctly marks the model field required.
-  const isExplicitModelRequired =
-    modelFieldVisible && providerRequiresExplicitModel(effectiveProvider);
+  // Customize pins a complete provider/model pair. Shared compute's concrete
+  // automatic-routing value is the only valid non-model-id choice.
+  const isExplicitModelRequired = aiConfigurationMode === "custom";
+  const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
+    aiConfigurationMode,
+    { provider, model },
+  );
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
@@ -415,6 +449,7 @@ export function AgentDefinitionDialog({
     // D1: localModeSatisfied covers both missingNormalizedFields AND
     // missingEnvKeys — credential env keys now block submit, not just display.
     localModeSatisfied &&
+    customAiPairSatisfied &&
     !isAvatarUploadPending;
 
   // Merge global env as the base layer so credential keys satisfied via global
@@ -476,13 +511,6 @@ export function AgentDefinitionDialog({
       : "",
     hideProviderIds,
   );
-  const defaultLlmProviderLabel =
-    inheritedProviderDefault.source === "build"
-      ? getBakedProviderInheritLabel(
-          inheritedProviderDefault.value,
-          providerOptions,
-        )
-      : getDefaultLlmProviderLabel(runtime, inheritedProviderDefault.value);
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
@@ -525,25 +553,30 @@ export function AgentDefinitionDialog({
     });
   }
   const providerDropdownOptions: PersonaDropdownOption[] = [
-    ...providerOptions.map((option) => ({
-      label: option.id === "" ? defaultLlmProviderLabel : option.label,
-      value: option.id || AUTO_PROVIDER_DROPDOWN_VALUE,
-    })),
+    ...providerOptions
+      .filter((option) => option.id.trim().length > 0)
+      .map((option) => ({
+        label: option.label,
+        value: option.id,
+      })),
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
-  const inheritedModelLabel =
-    inheritedModelDefault.source === "build"
-      ? getBakedModelInheritLabel(inheritedModelDefault.value)
-      : undefined;
   const modelDropdownOptions: PersonaDropdownOption[] =
     buildModelDropdownOptions({
       allowCustom: !isRelayMesh,
-      globalModel: isRelayMesh ? undefined : inheritedModelDefault.value,
-      globalModelLabel: isRelayMesh ? undefined : inheritedModelLabel,
+      globalModel: undefined,
       loading: modelDiscoveryLoading && discoveredModelOptions === null,
       loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
       options: modelOptions,
-    });
+    })
+      .filter(
+        (option) => isRelayMesh || option.value !== AUTO_MODEL_DROPDOWN_VALUE,
+      )
+      .map((option) =>
+        isRelayMesh && option.value === AUTO_MODEL_DROPDOWN_VALUE
+          ? { ...option, label: "Automatic" }
+          : option,
+      );
   const previewLabel = displayName.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
   const runtimeWarning =
@@ -778,6 +811,13 @@ export function AgentDefinitionDialog({
             </div>
 
             {llmProviderFieldVisible ? (
+              <AgentAiConfigurationModeField
+                mode={aiConfigurationMode}
+                onModeChange={handleAiConfigurationModeChange}
+              />
+            ) : null}
+
+            {llmProviderFieldVisible && aiConfigurationMode === "custom" ? (
               <div className="space-y-1.5">
                 <RequiredFieldLabel
                   htmlFor="persona-llm-provider"
@@ -795,7 +835,7 @@ export function AgentDefinitionDialog({
                   id="persona-llm-provider"
                   onValueChange={handleProviderDropdownChange}
                   options={providerDropdownOptions}
-                  placeholder={defaultLlmProviderLabel}
+                  placeholder="Choose a provider"
                   value={providerSelectValue}
                 />
                 {showCustomProviderInput ? (
@@ -823,7 +863,9 @@ export function AgentDefinitionDialog({
               </div>
             ) : null}
 
-            {llmProviderFieldVisible && topLevelSecretEnvVar ? (
+            {llmProviderFieldVisible &&
+            aiConfigurationMode === "custom" &&
+            topLevelSecretEnvVar ? (
               <PersonaProviderApiKeyField
                 disabled={isPending}
                 isInherited={apiKeyIsInherited}
@@ -845,7 +887,7 @@ export function AgentDefinitionDialog({
             ) : null}
 
             <AnimatePresence initial={false}>
-              {modelFieldVisible ? (
+              {modelFieldVisible && aiConfigurationMode === "custom" ? (
                 <PersonaModelField
                   disabled={isPending}
                   isExplicitModelRequired={isExplicitModelRequired}
@@ -865,12 +907,21 @@ export function AgentDefinitionDialog({
               ) : null}
             </AnimatePresence>
 
-            <AgentAiDefaultsNotice
-              confirmNavigation
-              explicitModel={model}
-              explicitProvider={provider}
-              inheritedModel={inheritedModelDefault}
-              inheritedProvider={inheritedProviderDefault}
+            {aiConfigurationMode === "defaults" ? (
+              <AgentAiDefaultsNotice
+                onEditDefaults={() => setAiDefaultsOpen(true)}
+                triggerRef={aiDefaultsTriggerRef}
+                explicitModel=""
+                explicitProvider=""
+                inheritedModel={inheritedModelDefault}
+                inheritedProvider={inheritedProviderDefault}
+              />
+            ) : null}
+
+            <AgentAiDefaultsDialog
+              onOpenChange={setAiDefaultsOpen}
+              open={aiDefaultsOpen}
+              returnFocusRef={aiDefaultsTriggerRef}
             />
 
             {isCreateMode ? createRunSection : null}
@@ -890,12 +941,6 @@ export function AgentDefinitionDialog({
                   )}
                 />
               </button>
-              {!showAdvancedFields && advancedInheritedSummary ? (
-                <p className="text-xs text-muted-foreground">
-                  {advancedInheritedSummary}
-                </p>
-              ) : null}
-
               <AnimatePresence initial={false}>
                 {showAdvancedFields ? (
                   <motion.div

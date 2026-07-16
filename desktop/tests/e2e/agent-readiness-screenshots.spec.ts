@@ -46,6 +46,7 @@ async function selectProvider(
   page: import("@playwright/test").Page,
   providerName: string,
 ) {
+  await page.getByRole("tab", { name: "Customize for this agent" }).click();
   await selectDropdownOption(
     page,
     page.locator("#persona-llm-provider"),
@@ -60,6 +61,15 @@ async function setCustomModel(
   page: import("@playwright/test").Page,
   modelId: string,
 ) {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("discover_agent_models");
   await page.locator("#persona-model").click();
   await page
     .getByRole("button", { name: "Custom model...", exact: true })
@@ -119,44 +129,46 @@ test.describe("agent readiness gate screenshots", () => {
     });
   });
 
-  // Shot 01: buzz-agent selected, provider empty → required marker shown, save allowed.
-  test("01-create-buzzagent-empty-provider-marker", async ({ page }) => {
-    await installMockBridge(page);
+  // Shot 01: inherited AI defaults are an explicit, valid choice. Provider and
+  // model controls stay hidden until the user chooses to customize this agent.
+  test("01-create-buzzagent-uses-ai-defaults", async ({ page }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
+      },
+    });
     await openCreateDialog(page);
 
-    // Wait for buzz-agent to auto-select and the provider field to render.
-    await expect(page.locator("#persona-llm-provider")).toBeVisible({
-      timeout: 10_000,
-    });
-
-    // Provider empty + no global provider → save is BLOCKED per the
-    // provider-default rule. The submit button must be disabled.
-    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
+    await expect(
+      page.getByRole("tab", { name: "Use AI defaults" }),
+    ).toHaveAttribute("data-state", "active");
+    await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
+    await expect(page.locator("#persona-model")).not.toBeVisible();
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 10_000,
     });
     await settleAnimations(page);
 
-    const dialog = page.getByRole("dialog");
-    await dialog.screenshot({
-      path: `${SHOTS}/01-create-buzzagent-empty-provider-marker.png`,
+    await page.getByRole("dialog").screenshot({
+      path: `${SHOTS}/01-create-buzzagent-uses-ai-defaults.png`,
     });
   });
 
-  // Shot 02: buzz-agent + anthropic selected, model empty → required marker
-  // shown. The unified dialog blocks submit until the explicit model is set
-  // (anthropic requires one) — stricter than the legacy dialog's save-allowed.
-  test("02-create-buzzagent-empty-model-marker", async ({ page }) => {
+  // Shot 02: customized Anthropic configuration uses Automatic model instead
+  // of presenting an obsolete model-required error.
+  test("02-create-buzzagent-automatic-model", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
-    await selectProvider(page, "Anthropic");
+    await selectProvider(page, "Buzz shared compute");
 
-    // Model still empty → required marker shown; submit blocked until set.
-    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled();
+    await expect(page.locator("#persona-model")).toContainText("Automatic");
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled();
     await settleAnimations(page);
 
-    const dialog = page.getByRole("dialog");
-    await dialog.screenshot({
-      path: `${SHOTS}/02-create-buzzagent-empty-model-marker.png`,
+    await page.getByRole("dialog").screenshot({
+      path: `${SHOTS}/02-create-buzzagent-automatic-model.png`,
     });
   });
 
@@ -252,11 +264,7 @@ test.describe("agent readiness gate screenshots", () => {
 
     await openCreateDialog(page);
 
-    // Wait for buzz-agent to auto-select (provider field visible), then
-    // switch to claude.
-    await expect(page.locator("#persona-llm-provider")).toBeVisible({
-      timeout: 10_000,
-    });
+    // Switch the auto-selected buzz-agent runtime to Claude Code.
     await selectDropdownOption(
       page,
       page.locator("#persona-runtime"),
@@ -305,8 +313,9 @@ test.describe("agent readiness gate screenshots", () => {
     await installMockBridge(page);
     await openCreateDialog(page);
 
-    // Buzz-agent auto-selects first; wait for its provider field, then
-    // switch to goose to confirm its required-marker behavior is identical.
+    // Opt into per-agent customization, then switch to goose to confirm a
+    // genuinely incomplete customized configuration remains blocked.
+    await page.getByRole("tab", { name: "Customize for this agent" }).click();
     await expect(page.locator("#persona-llm-provider")).toBeVisible({
       timeout: 10_000,
     });

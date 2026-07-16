@@ -33,7 +33,9 @@ test("edit-untouched: model and provider omitted when user changes nothing on au
 
 // ── edit-model-only ────────────────────────────────────────────────────────────
 //
-// User opens a null-runtime builtin with auto-seed and picks a model.
+// Transport-level coverage: the serializer remains permissive for legacy and
+// non-dialog callers. The separately tested AI configuration mode policy blocks
+// a model-only Customize submission in AgentDefinitionDialog.
 // Expected: model persisted, runtime omitted (auto-seeded, not explicit).
 
 test("edit-model-only: chosen model persists, runtime omitted on auto-seeded builtin", () => {
@@ -51,7 +53,9 @@ test("edit-model-only: chosen model persists, runtime omitted on auto-seeded bui
 
 // ── edit-provider-only ─────────────────────────────────────────────────────────
 //
-// User opens a null-runtime builtin with auto-seed and picks a provider.
+// Transport-level coverage: the serializer remains permissive for legacy and
+// non-dialog callers. The separately tested AI configuration mode policy blocks
+// a provider-only Customize submission in AgentDefinitionDialog.
 // Expected: provider persisted, model and runtime omitted.
 
 test("edit-provider-only: chosen provider persists, runtime omitted on auto-seeded builtin", () => {

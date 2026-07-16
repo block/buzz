@@ -1,4 +1,4 @@
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import type * as React from "react";
 import type { InheritedDefault } from "./bakedEnvHelpers";
 import { getPersonaProviderOptions } from "./personaDialogPickers";
 import { Button } from "@/shared/ui/button";
@@ -26,78 +26,45 @@ export function formatAiDefaultsSummary({
 }
 
 export function AgentAiDefaultsNotice({
-  confirmNavigation = false,
+  onEditDefaults,
+  triggerRef,
   explicitModel,
   explicitProvider,
   inheritedModel,
   inheritedProvider,
 }: {
-  confirmNavigation?: boolean;
+  onEditDefaults: () => void;
+  triggerRef?: React.Ref<HTMLButtonElement>;
   explicitModel: string;
   explicitProvider: string;
   inheritedModel: InheritedDefault;
   inheritedProvider: InheritedDefault;
 }) {
-  const { goSettings } = useAppNavigation();
-  const inheritsProvider = explicitProvider.trim().length === 0;
-  const inheritsModel = explicitModel.trim().length === 0;
-
-  const usesCustomConfig = !inheritsProvider && !inheritsModel;
-  const requiredProviderMissing = inheritsProvider && !inheritedProvider.value;
-
-  const inheritedParts = [
-    inheritsProvider
-      ? inheritedProvider.value
-        ? `Provider ${providerLabel(inheritedProvider.value)}`
-        : "Provider not configured"
-      : null,
-    inheritsModel
-      ? inheritedModel.value
-        ? `Model ${inheritedModel.value}`
-        : "Model not configured"
-      : null,
-  ].filter((value): value is string => Boolean(value));
+  const provider = explicitProvider.trim() || inheritedProvider.value;
+  const model = explicitModel.trim() || inheritedModel.value;
 
   return (
-    <div
-      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2"
-      data-testid="agent-ai-defaults-notice"
-    >
-      <div className="min-w-0">
-        <p className="text-xs font-medium text-foreground">
-          {usesCustomConfig
-            ? "Custom AI configuration"
-            : requiredProviderMissing
-              ? "AI defaults aren’t configured"
-              : inheritsProvider && inheritsModel
-                ? "Uses AI defaults"
-                : "Partially uses AI defaults"}
-        </p>
-        <p className="text-xs text-muted-foreground">
-          {usesCustomConfig
-            ? "This agent won’t follow provider or model default changes."
-            : requiredProviderMissing
-              ? "Choose a provider in AI defaults to use this agent."
-              : `${inheritedParts.join(" · ")}. Inherited fields follow future changes.`}
-        </p>
-      </div>
+    <div className="space-y-1" data-testid="agent-ai-defaults-notice">
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 text-sm">
+        <dt className="text-muted-foreground">Provider</dt>
+        <dd className="truncate text-foreground">
+          {provider ? providerLabel(provider) : "Not configured"}
+        </dd>
+        <dt className="text-muted-foreground">Model</dt>
+        <dd className="truncate text-foreground">
+          {model || "Not configured"}
+        </dd>
+      </dl>
       <Button
-        onClick={() => {
-          if (
-            confirmNavigation &&
-            !window.confirm(
-              "Leave this agent without saving? Your changes will be discarded.",
-            )
-          ) {
-            return;
-          }
-          void goSettings("agents");
-        }}
+        className="h-auto px-0 py-1"
+        data-testid="edit-ai-defaults"
+        onClick={onEditDefaults}
+        ref={triggerRef}
         size="xs"
         type="button"
         variant="link"
       >
-        Edit AI defaults
+        Edit global defaults
       </Button>
     </div>
   );

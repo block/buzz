@@ -153,6 +153,7 @@ test.describe("welcome and channel agent entry points", () => {
     await page
       .locator("#persona-system-prompt")
       .fill("Research a topic and return a concise brief.");
+    await page.getByRole("tab", { name: "Customize for this agent" }).click();
     const provider = page.locator("#persona-llm-provider");
     await provider.press("Enter");
     await page

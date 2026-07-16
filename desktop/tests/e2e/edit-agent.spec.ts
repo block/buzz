@@ -174,8 +174,12 @@ test.describe("edit agent dialog", () => {
     await expect(page.locator("#edit-agent-model")).toHaveText(
       "Inherit build default (claude-opus-4-8)",
     );
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
     await expect(
-      page.getByText("Using build defaults: effort high"),
+      defaults.getByText("Anthropic", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      defaults.getByText("claude-opus-4-8", { exact: true }),
     ).toBeVisible();
   });
 
@@ -207,7 +211,13 @@ test.describe("edit agent dialog", () => {
     await expect(page.locator("#edit-agent-model")).toHaveText(
       "Use AI defaults (claude-opus-4-5)",
     );
-    await expect(page.getByText("Using AI defaults: effort low")).toBeVisible();
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
+    await expect(
+      defaults.getByText("Anthropic", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      defaults.getByText("claude-opus-4-5", { exact: true }),
+    ).toBeVisible();
   });
 
   test("profile Edit routes persona-linked agents to the definition editor", async ({
