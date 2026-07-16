@@ -78,7 +78,10 @@ export function SidebarProfileCard({
   const hasStatus = Boolean(selfUserStatus?.text || selfUserStatus?.emoji);
   const communityLabel = activeCommunity?.name ?? "No community";
   const readonlyCommunityLabel = (
-    <span className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70">
+    <span
+      className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70"
+      data-buzz-sidebar-secondary
+    >
       <span
         aria-hidden="true"
         className="flex w-3.5 shrink-0 items-center justify-center text-2xs"
@@ -191,6 +194,7 @@ export function SidebarProfileCard({
                   "flex w-full min-w-0 items-center truncate rounded-sm text-left text-xs leading-snug text-sidebar-foreground/70 outline-hidden transition-opacity duration-150 focus:outline-none focus-visible:outline-none group-hover/profile-card:opacity-0",
                   profilePopoverOpen && "opacity-100",
                 )}
+                data-buzz-sidebar-secondary
                 data-testid="sidebar-profile-user-status"
                 onClick={(event) => {
                   event.stopPropagation();
@@ -211,6 +215,7 @@ export function SidebarProfileCard({
                   "pointer-events-none absolute inset-0 flex min-w-0 items-center text-xs leading-snug text-sidebar-foreground/70 opacity-0 transition-opacity duration-150 group-hover/profile-card:opacity-100",
                   profilePopoverOpen && "opacity-0",
                 )}
+                data-buzz-sidebar-secondary
               >
                 {readonlyCommunityLabel}
               </div>

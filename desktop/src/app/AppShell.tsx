@@ -761,6 +761,20 @@ export function AppShell() {
                     isHuddleDrawerOpen && "buzz-huddle-app-surface-open",
                   )}
                 >
+                  <div
+                    aria-hidden="true"
+                    className="buzz-theme-gradient-layer pointer-events-none absolute inset-0 -z-10"
+                    data-buzz-gradient-layer
+                  >
+                    <div
+                      className="buzz-theme-gradient-layer-light absolute inset-0 opacity-0"
+                      data-buzz-gradient="light"
+                    />
+                    <div
+                      className="buzz-theme-gradient-layer-dark absolute inset-0 opacity-0"
+                      data-buzz-gradient="dark"
+                    />
+                  </div>
                   {hasCommunityRail ? (
                     <CommunityRail
                       activeCommunityId={
@@ -921,9 +935,13 @@ export function AppShell() {
                             ref={mainInsetRef}
                             className="isolate min-h-0 min-w-0 overflow-hidden bg-sidebar"
                             data-buzz-glass-inset
+                            data-buzz-shadow-viewport
                             style={chromeCssVarDefaults as React.CSSProperties}
                           >
-                            <div className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
+                            <div
+                              className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-content-edge"
+                              data-buzz-content-surface
+                            >
                               <Outlet />
                             </div>
                           </SidebarInset>

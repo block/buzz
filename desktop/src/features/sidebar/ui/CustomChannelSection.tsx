@@ -293,12 +293,14 @@ function ChannelSectionHeader({
   isCollapsed,
   onToggleCollapsed,
   title,
+  testId,
   actions,
 }: {
   contentId: string;
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
   title: string;
+  testId: string;
   actions: React.ReactNode;
 }) {
   return (
@@ -308,10 +310,11 @@ function ChannelSectionHeader({
           aria-controls={contentId}
           aria-expanded={!isCollapsed}
           className={SECTION_LABEL_BUTTON_CLASS}
+          data-testid={`${testId}-section-label`}
           onClick={onToggleCollapsed}
           type="button"
         >
-          <span>{title}</span>
+          <span data-sidebar-section-title>{title}</span>
           <span aria-hidden="true" className={SECTION_LABEL_CHEVRON_CLASS}>
             <ChevronDown
               className={cn(
@@ -493,6 +496,7 @@ export function ChannelGroupSection({
         isCollapsed={isCollapsed}
         onToggleCollapsed={onToggleCollapsed}
         title={title}
+        testId={listTestId}
         actions={
           <>
             {showQuickCreate && (onQuickCreateClick ?? onCreateClick) ? (
@@ -626,11 +630,17 @@ export function CustomChannelSection({
             <ContextMenu>
               <ContextMenuTrigger asChild>
                 <div className="relative" {...dragHandleProps}>
-                  <SidebarGroupLabel asChild>
+                  <SidebarGroupLabel
+                    asChild
+                    className={section.icon ? undefined : "pl-8"}
+                  >
                     <button
                       aria-controls={contentId}
                       aria-expanded={!isCollapsed}
-                      className={SECTION_LABEL_BUTTON_CLASS}
+                      className={cn(
+                        SECTION_LABEL_BUTTON_CLASS,
+                        section.icon && "gap-2",
+                      )}
                       onClick={onToggleCollapsed}
                       type="button"
                     >
@@ -648,6 +658,7 @@ export function CustomChannelSection({
                       ) : null}
                       <span
                         className="truncate"
+                        data-sidebar-section-title
                         data-testid={`section-title-${section.id}`}
                       >
                         {section.name}

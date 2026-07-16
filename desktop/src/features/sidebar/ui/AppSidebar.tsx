@@ -29,7 +29,10 @@ import {
   useLeaveChannelDialog,
   type SectionDialogValue,
 } from "@/features/sidebar/ui/ChannelSectionDialogs";
-import { AppSidebarPinnedHeader } from "@/features/sidebar/ui/AppSidebarPinnedHeader";
+import {
+  AppSidebarPinnedHeader,
+  AppSidebarPrimaryMenu,
+} from "@/features/sidebar/ui/AppSidebarPinnedHeader";
 import { MoreUnreadButton } from "@/features/sidebar/ui/MoreUnreadButton";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
 import {
@@ -551,20 +554,13 @@ export function AppSidebar({
         <AppSidebarPinnedHeader
           channelLabels={dmChannelLabels}
           currentPubkey={currentPubkey}
-          homeBadgeCount={homeBadgeCount}
           onCreateAgent={onCreateAgent}
           onCreateChannel={handleOpenCreateChannel}
           onOpenDm={onOpenDm}
           onOpenSearchResult={onOpenSearchResult}
-          onSelectAgents={onSelectAgents}
           onSelectChannel={onSelectChannel}
-          onSelectHome={onSelectHome}
-          onSelectProjects={onSelectProjects}
-          onSelectPulse={onSelectPulse}
-          onSelectWorkflows={onSelectWorkflows}
           searchChannels={searchChannels}
           searchFocusRequest={searchFocusRequest}
-          selectedView={selectedView}
           suggestionChannels={channels}
         />
 
@@ -582,105 +578,57 @@ export function AppSidebar({
           ) : null}
 
           <SidebarContent
-            className="buzz-sidebar-scrollbar overscroll-none pt-4"
+            className="buzz-sidebar-scrollbar overscroll-none"
             ref={scrollRef}
           >
-            {isLoading ? (
-              <SidebarLoadingContent shape={sidebarLoadingShape} />
-            ) : null}
+            <div
+              className="flex w-full flex-col gap-2 px-[3px]"
+              data-testid="sidebar-scroll-content"
+            >
+              <AppSidebarPrimaryMenu
+                homeBadgeCount={homeBadgeCount}
+                onSelectAgents={onSelectAgents}
+                onSelectHome={onSelectHome}
+                onSelectProjects={onSelectProjects}
+                onSelectPulse={onSelectPulse}
+                onSelectWorkflows={onSelectWorkflows}
+                selectedView={selectedView}
+              />
 
-            {!isLoading ? (
-              <>
-                {starredChannels.length > 0 ? (
-                  <ChannelGroupSection
-                    hasUnread={starredChannels.some((c) =>
-                      unreadChannelIds.has(c.id),
-                    )}
-                    isCollapsed={collapsedGroups.starred}
-                    isActiveChannel={selectedView === "channel"}
-                    activeWorkingByChannelId={activeWorkingByChannelId}
-                    items={starredChannels}
-                    sortMode={sortModeFor("starred")}
-                    onSortModeChange={(mode) => setSortModeFor("starred", mode)}
-                    actionsTestId="section-actions-starred"
-                    listTestId="starred-list"
-                    onMarkAllRead={() => {
-                      for (const channel of starredChannels) {
-                        onMarkChannelRead(channel.id, channel.lastMessageAt);
-                      }
-                    }}
-                    onMarkChannelRead={onMarkChannelRead}
-                    onMarkChannelUnread={onMarkChannelUnread}
-                    onSelectChannel={onSelectChannel}
-                    onToggleCollapsed={() => toggleCollapsedGroup("starred")}
-                    selectedChannelId={selectedChannelId}
-                    title="Starred"
-                    unreadChannelCounts={unreadChannelCounts}
-                    unreadChannelIds={unreadChannelIds}
-                    mutedChannelIds={mutedChannelIds}
-                    onMuteChannel={onMuteChannel}
-                    onUnmuteChannel={onUnmuteChannel}
-                    starredChannelIds={starredChannelIds}
-                    onStarChannel={onStarChannel}
-                    onUnstarChannel={onUnstarChannel}
-                    onLeaveChannel={requestLeaveChannel}
-                  />
-                ) : null}
-                <SidebarDndContext
-                  channels={channels}
-                  sections={channelSections}
-                  sectionIds={sectionIds}
-                  onAssignChannel={assignChannel}
-                  onUnassignChannel={unassignChannel}
-                  onReorderSections={reorderSections}
-                >
-                  {channelSections.map((section, idx) => (
-                    <CustomChannelSection
-                      key={section.id}
-                      section={section}
-                      channels={sectionBuckets.bySection[section.id] ?? []}
-                      hasUnread={
-                        sectionBuckets.bySection[section.id]?.some((c) =>
-                          unreadChannelIds.has(c.id),
-                        ) ?? false
-                      }
-                      isCollapsed={collapsedSections[section.id] ?? false}
+              {isLoading ? (
+                <SidebarLoadingContent shape={sidebarLoadingShape} />
+              ) : null}
+
+              {!isLoading ? (
+                <>
+                  {starredChannels.length > 0 ? (
+                    <ChannelGroupSection
+                      hasUnread={starredChannels.some((c) =>
+                        unreadChannelIds.has(c.id),
+                      )}
+                      isCollapsed={collapsedGroups.starred}
                       isActiveChannel={selectedView === "channel"}
                       activeWorkingByChannelId={activeWorkingByChannelId}
-                      selectedChannelId={selectedChannelId}
-                      unreadChannelCounts={unreadChannelCounts}
-                      unreadChannelIds={unreadChannelIds}
-                      sections={channelSections}
-                      assignments={channelAssignments}
-                      isFirst={idx === 0}
-                      isLast={idx === channelSections.length - 1}
-                      sortMode={sortModeFor(sectionSortGroupKey(section.id))}
+                      items={starredChannels}
+                      sortMode={sortModeFor("starred")}
                       onSortModeChange={(mode) =>
-                        setSortModeFor(sectionSortGroupKey(section.id), mode)
+                        setSortModeFor("starred", mode)
                       }
-                      onToggleCollapsed={() =>
-                        toggleCollapsedSection(section.id)
-                      }
-                      onSelectChannel={onSelectChannel}
-                      onMarkChannelRead={onMarkChannelRead}
-                      onMarkChannelUnread={onMarkChannelUnread}
-                      onMarkSectionRead={() => {
-                        for (const channel of sectionBuckets.bySection[
-                          section.id
-                        ] ?? []) {
+                      actionsTestId="section-actions-starred"
+                      listTestId="starred-list"
+                      onMarkAllRead={() => {
+                        for (const channel of starredChannels) {
                           onMarkChannelRead(channel.id, channel.lastMessageAt);
                         }
                       }}
-                      onAssignChannel={assignChannel}
-                      onUnassignChannel={unassignChannel}
-                      onCreateSectionForChannel={handleCreateSectionForChannel}
-                      onCreateChannel={() =>
-                        handleCreateChannelInSection(section.id)
-                      }
-                      onRenameSection={() => setRenameSectionTarget(section)}
-                      onDeleteSection={() => setDeleteSectionTarget(section)}
-                      onMoveSectionUp={() => moveSectionUp(section.id)}
-                      onMoveSectionDown={() => moveSectionDown(section.id)}
+                      onMarkChannelRead={onMarkChannelRead}
+                      onMarkChannelUnread={onMarkChannelUnread}
+                      onSelectChannel={onSelectChannel}
+                      onToggleCollapsed={() => toggleCollapsedGroup("starred")}
+                      selectedChannelId={selectedChannelId}
+                      title="Starred"
+                      unreadChannelCounts={unreadChannelCounts}
+                      unreadChannelIds={unreadChannelIds}
                       mutedChannelIds={mutedChannelIds}
                       onMuteChannel={onMuteChannel}
                       onUnmuteChannel={onUnmuteChannel}
@@ -689,123 +637,197 @@ export function AppSidebar({
                       onUnstarChannel={onUnstarChannel}
                       onLeaveChannel={requestLeaveChannel}
                     />
-                  ))}
-                  <ChannelGroupSection
-                    draggable
-                    hasUnread={unreadChannelIds.size > 0}
-                    isCollapsed={collapsedGroups.channels}
-                    isActiveChannel={selectedView === "channel"}
-                    activeWorkingByChannelId={activeWorkingByChannelId}
-                    items={sectionBuckets.unassigned}
-                    sortMode={sortModeFor("channels")}
-                    onSortModeChange={(mode) =>
-                      setSortModeFor("channels", mode)
-                    }
-                    actionsTestId="section-actions-channels"
-                    listTestId="stream-list"
-                    quickCreateLabel="Add channel"
-                    onQuickCreateClick={onBrowseChannels}
-                    showQuickCreate
-                    onMarkAllRead={onMarkAllChannelsRead}
-                    onMarkChannelRead={onMarkChannelRead}
-                    onMarkChannelUnread={onMarkChannelUnread}
-                    onSelectChannel={onSelectChannel}
-                    onToggleCollapsed={() => toggleCollapsedGroup("channels")}
-                    selectedChannelId={selectedChannelId}
-                    title="Channels"
-                    unreadChannelCounts={unreadChannelCounts}
-                    unreadChannelIds={unreadChannelIds}
+                  ) : null}
+                  <SidebarDndContext
+                    channels={channels}
                     sections={channelSections}
-                    assignments={channelAssignments}
+                    sectionIds={sectionIds}
                     onAssignChannel={assignChannel}
                     onUnassignChannel={unassignChannel}
-                    onCreateSectionForChannel={handleCreateSectionForChannel}
-                    mutedChannelIds={mutedChannelIds}
-                    onMuteChannel={onMuteChannel}
-                    onUnmuteChannel={onUnmuteChannel}
-                    starredChannelIds={starredChannelIds}
-                    onStarChannel={onStarChannel}
-                    onUnstarChannel={onUnstarChannel}
-                    onLeaveChannel={requestLeaveChannel}
-                  />
-                </SidebarDndContext>
-                <FeatureGate feature="forum">
-                  <ChannelGroupSection
-                    createLabel="New forum"
-                    hasUnread={unreadChannelIds.size > 0}
-                    isCollapsed={collapsedGroups.forums}
+                    onReorderSections={reorderSections}
+                  >
+                    {channelSections.map((section, idx) => (
+                      <CustomChannelSection
+                        key={section.id}
+                        section={section}
+                        channels={sectionBuckets.bySection[section.id] ?? []}
+                        hasUnread={
+                          sectionBuckets.bySection[section.id]?.some((c) =>
+                            unreadChannelIds.has(c.id),
+                          ) ?? false
+                        }
+                        isCollapsed={collapsedSections[section.id] ?? false}
+                        isActiveChannel={selectedView === "channel"}
+                        activeWorkingByChannelId={activeWorkingByChannelId}
+                        selectedChannelId={selectedChannelId}
+                        unreadChannelCounts={unreadChannelCounts}
+                        unreadChannelIds={unreadChannelIds}
+                        sections={channelSections}
+                        assignments={channelAssignments}
+                        isFirst={idx === 0}
+                        isLast={idx === channelSections.length - 1}
+                        sortMode={sortModeFor(sectionSortGroupKey(section.id))}
+                        onSortModeChange={(mode) =>
+                          setSortModeFor(sectionSortGroupKey(section.id), mode)
+                        }
+                        onToggleCollapsed={() =>
+                          toggleCollapsedSection(section.id)
+                        }
+                        onSelectChannel={onSelectChannel}
+                        onMarkChannelRead={onMarkChannelRead}
+                        onMarkChannelUnread={onMarkChannelUnread}
+                        onMarkSectionRead={() => {
+                          for (const channel of sectionBuckets.bySection[
+                            section.id
+                          ] ?? []) {
+                            onMarkChannelRead(
+                              channel.id,
+                              channel.lastMessageAt,
+                            );
+                          }
+                        }}
+                        onAssignChannel={assignChannel}
+                        onUnassignChannel={unassignChannel}
+                        onCreateSectionForChannel={
+                          handleCreateSectionForChannel
+                        }
+                        onCreateChannel={() =>
+                          handleCreateChannelInSection(section.id)
+                        }
+                        onRenameSection={() => setRenameSectionTarget(section)}
+                        onDeleteSection={() => setDeleteSectionTarget(section)}
+                        onMoveSectionUp={() => moveSectionUp(section.id)}
+                        onMoveSectionDown={() => moveSectionDown(section.id)}
+                        mutedChannelIds={mutedChannelIds}
+                        onMuteChannel={onMuteChannel}
+                        onUnmuteChannel={onUnmuteChannel}
+                        starredChannelIds={starredChannelIds}
+                        onStarChannel={onStarChannel}
+                        onUnstarChannel={onUnstarChannel}
+                        onLeaveChannel={requestLeaveChannel}
+                      />
+                    ))}
+                    <ChannelGroupSection
+                      draggable
+                      hasUnread={unreadChannelIds.size > 0}
+                      isCollapsed={collapsedGroups.channels}
+                      isActiveChannel={selectedView === "channel"}
+                      activeWorkingByChannelId={activeWorkingByChannelId}
+                      items={sectionBuckets.unassigned}
+                      sortMode={sortModeFor("channels")}
+                      onSortModeChange={(mode) =>
+                        setSortModeFor("channels", mode)
+                      }
+                      actionsTestId="section-actions-channels"
+                      listTestId="stream-list"
+                      quickCreateLabel="Add channel"
+                      onQuickCreateClick={onBrowseChannels}
+                      showQuickCreate
+                      onMarkAllRead={onMarkAllChannelsRead}
+                      onMarkChannelRead={onMarkChannelRead}
+                      onMarkChannelUnread={onMarkChannelUnread}
+                      onSelectChannel={onSelectChannel}
+                      onToggleCollapsed={() => toggleCollapsedGroup("channels")}
+                      selectedChannelId={selectedChannelId}
+                      title="Channels"
+                      unreadChannelCounts={unreadChannelCounts}
+                      unreadChannelIds={unreadChannelIds}
+                      sections={channelSections}
+                      assignments={channelAssignments}
+                      onAssignChannel={assignChannel}
+                      onUnassignChannel={unassignChannel}
+                      onCreateSectionForChannel={handleCreateSectionForChannel}
+                      mutedChannelIds={mutedChannelIds}
+                      onMuteChannel={onMuteChannel}
+                      onUnmuteChannel={onUnmuteChannel}
+                      starredChannelIds={starredChannelIds}
+                      onStarChannel={onStarChannel}
+                      onUnstarChannel={onUnstarChannel}
+                      onLeaveChannel={requestLeaveChannel}
+                    />
+                  </SidebarDndContext>
+                  <FeatureGate feature="forum">
+                    <ChannelGroupSection
+                      createLabel="New forum"
+                      hasUnread={unreadChannelIds.size > 0}
+                      isCollapsed={collapsedGroups.forums}
+                      isActiveChannel={selectedView === "channel"}
+                      activeWorkingByChannelId={activeWorkingByChannelId}
+                      items={forumChannels}
+                      sortMode={sortModeFor("forums")}
+                      onSortModeChange={(mode) =>
+                        setSortModeFor("forums", mode)
+                      }
+                      actionsTestId="section-actions-forums"
+                      listTestId="forum-list"
+                      onCreateClick={() => openCreateDialog("forum")}
+                      onMarkAllRead={onMarkAllChannelsRead}
+                      onMarkChannelRead={onMarkChannelRead}
+                      onMarkChannelUnread={onMarkChannelUnread}
+                      onSelectChannel={onSelectChannel}
+                      onToggleCollapsed={() => toggleCollapsedGroup("forums")}
+                      selectedChannelId={selectedChannelId}
+                      title="Forums"
+                      unreadChannelCounts={unreadChannelCounts}
+                      unreadChannelIds={unreadChannelIds}
+                      mutedChannelIds={mutedChannelIds}
+                      onMuteChannel={onMuteChannel}
+                      onUnmuteChannel={onUnmuteChannel}
+                    />
+                  </FeatureGate>
+                  <SidebarSection
+                    action={
+                      <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
+                        <SectionQuickAction
+                          label="New message"
+                          onClick={onNewMessage}
+                          testId="section-actions-dms-quick-create"
+                        />
+                        <SectionActionsMenu
+                          sectionLabel="direct messages"
+                          testId="section-actions-dms"
+                          onOpenChange={setDmActionsMenuOpen}
+                          onNewMessage={onNewMessage}
+                          sortMode={sortModeFor("dms")}
+                          onSortModeChange={(mode) =>
+                            setSortModeFor("dms", mode)
+                          }
+                        />
+                      </div>
+                    }
+                    dmParticipantsByChannelId={dmParticipantsByChannelId}
+                    isCollapsed={collapsedGroups.directMessages}
                     isActiveChannel={selectedView === "channel"}
                     activeWorkingByChannelId={activeWorkingByChannelId}
-                    items={forumChannels}
-                    sortMode={sortModeFor("forums")}
-                    onSortModeChange={(mode) => setSortModeFor("forums", mode)}
-                    actionsTestId="section-actions-forums"
-                    listTestId="forum-list"
-                    onCreateClick={() => openCreateDialog("forum")}
-                    onMarkAllRead={onMarkAllChannelsRead}
+                    items={sortedDirectMessages}
+                    channelLabels={dmChannelLabels}
+                    onHideDm={onHideDm}
                     onMarkChannelRead={onMarkChannelRead}
                     onMarkChannelUnread={onMarkChannelUnread}
                     onSelectChannel={onSelectChannel}
-                    onToggleCollapsed={() => toggleCollapsedGroup("forums")}
+                    onToggleCollapsed={() =>
+                      toggleCollapsedGroup("directMessages")
+                    }
+                    presenceByChannelId={dmPresenceByChannelId}
                     selectedChannelId={selectedChannelId}
-                    title="Forums"
+                    testId="dm-list"
+                    title="Direct messages"
+                    sectionActionsOpen={dmActionsMenuOpen}
                     unreadChannelCounts={unreadChannelCounts}
                     unreadChannelIds={unreadChannelIds}
                     mutedChannelIds={mutedChannelIds}
                     onMuteChannel={onMuteChannel}
                     onUnmuteChannel={onUnmuteChannel}
                   />
-                </FeatureGate>
-                <SidebarSection
-                  action={
-                    <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
-                      <SectionQuickAction
-                        label="New message"
-                        onClick={onNewMessage}
-                        testId="section-actions-dms-quick-create"
-                      />
-                      <SectionActionsMenu
-                        sectionLabel="direct messages"
-                        testId="section-actions-dms"
-                        onOpenChange={setDmActionsMenuOpen}
-                        onNewMessage={onNewMessage}
-                        sortMode={sortModeFor("dms")}
-                        onSortModeChange={(mode) => setSortModeFor("dms", mode)}
-                      />
-                    </div>
-                  }
-                  dmParticipantsByChannelId={dmParticipantsByChannelId}
-                  isCollapsed={collapsedGroups.directMessages}
-                  isActiveChannel={selectedView === "channel"}
-                  activeWorkingByChannelId={activeWorkingByChannelId}
-                  items={sortedDirectMessages}
-                  channelLabels={dmChannelLabels}
-                  onHideDm={onHideDm}
-                  onMarkChannelRead={onMarkChannelRead}
-                  onMarkChannelUnread={onMarkChannelUnread}
-                  onSelectChannel={onSelectChannel}
-                  onToggleCollapsed={() =>
-                    toggleCollapsedGroup("directMessages")
-                  }
-                  presenceByChannelId={dmPresenceByChannelId}
-                  selectedChannelId={selectedChannelId}
-                  testId="dm-list"
-                  title="Direct messages"
-                  sectionActionsOpen={dmActionsMenuOpen}
-                  unreadChannelCounts={unreadChannelCounts}
-                  unreadChannelIds={unreadChannelIds}
-                  mutedChannelIds={mutedChannelIds}
-                  onMuteChannel={onMuteChannel}
-                  onUnmuteChannel={onUnmuteChannel}
-                />
-              </>
-            ) : null}
+                </>
+              ) : null}
 
-            {errorMessage && !relayConnectionCard.hasRelayUnreachableError ? (
-              <div className="px-3 py-2 text-sm text-destructive">
-                {errorMessage}
-              </div>
-            ) : null}
+              {errorMessage && !relayConnectionCard.hasRelayUnreachableError ? (
+                <div className="px-3 py-2 text-sm text-destructive">
+                  {errorMessage}
+                </div>
+              ) : null}
+            </div>
           </SidebarContent>
         </div>
 

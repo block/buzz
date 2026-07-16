@@ -15,6 +15,9 @@ export default {
         // 36px — the backup-step private key, shown large in monospace
         "nsec-key": ["2.25rem", { lineHeight: "1.3" }],
       },
+      boxShadow: {
+        "content-edge": "-1px -1px 0 0 hsl(var(--sidebar-border) / 0.45)",
+      },
       borderRadius: {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
