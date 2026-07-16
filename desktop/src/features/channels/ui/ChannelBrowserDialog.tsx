@@ -294,62 +294,67 @@ export function ChannelBrowserDialog({
             </DialogClose>
           </div>
           <div className={MODAL_SEARCH_SHELL_CLASS}>
-            <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
-            <input
-              autoCapitalize="none"
-              autoCorrect="off"
-              className={MODAL_SEARCH_INPUT_CLASS}
-              data-testid="channel-browser-search"
-              id="channel-browser-search"
-              onChange={(event) => {
-                setQuery(event.target.value);
-                setSelectedIndex(null);
-              }}
-              onKeyDown={(event) => {
-                if (
-                  event.key === "ArrowDown" &&
-                  orderedVisibleChannels.length > 0
-                ) {
-                  event.preventDefault();
-                  setSelectedIndex((current) =>
-                    current === null
-                      ? 0
-                      : Math.min(
-                          current + 1,
-                          orderedVisibleChannels.length - 1,
-                        ),
-                  );
-                  return;
-                }
+            <label
+              className="flex min-w-0 flex-1 cursor-text items-center gap-3"
+              htmlFor="channel-browser-search"
+            >
+              <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
+              <input
+                autoCapitalize="none"
+                autoCorrect="off"
+                className={MODAL_SEARCH_INPUT_CLASS}
+                data-testid="channel-browser-search"
+                id="channel-browser-search"
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setSelectedIndex(null);
+                }}
+                onKeyDown={(event) => {
+                  if (
+                    event.key === "ArrowDown" &&
+                    orderedVisibleChannels.length > 0
+                  ) {
+                    event.preventDefault();
+                    setSelectedIndex((current) =>
+                      current === null
+                        ? 0
+                        : Math.min(
+                            current + 1,
+                            orderedVisibleChannels.length - 1,
+                          ),
+                    );
+                    return;
+                  }
 
-                if (
-                  event.key === "ArrowUp" &&
-                  orderedVisibleChannels.length > 0
-                ) {
-                  event.preventDefault();
-                  setSelectedIndex((current) =>
-                    current === null
-                      ? orderedVisibleChannels.length - 1
-                      : Math.max(current - 1, 0),
-                  );
-                  return;
-                }
+                  if (
+                    event.key === "ArrowUp" &&
+                    orderedVisibleChannels.length > 0
+                  ) {
+                    event.preventDefault();
+                    setSelectedIndex((current) =>
+                      current === null
+                        ? orderedVisibleChannels.length - 1
+                        : Math.max(current - 1, 0),
+                    );
+                    return;
+                  }
 
-                if (
-                  event.key === "Enter" &&
-                  !event.nativeEvent.isComposing &&
-                  orderedVisibleChannels.length > 0
-                ) {
-                  event.preventDefault();
-                  handleSelect(selectedItem ?? orderedVisibleChannels[0]);
-                }
-              }}
-              placeholder={searchPlaceholder}
-              ref={inputRef}
-              spellCheck={false}
-              type="text"
-              value={query}
-            />
+                  if (
+                    event.key === "Enter" &&
+                    !event.nativeEvent.isComposing &&
+                    orderedVisibleChannels.length > 0
+                  ) {
+                    event.preventDefault();
+                    handleSelect(selectedItem ?? orderedVisibleChannels[0]);
+                  }
+                }}
+                placeholder={searchPlaceholder}
+                ref={inputRef}
+                spellCheck={false}
+                type="text"
+                value={query}
+              />
+            </label>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -357,7 +362,6 @@ export function ChannelBrowserDialog({
                     sort === "alphabetical" ? "Alphabetical" : "Most members"
                   }`}
                   data-testid="channel-browser-sort"
-                  onClick={(event) => event.preventDefault()}
                   size="icon-xs"
                   type="button"
                   variant="ghost"

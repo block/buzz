@@ -58,6 +58,7 @@ import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurn
 import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { getPlatformKeysById } from "@/shared/lib/keyboard-shortcuts";
 import { HashSearch } from "@/shared/ui/icons";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 
@@ -201,7 +202,9 @@ export function SectionActionsMenu({
           <DropdownMenuItem onSelect={() => deferMenuAction(onBrowse)}>
             <HashSearch className="h-4 w-4" />
             <span>{browseLabel ?? "Browse channels"}</span>
-            <DropdownMenuShortcut>⇧⌘O</DropdownMenuShortcut>
+            <DropdownMenuShortcut>
+              {getPlatformKeysById("browse-channels")}
+            </DropdownMenuShortcut>
           </DropdownMenuItem>
         ) : null}
         {onCreate ? (

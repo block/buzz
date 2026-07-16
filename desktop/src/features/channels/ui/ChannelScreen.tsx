@@ -4,6 +4,7 @@ import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
 import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandlers";
+import { useThreadTargetSync } from "@/features/channels/useThreadTargetSync";
 import {
   useChannelMembersQuery,
   useJoinChannelMutation,
@@ -93,7 +94,6 @@ export function ChannelScreen({
   targetMessageId,
 }: ChannelScreenProps) {
   const { goHome } = useAppNavigation();
-  const { openBrowseChannels, ...appShell } = useAppShell();
   const {
     markChannelRead,
     markChannelUnread,
@@ -101,6 +101,7 @@ export function ChannelScreen({
     getMessageReadAt,
     markMessageRead,
     setContextParentResolver,
+    openBrowseChannels,
     openCreateChannel,
     openChannelManagement: openGlobalChannelManagement,
     followThread,
@@ -109,7 +110,7 @@ export function ChannelScreen({
     isNotifiedForThread,
     isThreadMuted,
     readStateVersion,
-  } = appShell;
+  } = useAppShell();
   const {
     channelManagementOpen,
     clearAutoSend,
@@ -655,38 +656,21 @@ export function ChannelScreen({
     targetMessageId,
     timelineMessages,
   });
-  React.useEffect(() => {
-    if (openThreadHeadId && !openThreadHeadMessage) {
-      if (isTimelineLoading) {
-        return;
-      }
-      clearOptimisticThreadOverride();
-      setOpenThreadHeadId(null, { replace: true });
-      setExpandedThreadReplyIds(new Set());
-      setThreadScrollTargetId(null);
-      return;
-    }
-    if (openThreadHeadMessage && !threadReplyTargetId) {
-      setThreadReplyTargetId(openThreadHeadMessage.id);
-      return;
-    }
-    if (threadReplyTargetId && !threadReplyTargetMessage) {
-      setThreadReplyTargetId(openThreadHeadMessage?.id ?? null);
-    }
-    if (editTargetId && !editTargetMessage) {
-      setEditTargetId(null);
-    }
-  }, [
+  useThreadTargetSync({
     clearOptimisticThreadOverride,
     editTargetId,
     editTargetMessage,
     isTimelineLoading,
     openThreadHeadId,
     openThreadHeadMessage,
+    setEditTargetId,
+    setExpandedThreadReplyIds,
     setOpenThreadHeadId,
+    setThreadReplyTargetId,
+    setThreadScrollTargetId,
     threadReplyTargetId,
     threadReplyTargetMessage,
-  ]);
+  });
 
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||

@@ -250,3 +250,13 @@ export function getShortcutsByCategory(): Map<
 export function getPlatformKeys(shortcut: KeyboardShortcut): string {
   return isMacPlatform() ? shortcut.keys : shortcut.keysWindows;
 }
+
+/**
+ * Platform-appropriate key hint for a shortcut in {@link KEYBOARD_SHORTCUTS},
+ * or null when the id is unknown. Use this for inline hints (menus, tooltips)
+ * so they stay in sync with the canonical shortcut registry.
+ */
+export function getPlatformKeysById(id: string): string | null {
+  const shortcut = KEYBOARD_SHORTCUTS.find((s) => s.id === id);
+  return shortcut ? getPlatformKeys(shortcut) : null;
+}
