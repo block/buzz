@@ -421,8 +421,10 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     done
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
+    unset BUZZ_PRIVATE_KEY BUZZ_SHARE_IDENTITY
     source ../scripts/instance-env.sh
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
+    export BUZZ_DEV_KEYRING_SERVICE="buzz-desktop-dev.${BUZZ_INSTANCE_SLUG:-main}"
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
     pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
