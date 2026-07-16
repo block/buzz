@@ -17,10 +17,56 @@ type GitHubRelease = {
 
 type UserAgentData = {
   platform?: string;
+  mobile?: boolean;
   getHighEntropyValues?: (
     hints: string[],
   ) => Promise<{ architecture?: string; bitness?: string }>;
 };
+
+function normalizeOperatingSystem(
+  navigatorValue: Navigator,
+  userAgentData?: UserAgentData,
+): BuzzDownloadPlatform["operatingSystem"] {
+  const userAgent = navigatorValue.userAgent.toLowerCase();
+  const platform = (
+    userAgentData?.platform ??
+    navigatorValue.platform ??
+    ""
+  ).toLowerCase();
+
+  // Compatibility tokens are treacherous: iPadOS can report MacIntel and a
+  // Macintosh UA, while Android and ChromeOS expose Linux platform strings.
+  // Reject non-desktop devices before admitting desktop-looking signals.
+  const isIPadDesktopMode =
+    platform === "macintel" && navigatorValue.maxTouchPoints > 1;
+  const isUnsupportedDevice =
+    userAgentData?.mobile === true ||
+    isIPadDesktopMode ||
+    /android|iphone|ipad|ipod|mobile|tablet|windows phone|iemobile|opera mini|opera mobi|webos|blackberry|bb10|kindle|silk|kaios|cros/.test(
+      userAgent,
+    );
+  if (isUnsupportedDevice) return "unknown";
+
+  if (
+    platform === "macos" ||
+    platform.startsWith("mac") ||
+    userAgent.includes("macintosh")
+  )
+    return "macos";
+  if (
+    platform === "windows" ||
+    platform.startsWith("win") ||
+    userAgent.includes("windows nt")
+  )
+    return "windows";
+  if (
+    platform === "linux" ||
+    platform.startsWith("linux") ||
+    userAgent.includes("linux")
+  )
+    return "linux";
+  return "unknown";
+}
 
 function normalizeArchitecture(
   value: string,
@@ -37,15 +83,10 @@ export async function detectBuzzDownloadPlatform(
   const userAgentData = (
     navigatorValue as Navigator & { userAgentData?: UserAgentData }
   ).userAgentData;
-  const platform =
-    `${userAgentData?.platform ?? navigatorValue.platform} ${navigatorValue.userAgent}`.toLowerCase();
-  const operatingSystem = platform.includes("win")
-    ? "windows"
-    : platform.includes("mac")
-      ? "macos"
-      : platform.includes("linux") || platform.includes("x11")
-        ? "linux"
-        : "unknown";
+  const operatingSystem = normalizeOperatingSystem(
+    navigatorValue,
+    userAgentData,
+  );
   let architecture = normalizeArchitecture(navigatorValue.userAgent);
 
   if (userAgentData?.getHighEntropyValues) {
