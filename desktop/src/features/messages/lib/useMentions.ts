@@ -723,6 +723,30 @@ export function useMentions(
     [],
   );
 
+  const insertResolvedMention = React.useCallback(
+    ({
+      displayName,
+      pubkey,
+      replaceFromOffset,
+      replaceToOffset,
+      isAgent = false,
+    }: {
+      displayName: string;
+      pubkey: string;
+      replaceFromOffset: number;
+      replaceToOffset: number;
+      isAgent?: boolean;
+    }): AutocompleteEdit => {
+      registerMentionPubkey(displayName, pubkey, { isAgent });
+      return {
+        replaceFromOffset,
+        replaceToOffset,
+        insertText: `@${displayName.trim()} `,
+      };
+    },
+    [registerMentionPubkey],
+  );
+
   const getMentionDisplayName = React.useCallback(
     (pubkey: string): string | null => {
       const normalizedPubkey = normalizePubkey(pubkey);
@@ -956,6 +980,7 @@ export function useMentions(
     handleMentionKeyDown,
     hasResolvedMembers: members !== undefined,
     insertMention,
+    insertResolvedMention,
     agentKnownNames: agentHighlightNames,
     isAgentPubkey,
     isManagedAgentPubkey,

@@ -26,10 +26,7 @@ import {
   useMediaUpload,
 } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
-import {
-  getPersistentAgentAudienceScope,
-  usePersistentAgentAudience,
-} from "@/features/messages/lib/persistentAgentAudience";
+import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
@@ -58,8 +55,8 @@ import {
 } from "./MentionAutocomplete";
 import { MessageComposerToolbar } from "./MessageComposerToolbar";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
-import { PersistentAgentAudienceChips } from "./PersistentAgentAudienceChips";
 import { useMentionSendFlow } from "./useMentionSendFlow";
+import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 
@@ -211,7 +208,6 @@ function MessageComposerImpl({
           threadRootId: audienceThreadRootId,
         })
       : null;
-  const persistentAudience = usePersistentAgentAudience(audienceScope);
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
   // Snapshot composer state before edit mode so cancel can restore it.
@@ -346,6 +342,8 @@ function MessageComposerImpl({
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
 
+      persistentMentionHydrationRef.current?.reconcile(text);
+
       if (text.trim().length > 0) {
         notifyTyping();
       }
@@ -362,6 +360,19 @@ function MessageComposerImpl({
   onLinkSelectionChangeRef.current = linkEditor.showFromCursor;
   onLinkShortcutRef.current = linkEditor.openFromShortcut;
   useComposerSpoilerParticles(richText.editor, composerScrollRef);
+
+  const persistentMentionHydration = usePersistentAgentMentionHydration({
+    audienceScope,
+    hydrationKey: effectiveDraftKey,
+    isEditing: editTarget != null,
+    mentions,
+    richText,
+  });
+  const persistentAudience = persistentMentionHydration.audience;
+  const persistentMentionHydrationRef = React.useRef(
+    persistentMentionHydration,
+  );
+  persistentMentionHydrationRef.current = persistentMentionHydration;
 
   const mentionSendFlow = useMentionSendFlow({
     channelId,
@@ -653,6 +664,7 @@ function MessageComposerImpl({
     }
 
     onPreparingMentionSendChange?.(true);
+    persistentMentionHydration.beginSubmit();
     try {
       await mentionSendFlow.sendMessageWithMentionFlow({
         capturedChannelId: channelId,
@@ -664,13 +676,11 @@ function MessageComposerImpl({
         ),
         spoileredAttachmentUrls,
         trimmed,
-        persistentAgentPubkeys: persistentAudience.enabled
-          ? persistentAudience.pubkeys
-          : [],
         audienceGeneration: persistentAudience.generation,
         audienceRevision: audienceScope ? persistentAudience.revision : null,
       });
     } finally {
+      persistentMentionHydration.endSubmit();
       onPreparingMentionSendChange?.(false);
     }
   }, [
@@ -692,9 +702,8 @@ function MessageComposerImpl({
     onCaptureSendContext,
     onPreparingMentionSendChange,
     audienceScope,
-    persistentAudience.enabled,
+    persistentMentionHydration,
     persistentAudience.generation,
-    persistentAudience.pubkeys,
     persistentAudience.revision,
   ]);
   submitMessageRef.current = submitMessage;
@@ -997,15 +1006,6 @@ function MessageComposerImpl({
               selectedIndex={mentions.mentionSelectedIndex}
               suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
             />
-            {persistentAudience.enabled && editTarget == null ? (
-              <PersistentAgentAudienceChips
-                getDisplayName={mentions.getMentionDisplayName}
-                onAdd={openMentionPicker}
-                onClear={persistentAudience.clear}
-                onRemove={persistentAudience.removePubkey}
-                pubkeys={persistentAudience.pubkeys}
-              />
-            ) : null}
             {media.uploadState.status === "error" ? (
               <div className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
                 Upload failed: {media.uploadState.message}

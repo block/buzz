@@ -62,7 +62,6 @@ type SendMessageWithMentionFlowInput = {
   sentDraftKey: string | null | undefined;
   spoileredAttachmentUrls?: ReadonlySet<string>;
   trimmed: string;
-  persistentAgentPubkeys?: readonly string[];
   audienceGeneration?: number;
   audienceRevision?: number | null;
 };
@@ -623,7 +622,6 @@ export function useMentionSendFlow({
       sentDraftKey,
       spoileredAttachmentUrls = new Set(),
       trimmed,
-      persistentAgentPubkeys = [],
       audienceGeneration = 0,
       audienceRevision = null,
     }: SendMessageWithMentionFlowInput) => {
@@ -681,10 +679,7 @@ export function useMentionSendFlow({
             mentions.isAgentPubkey(pubkey) ||
             createdPersonaAgentPubkeySet.has(pubkey),
         );
-        const pubkeys = uniqueNormalizedPubkeys([
-          ...explicitMentionPubkeys,
-          ...persistentAgentPubkeys,
-        ]);
+        const pubkeys = explicitMentionPubkeys;
         const { content: finalContent, mediaTags } = buildOutgoingMessage(
           trimmed,
           pendingImeta,

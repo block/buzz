@@ -50,86 +50,61 @@ async function installAudienceFixtures(page: Page) {
   });
 }
 
-test("persistent audience states remain visible and deliberate", async ({
+test("persistent agents restore through the native inline mention UI", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_A, AGENT_B]);
-  await installAudienceFixtures(page);
-  await openGeneral(page);
-
-  const audience = page.getByTestId("persistent-agent-audience");
-  await expect(audience).toContainText("Talking to");
-  await expect(audience).toContainText("Morgarita");
-  await expect(audience).toContainText("Vogue");
-  await expect(audience.getByRole("button", { name: "Clear" })).toBeVisible();
-  await expect(
-    audience.getByRole("button", { name: "Mention someone" }),
-  ).toBeVisible();
-
-  await audience.getByRole("button", { name: /Remove Vogue/ }).click();
-  await expect(audience).toContainText("Morgarita");
-  await expect(audience).not.toContainText("Vogue");
-
-  await audience.getByRole("button", { name: /Remove Morgarita/ }).click();
-  await expect(audience).toHaveCount(0);
-});
-
-test("audience hides during editing and restores afterward", async ({
-  page,
-}) => {
-  await seedAudience(page, [AGENT_A]);
   await installAudienceFixtures(page);
   await openGeneral(page);
 
   const input = page.getByTestId("message-input");
-  await input.fill("Message to edit");
-  await page.getByTestId("send-message").click();
-  const row = page.getByTestId("message-row").last();
-  await row.scrollIntoViewIfNeeded();
-  await row.hover();
-  await row.getByLabel("More actions").click({ force: true });
-  await page.getByText("Edit message", { exact: true }).click();
+  await expect(input).toContainText("@Morgarita");
+  await expect(input).toContainText("@Vogue");
+  await expect(page.getByText("Talking to", { exact: true })).toHaveCount(0);
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(2);
 
-  await expect(page.getByTestId("persistent-agent-audience")).toHaveCount(0);
-  await expect(page.getByText("Editing message")).toBeVisible();
-  await page.getByLabel("Cancel edit").click();
-  await expect(page.getByTestId("persistent-agent-audience")).toContainText(
-    "Morgarita",
-  );
+  await input.fill("@Morgarita hello");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ scope }) => {
+          const stored = JSON.parse(
+            localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
+          );
+          return stored[scope] ?? [];
+        },
+        { scope: SCOPE },
+      ),
+    )
+    .toEqual([AGENT_A]);
+
+  await page.getByTestId("send-message").click();
+  await expect(input).toContainText("@Morgarita");
+  await expect(input).not.toContainText("@Vogue");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
 });
 
 for (const theme of ["buzz", "buzz-dark"]) {
-  test(`captures multi-agent audience in ${theme}`, async ({ page }) => {
+  test(`captures native persistent mentions in ${theme}`, async ({ page }) => {
     await seedAudience(page, [AGENT_A, AGENT_B], theme);
     await installAudienceFixtures(page);
     await openGeneral(page);
-
-    const audience = page.getByTestId("persistent-agent-audience");
-    await audience.getByRole("button", { name: "Mention someone" }).focus();
-    await expect(
-      audience.getByRole("button", { name: "Mention someone" }),
-    ).toBeFocused();
+    const composer = page.getByTestId("message-composer");
+    await page.getByTestId("message-input").focus();
     await waitForAnimations(page);
-    await audience.screenshot({ path: `${SHOTS}/${theme}-multi-focus.png` });
+    await composer.screenshot({
+      path: `${SHOTS}/${theme}-native-mentions.png`,
+    });
   });
 }
 
-test("captures a narrow wrapping audience and single-agent state", async ({
-  page,
-}) => {
+test("native persistent mentions fit the narrow composer", async ({ page }) => {
   await page.setViewportSize({ width: 700, height: 760 });
   await seedAudience(page, [AGENT_A, AGENT_B]);
   await installAudienceFixtures(page);
   await openGeneral(page);
-
   const composer = page.getByTestId("message-composer");
+  await expect(page.getByTestId("message-input")).toContainText("@Morgarita");
   await waitForAnimations(page);
-  await composer.screenshot({ path: `${SHOTS}/narrow-multi-wrap.png` });
-
-  const audience = page.getByTestId("persistent-agent-audience");
-  await audience.getByRole("button", { name: /Remove Vogue/ }).click();
-  await expect(audience).toContainText("Morgarita");
-  await expect(audience.getByRole("button", { name: "Clear" })).toHaveCount(0);
-  await waitForAnimations(page);
-  await audience.screenshot({ path: `${SHOTS}/narrow-single.png` });
+  await composer.screenshot({ path: `${SHOTS}/narrow-native-mentions.png` });
 });
