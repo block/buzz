@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -88,6 +88,7 @@ struct Harness {
     child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
     stdout: BufReader<tokio::process::ChildStdout>,
+    stderr: Arc<StdMutex<String>>,
     next_id: i64,
 }
 
@@ -108,15 +109,36 @@ impl Harness {
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = cmd.spawn().expect("spawn buzz-agent");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
+        let stderr = child.stderr.take().unwrap();
+        let stderr_buf = Arc::new(StdMutex::new(String::new()));
+        let stderr_out = Arc::clone(&stderr_buf);
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let n = match reader.read_line(&mut line).await {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut out) = stderr_out.lock() {
+                    out.push_str(&line);
+                }
+            }
+        });
         Self {
             child,
             stdin,
             stdout,
+            stderr: stderr_buf,
             next_id: 1,
         }
     }
@@ -168,6 +190,10 @@ impl Harness {
         drop(self.stdin);
         let _ = tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await;
         let _ = self.child.start_kill();
+    }
+
+    fn stderr_text(&self) -> String {
+        self.stderr.lock().map(|s| s.clone()).unwrap_or_default()
     }
 }
 
@@ -1380,6 +1406,15 @@ async fn token_usage_over_budget_triggers_handoff() {
         captured, 3,
         "expected handoff summarize() between the two prompts (3 reqs), saw {captured} — \
          token gate did not fire on usage over budget"
+    );
+    let stderr = h.stderr_text();
+    assert!(
+        stderr.contains("handoff #1 (history"),
+        "expected handoff log line in stderr, got: {stderr}"
+    );
+    assert!(
+        stderr.contains(" -> ") && stderr.contains(" tokens"),
+        "expected handoff log to include before/after token counts, got: {stderr}"
     );
     h.shutdown().await;
 }

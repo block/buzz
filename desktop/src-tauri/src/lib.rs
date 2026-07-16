@@ -51,10 +51,8 @@ use huddle::{
 };
 use managed_agents::{backfill_persona_snapshots, ensure_nest, try_regenerate_nest};
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
-use shutdown::hard_exit_after_mesh_shutdown;
-use shutdown::shutdown_managed_agents;
-#[cfg(feature = "mesh-llm")]
-use shutdown::shutdown_mesh_runtime;
+use shutdown::{hard_exit_after_mesh_shutdown, relaunch_after_mesh_shutdown};
+use shutdown::{is_restart_request, shut_down_app};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -775,9 +773,11 @@ pub fn run() {
             get_relay_http_url,
             get_media_proxy_port,
             fetch_link_preview_title,
+            discover_acp_auth_methods,
             discover_acp_providers,
             discover_git_bash_prerequisite,
             install_acp_runtime,
+            connect_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,
             sign_nostr_identity_binding,
@@ -967,19 +967,20 @@ pub fn run() {
     shutdown::install_signal_handler(app.handle().clone(), Arc::clone(&shutdown_done));
 
     let run_shutdown_done = Arc::clone(&shutdown_done);
+    let restart_requested = Arc::new(AtomicBool::new(false));
     app.run(move |app_handle, event| match event {
-        RunEvent::ExitRequested { .. } | RunEvent::Exit => {
-            app_handle
-                .state::<AppState>()
-                .shutdown_started
-                .store(true, Ordering::SeqCst);
-            if !run_shutdown_done.swap(true, Ordering::SeqCst) {
-                prevent_sleep::release(&app_handle.state::<AppState>().prevent_sleep);
-                if let Err(error) = shutdown_managed_agents(app_handle) {
-                    eprintln!("buzz-desktop: failed to stop managed agents: {error}");
-                }
-                #[cfg(feature = "mesh-llm")]
-                shutdown_mesh_runtime(app_handle);
+        RunEvent::ExitRequested { code, .. } => {
+            if is_restart_request(code) {
+                restart_requested.store(true, Ordering::SeqCst);
+            }
+            shut_down_app(app_handle, &run_shutdown_done);
+        }
+        RunEvent::Exit => {
+            shut_down_app(app_handle, &run_shutdown_done);
+
+            #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+            if restart_requested.load(Ordering::SeqCst) {
+                relaunch_after_mesh_shutdown(app_handle);
             }
 
             // AppKit terminates through libc exit(), which runs C++ static

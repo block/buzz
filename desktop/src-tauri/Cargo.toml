@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.4.6"
+version = "0.4.8"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -47,6 +47,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
 window-vibrancy = "0.6"
 user-idle = { version = "0.6", default-features = false }
+plist = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }

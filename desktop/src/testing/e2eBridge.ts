@@ -41,6 +41,10 @@ import {
   KIND_USER_STATUS,
 } from "@/shared/constants/kinds";
 import type {
+  RawAcpAuthMethodsResult,
+  RawConnectAcpRuntimeResult,
+} from "@/shared/api/tauriAgentAuth";
+import type {
   RawAcpRuntimeCatalogEntry,
   RawInstallRuntimeResult,
 } from "@/shared/api/tauri";
@@ -118,6 +122,10 @@ type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
+    acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
+    connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
+    connectAcpRuntimeDelayMs?: number;
+    connectAcpRuntimeError?: string;
     activePersonaIds?: string[];
     installAcpRuntimeResult?: RawInstallRuntimeResult;
     /** Sequence of results for successive `install_acp_runtime` calls.
@@ -2539,6 +2547,7 @@ let mockPersonas: RawPersona[] = [];
 let mockTeams: RawTeam[] = [];
 // Listeners registered via the mock __TAURI_INTERNALS__.listen — keyed by event name.
 const tauriEventListeners = new Map<string, Set<() => void>>();
+const openedExternalUrls: string[] = [];
 const defaultMockRelayAgents: RawRelayAgent[] = [
   {
     pubkey: ALICE_PUBKEY,
@@ -6506,6 +6515,33 @@ async function handleDiscoverAcpRuntimes(
   ];
 }
 
+async function handleDiscoverAcpAuthMethods(
+  args: { runtimeId?: string },
+  config: E2eConfig | undefined,
+): Promise<RawAcpAuthMethodsResult> {
+  const runtimeId = args.runtimeId ?? "";
+  const configured = config?.mock?.acpAuthMethods?.[runtimeId];
+  if (configured) {
+    return configured;
+  }
+  return { methods: [] };
+}
+
+async function handleConnectAcpRuntime(
+  _args: { request?: { runtimeId?: string; methodId?: string } },
+  config: E2eConfig | undefined,
+): Promise<RawConnectAcpRuntimeResult> {
+  const error = config?.mock?.connectAcpRuntimeError;
+  if (error) {
+    throw new Error(error);
+  }
+  const delayMs = config?.mock?.connectAcpRuntimeDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+  return config?.mock?.connectAcpRuntimeResult ?? { launched: true };
+}
+
 // Per-page install call counter. Reset each test run because this module is
 // re-evaluated via addInitScript, so the counter starts at 0 for every test.
 let installCallCount = 0;
@@ -8587,6 +8623,11 @@ export function maybeInstallE2eTauriMocks() {
         return importMockIdentity(
           (payload as { nsec?: string } | null)?.nsec ?? "",
         );
+      case "validate_repos_dir":
+        // The browser harness has no host filesystem to validate. Treat the
+        // seeded empty/default path as valid so Add Community can continue to
+        // relay-policy discovery.
+        return;
       case "apply_workspace": {
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
@@ -8851,6 +8892,16 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayHttpUrl(activeConfig);
       case "discover_acp_providers":
         return handleDiscoverAcpRuntimes(activeConfig);
+      case "discover_acp_auth_methods":
+        return handleDiscoverAcpAuthMethods(
+          payload as { runtimeId?: string },
+          activeConfig,
+        );
+      case "connect_acp_runtime":
+        return handleConnectAcpRuntime(
+          payload as { request?: { runtimeId?: string; methodId?: string } },
+          activeConfig,
+        );
       case "install_acp_runtime":
         return handleInstallAcpRuntime(
           payload as { runtimeId?: string },
@@ -9528,6 +9579,12 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof sendToMockSocket>[0],
         );
       case "plugin:opener|open_url":
+        openedExternalUrls.push(String((payload as { url: string | URL }).url));
+        return null;
+      case "get_e2e_opened_external_urls":
+        return [...openedExternalUrls];
+      case "clear_e2e_opened_external_urls":
+        openedExternalUrls.length = 0;
         return null;
       case "plugin:window|show":
       case "plugin:window|unminimize":

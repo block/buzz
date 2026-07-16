@@ -121,6 +121,17 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     AcpError::AgentError { code, message }
 }
 
+fn build_initialize_params() -> serde_json::Value {
+    serde_json::json!({
+        "protocolVersion": 2,
+        "clientCapabilities": build_client_capabilities(),
+        "clientInfo": {
+            "name": "buzz-acp",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+    })
+}
+
 /// ACP client that owns an agent subprocess and communicates over its stdio.
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
@@ -333,6 +344,29 @@ pub(crate) fn build_codex_config_env(
     Ok(Some(serde_json::Value::Object(base).to_string()))
 }
 
+fn build_client_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        // Signal to ACP adapters that Buzz can hand users to terminal-native
+        // auth flows. Adapters decide which auth methods to expose; Buzz does
+        // not hardcode vendor login commands from this capability.
+        "auth": {
+            "terminal": true
+        },
+        // Signal to goose that we handle `_goose/unstable/session/update`
+        // notifications. Without this the custom notification is suppressed
+        // on goose's side and usage data is never emitted.
+        "_meta": {
+            "goose": {
+                "customNotifications": true
+            },
+            // Non-standard extension used by claude-agent-acp to advertise the
+            // exact terminal login argv for subscription auth. Unknown `_meta`
+            // keys are ignored by other adapters.
+            "terminal-auth": true
+        }
+    })
+}
+
 impl AcpClient {
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
@@ -501,26 +535,18 @@ impl AcpClient {
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
         // Requesting version 2 is an intentional temporary pin — we are squatting
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
-        let params = serde_json::json!({
-            "protocolVersion": 2,
-            "clientCapabilities": {
-                // Signal to goose that we handle `_goose/unstable/session/update`
-                // notifications. Without this the custom notification is suppressed
-                // on goose's side and usage data is never emitted.
-                "_meta": {
-                    "goose": {
-                        "customNotifications": true
-                    }
-                }
-            },
-            "clientInfo": {
-                "name": "buzz-acp",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        });
+        let params = build_initialize_params();
         let result = self.send_request("initialize", params).await?;
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
+    }
+
+    /// Send the ACP `authenticate` request for an adapter-advertised method.
+    pub async fn authenticate(&mut self, method_id: &str) -> Result<serde_json::Value, AcpError> {
+        let params = serde_json::json!({
+            "methodId": method_id,
+        });
+        self.send_request("authenticate", params).await
     }
 
     /// Send `session/new` and return the full response alongside the session ID.
@@ -2067,13 +2093,7 @@ mod tests {
             "method": "initialize",
             "params": {
                 "protocolVersion": 2,
-                "clientCapabilities": {
-                    "_meta": {
-                        "goose": {
-                            "customNotifications": true
-                        }
-                    }
-                },
+                "clientCapabilities": build_client_capabilities(),
                 "clientInfo": {
                     "name": "buzz-acp",
                     "version": "0.1.0"
@@ -2086,6 +2106,11 @@ mod tests {
             Some("buzz-acp")
         );
         assert!(msg["params"]["clientCapabilities"].is_object());
+        assert_eq!(
+            msg["params"]["clientCapabilities"]["auth"]["terminal"].as_bool(),
+            Some(true),
+            "terminal auth capability must be advertised so adapters can expose terminal login methods"
+        );
         assert_eq!(
             msg["params"]["clientCapabilities"]["_meta"]["goose"]["customNotifications"].as_bool(),
             Some(true),

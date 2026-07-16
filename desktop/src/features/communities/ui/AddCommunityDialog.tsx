@@ -1,4 +1,5 @@
 import * as React from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import {
   deriveCommunityName,
@@ -6,6 +7,13 @@ import {
   normalizeRelayUrl,
 } from "@/features/communities/communityStorage";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
+import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
+import {
+  acceptJoinPolicy,
+  getJoinPolicy,
+  isJoinPolicyDiscoveryCandidate,
+  type JoinPolicy,
+} from "@/shared/api/invites";
 import { validateReposDir } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 import {
@@ -16,6 +24,10 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
+import { JoinPolicyNotice } from "@/features/onboarding/ui/JoinPolicyNotice";
+
+const POLICY_DISCOVERY_DELAY_MS = 250;
+const POLICY_REVEAL_EASE = [0.23, 1, 0.32, 1] as const;
 
 type AddCommunityDialogProps = {
   onSubmit?: (
@@ -33,9 +45,42 @@ export function AddCommunityDialog({
   const [relayUrl, setRelayUrl] = React.useState("");
   const [token, setToken] = React.useState("");
   const [inviteCode, setInviteCode] = React.useState("");
+  const [inviteError, setInviteError] = React.useState<string | null>(null);
+  const [joinPolicy, setJoinPolicy] = React.useState<JoinPolicy | null>(null);
+  const [ageConfirmed, setAgeConfirmed] = React.useState(false);
+  const [agreementConfirmed, setAgreementConfirmed] = React.useState(false);
   const [reposDir, setReposDir] = React.useState("");
   const communityOnboarding = useCommunityOnboarding();
   const [reposDirError, setReposDirError] = React.useState<string | null>(null);
+  const shouldReduceMotion = useReducedMotion();
+
+  React.useEffect(() => {
+    if (!open || !relayUrl.trim()) return;
+
+    const normalizedUrl = normalizeRelayUrl(relayUrl.trim());
+    if (!isJoinPolicyDiscoveryCandidate(normalizedUrl)) return;
+
+    let cancelled = false;
+    const timeoutId = window.setTimeout(() => {
+      void getJoinPolicy(normalizedUrl)
+        .then((policy) => {
+          if (cancelled || !policy) return;
+          setJoinPolicy(policy);
+          setAgeConfirmed(false);
+          setAgreementConfirmed(false);
+          setInviteError(null);
+        })
+        .catch(() => {
+          // Background discovery is best-effort. A deliberate submit retries
+          // the request and surfaces any relay error to the user.
+        });
+    }, POLICY_DISCOVERY_DELAY_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [open, relayUrl]);
 
   const handleClose = React.useCallback(() => {
     onOpenChange(false);
@@ -43,6 +88,10 @@ export function AddCommunityDialog({
     setRelayUrl("");
     setToken("");
     setInviteCode("");
+    setInviteError(null);
+    setJoinPolicy(null);
+    setAgeConfirmed(false);
+    setAgreementConfirmed(false);
     setReposDir("");
     setReposDirError(null);
   }, [onOpenChange]);
@@ -67,6 +116,45 @@ export function AddCommunityDialog({
       }
 
       const normalizedRelayUrl = normalizeRelayUrl(relayUrl.trim());
+      let policyReceipt: string | undefined;
+      try {
+        const policy = await getJoinPolicy(normalizedRelayUrl);
+        if (policy && (!joinPolicy || joinPolicy.version !== policy.version)) {
+          setJoinPolicy(policy);
+          setAgeConfirmed(false);
+          setAgreementConfirmed(false);
+          setInviteError(null);
+          return;
+        }
+        if (policy?.ageAttestationRequired && !ageConfirmed) {
+          setInviteError("Confirm that you are at least 18 years old.");
+          return;
+        }
+        if (
+          policy &&
+          (policy.termsMarkdown || policy.privacyMarkdown) &&
+          !agreementConfirmed
+        ) {
+          setInviteError("Agree to the Terms of Service and Privacy Policy.");
+          return;
+        }
+
+        // Receipts are bound to an invite code, so one is only minted when a
+        // code is present. The claim itself runs on the onboarding
+        // transaction (useClaimInvite), which forwards this receipt.
+        if (policy && inviteCode.trim()) {
+          policyReceipt = await acceptJoinPolicy(
+            normalizedRelayUrl,
+            inviteCode.trim(),
+            policy.version,
+            ageConfirmed,
+          );
+        }
+      } catch (error) {
+        setInviteError(`Community rejected: ${inviteErrorMessage(error)}`);
+        return;
+      }
+
       communityOnboarding.start({
         source: "add-community",
         relayUrl: normalizedRelayUrl,
@@ -74,6 +162,7 @@ export function AddCommunityDialog({
         communityName: name.trim() || deriveCommunityName(normalizedRelayUrl),
         token: token.trim() || undefined,
         reposDir: expandedReposDir,
+        policyReceipt,
       });
       handleClose();
     },
@@ -83,6 +172,9 @@ export function AddCommunityDialog({
       token,
       inviteCode,
       reposDir,
+      joinPolicy,
+      ageConfirmed,
+      agreementConfirmed,
       communityOnboarding,
       handleClose,
     ],
@@ -112,7 +204,13 @@ export function AddCommunityDialog({
             <Input
               autoFocus
               id="ws-relay-url"
-              onChange={(e) => setRelayUrl(e.target.value)}
+              onChange={(e) => {
+                setRelayUrl(e.target.value);
+                setInviteError(null);
+                setJoinPolicy(null);
+                setAgeConfirmed(false);
+                setAgreementConfirmed(false);
+              }}
               placeholder="wss://relay.example.com"
               type="text"
               value={relayUrl}
@@ -168,6 +266,10 @@ export function AddCommunityDialog({
               id="ws-invite-code"
               onChange={(e) => {
                 setInviteCode(e.target.value);
+                setInviteError(null);
+                setJoinPolicy(null);
+                setAgeConfirmed(false);
+                setAgreementConfirmed(false);
               }}
               placeholder="Paste an invite code for a members-only relay"
               type="text"
@@ -207,11 +309,81 @@ export function AddCommunityDialog({
             Communities share your active identity. To use a different key,
             import it on the profile step (or in settings).
           </p>
+          {inviteError ? (
+            <p className="text-xs text-destructive">{inviteError}</p>
+          ) : null}
+          <AnimatePresence initial={false}>
+            {joinPolicy && relayUrl.trim() ? (
+              <motion.div
+                animate={{
+                  height: "auto",
+                  marginTop: 0,
+                  opacity: 1,
+                  transform: "translateY(0rem)",
+                }}
+                className="overflow-hidden"
+                exit={
+                  shouldReduceMotion
+                    ? { height: 0, marginTop: "-1rem", opacity: 0 }
+                    : {
+                        height: 0,
+                        marginTop: "-1rem",
+                        opacity: 0,
+                        transform: "translateY(-0.25rem)",
+                      }
+                }
+                initial={
+                  shouldReduceMotion
+                    ? false
+                    : {
+                        height: 0,
+                        marginTop: "-1rem",
+                        opacity: 0,
+                        transform: "translateY(-0.25rem)",
+                      }
+                }
+                key={`${normalizeRelayUrl(relayUrl.trim())}:${joinPolicy.version}`}
+                transition={
+                  shouldReduceMotion
+                    ? { duration: 0 }
+                    : { duration: 0.22, ease: POLICY_REVEAL_EASE }
+                }
+              >
+                <JoinPolicyNotice
+                  ageConfirmed={ageConfirmed}
+                  agreementConfirmed={agreementConfirmed}
+                  onAgeConfirmedChange={(confirmed) => {
+                    setAgeConfirmed(confirmed);
+                    setInviteError(null);
+                  }}
+                  onAgreementConfirmedChange={(confirmed) => {
+                    setAgreementConfirmed(confirmed);
+                    setInviteError(null);
+                  }}
+                  policy={joinPolicy}
+                  // Editing the relay URL resets joinPolicy, so a visible
+                  // notice always belongs to the URL currently in the field.
+                  relayWsUrl={normalizeRelayUrl(relayUrl.trim())}
+                />
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
           <div className="flex justify-end gap-2 pt-2">
             <Button onClick={handleClose} type="button" variant="outline">
               Cancel
             </Button>
-            <Button disabled={!relayUrl.trim()} type="submit">
+            <Button
+              disabled={
+                !relayUrl.trim() ||
+                Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed) ||
+                Boolean(
+                  joinPolicy &&
+                    (joinPolicy.termsMarkdown || joinPolicy.privacyMarkdown) &&
+                    !agreementConfirmed,
+                )
+              }
+              type="submit"
+            >
               Add Community
             </Button>
           </div>

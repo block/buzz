@@ -84,11 +84,12 @@ export function MembershipDenied({
   }, [onImportKey, previewNpub, trimmedNsec]);
 
   const handleInviteRedeem = React.useCallback(
-    (relayWsUrl: string, code: string) => {
+    (relayWsUrl: string, code: string, policyReceipt?: string) => {
       communityOnboarding.start({
         source: "membership-recovery",
         relayUrl: relayWsUrl,
         inviteCode: code,
+        policyReceipt,
       });
     },
     [communityOnboarding],

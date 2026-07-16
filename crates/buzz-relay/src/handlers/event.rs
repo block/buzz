@@ -983,7 +983,11 @@ async fn handle_agent_observer_event(
 
     let agent_bytes = route.agent.to_bytes().to_vec();
     let owner_bytes = route.owner.to_bytes().to_vec();
-    let cache_key = (agent_bytes.clone(), owner_bytes.clone());
+    let cache_key = (
+        conn.tenant.community(),
+        agent_bytes.clone(),
+        owner_bytes.clone(),
+    );
     let is_owner = if session_owner_match {
         true
     } else {
@@ -1127,6 +1131,8 @@ fn single_tag_content<'a>(event: &'a Event, tag_name: &str) -> Result<&'a str, S
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU8;
     use std::sync::Arc;
 
     use buzz_core::kind::{
@@ -1138,6 +1144,9 @@ mod tests {
         OBSERVER_FRAME_TELEMETRY,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+    use tokio::sync::{mpsc, Mutex, RwLock};
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
 
     #[test]
     fn fanout_event_frame_matches_legacy_format_byte_for_byte() {
@@ -1300,6 +1309,95 @@ mod tests {
         assert!(
             !super::observer_frame_rate_limited(&state, community_b, agent_key),
             "A's exhausted budget must not rate-limit the same agent key in B"
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_owner_cache_is_scoped_to_community() {
+        let state = fanout_access::test_state().await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let agent_bytes = agent.public_key().to_bytes().to_vec();
+        let owner_bytes = owner.public_key().to_bytes().to_vec();
+        let community_a = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let community_b = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+
+        state.observer_owner_cache.insert(
+            (community_a, agent_bytes.clone(), owner_bytes.clone()),
+            true,
+        );
+        assert_eq!(
+            state.observer_owner_cache.get(&(
+                community_b,
+                agent_bytes.clone(),
+                owner_bytes.clone()
+            )),
+            None,
+            "A cached allow must not populate B's observer authorization key"
+        );
+        state.observer_owner_cache.insert(
+            (community_b, agent_bytes.clone(), owner_bytes.clone()),
+            false,
+        );
+
+        let encrypted = encrypt_observer_payload(
+            &agent,
+            &owner.public_key(),
+            &serde_json::json!({"type": "acp_read"}),
+        )
+        .expect("encrypt observer payload");
+        let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+            .tags([
+                Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
+                Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
+                Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign event");
+
+        let (send_tx, mut send_rx) = mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
+        let conn = Arc::new(crate::connection::ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: buzz_core::TenantContext::resolved(community_b, "b.example"),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
+            auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+                buzz_auth::AuthContext {
+                    pubkey: agent.public_key(),
+                    scopes: vec![],
+                    channel_ids: None,
+                    auth_method: buzz_auth::AuthMethod::Nip42,
+                    agent_owner_pubkey: None,
+                },
+            )),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+
+        super::handle_agent_observer_event(
+            event.clone(),
+            conn.conn_id,
+            &event.id.to_hex(),
+            conn,
+            state,
+        )
+        .await;
+
+        let axum::extract::ws::Message::Text(text) =
+            send_rx.try_recv().expect("observer rejection sent")
+        else {
+            panic!("expected text relay message");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("relay frame JSON");
+        assert_eq!(frame[0], "OK");
+        assert_eq!(frame[2], false);
+        assert_eq!(
+            frame[3],
+            "restricted: observer frame is not authorized for this agent owner"
         );
     }
 

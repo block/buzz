@@ -26,6 +26,8 @@ import {
   useMediaUpload,
 } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
+import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
   hasMentionClipboardHtml,
@@ -54,10 +56,16 @@ import {
 import { MessageComposerToolbar } from "./MessageComposerToolbar";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
+import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 
+type MessageComposerAudienceContext =
+  | { type: "timeline" }
+  | { type: "thread"; threadRootId: string };
+
 type MessageComposerProps = {
+  audienceContext?: MessageComposerAudienceContext | null;
   channelId?: string | null;
   channelName: string;
   channelType?: ChannelType | null;
@@ -137,6 +145,7 @@ type MessageComposerProps = {
 };
 
 function MessageComposerImpl({
+  audienceContext = null,
   channelId = null,
   channelName,
   channelType = null,
@@ -186,7 +195,19 @@ function MessageComposerImpl({
   }, []);
 
   const drafts = useDrafts();
+  const identityQuery = useIdentityQuery();
   const effectiveDraftKey = draftKey ?? channelId;
+  const ownerPubkey = identityQuery.data?.pubkey ?? null;
+  const audienceThreadRootId =
+    audienceContext?.type === "thread" ? audienceContext.threadRootId : null;
+  const audienceScope =
+    audienceContext && channelId && ownerPubkey
+      ? getPersistentAgentAudienceScope({
+          ownerPubkey,
+          channelId,
+          threadRootId: audienceThreadRootId,
+        })
+      : null;
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
   // Snapshot composer state before edit mode so cancel can restore it.
@@ -321,6 +342,8 @@ function MessageComposerImpl({
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
 
+      persistentMentionHydrationRef.current?.reconcile(text);
+
       if (text.trim().length > 0) {
         notifyTyping();
       }
@@ -338,6 +361,19 @@ function MessageComposerImpl({
   onLinkShortcutRef.current = linkEditor.openFromShortcut;
   useComposerSpoilerParticles(richText.editor, composerScrollRef);
 
+  const persistentMentionHydration = usePersistentAgentMentionHydration({
+    audienceScope,
+    hydrationKey: effectiveDraftKey,
+    isEditing: editTarget != null,
+    mentions,
+    richText,
+  });
+  const persistentAudience = persistentMentionHydration.audience;
+  const persistentMentionHydrationRef = React.useRef(
+    persistentMentionHydration,
+  );
+  persistentMentionHydrationRef.current = persistentMentionHydration;
+
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -354,6 +390,17 @@ function MessageComposerImpl({
     setIsEmojiPickerOpen,
     setPendingImeta: media.setPendingImeta,
     setSpoileredAttachmentUrls,
+    onSuccessfulExplicitAgentAudience:
+      persistentAudience.enabled && audienceContext && ownerPubkey
+        ? ({ channelId: successfulChannelId, ...promotion }) => {
+            const scope = getPersistentAgentAudienceScope({
+              ownerPubkey,
+              channelId: successfulChannelId,
+              threadRootId: audienceThreadRootId,
+            });
+            persistentAudience.promotePubkeys({ ...promotion, scope });
+          }
+        : undefined,
   });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger
@@ -617,6 +664,7 @@ function MessageComposerImpl({
     }
 
     onPreparingMentionSendChange?.(true);
+    persistentMentionHydration.beginSubmit();
     try {
       await mentionSendFlow.sendMessageWithMentionFlow({
         capturedChannelId: channelId,
@@ -628,8 +676,11 @@ function MessageComposerImpl({
         ),
         spoileredAttachmentUrls,
         trimmed,
+        audienceGeneration: persistentAudience.generation,
+        audienceRevision: audienceScope ? persistentAudience.revision : null,
       });
     } finally {
+      persistentMentionHydration.endSubmit();
       onPreparingMentionSendChange?.(false);
     }
   }, [
@@ -650,6 +701,10 @@ function MessageComposerImpl({
     syncComposerContentFromEditor,
     onCaptureSendContext,
     onPreparingMentionSendChange,
+    audienceScope,
+    persistentMentionHydration,
+    persistentAudience.generation,
+    persistentAudience.revision,
   ]);
   submitMessageRef.current = submitMessage;
 

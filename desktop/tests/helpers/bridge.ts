@@ -116,6 +116,10 @@ export type MockAgentMemoryListing = {
 
 type MockBridgeOptions = {
   acpRuntimesCatalog?: Record<string, unknown>[];
+  acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
+  connectAcpRuntimeResult?: { launched: boolean };
+  connectAcpRuntimeDelayMs?: number;
+  connectAcpRuntimeError?: string;
   /** Override the result returned by the `install_acp_runtime` mock command.
    *  Pass `{ success: false, steps: [...] }` to exercise error/Retry states. */
   installAcpRuntimeResult?: {
@@ -716,9 +720,27 @@ async function openSectionMenu(page: Page, actionsTestId: string) {
   await trigger.click();
 }
 
+// The Channels section "+" now opens the unified Add-channel browser, so the
+// standalone create dialog is reached via the primary-modifier + Shift + N
+// keyboard shortcut (the "New channel" menu item was removed as redundant).
 export async function openCreateChannelDialog(page: Page) {
-  await openSectionMenu(page, "section-actions-channels");
-  await page.getByRole("menuitem", { name: "New channel" }).click();
+  await page.getByTestId("app-sidebar").waitFor({ state: "visible" });
+  const isMacBrowser = await page.evaluate(() =>
+    /mac|iphone|ipad|ipod/i.test(navigator.platform),
+  );
+  await page.evaluate((isMac) => {
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: !isMac,
+        key: "N",
+        metaKey: isMac,
+        shiftKey: true,
+      }),
+    );
+  }, isMacBrowser);
+  await page.getByTestId("create-channel-dialog").waitFor();
 }
 
 export async function openNewMessagePage(page: Page) {

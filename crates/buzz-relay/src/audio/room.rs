@@ -8,6 +8,7 @@
 //! Frames are opaque Opus bytes — the relay never decodes audio.
 //! `try_send` is used throughout: real-time audio tolerates drops, never queues.
 
+use buzz_core::CommunityId;
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -117,8 +118,8 @@ struct AdmissionGuard {
     ///
     /// Pin is per-`Room`-instance and clears when the manager evicts the
     /// Room via [`AudioRoomManager::cleanup_if_empty`] — the next
-    /// `get_or_create` for the same channel id then constructs a fresh
-    /// `Room` with a fresh `AdmissionGuard` (and therefore `None` pin),
+    /// `get_or_create` for the same community-local channel then constructs a
+    /// fresh `Room` with a fresh `AdmissionGuard` (and therefore `None` pin),
     /// so a new generation of joiners can negotiate a new version.
     /// A momentarily-empty-but-not-yet-cleaned-up Room keeps its pin so
     /// reconnecting peers don't accidentally renegotiate mid-call. See
@@ -158,6 +159,8 @@ impl AdmissionGuard {
 
 /// A single audio room for one channel.
 pub struct Room {
+    /// Community this room belongs to.
+    pub community_id: CommunityId,
     /// Channel UUID this room belongs to.
     pub channel_id: Uuid,
     /// Connected peers keyed by peer UUID.
@@ -170,10 +173,11 @@ pub struct Room {
 }
 
 impl Room {
-    /// Create an empty room for the given channel.
-    pub fn new(channel_id: Uuid) -> Self {
+    /// Create an empty room for the given community-local channel.
+    pub fn new(community_id: CommunityId, channel_id: Uuid) -> Self {
         let (roster_tx, _) = broadcast::channel(64);
         Self {
+            community_id,
             channel_id,
             peers: DashMap::new(),
             guard: std::sync::Mutex::new(AdmissionGuard::new()),
@@ -487,7 +491,7 @@ impl Room {
 
 /// Global registry of active audio rooms.
 pub struct AudioRoomManager {
-    rooms: DashMap<Uuid, Arc<Room>>,
+    rooms: DashMap<(CommunityId, Uuid), Arc<Room>>,
 }
 
 impl AudioRoomManager {
@@ -499,25 +503,47 @@ impl AudioRoomManager {
     }
 
     /// Get an existing room or create a new one.
-    pub fn get_or_create(&self, channel_id: Uuid) -> Arc<Room> {
+    ///
+    /// Channel UUIDs are only unique inside a community. The room key must
+    /// carry both labels so two tenants that legitimately reuse the same UUID
+    /// never share peer lists, protocol pins, or audio frames.
+    pub fn get_or_create(&self, community_id: CommunityId, channel_id: Uuid) -> Arc<Room> {
         self.rooms
-            .entry(channel_id)
-            .or_insert_with(|| Arc::new(Room::new(channel_id)))
+            .entry((community_id, channel_id))
+            .or_insert_with(|| Arc::new(Room::new(community_id, channel_id)))
             .clone()
     }
 
-    /// Look up an existing room without creating one. Returns `None` when this
-    /// pod hosts no room for the channel — the cross-pod media path uses this
-    /// so an inbound datagram for a session we don't participate in is dropped,
-    /// never materializing an empty room.
-    pub fn get(&self, channel_id: Uuid) -> Option<Arc<Room>> {
-        self.rooms.get(&channel_id).map(|r| r.clone())
+    /// Look up an existing community-local room without creating one.
+    pub fn get(&self, community_id: CommunityId, channel_id: Uuid) -> Option<Arc<Room>> {
+        self.rooms
+            .get(&(community_id, channel_id))
+            .map(|room| room.clone())
+    }
+
+    /// Look up a room for a mesh datagram that carries only a channel UUID.
+    ///
+    /// The current mesh media envelope does not carry a community identifier.
+    /// If two active communities use the same channel UUID, routing would be
+    /// ambiguous, so fail closed instead of delivering one community's audio
+    /// to the other. Control-path lookups always use [`Self::get`].
+    pub fn get_unambiguous_by_channel(&self, channel_id: Uuid) -> Option<Arc<Room>> {
+        let mut matches = self
+            .rooms
+            .iter()
+            .filter(|entry| entry.key().1 == channel_id)
+            .map(|entry| Arc::clone(entry.value()));
+        let room = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(room)
     }
 
     /// Remove the room if it has no peers. Returns `true` if the room was removed.
-    pub fn cleanup_if_empty(&self, channel_id: Uuid) -> bool {
+    pub fn cleanup_if_empty(&self, community_id: CommunityId, channel_id: Uuid) -> bool {
         self.rooms
-            .remove_if(&channel_id, |_, room| room.is_empty())
+            .remove_if(&(community_id, channel_id), |_, room| room.is_empty())
             .is_some()
     }
 }
@@ -533,7 +559,7 @@ mod tests {
     use super::*;
 
     fn fresh_room() -> Room {
-        Room::new(Uuid::new_v4())
+        Room::new(CommunityId::from_uuid(Uuid::new_v4()), Uuid::new_v4())
     }
 
     #[test]
@@ -644,9 +670,10 @@ mod tests {
     #[test]
     fn manager_cleanup_resets_version_pin() {
         let manager = AudioRoomManager::new();
+        let community_id = CommunityId::from_uuid(Uuid::new_v4());
         let channel_id = Uuid::new_v4();
 
-        let room1 = manager.get_or_create(channel_id);
+        let room1 = manager.get_or_create(community_id, channel_id);
         let (peer_id, _, _, _) = room1
             .add_peer("alice".to_string(), 2)
             .expect("first peer admits");
@@ -655,14 +682,51 @@ mod tests {
             .remove_peer_and_check_ended(peer_id)
             .expect("peer existed");
         assert!(ended, "single-peer room should end on its last departure");
-        assert!(manager.cleanup_if_empty(channel_id));
+        assert!(manager.cleanup_if_empty(community_id, channel_id));
 
         // Next joiner with a different version on the same channel id gets a
         // brand-new room (no v=2 pin carried over from the prior generation).
-        let room2 = manager.get_or_create(channel_id);
+        let room2 = manager.get_or_create(community_id, channel_id);
         let _ = room2
             .add_peer("bob".to_string(), 1)
             .expect("fresh room must accept any version");
+    }
+
+    #[test]
+    fn manager_isolates_same_channel_uuid_across_communities() {
+        let manager = AudioRoomManager::new();
+        let channel_id = Uuid::new_v4();
+        let community_a = CommunityId::from_uuid(Uuid::new_v4());
+        let community_b = CommunityId::from_uuid(Uuid::new_v4());
+
+        let room_a = manager.get_or_create(community_a, channel_id);
+        assert!(Arc::ptr_eq(
+            &manager
+                .get_unambiguous_by_channel(channel_id)
+                .expect("one matching room is unambiguous"),
+            &room_a
+        ));
+        let room_b = manager.get_or_create(community_b, channel_id);
+
+        assert!(
+            !Arc::ptr_eq(&room_a, &room_b),
+            "same channel UUID in two communities must create distinct rooms"
+        );
+        assert_eq!(room_a.community_id, community_a);
+        assert_eq!(room_b.community_id, community_b);
+        assert!(
+            manager.get_unambiguous_by_channel(channel_id).is_none(),
+            "community-free mesh lookup must fail closed on a UUID collision"
+        );
+
+        room_a
+            .add_peer("alice".to_string(), 1)
+            .expect("A peer admits");
+        assert_eq!(room_a.peer_pubkeys(), vec![("alice".to_string(), 0)]);
+        assert!(
+            room_b.peer_pubkeys().is_empty(),
+            "A room peers must not appear in B's same-UUID room"
+        );
     }
 
     /// Peer-index reuse: after a peer leaves, their index is released; a new

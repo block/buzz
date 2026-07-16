@@ -9,6 +9,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
+import { LandingBees } from "./LandingBees";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
@@ -86,37 +87,35 @@ export function MachineOnboardingFlow({
 
   return (
     <div
-      className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground"
+      className={`buzz-onboarding-neutral-theme buzz-startup-shell flex items-center justify-center px-4 py-8 text-foreground ${
+        page === "identity" ? "buzz-onboarding-welcome" : ""
+      }`}
       data-testid="machine-onboarding-gate"
     >
       <StartupWindowDragRegion />
+      {page === "identity" ? <LandingBees /> : null}
       <div className="relative flex w-full max-w-[920px] flex-col items-center text-center">
         {page === "identity" ? (
           <OnboardingSlideTransition
-            className="flex w-full max-w-[500px] flex-col items-center text-center"
+            className="flex w-full max-w-[720px] flex-col items-center text-center"
             direction="forward"
             effect="mask-reveal-up"
             transitionKey="machine-identity"
           >
             <img
               alt="Buzz"
-              className="h-14 w-14 rounded-xl shadow-xs"
-              src="/app-icon@2x.png"
-              srcSet="/app-icon@2x.png 1x, /app-icon@3x.png 2x"
+              className="w-full max-w-[560px]"
+              src="/landing/buzz-wordmark.png"
             />
-            <h1 className="mt-6 text-3xl font-semibold tracking-tight">
-              Welcome to Buzz
-            </h1>
-            <p className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground">
-              Start with a new Nostr identity or bring the key you already use.
-              Your identity works across every community you join.
+            <p className="mt-2 max-w-[560px] text-center text-2xl font-normal leading-none text-foreground">
+              Your people, your agents, your projects — all in one place.
             </p>
             {error ? (
               <p className="mt-4 text-sm text-destructive">{error}</p>
             ) : null}
-            <div className="mt-8 flex w-full flex-col gap-3">
+            <div className="mt-10 flex flex-col items-center gap-3">
               <Button
-                className="h-10 w-full"
+                className="h-10 rounded-full px-6"
                 disabled={isPending}
                 onClick={() => void loadFreshIdentity()}
                 type="button"
@@ -124,13 +123,13 @@ export function MachineOnboardingFlow({
                 {isPending ? "Saving identity…" : "Get started"}
               </Button>
               <Button
-                className="h-10 w-full"
+                className="h-9 rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
                 disabled={isPending}
                 onClick={() => setPage("key-import")}
                 type="button"
                 variant="ghost"
               >
-                I already have a key
+                Enter a key
               </Button>
             </div>
           </OnboardingSlideTransition>
