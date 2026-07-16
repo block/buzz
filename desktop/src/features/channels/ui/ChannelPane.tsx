@@ -1,6 +1,5 @@
 import * as React from "react";
-import { Bot, Hash, LogIn, Plus, Sparkles, UserPlus } from "lucide-react";
-import { HashSearch } from "@/shared/ui/icons";
+import { Hash, LogIn } from "lucide-react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
@@ -45,11 +44,10 @@ import {
   type WelcomeComposerBannerState,
 } from "@/features/channels/ui/WelcomeComposerBanner";
 import {
-  getChannelIntroDescription,
-  getChannelIntroKind,
   isWelcomeSetupSystemMessage,
   mentionsKnownAgent,
 } from "@/features/channels/ui/ChannelPane.helpers";
+import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
 import { usePrepareDmSendChannel } from "@/features/channels/ui/usePrepareDmSendChannel";
@@ -437,90 +435,20 @@ export const ChannelPane = React.memo(function ChannelPane({
     [activeChannel, currentPubkey, profiles],
   );
 
-  const channelIntro = React.useMemo(() => {
-    if (!activeChannel || activeChannel.channelType === "dm") {
-      return null;
-    }
-
-    const actions = [];
-    if (isWelcomeExperience(activeChannel)) {
-      if (onBrowseChannels) {
-        actions.push({
-          icon: <HashSearch aria-hidden className="h-6 w-6" />,
-          label: "Browse channels",
-          onClick: onBrowseChannels,
-          testId: "welcome-intro-action-browse-channels",
-        });
-      }
-      if (onCreateChannel) {
-        actions.push({
-          icon: <Plus aria-hidden className="h-6 w-6" />,
-          label: "Create a channel",
-          onClick: onCreateChannel,
-          testId: "welcome-intro-action-create-channel",
-        });
-      }
-      if (onAddAgent) {
-        actions.push({
-          icon: <Bot aria-hidden className="h-6 w-6" />,
-          label: "Create an agent",
-          onClick: () =>
-            onAddAgent({
-              beforeSend: () =>
-                messageTimelineRef.current?.scrollToBottomOnNextUpdate(),
-            }),
-          testId: "welcome-intro-action-create-agent",
-        });
-      }
-
-      return {
-        actions,
-        channelKindLabel: isWelcomeChannel(activeChannel)
-          ? "private welcome channel"
-          : getChannelIntroKind(activeChannel),
-        channelName: activeChannel.name,
-        description: isWelcomeChannel(activeChannel)
-          ? null
-          : getChannelIntroDescription(activeChannel),
-        icon: <Sparkles aria-hidden className="h-7 w-7" />,
-      };
-    }
-
-    if (!activeChannel.archivedAt && activeChannel.isMember) {
-      if (onAddAgent) {
-        actions.push({
-          description: "Add an agent here.",
-          icon: <Bot aria-hidden className="h-6 w-6" />,
-          label: "Create agent",
-          onClick: onAddAgent,
-          testId: "channel-intro-action-create-agent",
-        });
-      }
-
-      if (onOpenMembers) {
-        actions.push({
-          description: "Invite members.",
-          icon: <UserPlus aria-hidden className="h-6 w-6" />,
-          label: "Add people",
-          onClick: onOpenMembers,
-          testId: "channel-intro-action-add-people",
-        });
-      }
-    }
-
-    return {
-      actions,
-      channelKindLabel: getChannelIntroKind(activeChannel),
-      channelName: activeChannel.name,
-      description: getChannelIntroDescription(activeChannel),
-    };
-  }, [
+  const handleWelcomeAddAgent = React.useCallback(() => {
+    onAddAgent?.({
+      beforeSend: () =>
+        messageTimelineRef.current?.scrollToBottomOnNextUpdate(),
+    });
+  }, [onAddAgent]);
+  const channelIntro = useChannelIntro({
     activeChannel,
     onAddAgent,
     onBrowseChannels,
     onCreateChannel,
     onOpenMembers,
-  ]);
+    onWelcomeAddAgent: onAddAgent ? handleWelcomeAddAgent : undefined,
+  });
   const visibleMessages = React.useMemo(() => {
     if (!isWelcomeExperience(activeChannel)) {
       return messages;
