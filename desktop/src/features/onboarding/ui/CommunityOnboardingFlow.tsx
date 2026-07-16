@@ -7,10 +7,9 @@ import {
   useCommunityOnboarding,
 } from "@/features/onboarding/communityOnboarding";
 import { initializeWelcomeChannel } from "@/features/onboarding/hooks";
+import { useClaimInvite } from "@/features/onboarding/useClaimInvite";
 import { AvatarUpload } from "@/features/profile/ui/AvatarUpload";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
-import { claimInvite } from "@/shared/api/invites";
-import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
 import { updateProfile } from "@/shared/api/tauriProfiles";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas } from "@/shared/api/tauriPersonas";
@@ -50,25 +49,7 @@ export function CommunityOnboardingFlow({
       .catch(() => setStarterPersonas([]));
   }, [transaction?.stage]);
 
-  React.useEffect(() => {
-    // The error guard keeps a failed claim parked on the Retry affordance —
-    // without it the effect refires on the error-bearing transaction and
-    // re-claims in a loop.
-    if (transaction?.stage !== "claiming" || transaction.error || isPending)
-      return;
-    setIsPending(true);
-    void getIdentity()
-      .then(async (identity) => {
-        await claimInvite(transaction.relayUrl, transaction.inviteCode ?? "");
-        update({
-          stage: "connecting",
-          error: undefined,
-          claimedPubkey: identity.pubkey,
-        });
-      })
-      .catch((error: unknown) => update({ error: inviteErrorMessage(error) }))
-      .finally(() => setIsPending(false));
-  }, [isPending, transaction, update]);
+  useClaimInvite();
 
   React.useEffect(() => {
     if (transaction?.stage !== "connecting") return;

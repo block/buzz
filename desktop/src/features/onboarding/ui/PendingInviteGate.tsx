@@ -1,9 +1,5 @@
-import * as React from "react";
-
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
-import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
-import { claimInvite } from "@/shared/api/invites";
-import { getIdentity } from "@/shared/api/tauriIdentity";
+import { useClaimInvite } from "@/features/onboarding/useClaimInvite";
 import { Button } from "@/shared/ui/button";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 
@@ -28,28 +24,7 @@ import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
  */
 export function PendingInviteGate() {
   const { transaction, update, clear } = useCommunityOnboarding();
-  const [isPending, setIsPending] = React.useState(false);
-
-  React.useEffect(() => {
-    if (transaction?.stage !== "claiming" || transaction.error || isPending) {
-      return;
-    }
-    setIsPending(true);
-    // Record which key signed the claim: this gate runs before the identity
-    // steps behind it are done, so the user can still import a different key.
-    // CommunityOnboardingFlow re-claims after setup if the final key differs.
-    void getIdentity()
-      .then(async (identity) => {
-        await claimInvite(transaction.relayUrl, transaction.inviteCode ?? "");
-        update({
-          stage: "connecting",
-          error: undefined,
-          claimedPubkey: identity.pubkey,
-        });
-      })
-      .catch((error: unknown) => update({ error: inviteErrorMessage(error) }))
-      .finally(() => setIsPending(false));
-  }, [isPending, transaction, update]);
+  useClaimInvite();
 
   if (!transaction) return null;
 
