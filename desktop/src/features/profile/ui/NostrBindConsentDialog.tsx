@@ -89,6 +89,11 @@ function normalizeVerificationCode(value: string): string[] {
     .map((character) => character.trim());
 }
 
+function isNostrBindRequestExpired(payload: NostrBindDeepLinkPayload): boolean {
+  const expiry = new Date(payload.expiresAt).getTime();
+  return Number.isNaN(expiry) || expiry <= Date.now();
+}
+
 function formatError(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -136,7 +141,7 @@ async function returnSignedResponseToBrowser(
   }
 }
 
-function SignedResponseFallback({
+function SignedResponseControls({
   copyFailed,
   copyLabel,
   onCopy,
@@ -231,6 +236,7 @@ export function NostrBindConsentDialog() {
     null,
   );
   const autoSignAttemptRef = React.useRef<string | null>(null);
+  const activeSignAttemptRef = React.useRef<symbol | null>(null);
   const systemColorScheme = useSystemColorScheme();
   const shouldReduceMotion = useReducedMotion();
   const enteredVerificationCode = verificationCode.join("");
@@ -276,8 +282,10 @@ export function NostrBindConsentDialog() {
     const unlistenPromise = listenForNostrBindDeepLinks((nextPayload) => {
       clearCopiedState();
       autoSignAttemptRef.current = null;
+      activeSignAttemptRef.current = null;
       setPayload(nextPayload);
       setIdentity(null);
+      setIsSigning(false);
       setSignedResponse(null);
       setVerificationCode(createEmptyVerificationCode());
       setHasCodeMismatch(false);
@@ -298,17 +306,12 @@ export function NostrBindConsentDialog() {
     };
   }, [clearCopiedState, isPreview]);
 
-  const isExpired = React.useMemo(() => {
-    if (!payload) {
-      return false;
-    }
-    const expiry = new Date(payload.expiresAt).getTime();
-    return Number.isNaN(expiry) || expiry <= Date.now();
-  }, [payload]);
+  const isExpired = payload !== null && isNostrBindRequestExpired(payload);
 
   const resetDialog = React.useCallback(() => {
     clearCopiedState();
     autoSignAttemptRef.current = null;
+    activeSignAttemptRef.current = null;
     setPayload(null);
     setSignedResponse(null);
     setVerificationCode(createEmptyVerificationCode());
@@ -507,10 +510,10 @@ export function NostrBindConsentDialog() {
   );
 
   const handleSign = React.useCallback(async () => {
-    if (!payload) {
+    if (activeSignAttemptRef.current || !payload) {
       return;
     }
-    if (isExpired) {
+    if (isNostrBindRequestExpired(payload)) {
       setError(EXPIRED_LINK_MESSAGE);
       return;
     }
@@ -525,6 +528,8 @@ export function NostrBindConsentDialog() {
       return;
     }
 
+    const attempt = Symbol("nostr-bind-sign");
+    activeSignAttemptRef.current = attempt;
     setIsSigning(true);
     clearCopiedState();
     setError(null);
@@ -539,24 +544,35 @@ export function NostrBindConsentDialog() {
             origin: payload.origin,
             expiresAt: payload.expiresAt,
           });
+      if (activeSignAttemptRef.current !== attempt) {
+        return;
+      }
+
       setSignedResponse(signed);
       if (payload.returnMode === "browser_fragment_v1" && payload.callbackUrl) {
         const callbackError = await returnSignedResponseToBrowser(
           payload.callbackUrl,
           signed,
         );
+        if (activeSignAttemptRef.current !== attempt) {
+          return;
+        }
         setError(callbackError);
         setIsManualFallbackOpen(callbackError !== null);
       }
     } catch (error) {
-      setError(formatError(error) || "Failed to sign binding response.");
+      if (activeSignAttemptRef.current === attempt) {
+        setError(formatError(error) || "Failed to sign binding response.");
+      }
     } finally {
-      setIsSigning(false);
+      if (activeSignAttemptRef.current === attempt) {
+        activeSignAttemptRef.current = null;
+        setIsSigning(false);
+      }
     }
   }, [
     clearCopiedState,
     enteredVerificationCode,
-    isExpired,
     isPreview,
     isVerificationCodeComplete,
     isVerificationCodeValid,
@@ -685,7 +701,7 @@ export function NostrBindConsentDialog() {
                         <p className="text-sm leading-6 text-muted-foreground">
                           Copy this response and paste it into the pairing page.
                         </p>
-                        <SignedResponseFallback
+                        <SignedResponseControls
                           copyFailed={copyFailed}
                           copyLabel={finishCopyButtonLabel}
                           onCopy={handleCopyAgain}
@@ -695,7 +711,7 @@ export function NostrBindConsentDialog() {
                     </details>
                   ) : (
                     <div className="mt-10 w-full">
-                      <SignedResponseFallback
+                      <SignedResponseControls
                         copyFailed={copyFailed}
                         copyLabel={finishCopyButtonLabel}
                         onCopy={handleCopyAgain}

@@ -28,22 +28,7 @@ const VALID_REQUEST: NostrBindPayload = {
   version: "1",
 };
 
-async function openNostrBind(
-  page: Page,
-  payload: NostrBindPayload = VALID_REQUEST,
-  mock?: Parameters<typeof installMockBridge>[1],
-) {
-  await installMockBridge(page, mock);
-  await page.goto("/");
-  await page.waitForFunction(
-    () =>
-      typeof (
-        window as Window & {
-          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
-        }
-      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function",
-  );
-
+async function emitNostrBind(page: Page, payload: NostrBindPayload) {
   await page.evaluate(async (nextPayload) => {
     const internals = (
       window as Window & {
@@ -63,7 +48,24 @@ async function openNostrBind(
       payload: nextPayload,
     });
   }, payload);
+}
 
+async function openNostrBind(
+  page: Page,
+  payload: NostrBindPayload = VALID_REQUEST,
+  mock?: Parameters<typeof installMockBridge>[1],
+) {
+  await installMockBridge(page, mock);
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function",
+  );
+  await emitNostrBind(page, payload);
   await expect(page.getByTestId("nostr-bind-page")).toBeVisible();
 }
 
@@ -191,6 +193,36 @@ test("auto-signs exactly once when the sixth correct digit is typed", async ({
   await expect.poll(() => signCommandPayloads(page)).toHaveLength(1);
   await page.waitForTimeout(100);
   await expect.poll(() => signCommandPayloads(page)).toHaveLength(1);
+});
+
+test("discards a signature when a newer pairing request arrives", async ({
+  page,
+}) => {
+  await openNostrBind(page, VALID_REQUEST, { nostrBindSignDelayMs: 150 });
+  await pasteCode(
+    page.getByTestId("nostr-bind-code-digit-1"),
+    VALID_REQUEST.verificationCode,
+  );
+  await expect.poll(() => signCommandPayloads(page)).toHaveLength(1);
+
+  const nextRequest = {
+    ...VALID_REQUEST,
+    challengeId: "550e8400-e29b-41d4-a716-446655440001",
+    verificationCode: "654321",
+  };
+  await emitNostrBind(page, nextRequest);
+
+  await expect(page.getByTestId("nostr-bind-code-digit-1")).toHaveValue("");
+  await page.waitForTimeout(200);
+  await expect(page.getByTestId("nostr-bind-code-step")).toBeVisible();
+  await expect(page.getByTestId("nostr-bind-finish-step")).toBeHidden();
+
+  await pasteCode(
+    page.getByTestId("nostr-bind-code-digit-1"),
+    nextRequest.verificationCode,
+  );
+  await expect(page.getByTestId("nostr-bind-finish-step")).toBeVisible();
+  await expect.poll(() => signCommandPayloads(page)).toHaveLength(2);
 });
 
 test("repeats mismatch feedback without signing", async ({ page }) => {

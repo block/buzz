@@ -189,6 +189,8 @@ type E2eConfig = {
     autoUpdateSupported?: boolean;
     /** Reject `plugin:opener|open_url` to exercise browser-return fallback UI. */
     openerError?: string;
+    /** Delay binding signatures so specs can exercise request supersession. */
+    nostrBindSignDelayMs?: number;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -8570,6 +8572,10 @@ export function maybeInstallE2eTauriMocks() {
           origin: string;
           verificationCode: string;
         };
+        const signDelayMs = activeConfig?.mock?.nostrBindSignDelayMs ?? 0;
+        if (signDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, signDelayMs));
+        }
         const activeIdentity = identity ?? DEFAULT_MOCK_IDENTITY;
         return JSON.stringify({
           id: "e2e-signed-nostr-binding",

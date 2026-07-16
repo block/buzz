@@ -206,6 +206,8 @@ type MockBridgeOptions = {
   autoUpdateSupported?: boolean;
   /** Reject browser opener calls to exercise manual pairing fallback UI. */
   openerError?: string;
+  /** Delay binding signatures so specs can exercise request supersession. */
+  nostrBindSignDelayMs?: number;
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
