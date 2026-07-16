@@ -60,10 +60,11 @@ import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionH
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 
-type MessageComposerAudienceContext =
-  | { type: "timeline" }
-  | { type: "thread"; threadRootId: string };
-
+type MessageComposerAudienceContext = {
+  type: "thread";
+  threadRootId: string;
+  initialAgentPubkeys?: readonly string[];
+};
 type MessageComposerProps = {
   audienceContext?: MessageComposerAudienceContext | null;
   channelId?: string | null;
@@ -198,10 +199,9 @@ function MessageComposerImpl({
   const identityQuery = useIdentityQuery();
   const effectiveDraftKey = draftKey ?? channelId;
   const ownerPubkey = identityQuery.data?.pubkey ?? null;
-  const audienceThreadRootId =
-    audienceContext?.type === "thread" ? audienceContext.threadRootId : null;
+  const audienceThreadRootId = audienceContext?.threadRootId ?? null;
   const audienceScope =
-    audienceContext && channelId && ownerPubkey
+    audienceThreadRootId && channelId && ownerPubkey
       ? getPersistentAgentAudienceScope({
           ownerPubkey,
           channelId,
@@ -364,6 +364,7 @@ function MessageComposerImpl({
   const persistentMentionHydration = usePersistentAgentMentionHydration({
     audienceScope,
     hydrationKey: effectiveDraftKey,
+    initialAgentPubkeys: audienceContext?.initialAgentPubkeys,
     isEditing: editTarget != null,
     mentions,
     richText,

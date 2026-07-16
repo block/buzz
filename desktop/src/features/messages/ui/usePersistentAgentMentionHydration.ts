@@ -7,12 +7,14 @@ import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTex
 export function usePersistentAgentMentionHydration({
   audienceScope,
   hydrationKey,
+  initialAgentPubkeys,
   isEditing,
   mentions,
   richText,
 }: {
   audienceScope: string | null;
   hydrationKey: string | null | undefined;
+  initialAgentPubkeys?: readonly string[];
   isEditing: boolean;
   mentions: UseMentionsResult;
   richText: UseRichTextEditorResult;
@@ -24,8 +26,13 @@ export function usePersistentAgentMentionHydration({
   scopeRef.current = audienceScope;
   const isEditingRef = React.useRef(isEditing);
   isEditingRef.current = isEditing;
+  React.useEffect(() => {
+    if (!audienceScope || !initialAgentPubkeys) return;
+    audience.initialize(initialAgentPubkeys);
+  }, [audience.initialize, audienceScope, initialAgentPubkeys]);
   const isRestoringRef = React.useRef(false);
   const isSubmittingRef = React.useRef(false);
+  const cancelHydrationAutocompleteRef = React.useRef(false);
   const hydratedRef = React.useRef(false);
 
   const hydrate = React.useCallback(() => {
@@ -69,6 +76,7 @@ export function usePersistentAgentMentionHydration({
         replaceFromOffset: prefixLength,
         replaceToOffset: prefixLength,
       });
+      cancelHydrationAutocompleteRef.current = true;
       richText.replacePlainTextRange(
         edit.replaceFromOffset,
         edit.replaceToOffset,
@@ -78,6 +86,12 @@ export function usePersistentAgentMentionHydration({
     }
     hydratedRef.current = scopeRef.current === capturedScope;
     isRestoringRef.current = false;
+    if (cancelHydrationAutocompleteRef.current) {
+      cancelHydrationAutocompleteRef.current = false;
+      // Hydration is a programmatic transition, not an authored query. Cancel
+      // only when its editor updates actually scheduled autocomplete work.
+      mentions.cancelMentionAutocomplete();
+    }
   }, [audience.enabled, audience.pubkeys, audienceScope, mentions, richText]);
 
   const reconcile = React.useCallback(
@@ -97,9 +111,15 @@ export function usePersistentAgentMentionHydration({
     [mentions.extractMentionPubkeys],
   );
 
+  const hydrateRef = React.useRef(hydrate);
+  hydrateRef.current = hydrate;
   const scheduleHydration = React.useCallback(
-    () => requestAnimationFrame(hydrate),
-    [hydrate],
+    (cancelAutocomplete = false) =>
+      requestAnimationFrame(() => {
+        hydrateRef.current();
+        if (cancelAutocomplete) mentions.cancelMentionAutocomplete();
+      }),
+    [mentions.cancelMentionAutocomplete],
   );
   React.useEffect(() => {
     void hydrationKey;
@@ -146,7 +166,7 @@ export function usePersistentAgentMentionHydration({
     },
     endSubmit: () => {
       isSubmittingRef.current = false;
-      scheduleHydration();
+      scheduleHydration(true);
     },
     reconcile,
     resolvePostSendContent,

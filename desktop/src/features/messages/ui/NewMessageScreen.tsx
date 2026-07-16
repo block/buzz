@@ -594,7 +594,6 @@ export function NewMessageScreen() {
       ) : null}
 
       <MessageComposer
-        audienceContext={{ type: "timeline" }}
         channelName="new message"
         channelType="dm"
         containerClassName="px-5"

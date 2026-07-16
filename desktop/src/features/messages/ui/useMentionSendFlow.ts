@@ -91,7 +91,10 @@ type UseMentionSendFlowOptions = {
       } | null,
     ) => Promise<void>
   >;
-  richText: Pick<UseRichTextEditorResult, "clearContent" | "setContent">;
+  richText: Pick<
+    UseRichTextEditorResult,
+    "clearContent" | "setContent" | "setContentAndFocusEnd"
+  >;
   setContent: (content: string) => void;
   setIsEmojiPickerOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setPendingImeta: (pendingImeta: ImetaMedia[]) => void;
@@ -390,8 +393,10 @@ export function useMentionSendFlow({
       setNonMemberPromptError(null);
       setContent(postSendContent);
       contentRef.current = postSendContent;
-      if (postSendContent) richText.setContent(postSendContent);
-      else richText.clearContent();
+      if (postSendContent) {
+        richText.setContentAndFocusEnd(postSendContent);
+        mentions.cancelMentionAutocomplete();
+      } else richText.clearContent();
       setPendingImeta([]);
       setSpoileredAttachmentUrls?.(new Set());
       if (!postSendContent) mentions.clearMentions();
@@ -403,9 +408,10 @@ export function useMentionSendFlow({
       channelLinks.clearChannels,
       contentRef,
       emojiAutocomplete.clearEmojis,
+      mentions.cancelMentionAutocomplete,
       mentions.clearMentions,
       richText.clearContent,
-      richText.setContent,
+      richText.setContentAndFocusEnd,
       setContent,
       setIsEmojiPickerOpen,
       setPendingImeta,

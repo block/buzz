@@ -613,6 +613,21 @@ export function useRichTextEditor({
     [editor],
   );
 
+  const setContentAndFocusEnd = React.useCallback(
+    (markdown: string) => {
+      if (!editor) return;
+      // The caller already synchronizes composer state. Keep this programmatic
+      // restoration out of user-edit observers (autocomplete/reconciliation),
+      // then move selection in the same command chain.
+      editor
+        .chain()
+        .setContent(markdown, { emitUpdate: false })
+        .focus("end")
+        .run();
+    },
+    [editor],
+  );
+
   const focusEnd = React.useCallback(() => {
     editor?.commands.focus("end");
   }, [editor]);
@@ -806,6 +821,7 @@ export function useRichTextEditor({
     isEmpty,
     clearContent,
     setContent,
+    setContentAndFocusEnd,
     focus,
     focusEnd,
     focusPreserve,

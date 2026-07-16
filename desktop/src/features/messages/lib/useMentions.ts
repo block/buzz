@@ -768,20 +768,20 @@ export function useMentions(
       managedAgentPubkeys.has(normalizePubkey(pubkey)),
     [managedAgentPubkeys],
   );
-
+  const autocompleteGenerationRef = React.useRef(0);
   const updateMentionQuery = React.useCallback(
     (value: string, cursorPosition: number) => {
-      // Stash the latest values so the debounced callback always uses fresh data.
+      const generation = ++autocompleteGenerationRef.current;
       latestValueRef.current = value;
       latestCursorRef.current = cursorPosition;
 
-      // Clear any previously scheduled detection.
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
       }
 
       debounceTimerRef.current = setTimeout(() => {
         debounceTimerRef.current = null;
+        if (generation !== autocompleteGenerationRef.current) return;
 
         const mention = detectPrefixQuery(
           "@",
@@ -866,18 +866,24 @@ export function useMentions(
     [activePersonaById],
   );
 
-  const clearMentions = React.useCallback(() => {
+  const cancelMentionAutocomplete = React.useCallback(() => {
+    autocompleteGenerationRef.current += 1;
     if (debounceTimerRef.current !== null) {
       clearTimeout(debounceTimerRef.current);
       debounceTimerRef.current = null;
     }
+    flushedMentionStartIndexRef.current = null;
+    setMentionQuery(null);
+    setMentionSelectedIndex(0);
+  }, []);
+
+  const clearMentions = React.useCallback(() => {
+    cancelMentionAutocomplete();
     mentionMapRef.current.clear();
     personaMentionMapRef.current.clear();
     setSelectedMentionNames([]);
     setSelectedAgentMentionNames([]);
-    setMentionQuery(null);
-    setMentionSelectedIndex(0);
-  }, []);
+  }, [cancelMentionAutocomplete]);
 
   const handleMentionKeyDown = React.useCallback(
     (
@@ -965,6 +971,7 @@ export function useMentions(
   );
 
   return {
+    cancelMentionAutocomplete,
     clearMentions,
     extractMentionPersonas,
     extractMentionPubkeys,

@@ -1,6 +1,10 @@
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
+import { hasMention } from "@/features/messages/lib/hasMention";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import {
   buildThreadSummaryFromVisibleEntries,
   hasNestedThreadBranches,
@@ -596,6 +600,37 @@ export function MessageThreadPanel({
       targetMessageId: scrollTargetId,
     });
 
+  const knownAgentPubkeys = useKnownAgentPubkeys();
+  const initialAgentPubkeys = React.useMemo(() => {
+    if (
+      !threadHead ||
+      !currentPubkey ||
+      normalizePubkey(threadHead.signerPubkey ?? threadHead.pubkey ?? "") !==
+        normalizePubkey(currentPubkey)
+    ) {
+      return [];
+    }
+    const { mentionPubkeysByName } = resolveMentionProps(
+      threadHead.tags,
+      profiles,
+    );
+    if (!mentionPubkeysByName) return [];
+
+    const ordered: string[] = [];
+    for (const [name, pubkey] of Object.entries(mentionPubkeysByName)) {
+      const normalized = normalizePubkey(pubkey);
+      if (
+        hasMention(threadHead.body, name) &&
+        (knownAgentPubkeys.has(normalized) ||
+          profiles?.[normalized]?.isAgent === true) &&
+        !ordered.includes(normalized)
+      ) {
+        ordered.push(normalized);
+      }
+    }
+    return ordered;
+  }, [currentPubkey, knownAgentPubkeys, profiles, threadHead]);
+
   if (!threadHead) {
     return null;
   }
@@ -884,6 +919,7 @@ export function MessageThreadPanel({
             audienceContext={{
               type: "thread",
               threadRootId: threadHead.id,
+              initialAgentPubkeys,
             }}
             channelId={channelId}
             channelName={channelName}
