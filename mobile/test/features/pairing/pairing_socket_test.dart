@@ -93,7 +93,10 @@ void main() {
         webSocket.add(jsonEncode(['AUTH', 'challenge']));
       });
       addTearDown(server.close);
-      final socket = _socket(server.url);
+      final socket = _socket(
+        server.url,
+        authResponseTimeout: const Duration(milliseconds: 100),
+      );
       addTearDown(socket.disconnect);
 
       await expectLater(socket.connect(), throwsA(isA<PairingAuthException>()));
@@ -106,13 +109,14 @@ void main() {
 PairingSocket _socket(
   String url, {
   Duration authChallengeTimeout = const Duration(milliseconds: 500),
+  Duration authResponseTimeout = const Duration(seconds: 10),
 }) => PairingSocket(
   wsUrl: url,
   ephemeralPrivkey: _privateKey,
   onMessage: (_) {},
   onDisconnected: (_) {},
   authChallengeTimeout: authChallengeTimeout,
-  authResponseTimeout: const Duration(milliseconds: 100),
+  authResponseTimeout: authResponseTimeout,
 );
 
 class _TestRelay {

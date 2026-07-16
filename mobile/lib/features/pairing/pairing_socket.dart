@@ -53,12 +53,8 @@ class PairingSocket {
 
   /// Connect and answer a NIP-42 challenge when the relay requires one.
   Future<void> connect() async {
-    try {
-      _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
-      await _channel!.ready;
-    } catch (_) {
-      rethrow;
-    }
+    _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
+    await _channel!.ready;
 
     _authCompleter = Completer<void>();
 
