@@ -387,9 +387,6 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     hasConfiguredCommunity: activeCommunity !== null,
     isSharedIdentity: sharedIdentity,
   });
-  const [dismissedInviteId, setDismissedInviteId] = useState<string | null>(
-    null,
-  );
 
   // Deep links are captured here — above the machine-onboarding gate — not in
   // CommunityApp. The Rust side queues them; draining into the persisted
@@ -413,17 +410,15 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     return <CommunityApp sharedIdentity={sharedIdentity} />;
   }
 
-  // A deep-link invite that arrived before machine onboarding finished:
-  // overlay an acknowledgment above the identity steps. The claim itself
-  // runs in CommunityOnboardingFlow once machine onboarding completes.
+  // An invite deep link that arrived before machine onboarding finished:
+  // overlay the "Opening your invite" loader above the identity steps while
+  // the invite is confirmed against its relay. On success the transaction
+  // advances past `claiming` and the overlay auto-dismisses back into setup;
+  // the remaining join steps run in CommunityOnboardingFlow afterwards.
   const transaction = communityOnboarding.transaction;
-  const pendingInvite =
-    transaction &&
-    (transaction.source === "deep-link-join" ||
-      transaction.source === "deep-link-connect") &&
-    transaction.id !== dismissedInviteId
-      ? transaction
-      : null;
+  const isConfirmingInvite =
+    transaction?.source === "deep-link-join" &&
+    transaction.stage === "claiming";
 
   return (
     <>
@@ -432,13 +427,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
         identityLost={machine.identityLost}
         queryClient={machine.queryClient}
       />
-      {pendingInvite ? (
-        <PendingInviteGate
-          communityName={pendingInvite.communityName}
-          hasInviteCode={Boolean(pendingInvite.inviteCode)}
-          onContinue={() => setDismissedInviteId(pendingInvite.id)}
-        />
-      ) : null}
+      {isConfirmingInvite ? <PendingInviteGate /> : null}
     </>
   );
 }

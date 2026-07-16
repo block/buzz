@@ -2,44 +2,61 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-// Pending-invite acknowledgment for deep links that arrive before machine
-// onboarding completes. The Rust side queues buzz://join / buzz://connect
-// links; the frontend drains them into a persisted community-onboarding
-// transaction the moment the app boots — even while the identity steps are
-// still on screen — and overlays the PendingInviteGate so the link visibly
-// reacts instead of silently waiting behind "Welcome to Buzz".
+// Invite deep links that arrive before machine onboarding completes. The
+// Rust side queues buzz://join links; the frontend drains them into a
+// persisted community-onboarding transaction the moment the app boots and
+// overlays the PendingInviteGate: a loading state that confirms the invite
+// against its relay right away, then auto-dismisses back into the identity
+// steps. The remaining join (add community, profile) resumes after setup.
 
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const TRANSACTION_STORAGE_KEY = "buzz-community-onboarding-transaction.v1";
 
-test("join deep link during machine onboarding shows the pending-invite gate", async ({
+const PENDING_JOIN_LINK = {
+  id: "dl-join-1",
+  kind: "join" as const,
+  relayUrl: "wss://hive.example.com",
+  code: "abc.def",
+};
+
+test("join deep link shows the invite loader and auto-advances into setup", async ({
   page,
 }) => {
+  await page.route("**/api/invites/claim", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: "joined",
+        community_id: "demo-community",
+        host: "hive.example.com",
+        role: "member",
+      }),
+    });
+  });
   await installMockBridge(
     page,
-    {
-      pendingCommunityDeepLinks: [
-        {
-          id: "dl-join-1",
-          kind: "join",
-          relayUrl: "wss://hive.example.com",
-          code: "abc.def",
-        },
-      ],
-    },
+    { pendingCommunityDeepLinks: [PENDING_JOIN_LINK] },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
 
-  // The invite is acknowledged on screen while machine onboarding is pending.
+  // The loader appears while the claim is in flight.
   const gate = page.getByTestId("pending-invite-gate");
   await expect(gate).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Opening your invite" }),
   ).toBeVisible();
-  await expect(gate).toContainText("You've been invited to join hive.");
+  await expect(gate).toContainText("Connecting to hive to confirm your invite");
 
-  // The drain persisted the invite, so it survives a relaunch mid-onboarding.
+  // On success it auto-dismisses into the identity steps — no click needed.
+  await expect(gate).toHaveCount(0);
+  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
+
+  // The confirmed invite is persisted past the claim, so the join resumes
+  // after setup (and survives a relaunch in between).
   await expect
     .poll(() =>
       page.evaluate(
@@ -47,39 +64,43 @@ test("join deep link during machine onboarding shows the pending-invite gate", a
         TRANSACTION_STORAGE_KEY,
       ),
     )
-    .toContain("deep-link-join");
-
-  // Continue returns to the identity steps; the claim runs after setup.
-  await page.getByTestId("pending-invite-continue").click();
-  await expect(gate).toHaveCount(0);
-  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
+    .toContain('"stage":"connecting"');
 });
 
-test("connect deep link during machine onboarding shows the community-link gate", async ({
+test("failed invite confirmation offers Retry and Cancel returns to setup", async ({
   page,
 }) => {
+  await page.route("**/api/invites/claim", (route) =>
+    route.fulfill({
+      status: 410,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "invite_expired" }),
+    }),
+  );
   await installMockBridge(
     page,
-    {
-      pendingCommunityDeepLinks: [
-        {
-          id: "dl-connect-1",
-          kind: "connect",
-          relayUrl: "wss://hive.example.com",
-        },
-      ],
-    },
+    { pendingCommunityDeepLinks: [PENDING_JOIN_LINK] },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
 
   const gate = page.getByTestId("pending-invite-gate");
   await expect(gate).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Opening community link" }),
-  ).toBeVisible();
-  await expect(gate).toContainText("You're connecting to hive.");
+  await expect(gate).toContainText("invite_expired");
+  await expect(page.getByTestId("pending-invite-retry")).toBeVisible();
+
+  // Cancel abandons the invite and drops back to the identity steps.
+  await page.getByTestId("pending-invite-cancel").click();
+  await expect(gate).toHaveCount(0);
+  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        TRANSACTION_STORAGE_KEY,
+      ),
+    )
+    .toBeNull();
 });
 
 test("persisted deep-link invite hands off to Joining after machine onboarding", async ({

@@ -51,7 +51,11 @@ export function CommunityOnboardingFlow({
   }, [transaction?.stage]);
 
   React.useEffect(() => {
-    if (transaction?.stage !== "claiming" || isPending) return;
+    // The error guard keeps a failed claim parked on the Retry affordance —
+    // without it the effect refires on the error-bearing transaction and
+    // re-claims in a loop.
+    if (transaction?.stage !== "claiming" || transaction.error || isPending)
+      return;
     setIsPending(true);
     void claimInvite(transaction.relayUrl, transaction.inviteCode ?? "")
       .then(() => update({ stage: "connecting", error: undefined }))
