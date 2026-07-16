@@ -6,7 +6,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'deep_link.dart';
 
-/// Holds the most recent `buzz://message` deep link that has not been
+/// Holds the most recent supported deep link that has not been
 /// dispatched yet.
 ///
 /// Listens to [AppLinks.uriLinkStream], which delivers both the cold-start
@@ -14,14 +14,14 @@ import 'deep_link.dart';
 /// Navigation cannot always happen the moment a link arrives — the user may
 /// not be authenticated yet, or channels may still be loading — so the parsed
 /// link is parked here and consumed by the dispatcher once the app is ready.
-class PendingDeepLinkNotifier extends Notifier<MessageDeepLink?> {
+class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
   @visibleForTesting
   static Stream<Uri>? debugUriStreamOverride;
 
   StreamSubscription<Uri>? _subscription;
 
   @override
-  MessageDeepLink? build() {
+  BuzzDeepLink? build() {
     final stream = debugUriStreamOverride ?? AppLinks().uriLinkStream;
     _subscription = stream.listen(handleUri);
     ref.onDispose(() {
@@ -34,7 +34,7 @@ class PendingDeepLinkNotifier extends Notifier<MessageDeepLink?> {
   /// Parse and park an incoming URI. Unsupported links are ignored loudly.
   @visibleForTesting
   void handleUri(Uri uri) {
-    final link = parseMessageDeepLink(uri);
+    final link = parseBuzzDeepLink(uri);
     if (link == null) {
       debugPrint('deep-link: ignoring unsupported link: $uri');
       return;
@@ -47,6 +47,6 @@ class PendingDeepLinkNotifier extends Notifier<MessageDeepLink?> {
 }
 
 final pendingDeepLinkProvider =
-    NotifierProvider<PendingDeepLinkNotifier, MessageDeepLink?>(
+    NotifierProvider<PendingDeepLinkNotifier, BuzzDeepLink?>(
       PendingDeepLinkNotifier.new,
     );

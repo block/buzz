@@ -14,7 +14,7 @@ const DOWNLOAD_URL = "https://github.com/block/buzz/releases/latest";
  */
 export function InvitePage({ code }: { code: string }) {
   const relay = relayWsUrl();
-  const host = relay.replace(/^wss?:\/\//, "");
+  const host = new URL(relay).host;
   const deepLink = `buzz://join?relay=${encodeURIComponent(relay)}&code=${encodeURIComponent(code)}`;
 
   return (

@@ -63,10 +63,10 @@ final _channel = Channel(
 class _FakePendingDeepLinkNotifier extends PendingDeepLinkNotifier {
   _FakePendingDeepLinkNotifier(this.link);
 
-  final MessageDeepLink link;
+  final BuzzDeepLink link;
 
   @override
-  MessageDeepLink? build() => link;
+  BuzzDeepLink? build() => link;
 }
 
 class _FakeChannelsNotifier extends ChannelsNotifier {

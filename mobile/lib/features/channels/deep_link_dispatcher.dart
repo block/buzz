@@ -3,6 +3,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
+import '../invites/invite_join_provider.dart';
+import '../invites/invite_join_sheet.dart';
 import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channels_provider.dart';
@@ -44,7 +46,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   @override
   Widget build(BuildContext context) {
     // Re-evaluate dispatch when either a new link arrives or channels load.
-    ref.listen<MessageDeepLink?>(pendingDeepLinkProvider, (_, link) {
+    ref.listen<BuzzDeepLink?>(pendingDeepLinkProvider, (_, link) {
       _maybeDispatch(link);
     });
     ref.listen<AsyncValue<List<Channel>>>(channelsProvider, (_, _) {
@@ -54,8 +56,13 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     return widget.child;
   }
 
-  void _maybeDispatch(MessageDeepLink? link) {
+  void _maybeDispatch(BuzzDeepLink? link) {
     if (link == null) return;
+    if (link is InviteDeepLink) {
+      _maybeDispatchInvite(link);
+      return;
+    }
+    if (link is! MessageDeepLink) return;
 
     final channels = ref.read(channelsProvider).asData?.value;
     // Channels not loaded yet — keep the link parked; the channelsProvider
@@ -91,5 +98,23 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
             ),
       ),
     );
+  }
+
+  void _maybeDispatchInvite(InviteDeepLink link) {
+    ref.read(pendingDeepLinkProvider.notifier).consume();
+    final navigatorContext = context;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    Future.microtask(() async {
+      await ref.read(inviteJoinProvider.notifier).prepare(link);
+      if (!navigatorContext.mounted) return;
+      final status = ref.read(inviteJoinProvider).status;
+      if (status == InviteJoinStatus.confirming) {
+        showInviteJoinSheet(navigatorContext, ref);
+      } else if (status == InviteJoinStatus.switchedExisting) {
+        messenger?.showSnackBar(
+          const SnackBar(content: Text('Switched to this community')),
+        );
+      }
+    });
   }
 }

@@ -1,4 +1,5 @@
 import { Check, Copy, Link2 } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -155,11 +156,34 @@ export function InviteLinkSection() {
           </div>
         ) : null}
       </div>
-      <p className="text-xs text-muted-foreground">
-        {invite
-          ? `Anyone with this link can join as a member until ${formatExpiry(invite.expiresAt)}.`
-          : "Create a shareable link that lets anyone join this relay as a member until it expires."}
-      </p>
+      {invite ? (
+        <div className="flex flex-col gap-3 rounded-md border border-border/70 bg-background/70 p-3 sm:flex-row sm:items-center">
+          <div className="shrink-0 self-center rounded-md bg-white p-2 text-black">
+            <QRCodeSVG
+              aria-label="Invite QR code"
+              data-testid="invite-link-qr-code"
+              level="M"
+              size={128}
+              value={invite.url}
+            />
+          </div>
+          <div className="space-y-1 text-xs text-muted-foreground">
+            <p>
+              Scan this QR code or share the link above to invite someone to
+              this relay.
+            </p>
+            <p>
+              Anyone with this link or QR code can join as a member until{" "}
+              {formatExpiry(invite.expiresAt)}.
+            </p>
+          </div>
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Create a shareable link that lets anyone join this relay as a member
+          until it expires.
+        </p>
+      )}
     </div>
   );
 }
