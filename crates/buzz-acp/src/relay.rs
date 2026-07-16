@@ -2749,11 +2749,16 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
 ///   mid-handshake) and `ResetWithoutClosingHandshake` (abrupt reset).
 /// - `WebSocket(Http(resp))` — non-101 HTTP response; terminal unless the
 ///   status is `408`, `429`, or `5xx` (server-side transient conditions).
+/// - `WebSocket(Tls)` — deterministic TLS validation/config failures
+///   (`InvalidDnsName`, invalid/expired certificates). On our rustls build
+///   the only connect-time `Tls` is deterministic; transport-level TLS loss
+///   surfaces as `Io` (transient).
 /// - `AuthFailed` — split by [`is_terminal_auth_failure`].
 ///
 /// **Transient (retry):**
 /// - `WebSocket(Io)`, `WebSocket(ConnectionClosed)` — link-level failures.
-/// - `WebSocket(Tls)` — TLS resets on a bad link are plausible.
+///   TLS transport loss also surfaces here: on our rustls build,
+///   `tokio-tungstenite` maps mid-handshake I/O failures to `Error::Io`.
 /// - `WebSocket(AlreadyClosed)`, `WebSocket(WriteBufferFull)` — unreachable
 ///   during `connect_async`; kept fail-safe transient.
 /// - `NoAuthChallenge`, `ConnectionClosed`, `Timeout` — timing/link noise.
@@ -2796,8 +2801,10 @@ fn is_terminal_ws_error(err: &tokio_tungstenite::tungstenite::Error) -> bool {
         // Link-level / timing failures.
         WsError::Io(_) | WsError::ConnectionClosed => false,
 
-        // TLS resets on a bad link are plausible; don't expand scope.
-        WsError::Tls(_) => false,
+        // Deterministic TLS validation/config failures. On our rustls build
+        // the only connect-time Tls is InvalidDnsName; transport-level TLS
+        // loss surfaces as Io (transient via the arm above).
+        WsError::Tls(_) => true,
 
         // Unreachable during connect_async; kept fail-safe transient.
         WsError::AlreadyClosed | WsError::WriteBufferFull(_) => false,
@@ -3879,7 +3886,7 @@ mod tests {
     #[test]
     fn connect_error_classification_matches_every_relay_error_variant() {
         use tokio_tungstenite::tungstenite::error::{
-            CapacityError, Error as WsError, ProtocolError, SubProtocolError, UrlError,
+            CapacityError, Error as WsError, ProtocolError, SubProtocolError, TlsError, UrlError,
         };
         use tokio_tungstenite::tungstenite::http;
 
@@ -4229,11 +4236,23 @@ mod tests {
                 false,
             ),
             (
-                "WebSocket(Tls): TLS reset on a bad link",
+                "WebSocket(Tls(Rustls(General))): deterministic TLS config error",
                 ws(WsError::Tls(
                     rustls::Error::General("tls handshake failed".into()).into(),
                 )),
-                false,
+                true,
+            ),
+            (
+                "WebSocket(Tls(InvalidDnsName)): invalid DNS name",
+                ws(WsError::Tls(TlsError::InvalidDnsName)),
+                true,
+            ),
+            (
+                "WebSocket(Tls(Rustls(InvalidCertificate(Expired)))): expired certificate",
+                ws(WsError::Tls(
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::Expired).into(),
+                )),
+                true,
             ),
             (
                 "WebSocket(AlreadyClosed): unreachable at connect, fail-safe transient",
