@@ -679,7 +679,7 @@ fn validate_mp4_metadata_free(path: &Path) -> Result<(), MediaError> {
     const EMPTY_FFMPEG_UDTA: &[u8] = &[
         0, 0, 0, 0x35, b'm', b'e', b't', b'a', 0, 0, 0, 0, 0, 0, 0, 0x21, b'h', b'd', b'l', b'r',
         0, 0, 0, 0, 0, 0, 0, 0, b'm', b'd', b'i', b'r', b'a', b'p', b'p', b'l', 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 8, b'i', b'l', b's', b't',
+        0, 0, 0, 0, 0, 0, 8, b'i', b'l', b's', b't',
     ];
     const FORBIDDEN: &[[u8; 4]] = &[
         *b"meta",
@@ -1719,6 +1719,23 @@ mod tests {
             }
             Err(e) => panic!("expected Ok, got {e:?}"),
         }
+    }
+
+    #[test]
+    fn test_accepts_exact_empty_ffmpeg_udta() {
+        let empty_ffmpeg_udta = hex::decode(
+            "000000356d657461000000000000002168646c7200000000000000006d6469726170706c00000000000000000000000008696c7374",
+        )
+        .unwrap();
+        let bytes = [
+            box_wrap(b"ftyp", b"isom\0\0\0\0isom"),
+            box_wrap(b"moov", &box_wrap(b"udta", &empty_ffmpeg_udta)),
+            box_wrap(b"mdat", b""),
+        ]
+        .concat();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), bytes).unwrap();
+        assert!(validate_mp4_metadata_free(tmp.path()).is_ok());
     }
 
     #[test]
