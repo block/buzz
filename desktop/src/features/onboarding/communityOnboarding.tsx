@@ -90,7 +90,7 @@ export function saveCommunityOnboardingTransaction(
   transaction: CommunityOnboardingTransaction,
   storage: Storage = localStorage,
 ): void {
-  if (storage === localStorage) {
+  if (typeof localStorage !== "undefined" && storage === localStorage) {
     setLocalStorageItemWithRecovery(STORAGE_KEY, JSON.stringify(transaction));
   } else {
     storage.setItem(STORAGE_KEY, JSON.stringify(transaction));
