@@ -26,7 +26,11 @@ import {
   useMediaUpload,
 } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
-import { usePersistentAgentAudience } from "@/features/messages/lib/persistentAgentAudience";
+import {
+  getPersistentAgentAudienceScope,
+  usePersistentAgentAudience,
+} from "@/features/messages/lib/persistentAgentAudience";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
   hasMentionClipboardHtml,
@@ -59,7 +63,12 @@ import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 
+type MessageComposerAudienceContext =
+  | { type: "timeline" }
+  | { type: "thread"; threadRootId: string };
+
 type MessageComposerProps = {
+  audienceContext?: MessageComposerAudienceContext | null;
   channelId?: string | null;
   channelName: string;
   channelType?: ChannelType | null;
@@ -139,6 +148,7 @@ type MessageComposerProps = {
 };
 
 function MessageComposerImpl({
+  audienceContext = null,
   channelId = null,
   channelName,
   channelType = null,
@@ -188,9 +198,19 @@ function MessageComposerImpl({
   }, []);
 
   const drafts = useDrafts();
+  const identityQuery = useIdentityQuery();
   const effectiveDraftKey = draftKey ?? channelId;
+  const ownerPubkey = identityQuery.data?.pubkey ?? null;
+  const audienceThreadRootId =
+    audienceContext?.type === "thread" ? audienceContext.threadRootId : null;
   const audienceScope =
-    channelId && effectiveDraftKey ? `${channelId}:${effectiveDraftKey}` : null;
+    audienceContext && channelId && ownerPubkey
+      ? getPersistentAgentAudienceScope({
+          ownerPubkey,
+          channelId,
+          threadRootId: audienceThreadRootId,
+        })
+      : null;
   const persistentAudience = usePersistentAgentAudience(audienceScope);
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
@@ -359,9 +379,17 @@ function MessageComposerImpl({
     setIsEmojiPickerOpen,
     setPendingImeta: media.setPendingImeta,
     setSpoileredAttachmentUrls,
-    onSuccessfulExplicitAgentAudience: persistentAudience.enabled
-      ? persistentAudience.addDraftPubkeys
-      : undefined,
+    onSuccessfulExplicitAgentAudience:
+      persistentAudience.enabled && audienceContext && ownerPubkey
+        ? ({ channelId: successfulChannelId, ...promotion }) => {
+            const scope = getPersistentAgentAudienceScope({
+              ownerPubkey,
+              channelId: successfulChannelId,
+              threadRootId: audienceThreadRootId,
+            });
+            persistentAudience.promotePubkeys({ ...promotion, scope });
+          }
+        : undefined,
   });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger
@@ -639,6 +667,8 @@ function MessageComposerImpl({
         persistentAgentPubkeys: persistentAudience.enabled
           ? persistentAudience.pubkeys
           : [],
+        audienceGeneration: persistentAudience.generation,
+        audienceRevision: audienceScope ? persistentAudience.revision : null,
       });
     } finally {
       onPreparingMentionSendChange?.(false);
@@ -661,8 +691,11 @@ function MessageComposerImpl({
     syncComposerContentFromEditor,
     onCaptureSendContext,
     onPreparingMentionSendChange,
+    audienceScope,
     persistentAudience.enabled,
+    persistentAudience.generation,
     persistentAudience.pubkeys,
+    persistentAudience.revision,
   ]);
   submitMessageRef.current = submitMessage;
 
@@ -964,9 +997,11 @@ function MessageComposerImpl({
               selectedIndex={mentions.mentionSelectedIndex}
               suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
             />
-            {persistentAudience.enabled ? (
+            {persistentAudience.enabled && editTarget == null ? (
               <PersistentAgentAudienceChips
                 getDisplayName={mentions.getMentionDisplayName}
+                onAdd={openMentionPicker}
+                onClear={persistentAudience.clear}
                 onRemove={persistentAudience.removePubkey}
                 pubkeys={persistentAudience.pubkeys}
               />

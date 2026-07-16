@@ -9,133 +9,182 @@ function createStorage() {
   };
 }
 
-test("audiences remain independently scoped and removable", async () => {
+const agentA = "a".repeat(64);
+const agentB = "b".repeat(64);
+const ownerA = "1".repeat(64);
+const ownerB = "2".repeat(64);
+const storageKey = "buzz:persistent-agent-audiences:v2";
+
+async function loadStore(offset = 0) {
   globalThis.window = { localStorage: createStorage() };
-  const store = await import(`./persistentAgentAudience.ts?test=${Date.now()}`);
-  const agentA = "a".repeat(64);
-  const agentB = "b".repeat(64);
+  return import(`./persistentAgentAudience.ts?test=${Date.now() + offset}`);
+}
 
-  store.setPersistentAgentAudience("channel:one", [agentA]);
-  store.setPersistentAgentAudience("thread:root", [agentB]);
-  store.removePersistentAgentAudienceMember("channel:one", agentA);
+function savedAudiences() {
+  return JSON.parse(window.localStorage.getItem(storageKey));
+}
 
-  const saved = JSON.parse(
-    window.localStorage.getItem("buzz:persistent-agent-audiences:v1"),
-  );
-  assert.deepEqual(saved, { "thread:root": [agentB] });
-});
-
-test("adding an explicit agent merges with the active audience", async () => {
-  globalThis.window = { localStorage: createStorage() };
-  const store = await import(
-    `./persistentAgentAudience.ts?test=${Date.now() + 1}`
-  );
-  const agentA = "a".repeat(64);
-  const agentB = "b".repeat(64);
-
-  store.setPersistentAgentAudienceEnabled(true);
-  store.setPersistentAgentAudience("channel:one", [agentA]);
-  store.addPersistentAgentAudienceMembers("channel:one", [agentB]);
-
-  const saved = JSON.parse(
-    window.localStorage.getItem("buzz:persistent-agent-audiences:v1"),
-  );
-  assert.deepEqual(saved, { "channel:one": [agentA, agentB] });
-});
-
-test("draft completion updates its captured scope after navigation", async () => {
-  globalThis.window = { localStorage: createStorage() };
-  const store = await import(
-    `./persistentAgentAudience.ts?test=${Date.now() + 2}`
-  );
-  const originatingAgent = "a".repeat(64);
-  const viewedAgent = "b".repeat(64);
-
-  store.setPersistentAgentAudienceEnabled(true);
-  store.addPersistentAgentAudienceMembersForDraft({
-    capturedChannelId: "originating-channel",
-    explicitAgentPubkeys: [originatingAgent],
-    sentDraftKey: "thread:originating-root",
+test("conversation scopes isolate identities, channels, and threads", async () => {
+  const store = await loadStore();
+  const channelA = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerA,
+    channelId: "channel-a",
   });
-  store.setPersistentAgentAudience(
-    store.getPersistentAgentAudienceScope(
-      "newly-viewed-channel",
-      "thread:newly-viewed-root",
-    ),
-    [viewedAgent],
-  );
-
-  const saved = JSON.parse(
-    window.localStorage.getItem("buzz:persistent-agent-audiences:v1"),
-  );
-  assert.deepEqual(saved, {
-    "originating-channel:thread:originating-root": [originatingAgent],
-    "newly-viewed-channel:thread:newly-viewed-root": [viewedAgent],
+  const channelB = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerA,
+    channelId: "channel-b",
   });
+  const threadA1 = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerA,
+    channelId: "channel-a",
+    threadRootId: "root-1",
+  });
+  const threadA2 = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerA,
+    channelId: "channel-a",
+    threadRootId: "root-2",
+  });
+  const otherIdentity = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerB,
+    channelId: "channel-a",
+  });
+
+  for (const scope of [channelA, channelB, threadA1, threadA2, otherIdentity]) {
+    assert.ok(scope);
+    store.setPersistentAgentAudience(scope, [agentA]);
+  }
+
+  assert.equal(new Set(Object.keys(savedAudiences())).size, 5);
 });
 
-test("completion after disabling cannot repopulate a cleared audience", async () => {
-  globalThis.window = { localStorage: createStorage() };
-  const store = await import(
-    `./persistentAgentAudience.ts?test=${Date.now() + 3}`
-  );
-  const agent = "a".repeat(64);
-
+test("successful fast send promotes without a persisted draft key", async () => {
+  const store = await loadStore(1);
+  const scope = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerA,
+    channelId: "channel-a",
+  });
   store.setPersistentAgentAudienceEnabled(true);
-  store.setPersistentAgentAudience("channel:one", [agent]);
+
+  store.promotePersistentAgentAudience({
+    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
+    scope,
+    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
+    explicitAgentPubkeys: [agentA],
+  });
+
+  assert.deepEqual(savedAudiences(), { [scope]: [agentA] });
+});
+
+test("explicit recipients merge and dedupe after successful send", async () => {
+  const store = await loadStore(2);
+  const scope = `${ownerA}:channel-a:timeline`;
+  store.setPersistentAgentAudienceEnabled(true);
+  store.setPersistentAgentAudience(scope, [agentA]);
+  const revision = store.getPersistentAgentAudienceRevision(scope);
+
+  store.promotePersistentAgentAudience({
+    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
+    scope,
+    expectedRevision: revision,
+    explicitAgentPubkeys: [agentA, agentB],
+  });
+
+  assert.deepEqual(savedAudiences(), { [scope]: [agentA, agentB] });
+});
+
+test("removal while send awaits wins over late success", async () => {
+  const store = await loadStore(3);
+  const scope = `${ownerA}:channel-a:timeline`;
+  store.setPersistentAgentAudienceEnabled(true);
+  store.setPersistentAgentAudience(scope, [agentA]);
+  const revisionAtSubmit = store.getPersistentAgentAudienceRevision(scope);
+
+  store.removePersistentAgentAudienceMember(scope, agentA);
+  store.promotePersistentAgentAudience({
+    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
+    scope,
+    expectedRevision: revisionAtSubmit,
+    explicitAgentPubkeys: [agentA],
+  });
+
+  assert.deepEqual(savedAudiences(), { [scope]: [] });
+});
+
+test("removing final chip preserves an explicit empty scope", async () => {
+  const store = await loadStore(4);
+  const scope = `${ownerA}:channel-a:thread:root`;
+  store.setPersistentAgentAudience(scope, [agentA]);
+  store.removePersistentAgentAudienceMember(scope, agentA);
+
+  assert.deepEqual(savedAudiences(), { [scope]: [] });
+});
+
+test("completion after disabling cannot repopulate audiences", async () => {
+  const store = await loadStore(5);
+  const scope = `${ownerA}:channel-a:timeline`;
+  store.setPersistentAgentAudienceEnabled(true);
+  store.setPersistentAgentAudience(scope, [agentA]);
+  const revisionAtSubmit = store.getPersistentAgentAudienceRevision(scope);
   store.setPersistentAgentAudienceEnabled(false);
-  store.addPersistentAgentAudienceMembersForDraft({
-    capturedChannelId: "channel",
-    explicitAgentPubkeys: [agent],
-    sentDraftKey: "one",
-  });
-  store.setPersistentAgentAudienceEnabled(true);
 
-  assert.deepEqual(
-    JSON.parse(
-      window.localStorage.getItem("buzz:persistent-agent-audiences:v1"),
-    ),
-    {},
-  );
+  store.promotePersistentAgentAudience({
+    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
+    scope,
+    expectedRevision: revisionAtSubmit,
+    explicitAgentPubkeys: [agentB],
+  });
+
+  assert.deepEqual(savedAudiences(), {});
 });
 
-test("invalid, duplicate, and differently-cased pubkeys are normalized", async () => {
-  globalThis.window = { localStorage: createStorage() };
-  const store = await import(
-    `./persistentAgentAudience.ts?test=${Date.now() + 1}`
-  );
-  const agent = "A".repeat(64);
-
-  store.setPersistentAgentAudience("channel:one", [
-    agent,
-    agent.toLowerCase(),
+test("invalid, duplicate, and differently-cased pubkeys normalize", async () => {
+  const store = await loadStore(6);
+  const scope = `${ownerA}:channel-a:timeline`;
+  store.setPersistentAgentAudience(scope, [
+    agentA.toUpperCase(),
+    agentA,
     "bad",
   ]);
 
-  const saved = JSON.parse(
-    window.localStorage.getItem("buzz:persistent-agent-audiences:v1"),
-  );
-  assert.deepEqual(saved, { "channel:one": [agent.toLowerCase()] });
+  assert.deepEqual(savedAudiences(), { [scope]: [agentA] });
 });
 
-test("preference persists and disabling clears stale audiences", async () => {
-  globalThis.window = { localStorage: createStorage() };
-  const store = await import(
-    `./persistentAgentAudience.ts?test=${Date.now() + 2}`
-  );
-
+test("first new-message send resolves its destination after capturing generation", async () => {
+  const store = await loadStore(7);
+  const capturedGeneration = store.getPersistentAgentAudienceGeneration();
   store.setPersistentAgentAudienceEnabled(true);
-  store.setPersistentAgentAudience("channel:one", ["a".repeat(64)]);
-  store.setPersistentAgentAudienceEnabled(false);
+  const scope = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerA,
+    channelId: "resolved-dm",
+  });
 
-  assert.equal(
-    window.localStorage.getItem("buzz:keep-addressed-agents-active"),
-    "0",
-  );
-  assert.deepEqual(
-    JSON.parse(
-      window.localStorage.getItem("buzz:persistent-agent-audiences:v1"),
-    ),
-    {},
-  );
+  store.promotePersistentAgentAudience({
+    expectedGeneration: capturedGeneration,
+    expectedRevision: null,
+    scope,
+    explicitAgentPubkeys: [agentA],
+  });
+
+  assert.deepEqual(savedAudiences(), { [scope]: [agentA] });
+});
+
+test("disable during new-message destination preparation invalidates promotion", async () => {
+  const store = await loadStore(8);
+  store.setPersistentAgentAudienceEnabled(true);
+  const capturedGeneration = store.getPersistentAgentAudienceGeneration();
+  store.setPersistentAgentAudienceEnabled(false);
+  store.setPersistentAgentAudienceEnabled(true);
+  const scope = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerA,
+    channelId: "resolved-dm",
+  });
+
+  store.promotePersistentAgentAudience({
+    expectedGeneration: capturedGeneration,
+    expectedRevision: null,
+    scope,
+    explicitAgentPubkeys: [agentA],
+  });
+
+  assert.deepEqual(savedAudiences(), {});
 });

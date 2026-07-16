@@ -45,6 +45,8 @@ type PendingNonMemberMentionSend = {
   savedImeta: ImetaMedia[];
   savedSpoileredAttachmentUrls: Set<string>;
   sentDraftKey: string | null | undefined;
+  audienceGeneration: number;
+  audienceRevision: number | null;
   /** Agent mentions explicitly authored in this draft (never inferred). */
   explicitAgentPubkeys: string[];
 };
@@ -61,6 +63,8 @@ type SendMessageWithMentionFlowInput = {
   spoileredAttachmentUrls?: ReadonlySet<string>;
   trimmed: string;
   persistentAgentPubkeys?: readonly string[];
+  audienceGeneration?: number;
+  audienceRevision?: number | null;
 };
 
 type UseMentionSendFlowOptions = {
@@ -95,9 +99,10 @@ type UseMentionSendFlowOptions = {
     React.SetStateAction<Set<string>>
   >;
   onSuccessfulExplicitAgentAudience?: (audience: {
-    capturedChannelId: string | null;
+    channelId: string;
+    expectedGeneration: number;
+    expectedRevision: number | null;
     explicitAgentPubkeys: string[];
-    sentDraftKey: string | null | undefined;
   }) => void;
 };
 
@@ -497,13 +502,14 @@ export function useMentionSendFlow({
             draft.capturedThreadContext,
           );
           if (draft.explicitAgentPubkeys.length > 0) {
-            // Promote only agents explicitly authored in this successful send,
-            // into the channel/draft scope captured at submit time. The store
-            // merges them with any audience already active in that scope.
+            // Promote only agents explicitly authored in this successful send
+            // into the conversation scope and revision captured at submit.
+            // A newer audience mutation makes this completion a no-op.
             onSuccessfulExplicitAgentAudience?.({
-              capturedChannelId: draft.capturedChannelId,
+              channelId: sendChannelId ?? draft.capturedChannelId ?? "",
+              expectedGeneration: draft.audienceGeneration,
+              expectedRevision: draft.audienceRevision,
               explicitAgentPubkeys: draft.explicitAgentPubkeys,
-              sentDraftKey: draft.sentDraftKey,
             });
           }
           if (draft.sentDraftKey) {
@@ -618,6 +624,8 @@ export function useMentionSendFlow({
       spoileredAttachmentUrls = new Set(),
       trimmed,
       persistentAgentPubkeys = [],
+      audienceGeneration = 0,
+      audienceRevision = null,
     }: SendMessageWithMentionFlowInput) => {
       if (isMentionSendPendingRef.current) {
         return;
@@ -721,6 +729,8 @@ export function useMentionSendFlow({
           savedImeta: [...pendingImeta],
           savedSpoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
           sentDraftKey,
+          audienceGeneration,
+          audienceRevision,
           explicitAgentPubkeys,
         };
 

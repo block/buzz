@@ -1,15 +1,20 @@
-import { X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import { Button } from "@/shared/ui/button";
 
 type PersistentAgentAudienceChipsProps = {
   getDisplayName: (pubkey: string) => string | null;
+  onAdd: () => void;
+  onClear: () => void;
   onRemove: (pubkey: string) => void;
   pubkeys: readonly string[];
 };
 
 export function PersistentAgentAudienceChips({
   getDisplayName,
+  onAdd,
+  onClear,
   onRemove,
   pubkeys,
 }: PersistentAgentAudienceChipsProps) {
@@ -27,21 +32,36 @@ export function PersistentAgentAudienceChips({
         const displayName = getDisplayName(pubkey) ?? truncatePubkey(pubkey);
         return (
           <span
-            className="inline-flex max-w-48 items-center gap-1 rounded-full border border-border/60 bg-muted/60 py-1 pl-2.5 pr-1 text-xs font-medium"
+            className="inline-flex max-w-48 items-center gap-1 rounded-full border border-border bg-muted py-1 pl-2.5 pr-1 text-xs font-medium text-foreground"
             key={pubkey}
           >
             <span className="truncate">{displayName}</span>
-            <button
+            <Button
               aria-label={`Remove ${displayName} from active audience`}
-              className="inline-flex size-6 items-center justify-center rounded-full text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               onClick={() => onRemove(pubkey)}
+              size="icon-xs"
               type="button"
+              variant="ghost"
             >
-              <X aria-hidden="true" className="size-3" />
-            </button>
+              <X aria-hidden="true" />
+            </Button>
           </span>
         );
       })}
+      <Button
+        aria-label="Mention someone"
+        onClick={onAdd}
+        size="icon-xs"
+        type="button"
+        variant="ghost"
+      >
+        <Plus aria-hidden="true" />
+      </Button>
+      {pubkeys.length > 1 ? (
+        <Button onClick={onClear} size="xs" type="button" variant="ghost">
+          Clear
+        </Button>
+      ) : null}
     </fieldset>
   );
 }

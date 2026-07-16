@@ -16,7 +16,7 @@ export function PreventSleepSettingsCard() {
     <section className="min-w-0" data-testid="settings-agents">
       <SettingsSectionHeader
         title="Agents"
-        description="Settings that affect how local managed agents run on this machine."
+        description="Control how agents behave in conversations and run on this machine."
       />
 
       <SettingsOptionGroup>
@@ -29,9 +29,8 @@ export function PreventSleepSettingsCard() {
               Keep addressed agents active
             </label>
             <p className="text-sm font-normal text-muted-foreground">
-              Keeps agents you explicitly address selected for your next
-              messages. Channel and thread audiences stay independent, and you
-              can remove an agent from the composer at any time.
+              Keep agents you address selected for future messages in the same
+              channel or thread. Remove them from the composer at any time.
             </p>
           </div>
           <Switch

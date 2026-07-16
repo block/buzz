@@ -472,6 +472,10 @@ export function InboxDetailPane({
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
           <div className="pointer-events-auto">
             <MessageComposer
+              audienceContext={{
+                type: "thread",
+                threadRootId: item.conversationId,
+              }}
               channelId={item.item.channelId}
               channelName={item.channelLabel ?? "channel"}
               channelType={composerChannelType}

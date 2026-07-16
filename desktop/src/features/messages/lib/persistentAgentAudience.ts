@@ -1,9 +1,13 @@
 import * as React from "react";
 
 const ENABLED_STORAGE_KEY = "buzz:keep-addressed-agents-active";
-const AUDIENCES_STORAGE_KEY = "buzz:persistent-agent-audiences:v1";
+const AUDIENCES_STORAGE_KEY = "buzz:persistent-agent-audiences:v2";
 
 const listeners = new Set<() => void>();
+const revisions = new Map<string, number>();
+let revisionClock = 0;
+let defaultRevision = 0;
+let generation = 0;
 let enabled = readEnabled();
 let audiences = readAudiences();
 let snapshot = buildSnapshot();
@@ -11,7 +15,14 @@ let snapshot = buildSnapshot();
 export type PersistentAgentAudienceSnapshot = Readonly<{
   enabled: boolean;
   audiences: Readonly<Record<string, readonly string[]>>;
+  generation: number;
 }>;
+
+type PersistentAgentAudienceScopeInput = {
+  ownerPubkey: string;
+  channelId: string;
+  threadRootId?: string | null;
+};
 
 function normalizePubkeys(pubkeys: Iterable<string>): string[] {
   return [...new Set([...pubkeys].map((pubkey) => pubkey.trim().toLowerCase()))]
@@ -40,10 +51,9 @@ function readAudiences(): Record<string, string[]> {
     const result: Record<string, string[]> = {};
     for (const [scope, value] of Object.entries(parsed)) {
       if (scope && Array.isArray(value)) {
-        const normalized = normalizePubkeys(
+        result[scope] = normalizePubkeys(
           value.filter((entry): entry is string => typeof entry === "string"),
         );
-        if (normalized.length > 0) result[scope] = normalized;
       }
     }
     return result;
@@ -53,7 +63,7 @@ function readAudiences(): Record<string, string[]> {
 }
 
 function buildSnapshot(): PersistentAgentAudienceSnapshot {
-  return { enabled, audiences };
+  return { enabled, audiences, generation };
 }
 
 function emit(): void {
@@ -72,10 +82,19 @@ function persistAudiences(): void {
   }
 }
 
+function advanceRevision(scope: string): void {
+  revisionClock += 1;
+  revisions.set(scope, revisionClock);
+}
+
 export function setPersistentAgentAudienceEnabled(nextEnabled: boolean): void {
   if (enabled === nextEnabled) return;
   enabled = nextEnabled;
-  if (!nextEnabled && Object.keys(audiences).length > 0) {
+  if (!nextEnabled) {
+    generation += 1;
+    revisionClock += 1;
+    defaultRevision = revisionClock;
+    revisions.clear();
     audiences = {};
     persistAudiences();
   }
@@ -87,11 +106,23 @@ export function setPersistentAgentAudienceEnabled(nextEnabled: boolean): void {
   emit();
 }
 
-export function getPersistentAgentAudienceScope(
-  channelId: string,
-  draftKey: string,
-): string {
-  return `${channelId}:${draftKey}`;
+export function getPersistentAgentAudienceScope({
+  ownerPubkey,
+  channelId,
+  threadRootId = null,
+}: PersistentAgentAudienceScopeInput): string | null {
+  const owner = ownerPubkey.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(owner) || !channelId) return null;
+  const conversation = threadRootId ? `thread:${threadRootId}` : "timeline";
+  return `${owner}:${channelId}:${conversation}`;
+}
+
+export function getPersistentAgentAudienceGeneration(): number {
+  return generation;
+}
+
+export function getPersistentAgentAudienceRevision(scope: string): number {
+  return revisions.get(scope) ?? defaultRevision;
 }
 
 export function setPersistentAgentAudience(
@@ -100,44 +131,45 @@ export function setPersistentAgentAudience(
 ): void {
   if (!scope) return;
   const normalized = normalizePubkeys(pubkeys);
-  const current = audiences[scope] ?? [];
+  const current = audiences[scope];
   if (
+    current !== undefined &&
     current.length === normalized.length &&
     current.every((pubkey, index) => pubkey === normalized[index])
   ) {
     return;
   }
 
-  const next = { ...audiences };
-  if (normalized.length > 0) next[scope] = normalized;
-  else delete next[scope];
-  audiences = next;
+  audiences = { ...audiences, [scope]: normalized };
+  advanceRevision(scope);
   persistAudiences();
   emit();
 }
 
-export function addPersistentAgentAudienceMembers(
-  scope: string,
-  pubkeys: Iterable<string>,
-): void {
-  if (!enabled || !scope) return;
-  setPersistentAgentAudience(scope, [...(audiences[scope] ?? []), ...pubkeys]);
-}
-
-export function addPersistentAgentAudienceMembersForDraft({
-  capturedChannelId,
+export function promotePersistentAgentAudience({
+  expectedGeneration,
+  expectedRevision,
   explicitAgentPubkeys,
-  sentDraftKey,
+  scope,
 }: {
-  capturedChannelId: string | null;
+  expectedGeneration: number;
+  expectedRevision: number | null;
   explicitAgentPubkeys: string[];
-  sentDraftKey: string | null | undefined;
+  scope: string | null;
 }): void {
-  if (!enabled || !capturedChannelId || !sentDraftKey) return;
-  addPersistentAgentAudienceMembers(
-    getPersistentAgentAudienceScope(capturedChannelId, sentDraftKey),
-    explicitAgentPubkeys,
-  );
+  if (
+    !enabled ||
+    expectedGeneration !== generation ||
+    !scope ||
+    (expectedRevision !== null &&
+      getPersistentAgentAudienceRevision(scope) !== expectedRevision)
+  ) {
+    return;
+  }
+  setPersistentAgentAudience(scope, [
+    ...(audiences[scope] ?? []),
+    ...explicitAgentPubkeys,
+  ]);
 }
 
 export function removePersistentAgentAudienceMember(
@@ -164,14 +196,18 @@ function getSnapshot(): PersistentAgentAudienceSnapshot {
 const serverSnapshot: PersistentAgentAudienceSnapshot = {
   enabled: false,
   audiences: {},
+  generation: 0,
 };
 
 export function usePersistentAgentAudience(scope: string | null): {
   enabled: boolean;
   pubkeys: readonly string[];
+  generation: number;
+  revision: number;
   setEnabled: (enabled: boolean) => void;
-  addDraftPubkeys: typeof addPersistentAgentAudienceMembersForDraft;
+  promotePubkeys: typeof promotePersistentAgentAudience;
   removePubkey: (pubkey: string) => void;
+  clear: () => void;
 } {
   const state = React.useSyncExternalStore(
     subscribe,
@@ -182,10 +218,18 @@ export function usePersistentAgentAudience(scope: string | null): {
   return {
     enabled: state.enabled,
     pubkeys: resolvedScope ? (state.audiences[resolvedScope] ?? []) : [],
+    generation: state.generation,
+    revision: resolvedScope
+      ? getPersistentAgentAudienceRevision(resolvedScope)
+      : 0,
     setEnabled: setPersistentAgentAudienceEnabled,
-    addDraftPubkeys: addPersistentAgentAudienceMembersForDraft,
+    promotePubkeys: promotePersistentAgentAudience,
     removePubkey: React.useCallback(
       (pubkey) => removePersistentAgentAudienceMember(resolvedScope, pubkey),
+      [resolvedScope],
+    ),
+    clear: React.useCallback(
+      () => setPersistentAgentAudience(resolvedScope, []),
       [resolvedScope],
     ),
   };
