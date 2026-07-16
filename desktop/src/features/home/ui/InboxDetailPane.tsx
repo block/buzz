@@ -18,7 +18,7 @@ import {
   hasSameMessageAuthor,
   isWithinGroupingWindow,
 } from "@/features/messages/lib/messageGrouping";
-import { hasMention } from "@/features/messages/lib/hasMention";
+import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
@@ -167,23 +167,15 @@ export function InboxDetailPane({
         }
       : null;
   const initialAgentPubkeys = rootMessage
-    ? Object.entries(rootMessage.mentionPubkeysByName ?? {}).reduce<string[]>(
-        (ordered, [name, pubkey]) => {
-          const normalized = normalizePubkey(pubkey);
-          if (
-            currentPubkey &&
-            normalizePubkey(rootMessage.authorPubkey) ===
-              normalizePubkey(currentPubkey) &&
-            hasMention(rootMessage.content, name) &&
-            agentPubkeys?.has(normalized) &&
-            !ordered.includes(normalized)
-          ) {
-            ordered.push(normalized);
-          }
-          return ordered;
-        },
-        [],
-      )
+    ? currentPubkey &&
+      normalizePubkey(rootMessage.authorPubkey) ===
+        normalizePubkey(currentPubkey)
+      ? orderMentionPubkeysByText(
+          rootMessage.content,
+          rootMessage.mentionPubkeysByName,
+          (pubkey) => agentPubkeys?.has(pubkey) === true,
+        )
+      : []
     : undefined;
   const pendingReplyMessages: InboxDisplayMessage[] = replies.map((reply) => ({
     ...reply,

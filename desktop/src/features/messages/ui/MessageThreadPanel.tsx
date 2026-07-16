@@ -2,7 +2,7 @@ import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
-import { hasMention } from "@/features/messages/lib/hasMention";
+import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import {
@@ -616,19 +616,12 @@ export function MessageThreadPanel({
     );
     if (!mentionPubkeysByName) return [];
 
-    const ordered: string[] = [];
-    for (const [name, pubkey] of Object.entries(mentionPubkeysByName)) {
-      const normalized = normalizePubkey(pubkey);
-      if (
-        hasMention(threadHead.body, name) &&
-        (knownAgentPubkeys.has(normalized) ||
-          profiles?.[normalized]?.isAgent === true) &&
-        !ordered.includes(normalized)
-      ) {
-        ordered.push(normalized);
-      }
-    }
-    return ordered;
+    return orderMentionPubkeysByText(
+      threadHead.body,
+      mentionPubkeysByName,
+      (pubkey) =>
+        knownAgentPubkeys.has(pubkey) || profiles?.[pubkey]?.isAgent === true,
+    );
   }, [currentPubkey, knownAgentPubkeys, profiles, threadHead]);
 
   if (!threadHead) {

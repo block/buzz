@@ -108,7 +108,8 @@ test("first thread open inherits explicitly addressed agents in authored order",
   const root = await emitRootMessage(
     page,
     "@Vogue please pair with @Morgarita",
-    [AGENT_B, AGENT_A],
+    // Event tag order deliberately opposes authored mention order.
+    [AGENT_A, AGENT_B],
   );
 
   await openThread(page, root.id);
