@@ -8,6 +8,7 @@ import { installMockBridge } from "../helpers/bridge";
 
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const TRANSACTION_STORAGE_KEY = "buzz-community-onboarding-transaction.v1";
+const COMMUNITY_RELAY_URL = "wss://hive.example.com";
 
 const PENDING_JOIN_LINK = {
   id: "dl-join-1",
@@ -89,6 +90,70 @@ test("connect deep link shows a static acknowledgment during setup", async ({
       ),
     )
     .toContain('"acknowledged":true');
+});
+
+test("Welcome failure can be skipped without abandoning community onboarding", async ({
+  page,
+}) => {
+  const welcomeError = "Channel creation is not permitted.";
+  await page.addInitScript(
+    ({ pubkey, relayUrl, storageKey }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          id: "txn-welcome-failure-1",
+          source: "deep-link-join",
+          stage: "team-intro",
+          relayUrl,
+          communityName: "hive",
+          communityId: "e2e-default-community",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    {
+      pubkey: DEFAULT_MOCK_PUBKEY,
+      relayUrl: COMMUNITY_RELAY_URL,
+      storageKey: TRANSACTION_STORAGE_KEY,
+    },
+  );
+  await installMockBridge(
+    page,
+    { createChannelErrors: [welcomeError, welcomeError] },
+    { relayWsUrl: COMMUNITY_RELAY_URL, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Enter hive" }).click();
+
+  await expect(page.getByText(welcomeError)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Preparing Welcome…" }),
+  ).toBeEnabled();
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  await expect(skip).toBeVisible();
+  await skip.click();
+
+  const completionKey = `buzz-community-onboarding-complete.v1:${encodeURIComponent(COMMUNITY_RELAY_URL)}:${DEFAULT_MOCK_PUBKEY}`;
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ completion, transaction }) => ({
+          completion: window.localStorage.getItem(completion),
+          transaction: window.localStorage.getItem(transaction),
+        }),
+        { completion: completionKey, transaction: TRANSACTION_STORAGE_KEY },
+      ),
+    )
+    .toEqual({ completion: "true", transaction: null });
+  await expect(page.getByTestId("community-onboarding-flow")).toHaveCount(0);
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
 });
 
 test("persisted deep-link invite hands off to Joining after machine onboarding", async ({

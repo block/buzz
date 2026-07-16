@@ -219,7 +219,7 @@ export function CommunityOnboardingFlow({
                   onClick={() => void finish()}
                   variant="ghost"
                 >
-                  Enter without Welcome channel
+                  Skip for now
                 </Button>
               ) : null}
             </div>
