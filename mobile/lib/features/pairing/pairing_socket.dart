@@ -6,6 +6,9 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../shared/relay/nostr_models.dart';
 
+const _desktopPairingAuthChallengeGrace = Duration(seconds: 3);
+const _pairingAuthOkTimeout = Duration(seconds: 8);
+
 /// Ephemeral WebSocket connection for NIP-AB pairing.
 ///
 /// Uses ephemeral keys for NIP-42 auth (not the stored user keys).
@@ -26,6 +29,7 @@ class PairingSocket {
   final void Function(Object? error) _onDisconnected;
   final Duration _authChallengeTimeout;
   final Duration _authResponseTimeout;
+  final WebSocketChannel Function(Uri uri) _channelFactory;
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
@@ -40,34 +44,31 @@ class PairingSocket {
     required String ephemeralPrivkey,
     required void Function(List<dynamic> message) onMessage,
     required void Function(Object? error) onDisconnected,
-    Duration authChallengeTimeout = const Duration(seconds: 3),
-    Duration authResponseTimeout = const Duration(seconds: 8),
+    Duration authChallengeTimeout = _desktopPairingAuthChallengeGrace,
+    Duration authResponseTimeout = _pairingAuthOkTimeout,
+    WebSocketChannel Function(Uri uri) channelFactory =
+        WebSocketChannel.connect,
   }) : _wsUrl = wsUrl,
        _ephemeralPrivkey = ephemeralPrivkey,
        _onMessage = onMessage,
        _onDisconnected = onDisconnected,
        _authChallengeTimeout = authChallengeTimeout,
-       _authResponseTimeout = authResponseTimeout;
+       _authResponseTimeout = authResponseTimeout,
+       _channelFactory = channelFactory;
 
   bool get isConnected => _connected;
 
   /// Connect and answer a NIP-42 challenge when the relay requires one.
   Future<void> connect() async {
-    _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
+    _channel = _channelFactory(Uri.parse(_wsUrl));
     await _channel!.ready;
 
     _authCompleter = Completer<void>();
 
     _subscription = _channel!.stream.listen(
       _handleRawMessage,
-      onError: (Object error) {
-        _failAuth(error);
-        _onDisconnected(error);
-      },
-      onDone: () {
-        _failAuth(null);
-        _onDisconnected(null);
-      },
+      onError: _failAuth,
+      onDone: () => _failAuth(null),
     );
 
     // Dedicated pairing relays may be open and send no NIP-42 challenge.

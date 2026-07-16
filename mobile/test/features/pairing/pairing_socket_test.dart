@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:buzz/features/pairing/pairing_socket.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 const _privateKey =
     '09b3065e3570a3a4054660dccd66e12774a99a904fdb0ca02dbc6c3136249506';
@@ -53,12 +54,17 @@ void main() {
         webSocket.add(jsonEncode(['OK', event['id'], false, 'bad auth']));
       });
       addTearDown(server.close);
-      final socket = _socket(server.url);
+      var disconnectCount = 0;
+      final socket = _socket(
+        server.url,
+        onDisconnected: (_) => disconnectCount++,
+      );
       addTearDown(socket.disconnect);
 
       await expectLater(socket.connect(), throwsA(isA<PairingAuthException>()));
 
       expect(socket.isConnected, isFalse);
+      expect(disconnectCount, 1);
     });
 
     test(
@@ -103,6 +109,72 @@ void main() {
 
       expect(socket.isConnected, isFalse);
     });
+
+    test('notifies once when a connected stream emits an error', () async {
+      var disconnectCount = 0;
+      final channel = _ControlledWebSocketChannel();
+      final socket = _socket(
+        'ws://unused',
+        onDisconnected: (_) => disconnectCount++,
+        channelFactory: (_) => channel,
+        authChallengeTimeout: Duration.zero,
+      );
+      addTearDown(socket.disconnect);
+
+      await socket.connect();
+      channel.emitError(Exception('stream failed'));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(disconnectCount, 1);
+    });
+
+    test('notifies once when a connected stream closes', () async {
+      var disconnectCount = 0;
+      final channel = _ControlledWebSocketChannel();
+      final socket = _socket(
+        'ws://unused',
+        onDisconnected: (_) => disconnectCount++,
+        channelFactory: (_) => channel,
+        authChallengeTimeout: Duration.zero,
+      );
+      addTearDown(socket.disconnect);
+
+      await socket.connect();
+      await channel.closeStream();
+
+      expect(disconnectCount, 1);
+    });
+
+    test(
+      'does not notify when deliberately disconnected or disposed',
+      () async {
+        var disconnectCount = 0;
+        final disconnectChannel = _ControlledWebSocketChannel();
+        final disconnectingSocket = _socket(
+          'ws://unused',
+          onDisconnected: (_) => disconnectCount++,
+          channelFactory: (_) => disconnectChannel,
+          authChallengeTimeout: Duration.zero,
+        );
+        await disconnectingSocket.connect();
+
+        await disconnectingSocket.disconnect();
+
+        final disposeChannel = _ControlledWebSocketChannel();
+        final disposingSocket = _socket(
+          'ws://unused',
+          onDisconnected: (_) => disconnectCount++,
+          channelFactory: (_) => disposeChannel,
+          authChallengeTimeout: Duration.zero,
+        );
+        await disposingSocket.connect();
+
+        disposingSocket.dispose();
+        await Future<void>.delayed(Duration.zero);
+
+        expect(disconnectCount, 0);
+      },
+    );
   });
 }
 
@@ -110,14 +182,66 @@ PairingSocket _socket(
   String url, {
   Duration authChallengeTimeout = const Duration(milliseconds: 500),
   Duration authResponseTimeout = const Duration(seconds: 10),
+  void Function(Object? error)? onDisconnected,
+  WebSocketChannel Function(Uri uri)? channelFactory,
 }) => PairingSocket(
   wsUrl: url,
   ephemeralPrivkey: _privateKey,
   onMessage: (_) {},
-  onDisconnected: (_) {},
+  onDisconnected: onDisconnected ?? (_) {},
   authChallengeTimeout: authChallengeTimeout,
   authResponseTimeout: authResponseTimeout,
+  channelFactory: channelFactory ?? WebSocketChannel.connect,
 );
+
+class _ControlledWebSocketChannel implements WebSocketChannel {
+  final StreamController<dynamic> _streamController = StreamController();
+  final WebSocketSink _sink = _ControlledWebSocketSink();
+
+  void emitError(Object error) => _streamController.addError(error);
+
+  Future<void> closeStream() => _streamController.close();
+
+  @override
+  Future<void> get ready => Future.value();
+
+  @override
+  Stream<dynamic> get stream => _streamController.stream;
+
+  @override
+  WebSocketSink get sink => _sink;
+
+  @override
+  int? get closeCode => null;
+
+  @override
+  String? get closeReason => null;
+
+  @override
+  String? get protocol => null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _ControlledWebSocketSink implements WebSocketSink {
+  @override
+  void add(dynamic event) {}
+
+  @override
+  void addError(Object error, [StackTrace? stackTrace]) {}
+
+  @override
+  Future<void> addStream(Stream<dynamic> stream) async {
+    await stream.drain<void>();
+  }
+
+  @override
+  Future<void> close([int? closeCode, String? closeReason]) async {}
+
+  @override
+  Future<void> get done => Future.value();
+}
 
 class _TestRelay {
   final HttpServer _server;
