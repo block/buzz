@@ -41,7 +41,7 @@ export function NostrKeyImportForm({
   const trimmedInput = nsecInput.trim();
   const hasInput = trimmedInput.length > 0;
   const isValid = previewNpub !== null;
-  const isBusy = disabled || isImporting;
+  const isInteractionDisabled = disabled || isImporting;
   const showInvalidHint = hasInput && !isValid && trimmedInput.length >= 5;
   const errorMessage = importError ?? externalErrorMessage;
 
@@ -50,12 +50,12 @@ export function NostrKeyImportForm({
   }, []);
 
   const openFilePicker = React.useCallback(() => {
-    if (isBusy) {
+    if (isInteractionDisabled) {
       return;
     }
 
     fileInputRef.current?.click();
-  }, [isBusy]);
+  }, [isInteractionDisabled]);
 
   const handleFiles = React.useCallback(async (files: FileList | null) => {
     const file = files?.[0];
@@ -98,7 +98,7 @@ export function NostrKeyImportForm({
       await onImport(trimmedInput);
     } catch (error) {
       setImportError(
-        error instanceof Error ? error.message : "Failed to import key.",
+        error instanceof Error ? error.message : "Couldn't import this key.",
       );
     } finally {
       setIsImporting(false);
@@ -141,7 +141,7 @@ export function NostrKeyImportForm({
       <input
         accept=".key,text/plain"
         className="sr-only"
-        disabled={isBusy}
+        disabled={isInteractionDisabled}
         onChange={(event) => {
           void handleFiles(event.currentTarget.files);
           event.currentTarget.value = "";
@@ -159,12 +159,12 @@ export function NostrKeyImportForm({
         )}
         data-dragging={isDragging ? "true" : undefined}
         data-testid="nostr-import-drop"
-        disabled={isBusy}
+        disabled={isInteractionDisabled}
         onClick={openFilePicker}
         onDragEnter={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          if (!isBusy) {
+          if (!isInteractionDisabled) {
             setIsDragging(true);
           }
         }}
@@ -181,7 +181,7 @@ export function NostrKeyImportForm({
         onDragOver={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          if (!isBusy) {
+          if (!isInteractionDisabled) {
             event.dataTransfer.dropEffect = "copy";
           }
         }}
@@ -189,7 +189,7 @@ export function NostrKeyImportForm({
           event.preventDefault();
           event.stopPropagation();
           setIsDragging(false);
-          if (isBusy) {
+          if (isInteractionDisabled) {
             return;
           }
           void handleFiles(event.dataTransfer.files);
@@ -250,10 +250,10 @@ export function NostrKeyImportForm({
         <Button
           className="h-10 w-full"
           data-testid="nostr-import-submit"
-          disabled={!isValid || isBusy}
+          disabled={!isValid || isInteractionDisabled}
           type="submit"
         >
-          {isBusy ? (
+          {isImporting ? (
             <Spinner aria-label="Importing key" className="h-4 w-4 border-2" />
           ) : (
             "Continue with this key"
@@ -262,7 +262,7 @@ export function NostrKeyImportForm({
 
         <Button
           className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
-          disabled={isBusy}
+          disabled={isImporting}
           onClick={onBack}
           type="button"
           variant="ghost"

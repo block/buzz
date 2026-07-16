@@ -2539,6 +2539,7 @@ let mockPersonas: RawPersona[] = [];
 let mockTeams: RawTeam[] = [];
 // Listeners registered via the mock __TAURI_INTERNALS__.listen — keyed by event name.
 const tauriEventListeners = new Map<string, Set<() => void>>();
+const openedExternalUrls: string[] = [];
 const defaultMockRelayAgents: RawRelayAgent[] = [
   {
     pubkey: ALICE_PUBKEY,
@@ -8587,6 +8588,11 @@ export function maybeInstallE2eTauriMocks() {
         return importMockIdentity(
           (payload as { nsec?: string } | null)?.nsec ?? "",
         );
+      case "validate_repos_dir":
+        // The browser harness has no host filesystem to validate. Treat the
+        // seeded empty/default path as valid so Add Community can continue to
+        // relay-policy discovery.
+        return;
       case "apply_workspace": {
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
@@ -9528,6 +9534,12 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof sendToMockSocket>[0],
         );
       case "plugin:opener|open_url":
+        openedExternalUrls.push(String((payload as { url: string | URL }).url));
+        return null;
+      case "get_e2e_opened_external_urls":
+        return [...openedExternalUrls];
+      case "clear_e2e_opened_external_urls":
+        openedExternalUrls.length = 0;
         return null;
       case "plugin:window|show":
       case "plugin:window|unminimize":

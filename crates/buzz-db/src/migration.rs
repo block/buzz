@@ -812,6 +812,18 @@ mod tests {
             .sql
             .as_str()
             .contains("purge_soft_deleted_buzz_mesh_status"));
+
+        // Join policy acceptances landed concurrently with mesh status retention;
+        // keep both additive migrations in a single, unambiguous sequence.
+        assert_eq!(migrations[19].version, 20);
+        assert!(migrations[19]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE join_policy_acceptances"));
+        assert!(!migrations[0]
+            .sql
+            .as_str()
+            .contains("join_policy_acceptances"));
     }
 
     #[test]
@@ -1054,7 +1066,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(19));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(20));
     }
 
     #[tokio::test]
