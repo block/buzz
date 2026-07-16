@@ -5,6 +5,7 @@ import {
 } from "@/features/agents/openSnapshotImportFromUrlEvent";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
+import { AgentAiDefaultsDialog } from "./AgentAiDefaultsDialog";
 import { AgentDialog } from "./AgentDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
@@ -37,6 +38,8 @@ export function AgentsView() {
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
+  const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const [isAiDefaultsOpen, setIsAiDefaultsOpen] = React.useState(false);
   // Exclusivity: create never sets `personaDialogState` (edit/dup/import do),
   // so the create-mode and definition-edit AgentDialog mounts never coexist.
   const [isCreateDialogOpen, setIsCreateDialogOpen] = React.useState(false);
@@ -102,6 +105,8 @@ export function AgentsView() {
           <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
               defaultModel={inheritedDefaults.model.value}
+              globalModel={globalConfig.model}
+              globalModelTriggerRef={aiDefaultsTriggerRef}
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
@@ -117,6 +122,7 @@ export function AgentsView() {
               onBulkStopRunning={() => {
                 void agents.handleBulkStopRunning();
               }}
+              onEditGlobalModel={() => setIsAiDefaultsOpen(true)}
               onOpenAgentProfile={(pubkey, options) => {
                 openProfilePanel?.(pubkey, options);
               }}
@@ -203,6 +209,12 @@ export function AgentsView() {
           </div>
         </div>
       </div>
+
+      <AgentAiDefaultsDialog
+        onOpenChange={setIsAiDefaultsOpen}
+        open={isAiDefaultsOpen}
+        returnFocusRef={aiDefaultsTriggerRef}
+      />
 
       {isCreateDialogOpen ? (
         <AgentDialog

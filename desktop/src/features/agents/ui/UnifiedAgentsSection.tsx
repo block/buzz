@@ -1,11 +1,5 @@
 import * as React from "react";
-import {
-  ChevronDown,
-  ChevronRight,
-  Ellipsis,
-  OctagonX,
-  RefreshCw,
-} from "lucide-react";
+import { ChevronDown, ChevronRight, OctagonX, RefreshCw } from "lucide-react";
 
 import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
@@ -32,6 +26,8 @@ import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
   defaultModel: string;
+  globalModel: string | null;
+  globalModelTriggerRef: React.RefObject<HTMLButtonElement | null>;
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
@@ -41,6 +37,7 @@ type UnifiedAgentsSectionProps = {
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
   onBulkStopRunning: () => void;
+  onEditGlobalModel: () => void;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
@@ -83,6 +80,9 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     startingAgentPubkey,
     startingPersonaIds,
     onBulkStopRunning,
+    globalModel,
+    globalModelTriggerRef,
+    onEditGlobalModel,
     onOpenAgentProfile,
     onOpenPersonaProfile,
     onStartAgent,
@@ -160,12 +160,14 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
       ) : null}
 
       <AgentsListActions
-        agentCount={agents.length}
         fileInputRef={fileInputRef}
+        globalModel={globalModel}
+        globalModelTriggerRef={globalModelTriggerRef}
         handleFileChange={handleFileChange}
         isActionPending={isActionPending}
         runningCount={runningCount}
         onBulkStopRunning={onBulkStopRunning}
+        onEditGlobalModel={onEditGlobalModel}
       />
 
       {isLoading ? <LoadingSkeleton /> : null}
@@ -457,20 +459,26 @@ function firstAvatarUrl(
 }
 
 function AgentsListActions({
-  agentCount,
   fileInputRef,
+  globalModel,
+  globalModelTriggerRef,
   handleFileChange,
   isActionPending,
   runningCount,
   onBulkStopRunning,
+  onEditGlobalModel,
 }: {
-  agentCount: number;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
+  globalModel: string | null;
+  globalModelTriggerRef: React.RefObject<HTMLButtonElement | null>;
   handleFileChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   isActionPending: boolean;
   runningCount: number;
   onBulkStopRunning: () => void;
+  onEditGlobalModel: () => void;
 }) {
+  const model = globalModel?.trim();
+
   return (
     <>
       <input
@@ -480,34 +488,27 @@ function AgentsListActions({
         ref={fileInputRef}
         type="file"
       />
-      {agentCount > 0 ? (
-        <div className={`${AGENT_CARD_COLUMN_CLASS} flex justify-end`}>
-          <DropdownMenu modal={false}>
-            <DropdownMenuTrigger asChild>
-              <Button
-                aria-label="Bulk actions"
-                className="h-7 w-7"
-                size="icon"
-                variant="ghost"
-              >
-                <Ellipsis className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="end"
-              onCloseAutoFocus={(event) => event.preventDefault()}
-            >
-              <DropdownMenuItem
-                disabled={isActionPending || runningCount === 0}
-                onClick={onBulkStopRunning}
-              >
-                <OctagonX className="h-4 w-4" />
-                Stop all running ({runningCount})
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      ) : null}
+      <div className={`${AGENT_CARD_COLUMN_CLASS} flex flex-wrap gap-2`}>
+        <Button
+          onClick={onEditGlobalModel}
+          ref={globalModelTriggerRef}
+          size="sm"
+          variant="outline"
+        >
+          {model ? `Global model: ${model}` : "Set global model"}
+        </Button>
+        {runningCount > 0 ? (
+          <Button
+            disabled={isActionPending}
+            onClick={onBulkStopRunning}
+            size="sm"
+            variant="outline"
+          >
+            <OctagonX />
+            Stop all running agents
+          </Button>
+        ) : null}
+      </div>
     </>
   );
 }

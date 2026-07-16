@@ -127,8 +127,7 @@ export function AgentAiDefaultsDialog({
           <AlertDialogHeader>
             <AlertDialogTitle>Discard changes to AI defaults?</AlertDialogTitle>
             <AlertDialogDescription>
-              Your agent draft will stay open, but changes made in this overlay
-              will be lost.
+              Unsaved changes made to AI defaults will be lost.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
