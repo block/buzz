@@ -296,6 +296,13 @@ test("shows profile save feedback as a toast", async ({ page }) => {
 });
 
 test("nests the avatar edit button in a clipped notch", async ({ page }) => {
+  // Under the Buzz default theme the settings nav overrides `--sidebar-active`
+  // (white pill on the gradient) while the avatar edit button deliberately
+  // keeps the root accent-driven token, so the shared-token comparison below
+  // only holds outside the Buzz theme.
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "github-light");
+  });
   await page.goto("/");
 
   await openSettings(page, "profile");
@@ -1358,8 +1365,10 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
     )
     .toBe(true);
 
-  // Switch to Light mode tab to reveal light themes
-  await page.getByRole("button", { name: "Light" }).click();
+  // Switch to Light mode tab to reveal light themes. Target the testid — in
+  // the default System mode the "Light" paired-theme tile shares the same
+  // accessible name as the mode button.
+  await page.getByTestId("appearance-mode-light").click();
 
   // Switch to a light theme — verifies dark→light transition
   await page.getByTestId("theme-option-github-light").click();
@@ -1391,7 +1400,7 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
     .toBe("github-light");
 
   // Switch to Dark mode tab to reveal dark themes
-  await page.getByRole("button", { name: "Dark" }).click();
+  await page.getByTestId("appearance-mode-dark").click();
 
   // Switch back to a dark theme — verifies light→dark transition
   await page.getByTestId("theme-option-dracula").click();
