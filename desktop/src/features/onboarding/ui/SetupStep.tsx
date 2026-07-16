@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Check,
   ExternalLink,
+  Info,
   Plus,
   TerminalSquare,
 } from "lucide-react";
@@ -20,6 +21,7 @@ import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Spinner } from "@/shared/ui/spinner";
 import {
   type OnboardingTransitionDirection,
@@ -166,6 +168,92 @@ function RuntimeStatus({
   );
 }
 
+function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+  if (
+    runtime.availability === "available" &&
+    runtime.command &&
+    runtime.binaryPath
+  ) {
+    const description = describeResolvedCommand(
+      runtime.command,
+      runtime.binaryPath,
+    );
+    return (
+      <>
+        <p className="text-sm leading-5 text-muted-foreground">
+          {description.charAt(0).toUpperCase() + description.slice(1)}
+        </p>
+        {runtime.defaultArgs.length > 0 ? (
+          <p className="mt-1 text-xs text-muted-foreground/80">
+            Args:{" "}
+            <code className="font-mono">{runtime.defaultArgs.join(", ")}</code>
+          </p>
+        ) : null}
+      </>
+    );
+  }
+
+  if (runtime.availability === "adapter_missing") {
+    return (
+      <>
+        <p className="text-sm leading-5 text-muted-foreground">
+          CLI detected; ACP adapter missing.
+        </p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
+          {runtime.installHint}
+        </p>
+      </>
+    );
+  }
+
+  if (runtime.availability === "adapter_outdated") {
+    return (
+      <>
+        <p className="text-sm leading-5 text-muted-foreground">
+          ACP adapter detected but outdated — reinstall required.
+        </p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
+          This updates the machine-global{" "}
+          <code className="rounded bg-muted px-0.5 text-2xs">codex-acp</code>{" "}
+          adapter. Older Buzz releases using the legacy adapter contract may
+          lose community access until{" "}
+          <code className="rounded bg-muted px-0.5 text-2xs">
+            @zed-industries/codex-acp@0.16.0
+          </code>{" "}
+          is restored.
+        </p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
+          {runtime.installHint}
+        </p>
+      </>
+    );
+  }
+
+  if (runtime.availability === "cli_missing") {
+    return (
+      <>
+        <p className="text-sm leading-5 text-muted-foreground">
+          ACP adapter detected; CLI missing.
+        </p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
+          {runtime.installHint}
+        </p>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <p className="text-sm leading-5 text-muted-foreground">
+        Not installed yet.
+      </p>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
+        {runtime.installHint}
+      </p>
+    </>
+  );
+}
+
 function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   if (
     runtime.availability === "available" &&
@@ -215,7 +303,6 @@ function RuntimeCard({
         installError && "ring-1 ring-destructive/40",
       )}
       data-testid={`onboarding-runtime-${runtime.id}`}
-      title={installError ?? runtimeDetailText(runtime)}
     >
       <div className="absolute right-2 top-2">
         <RuntimeStatus
@@ -225,6 +312,26 @@ function RuntimeCard({
           onInstall={onInstall}
           runtime={runtime}
         />
+      </div>
+
+      <div className="absolute left-2 top-2">
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button
+              aria-label={`${runtime.label} details`}
+              className="h-6 w-6 text-muted-foreground/70 hover:text-foreground"
+              data-testid={`onboarding-runtime-details-${runtime.id}`}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <Info className="h-3.5 w-3.5" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="start" className="w-80 text-left">
+            <RuntimeDetails runtime={runtime} />
+          </PopoverContent>
+        </Popover>
       </div>
 
       <RuntimeIcon runtime={runtime} />
