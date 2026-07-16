@@ -309,6 +309,9 @@ export function AddCommunityDialog({
             Communities share your active identity. To use a different key,
             import it on the profile step (or in settings).
           </p>
+          {inviteError ? (
+            <p className="text-xs text-destructive">{inviteError}</p>
+          ) : null}
           <AnimatePresence initial={false}>
             {joinPolicy && relayUrl.trim() ? (
               <motion.div
