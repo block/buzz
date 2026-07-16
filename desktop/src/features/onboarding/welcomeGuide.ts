@@ -134,6 +134,15 @@ export async function getWelcomeGuideAgentPubkeys(relayUrl?: string | null) {
     .map((agent) => agent.pubkey);
 }
 
+export async function activateWelcomeTeamPersonasSequentially(
+  inactivePersonaIds: readonly string[],
+  activate: (personaId: string) => Promise<unknown>,
+) {
+  for (const personaId of inactivePersonaIds) {
+    await activate(personaId);
+  }
+}
+
 async function ensureWelcomeTeamPersonasActive() {
   const personas = await listPersonas();
   const personasById = new Map(
@@ -146,10 +155,14 @@ async function ensureWelcomeTeamPersonasActive() {
     }
   }
 
-  await Promise.all(
+  // Persona activation is a read-modify-write operation over one shared file.
+  // Run these sequentially so concurrent writes cannot lose a teammate's
+  // activation and leave Welcome provisioning permanently partial.
+  await activateWelcomeTeamPersonasSequentially(
     WELCOME_TEAM_STARTERS.filter(
       ({ personaId }) => !personasById.get(personaId)?.isActive,
-    ).map(({ personaId }) => setPersonaActive(personaId, true)),
+    ).map(({ personaId }) => personaId),
+    (personaId) => setPersonaActive(personaId, true),
   );
 }
 

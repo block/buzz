@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activateWelcomeTeamPersonasSequentially,
   LEGACY_WELCOME_GUIDE_SYSTEM_PROMPT,
   pickWelcomeGuideAgent,
   pickWelcomeGuideAgentForRelay,
@@ -130,6 +131,24 @@ test("pickWelcomeGuideAgentForRelay returns null when Fizz only exists in anothe
     pickWelcomeGuideAgentForRelay([otherCommunityFizz], RELAY_B),
     null,
   );
+});
+
+test("starter persona activation is serialized to protect the shared store", async () => {
+  const calls = [];
+  let activeWrites = 0;
+
+  await activateWelcomeTeamPersonasSequentially(
+    ["builtin:fizz", "builtin:honey", "builtin:bumble"],
+    async (personaId) => {
+      assert.equal(activeWrites, 0, "activation writes must never overlap");
+      activeWrites += 1;
+      calls.push(personaId);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      activeWrites -= 1;
+    },
+  );
+
+  assert.deepEqual(calls, ["builtin:fizz", "builtin:honey", "builtin:bumble"]);
 });
 
 test("welcome team starter definitions and role identities are stable", () => {

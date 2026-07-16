@@ -10,6 +10,7 @@ import { useCommunities } from "@/features/communities/useCommunities";
 import { welcomeKickoffMarker } from "@/features/onboarding/devFreshOnboarding";
 import { resolveAgentReadiness } from "@/features/onboarding/ui/agentReadiness";
 import {
+  ensureWelcomeTeam,
   pickWelcomeTeamStarterAgentForRelay,
   WELCOME_TEAM_STARTERS,
   type WelcomeTeamStarterDefinition,
@@ -145,7 +146,6 @@ export function useWelcomeKickoff(
     if (
       !channelId ||
       !isActiveWelcome ||
-      !agentSet ||
       configLoading ||
       runtimesQuery.isPending ||
       kickoffInFlight.has(channelId)
@@ -156,12 +156,21 @@ export function useWelcomeKickoff(
     kickoffInFlight.add(channelId);
     void (async () => {
       try {
+        const resolvedAgentSet = agentSet;
+        if (!resolvedAgentSet) {
+          await ensureWelcomeTeam(channelId, activeCommunity?.relayUrl);
+          await queryClient.invalidateQueries({
+            queryKey: managedAgentsQueryKey,
+          });
+          return;
+        }
+
         if (await markerExists(channelId, closerMarker)) {
           return;
         }
         if (!readiness.ready) {
           await sendManagedAgentChannelMessage({
-            agentPubkey: agentSet.lead.pubkey,
+            agentPubkey: resolvedAgentSet.lead.pubkey,
             channelId,
             content: WELCOME_KICKOFF_PROVIDER_MESSAGE,
             marker: providerMarker,
@@ -175,27 +184,40 @@ export function useWelcomeKickoff(
         // startup watermark, so no separate subscription-ready wait is needed.
         // On resume, restart unresolved teammates but never replay the opener.
         const agentsToStart = openerAlreadySent
-          ? agentSet.teammates
-          : [agentSet.lead, ...agentSet.teammates];
-        await Promise.allSettled(
+          ? resolvedAgentSet.teammates
+          : [resolvedAgentSet.lead, ...resolvedAgentSet.teammates];
+        const startResults = await Promise.allSettled(
           agentsToStart.map((agent) =>
             agent.status === "running" || agent.status === "deployed"
               ? Promise.resolve(agent)
               : startManagedAgent(agent.pubkey),
           ),
         );
+        for (const [index, result] of startResults.entries()) {
+          if (result.status === "rejected") {
+            console.warn(
+              `Failed to start Welcome teammate ${agentsToStart[index]?.name ?? "unknown"}.`,
+              result.reason,
+            );
+          }
+        }
         await queryClient.invalidateQueries({
           queryKey: managedAgentsQueryKey,
         });
         if (openerAlreadySent) return;
 
         await sendManagedAgentChannelMessage({
-          agentPubkey: agentSet.lead.pubkey,
+          agentPubkey: resolvedAgentSet.lead.pubkey,
           channelId,
-          content: buildWelcomeKickoffOpener(agentSet.lead, agentSet.teammates),
+          content: buildWelcomeKickoffOpener(
+            resolvedAgentSet.lead,
+            resolvedAgentSet.teammates,
+          ),
           marker: openerMarker,
           markerScope: "channel",
-          mentionPubkeys: agentSet.teammates.map((agent) => agent.pubkey),
+          mentionPubkeys: resolvedAgentSet.teammates.map(
+            (agent) => agent.pubkey,
+          ),
         });
       } catch (error) {
         console.warn("Failed to start the Welcome team kickoff.", error);
@@ -204,6 +226,7 @@ export function useWelcomeKickoff(
       }
     })();
   }, [
+    activeCommunity?.relayUrl,
     agentSet,
     channelId,
     configLoading,
