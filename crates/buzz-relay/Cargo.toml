@@ -77,6 +77,7 @@ moka            = { workspace = true }
 metrics         = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 metrics-util    = { workspace = true }
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 
 [features]
 dev = ["buzz-auth/dev"]

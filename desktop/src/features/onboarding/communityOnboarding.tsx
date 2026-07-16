@@ -29,6 +29,12 @@ export type CommunityOnboardingTransaction = {
   communityName: string;
   token?: string;
   reposDir?: string;
+  /**
+   * Join-policy acceptance receipt minted before the claim (bound to the
+   * invite code). Forwarded to `claimInvite` so relays with a configured
+   * join policy admit the claim.
+   */
+  policyReceipt?: string;
   communityId?: string;
   createdAt: string;
   updatedAt: string;
@@ -52,6 +58,7 @@ export type StartCommunityOnboardingInput = {
   communityName?: string;
   token?: string;
   reposDir?: string;
+  policyReceipt?: string;
 };
 
 function canonicalRelayUrl(rawRelayUrl: string) {
@@ -127,6 +134,7 @@ export function startCommunityOnboarding(
       communityName: input.communityName?.trim() || existing.communityName,
       token: input.token?.trim() || existing.token,
       reposDir: input.reposDir ?? existing.reposDir,
+      policyReceipt: input.policyReceipt ?? existing.policyReceipt,
       updatedAt: now.toISOString(),
       error: undefined,
       // A freshly opened link deserves fresh feedback — re-present the gate
@@ -147,6 +155,7 @@ export function startCommunityOnboarding(
     communityName: input.communityName?.trim() || deriveCommunityName(relayUrl),
     token: input.token?.trim() || undefined,
     reposDir: input.reposDir,
+    policyReceipt: input.policyReceipt,
     createdAt: timestamp,
     updatedAt: timestamp,
   };

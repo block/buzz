@@ -72,11 +72,12 @@ export function WelcomeSetup({
   }, [communityOnboarding, defaultRelayUrl]);
 
   const handleInviteRedeem = React.useCallback(
-    (relayWsUrl: string, code: string) => {
+    (relayWsUrl: string, code: string, policyReceipt?: string) => {
       communityOnboarding.start({
         source: "first-community",
         relayUrl: relayWsUrl,
         inviteCode: code,
+        policyReceipt,
       });
     },
     [communityOnboarding],

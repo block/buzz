@@ -1,21 +1,72 @@
 import buzzAppIcon from "@/assets/app-icon@3x.png";
 import { relayWsUrl } from "@/shared/lib/relay-url";
 import { Button } from "@/shared/ui/button";
+import * as React from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 const DOWNLOAD_URL = "https://github.com/block/buzz/releases/latest";
+type JoinPolicy = {
+  terms_markdown?: string;
+  privacy_markdown?: string;
+  age_attestation_required: boolean;
+  version: string;
+};
 
-/**
- * Landing page for a community invite link (`/invite/<code>`).
- *
- * The code is not validated here — validation happens in the desktop app when
- * the invite is claimed against `POST /api/invites/claim`, signed by the
- * joining key. This page only hands the code off via the `buzz://join` deep
- * link (or tells the visitor where to get the app first).
- */
+type PolicyDocument = { title: string; markdown: string };
+
+/** Landing page for a community invite link (`/invite/<code>`). */
 export function InvitePage({ code }: { code: string }) {
   const relay = relayWsUrl();
   const host = relay.replace(/^wss?:\/\//, "");
-  const deepLink = `buzz://join?relay=${encodeURIComponent(relay)}&code=${encodeURIComponent(code)}`;
+  const [policy, setPolicy] = React.useState<JoinPolicy | null | undefined>(
+    undefined,
+  );
+  const [document, setDocument] = React.useState<PolicyDocument | null>(null);
+  const [ageConfirmed, setAgeConfirmed] = React.useState(false);
+  const [opening, setOpening] = React.useState(false);
+
+  React.useEffect(() => {
+    fetch("/api/join-policy")
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const config = (await response.json()) as { policy?: JoinPolicy };
+        setPolicy(config.policy ?? null);
+      })
+      .catch(() => setPolicy(undefined));
+  }, []);
+
+  const openInvite = async () => {
+    setOpening(true);
+    try {
+      let receipt: string | undefined;
+      if (policy) {
+        const response = await fetch("/api/invites/accept-policy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            code,
+            policy_version: policy.version,
+            age_confirmed: ageConfirmed,
+          }),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        receipt = ((await response.json()) as { receipt: string }).receipt;
+      }
+      const query = new URLSearchParams({ relay, code });
+      if (receipt) query.set("policy_receipt", receipt);
+      window.location.href = `buzz://join?${query.toString()}`;
+    } finally {
+      setOpening(false);
+    }
+  };
+
+  const disabled =
+    policy === undefined ||
+    opening ||
+    Boolean(policy?.age_attestation_required && !ageConfirmed);
+  const showDocument = (title: string, markdown: string) =>
+    setDocument({ title, markdown });
 
   return (
     <div
@@ -24,38 +75,94 @@ export function InvitePage({ code }: { code: string }) {
         backgroundImage: "linear-gradient(180deg, #D7D72E 0%, #D7E7F6 100%)",
       }}
     >
-      <div
-        className="flex w-full max-w-xl flex-col items-center rounded-3xl bg-white px-6 py-10 sm:px-12 sm:py-12"
-        style={{
-          boxShadow:
-            "0 0 0 1px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.04)",
-        }}
-      >
-        <div
-          className="h-16 w-16 overflow-hidden bg-black"
-          style={{ borderRadius: "22.37%" }}
-        >
-          <img alt="Buzz" className="h-full w-full" src={buzzAppIcon} />
-        </div>
-        <h1 className="mt-6 text-2xl font-semibold tracking-tight text-black">
-          You&apos;re invited to join
-        </h1>
-        <p className="mt-1 font-mono text-lg text-black/70">{host}</p>
-
-        <div className="mt-8">
-          <Button
-            asChild
-            className="bg-black text-white hover:bg-black/90 focus-visible:ring-black"
-            size="lg"
+      <div className="w-full max-w-xl space-y-4">
+        <div className="flex w-full flex-col items-center rounded-3xl bg-white px-6 py-10 sm:px-12 sm:py-12">
+          <div
+            className="h-12 w-12 overflow-hidden bg-black"
+            style={{ borderRadius: "22.37%" }}
           >
-            <a href={deepLink}>Accept invite in Buzz</a>
-          </Button>
-        </div>
+            <img alt="Buzz" className="h-full w-full" src={buzzAppIcon} />
+          </div>
+          <h1 className="mt-4 text-2xl font-semibold tracking-tight text-black">
+            You&apos;re invited to
+          </h1>
+          <p className="mt-9 font-mono text-lg text-black/70">{host}</p>
 
-        <p className="mt-6 text-sm text-black/60">
+          {policy?.age_attestation_required && (
+            <label className="mt-9 flex max-w-md cursor-pointer items-start gap-3 text-left text-sm text-black/70">
+              <input
+                className="mt-0.5 h-4 w-4 accent-black"
+                type="checkbox"
+                checked={ageConfirmed}
+                onChange={(event) => setAgeConfirmed(event.target.checked)}
+              />
+              <span>I am 18 years of age or older.</span>
+            </label>
+          )}
+          <div className={policy?.age_attestation_required ? "mt-5" : "mt-9"}>
+            {policy === null ? (
+              <Button
+                asChild
+                className="bg-black text-white hover:bg-black/90 focus-visible:ring-black"
+                size="lg"
+              >
+                <a
+                  href={`buzz://join?relay=${encodeURIComponent(relay)}&code=${encodeURIComponent(code)}`}
+                >
+                  Accept invite in Buzz
+                </a>
+              </Button>
+            ) : (
+              <Button
+                className="bg-black text-white hover:bg-black/90 focus-visible:ring-black disabled:cursor-not-allowed disabled:bg-black/30 disabled:text-white/70"
+                size="lg"
+                disabled={disabled}
+                onClick={openInvite}
+              >
+                Accept invite in Buzz
+              </Button>
+            )}
+          </div>
+          {policy && (policy.terms_markdown || policy.privacy_markdown) && (
+            <p className="mt-4 max-w-md text-xs text-black/60">
+              By proceeding you agree to the Buzz{" "}
+              {policy.terms_markdown && (
+                <button
+                  className="text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
+                  type="button"
+                  onClick={() =>
+                    showDocument(
+                      "Terms of Service",
+                      policy.terms_markdown ?? "",
+                    )
+                  }
+                >
+                  Terms of Service
+                </button>
+              )}
+              {policy.terms_markdown && policy.privacy_markdown && " and "}
+              {policy.privacy_markdown && (
+                <button
+                  className="text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
+                  type="button"
+                  onClick={() =>
+                    showDocument(
+                      "Privacy Policy",
+                      policy.privacy_markdown ?? "",
+                    )
+                  }
+                >
+                  Privacy Policy
+                </button>
+              )}
+              .
+            </p>
+          )}
+        </div>
+        <p className="flex h-[3.125rem] items-center justify-center rounded-2xl bg-white text-sm text-black/60">
           Don&apos;t have the app?{" "}
           <a
-            className="font-medium text-black underline-offset-4 hover:text-black/70 hover:decoration-current hover:underline focus-visible:underline"
+            className="ml-1 font-medium text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
             href={DOWNLOAD_URL}
             rel="noreferrer"
             target="_blank"
@@ -64,6 +171,37 @@ export function InvitePage({ code }: { code: string }) {
           </a>
         </p>
       </div>
+
+      {document && (
+        <div
+          aria-label={document.title}
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 text-left"
+          role="dialog"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) setDocument(null);
+          }}
+        >
+          <div className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white p-6 text-black shadow-xl sm:p-8">
+            <div className="mb-6 flex items-start justify-between gap-4">
+              <h2 className="text-xl font-semibold">{document.title}</h2>
+              <button
+                aria-label="Close"
+                className="text-2xl leading-none text-black/60 hover:text-black"
+                type="button"
+                onClick={() => setDocument(null)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="prose prose-sm max-w-none">
+              <Markdown remarkPlugins={[remarkGfm]}>
+                {document.markdown}
+              </Markdown>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

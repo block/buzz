@@ -121,6 +121,197 @@ test("channel browser shows no results for unmatched search", async ({
   await expect(page.getByText("No channels match your search")).toBeVisible();
 });
 
+test("channel browser fuzzy-matches a subsequence", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  // "engr" is not a substring of "engineering", but it is an in-order
+  // subsequence — plain includes() would miss it, fuzzy matching finds it.
+  await page.getByTestId("channel-browser-search").fill("engr");
+
+  await expect(page.getByTestId("browse-channel-engineering")).toBeVisible();
+  await expect(page.getByTestId("browse-channel-general")).toHaveCount(0);
+});
+
+test("channel browser matches a scattered subsequence", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  // "sls" is neither a substring nor a prefix of "sales" — it only matches as
+  // an in-order subsequence (s·a·l·e·s). Proves fuzzy matching end-to-end.
+  await page.getByTestId("channel-browser-search").fill("sls");
+
+  await expect(page.getByTestId("browse-channel-sales")).toBeVisible();
+  await expect(page.getByTestId("browse-channel-general")).toHaveCount(0);
+});
+
+test("channel browser ranks the best match first", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  // "gen" is a prefix of "general" (strong match) but only a substring of
+  // "agents" and a subsequence of "engineering" (weaker). The prefix match
+  // should float to the top regardless of the alphabetical default sort.
+  await page.getByTestId("channel-browser-search").fill("gen");
+
+  const firstRow = page.getByTestId(/^browse-channel-/).first();
+  await expect(firstRow).toHaveAttribute(
+    "data-testid",
+    "browse-channel-general",
+  );
+});
+
+test("sidebar add-channel button opens the browser", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+
+  await page.getByTestId("section-actions-channels-quick-create").click();
+
+  await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
+});
+
+test("create affordance is visible on open before typing", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+
+  // The create row is present from the get-go so it's clear you can browse OR
+  // create — not just after you start typing.
+  const createRow = page.getByTestId("channel-browser-create-row");
+  await expect(createRow).toBeVisible();
+  await expect(createRow).toContainText("Create a new channel");
+});
+
+test("typing a partial match surfaces a persistent create row", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  // "desig" matches "design" by substring but is not an exact channel name,
+  // so both the matching channel AND the create row are shown.
+  await page.getByTestId("channel-browser-search").fill("desig");
+
+  const createRow = page.getByTestId("channel-browser-create-row");
+  await expect(createRow).toBeVisible();
+  await expect(createRow).toContainText("desig");
+  await expect(page.getByTestId("browse-channel-design")).toBeVisible();
+});
+
+test("exact name match hides the create row", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  await page.getByTestId("channel-browser-search").fill("general");
+
+  await expect(page.getByTestId("browse-channel-general")).toBeVisible();
+  await expect(page.getByTestId("channel-browser-create-row")).toHaveCount(0);
+});
+
+test("no-match search pins a create row above the empty state", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  await page.getByTestId("channel-browser-search").fill("zzz-nonexistent");
+
+  await expect(page.getByText("No channels match your search")).toBeVisible();
+  const createRow = page.getByTestId("channel-browser-create-row");
+  await expect(createRow).toBeVisible();
+  await expect(createRow).toContainText("zzz-nonexistent");
+});
+
+test("create row leads to the prefilled create form", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  await page.getByTestId("channel-browser-search").fill("desig");
+  await page.getByTestId("channel-browser-create-row").click();
+
+  // Create mode reuses the shared form; the name is prefilled from the query.
+  await expect(page.getByTestId("create-channel-name")).toHaveValue("desig");
+
+  // Back returns to the search list without closing the dialog.
+  await page.getByTestId("channel-browser-create-back").click();
+  await expect(page.getByTestId("channel-browser-search")).toBeVisible();
+});
+
+test("creating from the browser adds the channel to the sidebar", async ({
+  page,
+}) => {
+  const channelName = `browse-created-${Date.now()}`;
+
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  await page.getByTestId("channel-browser-search").fill(channelName);
+  await page.getByTestId("channel-browser-create-row").click();
+
+  await expect(page.getByTestId("create-channel-name")).toHaveValue(
+    channelName,
+  );
+  await page.getByTestId("create-channel-submit").click();
+
+  await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  await expect(page.getByTestId("stream-list")).toContainText(channelName);
+  await expect(page.getByTestId("chat-title")).toContainText(channelName);
+});
+
+test("Enter with no matches jumps to create", async ({ page }) => {
+  const channelName = `enter-created-${Date.now()}`;
+
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  await page.getByTestId("channel-browser-search").fill(channelName);
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByTestId("create-channel-name")).toHaveValue(
+    channelName,
+  );
+});
+
+test("arrow keys reach the pinned create row and Enter activates it", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  // "desig" keeps a channel match (#design) AND the create row visible, so the
+  // create row is not the only actionable item — it must be reachable by
+  // keyboard, not just Tab.
+  await page.getByTestId("channel-browser-search").fill("desig");
+
+  const createRow = page.getByTestId("channel-browser-create-row");
+  await expect(createRow).toBeVisible();
+
+  // The create row is pinned at the top → first ArrowDown highlights it.
+  await page.keyboard.press("ArrowDown");
+  await expect(createRow).toHaveAttribute("data-selected", "true");
+
+  // Enter on the highlighted create row enters the prefilled create form.
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("create-channel-name")).toHaveValue("desig");
+});
+
+test("Enter selects a channel when create row is not highlighted", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  // With the create row present but NOT highlighted, Enter should still select
+  // the first channel match rather than jumping to create.
+  await page.getByTestId("channel-browser-search").fill("desig");
+  await expect(page.getByTestId("browse-channel-design")).toBeVisible();
+
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  await expect(page.getByTestId("chat-title")).toHaveText("design");
+});
+
 test("joining a channel from browser adds it to the sidebar", async ({
   page,
 }) => {

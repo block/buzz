@@ -37,6 +37,7 @@ export type NostrBindDeepLinkPayload = {
 export type JoinDeepLinkPayload = {
   relayUrl: string;
   code: string;
+  policyReceipt: string | null;
 };
 
 type PendingCommunityDeepLink = {
@@ -44,6 +45,7 @@ type PendingCommunityDeepLink = {
   kind: "connect" | "join";
   relayUrl: string;
   code: string | null;
+  policyReceipt: string | null;
 };
 
 function acceptPendingCommunityDeepLink(
@@ -54,6 +56,7 @@ function acceptPendingCommunityDeepLink(
     source: pending.kind === "join" ? "deep-link-join" : "deep-link-connect",
     relayUrl: pending.relayUrl,
     inviteCode: pending.code ?? undefined,
+    policyReceipt: pending.policyReceipt ?? undefined,
   });
   return accepted
     ? invoke<boolean>("acknowledge_pending_community_deep_link", {

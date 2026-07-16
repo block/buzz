@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::warn;
 
@@ -21,6 +22,19 @@ pub enum ConfigError {
     /// A configuration value failed validation.
     #[error("invalid config: {0}")]
     InvalidValue(String),
+}
+
+/// Relay-hosted policy content presented on join surfaces.
+#[derive(Debug, Clone)]
+pub struct JoinPolicyConfig {
+    /// Operator-provided Terms of Service document in Markdown.
+    pub terms_markdown: Option<String>,
+    /// Operator-provided Privacy Policy document in Markdown.
+    pub privacy_markdown: Option<String>,
+    /// Whether join surfaces must collect an 18+ attestation.
+    pub age_attestation_required: bool,
+    /// Content-derived identifier binding receipts to the exact policy revision.
+    pub version: String,
 }
 
 /// Relay runtime configuration, loaded from environment variables.
@@ -201,6 +215,10 @@ pub struct Config {
     /// Hard timeout for one gateway delivery request.
     pub push_gateway_timeout: Duration,
 
+    /// Optional relay-hosted policy shown on join surfaces. Disabled when no
+    /// documents or age attestation are configured.
+    pub join_policy: Option<JoinPolicyConfig>,
+
     /// Optional path to the web UI `dist/` directory.
     /// When set, the relay serves the invite landing page and its static assets.
     /// When unset, no static file serving happens (relay behaves as before).
@@ -258,6 +276,22 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
         ));
     }
     Ok(url)
+}
+
+fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(error) => Err(ConfigError::InvalidValue(format!(
+            "{name} must be valid UTF-8: {error}"
+        ))),
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" => Ok(true),
+            "false" | "0" | "off" | "" => Ok(false),
+            _ => Err(ConfigError::InvalidValue(format!(
+                "{name} must be true or false"
+            ))),
+        },
+    }
 }
 
 fn ensure_git_repo_path(
@@ -615,6 +649,44 @@ impl Config {
         };
         let push_gateway_timeout = Duration::from_millis(push_gateway_timeout_millis);
 
+        const MAX_POLICY_MARKDOWN_BYTES: usize = 256 * 1024;
+        let read_policy_markdown = |name: &str| -> Result<Option<String>, ConfigError> {
+            let value = std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            if value
+                .as_ref()
+                .is_some_and(|value| value.len() > MAX_POLICY_MARKDOWN_BYTES)
+            {
+                return Err(ConfigError::InvalidValue(format!(
+                    "{name} must contain at most {MAX_POLICY_MARKDOWN_BYTES} bytes"
+                )));
+            }
+            Ok(value)
+        };
+        let terms_markdown = read_policy_markdown("BUZZ_TERMS_OF_SERVICE_MARKDOWN")?;
+        let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
+        let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
+        let join_policy = if terms_markdown.is_none()
+            && privacy_markdown.is_none()
+            && !age_attestation_required
+        {
+            None
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(terms_markdown.as_deref().unwrap_or_default().as_bytes());
+            hasher.update([0]);
+            hasher.update(privacy_markdown.as_deref().unwrap_or_default().as_bytes());
+            hasher.update([0, u8::from(age_attestation_required)]);
+            Some(JoinPolicyConfig {
+                terms_markdown,
+                privacy_markdown,
+                age_attestation_required,
+                version: hex::encode(hasher.finalize()),
+            })
+        };
+
         // Web UI static file serving
         let web_dir = std::env::var("BUZZ_WEB_DIR")
             .ok()
@@ -687,6 +759,7 @@ impl Config {
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
+            join_policy,
             web_dir,
             serve_git_web_gui,
         })
@@ -742,9 +815,31 @@ mod tests {
             "require_media_get_auth should default to false for staged client rollout"
         );
         assert!(
+            config.join_policy.is_none(),
+            "join_policy should default to None so policy prompts and acceptance receipts are opt-in"
+        );
+        assert!(
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+    }
+
+    #[test]
+    fn join_policy_age_attestation_rejects_invalid_boolean() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_AGE_ATTESTATION_REQUIRED");
+        std::env::set_var("BUZZ_AGE_ATTESTATION_REQUIRED", "sometimes");
+        let result = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED");
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_AGE_ATTESTATION_REQUIRED", value);
+        } else {
+            std::env::remove_var("BUZZ_AGE_ATTESTATION_REQUIRED");
+        }
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_AGE_ATTESTATION_REQUIRED")
+        ));
     }
 
     #[test]

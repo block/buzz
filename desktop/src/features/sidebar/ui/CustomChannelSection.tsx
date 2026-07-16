@@ -342,6 +342,8 @@ export function ChannelGroupSection({
   listTestId,
   onBrowseClick,
   onCreateClick,
+  onQuickCreateClick,
+  quickCreateLabel,
   showQuickCreate,
   onMarkAllRead,
   onMarkChannelRead,
@@ -379,6 +381,14 @@ export function ChannelGroupSection({
   listTestId: string;
   onBrowseClick?: () => void;
   onCreateClick?: () => void;
+  /**
+   * Overrides the quick-create (`+`) button's click handler. Defaults to
+   * `onCreateClick`. Used to point the sidebar `+` at the unified
+   * "Add channel" search-and-create browser instead of the bare create form.
+   */
+  onQuickCreateClick?: () => void;
+  /** Overrides the quick-create button's aria-label/tooltip. */
+  quickCreateLabel?: string;
   showQuickCreate?: boolean;
   onMarkChannelRead: (
     channelId: string,
@@ -485,10 +495,10 @@ export function ChannelGroupSection({
         title={title}
         actions={
           <>
-            {showQuickCreate && onCreateClick ? (
+            {showQuickCreate && (onQuickCreateClick ?? onCreateClick) ? (
               <SectionQuickAction
-                label={createLabel ?? "Create channel"}
-                onClick={onCreateClick}
+                label={quickCreateLabel ?? createLabel ?? "Create channel"}
+                onClick={(onQuickCreateClick ?? onCreateClick) as () => void}
                 testId={
                   actionsTestId ? `${actionsTestId}-quick-create` : undefined
                 }
