@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "buzz-desktop"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1010,6 +1010,7 @@ dependencies = [
  "notify-rust",
  "objc2-app-kit",
  "opus",
+ "plist",
  "png 0.18.1",
  "regex",
  "reqwest 0.13.4",
