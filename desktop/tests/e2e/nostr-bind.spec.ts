@@ -31,8 +31,9 @@ const VALID_REQUEST: NostrBindPayload = {
 async function openNostrBind(
   page: Page,
   payload: NostrBindPayload = VALID_REQUEST,
+  mock?: Parameters<typeof installMockBridge>[1],
 ) {
-  await installMockBridge(page);
+  await installMockBridge(page, mock);
   await page.goto("/");
   await page.waitForFunction(
     () =>
@@ -150,7 +151,7 @@ async function shakeCount(page: Page): Promise<number> {
   );
 }
 
-test("supports OTP entry, navigation, and paste without signing incomplete input", async ({
+test("supports OTP entry and navigation without signing incomplete input", async ({
   page,
 }) => {
   await openNostrBind(page);
@@ -174,42 +175,40 @@ test("supports OTP entry, navigation, and paste without signing incomplete input
   await expect(second).toHaveValue("");
   await expect(continueButton).toBeDisabled();
   await expect.poll(() => signCommandPayloads(page)).toEqual([]);
-
-  await pasteCode(first, VALID_REQUEST.verificationCode);
-  for (const [index, digit] of [...VALID_REQUEST.verificationCode].entries()) {
-    await expect(
-      page.getByTestId(`nostr-bind-code-digit-${index + 1}`),
-    ).toHaveValue(digit);
-  }
-  await expect(page.getByTestId("nostr-bind-code-digit-6")).toBeFocused();
-  await expect(continueButton).toBeEnabled();
 });
 
-test("locks a filled sixth slot and repeats mismatch feedback without signing", async ({
+test("auto-signs exactly once when the sixth correct digit is typed", async ({
   page,
 }) => {
+  await openNostrBind(page);
+
+  await page.getByTestId("nostr-bind-code-digit-1").click();
+  for (const digit of VALID_REQUEST.verificationCode) {
+    await page.keyboard.type(digit);
+  }
+
+  await expect(page.getByTestId("nostr-bind-finish-step")).toBeVisible();
+  await expect.poll(() => signCommandPayloads(page)).toHaveLength(1);
+  await page.waitForTimeout(100);
+  await expect.poll(() => signCommandPayloads(page)).toHaveLength(1);
+});
+
+test("repeats mismatch feedback without signing", async ({ page }) => {
   await installShakeCounter(page);
   await openNostrBind(page);
 
   const first = page.getByTestId("nostr-bind-code-digit-1");
-  const last = page.getByTestId("nostr-bind-code-digit-6");
   const continueButton = page.getByTestId("nostr-bind-sign-and-copy");
-
-  await pasteCode(first, VALID_REQUEST.verificationCode);
-  await last.press("9");
-  await expect(last).toHaveValue("6");
-  await expect(continueButton).toBeEnabled();
-  await expect.poll(() => shakeCount(page)).toBe(1);
 
   await pasteCode(first, "654321");
   await expect(page.getByRole("alert")).toHaveText(
     "That code doesn't match. Check the code and try again.",
   );
   await expect(continueButton).toBeDisabled();
-  await expect.poll(() => shakeCount(page)).toBe(2);
+  await expect.poll(() => shakeCount(page)).toBe(1);
 
   await pasteCode(first, "654321");
-  await expect.poll(() => shakeCount(page)).toBe(3);
+  await expect.poll(() => shakeCount(page)).toBe(2);
   await expect.poll(() => signCommandPayloads(page)).toEqual([]);
 });
 
@@ -263,7 +262,6 @@ test("signs a valid request, shows the response, and copies it", async ({
     VALID_REQUEST.verificationCode,
   );
 
-  await page.getByTestId("nostr-bind-sign-and-copy").click();
   await expect(page.getByTestId("nostr-bind-finish-step")).toBeVisible();
   const response = page.getByTestId("nostr-bind-signed-response");
   await expect(response).toContainText("e2e-signed-nostr-binding");
@@ -296,11 +294,16 @@ test("signs a valid request, shows the response, and copies it", async ({
       ),
     )
     .toBe(signedResponse);
+  await expect.poll(() => signCommandPayloads(page)).toHaveLength(1);
+
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByTestId("nostr-bind-page")).toBeHidden();
 });
 
 test("returns a signed response in the callback fragment after consent", async ({
   page,
 }) => {
+  await installClipboardStub(page, false);
   await openNostrBind(page, {
     ...VALID_REQUEST,
     callbackUrl: "https://admin.example.com/buzz?source=bind#stale",
@@ -326,11 +329,38 @@ test("returns a signed response in the callback fragment after consent", async (
     page.getByTestId("nostr-bind-code-digit-1"),
     VALID_REQUEST.verificationCode,
   );
-  await page.getByTestId("nostr-bind-sign-and-copy").click();
+  await expect(page.getByTestId("nostr-bind-finish-step")).toBeVisible();
 
   await expect(
     page.getByRole("heading", { name: "Continue in your browser" }),
   ).toBeVisible();
+  const manualFallback = page.getByTestId("nostr-bind-manual-fallback");
+  await expect(manualFallback).not.toHaveAttribute("open", "");
+  await expect(page.getByTestId("nostr-bind-signed-response")).toBeHidden();
+  await expect(page.getByTestId("nostr-bind-copy-response")).toBeHidden();
+
+  const fallbackSummary = manualFallback.locator("summary");
+  await fallbackSummary.focus();
+  await fallbackSummary.press("Enter");
+  await expect(manualFallback).toHaveAttribute("open", "");
+  const signedResponse = page.getByTestId("nostr-bind-signed-response");
+  await expect(signedResponse).toContainText("e2e-signed-nostr-binding");
+  const copyResponse = page.getByTestId("nostr-bind-copy-response");
+  await expect(copyResponse).toBeVisible();
+  await copyResponse.click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_CLIPBOARD_TEXT__?: string;
+            }
+          ).__BUZZ_E2E_CLIPBOARD_TEXT__,
+      ),
+    )
+    .toBe(await signedResponse.textContent());
+
   const callback = await page.evaluate(() => {
     const command = (
       (
@@ -352,6 +382,36 @@ test("returns a signed response in the callback fragment after consent", async (
   expect(callbackUrl.hash).toMatch(/^#buzz_bind=v1\.[A-Za-z0-9_-]+$/);
 });
 
+test("opens the manual fallback when returning to the browser fails", async ({
+  page,
+}) => {
+  await openNostrBind(
+    page,
+    {
+      ...VALID_REQUEST,
+      callbackUrl: "https://admin.example.com/buzz",
+      returnMode: "browser_fragment_v1",
+    },
+    { openerError: "browser unavailable" },
+  );
+
+  await pasteCode(
+    page.getByTestId("nostr-bind-code-digit-1"),
+    VALID_REQUEST.verificationCode,
+  );
+
+  await expect(
+    page.getByText(
+      "Could not open the browser. Copy the response below to finish manually.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByTestId("nostr-bind-manual-fallback")).toHaveAttribute(
+    "open",
+    "",
+  );
+  await expect(page.getByTestId("nostr-bind-copy-response")).toBeVisible();
+});
+
 test("keeps the signed response available when clipboard access fails", async ({
   page,
 }) => {
@@ -361,11 +421,13 @@ test("keeps the signed response available when clipboard access fails", async ({
     page.getByTestId("nostr-bind-code-digit-1"),
     VALID_REQUEST.verificationCode,
   );
-  await page.getByTestId("nostr-bind-sign-and-copy").click();
+  await expect(page.getByTestId("nostr-bind-finish-step")).toBeVisible();
 
   await page.getByTestId("nostr-bind-copy-response").click();
   await expect(
-    page.getByText("Buzz couldn't access the clipboard. Try again."),
+    page
+      .getByTestId("nostr-bind-manual-fallback-content")
+      .getByText("Buzz couldn't access the clipboard. Try again."),
   ).toBeVisible();
   await expect(page.getByTestId("nostr-bind-signed-response")).toContainText(
     "e2e-signed-nostr-binding",

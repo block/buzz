@@ -187,6 +187,8 @@ type E2eConfig = {
      *  Linux .deb install where Tauri's updater cannot swap the binary).
      *  Defaults to true for all existing tests. */
     autoUpdateSupported?: boolean;
+    /** Reject `plugin:opener|open_url` to exercise browser-return fallback UI. */
+    openerError?: string;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -9579,6 +9581,9 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof sendToMockSocket>[0],
         );
       case "plugin:opener|open_url":
+        if (activeConfig?.mock?.openerError) {
+          throw new Error(activeConfig.mock.openerError);
+        }
         openedExternalUrls.push(String((payload as { url: string | URL }).url));
         return null;
       case "get_e2e_opened_external_urls":
