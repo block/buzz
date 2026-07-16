@@ -43,6 +43,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/images/buzz-icon.png
   fonts:
     - family: Inter
       fonts:
