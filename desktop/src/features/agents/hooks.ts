@@ -2,6 +2,10 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  connectAcpRuntime,
+  discoverAcpAuthMethods,
+} from "@/shared/api/tauriAgentAuth";
+import {
   attachManagedAgentToChannel,
   createChannelManagedAgents,
   ensureChannelAgentPresetInChannel,
@@ -14,10 +18,8 @@ import {
 } from "@/features/channels/hooks";
 import { evictUsersBatchEntries } from "@/features/profile/hooks";
 import {
-  connectAcpRuntime,
   createManagedAgent,
   deleteManagedAgent,
-  discoverAcpAuthMethods,
   discoverAcpRuntimes,
   discoverBackendProviders,
   discoverGitBashPrerequisite,

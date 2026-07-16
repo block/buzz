@@ -208,35 +208,58 @@ function InstallActions({
   runtime: AcpRuntimeCatalogEntry;
 }) {
   const showInstall = runtime.canAutoInstall && !runtime.nodeRequired;
+  const installLabel =
+    runtime.availability === "adapter_missing"
+      ? "Install ACP adapter"
+      : runtime.availability === "adapter_outdated"
+        ? "Update ACP adapter"
+        : `Install ${runtime.label}`;
+  const pendingLabel =
+    runtime.availability === "adapter_missing" ||
+    runtime.availability === "adapter_outdated"
+      ? "Installing adapter..."
+      : `Installing ${runtime.label}...`;
 
   return (
-    <div className="mt-2 flex items-center gap-2">
+    <div className="mt-2 space-y-2">
       {showInstall ? (
-        <Button
-          disabled={isInstalling}
-          onClick={onInstall}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          {isInstalling ? (
-            <RefreshCw className="h-4 w-4 animate-spin" />
-          ) : hasError ? (
-            <RefreshCw className="h-4 w-4" />
-          ) : (
-            <Download className="h-4 w-4" />
-          )}
-          {isInstalling ? "Installing..." : hasError ? "Retry" : "Install"}
-        </Button>
+        <p className="text-xs text-muted-foreground">
+          Buzz uses the official installer and adds the ACP adapter. After it
+          finishes, Buzz will show the vendor&apos;s sign-in flow here.
+        </p>
       ) : null}
-      <button
-        className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-        onClick={() => void openUrl(runtime.installInstructionsUrl)}
-        type="button"
-      >
-        <ExternalLink className="h-4 w-4" />
-        View instructions
-      </button>
+      <div className="flex items-center gap-2">
+        {showInstall ? (
+          <Button
+            disabled={isInstalling}
+            onClick={onInstall}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            {isInstalling ? (
+              <RefreshCw className="h-4 w-4 animate-spin" />
+            ) : hasError ? (
+              <RefreshCw className="h-4 w-4" />
+            ) : (
+              <Download className="h-4 w-4" />
+            )}
+            {isInstalling
+              ? pendingLabel
+              : hasError
+                ? `Retry ${installLabel}`
+                : installLabel}
+          </Button>
+        ) : null}
+        <button
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          onClick={() => void openUrl(runtime.installInstructionsUrl)}
+          type="button"
+        >
+          <ExternalLink className="h-4 w-4" />
+          View instructions
+        </button>
+      </div>
     </div>
   );
 }
@@ -474,7 +497,7 @@ function RuntimeRow({
 
         {installSuccess && runtime.availability !== "available" ? (
           <p className="mt-2 rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-1.5 text-sm text-green-700 dark:text-green-400">
-            Installed successfully!
+            {runtime.label} installed. Checking for sign-in options...
           </p>
         ) : null}
         {installError ? (

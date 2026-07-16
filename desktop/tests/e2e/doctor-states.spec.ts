@@ -300,12 +300,12 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(row).toBeVisible({ timeout: 10_000 });
 
     // Trigger the first install — the mock returns a failure.
-    const installBtn = row.getByRole("button", { name: "Install" });
+    const installBtn = row.getByRole("button", { name: "Install Codex" });
     await expect(installBtn).toBeVisible({ timeout: 5_000 });
     await installBtn.click();
 
     // After failure: Retry button appears and the error message is visible.
-    const retryBtn = row.getByRole("button", { name: "Retry" });
+    const retryBtn = row.getByRole("button", { name: "Retry Install Codex" });
     await expect(retryBtn).toBeVisible({ timeout: 5_000 });
     await expect(row).toContainText("Step");
     await expect(row).toContainText("failed");
@@ -320,7 +320,9 @@ test.describe("Doctor panel state screenshots", () => {
     // Error paragraph must disappear and per-runtime spinner must appear,
     // then the success banner must render.
     await expect(row).not.toContainText("failed", { timeout: 5_000 });
-    await expect(row.getByText("Installed successfully!")).toBeVisible({
+    await expect(
+      row.getByText("Codex installed. Checking for sign-in options..."),
+    ).toBeVisible({
       timeout: 10_000,
     });
 

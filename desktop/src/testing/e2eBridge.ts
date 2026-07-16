@@ -42,8 +42,10 @@ import {
 } from "@/shared/constants/kinds";
 import type {
   RawAcpAuthMethodsResult,
-  RawAcpRuntimeCatalogEntry,
   RawConnectAcpRuntimeResult,
+} from "@/shared/api/tauriAgentAuth";
+import type {
+  RawAcpRuntimeCatalogEntry,
   RawInstallRuntimeResult,
 } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
