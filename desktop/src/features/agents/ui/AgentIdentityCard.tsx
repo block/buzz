@@ -73,7 +73,7 @@ export function AgentIdentityCard({
           {label}
         </span>
         {modelLabel ? (
-          <span className="min-w-0 truncate font-normal text-secondary-foreground/75">
+          <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
             {modelLabel}
           </span>
         ) : null}
