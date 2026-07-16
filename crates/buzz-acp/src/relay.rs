@@ -2751,16 +2751,18 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
 ///   status is `408`, `429`, or `5xx` (server-side transient conditions).
 /// - `WebSocket(Tls)` — deterministic TLS config failures. On our rustls
 ///   build the only connect-time `Tls` is `InvalidDnsName`.
-/// - `WebSocket(Io)` with a `rustls::Error` in the source chain — terminal.
-///   `tokio-rustls` wraps all rustls handshake failures (invalid/expired
-///   certificate, hostname mismatch, protocol errors) as `io::Error` with
-///   the `rustls::Error` as source; `tokio-tungstenite` then surfaces them
-///   as `Error::Io`. These are deterministic validation failures.
+/// - `WebSocket(Io)` with a deterministic `rustls::Error` in the source
+///   chain — terminal. `tokio-rustls` wraps all rustls handshake failures
+///   as `io::Error` with the `rustls::Error` as source; `tokio-tungstenite`
+///   then surfaces them as `Error::Io`. Only deterministic cert/config/
+///   incompatibility variants (allowlist) are terminal; ambiguous protocol,
+///   decrypt, and server-alert shapes stay transient under the bounded budget.
 /// - `AuthFailed` — split by [`is_terminal_auth_failure`].
 ///
 /// **Transient (retry):**
-/// - `WebSocket(Io)` without a rustls source — plain transport failures
-///   (reset, EOF, timeout, refused, mid-handshake TLS transport loss).
+/// - `WebSocket(Io)` without a rustls source, or with an ambiguous rustls
+///   error (alerts, protocol, decrypt) — plain transport failures (reset,
+///   EOF, timeout, refused) and ambiguous TLS errors stay retryable.
 /// - `WebSocket(ConnectionClosed)` — link-level closure.
 /// - `WebSocket(AlreadyClosed)`, `WebSocket(WriteBufferFull)` — unreachable
 ///   during `connect_async`; kept fail-safe transient.
@@ -2801,14 +2803,15 @@ fn is_terminal_ws_error(err: &tokio_tungstenite::tungstenite::Error) -> bool {
             ProtocolError::HandshakeIncomplete | ProtocolError::ResetWithoutClosingHandshake
         ),
 
-        // Io: split by error source. tokio-rustls wraps all rustls handshake
-        // failures (invalid/expired cert, hostname mismatch, protocol errors)
-        // as io::Error with the rustls::Error as source. Those are terminal —
-        // deterministic validation failures that retry cannot fix. Plain
-        // transport Io (reset, EOF, timeout, refused) stays transient.
+        // Io: split by error source and rustls variant. tokio-rustls wraps
+        // rustls errors as io::Error(InvalidData, rustls_err). Deterministic
+        // cert/config/incompatibility failures (allowlist) are terminal;
+        // ambiguous protocol, decrypt, and server-alert shapes stay transient
+        // under the bounded retry budget. Plain transport Io (reset, EOF,
+        // timeout, refused) also stays transient.
         // Relies on a single rustls version in the dep tree (0.23.40);
         // a version split would break the downcast.
-        WsError::Io(e) => has_rustls_source(e),
+        WsError::Io(e) => is_terminal_rustls_io_error(e),
 
         WsError::ConnectionClosed => false,
 
@@ -2823,27 +2826,48 @@ fn is_terminal_ws_error(err: &tokio_tungstenite::tungstenite::Error) -> bool {
     }
 }
 
-/// Walks the `std::error::Error::source()` chain of an `io::Error` looking
-/// for a `rustls::Error`. Returns `true` if found — the error originated
-/// from a deterministic TLS validation failure, not a transport problem.
-fn has_rustls_source(err: &std::io::Error) -> bool {
+/// Walks an `io::Error` for a `rustls::Error` and inspects its variant.
+/// Returns `true` (terminal) only for deterministic cert/config/incompatibility
+/// failures that retry cannot fix. Ambiguous protocol, decrypt, and server-alert
+/// shapes return `false` (transient) — retries are bounded and the feature's
+/// purpose is resilience.
+///
+/// Relies on a single rustls version in the dep tree (0.23.40); a version split
+/// would break the downcast.
+fn is_terminal_rustls_io_error(err: &std::io::Error) -> bool {
     use std::error::Error as _;
-    // First check the direct inner error (io::Error stores the custom error
-    // as its payload, accessible via get_ref — source() skips to *its* source).
-    if let Some(inner) = err.get_ref() {
-        if inner.downcast_ref::<rustls::Error>().is_some() {
-            return true;
+
+    fn find_rustls_error(err: &std::io::Error) -> Option<&rustls::Error> {
+        // First check the direct inner payload (io::Error stores it via
+        // get_ref — source() skips to *its* source).
+        if let Some(inner) = err.get_ref() {
+            if let Some(re) = inner.downcast_ref::<rustls::Error>() {
+                return Some(re);
+            }
         }
-    }
-    // Walk the source chain for deeper wrapping.
-    let mut source = err.source();
-    while let Some(e) = source {
-        if e.downcast_ref::<rustls::Error>().is_some() {
-            return true;
+        // Walk the source chain for deeper wrapping.
+        let mut source = err.source();
+        while let Some(e) = source {
+            if let Some(re) = e.downcast_ref::<rustls::Error>() {
+                return Some(re);
+            }
+            source = e.source();
         }
-        source = e.source();
+        None
     }
-    false
+
+    let Some(rustls_err) = find_rustls_error(err) else {
+        return false;
+    };
+
+    matches!(
+        rustls_err,
+        rustls::Error::InvalidCertificate(_)
+            | rustls::Error::InvalidCertRevocationList(_)
+            | rustls::Error::NoCertificatesPresented
+            | rustls::Error::UnsupportedNameType
+            | rustls::Error::PeerIncompatible(_)
+    )
 }
 
 /// Whether a relay's `OK false <message>` denial during NIP-42 auth is
@@ -4280,10 +4304,10 @@ mod tests {
                 ws(WsError::Io(std::io::ErrorKind::TimedOut.into())),
                 false,
             ),
-            // ── WebSocket(Io): rustls-sourced (terminal) ──
+            // ── WebSocket(Io): rustls-sourced, variant-inspected ──
             // Production shape: tokio-rustls wraps rustls errors as
-            // io::Error(InvalidData, rustls::Error). These are deterministic
-            // validation failures that retry cannot fix.
+            // io::Error(InvalidData, rustls::Error). Only deterministic
+            // cert/config/incompatibility variants are terminal.
             (
                 "Io(rustls InvalidCertificate(Expired)): production-shaped expired cert is terminal",
                 ws(WsError::Io(std::io::Error::new(
@@ -4303,12 +4327,40 @@ mod tests {
                 true,
             ),
             (
-                "Io(rustls General): general rustls error is terminal",
+                "Io(rustls NoCertificatesPresented): missing cert is terminal",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::NoCertificatesPresented,
+                ))),
+                true,
+            ),
+            // ── WebSocket(Io): rustls-sourced, ambiguous (transient) ──
+            // Protocol, decrypt, alert, and general errors may be caused by
+            // network conditions or transient server failures — retryable
+            // under the bounded budget.
+            (
+                "Io(rustls General): ambiguous general error is transient",
                 ws(WsError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     rustls::Error::General("protocol error".into()),
                 ))),
-                true,
+                false,
+            ),
+            (
+                "Io(rustls AlertReceived(InternalError)): server alert is transient",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::AlertReceived(rustls::AlertDescription::InternalError),
+                ))),
+                false,
+            ),
+            (
+                "Io(rustls DecryptError): corrupted record is transient",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::DecryptError,
+                ))),
+                false,
             ),
             (
                 "WebSocket(ConnectionClosed): link-level closure",
