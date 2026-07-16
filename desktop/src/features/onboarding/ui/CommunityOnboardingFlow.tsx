@@ -57,16 +57,47 @@ export function CommunityOnboardingFlow({
     if (transaction?.stage !== "claiming" || transaction.error || isPending)
       return;
     setIsPending(true);
-    void claimInvite(transaction.relayUrl, transaction.inviteCode ?? "")
-      .then(() => update({ stage: "connecting", error: undefined }))
+    void getIdentity()
+      .then(async (identity) => {
+        await claimInvite(transaction.relayUrl, transaction.inviteCode ?? "");
+        update({
+          stage: "connecting",
+          error: undefined,
+          claimedPubkey: identity.pubkey,
+        });
+      })
       .catch((error: unknown) => update({ error: inviteErrorMessage(error) }))
       .finally(() => setIsPending(false));
   }, [isPending, transaction, update]);
 
   React.useEffect(() => {
     if (transaction?.stage !== "connecting") return;
-    onConnect();
-  }, [onConnect, transaction]);
+    const { claimedPubkey } = transaction;
+    if (!claimedPubkey) {
+      onConnect();
+      return;
+    }
+    // A claim made during machine onboarding (PendingInviteGate) signed with
+    // the boot-time key, but the identity steps can still swap in an imported
+    // key — the relay never admitted that one. Re-claim with the final key
+    // instead of connecting as a non-member.
+    let cancelled = false;
+    void getIdentity()
+      .then((identity) => {
+        if (cancelled) return;
+        if (identity.pubkey === claimedPubkey) {
+          onConnect();
+        } else {
+          update({ stage: "claiming", error: undefined });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) onConnect();
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [onConnect, transaction, update]);
 
   const retryClaim = () => update({ stage: "claiming", error: undefined });
   const relayUrl = transaction?.relayUrl;

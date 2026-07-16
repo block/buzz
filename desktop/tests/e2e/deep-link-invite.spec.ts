@@ -102,6 +102,125 @@ test("failed invite confirmation offers Retry and Cancel returns to setup", asyn
     .toBeNull();
 });
 
+test("resumed invite re-claims when the identity changed during setup", async ({
+  page,
+}) => {
+  // The gate claimed with the boot-time key, then the user imported a
+  // different key in the identity steps: the persisted claimedPubkey no
+  // longer matches the current identity, so the flow must claim again with
+  // the final key before connecting.
+  let claimCalls = 0;
+  await page.route("**/api/invites/claim", async (route) => {
+    claimCalls++;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: "joined",
+        community_id: "demo-community",
+        host: "hive.example.com",
+        role: "member",
+      }),
+    });
+  });
+  await page.addInitScript(
+    ({ pubkey, storageKey }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          id: "txn-deep-link-2",
+          source: "deep-link-join",
+          stage: "connecting",
+          relayUrl: "wss://hive.example.com",
+          inviteCode: "abc.def",
+          communityName: "hive",
+          claimedPubkey: "11".repeat(32),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    { pubkey: DEFAULT_MOCK_PUBKEY, storageKey: TRANSACTION_STORAGE_KEY },
+  );
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  await expect(page.getByTestId("community-onboarding-flow")).toBeVisible();
+
+  // The invite is claimed again, and the transaction now records the final
+  // identity as the admitted key.
+  await expect.poll(() => claimCalls).toBeGreaterThan(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        TRANSACTION_STORAGE_KEY,
+      ),
+    )
+    .toContain(`"claimedPubkey":"${DEFAULT_MOCK_PUBKEY}"`);
+});
+
+test("resumed invite does not re-claim when the identity is unchanged", async ({
+  page,
+}) => {
+  let claimCalls = 0;
+  await page.route("**/api/invites/claim", async (route) => {
+    claimCalls++;
+    await route.abort();
+  });
+  await page.addInitScript(
+    ({ pubkey, storageKey }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          id: "txn-deep-link-3",
+          source: "deep-link-join",
+          stage: "connecting",
+          relayUrl: "wss://hive.example.com",
+          inviteCode: "abc.def",
+          communityName: "hive",
+          claimedPubkey: pubkey,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    { pubkey: DEFAULT_MOCK_PUBKEY, storageKey: TRANSACTION_STORAGE_KEY },
+  );
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  await expect(page.getByTestId("community-onboarding-flow")).toBeVisible();
+
+  // The matching pubkey lets the join proceed straight to connecting: the
+  // community is registered on the transaction without another claim.
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        TRANSACTION_STORAGE_KEY,
+      ),
+    )
+    .toContain('"communityId"');
+  expect(claimCalls).toBe(0);
+});
+
 test("persisted deep-link invite hands off to Joining after machine onboarding", async ({
   page,
 }) => {

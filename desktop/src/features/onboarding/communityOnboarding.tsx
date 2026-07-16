@@ -33,7 +33,19 @@ export type CommunityOnboardingTransaction = {
   createdAt: string;
   updatedAt: string;
   error?: string;
+  // Pubkey that signed the successful invite claim. A claim made during
+  // machine onboarding (PendingInviteGate) uses the boot-time key, but the
+  // identity steps can still swap in an imported key — CommunityOnboardingFlow
+  // compares this against the final identity and re-claims on mismatch.
+  claimedPubkey?: string;
 };
+
+export type CommunityOnboardingTransactionPatch = Partial<
+  Pick<
+    CommunityOnboardingTransaction,
+    "stage" | "communityId" | "communityName" | "error" | "claimedPubkey"
+  >
+>;
 
 export type StartCommunityOnboardingInput = {
   source: CommunityOnboardingSource;
@@ -143,12 +155,7 @@ export function startCommunityOnboarding(
 
 export function updateCommunityOnboardingTransaction(
   transaction: CommunityOnboardingTransaction,
-  patch: Partial<
-    Pick<
-      CommunityOnboardingTransaction,
-      "stage" | "communityId" | "communityName" | "error"
-    >
-  >,
+  patch: CommunityOnboardingTransactionPatch,
   storage: Storage = localStorage,
   now = new Date(),
 ): CommunityOnboardingTransaction {
@@ -176,14 +183,7 @@ import * as React from "react";
 type CommunityOnboardingContextValue = {
   transaction: CommunityOnboardingTransaction | null;
   start: (input: StartCommunityOnboardingInput) => boolean;
-  update: (
-    patch: Partial<
-      Pick<
-        CommunityOnboardingTransaction,
-        "stage" | "communityId" | "communityName" | "error"
-      >
-    >,
-  ) => void;
+  update: (patch: CommunityOnboardingTransactionPatch) => void;
   clear: () => void;
 };
 
@@ -212,14 +212,7 @@ export function CommunityOnboardingProvider({
     [transaction],
   );
   const update = React.useCallback(
-    (
-      patch: Partial<
-        Pick<
-          CommunityOnboardingTransaction,
-          "stage" | "communityId" | "communityName" | "error"
-        >
-      >,
-    ) => {
+    (patch: CommunityOnboardingTransactionPatch) => {
       setTransaction((current) =>
         current
           ? updateCommunityOnboardingTransaction(current, patch)

@@ -79,6 +79,26 @@ test("same-relay ingress resumes rather than replacing progress", () => {
   assert.equal(resumed.inviteCode, "new-code");
 });
 
+test("claimed pubkey persists so a post-setup identity change can re-claim", () => {
+  const storage = createMemoryStorage();
+  const transaction = startCommunityOnboarding(
+    {
+      source: "deep-link-join",
+      relayUrl: "wss://relay.example",
+      inviteCode: "invite-code",
+    },
+    storage,
+  );
+  updateCommunityOnboardingTransaction(
+    transaction,
+    { stage: "connecting", claimedPubkey: "boot-time-pubkey" },
+    storage,
+  );
+  const persisted = loadCommunityOnboardingTransaction(storage);
+  assert.equal(persisted?.stage, "connecting");
+  assert.equal(persisted?.claimedPubkey, "boot-time-pubkey");
+});
+
 test("malformed persisted state is ignored and can be cleared", () => {
   const storage = createMemoryStorage({
     "buzz-community-onboarding-transaction.v1": '{"stage":"profile"}',
