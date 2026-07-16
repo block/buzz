@@ -1,10 +1,7 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import {
-  hasRunningAgentAnywhere,
-  hasRunningAgentInCommunity,
-} from "@/features/agents/agentRelayScope";
+import { hasRunningAgentInCommunity } from "@/features/agents/agentRelayScope";
 import {
   attachManagedAgentToChannel,
   createChannelManagedAgents,
@@ -297,18 +294,11 @@ export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
       // with no relay event to signal it, so this poll is the only liveness
       // path for them. When nothing is running there IS an event path —
       // `agents-data-changed` (control-plane changes) — so the idle branch
-      // drops its poll entirely rather than falling back to 30s. Two tiers:
-      // 5s while an agent in the ACTIVE community runs (its rows render live
-      // process state), relaxed to 60s while agents run only in other
-      // communities — those surface merely as last-known indicators (the
-      // community rail's active-agents dot, the "running in other
-      // communities" line), which must still notice a background process
-      // dying rather than staying green forever.
-      return hasRunningAgentInCommunity(agents, activeRelayUrl)
-        ? 5_000
-        : hasRunningAgentAnywhere(agents)
-          ? 60_000
-          : false;
+      // drops its poll entirely rather than falling back to 30s. Scoped to
+      // the active community's relay: agents left running in other
+      // communities render no process state on this community's surfaces,
+      // so they must not keep its poll alive.
+      return hasRunningAgentInCommunity(agents, activeRelayUrl) ? 5_000 : false;
     },
   });
 }

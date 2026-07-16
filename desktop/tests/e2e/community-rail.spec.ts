@@ -134,50 +134,6 @@ test.describe("community rail", () => {
     await expect(buttonB).toHaveAttribute("aria-current", "true");
   });
 
-  test("shows an active-agents dot only on communities with running agents", async ({
-    page,
-  }) => {
-    await installMockBridge(
-      page,
-      {
-        managedAgents: [
-          {
-            pubkey:
-              "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11",
-            name: "Bravo Coder",
-            status: "running",
-            relayUrl: COMMUNITY_B.relayUrl,
-          },
-          {
-            pubkey:
-              "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22",
-            name: "Alpha Idle",
-            status: "stopped",
-            relayUrl: COMMUNITY_A.relayUrl,
-          },
-        ],
-      },
-      { skipCommunitySeed: true },
-    );
-    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
-    await page.goto("/");
-
-    // The community with a running agent gets the green dot — even while
-    // another community is active — and its tooltip label reports the count.
-    const dotB = page.getByTestId(
-      `community-rail-agents-dot-${COMMUNITY_B.id}`,
-    );
-    await expect(dotB).toBeVisible();
-    await expect(
-      page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`),
-    ).toHaveAttribute("aria-label", "Bravo — 1 agent active");
-
-    // A community with only stopped agents shows no dot.
-    await expect(
-      page.getByTestId(`community-rail-agents-dot-${COMMUNITY_A.id}`),
-    ).toHaveCount(0);
-  });
-
   test("hides the rail with a single community", async ({ page }) => {
     await installMockBridge(page, undefined, { skipCommunitySeed: true });
     await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);

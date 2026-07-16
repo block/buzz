@@ -4,8 +4,6 @@ import test from "node:test";
 
 import {
   agentBelongsToRelay,
-  countActiveAgentsByCommunity,
-  hasRunningAgentAnywhere,
   hasRunningAgentInCommunity,
   normalizeRelayUrlForCompare,
   partitionAgentsByRelay,
@@ -152,104 +150,4 @@ test("pollingGate_blankPinRunningAgent_polls", () => {
     hasRunningAgentInCommunity([{ relayUrl: "", status: "running" }], RELAY_A),
     true,
   );
-});
-
-// ── hasRunningAgentAnywhere: the slow cross-community poll tier ──────────────
-
-test("anywhereGate_runningAgentInAnyCommunity_polls", () => {
-  assert.equal(
-    hasRunningAgentAnywhere([
-      { relayUrl: RELAY_A, status: "stopped" },
-      { relayUrl: RELAY_B, status: "running" },
-    ]),
-    true,
-  );
-});
-
-test("anywhereGate_deployedOnly_doesNotPoll", () => {
-  // Provider-backed agents change status only through control-plane
-  // actions — no silent process death to notice, so no poll.
-  assert.equal(
-    hasRunningAgentAnywhere([{ relayUrl: RELAY_A, status: "deployed" }]),
-    false,
-  );
-  assert.equal(hasRunningAgentAnywhere(undefined), false);
-});
-
-// ── countActiveAgentsByCommunity: the community-rail active-agents dot ───────
-
-const COMMUNITIES = [
-  { id: "community-a", relayUrl: RELAY_A },
-  { id: "community-b", relayUrl: RELAY_B },
-];
-
-test("railCounts_scopesActiveAgentsToTheirPinnedCommunity", () => {
-  const counts = countActiveAgentsByCommunity(
-    [
-      { relayUrl: RELAY_A, status: "running" },
-      // Cosmetic URL differences must not split an agent from its community.
-      { relayUrl: `WS://RELAY-A.example.com:3000/`, status: "running" },
-      { relayUrl: RELAY_B, status: "stopped" },
-    ],
-    COMMUNITIES,
-    "community-b",
-  );
-
-  assert.equal(counts.get("community-a"), 2);
-  assert.equal(counts.get("community-b"), undefined);
-});
-
-test("railCounts_deployedCountsAsActive", () => {
-  // Mirrors isManagedAgentActive: the agents screen presents deployed
-  // provider-backed agents as active, so the rail dot must agree.
-  const counts = countActiveAgentsByCommunity(
-    [{ relayUrl: RELAY_B, status: "deployed" }],
-    COMMUNITIES,
-    "community-a",
-  );
-
-  assert.equal(counts.get("community-b"), 1);
-});
-
-test("railCounts_blankPin_followsActiveCommunityOnly", () => {
-  // On an all-communities surface the per-surface "blank follows the
-  // community being viewed" fallback would light EVERY dot for one stray
-  // unstamped record; here it must attach to the active community alone.
-  const counts = countActiveAgentsByCommunity(
-    [{ relayUrl: "", status: "running" }],
-    COMMUNITIES,
-    "community-a",
-  );
-
-  assert.equal(counts.get("community-a"), 1);
-  assert.equal(counts.get("community-b"), undefined);
-});
-
-test("railCounts_blankPin_noActiveCommunity_countsNowhere", () => {
-  const counts = countActiveAgentsByCommunity(
-    [{ relayUrl: "", status: "running" }],
-    COMMUNITIES,
-    null,
-  );
-
-  assert.equal(counts.size, 0);
-});
-
-test("railCounts_communitiesSharingARelay_bothLight", () => {
-  const counts = countActiveAgentsByCommunity(
-    [{ relayUrl: RELAY_A, status: "running" }],
-    [
-      { id: "community-a", relayUrl: RELAY_A },
-      { id: "community-a-alias", relayUrl: `${RELAY_A}/` },
-    ],
-    "community-a",
-  );
-
-  assert.equal(counts.get("community-a"), 1);
-  assert.equal(counts.get("community-a-alias"), 1);
-});
-
-test("railCounts_undefinedAgents_yieldsEmpty", () => {
-  const counts = countActiveAgentsByCommunity(undefined, COMMUNITIES, null);
-  assert.equal(counts.size, 0);
 });

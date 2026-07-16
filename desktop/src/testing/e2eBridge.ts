@@ -64,8 +64,6 @@ type MockManagedAgentSeed = {
   avatarUrl?: string | null;
   personaId?: string | null;
   status?: RawManagedAgent["status"];
-  /** Home-relay pin; defaults to the mock workspace relay when omitted. */
-  relayUrl?: string;
   channelNames?: string[];
   channelIds?: string[];
   backend?: RawManagedAgent["backend"];
@@ -1752,7 +1750,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     pubkey: seed.pubkey,
     name: seed.name,
     persona_id: seed.personaId ?? null,
-    relay_url: seed.relayUrl ?? DEFAULT_RELAY_WS_URL,
+    relay_url: DEFAULT_RELAY_WS_URL,
     acp_command: "buzz-acp",
     agent_command: "goose",
     agent_args: ["acp"],

@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import {
-  communityRailIndicators,
-  communityRailTooltipLabel,
-} from "./CommunityRail.tsx";
+import { communityRailIndicators } from "./CommunityRail.tsx";
 
 describe("communityRailIndicators", () => {
   it("shows no badge for an observed community with unread but no mentions", () => {
@@ -71,57 +68,5 @@ describe("communityRailIndicators", () => {
     assert.equal(r.showDot, false);
     assert.equal(r.mentionCount, 0);
     assert.equal(r.pending, false);
-  });
-});
-
-describe("communityRailTooltipLabel", () => {
-  const quiet = { showBadge: false, showDot: false, mentionCount: 0 };
-
-  it("is just the name with nothing to report", () => {
-    assert.equal(communityRailTooltipLabel("Acme", quiet, 0), "Acme");
-  });
-
-  it("reports active agents with singular/plural forms", () => {
-    assert.equal(
-      communityRailTooltipLabel("Acme", quiet, 1),
-      "Acme — 1 agent active",
-    );
-    assert.equal(
-      communityRailTooltipLabel("Acme", quiet, 3),
-      "Acme — 3 agents active",
-    );
-  });
-
-  it("combines mentions with active agents — mentions beat plain unread", () => {
-    assert.equal(
-      communityRailTooltipLabel(
-        "Acme",
-        { showBadge: true, showDot: false, mentionCount: 2 },
-        1,
-      ),
-      "Acme — 2 mentions, 1 agent active",
-    );
-  });
-
-  it("combines plain unread with active agents", () => {
-    assert.equal(
-      communityRailTooltipLabel(
-        "Acme",
-        { showBadge: false, showDot: true, mentionCount: 0 },
-        2,
-      ),
-      "Acme — unread, 2 agents active",
-    );
-  });
-
-  it("keeps the plain unread form without agents", () => {
-    assert.equal(
-      communityRailTooltipLabel(
-        "Acme",
-        { showBadge: false, showDot: true, mentionCount: 0 },
-        0,
-      ),
-      "Acme — unread",
-    );
   });
 });

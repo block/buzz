@@ -1,8 +1,6 @@
 import { CheckCheck, Link2, Plus, Settings2 } from "lucide-react";
 import * as React from "react";
 
-import { countActiveAgentsByCommunity } from "@/features/agents/agentRelayScope";
-import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import type { Community } from "@/features/communities/types";
 import { EditCommunityDialog } from "@/features/communities/ui/EditCommunityDialog";
 import { useCommunityIcons } from "@/features/communities/useCommunityIcons";
@@ -70,41 +68,10 @@ export function communityRailIndicators(unread: CommunityUnreadState): {
   };
 }
 
-/**
- * Tooltip / aria label for one community button: the community name, plus
- * the unread state (mention count beats plain unread, mirroring the badge/dot
- * exclusivity) and the active-agent count when agents run there. Pure for
- * unit tests.
- */
-export function communityRailTooltipLabel(
-  name: string,
-  indicators: Pick<
-    ReturnType<typeof communityRailIndicators>,
-    "showBadge" | "showDot" | "mentionCount"
-  >,
-  activeAgentCount: number,
-): string {
-  const parts: string[] = [];
-  if (indicators.showBadge) {
-    parts.push(
-      `${indicators.mentionCount} mention${indicators.mentionCount === 1 ? "" : "s"}`,
-    );
-  } else if (indicators.showDot) {
-    parts.push("unread");
-  }
-  if (activeAgentCount > 0) {
-    parts.push(
-      `${activeAgentCount} agent${activeAgentCount === 1 ? "" : "s"} active`,
-    );
-  }
-  return parts.length === 0 ? name : `${name} — ${parts.join(", ")}`;
-}
-
 function CommunityButton({
   community,
   isActive,
   unread,
-  activeAgentCount,
   iconUrl,
   onSwitch,
   menu,
@@ -112,19 +79,18 @@ function CommunityButton({
   community: Community;
   isActive: boolean;
   unread: CommunityUnreadState;
-  activeAgentCount: number;
   iconUrl: string | null;
   onSwitch: () => void;
   menu: React.ReactNode;
 }) {
-  const indicators = communityRailIndicators(unread);
-  const { showBadge, showDot, pending, badgeLabel } = indicators;
+  const { mentionCount, showBadge, showDot, pending, badgeLabel } =
+    communityRailIndicators(unread);
 
-  const tooltipLabel = communityRailTooltipLabel(
-    community.name,
-    indicators,
-    activeAgentCount,
-  );
+  const tooltipLabel = showBadge
+    ? `${community.name} — ${mentionCount} mention${mentionCount === 1 ? "" : "s"}`
+    : showDot
+      ? `${community.name} — unread`
+      : community.name;
 
   return (
     <ContextMenu modal={false}>
@@ -160,17 +126,6 @@ function CommunityButton({
                   getInitials(community.name) || "🐝"
                 )}
               </span>
-              {activeAgentCount > 0 ? (
-                // Top-right so it composes with the unread badge/dot at
-                // bottom-right. Emerald mirrors the agents list's "online"
-                // PresenceDot (getPresenceDotClassName).
-                <span
-                  className="absolute -right-0.5 -top-0.5 h-2 w-2 shrink-0 rounded-full bg-emerald-500 ring-2 ring-sidebar"
-                  data-testid={`community-rail-agents-dot-${community.id}`}
-                >
-                  <span className="sr-only">agents active</span>
-                </span>
-              ) : null}
               {showBadge ? (
                 <span
                   className="absolute -bottom-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold text-primary-foreground ring-2 ring-sidebar"
@@ -201,10 +156,8 @@ function CommunityButton({
 /**
  * Discord/Slack-style vertical rail of communities on the far left of the app.
  * Shows a mention-count badge for inactive communities (observed via
- * `useCommunityUnread`), a green dot on communities with active managed
- * agents (running there thanks to lazy multi-workspace activation), and
- * switches relays on click. Right-click opens a per-community menu: mark all
- * as read, copy relay URL, community settings.
+ * `useCommunityUnread`) and switches relays on click. Right-click opens a
+ * per-community menu: mark all as read, copy relay URL, community settings.
  *
  * Hidden entirely with a single community — a rail of one adds no value.
  */
@@ -219,19 +172,6 @@ export function CommunityRail({
   const { unreadByCommunity, markCommunityRead } = useCommunityUnread(
     communities,
     activeCommunityId,
-  );
-  // Shares the app-wide managed-agents cache; process-state freshness for
-  // other communities rides the slow poll tier in useManagedAgentsQuery.
-  const managedAgentsQuery = useManagedAgentsQuery();
-  const managedAgents = managedAgentsQuery.data;
-  const activeAgentCounts = React.useMemo(
-    () =>
-      countActiveAgentsByCommunity(
-        managedAgents,
-        communities,
-        activeCommunityId,
-      ),
-    [managedAgents, communities, activeCommunityId],
   );
   const iconsByCommunity = useCommunityIcons(communities);
   const isFullscreen = useIsFullscreen();
@@ -273,7 +213,6 @@ export function CommunityRail({
       {communities.map((community) => (
         <CommunityButton
           key={community.id}
-          activeAgentCount={activeAgentCounts.get(community.id) ?? 0}
           iconUrl={iconsByCommunity[community.id] ?? null}
           isActive={community.id === activeCommunityId}
           menu={
