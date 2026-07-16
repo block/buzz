@@ -25,15 +25,40 @@ Companion research: `RESEARCH/WELCOME_TEAM_KICKOFF_TECH_MAP.md`
 6. **Intros are real model turns, simultaneous.** Both Honey and Bumble fire
    naturally off the opener's mentions (sibling-gated, mention-triggered) and
    land in whatever order they land. No app-side gating between them (v1).
-7. **Closer is templated, gated on both intros.** After messages from both
-   Honey's and Bumble's pubkeys arrive, Fizz sends the templated closer:
-   *"What can we help you build? Bring us something you're working on, or
-   give us a quick challenge to see how we work together."* No timeout
-   fallback in v1 — but log/telemetry the stall case so we know if we need one.
+7. **Closer is templated, gated on resolution (not just success).** The
+   closer waits until every mentioned agent has **resolved** — its intro
+   arrived, OR it was detected as failed (status `stopped` + `last_error`
+   after start). Then Fizz sends the templated closer: *"What can we help
+   you build? Bring us something you're working on, or give us a quick
+   challenge to see how we work together."* If one agent failed, the closer
+   is preceded by one templated Fizz-voiced aside ("Bumble's having trouble
+   starting — you can check on it in Agents"). If **both** failed, send a
+   Fizz-voiced recovery message that acknowledges the missing teammates and
+   itself ends with the CTA (the recovery message *is* the closer) — the
+   experience degrades to today's solo-Fizz welcome plus one honest
+   sentence. One state machine covers healthy/partial/total failure. No
+   generic timeout fallback in v1 — telemetry the "unresolved" stall case.
 8. **Canvas is app-seeded at channel creation** (not part of the
    choreography). Light v1 content: what the Welcome channel is for, how to
    work with agents, try-something prompts, links to help/user guides, note
    that the agents can troubleshoot here. Agents may reference it in intros.
+9. **No provider configured → placeholder, not kickoff.** If
+   `resolveAgentReadiness()` fails, do NOT send the opener. Instead post a
+   templated placeholder: *"To get started with agents, connect to an AI
+   provider in settings."* (unmarked-by-kickoff-markers, so the kickoff still
+   counts as not-run). On every subsequent Welcome focus the gate
+   re-evaluates — once a provider exists, the kickoff runs normally.
+10. **Existing users get the fresh kickoff.** Users with the old solo-Fizz
+    welcome (`buzz-welcome-intro.v1`) still get the new team kickoff — the
+    new markers are distinct, so this is automatic. The channel-reuse
+    membership check must tolerate adding Honey/Bumble pubkeys.
+11. **Starter agents are not renameable/editable during onboarding.** Persona
+    IDs and names are stable — no drift concerns for the team record,
+    mentions, or templated copy.
+12. **No loop-prevention machinery in v1.** The opener is the only message
+    carrying agent mention tags; intros aren't asked to mention anyone.
+    `ignore_self` covers self-loops. Keep it simple unless real-world runs
+    show chatter.
 
 ## Sequence
 
@@ -43,26 +68,44 @@ onboarding completes (colleague's splash flow adds/edits the 3 agents)
   └─ seed canvas (marker/idempotent — canvas set is full-replace, only seed if empty)
 user focuses Welcome channel for the first time
   └─ query channel for kickoff markers → none found
-  └─ spawn Honey + Bumble buzz-acp processes (background, ASAP)
+  └─ gate: resolveAgentReadiness()
+       ├─ NOT ready → send templated placeholder ("connect an AI provider
+       │  in settings"); stop. Re-evaluate on next focus.
+       └─ ready ↓
+  └─ START Honey + Bumble buzz-acp processes (await the start command —
+     must be issued BEFORE the opener; buzz-acp's startup watermark replays
+     events published after process start, but not before)
   └─ send Fizz opener (synthetic, marker: buzz-welcome-kickoff.opener.v1,
-     markerScope: channel, mentions @Honey @Bumble)
+     markerScope: channel, mention p tags for Honey + Bumble) — no need to
+     wait for subscription readiness; backfill covers the gap
   └─ Honey + Bumble respond live (real turns, simultaneous)
-  └─ orchestrator observes ≥1 post-opener message from each of Honey's and
-     Bumble's pubkeys
+  └─ orchestrator waits until each mentioned agent RESOLVES:
+       intro message from its pubkey arrived, OR failure detected
+       (status stopped + last_error after start — poll/refetch, no push event)
   └─ send Fizz closer (synthetic, marker: buzz-welcome-kickoff.closer.v1)
+       ├─ both intro'd → plain closer CTA
+       ├─ one failed → one templated aside about the missing teammate + CTA
+       └─ both failed → recovery message (acknowledges missing teammates,
+          ends with CTA) — degrades to solo-Fizz welcome + one honest line
 done — markers on relay prevent any re-run, ever
 ```
 
 ### Resume logic (app quit mid-sequence)
 
-On every Welcome focus, evaluate marker state:
+On every Welcome focus, evaluate readiness + marker state:
 
-| opener marker | closer marker | intros present | action |
-|---|---|---|---|
-| absent | — | — | run full sequence |
-| present | absent | 0 or 1 | (re)spawn missing agents; wait for intros |
-| present | absent | 2 | send closer |
-| present | present | — | do nothing |
+| readiness | opener marker | closer marker | agents resolved | action |
+|---|---|---|---|---|
+| not ready | absent | — | — | send/keep placeholder message; stop |
+| ready | absent | — | — | run full sequence |
+| ready | present | absent | 0 or 1 of 2 | (re)start unresolved agents; wait for intro or failure |
+| ready | present | absent | 2 of 2 | send closer (variant per failure count) |
+| — | present | present | — | do nothing |
+
+"Resolved" = intro message from the agent's pubkey exists after the opener,
+OR the agent is `stopped` with a `last_error` after our start attempt. The
+placeholder message uses its own marker so it isn't re-sent on every focus,
+but does NOT count as the opener.
 
 ## Workstreams / files to touch
 
@@ -91,21 +134,40 @@ On every Welcome focus, evaluate marker state:
     (find where Welcome focus is detected — the
     `buzz:onboarding-welcome-channel-ready` event + ChannelPane focus are the
     existing seams in `hooks.ts` / `ChannelPane.tsx`).
-  - Marker query: reuse `find_managed_agent_channel_message_by_marker`
-    (Rust `commands/messages.rs:569`) — likely needs a read-only Tauri
-    command exposing "does marker exist in channel" to TS, or query kind-9
-    events with `["client", marker]` tags via the relay client.
-  - Spawn Honey + Bumble (and Fizz if we want him live for follow-ups) via
-    managed-agent start command as the first act.
+  - Readiness gate first: `resolveAgentReadiness()`
+    (`agentReadiness.ts:22`). Not ready → send placeholder (own marker),
+    stop.
+  - Marker-existence read: **new read-only Tauri command** wrapping the
+    existing private helper `find_managed_agent_channel_message_by_marker`
+    (Rust `commands/messages.rs:569`). Relay query is NOT viable — `client`
+    is a multi-letter tag and Nostr filters only support single-letter tag
+    queries (`bridge.rs:202`). ~15 lines; keeps marker/scope semantics in
+    one place.
+  - START Honey + Bumble via the managed-agent start command and **await
+    it before sending the opener** (buzz-acp's `startup_watermark`,
+    `lib.rs:1220`, replays events published after process start with
+    `since = watermark − 5s`; events published before start are lost). No
+    subscription-ready wait needed — backfill covers the gap. `status:
+    "running"` = process-alive only; that suffices.
   - Send opener via `sendManagedAgentChannelMessage`
-    (`shared/api/tauriManagedAgentMessages.ts`) with mention `p` tags for
-    Honey + Bumble — **verify the synthetic send path supports `p` tags /
-    mention formatting**; if not, extend the Rust command
-    (`commands/messages.rs:667`) to accept mention pubkeys.
-  - Subscribe to channel events; when ≥1 message from each of Honey/Bumble
-    pubkeys with `created_at` after the opener exists, send closer.
-  - Stall telemetry: if intros incomplete after N minutes, log (no fallback
-    behavior in v1).
+    (`shared/api/tauriManagedAgentMessages.ts`) with mention `p` tags.
+    **Small extension required**: the Rust command hardcodes mentions to
+    `&[]` when calling `build_message_with_client_tags` (`events.rs:317`);
+    add `mention_pubkeys: Option<Vec<String>>` to the command +
+    `mentionPubkeys?: string[]` to the TS wrapper. The builder's
+    `mention_tags` (`events.rs:63`) already validates/dedupes. No
+    `nostr:npub` content formatting needed — buzz-acp's gate checks only
+    the `p` tag (`filter.rs:390`) and UI pills resolve `@Name` from `p`
+    tags (`remarkMentions.ts` / `resolveMentionNames.ts`).
+  - Resolution loop: subscribe to channel events for intros; for failure
+    detection, poll/refetch the managed-agents query (no push event exists;
+    status model is `running/stopped` — no `error` status; failure =
+    `stopped` + `last_error`/`last_exit_code`, `runtime.rs:1152-1188`).
+    Reuse `friendlyAgentLastError` for any user-facing failure copy.
+  - Closer variants per resolution outcome (§ Product decision 7): plain /
+    one-teammate-missing aside / both-failed recovery-as-closer.
+  - Stall telemetry: if any agent unresolved after N minutes, log (no
+    generic timeout fallback in v1).
 
 ### C. Intro-turn quality (buzz-acp / prompts)
 
@@ -117,9 +179,9 @@ On every Welcome focus, evaluate marker state:
 - Risk: user-edited instructions may produce long/weird intros. Acceptable
   for v1; revisit a one-turn kickoff prompt seam in buzz-acp
   (`prompt_tag` in `filter.rs`) only if needed.
-- **Verify in `crates/buzz-acp/src/queue.rs`**: no runaway agent↔agent loop
-  from the intros (intros shouldn't mention each other; `ignore_self` covers
-  self-loops). Opener template should be the only message with agent `p` tags.
+- Loop safety (decided): no machinery in v1 — the opener template is the
+  only message with agent `p` tags, intros are asked to mention no one, and
+  `ignore_self` covers self-loops. Revisit only if real runs show chatter.
 
 ### D. Canvas seeding
 
@@ -141,7 +203,9 @@ On every Welcome focus, evaluate marker state:
 - Keep `builtin:fizz` persona active (he's the lead). What's retired is the
   single-agent intro + the Fizz-specific composer coachmark copy
   (`WelcomeComposerBanner.tsx`, ChannelPane coachmark) — update or remove.
-- Migration question (below) for users who already have the old Fizz welcome.
+- Existing users (decided): everyone with the old Fizz welcome gets the new
+  team kickoff — new markers are distinct, so no migration needed; just
+  ensure the channel-reuse membership check tolerates the added pubkeys.
 
 ### F. Tests
 
@@ -151,28 +215,35 @@ On every Welcome focus, evaluate marker state:
   closer appears; and a resume-state spec. Existing onboarding E2E tests
   hardcode Fizz — update.
 
-## Open engineering questions (Trace-level review)
+## Engineering questions — RESOLVED
 
-1. Does `sendManagedAgentChannelMessage` support mention `p` tags today? If
-   not, smallest extension to the Rust command.
-2. Cleanest TS-side "does marker exist in channel" read — new Tauri command
-   vs. relay query from the frontend?
-3. Cold-start reality check: measured time from `start agent` → buzz-acp
-   ready to receive a mention. Does the opener need to wait for spawn
-   confirmation before sending, or is the relay queue durable enough that
-   mentions sent pre-ready are still consumed?
-4. `queue.rs` agent↔agent loop behavior — confirm no unbounded chain risk
-   when two agents are mentioned in one message.
-5. Provider readiness gating (`agentReadiness.ts`): what happens if the user
-   reaches Welcome with no provider configured? Kickoff should no-op (not
-   half-run) until readiness — where's the right gate?
-6. Existing users / migration: users with the old `buzz-welcome-intro.v1`
-   channel — do they get the new kickoff (probably yes, markers differ), and
-   does the channel-reuse membership check break when we add two more agent
-   pubkeys?
-7. Team `d` tag stability + behavior if the user renamed/edited the starter
-   agents during onboarding — team groups persona IDs, so edits should be
-   transparent; confirm persona edits don't change IDs.
+(Details in `WELCOME_TEAM_KICKOFF_TECH_MAP.md` § Investigation answers.)
+
+1. **Mentions in synthetic sends** — not supported today; trivial extension
+   (thread `mention_pubkeys` through `send_managed_agent_channel_message` →
+   `build_message_with_client_tags`; TS wrapper gains `mentionPubkeys`). No
+   content formatting needed for gate or UI pills.
+2. **Marker read** — new ~15-line read-only Tauri command wrapping the
+   existing Rust helper. Relay query not viable (multi-letter `client` tag
+   can't be filtered).
+3. **Cold start** — start agents (await command), then send opener
+   immediately; buzz-acp's startup-watermark backfill replays mentions
+   published after process start. No ready-signal wait.
+4. **Loops** — decision: no machinery in v1. Opener is the only message with
+   agent mention tags; intros mention no one; `ignore_self` covers
+   self-loops.
+5. **Provider readiness** — gate on `resolveAgentReadiness()`; not ready →
+   templated placeholder ("connect an AI provider in settings"), kickoff
+   re-evaluates on next focus.
+6. **Existing users** — everyone with the old solo-Fizz welcome gets the new
+   kickoff (new markers are distinct — automatic). Channel-reuse membership
+   check updated to include Honey/Bumble pubkeys (workstream A).
+7. **Renaming** — moot: starter agents are not editable during onboarding.
+8. **Agent failure handling (new)** — no `error` status; failure =
+   `stopped` + `last_error` after start, detected by polling. Closer gates
+   on per-agent *resolution* (intro or failure); variants: plain / one
+   missing / both failed (recovery-as-closer). Degrades to solo-Fizz
+   welcome + one honest sentence.
 
 ## Explicitly out of scope (v1)
 

@@ -285,3 +285,141 @@ Nothing exists as a "conversation script" engine. Viable seams:
 5. **Canvas seeding** — mechanically trivial (kind 40100, `buzz canvas set`),
    but no onboarding hook writes it today; decide desktop-seeded vs.
    Fizz-written.
+
+## Investigation answers (Q1–Q4)
+
+### Q1. Mentions in synthetic sends — NOT supported today; small, safe extension
+
+**Current path:** `sendManagedAgentChannelMessage`
+(`desktop/src/shared/api/tauriManagedAgentMessages.ts:12`) passes only
+`agentPubkey, channelId, content, marker, markerScope` to the Rust command
+`send_managed_agent_channel_message` (`desktop/src-tauri/src/commands/messages.rs:667`).
+The Rust side builds the event via `events::build_message_with_client_tags(channel_uuid,
+trimmed, None, &[], &[], &[], &[], &client_tags)` (messages.rs:~745) — **the
+mentions slot (4th arg) and mention-ref slot are hardcoded to `&[]`**. Tags on
+the sent kind-9 event today: `["h", channel]` + optional `["client", marker]`.
+No `p` tags → buzz-acp's `require_mention` gate (`crates/buzz-acp/src/filter.rs:390`,
+checks for a `p` tag equal to the agent pubkey) would never fire off a synthetic opener.
+
+**The builder already supports mentions.** `build_message_with_client_tags`
+(`desktop/src-tauri/src/events.rs:317`) calls `mention_tags(mentions)`
+(events.rs:63), which validates pubkeys, dedupes, enforces `MAX_MENTIONS`, and
+emits lowercase `["p", <hex>]` tags. The user-authored send path
+(`send_channel_message`, messages.rs:478,491) already threads
+`mention_pubkeys: Option<Vec<String>>` through this exact function.
+
+**Smallest extension:**
+1. Rust: add `mention_pubkeys: Option<Vec<String>>` to
+   `send_managed_agent_channel_message` (messages.rs:667), mirror the
+   conversion at messages.rs:491 (`let mention_refs: Vec<&str> = ...`), and pass
+   `&mention_refs` as the 4th arg to `build_message_with_client_tags`.
+2. TS: add optional `mentionPubkeys?: string[]` to the input of
+   `sendManagedAgentChannelMessage` and forward it in the `invokeTauri` payload.
+
+**Content formatting:** buzz-acp's gate needs ONLY the `p` tag — no
+`nostr:npub` in content required. The desktop UI mention pill also doesn't use
+npub URIs: `remarkMentions` (`desktop/src/shared/lib/remarkMentions.ts`) matches
+plain `@Name` text against `mentionNames` derived from the event's `p`/`mention`
+tags via `resolveMentionProps` (`desktop/src/shared/lib/resolveMentionNames.ts:65`
+— aliases from display name / kind-0 name / NIP-05 local part). So the opener
+template just needs literal `@Honey @Bumble` in the content plus matching `p`
+tags, and pills render + resolve automatically (provided the agents' kind-0
+profiles carry those names).
+
+### Q2. Marker-existence read from frontend — no existing read path; add a read-only Tauri command
+
+- `find_managed_agent_channel_message_by_marker` (messages.rs:569) is a private
+  helper used only inside the send command's idempotency check. **No Tauri
+  command exposes it read-only.**
+- No frontend relay-query path exists for `client` tags either. Nostr filters
+  only support single-letter tag queries (`#h`, `#p`, `#e` …); `client` is a
+  multi-letter tag. The relay's filter matcher (`crates/buzz-core/src/filter.rs:68`)
+  iterates `filter.generic_tags`, and `nostr::Filter`'s generic_tags are keyed by
+  `SingleLetterTag` (see usages in `crates/buzz-relay/src/api/bridge.rs:202,835`) —
+  a `#client` filter is not expressible. This is exactly why the Rust helper
+  itself queries by `kinds + #h + limit 500` and scans tags client-side
+  (messages.rs:583-600, with pagination via `until`).
+- The frontend relay client (`relayClientShared.ts:32 RelaySubscriptionFilter`)
+  could replicate that query-and-scan in TS, but it would duplicate the
+  pagination/scan logic and the trust boundary.
+
+**Recommendation:** add a thin read-only Tauri command, e.g.
+`find_managed_agent_channel_message_marker(channel_id, marker, agent_pubkey?) ->
+Option<{event_id, pubkey, created_at}>`, wrapping the existing helper (with
+`marker_author_for_scope` semantics, messages.rs:619). ~15 lines of Rust, zero
+new logic, single source of truth for marker semantics, and the orchestrator's
+resume table (opener/closer present?) becomes two awaits.
+
+### Q3. Cold start & durability — opener can be sent immediately; backfill exists but sequence carefully
+
+**Startup steps** (crates/buzz-acp/src/lib.rs main flow): spawn ~24 ACP agent
+workers (before relay connect — `agent_pool_ready`, lib.rs:1216; noted in
+process_lifecycle.rs:49) → capture `startup_watermark` (lib.rs:1220-1230) →
+connect to relay → `set_startup_watermark` (lib.rs:1248) → subscribe membership
+notifications (lib.rs:1255) → resolve channel filters → `subscribe_channel` per
+channel (lib.rs:1382). Worker spawn + model/harness init dominates; expect
+seconds, not ms.
+
+**Backfill exists (Finding #22):** the watermark is captured BEFORE relay
+connect, and the relay task issues the first REQ with `since = watermark - 5s`
+instead of `since = now` (lib.rs:1244-1249; `crates/buzz-acp/src/relay.rs:924-947`,
+`subscribe_channel_from` relay.rs:664, `last_seen` tracking relay.rs:896,962).
+So any mention published **after the buzz-acp process starts** (even before its
+subscription lands) is replayed. Reconnects use `min(last_seen,
+channel_dropped_since)` (relay.rs:914,974). The relay itself stores events in
+Postgres, so replay is durable, not best-effort.
+
+**But**: a mention published *before the process starts* is before the
+watermark and is NOT replayed (minus the 5s grace). Practical guidance:
+
+- **Safe pattern:** issue the start command for Honey + Bumble first, then send
+  the opener immediately — no need to await "subscribed". Once the process is
+  up (watermark captured pre-connect), the opener is inside the replay window
+  even if the subscription takes seconds more. The only hard ordering is
+  "spawn call before send", plus a small margin (the ≥5s grace covers the
+  spawn-syscall → watermark-capture gap in practice, but don't rely on it —
+  fire spawn, await the Tauri start command's return, then send).
+- **Ready signal:** there is no per-agent "subscribed" event surfaced to TS.
+  The status model (Q4) flips to `"running"` when the child process is alive
+  (runtime.rs:1291) — that's process-alive, not subscription-ready. buzz-acp
+  logs `agent_pool_ready` / "subscribed to channel" but these aren't bridged as
+  Tauri events. Given the watermark backfill, we don't need one for v1.
+
+### Q4. Provider readiness & spawn failure
+
+**Readiness:** `resolveAgentReadiness(runtimes, globalConfig)`
+(`desktop/src/features/onboarding/ui/agentReadiness.ts:22`) returns
+`{ready: true, reason: "cli"|"buzz-agent"}` or `{ready: false}`. CLI path = any
+non-buzz-agent runtime with `availability === "available"` and authStatus
+`logged_in`/`not_applicable`; buzz-agent path = provider + model set and all
+`requiredCredentialEnvKeys` present in `globalConfig.env_vars`. Used by
+`SetupStep.tsx:118` (readiness badge, `agent-readiness-badge` /
+`agent-readiness-recheck` testids). Types: `AcpAvailabilityStatus` / `AuthStatus`
+(`desktop/src-tauri/src/managed_agents/types.rs:534,549` — tagged union so TS
+can exhaustively switch). **Kickoff gate:** call `resolveAgentReadiness` in the
+orchestrator before doing anything; if not ready, no-op entirely (don't send the
+opener — resume logic re-evaluates on next focus, so nothing half-runs).
+
+**Status model:** managed agents carry a `status: String` (types.rs:185,502):
+local backend = `"running"` (child alive, runtime.rs:1291) / `"stopped"`
+(runtime.rs:1305); remote backends use a two-axis model where `"deployed"`
+means provider-invoked (runtime.rs:1266-1282). **There is no `"error"` status**
+— failures surface as `"stopped"` + populated `last_exit_code`, `last_error`,
+`last_error_code` on the record (runtime.rs:1152-1188: `try_wait` detects
+exit, harvests a log-derived error like "harness exited with status …";
+snapshot at runtime.rs:1384-1392). Also relevant: spawn falls back to a
+**setup-listener mode** if the agent isn't ready at spawn time
+(runtime.rs:1591,1693 "agent … not ready — spawning in setup-listener mode").
+
+**Existing UI error surfaces to reuse:**
+`friendlyAgentLastError(lastError, lastErrorCode)`
+(`desktop/src/features/agents/lib/friendlyAgentLastError.ts`) maps raw errors to
+user copy, consumed by `ManagedAgentRow.tsx:93` and
+`UnifiedAgentsSection.tsx:308,387`. The kickoff orchestrator can detect
+"provider configured but agents failed" by polling/observing the managed-agent
+query for `status === "stopped" && lastError != null` after issuing start, and
+reuse `friendlyAgentLastError` for any inline messaging. Note there is no push
+event stream for status transitions (`grep emit(` in managed_agents/*.rs is
+empty) — status is read via the managed-agents list query (React Query
+invalidation), so the orchestrator should poll/refetch rather than expect an
+event.
