@@ -12,6 +12,7 @@ import {
 } from "@/features/agents/hooks";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
+import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/effectiveExplicitAgentPubkeys";
 import type { UseChannelLinksResult } from "@/features/messages/lib/useChannelLinks";
 import type { UseEmojiAutocompleteResult } from "@/features/messages/lib/useEmojiAutocomplete";
 import {
@@ -500,15 +501,20 @@ export function useMentionSendFlow({
             sendChannelId,
             draft.capturedThreadContext,
           );
-          if (draft.explicitAgentPubkeys.length > 0) {
-            // Promote only agents explicitly authored in this successful send
-            // into the conversation scope and revision captured at submit.
-            // A newer audience mutation makes this completion a no-op.
+          const effectiveExplicitAgentPubkeys =
+            filterEffectiveExplicitAgentPubkeys(
+              draft.explicitAgentPubkeys,
+              mentionPubkeys,
+            );
+          if (effectiveExplicitAgentPubkeys.length > 0) {
+            // Promote only explicitly authored agents that remained effective
+            // for this successful send. "Send without inviting" removes its
+            // excluded recipients here as well as from event routing.
             onSuccessfulExplicitAgentAudience?.({
               channelId: sendChannelId ?? draft.capturedChannelId ?? "",
               expectedGeneration: draft.audienceGeneration,
               expectedRevision: draft.audienceRevision,
-              explicitAgentPubkeys: draft.explicitAgentPubkeys,
+              explicitAgentPubkeys: effectiveExplicitAgentPubkeys,
             });
           }
           if (draft.sentDraftKey) {
