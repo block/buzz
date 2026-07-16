@@ -74,6 +74,14 @@ function formatSearchUserSecondaryLabel(user: UserSearchResult) {
   return null;
 }
 
+function appendUniqueName(current: string[], name: string): string[] {
+  return current.some(
+    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+  )
+    ? current
+    : [...current, name];
+}
+
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -694,30 +702,14 @@ export function useMentions(
       personaMentionMapRef.current.delete(trimmedName);
       trimMapToSize(mentionMapRef.current, 200);
 
-      setSelectedMentionNames((current) => {
-        if (
-          current.some(
-            (name) => name.toLowerCase() === trimmedName.toLowerCase(),
-          )
-        ) {
-          return current;
-        }
-
-        return [...current, trimmedName];
-      });
+      setSelectedMentionNames((current) =>
+        appendUniqueName(current, trimmedName),
+      );
 
       if (options?.isAgent) {
-        setSelectedAgentMentionNames((current) => {
-          if (
-            current.some(
-              (name) => name.toLowerCase() === trimmedName.toLowerCase(),
-            )
-          ) {
-            return current;
-          }
-
-          return [...current, trimmedName];
-        });
+        setSelectedAgentMentionNames((current) =>
+          appendUniqueName(current, trimmedName),
+        );
       }
     },
     [],
