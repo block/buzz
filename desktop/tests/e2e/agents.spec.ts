@@ -246,10 +246,6 @@ test("built-in persona edits persist", async ({ page }) => {
   const dialog = page.getByTestId("persona-dialog");
   await dialog.getByLabel("Agent name").fill("My Fizz");
   await dialog.getByLabel("Agent instruction").fill("User-edited instructions");
-  await dialog.getByRole("button", { name: "LLM provider" }).click();
-  await page
-    .getByRole("menuitemradio", { name: "Anthropic", exact: true })
-    .click();
   await dialog.getByRole("button", { name: "Save changes" }).click();
 
   await expect(dialog).toHaveCount(0);

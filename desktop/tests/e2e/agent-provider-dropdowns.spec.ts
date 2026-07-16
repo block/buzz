@@ -169,6 +169,8 @@ test.describe("agent provider dropdown screenshots", () => {
       timeout: 8_000,
     });
 
+    await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
+
     // Regression: the model combobox must appear (modelFieldVisible = true once
     // runtime is non-empty) and model discovery must have run, populating it.
     const modelCombobox = dialog.getByRole("combobox", { name: /model/i });
