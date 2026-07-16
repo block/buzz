@@ -66,8 +66,11 @@ test("channel browser sorts alphabetically or by member count", async ({
     /#secret-projects/,
   ]);
 
+  await expect(page.getByTestId("channel-browser-sort")).toHaveAttribute(
+    "aria-label",
+    "Sort channels by most members",
+  );
   await page.getByTestId("channel-browser-sort").click();
-  await page.getByTestId("channel-browser-sort-members").click();
 
   await expect(rows).toHaveText([
     /#general/,
@@ -82,7 +85,11 @@ test("channel browser sorts alphabetically or by member count", async ({
   ]);
   await expect(page.getByTestId("channel-browser-sort")).toHaveAttribute(
     "aria-label",
-    "Sort channels: Most members",
+    "Sort channels by alphabetical order",
+  );
+  await expect(page.getByTestId("channel-browser-sort")).toHaveAttribute(
+    "aria-pressed",
+    "true",
   );
 });
 
