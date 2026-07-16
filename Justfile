@@ -407,6 +407,26 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     FEATURES=(); [[ -n "{{mesh}}" ]] && FEATURES=(--features mesh-llm)
     pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
+# Run only the desktop app. No relay, database, Docker, migrations, or .env are needed.
+# The app opens normally and asks for a community before making a relay connection.
+desktop-standalone *ARGS: _ensure-sidecar-stubs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+        cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
+    done
+    cd {{desktop_dir}}
+    [[ -d node_modules ]] || pnpm install
+    source ../scripts/instance-env.sh
+    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
+    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
+    echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
+    pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
 staging *ARGS: bootstrap _ensure-sidecar-stubs
     #!/usr/bin/env bash
