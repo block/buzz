@@ -7,18 +7,32 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 test("normal first launch uses the already-persisted identity", async ({
   page,
 }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
   await page.goto("/");
 
-  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
+  const gate = page.getByTestId("machine-onboarding-gate");
+  await expect(gate).toBeVisible();
+  await expect(gate).toHaveCSS("background-color", "rgb(215, 215, 46)");
+  await expect(gate).toHaveCSS("background-image", "none");
+  await expect(gate).toHaveCSS("color", "rgb(23, 23, 23)");
+  await expect(page.getByRole("button", { name: "Get started" })).toHaveCSS(
+    "background-color",
+    "rgb(23, 23, 23)",
+  );
   await page.getByRole("button", { name: "Get started" }).click();
 
   await expect(
     page.getByRole("heading", { name: "Save your private key" }),
   ).toBeVisible();
+  await expect(gate).toHaveCSS(
+    "background-image",
+    "linear-gradient(rgb(215, 215, 46), rgb(215, 231, 246))",
+  );
+  await expect(gate).toHaveCSS("color", "rgb(23, 23, 23)");
   const commands = await page.evaluate(
     () =>
       (
