@@ -43,6 +43,7 @@ import {
 } from "./ProjectFeedRow";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
+import { MergePullRequestButton } from "./MergePullRequestButton";
 
 function compactDate(createdAt: number) {
   return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
@@ -411,6 +412,10 @@ function PullRequestReviewCard({
     !isAuthor &&
     !hasApproved &&
     (pullRequest.status === "Open" || pullRequest.status === "Draft");
+  const canMerge =
+    isOwner &&
+    pullRequest.status === "Open" &&
+    Boolean(pullRequest.branchName && pullRequest.commit);
 
   const handleStatusChange = React.useCallback(
     async (status: "open" | "draft") => {
@@ -500,7 +505,10 @@ function PullRequestReviewCard({
             ) : null}
           </div>
         </div>
-        {hasApproved || canApprove || (canChangeStatus && isDraft) ? (
+        {hasApproved ||
+        canApprove ||
+        canMerge ||
+        (canChangeStatus && isDraft) ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             {hasApproved ? (
               <span className="inline-flex items-center gap-1.5 rounded-md border border-green-600/40 px-2.5 py-1 text-xs font-medium text-green-600 dark:text-green-500">
@@ -521,6 +529,12 @@ function PullRequestReviewCard({
                 <Check className="h-3.5 w-3.5" />
                 Approve
               </Button>
+            ) : null}
+            {canMerge ? (
+              <MergePullRequestButton
+                project={project}
+                pullRequest={pullRequest}
+              />
             ) : null}
             {canChangeStatus && isDraft ? (
               <Button

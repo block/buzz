@@ -176,14 +176,14 @@ export function projectPeople(
   ];
 }
 
-function normalizeRepositoryUrl(url: string) {
+export function normalizeRepositoryUrl(url: string) {
   try {
     const parsed = new URL(url);
     const normalizedPath = parsed.pathname
       .replace(/\/+$/, "")
       .replace(/\.git$/i, "")
       .toLowerCase();
-    return `${parsed.hostname.toLowerCase()}${normalizedPath}`;
+    return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${normalizedPath}`;
   } catch {
     return url
       .trim()

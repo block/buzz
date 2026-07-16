@@ -1,7 +1,9 @@
 import type {
   ProjectLocalRepository,
   ProjectLocalRepoSnapshot,
+  ProjectRepoCloneResult,
   ProjectRepoDiff,
+  ProjectRepoMergeResult,
   ProjectRepoPullResult,
   ProjectRepoPushResult,
   ProjectRepoSnapshot,
@@ -70,6 +72,7 @@ type RawProjectRepoSyncStatus = {
   remote_branch: string | null;
   remote_head: string | null;
   remote_short_head: string | null;
+  merge_base: string | null;
   ahead_count: number;
   behind_count: number;
   has_uncommitted_changes: boolean;
@@ -83,6 +86,9 @@ type RawProjectRepoSyncStatus = {
 type RawProjectRepoPushResult = {
   pushed: boolean;
   message: string;
+  branch: string;
+  commit: string;
+  merge_base: string | null;
 };
 
 type RawProjectRepoPullResult = {
@@ -273,6 +279,7 @@ function fromRawProjectRepoSyncStatus(
     remoteBranch: status.remote_branch,
     remoteHead: status.remote_head,
     remoteShortHead: status.remote_short_head,
+    mergeBase: status.merge_base,
     aheadCount: status.ahead_count,
     behindCount: status.behind_count,
     hasUncommittedChanges: status.has_uncommitted_changes,
@@ -288,7 +295,8 @@ export async function getProjectRepoSyncStatus(input: {
   reposDir?: string | null;
   projectDtag: string;
   cloneUrl: string;
-  defaultBranch?: string | null;
+  branchName?: string | null;
+  baseBranch?: string | null;
 }): Promise<ProjectRepoSyncStatus> {
   const status = await invokeTauri<RawProjectRepoSyncStatus>(
     "get_project_repo_sync_status",
@@ -296,7 +304,8 @@ export async function getProjectRepoSyncStatus(input: {
       reposDir: input.reposDir ?? null,
       projectDtag: input.projectDtag,
       cloneUrl: input.cloneUrl,
-      defaultBranch: input.defaultBranch ?? null,
+      branchName: input.branchName ?? null,
+      baseBranch: input.baseBranch ?? null,
     },
   );
   return fromRawProjectRepoSyncStatus(status);
@@ -332,7 +341,8 @@ export async function pushProjectLocalRepository(input: {
   reposDir?: string | null;
   projectDtag: string;
   cloneUrl: string;
-  defaultBranch?: string | null;
+  branchName?: string | null;
+  baseBranch?: string | null;
 }): Promise<ProjectRepoPushResult> {
   const result = await invokeTauri<RawProjectRepoPushResult>(
     "push_project_local_repository",
@@ -340,12 +350,16 @@ export async function pushProjectLocalRepository(input: {
       reposDir: input.reposDir ?? null,
       projectDtag: input.projectDtag,
       cloneUrl: input.cloneUrl,
-      defaultBranch: input.defaultBranch ?? null,
+      branchName: input.branchName ?? null,
+      baseBranch: input.baseBranch ?? null,
     },
   );
   return {
     pushed: result.pushed,
     message: result.message,
+    branch: result.branch,
+    commit: result.commit,
+    mergeBase: result.merge_base,
   };
 }
 
@@ -353,7 +367,7 @@ export async function pullProjectLocalRepository(input: {
   reposDir?: string | null;
   projectDtag: string;
   cloneUrl: string;
-  defaultBranch?: string | null;
+  branchName?: string | null;
 }): Promise<ProjectRepoPullResult> {
   const result = await invokeTauri<RawProjectRepoPullResult>(
     "pull_project_local_repository",
@@ -361,11 +375,55 @@ export async function pullProjectLocalRepository(input: {
       reposDir: input.reposDir ?? null,
       projectDtag: input.projectDtag,
       cloneUrl: input.cloneUrl,
-      defaultBranch: input.defaultBranch ?? null,
+      branchName: input.branchName ?? null,
     },
   );
   return {
     pulled: result.pulled,
     message: result.message,
+  };
+}
+
+export async function cloneProjectRepository(input: {
+  reposDir?: string | null;
+  projectDtag: string;
+  cloneUrl: string;
+  defaultBranch?: string | null;
+}): Promise<ProjectRepoCloneResult> {
+  return invokeTauri<ProjectRepoCloneResult>("clone_project_repository", {
+    reposDir: input.reposDir ?? null,
+    projectDtag: input.projectDtag,
+    cloneUrl: input.cloneUrl,
+    defaultBranch: input.defaultBranch ?? null,
+  });
+}
+
+type RawProjectRepoMergeResult = {
+  message: string;
+  merge_commit: string;
+};
+
+export async function mergeProjectPullRequest(input: {
+  targetCloneUrl: string;
+  sourceCloneUrl: string;
+  targetOwner: string;
+  targetBranch: string;
+  sourceBranch: string;
+  expectedCommit: string;
+}): Promise<ProjectRepoMergeResult> {
+  const result = await invokeTauri<RawProjectRepoMergeResult>(
+    "merge_project_pull_request",
+    {
+      targetCloneUrl: input.targetCloneUrl,
+      sourceCloneUrl: input.sourceCloneUrl,
+      targetOwner: input.targetOwner,
+      targetBranch: input.targetBranch,
+      sourceBranch: input.sourceBranch,
+      expectedCommit: input.expectedCommit,
+    },
+  );
+  return {
+    message: result.message,
+    mergeCommit: result.merge_commit,
   };
 }

@@ -1,11 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  cloneProjectRepository,
   getProjectRepoSyncStatus,
   pullProjectLocalRepository,
   pushProjectLocalRepository,
 } from "@/shared/api/projectGit";
-import type { Project } from "@/features/projects/hooks";
+import { getIdentity } from "@/shared/api/tauriIdentity";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+import type { Project, ProjectPullRequest } from "@/features/projects/hooks";
+import { publishProjectPullRequestUpdate } from "./pullRequestMutations";
 
 /** Local-vs-remote git sync status for a project checkout (ahead/behind
  * counts, push/pull availability). Polls gently — each check runs a
@@ -33,7 +37,8 @@ export function useProjectRepoSyncStatusQuery(
         reposDir,
         projectDtag: project.dtag,
         cloneUrl: project.cloneUrls[0],
-        defaultBranch: selectedBranch,
+        branchName: selectedBranch,
+        baseBranch: project.defaultBranch,
       });
     },
     staleTime: 10_000,
@@ -48,25 +53,97 @@ export function usePushProjectLocalRepositoryMutation(
   project: Project | null | undefined,
   reposDir?: string | null,
   branchName?: string | null,
+  pullRequest?: ProjectPullRequest | null,
 ) {
   const queryClient = useQueryClient();
   const selectedBranch = branchName ?? project?.defaultBranch ?? null;
 
   return useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       if (!project?.cloneUrls[0]) throw new Error("No project selected.");
-      return pushProjectLocalRepository({
+      const result = await pushProjectLocalRepository({
         reposDir,
         projectDtag: project.dtag,
         cloneUrl: project.cloneUrls[0],
-        defaultBranch: selectedBranch,
+        branchName: selectedBranch,
+        baseBranch: project.defaultBranch,
       });
+      let pullRequestUpdate:
+        | { status: "skipped" | "unchanged" | "updated" }
+        | { status: "failed"; error: string } = { status: "skipped" };
+      if (
+        pullRequest &&
+        (pullRequest.status === "Open" || pullRequest.status === "Draft")
+      ) {
+        try {
+          const identity = await getIdentity();
+          const viewer = normalizePubkey(identity.pubkey);
+          if (
+            viewer !== normalizePubkey(project.owner) &&
+            viewer !== normalizePubkey(pullRequest.author)
+          ) {
+            throw new Error(
+              "Only the pull request author or repository owner can publish its update.",
+            );
+          }
+          const updated = await publishProjectPullRequestUpdate({
+            commit: result.commit,
+            mergeBase: result.mergeBase,
+            project,
+            pullRequest,
+          });
+          pullRequestUpdate = {
+            status: updated ? "updated" : "unchanged",
+          };
+        } catch (error) {
+          pullRequestUpdate = {
+            status: "failed",
+            error:
+              error instanceof Error
+                ? error.message
+                : "The pull request update could not be published.",
+          };
+        }
+      }
+      return { ...result, pullRequestUpdate };
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: ["project", project?.id ?? "none"],
       });
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+}
+
+/** Clones a project into the workspace repositories directory. */
+export function useCloneProjectRepositoryMutation(
+  project: Project | null | undefined,
+  reposDir?: string | null,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => {
+      if (!project?.cloneUrls[0]) throw new Error("No project selected.");
+      return cloneProjectRepository({
+        reposDir,
+        projectDtag: project.dtag,
+        cloneUrl: project.cloneUrls[0],
+        defaultBranch: project.defaultBranch,
+      });
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["project", project?.id ?? "none", "local-repo-snapshot"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["project", project?.id ?? "none", "repo-sync-status"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["projects", "local-repositories"],
+        }),
+      ]);
     },
   });
 }
@@ -87,7 +164,7 @@ export function usePullProjectLocalRepositoryMutation(
         reposDir,
         projectDtag: project.dtag,
         cloneUrl: project.cloneUrls[0],
-        defaultBranch: selectedBranch,
+        branchName: selectedBranch,
       });
     },
     onSuccess: () => {

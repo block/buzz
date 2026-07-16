@@ -23,10 +23,15 @@ import {
   useRepoStateQuery,
 } from "@/features/projects/hooks";
 import {
+  useCloneProjectRepositoryMutation,
   useProjectRepoSyncStatusQuery,
   usePullProjectLocalRepositoryMutation,
   usePushProjectLocalRepositoryMutation,
 } from "@/features/projects/repoSyncHooks";
+import {
+  useCreateProjectPullRequestMutation,
+  useUpdateProjectPullRequestMutation,
+} from "@/features/projects/pullRequestMutations";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import {
@@ -58,6 +63,7 @@ import { useCommunities } from "@/features/communities/useCommunities";
 import { useProjectCommitDiffQuery } from "@/features/projects/useProjectCommitDiff";
 import { useGitIdentityQuery } from "@/features/projects/useGitIdentity";
 import type { ViewerGitIdentity } from "@/features/projects/lib/projectContributorMatching";
+import { normalizeRepositoryUrl } from "@/features/projects/lib/projectsViewHelpers";
 import { WorkspaceTabs } from "./ProjectWorkspaceTabs";
 import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 import {
@@ -65,6 +71,7 @@ import {
   useOpenProjectTerminal,
 } from "./useOpenProjectTerminal";
 import { CopyTextButton } from "./ProjectCommitCopyButton";
+import type { CreatePullRequestDialogInput } from "./CreatePullRequestDialog";
 
 /** Tooltip for the push/pull sync buttons, e.g. "Pull 2 remote commits". */
 function pushPullTitle(
@@ -94,6 +101,51 @@ function snapshotHasContent(snapshot: ProjectRepoSnapshot | null | undefined) {
         snapshot.files.length > 0 ||
         snapshot.contributors.length > 0),
   );
+}
+
+function createPullRequestAvailability(input: {
+  activeBranch: string | null;
+  defaultBranch: string;
+  hasLocalCheckout: boolean;
+  hasOpenPullRequest: boolean;
+  localBranch: string | null | undefined;
+  localHead: string | null | undefined;
+  remoteHead: string | null | undefined;
+}) {
+  if (input.hasOpenPullRequest) {
+    return {
+      enabled: false,
+      reason: "A pull request already exists for this branch.",
+    };
+  }
+  if (!input.activeBranch || input.activeBranch === input.defaultBranch) {
+    return {
+      enabled: false,
+      reason: "Select a feature branch to create a pull request.",
+    };
+  }
+  if (!input.hasLocalCheckout) {
+    return {
+      enabled: false,
+      reason: "Clone the repository before creating a pull request.",
+    };
+  }
+  if (input.localBranch !== input.activeBranch) {
+    return {
+      enabled: false,
+      reason: `Check out ${input.activeBranch} locally first.`,
+    };
+  }
+  if (!input.localHead || input.localHead !== input.remoteHead) {
+    return {
+      enabled: false,
+      reason: "Push this branch before creating a pull request.",
+    };
+  }
+  return {
+    enabled: true,
+    reason: "Create a pull request from this branch.",
+  };
 }
 
 type ProjectDetailScreenProps = {
@@ -190,13 +242,25 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     [],
   );
   const issuesQuery = useProjectIssuesQuery(project);
-  const selectedBranchPullRequest = React.useMemo(
-    () =>
-      pullRequestsQuery.data?.find(
-        (pullRequest) => pullRequest.branchName === activeBranch,
-      ) ?? null,
-    [activeBranch, pullRequestsQuery.data],
-  );
+  const selectedBranchPullRequest = React.useMemo(() => {
+    const projectRepositories = new Set(
+      (project?.cloneUrls ?? []).map(normalizeRepositoryUrl),
+    );
+    const matches =
+      pullRequestsQuery.data?.filter(
+        (pullRequest) =>
+          pullRequest.branchName === activeBranch &&
+          pullRequest.cloneUrls.some((cloneUrl) =>
+            projectRepositories.has(normalizeRepositoryUrl(cloneUrl)),
+          ),
+      ) ?? [];
+    return matches.length === 1 ? matches[0] : null;
+  }, [activeBranch, project?.cloneUrls, pullRequestsQuery.data]);
+  const openBranchPullRequest =
+    selectedBranchPullRequest?.status === "Open" ||
+    selectedBranchPullRequest?.status === "Draft"
+      ? selectedBranchPullRequest
+      : null;
   const activeRepoPullRequest =
     pullRequestsQuery.data?.find((item) => item.id === selectedPullRequestId) ??
     selectedBranchPullRequest;
@@ -241,11 +305,22 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     project,
     activeCommunity?.reposDir,
     activeBranch,
+    openBranchPullRequest,
   );
   const pullLocalRepoMutation = usePullProjectLocalRepositoryMutation(
     project,
     activeCommunity?.reposDir,
     activeBranch,
+  );
+  const cloneRepoMutation = useCloneProjectRepositoryMutation(
+    project,
+    activeCommunity?.reposDir,
+  );
+  const createPullRequestMutation =
+    useCreateProjectPullRequestMutation(project);
+  const updatePullRequestMutation = useUpdateProjectPullRequestMutation(
+    project,
+    openBranchPullRequest,
   );
   const hasLocalCheckout = Boolean(
     localRepoSnapshotQuery.data || repoSyncStatusQuery.data?.localPath,
@@ -259,11 +334,21 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repoSource === "local"
       ? localRepoDiffQuery.isLoading
       : repoDiffQuery.isLoading;
+  const branchOptionsWithLocal = React.useMemo(
+    () => [
+      ...new Set(
+        [...branchOptions, repoSyncStatusQuery.data?.localBranch].filter(
+          (branch): branch is string => Boolean(branch),
+        ),
+      ),
+    ],
+    [branchOptions, repoSyncStatusQuery.data?.localBranch],
+  );
   // Compact branch + remote/local controls shared by the readme and Code
   // tab headers.
   const filesSourceControls: RepoSourceHeaderControls = {
     branch: activeBranch ?? "",
-    branchOptions,
+    branchOptions: branchOptionsWithLocal,
     onBranchChange: setSelectedBranch,
     source: repoSource,
     onSourceChange: setRepoSource,
@@ -425,7 +510,17 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const handlePushLocalRepo = React.useCallback(async () => {
     try {
       const result = await pushLocalRepoMutation.mutateAsync();
-      toast.success(result.message);
+      if (result.pullRequestUpdate.status === "failed") {
+        toast.warning(result.message, {
+          description: result.pullRequestUpdate.error,
+        });
+      } else {
+        toast.success(
+          result.pullRequestUpdate.status === "updated"
+            ? `${result.message} Pull request updated.`
+            : result.message,
+        );
+      }
       await Promise.all([
         repoSnapshotQuery.refetch(),
         localRepoSnapshotQuery.refetch(),
@@ -443,6 +538,69 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repoSnapshotQuery,
     repoStateQuery,
     repoSyncStatusQuery,
+  ]);
+  const handleCloneRepo = React.useCallback(async () => {
+    try {
+      const result = await cloneRepoMutation.mutateAsync();
+      toast.success(result.message);
+      setRepoSource("local");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to clone repository",
+      );
+    }
+  }, [cloneRepoMutation]);
+  const handleCreatePullRequest = React.useCallback(
+    async ({ body, title }: CreatePullRequestDialogInput) => {
+      const branch = activeBranch;
+      const commit = repoSyncStatusQuery.data?.localHead;
+      if (!branch || !commit) {
+        throw new Error("No local branch commit is available.");
+      }
+      const pullRequestId = await createPullRequestMutation.mutateAsync({
+        title,
+        body,
+        branch,
+        commit,
+        mergeBase: repoSyncStatusQuery.data?.mergeBase ?? null,
+        reviewers: [],
+      });
+      toast.success("Pull request created.");
+      await pullRequestsQuery.refetch();
+      setSelectedPullRequestId(pullRequestId);
+    },
+    [
+      activeBranch,
+      createPullRequestMutation,
+      pullRequestsQuery,
+      repoSyncStatusQuery.data?.localHead,
+      repoSyncStatusQuery.data?.mergeBase,
+    ],
+  );
+  const handleUpdatePullRequest = React.useCallback(async () => {
+    const commit = repoSyncStatusQuery.data?.remoteHead;
+    if (!commit) return;
+    try {
+      const updated = await updatePullRequestMutation.mutateAsync({
+        commit,
+        mergeBase: repoSyncStatusQuery.data?.mergeBase ?? null,
+      });
+      toast.success(
+        updated ? "Pull request updated." : "Pull request is already current.",
+      );
+      await pullRequestsQuery.refetch();
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Failed to update pull request",
+      );
+    }
+  }, [
+    pullRequestsQuery,
+    repoSyncStatusQuery.data?.mergeBase,
+    repoSyncStatusQuery.data?.remoteHead,
+    updatePullRequestMutation,
   ]);
   const handlePullLocalRepo = React.useCallback(async () => {
     try {
@@ -530,6 +688,15 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const repoContributors = repoSnapshotQuery.data?.contributors ?? [];
   const safeWebUrl =
     project.webUrl && isSafeUrl(project.webUrl) ? project.webUrl : null;
+  const createPullRequest = createPullRequestAvailability({
+    activeBranch,
+    defaultBranch: project.defaultBranch,
+    hasLocalCheckout,
+    hasOpenPullRequest: Boolean(openBranchPullRequest),
+    localBranch: repoSyncStatusQuery.data?.localBranch,
+    localHead: repoSyncStatusQuery.data?.localHead,
+    remoteHead: repoSyncStatusQuery.data?.remoteHead,
+  });
   const selectedPullRequest =
     pullRequestsQuery.data?.find((item) => item.id === selectedPullRequestId) ??
     null;
@@ -732,9 +899,43 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
 
               <WorkspaceTabs
                 key={`${project.id}:${tabsResetKey}`}
+                cloneAction={
+                  !hasLocalCheckout && project.cloneUrls[0]
+                    ? {
+                        onClone: () => {
+                          void handleCloneRepo();
+                        },
+                        pending: cloneRepoMutation.isPending,
+                      }
+                    : undefined
+                }
                 commitDiff={commitDiffQuery.data}
                 commitDiffError={commitDiffQuery.error}
                 commitDiffLoading={commitDiffQuery.isLoading}
+                createPullRequestAction={
+                  activeBranch && activeBranch !== project.defaultBranch
+                    ? {
+                        commit: repoSyncStatusQuery.data?.localHead ?? "",
+                        enabled: createPullRequest.enabled,
+                        onCreate: handleCreatePullRequest,
+                        pending: createPullRequestMutation.isPending,
+                        title: createPullRequest.reason,
+                      }
+                    : undefined
+                }
+                updatePullRequestAction={
+                  openBranchPullRequest &&
+                  repoSyncStatusQuery.data?.remoteHead &&
+                  repoSyncStatusQuery.data.remoteHead !==
+                    openBranchPullRequest.commit
+                    ? {
+                        onUpdate: () => {
+                          void handleUpdatePullRequest();
+                        },
+                        pending: updatePullRequestMutation.isPending,
+                      }
+                    : undefined
+                }
                 localSnapshot={localRepoSnapshotQuery.data}
                 localSnapshotError={localRepoSnapshotQuery.error}
                 localSnapshotLoading={localRepoSnapshotQuery.isLoading}

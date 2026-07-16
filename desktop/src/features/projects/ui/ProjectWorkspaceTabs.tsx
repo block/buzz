@@ -1,4 +1,9 @@
-import { SquareTerminal } from "lucide-react";
+import {
+  Download,
+  GitPullRequest,
+  RefreshCw,
+  SquareTerminal,
+} from "lucide-react";
 import * as React from "react";
 
 import type {
@@ -33,11 +38,36 @@ import {
   PullRequestTabsList,
 } from "./ProjectWorkspaceTabList";
 import { ProjectPullRequestFilesChangedPanel } from "./ProjectPullRequestFilesChangedPanel";
+import {
+  CreatePullRequestDialog,
+  type CreatePullRequestDialogInput,
+} from "./CreatePullRequestDialog";
+
+type CloneRepositoryAction = {
+  onClone: () => void;
+  pending: boolean;
+};
+
+type CreatePullRequestAction = {
+  commit: string;
+  enabled: boolean;
+  onCreate: (input: CreatePullRequestDialogInput) => Promise<void>;
+  pending: boolean;
+  title: string;
+};
+
+type UpdatePullRequestAction = {
+  onUpdate: () => void;
+  pending: boolean;
+};
 
 export function WorkspaceTabs({
+  cloneAction,
   commitDiff,
   commitDiffError,
   commitDiffLoading,
+  createPullRequestAction,
+  updatePullRequestAction,
   localSnapshot,
   localSnapshotError,
   localSnapshotLoading,
@@ -67,9 +97,12 @@ export function WorkspaceTabs({
   terminalTitle,
   viewerGitIdentity,
 }: {
+  cloneAction?: CloneRepositoryAction;
   commitDiff: ProjectRepoDiff | null | undefined;
   commitDiffError: unknown;
   commitDiffLoading: boolean;
+  createPullRequestAction?: CreatePullRequestAction;
+  updatePullRequestAction?: UpdatePullRequestAction;
   localSnapshot: ProjectLocalRepoSnapshot | null | undefined;
   localSnapshotError: unknown;
   localSnapshotLoading: boolean;
@@ -122,6 +155,8 @@ export function WorkspaceTabs({
     ) ?? null;
   const isPullRequestSelected = Boolean(selectedPullRequest);
   const [selectedTab, setSelectedTab] = React.useState("overview");
+  const [createPullRequestOpen, setCreatePullRequestOpen] =
+    React.useState(false);
 
   React.useEffect(() => {
     onSelectedTabChange?.(selectedTab);
@@ -182,6 +217,51 @@ export function WorkspaceTabs({
     >
       <div className="flex min-w-0 items-center gap-1">
         <ProjectTabsList prsActive={isPullRequestSelected} />
+        {cloneAction ? (
+          <Button
+            className="h-8 shrink-0 gap-1.5"
+            disabled={cloneAction.pending}
+            onClick={cloneAction.onClone}
+            size="sm"
+            title="Clone repository"
+            variant="outline"
+          >
+            <Download className="h-4 w-4" />
+            {cloneAction.pending ? "Cloning…" : "Clone"}
+          </Button>
+        ) : null}
+        {createPullRequestAction &&
+        sourceControls?.branch &&
+        sourceControls.branch !== project.defaultBranch &&
+        !selectedPullRequest ? (
+          <Button
+            className="h-8 shrink-0 gap-1.5"
+            disabled={
+              !createPullRequestAction.enabled ||
+              createPullRequestAction.pending
+            }
+            onClick={() => setCreatePullRequestOpen(true)}
+            size="sm"
+            title={createPullRequestAction.title}
+            variant="outline"
+          >
+            <GitPullRequest className="h-4 w-4" />
+            New pull request
+          </Button>
+        ) : null}
+        {updatePullRequestAction ? (
+          <Button
+            className="h-8 shrink-0 gap-1.5"
+            disabled={updatePullRequestAction.pending}
+            onClick={updatePullRequestAction.onUpdate}
+            size="sm"
+            title="Publish the pushed commit to this pull request"
+            variant="outline"
+          >
+            <RefreshCw className="h-4 w-4" />
+            {updatePullRequestAction.pending ? "Updating…" : "Update PR"}
+          </Button>
+        ) : null}
         {onOpenTerminal ? (
           <Button
             aria-label="Open terminal"
@@ -344,6 +424,17 @@ export function WorkspaceTabs({
           repoContributors={displayedContributors}
         />
       </TabsContent>
+      {createPullRequestAction && sourceControls?.branch ? (
+        <CreatePullRequestDialog
+          commit={createPullRequestAction.commit}
+          isCreating={createPullRequestAction.pending}
+          onCreate={createPullRequestAction.onCreate}
+          onOpenChange={setCreatePullRequestOpen}
+          open={createPullRequestOpen}
+          sourceBranch={sourceControls.branch}
+          targetBranch={project.defaultBranch}
+        />
+      ) : null}
     </Tabs>
   );
 }

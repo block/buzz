@@ -854,6 +854,26 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    /** Project event kinds rejected once, in order, to exercise retry flows. */
+    __BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?: number[];
+    __BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__?: {
+      local_path: string | null;
+      local_branch: string | null;
+      local_head: string | null;
+      local_short_head: string | null;
+      remote_branch: string | null;
+      remote_head: string | null;
+      remote_short_head: string | null;
+      merge_base: string | null;
+      ahead_count: number;
+      behind_count: number;
+      has_uncommitted_changes: boolean;
+      has_untracked_files: boolean;
+      can_push: boolean;
+      push_block_reason: string | null;
+      can_pull: boolean;
+      pull_block_reason: string | null;
+    };
     __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: ConnectionState) => void;
     __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => ConnectionState;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
@@ -4560,7 +4580,7 @@ function buildMockProjectEvents(): RelayEvent[] {
           ["d", seed.dtag],
           ["name", seed.name],
           ["description", seed.description],
-          ["clone", `https://relay.example.com/git/${seed.dtag}.git`],
+          ["clone", `https://relay.example.com/git/${seed.owner}/${seed.dtag}`],
           ...seed.contributors.map((pubkey) => ["p", pubkey]),
         ],
         seed.owner,
@@ -4596,6 +4616,15 @@ function buildMockProjectEvents(): RelayEvent[] {
           ["a", repoAddress],
           ["subject", subject],
           ...(kind === KIND_GIT_ISSUE ? [] : [["c", commitHash]]),
+          ...(kind === KIND_GIT_PULL_REQUEST
+            ? [
+                ["branch-name", `feature/mock-${dayOffset}-${index}`],
+                [
+                  "clone",
+                  `https://relay.example.com/git/${seed.owner}/${seed.dtag}`,
+                ],
+              ]
+            : []),
         ];
 
         events.push(createMockEvent(kind, subject, tags, author, createdAt));
@@ -8182,6 +8211,22 @@ function sendToMockSocket(args: {
     }
 
     if (isMockProjectScopedEvent(event)) {
+      const rejectionIndex =
+        window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.indexOf(event.kind) ??
+        -1;
+      if (rejectionIndex >= 0) {
+        window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.splice(
+          rejectionIndex,
+          1,
+        );
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "mock project event rejection",
+        ]);
+        return;
+      }
       getMockProjectEventStore().push(event);
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
@@ -8794,34 +8839,66 @@ export function maybeInstallE2eTauriMocks() {
       case "get_project_local_repo_diff":
         return null;
       case "get_project_repo_sync_status":
-        return {
-          local_path: null,
-          local_branch: null,
-          local_head: null,
-          local_short_head: null,
-          remote_branch: "main",
-          remote_head: "0123456789abcdef0123456789abcdef01234567",
-          remote_short_head: "0123456",
-          ahead_count: 0,
-          behind_count: 0,
-          has_uncommitted_changes: false,
-          has_untracked_files: false,
-          can_push: false,
-          push_block_reason: "No local checkout found.",
-          can_pull: false,
-          pull_block_reason: "No local checkout found.",
-        };
+        return (
+          window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__ ?? {
+            local_path: null,
+            local_branch: null,
+            local_head: null,
+            local_short_head: null,
+            remote_branch: "main",
+            remote_head: "0123456789abcdef0123456789abcdef01234567",
+            remote_short_head: "0123456",
+            merge_base: "0123456789abcdef0123456789abcdef01234567",
+            ahead_count: 0,
+            behind_count: 0,
+            has_uncommitted_changes: false,
+            has_untracked_files: false,
+            can_push: false,
+            push_block_reason: "No local checkout found.",
+            can_pull: false,
+            pull_block_reason: "No local checkout found.",
+          }
+        );
       case "list_project_local_repositories":
         return [];
-      case "push_project_local_repository":
+      case "push_project_local_repository": {
+        const input = payload as { branchName?: string | null };
+        const status = window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__;
+        const branch = input.branchName ?? status?.remote_branch ?? "main";
+        const commit =
+          status?.local_head ?? "0123456789abcdef0123456789abcdef01234567";
+        if (status) {
+          status.remote_branch = branch;
+          status.remote_head = commit;
+          status.remote_short_head = commit.slice(0, 7);
+          status.ahead_count = 0;
+          status.can_push = false;
+          status.push_block_reason = "Local branch is already pushed.";
+        }
         return {
           pushed: true,
-          message: "Pushed main to remote.",
+          message: `Pushed ${branch} to remote.`,
+          branch,
+          commit,
+          merge_base:
+            status?.merge_base ?? "0123456789abcdef0123456789abcdef01234567",
         };
+      }
       case "pull_project_local_repository":
         return {
           pulled: true,
           message: "Pulled main from remote.",
+        };
+      case "clone_project_repository":
+        return {
+          path: "/tmp/buzz/REPOS/mock-project",
+          cloned: true,
+          message: "Cloned repository.",
+        };
+      case "merge_project_pull_request":
+        return {
+          message: "Merged feature into main.",
+          merge_commit: "abcdef0123456789abcdef0123456789abcdef01",
         };
       case "get_relay_ws_url":
         return getRelayWsUrl(activeConfig);

@@ -1,5 +1,5 @@
 use super::project_git_exec::{
-    build_git_auth_config, clean_branch, run_git, validate_clone_url, GitAuthConfig,
+    build_git_auth_config, clean_branch, run_git, validate_workspace_clone_url, GitAuthConfig,
 };
 use super::project_repo_paths::find_local_repo_dir;
 use crate::app_state::AppState;
@@ -37,7 +37,7 @@ fn clean_target_ref(value: Option<String>) -> Option<String> {
     })
 }
 
-fn clean_commit(value: Option<String>) -> Option<String> {
+pub(crate) fn clean_commit(value: Option<String>) -> Option<String> {
     value
         .filter(|value| matches!(value.len(), 40 | 64))
         .filter(|value| value.chars().all(|c| c.is_ascii_hexdigit()))
@@ -388,7 +388,7 @@ pub async fn get_project_repo_diff(
     target_commit: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoDiffInfo, String> {
-    validate_clone_url(&clone_url)?;
+    validate_workspace_clone_url(&clone_url, &state)?;
     let auth = build_git_auth_config(&state)?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);

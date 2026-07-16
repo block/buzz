@@ -273,7 +273,11 @@ async function fetchProject(projectId: string): Promise<Project | null> {
     limit: 10,
   });
 
-  return isDeletedByA(project, deletionEvents) ? null : project;
+  if (isDeletedByA(project, deletionEvents)) return null;
+  const repoState = await fetchRepoState(project);
+  return repoState?.head
+    ? { ...project, defaultBranch: repoState.head }
+    : project;
 }
 
 function eventToRepoState(event: RelayEvent): RepoState {
@@ -290,7 +294,7 @@ function eventToRepoState(event: RelayEvent): RepoState {
     } else if (name.startsWith("refs/tags/")) {
       tags.push({ name: name.slice("refs/tags/".length), commit: value });
     } else if (name === "HEAD") {
-      head = value.replace(/^ref:\s*/, "");
+      head = value.replace(/^ref:\s*/, "").replace(/^refs\/heads\//, "");
     }
   }
 

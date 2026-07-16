@@ -138,7 +138,9 @@ async function approveProjectPullRequest({
   );
 }
 
-function usePullRequestWriteInvalidation(project: Project | null | undefined) {
+export function useProjectPullRequestWriteInvalidation(
+  project: Project | null | undefined,
+) {
   const queryClient = useQueryClient();
   return React.useCallback(() => {
     void queryClient.invalidateQueries({
@@ -156,7 +158,7 @@ function usePullRequestWriteInvalidation(project: Project | null | undefined) {
 export function useUpdateProjectPullRequestStatusMutation(
   project: Project | null | undefined,
 ) {
-  const invalidate = usePullRequestWriteInvalidation(project);
+  const invalidate = useProjectPullRequestWriteInvalidation(project);
 
   return useMutation({
     mutationFn: ({
@@ -176,7 +178,7 @@ export function useUpdateProjectPullRequestStatusMutation(
 export function useRequestProjectPullRequestReviewMutation(
   project: Project | null | undefined,
 ) {
-  const invalidate = usePullRequestWriteInvalidation(project);
+  const invalidate = useProjectPullRequestWriteInvalidation(project);
 
   return useMutation({
     mutationFn: ({
@@ -203,7 +205,7 @@ export function useRequestProjectPullRequestReviewMutation(
 export function useApproveProjectPullRequestMutation(
   project: Project | null | undefined,
 ) {
-  const invalidate = usePullRequestWriteInvalidation(project);
+  const invalidate = useProjectPullRequestWriteInvalidation(project);
 
   return useMutation({
     mutationFn: ({ pullRequest }: { pullRequest: ProjectPullRequest }) => {

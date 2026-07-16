@@ -41,7 +41,11 @@ pub(crate) fn run_git(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    configure_git_auth(&mut command, auth);
+    let needs_credentials = matches!(
+        args.first().copied(),
+        Some("clone" | "fetch" | "push" | "pull" | "ls-remote")
+    );
+    configure_git_auth(&mut command, auth, needs_credentials);
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -92,9 +96,20 @@ pub(crate) fn run_git(
     Ok(stdout)
 }
 
-fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig) {
+fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credentials: bool) {
     command.env("GIT_TERMINAL_PROMPT", "0");
     command.env("GIT_CONFIG_NOSYSTEM", "1");
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_SSH_COMMAND",
+        "GIT_EXTERNAL_DIFF",
+    ] {
+        command.env_remove(key);
+    }
     // Git for Windows maps `/dev/null` to `NUL` internally, so this value
     // disables the global config file on every platform.
     command.env("GIT_CONFIG_GLOBAL", "/dev/null");
@@ -106,12 +121,25 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig) {
     let mut entries: Vec<(&str, String)> = vec![
         ("credential.helper", String::new()),
         ("core.hooksPath", "/dev/null".to_string()),
+        ("core.fsmonitor", "false".to_string()),
+        ("protocol.allow", "never".to_string()),
+        ("protocol.http.allow", "always".to_string()),
+        ("protocol.https.allow", "always".to_string()),
+        ("protocol.ext.allow", "never".to_string()),
+        ("protocol.file.allow", "never".to_string()),
     ];
-    if let Some(cred_helper) = &auth.credential_helper {
+    if needs_credentials {
+        let Some(cred_helper) = &auth.credential_helper else {
+            return apply_git_config(command, &entries);
+        };
         command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
         entries.push(("credential.helper", cred_helper.display().to_string()));
         entries.push(("credential.useHttpPath", "true".to_string()));
     }
+    apply_git_config(command, &entries);
+}
+
+fn apply_git_config(command: &mut Command, entries: &[(&str, String)]) {
     command.env("GIT_CONFIG_COUNT", entries.len().to_string());
     for (index, (key, value)) in entries.iter().enumerate() {
         command.env(format!("GIT_CONFIG_KEY_{index}"), key);
@@ -171,21 +199,61 @@ pub(crate) fn validate_clone_url(clone_url: &str) -> Result<(), String> {
         .path_segments()
         .map(|segments| segments.filter(|s| !s.is_empty()).collect::<Vec<_>>())
         .unwrap_or_default();
-    let is_buzz_repo_path = segments.windows(3).any(|window| {
-        window[0] == "git"
-            && window[1].len() == 64
-            && window[1].chars().all(|c| c.is_ascii_hexdigit())
-            && !window[2].is_empty()
-    });
+    let is_buzz_repo_path = segments
+        .iter()
+        .rposition(|segment| *segment == "git")
+        .filter(|index| segments.len() == index + 3)
+        .map(|index| {
+            segments[index + 1].len() == 64
+                && segments[index + 1].chars().all(|c| c.is_ascii_hexdigit())
+                && !segments[index + 2].is_empty()
+        })
+        .unwrap_or(false);
     if !is_buzz_repo_path {
         return Err("clone URL must point at a Buzz git repository".into());
     }
     Ok(())
 }
 
+pub(crate) fn clone_url_owner(clone_url: &str) -> Option<String> {
+    let parsed = Url::parse(clone_url).ok()?;
+    let segments = parsed
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let index = segments.iter().rposition(|segment| *segment == "git")?;
+    (segments.len() == index + 3).then(|| segments[index + 1].to_ascii_lowercase())
+}
+
+pub(crate) fn validate_workspace_clone_url(
+    clone_url: &str,
+    state: &AppState,
+) -> Result<(), String> {
+    let relay_base = crate::relay::relay_api_base_url_with_override(state);
+    validate_clone_url_against_relay(clone_url, &relay_base)
+}
+
+fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result<(), String> {
+    validate_clone_url(clone_url)?;
+    let clone = Url::parse(clone_url).map_err(|error| format!("invalid clone URL: {error}"))?;
+    let relay = Url::parse(relay_base)
+        .map_err(|error| format!("configured relay URL is invalid: {error}"))?;
+    if clone.scheme() != relay.scheme()
+        || clone.host_str() != relay.host_str()
+        || clone.port_or_known_default() != relay.port_or_known_default()
+    {
+        return Err("clone URL must use the active workspace relay".into());
+    }
+    let relay_path = relay.path().trim_end_matches('/');
+    if !relay_path.is_empty() && !clone.path().starts_with(&format!("{relay_path}/")) {
+        return Err("clone URL must use the active workspace relay path".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{clean_branch, validate_clone_url};
+    use super::{clean_branch, validate_clone_url, validate_clone_url_against_relay};
 
     #[test]
     fn clean_branch_accepts_plain_and_prefixed_names() {
@@ -220,5 +288,26 @@ mod tests {
         assert!(validate_clone_url("https://relay.example/git/short/repo").is_err());
         assert!(validate_clone_url("https://evil.example/has/git/inpath").is_err());
         assert!(validate_clone_url(&format!("ssh://relay.example/git/{owner}/repo")).is_err());
+        assert!(validate_clone_url(&format!(
+            "https://relay.example/git/{owner}/repo/unexpected"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn workspace_clone_url_requires_exact_relay_origin_and_prefix() {
+        let owner = "a".repeat(64);
+        let valid = format!("https://relay.example/prefix/git/{owner}/repo");
+        assert!(validate_clone_url_against_relay(&valid, "https://relay.example/prefix").is_ok());
+        assert!(validate_clone_url_against_relay(&valid, "http://relay.example/prefix").is_err());
+        assert!(
+            validate_clone_url_against_relay(&valid, "https://relay.example:8443/prefix").is_err()
+        );
+        assert!(validate_clone_url_against_relay(&valid, "https://relay.example/other").is_err());
+        assert!(validate_clone_url_against_relay(
+            &format!("https://evil.example/prefix/git/{owner}/repo"),
+            "https://relay.example/prefix",
+        )
+        .is_err());
     }
 }
