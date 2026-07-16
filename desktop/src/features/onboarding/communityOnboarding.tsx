@@ -33,27 +33,15 @@ export type CommunityOnboardingTransaction = {
   createdAt: string;
   updatedAt: string;
   error?: string;
-  // Pubkey that signed the successful invite claim. A claim made during
-  // machine onboarding (PendingInviteGate) uses the boot-time key, but the
-  // identity steps can still swap in an imported key — CommunityOnboardingFlow
-  // compares this against the final identity and re-claims on mismatch.
-  claimedPubkey?: string;
-  // Claimless deep links (buzz://connect, or join without a code) have
-  // nothing to confirm against the relay, so during machine onboarding the
-  // gate shows a static acknowledgment instead of the loader. Set when the
-  // user dismisses it, so the gate doesn't reappear on relaunch mid-setup.
+  // Deep links are persisted before machine onboarding completes. Set when
+  // the user dismisses the acknowledgment so it stays dismissed on relaunch.
   acknowledged?: boolean;
 };
 
 export type CommunityOnboardingTransactionPatch = Partial<
   Pick<
     CommunityOnboardingTransaction,
-    | "stage"
-    | "communityId"
-    | "communityName"
-    | "error"
-    | "claimedPubkey"
-    | "acknowledged"
+    "stage" | "communityId" | "communityName" | "error" | "acknowledged"
   >
 >;
 
@@ -177,6 +165,17 @@ export function updateCommunityOnboardingTransaction(
   return updated;
 }
 
+export function updateCurrentCommunityOnboardingTransaction(
+  current: CommunityOnboardingTransaction | null,
+  patch: CommunityOnboardingTransactionPatch,
+  expectedId: string | undefined,
+  storage: Storage = localStorage,
+  now = new Date(),
+): CommunityOnboardingTransaction | null {
+  if (!current || (expectedId && current.id !== expectedId)) return current;
+  return updateCommunityOnboardingTransaction(current, patch, storage, now);
+}
+
 export function markCommunityOnboardingComplete(
   pubkey: string,
   relayUrl: string,
@@ -196,7 +195,10 @@ import * as React from "react";
 type CommunityOnboardingContextValue = {
   transaction: CommunityOnboardingTransaction | null;
   start: (input: StartCommunityOnboardingInput) => boolean;
-  update: (patch: CommunityOnboardingTransactionPatch) => void;
+  update: (
+    patch: CommunityOnboardingTransactionPatch,
+    expectedId?: string,
+  ) => void;
   clear: () => void;
 };
 
@@ -225,11 +227,9 @@ export function CommunityOnboardingProvider({
     [transaction],
   );
   const update = React.useCallback(
-    (patch: CommunityOnboardingTransactionPatch) => {
+    (patch: CommunityOnboardingTransactionPatch, expectedId?: string) => {
       setTransaction((current) =>
-        current
-          ? updateCommunityOnboardingTransaction(current, patch)
-          : current,
+        updateCurrentCommunityOnboardingTransaction(current, patch, expectedId),
       );
     },
     [],

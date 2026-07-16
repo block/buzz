@@ -7,6 +7,7 @@ import {
   markCommunityOnboardingComplete,
   startCommunityOnboarding,
   updateCommunityOnboardingTransaction,
+  updateCurrentCommunityOnboardingTransaction,
 } from "./communityOnboarding.tsx";
 
 function createMemoryStorage(initial = {}) {
@@ -79,9 +80,9 @@ test("same-relay ingress resumes rather than replacing progress", () => {
   assert.equal(resumed.inviteCode, "new-code");
 });
 
-test("claimed pubkey persists so a post-setup identity change can re-claim", () => {
+test("stale asynchronous updates cannot mutate a replacement transaction", () => {
   const storage = createMemoryStorage();
-  const transaction = startCommunityOnboarding(
+  const original = startCommunityOnboarding(
     {
       source: "deep-link-join",
       relayUrl: "wss://relay.example",
@@ -89,14 +90,21 @@ test("claimed pubkey persists so a post-setup identity change can re-claim", () 
     },
     storage,
   );
-  updateCommunityOnboardingTransaction(
-    transaction,
-    { stage: "connecting", claimedPubkey: "boot-time-pubkey" },
+  const replacement = startCommunityOnboarding(
+    { source: "deep-link-connect", relayUrl: "wss://other.example" },
     storage,
   );
-  const persisted = loadCommunityOnboardingTransaction(storage);
-  assert.equal(persisted?.stage, "connecting");
-  assert.equal(persisted?.claimedPubkey, "boot-time-pubkey");
+
+  const result = updateCurrentCommunityOnboardingTransaction(
+    replacement,
+    { stage: "connecting", error: "stale error" },
+    original.id,
+    storage,
+  );
+
+  assert.equal(result, replacement);
+  assert.equal(loadCommunityOnboardingTransaction(storage)?.id, replacement.id);
+  assert.equal(loadCommunityOnboardingTransaction(storage)?.error, undefined);
 });
 
 test("acknowledgment persists but resets when the same-relay link reopens", () => {

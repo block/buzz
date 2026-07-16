@@ -3,18 +3,12 @@ import * as React from "react";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
 import { claimInvite } from "@/shared/api/invites";
-import { getIdentity } from "@/shared/api/tauriIdentity";
 
 /**
- * Drive the `claiming` stage of the community-onboarding transaction: claim
- * the invite against its relay, then advance to `connecting` with the pubkey
- * that signed the claim recorded as `claimedPubkey`. Shared by
- * `PendingInviteGate` (claims during machine onboarding, possibly with the
- * boot-time key the identity steps later replace) and
- * `CommunityOnboardingFlow` (which compares `claimedPubkey` against the final
- * identity and re-claims on mismatch) — the two mount mutually exclusively,
- * gate before machine onboarding completes, flow after, so only one claim
- * runs at a time.
+ * Drive the `claiming` stage after machine onboarding completes: claim the
+ * invite with the user's final identity, then advance to `connecting`.
+ * Completion is fenced by transaction ID so cancelling or replacing the
+ * transaction while the request is pending cannot mutate the replacement.
  *
  * The error guard keeps a failed claim parked on the caller's Retry
  * affordance — without it the effect refires on the error-bearing transaction
@@ -29,16 +23,13 @@ export function useClaimInvite() {
       return;
     }
     setIsPending(true);
-    void getIdentity()
-      .then(async (identity) => {
-        await claimInvite(transaction.relayUrl, transaction.inviteCode ?? "");
-        update({
-          stage: "connecting",
-          error: undefined,
-          claimedPubkey: identity.pubkey,
-        });
+    void claimInvite(transaction.relayUrl, transaction.inviteCode ?? "")
+      .then(() => {
+        update({ stage: "connecting", error: undefined }, transaction.id);
       })
-      .catch((error: unknown) => update({ error: inviteErrorMessage(error) }))
+      .catch((error: unknown) =>
+        update({ error: inviteErrorMessage(error) }, transaction.id),
+      )
       .finally(() => setIsPending(false));
   }, [isPending, transaction, update]);
 }

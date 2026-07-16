@@ -410,24 +410,14 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     return <CommunityApp sharedIdentity={sharedIdentity} />;
   }
 
-  // An invite deep link that arrived before machine onboarding finished:
-  // overlay the "Opening your invite" loader above the identity steps while
-  // the invite is confirmed against its relay. On success the transaction
-  // advances past `claiming` and the overlay auto-dismisses back into setup;
-  // the remaining join steps run in CommunityOnboardingFlow afterwards.
-  // Claimless links (buzz://connect, or join without a code) start directly
-  // at `connecting` with nothing to confirm — for those the same gate shows
-  // a static acknowledgment until the user continues setup.
+  // A community deep link that arrived before machine onboarding finished is
+  // persisted immediately and acknowledged here. Invite claiming waits until
+  // setup completes so it is signed only by the user's final identity.
   const transaction = communityOnboarding.transaction;
   const isDeepLink =
     transaction?.source === "deep-link-join" ||
     transaction?.source === "deep-link-connect";
-  const isConfirmingInvite =
-    isDeepLink &&
-    (transaction.stage === "claiming" ||
-      (transaction.stage === "connecting" &&
-        !transaction.inviteCode &&
-        !transaction.acknowledged));
+  const shouldAcknowledgeDeepLink = isDeepLink && !transaction.acknowledged;
 
   return (
     <>
@@ -436,7 +426,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
         identityLost={machine.identityLost}
         queryClient={machine.queryClient}
       />
-      {isConfirmingInvite ? <PendingInviteGate /> : null}
+      {shouldAcknowledgeDeepLink ? <PendingInviteGate /> : null}
     </>
   );
 }
