@@ -581,6 +581,9 @@ test("first-community choices expose npub and invite input", async ({
   await page.goto("/");
 
   await expect(
+    page.getByRole("button", { name: "Join default community" }),
+  ).toBeVisible();
+  await expect(
     page.getByRole("button", { name: "Join a community" }),
   ).toBeVisible();
   await expect(
@@ -618,6 +621,31 @@ test("first-community choices expose npub and invite input", async ({
     page.getByRole("heading", { name: "I have an invite link" }),
   ).toBeVisible();
   await expect(page.getByTestId("invite-redeem-input")).toBeVisible();
+});
+
+test("first-community hides the default option for localhost", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "ws://localhost:3000",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("button", { name: "Join default community" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Join a community" }),
+  ).toBeVisible();
 });
 
 test("identity fallback text does not count as a real onboarding name", async ({
