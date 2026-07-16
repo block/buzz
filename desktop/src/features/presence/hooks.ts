@@ -2,18 +2,20 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { getOsIdleSeconds } from "@/shared/api/osIdle";
 import { getPresence } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   mergePresenceUpdate,
   parseLivePresenceEvent,
   presenceQueryWantsPubkey,
+  resolveAutomaticPresenceStatus,
 } from "@/features/presence/lib/presence";
 import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
 
 const PRESENCE_HEARTBEAT_INTERVAL_MS = 30_000;
-const PRESENCE_IDLE_TIMEOUT_MS = 5 * 60_000;
 const PRESENCE_STATUS_TICK_INTERVAL_MS = 30_000;
+const PRESENCE_ACTIVITY_THROTTLE_MS = 1_000;
 const PRESENCE_TTL_SECONDS = 90;
 const PRESENCE_PREFERENCE_STORAGE_KEY = "buzz-presence-preference";
 
@@ -62,16 +64,11 @@ function writeStoredPresencePreference(
   window.localStorage.setItem(presencePreferenceStorageKey(pubkey), preference);
 }
 
-function resolveAutomaticPresenceStatus(
-  isDocumentHidden: boolean,
+function resolveAutomaticPresenceStatusSync(
   lastActivityAt: number,
   now: number,
 ): PresenceStatus {
-  if (isDocumentHidden) {
-    return "away";
-  }
-
-  return now - lastActivityAt >= PRESENCE_IDLE_TIMEOUT_MS ? "away" : "online";
+  return resolveAutomaticPresenceStatus(null, lastActivityAt, now);
 }
 
 export function usePresenceQuery(
@@ -208,25 +205,41 @@ export function usePresenceSession(pubkey?: string) {
   const lastActivityAtRef = React.useRef(Date.now());
   const [automaticStatus, setAutomaticStatus] = React.useState<PresenceStatus>(
     () =>
-      resolveAutomaticPresenceStatus(
-        typeof document === "undefined" ? false : document.hidden,
-        lastActivityAtRef.current,
-        Date.now(),
-      ),
+      resolveAutomaticPresenceStatusSync(lastActivityAtRef.current, Date.now()),
   );
   const automaticStatusRef = React.useRef(automaticStatus);
   const skipNextSyncRef = React.useRef<PresenceStatus | null>(null);
 
-  const reevaluateAutomaticStatus = React.useEffectEvent(() => {
-    const next = resolveAutomaticPresenceStatus(
-      typeof document === "undefined" ? false : document.hidden,
-      lastActivityAtRef.current,
-      Date.now(),
-    );
+  const applyAutomaticStatus = React.useEffectEvent((next: PresenceStatus) => {
     if (next !== automaticStatusRef.current) {
       automaticStatusRef.current = next;
       setAutomaticStatus(next);
     }
+  });
+
+  const reevaluateAutomaticStatus = React.useEffectEvent(() => {
+    applyAutomaticStatus(
+      resolveAutomaticPresenceStatusSync(lastActivityAtRef.current, Date.now()),
+    );
+  });
+
+  // OS-wide idle is authoritative when available; async, so tick-driven only.
+  const reevaluateFromOsIdle = React.useEffectEvent(async () => {
+    const osIdleSeconds = await getOsIdleSeconds().catch(() => null);
+    if (typeof osIdleSeconds === "number") {
+      // Keep the fallback clock consistent so a later null reading can't flap.
+      lastActivityAtRef.current = Math.max(
+        lastActivityAtRef.current,
+        Date.now() - osIdleSeconds * 1000,
+      );
+    }
+    applyAutomaticStatus(
+      resolveAutomaticPresenceStatus(
+        typeof osIdleSeconds === "number" ? osIdleSeconds : null,
+        lastActivityAtRef.current,
+        Date.now(),
+      ),
+    );
   });
 
   React.useEffect(() => {
@@ -249,37 +262,36 @@ export function usePresenceSession(pubkey?: string) {
       return;
     }
 
+    // Fallback activity signal: wheel/pointermove count (passive reading),
+    // throttled to 1/s; window visibility never affects presence.
+    let lastRecordedAt = 0;
+
     function handleUserActivity() {
-      if (typeof document !== "undefined" && document.hidden) {
+      const now = Date.now();
+      if (now - lastRecordedAt < PRESENCE_ACTIVITY_THROTTLE_MS) {
         return;
       }
-
+      lastRecordedAt = now;
       recordActivity();
-    }
-
-    function handleFocus() {
-      recordActivity();
-    }
-
-    function handleVisibilityChange() {
-      if (!document.hidden) {
-        recordActivity();
-        return;
-      }
-      // Going hidden can flip the automatic status to away.
-      reevaluateAutomaticStatus();
     }
 
     window.addEventListener("pointerdown", handleUserActivity, true);
+    window.addEventListener("pointermove", handleUserActivity, true);
+    window.addEventListener("wheel", handleUserActivity, {
+      capture: true,
+      passive: true,
+    });
     window.addEventListener("keydown", handleUserActivity, true);
-    window.addEventListener("focus", handleFocus);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleUserActivity);
 
     return () => {
       window.removeEventListener("pointerdown", handleUserActivity, true);
+      window.removeEventListener("pointermove", handleUserActivity, true);
+      window.removeEventListener("wheel", handleUserActivity, {
+        capture: true,
+      });
       window.removeEventListener("keydown", handleUserActivity, true);
-      window.removeEventListener("focus", handleFocus);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleUserActivity);
     };
   }, [normalizedPubkey]);
 
@@ -288,8 +300,9 @@ export function usePresenceSession(pubkey?: string) {
       return;
     }
 
+    void reevaluateFromOsIdle();
     const intervalId = window.setInterval(() => {
-      reevaluateAutomaticStatus();
+      void reevaluateFromOsIdle();
     }, PRESENCE_STATUS_TICK_INTERVAL_MS);
 
     return () => {

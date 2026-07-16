@@ -1,3 +1,7 @@
+// Deep async call chains (mesh ensure→download→start under Tauri command
+// futures) exceed the default query depth when computing layouts.
+#![recursion_limit = "256"]
+
 mod app_state;
 mod archive;
 mod commands;
@@ -31,7 +35,10 @@ use mesh_llm_stubs::*;
 
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use commands::*;
-use deep_link::handle_deep_link_url;
+use deep_link::{
+    acknowledge_pending_community_deep_link, handle_deep_link_url,
+    take_pending_community_deep_link, PendingCommunityDeepLinks,
+};
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
 };
@@ -43,7 +50,11 @@ use huddle::{
     set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{backfill_persona_snapshots, ensure_nest, try_regenerate_nest};
+#[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+use shutdown::hard_exit_after_mesh_shutdown;
 use shutdown::shutdown_managed_agents;
+#[cfg(feature = "mesh-llm")]
+use shutdown::shutdown_mesh_runtime;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -223,6 +234,34 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // mesh-llm's async chains (model download, node start/join) overflow
+    // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
+    // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
+    // stacks for this reason; give Tauri's command runtime the same headroom
+    // before anything else touches tauri::async_runtime.
+    #[cfg(feature = "mesh-llm")]
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(crate::mesh_llm::MESH_WORKER_STACK_SIZE)
+        .build()
+    {
+        Ok(runtime) => {
+            tauri::async_runtime::set(runtime.handle().clone());
+            // Keep the runtime alive for the process lifetime; dropping it
+            // would shut down the workers Tauri now depends on.
+            std::mem::forget(runtime);
+            eprintln!(
+                "buzz-mesh: installed tokio runtime with {} MiB worker stacks",
+                crate::mesh_llm::MESH_WORKER_STACK_SIZE / (1024 * 1024)
+            );
+        }
+        Err(error) => {
+            // Fall back to Tauri's default runtime: the app still works,
+            // only deep mesh-llm futures are at risk of stack overflow.
+            eprintln!("buzz-mesh: failed to build big-stack tokio runtime, using default: {error}");
+        }
+    }
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance launches.
@@ -413,6 +452,7 @@ pub fn run() {
             });
         })
         .manage(build_app_state())
+        .manage(PendingCommunityDeepLinks::default())
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -503,15 +543,18 @@ pub fn run() {
                 *guard = Some(app_handle.clone());
             }
 
-            // Bring up the runtime-owned relay-mesh call-me-now listener now,
-            // before any saved agent restore can request a connection. Its
-            // lifetime is tied to the runtime, not a UI mount — this is what
-            // closes the cold-launch hole-punch race.
+            // Bring up the runtime-owned shared-compute coordinator before
+            // saved agents are restored. Its lifetime is tied to the app, not
+            // a UI mount; it publishes discovery and reconciles membership for
+            // MeshLLM's native admission and transport.
             #[cfg(feature = "mesh-llm")]
             {
+                // Route mesh-llm's download progress (model weights, runtime)
+                // onto Tauri events so the UI can render real progress.
+                crate::mesh_llm::install_progress_sink(&app_handle);
                 let mesh_app = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    crate::mesh_llm::spawn_listener(mesh_app).await;
+                    crate::mesh_llm::start_coordinator(mesh_app).await;
                 });
             }
 
@@ -700,6 +743,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            take_pending_community_deep_link,
+            acknowledge_pending_community_deep_link,
             title_bar_double_click,
             get_identity,
             get_nsec,
@@ -722,6 +767,7 @@ pub fn run() {
             open_project_terminal,
             search_users,
             get_presence,
+            get_os_idle_seconds,
             get_default_relay_url,
             get_legacy_workspace_storage,
             is_shared_identity,
@@ -777,11 +823,13 @@ pub fn run() {
             show_native_notification,
             upload_media,
             pick_and_upload_media,
+            pick_and_upload_image,
             upload_media_bytes,
             download_image,
             download_file,
             fetch_media_bytes,
             copy_image_to_clipboard,
+            copy_text_to_clipboard,
             fetch_snapshot_bytes,
             list_relay_members,
             get_my_relay_membership,
@@ -811,16 +859,11 @@ pub fn run() {
             put_agent_session_config,
             get_global_agent_config,
             set_global_agent_config,
-            mesh_availability,
             mesh_start_node,
-            mesh_ensure_client_node,
-            mesh_prepare_relay_mesh_client,
-            mesh_dial_endpoint_addr,
-            mesh_status_report_payload,
             mesh_stop_node,
             mesh_node_status,
             mesh_installed_models,
-            mesh_agent_preset,
+            mesh_model_catalog,
             update_managed_agent,
             discover_backend_providers,
             probe_backend_provider,
@@ -920,29 +963,8 @@ pub fn run() {
 
     let shutdown_done = Arc::new(AtomicBool::new(false));
 
-    // Agent cleanup on SIGINT (Ctrl+C), SIGTERM, and SIGHUP (terminal close).
-    // The ctrlc crate with the "termination" feature covers all three signals
-    // and runs the handler on a dedicated thread (safe for mutex operations).
-    // `shutdown_done` prevents double-execution with the RunEvent handler.
-    // `process::exit(0)` intentionally skips Drop impls to avoid re-entrant
-    // locking in destructors during signal teardown.
     #[cfg(unix)]
-    {
-        let signal_app = app.handle().clone();
-        let signal_shutdown_done = Arc::clone(&shutdown_done);
-        if let Err(e) = ctrlc::set_handler(move || {
-            signal_app
-                .state::<AppState>()
-                .shutdown_started
-                .store(true, Ordering::SeqCst);
-            if !signal_shutdown_done.swap(true, Ordering::SeqCst) {
-                let _ = shutdown_managed_agents(&signal_app);
-            }
-            std::process::exit(0);
-        }) {
-            eprintln!("buzz-desktop: failed to register signal handler: {e}");
-        }
-    }
+    shutdown::install_signal_handler(app.handle().clone(), Arc::clone(&shutdown_done));
 
     let run_shutdown_done = Arc::clone(&shutdown_done);
     app.run(move |app_handle, event| match event {
@@ -956,7 +978,17 @@ pub fn run() {
                 if let Err(error) = shutdown_managed_agents(app_handle) {
                     eprintln!("buzz-desktop: failed to stop managed agents: {error}");
                 }
+                #[cfg(feature = "mesh-llm")]
+                shutdown_mesh_runtime(app_handle);
             }
+
+            // AppKit terminates through libc exit(), which runs C++ static
+            // destructors. The embedded ggml/Metal runtime currently aborts in
+            // that destructor phase even after its node has stopped cleanly.
+            // End the process only after Buzz and Mesh shutdown above, while
+            // deliberately skipping those native global destructors.
+            #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+            hard_exit_after_mesh_shutdown();
         }
         _ => {}
     });

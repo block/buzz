@@ -215,12 +215,13 @@ export function ProfileStep({
       effect={transitionEffect}
       transitionKey={`profile-${direction}`}
     >
-      <div className="w-full max-w-[500px]">
+      <div className="w-full max-w-2xl">
         <h1 className="text-3xl font-semibold text-foreground">
-          First, let's start with your name
+          What should we call you?
         </h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Enter a nickname or whatever you want people to call you.
+          Pick the name people and agents will see in Buzz. You can change it
+          anytime.
         </p>
       </div>
 
@@ -240,7 +241,7 @@ export function ProfileStep({
                   aria-hidden="true"
                   className="buzz-onboarding-name-placeholder-caret h-[0.9em] w-0.5 rounded-full bg-primary"
                 />
-                Name
+                Enter your name
               </span>
             </div>
           ) : null}
@@ -285,7 +286,7 @@ export function ProfileStep({
           {isSaving ? (
             <Spinner aria-label="Saving profile" className="h-4 w-4 border-2" />
           ) : (
-            "Next"
+            "Create an identity key"
           )}
         </Button>
 

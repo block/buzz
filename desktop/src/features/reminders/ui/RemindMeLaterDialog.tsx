@@ -1,4 +1,4 @@
-import { CalendarClock, Clock } from "lucide-react";
+import { CalendarClock, Clock, Loader2 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -102,17 +102,6 @@ export function RemindMeLaterDialog({
               value={customTime}
             />
           </div>
-          <Button
-            className="w-full"
-            disabled={create.isPending || customTimestamp === null}
-            onClick={() => {
-              if (customTimestamp === null) return;
-              submit(customTimestamp);
-            }}
-            variant="default"
-          >
-            Set reminder
-          </Button>
         </div>
 
         <div className="space-y-2">
@@ -132,13 +121,33 @@ export function RemindMeLaterDialog({
           />
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="sm:justify-between">
           <Button
             variant="ghost"
             onClick={() => onOpenChange(false)}
             disabled={create.isPending}
           >
             Cancel
+          </Button>
+          <Button
+            className="relative"
+            disabled={create.isPending || customTimestamp === null}
+            onClick={() => {
+              if (customTimestamp === null) return;
+              submit(customTimestamp);
+            }}
+            variant="default"
+          >
+            {/* The hidden label keeps the button width stable while the
+                spinner overlays it. */}
+            <span className={create.isPending ? "invisible" : undefined}>
+              Set reminder
+            </span>
+            {create.isPending ? (
+              <span className="absolute inset-0 flex items-center justify-center">
+                <Loader2 className="animate-spin" />
+              </span>
+            ) : null}
           </Button>
         </DialogFooter>
       </DialogContent>

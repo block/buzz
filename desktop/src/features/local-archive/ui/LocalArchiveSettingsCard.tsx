@@ -77,7 +77,9 @@ function ObserverArchiveSection({
 }: ObserverSectionProps) {
   return (
     <div className="space-y-3" data-testid="local-archive-observer-section">
-      <h3 className="text-sm font-medium">Agent observer feed</h3>
+      <h2 className="text-lg font-semibold tracking-tight">
+        Agent observer feed
+      </h2>
       <SettingsOptionGroup>
         <SettingsOptionRow>
           <div className="min-w-0 flex-1">
@@ -121,7 +123,9 @@ function AgentMetricArchiveSection({
 }: AgentMetricSectionProps) {
   return (
     <div className="space-y-3" data-testid="local-archive-agent-metric-section">
-      <h3 className="text-sm font-medium">Agent turn metrics</h3>
+      <h2 className="text-lg font-semibold tracking-tight">
+        Agent turn metrics
+      </h2>
       <SettingsOptionGroup>
         <SettingsOptionRow>
           <div className="min-w-0 flex-1">
@@ -512,7 +516,7 @@ export function LocalArchiveSettingsCard() {
   return (
     <section className="min-w-0" data-testid="settings-local-archive">
       <SettingsSectionHeader
-        title="Local Archive"
+        title="Local archive"
         description="Save copies of relay messages to a local SQLite database in your Buzz nest. Events are re-verified against the relay at archive time."
       />
 
@@ -533,10 +537,10 @@ export function LocalArchiveSettingsCard() {
 
         {/* Channel subscriptions */}
         <div className="space-y-3" data-testid="local-archive-subscriptions">
-          <h3 className="text-sm font-medium">
+          <h2 className="text-lg font-semibold tracking-tight">
             Channel subscriptions
             {channelSubs.length > 0 ? ` (${channelSubs.length})` : ""}
-          </h3>
+          </h2>
           {isLoading ? (
             <SettingsOptionGroup>
               <div className="px-4 py-3 text-sm font-normal text-muted-foreground">
@@ -588,7 +592,9 @@ export function LocalArchiveSettingsCard() {
 
         {/* Add channel subscription */}
         <div className="space-y-3" data-testid="local-archive-add">
-          <h3 className="text-sm font-medium">Add channel subscription</h3>
+          <h2 className="text-lg font-semibold tracking-tight">
+            Add channel subscription
+          </h2>
           {isAddingOpen ? (
             <AddSubscriptionForm
               channels={joinedChannels}

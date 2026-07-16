@@ -6,9 +6,11 @@ use std::path::PathBuf;
 ///
 /// Concatenates, in priority order:
 ///   1. `<home>/.local/bin` — bundled CLI symlink
-///   2. `nvm_bin` — nvm's default Node.js bin dir (if the user uses nvm)
-///   3. exe parent dir — DMG sidecars under `Contents/MacOS/`
-///   4. user's login-shell `PATH` — runtimes like node/python from other managers
+///   2. Buzz-managed npm prefix bin dir — app-private ACP adapter shims
+///   3. Buzz-managed Node.js bin dir — app-private Node/npm runtime
+///   4. `nvm_bin` — nvm's default Node.js bin dir (if the user uses nvm)
+///   5. exe parent dir — DMG sidecars under `Contents/MacOS/`
+///   6. user's login-shell `PATH` — runtimes like node/python from other managers
 ///
 /// `shell_path` is the raw colon-delimited string from a login shell, so it is
 /// split into individual entries before joining. Pushing it as a single segment
@@ -23,8 +25,20 @@ pub(in crate::managed_agents) fn build_augmented_path(
     nvm_bin: Option<PathBuf>,
 ) -> Option<String> {
     let mut parts: Vec<PathBuf> = Vec::new();
+    let home_added = home.is_some();
     if let Some(home) = home {
         parts.push(home.join(".local").join("bin"));
+    }
+    // Only add managed runtime dirs when a home or executable context exists.
+    // This keeps tests/utility callers that intentionally pass no local context
+    // from manufacturing a PATH out of ambient platform dirs alone.
+    if home_added || exe_parent.is_some() {
+        if let Some(managed_npm_bin) = crate::managed_agents::buzz_managed_npm_bin_dir() {
+            parts.push(managed_npm_bin);
+        }
+        if let Some(managed_node_bin) = crate::managed_agents::buzz_managed_node_bin_dir() {
+            parts.push(managed_node_bin);
+        }
     }
     if let Some(nvm_bin) = nvm_bin {
         parts.push(nvm_bin);
@@ -62,12 +76,15 @@ mod tests {
             Some("/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin".to_string()),
             None,
         );
-        assert_eq!(
-            result.as_deref(),
-            Some(
-                "/home/agent/.local/bin:/Applications/Buzz.app/Contents/MacOS:\
-/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
-            ),
+        let result = result.expect("path");
+        assert!(result.starts_with("/home/agent/.local/bin:"), "{result}");
+        assert!(
+            result.contains(":/Applications/Buzz.app/Contents/MacOS:"),
+            "{result}"
+        );
+        assert!(
+            result.ends_with(":/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"),
+            "{result}"
         );
     }
 
@@ -92,15 +109,16 @@ mod tests {
             Some("/usr/bin:/bin".to_string()),
             Some(PathBuf::from("/home/user/.nvm/versions/node/v20.0.0/bin")),
         );
-        assert_eq!(
-            result.as_deref(),
-            Some(
-                "/home/user/.local/bin:\
-/home/user/.nvm/versions/node/v20.0.0/bin:\
-/Applications/Buzz.app/Contents/MacOS:\
-/usr/bin:/bin"
-            ),
-        );
+        let result = result.expect("path");
+        let local = result.find("/home/user/.local/bin").unwrap();
+        let nvm = result
+            .find("/home/user/.nvm/versions/node/v20.0.0/bin")
+            .unwrap();
+        let exe = result
+            .find("/Applications/Buzz.app/Contents/MacOS")
+            .unwrap();
+        assert!(local < nvm && nvm < exe, "{result}");
+        assert!(result.ends_with(":/usr/bin:/bin"), "{result}");
     }
 
     #[cfg(unix)]
@@ -112,9 +130,8 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(
-            result.as_deref(),
-            Some("/home/user/.local/bin:/usr/local/bin"),
-        );
+        let result = result.expect("path");
+        assert!(result.starts_with("/home/user/.local/bin:"), "{result}");
+        assert!(result.ends_with(":/usr/local/bin"), "{result}");
     }
 }

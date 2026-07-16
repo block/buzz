@@ -55,8 +55,8 @@ hooks:
     git config --local core.hooksPath "$HOOKS_DIR"
     lefthook install --force
 
-# ⚠️  Wipe ALL data and recreate a clean environment
-[confirm("This will DELETE all local data. Continue? (y/N)")]
+# Wipe development state and recreate a clean environment. Installed Buzz is preserved.
+[confirm("This will DELETE all development data and preserve installed Buzz. Continue? (y/N)")]
 reset:
     ./scripts/dev-reset.sh --yes
 
@@ -224,6 +224,11 @@ desktop-e2e-smoke:
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
+# Run only the e2e specs changed vs origin/main (both projects) before pushing
+desktop-e2e-pre-push: _ensure-migrations
+    git fetch origin main
+    cd {{desktop_dir}} && pnpm build && pnpm exec playwright test --only-changed=origin/main
+
 # Run all checks suitable for CI / pre-push (no infra needed)
 ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
@@ -261,17 +266,54 @@ test-unit:
 test-integration:
     ./scripts/run-tests.sh integration
 
-# Mesh-compute e2e: the CI-safe layers (relay mesh signaling invariants + Playwright UI)
+# Buzz shared compute e2e: current desktop discovery/admission logic and
+# Playwright UI coverage.
 mesh-e2e:
-    cargo test -p buzz-relay mesh_signaling
-    cd {{desktop_dir}} && pnpm test:e2e:integration -- mesh-compute.spec.ts
+    cargo test --manifest-path {{desktop_dir}}/src-tauri/Cargo.toml --features mesh-llm mesh_llm --lib
+    cd {{desktop_dir}} && pnpm test:e2e:smoke -- mesh-compute.spec.ts
 
-# Mesh-compute Layer 1: REAL serve->client->inference on this machine (not CI)
+# Reset only development state, seed deterministic local channels, and launch
+# the mesh-enabled desktop with the repository's public Tyler test identity.
+# This is for local verification only; never point this identity at staging/prod.
+[confirm("This will reset development data, preserve installed Buzz, then launch a seeded mesh dev app. Continue? (y/N)")]
+mesh-dev-fresh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/dev-reset.sh --yes
+    ./scripts/setup-desktop-test-data.sh
+    export BUZZ_PRIVATE_KEY="3dbaebadb5dfd777ff25149ee230d907a15a9e1294b40b830661e65bb42f6c03"
+    export BUZZ_REQUIRE_RELAY_MEMBERSHIP=true
+    export BUZZ_ALLOW_NIP_OA_AUTH=true
+    export RELAY_OWNER_PUBKEY="e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34"
+    export BUZZ_RELAY_PRIVATE_KEY="0000000000000000000000000000000000000000000000000000000000000001"
+    export BUZZ_RECONCILE_CHANNELS=true
+    export BUZZ_RESET_WEBVIEW_STATE=1
+    exec just mesh=1 dev
+
+# Real serve->client->inference on this machine (not CI).
 mesh-e2e-hardware:
     #!/usr/bin/env bash
     set -euo pipefail
     export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo run -p buzz-relay --example mesh_serve_client_smoke
+
+# Three isolated node processes: trusted member joins and infers; stranger is rejected.
+# Uses temp homes and explicit mesh owner keystores. Never reads the Buzz Keychain.
+mesh-e2e-admission:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
+    cargo run -p buzz-relay --example mesh_admission_smoke
+
+# Full hardware confidence suite: routing, owner admission, and real agent inference.
+mesh-e2e-confidence:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
+    cargo build --release -p buzz-agent -p buzz-dev-mcp
+    cargo run -p buzz-relay --example mesh_serve_client_smoke
+    cargo run -p buzz-relay --example mesh_admission_smoke
+    cargo run -p buzz-relay --example mesh_agent_e2e
 
 # Take desktop screenshots using the mock bridge
 desktop-screenshot *ARGS:
@@ -330,19 +372,38 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
         done
     fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
+    if [[ -n "{{mesh}}" ]]; then
+        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
+    fi
+    # Docker Desktop's forwarded MinIO port can stall under the deployment
+    # probe's 32 concurrent writers. Keep the gate enabled in local dev, using
+    # the bounded profile already used by the relay test launcher.
+    export BUZZ_GIT_PROBE_WRITERS="${BUZZ_GIT_PROBE_WRITERS:-8}"
+    export BUZZ_GIT_PROBE_ROUNDS="${BUZZ_GIT_PROBE_ROUNDS:-2}"
     ./target/debug/buzz-relay &
     RELAY_PID=$!
-    sleep 1
-    if ! kill -0 "$RELAY_PID" 2>/dev/null; then
-        echo "Error: buzz-relay exited during startup; refusing to launch desktop against a stale relay." >&2
-        wait "$RELAY_PID" || true
-        exit 1
-    fi
     cleanup() {
         [[ -n "${INSTANCE_ID:-}" ]] && ../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true
         kill "$RELAY_PID" 2>/dev/null || true
     }
     trap cleanup EXIT
+    relay_ready=false
+    for _ in $(seq 1 120); do
+        if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+            echo "Error: buzz-relay exited during startup; refusing to launch desktop." >&2
+            wait "$RELAY_PID" || true
+            exit 1
+        fi
+        if curl --silent --fail --max-time 1 "http://127.0.0.1:${health_port}/_readiness" >/dev/null; then
+            relay_ready=true
+            break
+        fi
+        sleep 0.5
+    done
+    if [[ "$relay_ready" != true ]]; then
+        echo "Error: buzz-relay did not become healthy within 60 seconds; refusing to launch desktop." >&2
+        exit 1
+    fi
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     source ../scripts/instance-env.sh
@@ -350,6 +411,28 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     echo "Starting on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     FEATURES=(); [[ -n "{{mesh}}" ]] && FEATURES=(--features mesh-llm)
     pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+
+# Run only the desktop app. No relay, database, Docker, migrations, or .env are needed.
+# The app opens normally and asks for a community before making a relay connection.
+desktop-standalone *ARGS: _ensure-sidecar-stubs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+        cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
+    done
+    cd {{desktop_dir}}
+    [[ -d node_modules ]] || pnpm install
+    unset BUZZ_PRIVATE_KEY BUZZ_SHARE_IDENTITY
+    source ../scripts/instance-env.sh
+    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
+    export BUZZ_DEV_KEYRING_SERVICE="buzz-desktop-dev.${BUZZ_INSTANCE_SLUG:-main}"
+    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
+    echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
+    pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
 staging *ARGS: bootstrap _ensure-sidecar-stubs

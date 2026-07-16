@@ -2,7 +2,6 @@ import { isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
-import { Hexagon } from "lucide-react";
 import {
   type ReactNode,
   useCallback,
@@ -17,12 +16,14 @@ import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
-import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSlideTransition";
+import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
+import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
+import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboardingFlow";
+import { MachineOnboardingFlow } from "@/features/onboarding/ui/MachineOnboardingFlow";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
 import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
 import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequiredScreen";
 import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
-import type { Community } from "@/features/communities/types";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -32,14 +33,11 @@ import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChang
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { listenForDeepLinks } from "@/shared/deep-link";
-import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
-import { StepProgress } from "@/shared/ui/step-progress";
 
 const LOADING_TEXT = "Setting up your community...";
 
@@ -178,78 +176,6 @@ function CommunitySwitchGate() {
   );
 }
 
-function OnboardingLoadingGate() {
-  const systemColorScheme = useSystemColorScheme();
-
-  return (
-    <div
-      className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground"
-      data-system-color-scheme={systemColorScheme}
-    >
-      <StartupWindowDragRegion />
-      <div className="relative flex w-full max-w-[500px] flex-col items-center text-center">
-        <StepProgress
-          activeSegmentClassName="bg-primary"
-          className="fixed bottom-12 left-1/2 z-40 -translate-x-1/2"
-          completeSegmentClassName="bg-primary/35"
-          currentStep={2}
-          inactiveSegmentClassName="bg-muted-foreground/25"
-        />
-
-        <OnboardingSlideTransition
-          className="flex w-full flex-col items-center text-center"
-          direction="forward"
-          effect="none"
-          transitionKey="community-connecting"
-        >
-          <div className="flex h-14 w-14 items-center justify-center rounded-lg border border-border bg-background text-foreground shadow-xs">
-            <Hexagon className="h-7 w-7" aria-hidden="true" />
-          </div>
-
-          <h1 className="mt-6 text-3xl font-semibold tracking-tight">
-            Welcome to Buzz
-          </h1>
-          <p className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground">
-            Choose your first community to get started.
-          </p>
-
-          <div className="mt-8 flex w-full max-w-[500px] flex-col gap-3">
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              tabIndex={-1}
-              type="button"
-            >
-              Continue with default community
-            </Button>
-
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              tabIndex={-1}
-              type="button"
-              variant="secondary"
-            >
-              Join a community
-            </Button>
-
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              data-testid="welcome-continue-nostr"
-              tabIndex={-1}
-              type="button"
-              variant="ghost"
-            >
-              I already have a key
-            </Button>
-          </div>
-        </OnboardingSlideTransition>
-      </div>
-    </div>
-  );
-}
-
 function CommunityQueryProvider({ children }: { children: ReactNode }) {
   const [queryClient] = useState(createBuzzQueryClient);
 
@@ -276,27 +202,13 @@ function CommunityQueryProvider({ children }: { children: ReactNode }) {
 }
 
 function AppReady({
-  isCompletingFirstRunCommunity,
   isSharedIdentity,
   isCommunitySwitch,
-  onFirstRunCommunitySettled,
 }: {
-  isCompletingFirstRunCommunity: boolean;
   isSharedIdentity: boolean;
   isCommunitySwitch: boolean;
-  onFirstRunCommunitySettled: () => void;
 }) {
   const onboarding = useAppOnboardingState(isSharedIdentity);
-
-  useEffect(() => {
-    if (isCompletingFirstRunCommunity && onboarding.stage !== "blocking") {
-      onFirstRunCommunitySettled();
-    }
-  }, [
-    isCompletingFirstRunCommunity,
-    onboarding.stage,
-    onFirstRunCommunitySettled,
-  ]);
 
   if (onboarding.stage === "reset-failed") {
     return <ResetFailedScreen />;
@@ -322,10 +234,6 @@ function AppReady({
   }
 
   if (onboarding.stage === "blocking") {
-    if (isCompletingFirstRunCommunity) {
-      return <OnboardingLoadingGate />;
-    }
-
     return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
   }
 
@@ -336,22 +244,7 @@ function AppReady({
   );
 }
 
-export function App() {
-  // Mounted at the root so Cmd/Ctrl+R reloads in every app state,
-  // including the loading and first-run setup screens below.
-  useReloadShortcut();
-  useInitialRenderReady();
-
-  const [sharedIdentity, setSharedIdentity] = useState<boolean | null>(null);
-  useEffect(() => {
-    isSharedIdentityCmd()
-      .then(setSharedIdentity)
-      .catch((err) => {
-        console.warn("is_shared_identity command failed:", err);
-        setSharedIdentity(false);
-      });
-  }, []);
-
+function CommunityApp({ sharedIdentity }: { sharedIdentity: boolean }) {
   const {
     activeCommunity,
     reinitKey,
@@ -359,20 +252,17 @@ export function App() {
     switchCommunity,
     reconnectCommunity,
   } = useCommunities();
-  const [isCompletingFirstRunCommunity, setIsCompletingFirstRunCommunity] =
-    useState(false);
+  const communityOnboarding = useCommunityOnboarding();
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
 
   useEffect(() => {
     const unlisten = listenForDeepLinks({
-      addCommunity,
-      switchCommunity,
-      reconnectCommunity,
+      startCommunityOnboarding: communityOnboarding.start,
     });
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, [addCommunity, switchCommunity, reconnectCommunity]);
+  }, [communityOnboarding.start]);
   // Surface nest-related backend events (repos-dir errors, legacy migration)
   // as toasts. Mounted before useCommunityInit so the listeners are registered
   // ahead of the first apply_workspace call.
@@ -395,39 +285,50 @@ export function App() {
   const community = useCommunityInit(
     activeCommunity,
     communityKey,
-    sharedIdentity ?? false,
+    sharedIdentity,
   );
 
-  const handleSetupComplete = useCallback(
-    (community: Community) => {
-      setIsCompletingFirstRunCommunity(true);
-      const communityId = addCommunity(community);
-      switchCommunity(communityId);
-    },
-    [addCommunity, switchCommunity],
-  );
-
-  const handleFirstRunCommunitySettled = useCallback(() => {
-    setIsCompletingFirstRunCommunity(false);
-  }, []);
+  const handleCommunityOnboardingConnect = useCallback(() => {
+    const transaction = communityOnboarding.transaction;
+    if (transaction?.stage !== "connecting") return;
+    if (transaction.communityId) {
+      switchCommunity(transaction.communityId);
+      return;
+    }
+    const id = addCommunity({
+      id: crypto.randomUUID(),
+      name: transaction.communityName,
+      relayUrl: transaction.relayUrl,
+      token: transaction.token,
+      reposDir: transaction.reposDir,
+      addedAt: new Date().toISOString(),
+    });
+    communityOnboarding.update({ communityId: id, error: undefined });
+    switchCommunity(id);
+    reconnectCommunity();
+  }, [addCommunity, communityOnboarding, reconnectCommunity, switchCommunity]);
 
   const bootSplashPhase = useBootSplashHold();
 
-  // Wait for the shared-identity IPC call to resolve before rendering
-  // anything that depends on it. Without this gate, children briefly see
-  // isSharedIdentity=false and may flash WelcomeSetup or the onboarding flow.
-  if (sharedIdentity === null) {
-    return <AppLoadingGate />;
+  const transaction = communityOnboarding.transaction;
+  const targetIsReady =
+    transaction?.communityId === activeCommunity?.id &&
+    community.isReady &&
+    community.appliedKey === communityKey;
+  useEffect(() => {
+    if (transaction?.stage === "connecting" && targetIsReady) {
+      communityOnboarding.update({ stage: "profile", error: undefined });
+    }
+  }, [communityOnboarding.update, targetIsReady, transaction?.stage]);
+  if (transaction) {
+    return (
+      <CommunityOnboardingFlow onConnect={handleCommunityOnboardingConnect} />
+    );
   }
 
   // Show welcome setup for first-run users with no communities
   if (community.needsSetup) {
-    return (
-      <WelcomeSetup
-        defaultRelayUrl={community.defaultRelayUrl}
-        onComplete={handleSetupComplete}
-      />
-    );
+    return <WelcomeSetup defaultRelayUrl={community.defaultRelayUrl} />;
   }
 
   // Surface apply failures so the user can retry or change community.
@@ -453,29 +354,21 @@ export function App() {
   // a one-render race where React sees the new active community while the Tauri
   // backend is still configured for the previous one.
   if (!community.isReady || community.appliedKey !== communityKey) {
-    if (isCompletingFirstRunCommunity) {
-      return <OnboardingLoadingGate />;
-    }
-
     return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
   }
 
   // The app mounts (and starts loading data) beneath the splash overlay; the
   // overlay just keeps the bee on screen long enough to be seen, then fades.
-  // Community switches and first-run completion keep their quiet gates.
+  // Community switches keep their quiet gate.
   const showBootSplashOverlay =
-    bootSplashPhase !== "done" &&
-    !isCommunitySwitch &&
-    !isCompletingFirstRunCommunity;
+    bootSplashPhase !== "done" && !isCommunitySwitch;
 
   return (
     <CommunityQueryProvider key={communityKey}>
       <AppReady
-        isCompletingFirstRunCommunity={isCompletingFirstRunCommunity}
         isCommunitySwitch={isCommunitySwitch}
         key={communityKey}
         isSharedIdentity={sharedIdentity}
-        onFirstRunCommunitySettled={handleFirstRunCommunitySettled}
       />
       {showBootSplashOverlay ? (
         <div
@@ -491,5 +384,53 @@ export function App() {
         </div>
       ) : null}
     </CommunityQueryProvider>
+  );
+}
+
+function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
+  const { activeCommunity } = useCommunities();
+  const machine = useMachineOnboardingState({
+    hasConfiguredCommunity: activeCommunity !== null,
+    isSharedIdentity: sharedIdentity,
+  });
+
+  if (machine.stage === "reset-failed") return <ResetFailedScreen />;
+  if (machine.stage === "keyring-locked") return <KeyringLockedScreen />;
+  if (machine.stage === "relaunch-required") return <RelaunchRequiredScreen />;
+  if (machine.stage === "blocking") return <AppLoadingGate />;
+  if (machine.stage === "ready") {
+    return <CommunityApp sharedIdentity={sharedIdentity} />;
+  }
+
+  return (
+    <MachineOnboardingFlow
+      complete={machine.complete}
+      identityLost={machine.identityLost}
+      queryClient={machine.queryClient}
+    />
+  );
+}
+
+export function App() {
+  useReloadShortcut();
+  useInitialRenderReady();
+  const [sharedIdentity, setSharedIdentity] = useState<boolean | null>(null);
+  const [queryClient] = useState(createBuzzQueryClient);
+
+  useEffect(() => {
+    isSharedIdentityCmd()
+      .then(setSharedIdentity)
+      .catch((err) => {
+        console.warn("is_shared_identity command failed:", err);
+        setSharedIdentity(false);
+      });
+  }, []);
+
+  if (sharedIdentity === null) return <AppLoadingGate />;
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      <MachineBootstrap sharedIdentity={sharedIdentity} />
+    </QueryClientProvider>
   );
 }

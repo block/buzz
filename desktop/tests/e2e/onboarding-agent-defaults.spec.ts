@@ -1,15 +1,7 @@
 import { expect, test } from "@playwright/test";
-import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
-import {
-  seedActiveIdentity,
-  passThroughBackupStep,
-} from "../helpers/onboarding";
-
-const FIRST_RUN_ALICE = {
-  ...TEST_IDENTITIES.alice,
-  username: "",
-};
+import { passThroughBackupStep } from "../helpers/onboarding";
 
 const SHOTS = "test-results/screenshots-onboarding";
 
@@ -17,25 +9,18 @@ const SHOTS = "test-results/screenshots-onboarding";
 async function navigateToSetupPage(
   page: Parameters<typeof installMockBridge>[0],
 ) {
-  await page.getByTestId("onboarding-display-name").fill("Alice");
-  await page.getByTestId("onboarding-next").click();
+  await page.getByRole("button", { name: "Get started" }).click();
   await passThroughBackupStep(page);
-  await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
-  await page
-    .getByTestId("onboarding-avatar-url")
-    .fill("https://example.com/alice.png");
-  await page.getByTestId("onboarding-next").click();
-  await expect(page.getByTestId("onboarding-page-theme")).toBeVisible();
-  await page.getByTestId("onboarding-theme-option-github-light").click();
-  await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 }
 
 test("setup page shows Agent defaults section with readiness badge", async ({
   page,
 }) => {
-  await seedActiveIdentity(page, FIRST_RUN_ALICE);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
   await page.goto("/");
 
   await navigateToSetupPage(page);
@@ -54,12 +39,11 @@ test("setup page shows Agent defaults section with readiness badge", async ({
 test("setup page shows Not configured badge when no CLI runtime or buzz-agent config", async ({
   page,
 }) => {
-  await seedActiveIdentity(page, FIRST_RUN_ALICE);
   // Seed empty ACP runtimes so no CLI harness is available.
   await installMockBridge(
     page,
     { acpRuntimesCatalog: [] },
-    { skipOnboardingSeed: true },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
 
@@ -85,8 +69,10 @@ test("setup page shows Not configured badge when no CLI runtime or buzz-agent co
 test("setup page Re-check button triggers runtimes refetch", async ({
   page,
 }) => {
-  await seedActiveIdentity(page, FIRST_RUN_ALICE);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
   await page.goto("/");
 
   await navigateToSetupPage(page);
@@ -103,11 +89,10 @@ test("setup page Re-check button triggers runtimes refetch", async ({
 test("Finish button is always enabled on setup page regardless of readiness", async ({
   page,
 }) => {
-  await seedActiveIdentity(page, FIRST_RUN_ALICE);
   await installMockBridge(
     page,
     { acpRuntimesCatalog: [] },
-    { skipOnboardingSeed: true },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
 
@@ -125,13 +110,12 @@ test("Finish button is always enabled on setup page regardless of readiness", as
 test("rapid consecutive provider changes both survive — later change wins", async ({
   page,
 }) => {
-  await seedActiveIdentity(page, FIRST_RUN_ALICE);
   // Hold each set_global_agent_config request for 300 ms so the test can
   // make a second edit before the first response arrives.
   await installMockBridge(
     page,
     { acpRuntimesCatalog: [], setGlobalAgentConfigDelayMs: 300 },
-    { skipOnboardingSeed: true },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
 

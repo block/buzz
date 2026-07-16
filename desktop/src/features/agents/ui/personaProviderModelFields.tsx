@@ -17,6 +17,7 @@ import {
   getModelSelectValue,
   getPersonaProviderOptions,
   hasPersonaModelOption,
+  providerDisplayLabel,
   type PersonaModelOption,
 } from "./personaDialogPickers";
 import { MODEL_DISCOVERY_LOADING_VALUE } from "./usePersonaModelDiscovery";
@@ -47,6 +48,8 @@ export function AgentModelField({
   disabled,
   discoveredModelOptions,
   globalModel,
+  allowDefaultModel = true,
+  defaultModelLabel,
   id = "agent-model",
   isCustomModelEditing,
   isRequired,
@@ -55,11 +58,16 @@ export function AgentModelField({
   modelDiscoveryStatus,
   onIsCustomModelEditingChange,
   onModelChange,
+  provider,
 }: {
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
-  /** Global model default; when set, the zero-value option reads `Inherit global default (<model>)`. */
+  /** Known lower-precedence model used when this field is left empty. */
   globalModel?: string;
+  /** Hide the empty/default option when no valid lower-precedence model exists. */
+  allowDefaultModel?: boolean;
+  /** Source-aware label for the empty/default option. */
+  defaultModelLabel?: string;
   /** DOM id for the model select. Defaults to `"agent-model"`. Override in
    *  contexts where multiple instances coexist on the same page (e.g. the
    *  global-config settings card) to avoid duplicate DOM ids. */
@@ -71,30 +79,46 @@ export function AgentModelField({
   modelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
   onIsCustomModelEditingChange: (value: boolean) => void;
   onModelChange: (value: string) => void;
+  provider?: string;
 }) {
   const trimmedModel = model.trim();
+  const isSharedCompute = provider?.trim() === "relay-mesh";
 
-  // Mirror Persona: static options serve as the fallback when discovery hasn't
-  // returned yet. Discovered options are ADDITIVE — we never disable the picker
-  // or hide the custom input just because discovery returned null.
-  const staticModelOptions: readonly PersonaModelOption[] = [
-    { id: "", label: getDefaultLlmModelLabel(globalModel) },
-  ];
-  const effectiveModelOptions = discoveredModelOptions ?? staticModelOptions;
+  // Buzz shared compute always has an automatic routing choice, even when
+  // discovery is empty or returns only explicit live model ids.
+  const defaultOption: PersonaModelOption = {
+    id: "",
+    label:
+      defaultModelLabel ??
+      (isSharedCompute
+        ? "Default (auto)"
+        : getDefaultLlmModelLabel(globalModel)),
+  };
+  const discoveredWithoutDefault = (discoveredModelOptions ?? []).filter(
+    (option) => option.id.trim() !== "",
+  );
+  const effectiveModelOptions = isSharedCompute
+    ? [defaultOption, ...discoveredWithoutDefault]
+    : [
+        ...(allowDefaultModel ? [defaultOption] : []),
+        ...discoveredWithoutDefault,
+      ];
 
   // isModelCustom: true when the current model isn't in any known option set.
   // We check discovered options (when available) or runtime-static options so
   // a previously-saved custom model stays in custom mode even before discovery.
-  const isModelCustom = !hasPersonaModelOption(
-    effectiveModelOptions,
-    trimmedModel,
-  );
+  const isModelCustom =
+    !isSharedCompute &&
+    !hasPersonaModelOption(effectiveModelOptions, trimmedModel);
 
-  const modelSelectValue = getModelSelectValue({
-    isCustomModelEditing,
-    isModelCustom,
-    model,
-  });
+  const modelSelectValue =
+    isSharedCompute && (trimmedModel === "" || trimmedModel === "auto")
+      ? AUTO_MODEL_DROPDOWN_VALUE
+      : getModelSelectValue({
+          isCustomModelEditing,
+          isModelCustom,
+          model,
+        });
 
   // The select is only disabled for mutation pending — never for missing discovery.
   // Default/custom options remain usable regardless of discovery state.
@@ -102,7 +126,8 @@ export function AgentModelField({
 
   // Show the custom model input whenever custom mode is active or the current
   // model is already custom — not gated on discovery having returned.
-  const showCustomModelInput = isCustomModelEditing || isModelCustom;
+  const showCustomModelInput =
+    !isSharedCompute && (isCustomModelEditing || isModelCustom);
 
   return (
     <div className="space-y-1.5">
@@ -118,7 +143,7 @@ export function AgentModelField({
           const nextValue = event.target.value;
           if (nextValue === AUTO_MODEL_DROPDOWN_VALUE) {
             onIsCustomModelEditingChange(false);
-            onModelChange("");
+            onModelChange(isSharedCompute ? "auto" : "");
             return;
           }
           if (nextValue === CUSTOM_MODEL_DROPDOWN_VALUE) {
@@ -143,7 +168,9 @@ export function AgentModelField({
             Loading models...
           </option>
         ) : null}
-        <option value={CUSTOM_MODEL_DROPDOWN_VALUE}>Custom model...</option>
+        {!isSharedCompute ? (
+          <option value={CUSTOM_MODEL_DROPDOWN_VALUE}>Custom model...</option>
+        ) : null}
       </select>
       {showCustomModelInput ? (
         <Input
@@ -213,7 +240,7 @@ export function AgentProviderField({
             key={option.id}
             value={option.id || AUTO_PROVIDER_DROPDOWN_VALUE}
           >
-            {option.label}
+            {option.id ? providerDisplayLabel(option.label) : option.label}
           </option>
         ))}
         <option value={CUSTOM_PROVIDER_DROPDOWN_VALUE}>

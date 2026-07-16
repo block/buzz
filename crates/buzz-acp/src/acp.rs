@@ -92,6 +92,9 @@ pub enum AcpError {
     #[error("Hard turn timeout exceeded")]
     HardTimeout,
 
+    #[error("Agent did not stop within {0:?} after cancellation")]
+    CancelDrainTimeout(std::time::Duration),
+
     #[error("Request timeout — agent did not respond within {0:?}")]
     Timeout(std::time::Duration),
 
@@ -815,6 +818,12 @@ impl AcpClient {
     /// cancellation look broken. This variant gives the agent a short chance to
     /// acknowledge cancellation, then returns a timeout so the caller can respawn
     /// the agent process and actually stop the work.
+    ///
+    /// The `grace` window is a cleanup deadline, not the turn's real max-turn
+    /// wall clock — a bounded drain that expires maps to
+    /// [`AcpError::CancelDrainTimeout`], never [`AcpError::HardTimeout`], so
+    /// callers can distinguish "agent didn't stop in time" from a genuine
+    /// configured hard-cap breach.
     pub async fn cancel_with_cleanup_grace(
         &mut self,
         session_id: &str,
@@ -822,8 +831,13 @@ impl AcpClient {
     ) -> Result<StopReason, AcpError> {
         let _ = self.current_hard_deadline.take();
         let hard_deadline = tokio::time::Instant::now() + grace;
-        self.cancel_with_cleanup_until(session_id, hard_deadline)
+        match self
+            .cancel_with_cleanup_until(session_id, hard_deadline)
             .await
+        {
+            Err(AcpError::HardTimeout) => Err(AcpError::CancelDrainTimeout(grace)),
+            other => other,
+        }
     }
 
     async fn cancel_with_cleanup_until(
@@ -2541,6 +2555,27 @@ mod tests {
         assert!(
             matches!(result, Err(AcpError::HardTimeout)),
             "expected HardTimeout, got {result:?}"
+        );
+    }
+
+    /// `cancel_with_cleanup_grace`'s bounded drain deadline must map to
+    /// [`AcpError::CancelDrainTimeout`], never [`AcpError::HardTimeout`] —
+    /// the two share an underlying deadline mechanism but must not share
+    /// classification, since callers dead-letter a real `HardTimeout` and
+    /// must not dead-letter a drain that simply ran past its grace window.
+    #[tokio::test]
+    async fn cancel_with_cleanup_grace_maps_expiry_to_cancel_drain_timeout() {
+        // Agent ignores `session/cancel` on stdin and keeps producing noise
+        // forever — never drains within the grace window.
+        let mut client = spawn_script("while true; do echo 'noise'; sleep 0.01; done").await;
+        client.last_prompt_id = Some(999);
+        let grace = std::time::Duration::from_millis(200);
+        let result = client
+            .cancel_with_cleanup_grace("test-session", grace)
+            .await;
+        assert!(
+            matches!(result, Err(AcpError::CancelDrainTimeout(g)) if g == grace),
+            "expected CancelDrainTimeout({grace:?}), got {result:?}"
         );
     }
 

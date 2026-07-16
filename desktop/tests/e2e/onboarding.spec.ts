@@ -1,12 +1,11 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { nsecEncode } from "nostr-tools/nip19";
+import { npubEncode, nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import {
   E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
   seedActiveIdentity,
-  passThroughBackupStep,
 } from "../helpers/onboarding";
 
 type RelayConnectionState =
@@ -287,7 +286,7 @@ async function expectWelcomeView(page: Page) {
   );
   await expectIntroActionIconStackedAboveTitle(
     page.getByTestId("welcome-intro-action-create-agent"),
-    "Create a custom agent",
+    "Create an agent",
   );
   await expect(page.getByTestId("message-composer")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toBeVisible();
@@ -520,21 +519,13 @@ async function expectIncompleteOnboarding(page: Page) {
   await expect(page.getByTestId("onboarding-display-name")).toHaveValue("");
 }
 
-async function continueToSetupPage(page: Page) {
+async function completeProfileOnboarding(page: Page) {
   await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page
     .getByTestId("onboarding-avatar-url")
     .fill("https://example.com/onboarding-avatar.png");
   await page.getByTestId("onboarding-next").click();
-  await expect(page.getByTestId("onboarding-page-theme")).toBeVisible();
-  await page.getByTestId("onboarding-theme-option-github-light").click();
-  await expect
-    .poll(() => page.evaluate(() => window.localStorage.getItem("buzz-theme")))
-    .toBe("github-light");
-  await page.getByTestId("onboarding-next").click();
-  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 }
 
 test("completed users skip the loading gate while profile is still settling", async ({
@@ -550,60 +541,16 @@ test("completed users skip the loading gate while profile is still settling", as
   await expectHomeView(page);
 });
 
-test("first-run default community handoff gives immediate stepper feedback", async ({
+test("first-community choices expose npub and invite input", async ({
   page,
 }) => {
-  // Use a blank-username identity so the profile has no display name and
-  // the auto-skip logic does not fire — we need to stay in onboarding to
-  // verify the stepper UX.
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(
-    page,
-    {
-      profileReadDelayMs: 2_000,
-    },
-    {
-      relayWsUrl: "wss://default.example.com",
-      skipOnboardingSeed: true,
-      skipCommunitySeed: true,
-    },
-  );
-  await page.goto("/");
-
-  await expect(page.getByText("Welcome to Buzz")).toBeVisible();
-  await page
-    .getByRole("button", { name: "Continue with default community" })
-    .click();
-
-  await page.waitForTimeout(80);
-  await expect(page.getByRole("button", { name: "Connecting..." })).toHaveCount(
-    0,
-  );
-  await expect(
-    page.getByRole("button", { name: "Continue with default community" }),
-  ).toBeVisible();
-  await expect(page.getByRole("progressbar")).toHaveAttribute(
-    "aria-valuenow",
-    "2",
-  );
-  await page.waitForTimeout(240);
-  await expect(page.getByTestId("welcome-continue-nostr")).toBeVisible();
-  await expect(page.getByRole("progressbar")).toHaveAttribute(
-    "aria-valuenow",
-    "2",
-  );
-
-  const nameInput = page.getByTestId("onboarding-display-name");
-  await expect(nameInput).toHaveValue("");
-  await expect(page.getByRole("progressbar")).toHaveAttribute(
-    "aria-valuenow",
-    "2",
-  );
-  await expect(nameInput).toHaveAttribute("autocomplete", "off");
-  await expect(page.getByTestId("onboarding-back")).toBeVisible();
-});
-
-test("welcome can continue using an existing Nostr key", async ({ page }) => {
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
   await installMockBridge(page, undefined, {
     relayWsUrl: "wss://default.example.com",
     skipOnboardingSeed: true,
@@ -611,53 +558,44 @@ test("welcome can continue using an existing Nostr key", async ({ page }) => {
   });
   await page.goto("/");
 
-  await page.getByTestId("welcome-continue-nostr").click();
-  await expect(
-    page.getByRole("heading", { name: "Use your existing key" }),
-  ).toBeVisible();
-
-  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
-  await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
-  await expect(page.getByTestId("nostr-import-npub-preview")).toBeVisible();
-  await page.getByTestId("nostr-import-submit").click();
-
-  // Alice already has a relay profile with a display name, so onboarding
-  // auto-completes after the identity swap.
-  await expect
-    .poll(() =>
-      page.evaluate(() => {
-        const rawCommunities = window.localStorage.getItem("buzz-communities");
-        const communities = rawCommunities
-          ? (JSON.parse(rawCommunities) as Array<{ pubkey?: string }>)
-          : [];
-        return communities[0]?.pubkey ?? null;
-      }),
-    )
-    .toBe(TEST_IDENTITIES.alice.pubkey);
-  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expectHomeView(page);
-});
-
-test("welcome presents custom community setup as joining a community", async ({
-  page,
-}) => {
-  await installMockBridge(page, undefined, {
-    skipOnboardingSeed: true,
-    skipCommunitySeed: true,
-  });
-  await page.goto("/");
-
-  await expect(
-    page.getByRole("button", { name: "Continue with default community" }),
-  ).toHaveCount(0);
-  await page.getByRole("button", { name: "Join a community" }).click();
-
-  await expect(
-    page.getByRole("heading", { name: "Join a community" }),
-  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Join a community" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "I have an invite link" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Create a community" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Create a community" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const log = (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: Array<{
+              command: string;
+              payload: unknown;
+            }>;
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__;
+        return log?.find((entry) => entry.command === "plugin:opener|open_url")
+          ?.payload;
+      }),
+    )
+    .toMatchObject({ url: "https://buzz.xyz" });
+
+  await page.getByRole("button", { name: "Join a community" }).click();
+  await expect(page.getByTestId("welcome-join-npub")).toHaveText(
+    npubEncode(BLANK_TYLER_IDENTITY.pubkey),
+  );
+  await page.getByRole("button", { name: "Back" }).click();
+
+  await page.getByRole("button", { name: "I have an invite link" }).click();
+  await expect(
+    page.getByRole("heading", { name: "I have an invite link" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("invite-redeem-input")).toBeVisible();
 });
 
 test("identity fallback text does not count as a real onboarding name", async ({
@@ -762,7 +700,6 @@ test("avatar step uses an add-image placeholder before an avatar is chosen", asy
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
 
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   const preview = page.getByTestId("onboarding-avatar-preview");
@@ -780,7 +717,6 @@ test("avatar step reveals preset backgrounds after the first emoji pick", async 
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
 
   await page.getByRole("tab", { name: "Emoji" }).click();
@@ -798,7 +734,7 @@ test("avatar step reveals preset backgrounds after the first emoji pick", async 
   );
 });
 
-test("avatar step accepts an avatar URL before theme selection", async ({
+test("avatar step accepts an avatar URL before completing onboarding", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -807,7 +743,6 @@ test("avatar step accepts an avatar URL before theme selection", async ({
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page
     .getByTestId("onboarding-avatar-url")
@@ -820,14 +755,8 @@ test("avatar step accepts an avatar URL before theme selection", async ({
   expect(box?.height).toBeCloseTo(192, 0);
 
   await page.getByTestId("onboarding-next").click();
-  await expect(page.getByTestId("onboarding-page-theme")).toBeVisible();
-  await page.getByTestId("onboarding-theme-option-github-light").click();
-  await expect
-    .poll(() => page.evaluate(() => window.localStorage.getItem("buzz-theme")))
-    .toBe("github-light");
-  await page.getByTestId("onboarding-next").click();
-  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
-  await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
+  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
+  await expectWelcomeView(page);
 });
 
 test("failed avatar saves can continue without saving the avatar", async ({
@@ -839,7 +768,6 @@ test("failed avatar saves can continue without saving the avatar", async ({
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page
     .getByTestId("onboarding-avatar-url")
@@ -862,67 +790,8 @@ test("failed avatar saves can continue without saving the avatar", async ({
   ).toBeVisible();
   await page.getByTestId("onboarding-next-without-saving").click();
 
-  await expect(page.getByTestId("onboarding-page-theme")).toBeVisible();
-});
-
-test("theme step offers skip instead of going back", async ({ page }) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
-  await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
-  await page
-    .getByTestId("onboarding-avatar-url")
-    .fill("https://example.com/morty.png");
-  await expect
-    .poll(() => page.evaluate(() => window.localStorage.getItem("buzz-theme")))
-    .toBe("github-light-default");
-  await expect
-    .poll(() =>
-      page.evaluate(() => window.localStorage.getItem("buzz-accent-color")),
-    )
-    .toBe("neutral");
-  await expect
-    .poll(() =>
-      page.evaluate(() => document.documentElement.classList.contains("light")),
-    )
-    .toBe(true);
-  await page.getByTestId("onboarding-next").click();
-
-  await expect(page.getByTestId("onboarding-page-theme")).toBeVisible();
-  await expect
-    .poll(() => page.evaluate(() => window.localStorage.getItem("buzz-theme")))
-    .toBe("github-light-default");
-  await expect
-    .poll(() =>
-      page.evaluate(() => window.localStorage.getItem("buzz-accent-color")),
-    )
-    .toBe("neutral");
-  await expect(
-    page.getByTestId("onboarding-theme-option-github-light-default"),
-  ).toHaveAttribute("aria-pressed", "true");
-  await expect(
-    page.getByTestId("onboarding-accent-color-neutral"),
-  ).toHaveAttribute("aria-pressed", "true");
-  await page.getByTestId("onboarding-accent-color-blue").click();
-  await expect
-    .poll(() =>
-      page.evaluate(() => window.localStorage.getItem("buzz-accent-color")),
-    )
-    .toBe("#3b82f6");
-  await page.getByTestId("onboarding-accent-color-neutral").click();
-  await expect
-    .poll(() =>
-      page.evaluate(() => window.localStorage.getItem("buzz-accent-color")),
-    )
-    .toBe("neutral");
-  await expect(page.getByTestId("onboarding-back")).toHaveCount(0);
-  await page.getByTestId("onboarding-skip").click();
-
-  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
+  await expectWelcomeView(page);
 });
 
 test("avatar upload rejects a file whose server-detected MIME is not an image", async ({
@@ -954,7 +823,6 @@ test("avatar upload rejects a file whose server-detected MIME is not an image", 
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page.getByTestId("onboarding-avatar-input").setInputFiles({
     name: "looks-like.png",
@@ -992,7 +860,6 @@ test("avatar upload accepts a file whose server-detected MIME is an image", asyn
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
-  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page.getByTestId("onboarding-avatar-input").setInputFiles({
     name: "avatar.png",
@@ -1007,7 +874,7 @@ test("avatar upload accepts a file whose server-detected MIME is an image", asyn
   await expect(page.getByTestId("onboarding-avatar-error")).toHaveCount(0);
 });
 
-test("first-run onboarding keeps the shell hidden through setup and lands on Welcome after finish", async ({
+test("first-run onboarding keeps the shell hidden and lands on Welcome after profile setup", async ({
   page,
 }) => {
   await seedActiveIdentity(page, FIRST_RUN_ALICE);
@@ -1020,12 +887,7 @@ test("first-run onboarding keeps the shell hidden through setup and lands on Wel
   await expectNoHomeSeenEntries(page);
 
   await page.getByTestId("onboarding-display-name").fill("Alice");
-  await continueToSetupPage(page);
-  await expectShellHidden(page);
-  await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
-  await expectNoHomeSeenEntries(page);
-
-  await page.getByTestId("onboarding-finish").click();
+  await completeProfileOnboarding(page);
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectWelcomeView(page);
   await expectPrivateWelcomeChannel(page);
@@ -1122,8 +984,7 @@ test("failed Welcome and general retries recreate actionable toasts", async ({
   await page.goto("/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await continueToSetupPage(page);
-  await page.getByTestId("onboarding-finish").click();
+  await completeProfileOnboarding(page);
 
   await expectRetryFailureRecreatesActionableToast(page, {
     command: "create_channel",
@@ -1154,8 +1015,7 @@ test("successful Welcome and general retries clear their actionable toasts", asy
   await page.goto("/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await continueToSetupPage(page);
-  await page.getByTestId("onboarding-finish").click();
+  await completeProfileOnboarding(page);
 
   await expectRetrySuccessDismissesToast(page, {
     command: "create_channel",
@@ -1181,8 +1041,7 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   await page.goto("/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await continueToSetupPage(page);
-  await page.getByTestId("onboarding-finish").click();
+  await completeProfileOnboarding(page);
 
   const loadingGate = page.getByTestId("app-loading-gate");
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
@@ -1323,35 +1182,13 @@ test("finishing onboarding creates and focuses a private Welcome channel for a n
   await page.goto("/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await continueToSetupPage(page);
-  await page.getByTestId("onboarding-finish").click();
+  await completeProfileOnboarding(page);
 
   await expectWelcomeView(page);
   await expect(page.getByTestId("channel-general")).toBeVisible();
   await expectPrivateWelcomeChannel(page);
   await expectWelcomeGuideIntro(page);
   await expectWelcomeComposerBannerCompletesAfterPersonaMention(page);
-});
-
-test("page 2 falls back to Doctor guidance when ACP tools are not installed", async ({
-  page,
-}) => {
-  await seedActiveIdentity(page, FIRST_RUN_ALICE);
-  await installMockBridge(
-    page,
-    {
-      acpRuntimesCatalog: [],
-    },
-    { skipOnboardingSeed: true },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Alice");
-  await continueToSetupPage(page);
-  await expect(page.getByTestId("onboarding-acp-empty")).toBeVisible();
-  await expect(
-    page.getByText("Settings > Doctor", { exact: false }),
-  ).toBeVisible();
 });
 
 test("initial profile read failures still hold incomplete users in onboarding", async ({
@@ -1844,15 +1681,19 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
     .fill(`${relayBHttpUrl}/invite/test-invite-code`);
   await page.getByTestId("invite-redeem-submit").click();
 
-  // After successful claim, the community should switch to relay B's URL.
+  // After successful claim, relay B is added and becomes active; relay A remains
+  // in the community list for future switching.
   await expect
     .poll(() =>
       page.evaluate(() => {
         const raw = window.localStorage.getItem("buzz-communities");
+        const activeCommunityId = window.localStorage.getItem(
+          "buzz-active-community-id",
+        );
         const communities = raw
-          ? (JSON.parse(raw) as Array<{ relayUrl?: string }>)
+          ? (JSON.parse(raw) as Array<{ id?: string; relayUrl?: string }>)
           : [];
-        return communities[0]?.relayUrl ?? null;
+        return communities.find(({ id }) => id === activeCommunityId)?.relayUrl;
       }),
     )
     .toBe(relayBUrl);

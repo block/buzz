@@ -160,6 +160,10 @@ pub struct Config {
     /// Maximum media upload starts accepted from one pubkey per minute.
     pub media_uploads_per_minute: u32,
 
+    /// Require Blossom kind:24242 `t=get` auth plus relay membership before
+    /// serving media GET/HEAD. Default off for staged client rollout.
+    pub require_media_get_auth: bool,
+
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
     /// of the client-provided one. Useful for testing ephemeral expiry quickly.
@@ -198,9 +202,12 @@ pub struct Config {
     pub push_gateway_timeout: Duration,
 
     /// Optional path to the web UI `dist/` directory.
-    /// When set, the relay serves the SPA from this directory for browser requests.
+    /// When set, the relay serves the invite landing page and its static assets.
     /// When unset, no static file serving happens (relay behaves as before).
     pub web_dir: Option<std::path::PathBuf>,
+    /// Whether the configured web bundle serves Git browser routes in addition
+    /// to the public invite landing page. Defaults to false.
+    pub serve_git_web_gui: bool,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -532,6 +539,15 @@ impl Config {
             .filter(|&v| v > 0)
             .unwrap_or(30);
 
+        let require_media_get_auth = std::env::var("BUZZ_REQUIRE_MEDIA_GET_AUTH")
+            .map(|v| {
+                v == "true"
+                    || v == "1"
+                    || v.eq_ignore_ascii_case("yes")
+                    || v.eq_ignore_ascii_case("on")
+            })
+            .unwrap_or(false);
+
         let ephemeral_ttl_override = std::env::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
@@ -605,6 +621,9 @@ impl Config {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from);
+        let serve_git_web_gui = std::env::var("BUZZ_SERVE_GIT_WEB_GUI")
+            .map(|value| value == "true" || value == "1")
+            .unwrap_or(false);
 
         if let Some(ref dir) = web_dir {
             if !dir.join("index.html").is_file() {
@@ -657,6 +676,7 @@ impl Config {
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
+            require_media_get_auth,
             ephemeral_ttl_override,
             git_repo_path,
             git_max_pack_bytes,
@@ -668,6 +688,7 @@ impl Config {
             push_gateway_delivery_url,
             push_gateway_timeout,
             web_dir,
+            serve_git_web_gui,
         })
     }
 }
@@ -711,6 +732,14 @@ mod tests {
         assert!(
             !config.allow_nip_oa_auth,
             "allow_nip_oa_auth should default to false"
+        );
+        assert!(
+            !config.serve_git_web_gui,
+            "serve_git_web_gui should default to false"
+        );
+        assert!(
+            !config.require_media_get_auth,
+            "require_media_get_auth should default to false for staged client rollout"
         );
         assert!(
             config.huddle_audio_available,

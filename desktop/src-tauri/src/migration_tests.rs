@@ -929,6 +929,23 @@ fn migrate_legacy_nest_noops_when_legacy_absent() {
 }
 
 #[test]
+fn migrate_legacy_nest_respects_deliberate_dev_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz-dev");
+
+    std::fs::create_dir_all(legacy.join("RESEARCH")).unwrap();
+    std::fs::write(legacy.join("RESEARCH/NOTES.md"), "legacy-notes").unwrap();
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::write(current.join(".dev-nest-migrated"), "").unwrap();
+
+    let migrated = super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert!(!migrated, "reset marker opts out of legacy nest imports");
+    assert!(!current.join("RESEARCH").exists());
+}
+
+#[test]
 fn migrate_legacy_nest_overwrites_generated_default_agents_md() {
     let dir = tempfile::tempdir().unwrap();
     let legacy = dir.path().join(".sprout");

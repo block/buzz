@@ -1,3 +1,4 @@
+pub mod agent_management;
 mod client;
 mod commands;
 mod error;
@@ -160,6 +161,9 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Draft owner-reviewed agent creation and updates
+    #[command(subcommand)]
+    Agents(AgentsCmd),
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
@@ -205,6 +209,9 @@ enum Cmd {
     /// Open, update, list, and set status on git pull requests (NIP-34)
     #[command(subcommand)]
     Pr(PrCmd),
+    /// Upload and download relay Blossom media
+    #[command(subcommand)]
+    Media(MediaCmd),
     /// Upload files to the relay's Blossom store
     #[command(subcommand)]
     Upload(UploadCmd),
@@ -217,6 +224,62 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum RespondToArg {
+    #[value(name = "owner-only")]
+    OwnerOnly,
+    #[value(name = "anyone")]
+    Anyone,
+}
+
+impl RespondToArg {
+    fn to_wire(self) -> String {
+        match self {
+            Self::OwnerOnly => "owner-only",
+            Self::Anyone => "anyone",
+        }
+        .to_string()
+    }
+}
+
+#[derive(Subcommand)]
+pub enum AgentsCmd {
+    /// Open a prefilled create-agent form in the owner's Buzz Desktop
+    DraftCreate {
+        /// Current channel UUID; the new agent is added here after save
+        #[arg(long)]
+        channel: String,
+        /// Proposed agent name
+        #[arg(long)]
+        display_name: String,
+        /// Proposed instructions; use '-' to read from stdin
+        #[arg(long)]
+        system_prompt: String,
+    },
+    /// Open a prefilled edit-agent form in the owner's Buzz Desktop
+    DraftUpdate {
+        /// Current channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Current name of the personal agent to update
+        #[arg(long)]
+        agent_name: String,
+        #[arg(long)]
+        display_name: Option<String>,
+        /// Replacement instructions; use '-' to read from stdin
+        #[arg(long)]
+        system_prompt: Option<String>,
+        #[arg(long)]
+        runtime: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, value_enum)]
+        respond_to: Option<RespondToArg>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1332,6 +1395,18 @@ pub enum UploadCmd {
     },
 }
 
+#[derive(Subcommand)]
+pub enum MediaCmd {
+    /// Download relay media with Blossom get auth
+    Get {
+        /// Relay media URL or sha256[.ext] path segment
+        input: String,
+        /// Output path. Omit or use '-' to write raw bytes to stdout.
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+}
+
 /// Subcommands for `buzz mem`.
 #[derive(Subcommand)]
 pub enum MemCmd {
@@ -1564,6 +1639,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
 
     match cli.command {
+        Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
@@ -1579,6 +1655,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
         Cmd::Issues(sub) => commands::issues::dispatch(sub, &client).await,
         Cmd::Pr(sub) => commands::pr::dispatch(sub, &client).await,
+        Cmd::Media(sub) => commands::upload::dispatch_media(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
@@ -1600,12 +1677,14 @@ mod tests {
     #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
+            "agents",
             "canvas",
             "channels",
             "dms",
             "emoji",
             "feed",
             "issues",
+            "media",
             "mem",
             "messages",
             "moderation",
@@ -1660,6 +1739,7 @@ mod tests {
         }
 
         let cmd = Cli::command();
+        assert_eq!(names(&cmd, "agents"), vec!["draft-create", "draft-update"]);
         assert_eq!(
             names(&cmd, "messages"),
             vec![
@@ -1738,6 +1818,7 @@ mod tests {
             names(&cmd, "issues"),
             vec!["create", "get", "list", "status"]
         );
+        assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
         assert_eq!(
@@ -1758,12 +1839,14 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
+            ("agents", 2),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
             ("issues", 4),
+            ("media", 1),
             ("messages", 8),
             ("pack", 2),
             ("patches", 4),

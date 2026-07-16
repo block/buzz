@@ -7,6 +7,7 @@ import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
+import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
@@ -20,6 +21,26 @@ type E2eWindow = Window & {
 const E2E_DEFAULT_PUBKEY = "deadbeef".repeat(8);
 const E2E_COMMUNITY_ID = "e2e-default-community";
 const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX = "buzz-onboarding-complete.v1:";
+const DEV_STATE_RESET_PARAM = "resetDevState";
+
+function resetDevWebviewStateFromUrl() {
+  if (!import.meta.env.DEV) {
+    return;
+  }
+
+  const url = new URL(window.location.href);
+  if (url.searchParams.get(DEV_STATE_RESET_PARAM) !== "1") {
+    return;
+  }
+
+  // WebKit groups every Buzz binary under one disk directory, but storage is
+  // isolated by origin. Clearing here resets only this dev server's origin;
+  // deleting the shared WebKit directory would also destroy installed-app state.
+  window.localStorage.clear();
+  window.sessionStorage.clear();
+  url.searchParams.delete(DEV_STATE_RESET_PARAM);
+  window.history.replaceState(window.history.state, "", url);
+}
 
 function configureDevE2eBridgeFromUrl() {
   if (!import.meta.env.DEV) {
@@ -52,19 +73,21 @@ function renderApp() {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
       <CommunitiesProvider>
-        <ThemeProvider defaultTheme="houston">
-          <TooltipProvider delayDuration={300}>
-            <EmojiBurstProvider>
-              <PoofBurstProvider>
-                <UpdaterProvider>
-                  <App />
-                  <NostrBindConsentDialog />
-                </UpdaterProvider>
-                <Toaster />
-              </PoofBurstProvider>
-            </EmojiBurstProvider>
-          </TooltipProvider>
-        </ThemeProvider>
+        <CommunityOnboardingProvider>
+          <ThemeProvider defaultTheme="houston">
+            <TooltipProvider delayDuration={300}>
+              <EmojiBurstProvider>
+                <PoofBurstProvider>
+                  <UpdaterProvider>
+                    <App />
+                    <NostrBindConsentDialog />
+                  </UpdaterProvider>
+                  <Toaster />
+                </PoofBurstProvider>
+              </EmojiBurstProvider>
+            </TooltipProvider>
+          </ThemeProvider>
+        </CommunityOnboardingProvider>
       </CommunitiesProvider>
     </React.StrictMode>,
   );
@@ -82,6 +105,7 @@ async function installE2eBridgeIfConfigured() {
 }
 
 async function bootstrap() {
+  resetDevWebviewStateFromUrl();
   configureDevE2eBridgeFromUrl();
   await installE2eBridgeIfConfigured();
   await migrateLegacyCommunityStorageBeforeRender();

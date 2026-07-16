@@ -497,7 +497,9 @@ export function DoctorSettingsPanel() {
           {gitBashQuery.data ? (
             <>
               <div className="px-4 py-3 text-sm">
-                <h3 className="text-sm font-medium">System prerequisites</h3>
+                <h2 className="text-lg font-semibold tracking-tight">
+                  System prerequisites
+                </h2>
                 <p className="mt-1 text-sm font-normal text-muted-foreground">
                   Windows tools required by supported agents.
                 </p>
@@ -506,7 +508,9 @@ export function DoctorSettingsPanel() {
             </>
           ) : null}
           <div className="px-4 py-3 text-sm">
-            <h3 className="text-sm font-medium">Agent CLIs and ACP runtimes</h3>
+            <h2 className="text-lg font-semibold tracking-tight">
+              Agent CLIs and ACP runtimes
+            </h2>
             <p className="mt-1 text-sm font-normal text-muted-foreground">
               Installation status of supported agent CLIs and their ACP
               runtimes.

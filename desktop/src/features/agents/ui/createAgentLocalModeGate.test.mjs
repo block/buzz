@@ -36,6 +36,8 @@ import {
   countNonSecretInheritedEnvVars,
   getBakedModelInheritLabel,
   getAdvancedInheritedSummary,
+  getGlobalModelFallback,
+  getInheritedAgentDefaults,
   getBakedProviderInheritLabel,
   resolveInheritedDefault,
 } from "./bakedEnvHelpers.ts";
@@ -87,7 +89,6 @@ test("localMode_buzzAgent_emptyProvider_notSatisfied", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -111,7 +112,6 @@ test("localMode_buzzAgent_emptyModel_notSatisfied", () => {
     model: "",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -137,7 +137,6 @@ test("localMode_buzzAgent_anthropic_missingKey_notSatisfied", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -159,7 +158,6 @@ test("localMode_buzzAgent_anthropic_allRequired_present_allowed", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.deepEqual(
@@ -191,7 +189,6 @@ test("localMode_claude_noRequiredFields_notBlocked", () => {
     model: "",
     provider: "",
     runtimeId: "claude",
-    useMesh: false,
   });
 
   assert.deepEqual(
@@ -211,7 +208,7 @@ test("localMode_claude_noRequiredFields_notBlocked", () => {
   );
 });
 
-// ── Gate: isProviderMode / useMesh bypass ─────────────────────────────────
+// ── Gate: provider mode bypass ─────────────────────────────────
 
 test("localMode_gate_bypassed_for_providerMode", () => {
   // In provider mode, gate must be satisfied regardless of local fields.
@@ -221,30 +218,12 @@ test("localMode_gate_bypassed_for_providerMode", () => {
     model: "",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
     result.satisfied,
     true,
     "provider mode must bypass the local-mode gate",
-  );
-});
-
-test("localMode_gate_bypassed_for_meshMode", () => {
-  const result = computeLocalModeGate({
-    envVars: {},
-    isProviderMode: false,
-    model: "",
-    provider: "",
-    runtimeId: "buzz-agent",
-    useMesh: true,
-  });
-
-  assert.equal(
-    result.satisfied,
-    true,
-    "relay-mesh mode must bypass the local-mode gate",
   );
 });
 
@@ -270,7 +249,6 @@ test("localMode_requiredEnvKeys_gate_and_envVarsEditor_share_same_key_set", () =
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
   const fullKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
 
@@ -292,7 +270,6 @@ test("localMode_providerSelection_drives_requiredKey", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
   const databricksGate = computeLocalModeGate({
     envVars: {},
@@ -300,7 +277,6 @@ test("localMode_providerSelection_drives_requiredKey", () => {
     model: "databricks-meta-llama",
     provider: "databricks",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -335,7 +311,6 @@ test("localMode_goose_databricksHost_satisfiedByFileConfig_notRequired", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: fileConfig,
-    useMesh: false,
   });
 
   assert.ok(
@@ -363,7 +338,6 @@ test("localMode_goose_databricksHost_noFileConfig_stillRequired", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.ok(
@@ -392,7 +366,6 @@ test("localMode_goose_providerSatisfiedByFileConfig_noNormalizedFieldRequired", 
     provider: "",
     runtimeId: "goose",
     runtimeFileConfig: fileConfig,
-    useMesh: false,
   });
 
   assert.deepEqual(
@@ -412,7 +385,6 @@ test("localMode_goose_envPlusFileConfig_bothEmpty_stillRequired", () => {
     provider: "",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.ok(
@@ -439,7 +411,6 @@ test("baked_databricksHost_silencesRequirement", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.ok(
@@ -465,7 +436,6 @@ test("baked_databricksHost_andAgentLocal_agentLocalWins_keyNotRequired", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.ok(
@@ -485,7 +455,6 @@ test("baked_emptyOrUndefined_behaviorUnchanged", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
   const resultEmpty = computeLocalModeGate({
     bakedEnvKeys: [],
@@ -495,7 +464,6 @@ test("baked_emptyOrUndefined_behaviorUnchanged", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.ok(
@@ -529,7 +497,6 @@ test("baked_satisfiedKey_doesNotCountAsMissing_noSaveBlock", () => {
     provider: "databricks_v2",
     runtimeId: "goose",
     runtimeFileConfig: null,
-    useMesh: false,
   });
 
   assert.deepEqual(
@@ -674,7 +641,6 @@ test("localMode_globalEnvVars_satisfies_missing_env_key", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -699,7 +665,6 @@ test("localMode_perAgentEnvVar_wins_over_globalEnvVars_for_gate", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -718,7 +683,6 @@ test("localMode_globalEnvVars_empty_still_fails_gate", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -755,7 +719,6 @@ test("localMode_globalProvider_inherited_no_key_surfacesAsRequired", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -780,7 +743,6 @@ test("localMode_globalProvider_inherited_globalEnv_satisfies_key", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -814,7 +776,6 @@ test("localMode_requiredKey_stays_in_requiredEnvKeys_when_locally_filled", () =>
     model: "claude-3-5-sonnet-20241022",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -835,7 +796,6 @@ test("localMode_requiredKey_stays_in_requiredEnvKeys_when_locally_filled", () =>
     model: "claude-3-5-sonnet-20241022",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -882,8 +842,8 @@ test("providerDefaultLabel_globalSet_returnsInheritLabel", () => {
   const label = getDefaultLlmProviderLabel("buzz-agent", "anthropic");
   assert.equal(
     label,
-    "Inherit global default (anthropic)",
-    "global provider set must return 'Inherit global default (<provider>)'",
+    "Use AI defaults (anthropic)",
+    "global provider set must return 'Use AI defaults (<provider>)'",
   );
 });
 
@@ -892,8 +852,15 @@ test("providerDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () =
   const label = getDefaultLlmProviderLabel("buzz-agent", "  openai  ");
   assert.equal(
     label,
-    "Inherit global default (openai)",
+    "Use AI defaults (openai)",
     "global provider with surrounding whitespace must be trimmed in label",
+  );
+});
+
+test("providerDefaultLabel_sharedCompute_neverLeaksInternalId", () => {
+  assert.equal(
+    getDefaultLlmProviderLabel("buzz-agent", "relay-mesh"),
+    "Use AI defaults (Buzz shared compute)",
   );
 });
 
@@ -1007,8 +974,8 @@ test("modelDefaultLabel_globalSet_returnsInheritLabel", () => {
   const label = getDefaultLlmModelLabel("claude-opus-4-5");
   assert.equal(
     label,
-    "Inherit global default (claude-opus-4-5)",
-    "global model set must return 'Inherit global default (<model>)'",
+    "Use AI defaults (claude-opus-4-5)",
+    "global model set must return 'Use AI defaults (<model>)'",
   );
 });
 
@@ -1017,7 +984,7 @@ test("modelDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () => {
   const label = getDefaultLlmModelLabel("  gpt-4o  ");
   assert.equal(
     label,
-    "Inherit global default (gpt-4o)",
+    "Use AI defaults (gpt-4o)",
     "global model with surrounding whitespace must be trimmed in label",
   );
 });
@@ -1075,7 +1042,6 @@ test("globalAwareGate_globalProviderSet_requiredKeyAppearsWhenMissing", () => {
     provider: "",
     runtimeId: "buzz-agent",
     runtimeFileConfig: undefined,
-    useMesh: false,
   });
   assert.ok(
     gate.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
@@ -1094,7 +1060,6 @@ test("globalAwareGate_globalProviderAndKeySet_requiredKeyAbsent", () => {
     provider: "",
     runtimeId: "buzz-agent",
     runtimeFileConfig: undefined,
-    useMesh: false,
   });
   assert.equal(
     gate.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
@@ -1125,7 +1090,6 @@ test("f3_templateDialog_localAnthropicWithGlobalModel_modelNotRequired", () => {
     model: "",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -1154,7 +1118,6 @@ test("f3_templateDialog_localProviderBlankGlobalAnthropicNoModel_saveBlocked", (
     model: "",
     provider: "",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -1170,11 +1133,11 @@ test("f3_templateDialog_localProviderBlankGlobalAnthropicNoModel_saveBlocked", (
 
 test("f3_templateDialog_globalModelSet_zeroValueLabelIsInherit", () => {
   // Case 3: global model set → the zero-value model dropdown option must show
-  // "Inherit global default (<model>)" not the generic "Default model".
+  // "Use AI defaults (<model>)" not the generic "Default model".
   // getDefaultLlmModelLabel is what AgentDefinitionDialog now uses for that slot.
   assert.equal(
     getDefaultLlmModelLabel("claude-opus-4-5"),
-    "Inherit global default (claude-opus-4-5)",
+    "Use AI defaults (claude-opus-4-5)",
     "zero-value model option label must show the global model name when set",
   );
   assert.equal(
@@ -1214,7 +1177,7 @@ test("f3b_buildTemplateModelDropdownOptions_anthropicGlobalModelSet_containsInhe
   );
   assert.equal(
     inheritEntry.label,
-    "Inherit global default (claude-opus-4-5)",
+    "Use AI defaults (claude-opus-4-5)",
     "inherit entry must carry the global model name",
   );
 });
@@ -1254,7 +1217,7 @@ test("f3b_buildTemplateModelDropdownOptions_blankProviderGlobalModelSet_noDouble
   );
   assert.equal(
     autoEntries[0].label,
-    "Inherit global default (claude-opus-4-5)",
+    "Use AI defaults (claude-opus-4-5)",
     "existing zero-value entry must be relabeled with the global model name",
   );
 });
@@ -1383,7 +1346,6 @@ test("localMode_globalEnvSatisfied_agentLocalExplicitlyEmpty_stillRequired", () 
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.ok(
@@ -1412,7 +1374,6 @@ test("localMode_globalEnvSatisfied_agentLocalKeyAbsent_silenced", () => {
     model: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
     runtimeId: "buzz-agent",
-    useMesh: false,
   });
 
   assert.equal(
@@ -1430,4 +1391,54 @@ test("localMode_globalEnvSatisfied_agentLocalKeyAbsent_silenced", () => {
     true,
     "gate must be satisfied when global key is not shadowed by an explicit empty",
   );
+});
+
+test("global model fallback resolves the selected provider model env", () => {
+  const bakedEnv = [
+    {
+      key: "DATABRICKS_MODEL",
+      value: "goose-claude-opus-4-8",
+      masked: false,
+    },
+  ];
+  assert.equal(
+    getGlobalModelFallback(bakedEnv, "databricks_v2"),
+    "goose-claude-opus-4-8",
+  );
+});
+
+test("global model fallback gives saved provider env precedence over build env", () => {
+  const bakedEnv = [
+    { key: "ANTHROPIC_MODEL", value: "build-model", masked: false },
+  ];
+  assert.equal(
+    getGlobalModelFallback(bakedEnv, "anthropic", {
+      ANTHROPIC_MODEL: "saved-model",
+    }),
+    "saved-model",
+  );
+});
+
+test("global model fallback never uses another provider's model", () => {
+  const bakedEnv = [
+    { key: "DATABRICKS_MODEL", value: "databricks-model", masked: false },
+  ];
+  assert.equal(getGlobalModelFallback(bakedEnv, "anthropic"), null);
+});
+
+test("inherited defaults expose a provider-specific model fallback to agent dialogs", () => {
+  const defaults = getInheritedAgentDefaults(
+    { env_vars: {}, provider: "databricks_v2", model: null },
+    [
+      {
+        key: "DATABRICKS_MODEL",
+        value: "goose-claude-opus-4-8",
+        masked: false,
+      },
+    ],
+  );
+  assert.deepEqual(defaults.model, {
+    source: "build",
+    value: "goose-claude-opus-4-8",
+  });
 });

@@ -26,6 +26,7 @@ import {
 
 export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
 import {
   clearTimeoutState,
   recordTimeoutFromRejection,
@@ -447,6 +448,11 @@ export function useSendMessageMutation(
         emojiTags,
         mentionTags,
       } = splitOutgoingTags(mediaTags);
+      const recipientPubkeys = messageMentionPubkeys(
+        effectiveChannel,
+        identity.pubkey,
+        mentionPubkeys,
+      );
 
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
@@ -461,7 +467,7 @@ export function useSendMessageMutation(
           content,
           parentEventId ?? null,
           imetaTags,
-          mentionPubkeys,
+          recipientPubkeys,
           undefined,
           emojiTags,
           mentionTags,
@@ -476,7 +482,7 @@ export function useSendMessageMutation(
               identity.pubkey,
               parentEventId,
               resolveReplyRootId(parentEventId, cachedMessages),
-              mentionPubkeys,
+              recipientPubkeys,
             )
           : [];
         const baseTags = parentEventId
@@ -495,10 +501,9 @@ export function useSendMessageMutation(
             ...baseTags,
             // For non-replies, add mention p-tags here (replies get them via buildReplyTags)
             ...(!parentEventId
-              ? normalizeMentionPubkeys(
-                  mentionPubkeys ?? [],
-                  identity.pubkey,
-                ).map((pk) => ["p", pk])
+              ? normalizeMentionPubkeys(recipientPubkeys, identity.pubkey).map(
+                  (pk) => ["p", pk],
+                )
               : []),
             ...imetaTags,
             ...emojiTags,
@@ -512,7 +517,7 @@ export function useSendMessageMutation(
       return relayClient.sendMessage(
         effectiveChannel.id,
         content,
-        mentionPubkeys ?? [],
+        recipientPubkeys,
         mentionTags,
       );
     },

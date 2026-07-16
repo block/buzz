@@ -36,12 +36,6 @@ type CommunityRailProps = {
 
 const MAX_BADGE = 99;
 
-// Strip punctuation before initials so "B (relay)" yields "BR", not "B(".
-export function communityInitials(name: string): string {
-  const cleaned = name.replace(/[^\p{L}\p{N}\s]/gu, " ");
-  return getInitials(cleaned);
-}
-
 /**
  * Presentation decisions for one community button, derived from its observed
  * mention state. Pure so it can be unit-tested without a DOM. The `state` guard
@@ -129,7 +123,7 @@ function CommunityButton({
                     src={iconUrl}
                   />
                 ) : (
-                  communityInitials(community.name) || "🐝"
+                  getInitials(community.name) || "🐝"
                 )}
               </span>
               {showBadge ? (

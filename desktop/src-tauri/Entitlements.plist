@@ -6,5 +6,8 @@
     <true/>
     <key>com.apple.security.device.camera</key>
     <true/>
+    <!-- MeshLLM installs versioned native runtimes outside the app bundle. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
 </dict>
 </plist>

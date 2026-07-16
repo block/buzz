@@ -239,10 +239,10 @@ export function clearDraftEntry(draftKey: string): void {
 
 /**
  * Return true only when every field of two DraftState values is identical,
- * including all BlobDescriptor optional fields (dim, blurhash, thumb,
- * duration, image, filename, uploaded). Any divergence — including selection
- * offsets, timestamps, attachment metadata, spoiler state, and status — is
- * treated as a distinct record that must not be discarded.
+ * including all ImetaMedia optional fields (dim, blurhash, thumb, duration,
+ * image, filename, displayLabel, uploaded). Any divergence — including
+ * selection offsets, timestamps, attachment metadata, spoiler state, and
+ * status — is treated as a distinct record that must not be discarded.
  */
 function draftStatesEqual(a: DraftState, b: DraftState): boolean {
   if (
@@ -272,7 +272,8 @@ function draftStatesEqual(a: DraftState, b: DraftState): boolean {
       am.thumb !== bm.thumb ||
       am.duration !== bm.duration ||
       am.image !== bm.image ||
-      am.filename !== bm.filename
+      am.filename !== bm.filename ||
+      am.displayLabel !== bm.displayLabel
     ) {
       return false;
     }

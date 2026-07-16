@@ -354,7 +354,7 @@ export function CommunityMembersSettingsCard({
   return (
     <section className="min-w-0" data-testid="settings-community-members">
       <SettingsSectionHeader
-        title="Community Access"
+        title="Community access"
         description={
           <>
             Manage who can connect to this relay. Owners can invite admins or

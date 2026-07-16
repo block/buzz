@@ -101,7 +101,7 @@ export function ChannelTemplatesSettingsCard() {
   return (
     <section className="min-w-0" data-testid="settings-channel-templates">
       <SettingsSectionHeader
-        title="Channel Templates"
+        title="Channel templates"
         description={
           <>
             Save reusable channel configurations and apply them when creating

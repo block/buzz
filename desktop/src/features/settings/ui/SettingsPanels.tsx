@@ -63,6 +63,7 @@ import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
+import { GlobalAgentConfigSettingsCard } from "./GlobalAgentConfigSettingsCard";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -179,7 +180,7 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "community-members",
-    label: "Community Access",
+    label: "Community access",
     icon: LockKeyhole,
   },
   {
@@ -189,13 +190,13 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "custom-emoji",
-    label: "Custom Emoji",
+    label: "Custom emoji",
     icon: Smile,
     featureGate: "custom-emoji",
   },
   {
     value: "local-archive",
-    label: "Local Archive",
+    label: "Local archive",
     icon: Archive,
   },
   {
@@ -712,7 +713,12 @@ export function renderSettingsSection(
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":
-      return <PreventSleepSettingsCard />;
+      return (
+        <div className="space-y-12">
+          <PreventSleepSettingsCard />
+          <GlobalAgentConfigSettingsCard />
+        </div>
+      );
     case "channel-templates":
       return <ChannelTemplatesSettingsCard />;
     case "compute":

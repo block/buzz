@@ -82,8 +82,8 @@ metrics-util    = { workspace = true }
 dev = ["buzz-auth/dev"]
 
 [dev-dependencies]
-mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab4c4b5f4a45d5bc942c66c18583800c3f82", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }
-mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab4c4b5f4a45d5bc942c66c18583800c3f82", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"] }
+mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }
+mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"] }
 buzz-core = { workspace = true, features = ["test-utils"] }
 buzz-auth = { workspace = true, features = ["dev"] }
 reqwest = { workspace = true }

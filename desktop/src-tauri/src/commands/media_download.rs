@@ -4,7 +4,7 @@ use tauri::State;
 
 use crate::app_state::AppState;
 use crate::commands::export_util::save_bytes_with_dialog;
-use crate::commands::media::{detect_and_validate_mime, sanitize_filename};
+use crate::commands::media::{detect_and_validate_mime, mint_media_get_auth, sanitize_filename};
 use crate::commands::{
     personas::{
         decode_snapshot_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES, PNG_MAGIC,
@@ -223,6 +223,40 @@ pub async fn copy_image_to_clipboard(
         .map_err(|_| "clipboard result channel closed unexpectedly".to_string())?
 }
 
+/// Write text to the system clipboard through the native shell.
+///
+/// WebKit can revoke browser clipboard permission after a user action awaits a
+/// long-running operation such as snapshot encoding and upload. Keeping the
+/// delayed write in the native layer makes that flow reliable on macOS.
+#[tauri::command]
+pub async fn copy_text_to_clipboard(
+    text: String,
+    html: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    app.run_on_main_thread(move || {
+        let result = arboard::Clipboard::new()
+            .map_err(|e| format!("clipboard error: {e}"))
+            .and_then(|mut clipboard| {
+                if let Some(html) = html {
+                    clipboard
+                        .set_html(html, Some(text))
+                        .map_err(|e| format!("clipboard error: {e}"))
+                } else {
+                    clipboard
+                        .set_text(text)
+                        .map_err(|e| format!("clipboard error: {e}"))
+                }
+            });
+        let _ = tx.send(result);
+    })
+    .map_err(|e| format!("main thread dispatch failed: {e}"))?;
+
+    rx.recv()
+        .map_err(|_| "clipboard result channel closed unexpectedly".to_string())?
+}
+
 /// Fetch blob bytes from a (pre-validated) relay media URL through the app's
 /// HTTP client, enforcing the download size cap. The caller is responsible for
 /// validating the URL origin and for any content-type checks on the result.
@@ -237,13 +271,17 @@ async fn fetch_blob_bytes_with_cap(
     cap: u64,
 ) -> Result<Vec<u8>, String> {
     // Fetch bytes via the app's HTTP client (goes through WARP tunnel).
-    let resp = state
-        .http_client
-        .get(url)
-        .timeout(DOWNLOAD_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let mut req = state.http_client.get(url).timeout(DOWNLOAD_TIMEOUT);
+
+    // Every caller pre-validates `url` against the relay origin via
+    // `validate_download_url`, satisfying the mint_media_get_auth safety
+    // contract (the token never leaves the relay origin).
+    let relay_base = relay_api_base_url_with_override(state);
+    if let Some(auth) = mint_media_get_auth(state, &relay_base) {
+        req = req.header("authorization", auth);
+    }
+
+    let resp = req.send().await.map_err(|e| classify_request_error(&e))?;
 
     if !resp.status().is_success() {
         return Err(relay_error_message(resp).await);

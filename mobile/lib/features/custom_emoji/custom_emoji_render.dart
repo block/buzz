@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../../shared/relay/relay.dart';
 
 import 'custom_emoji.dart';
 
@@ -29,14 +32,17 @@ class CustomEmojiImage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final fallbackStyle = DefaultTextStyle.of(context).style;
-    return Image.network(
-      url,
-      width: size,
-      height: size,
-      fit: BoxFit.contain,
-      filterQuality: FilterQuality.medium,
-      semanticLabel: ':$shortcode:',
-      errorBuilder: (_, _, _) => Text(':$shortcode:', style: fallbackStyle),
+    return Consumer(
+      builder: (context, ref, _) => Image.network(
+        url,
+        headers: mediaGetHeadersFor(ref, url),
+        width: size,
+        height: size,
+        fit: BoxFit.contain,
+        filterQuality: FilterQuality.medium,
+        semanticLabel: ':$shortcode:',
+        errorBuilder: (_, _, _) => Text(':$shortcode:', style: fallbackStyle),
+      ),
     );
   }
 }

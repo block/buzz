@@ -59,7 +59,7 @@ async function autoJoinDefaultChannel(
   }
 }
 
-async function initializeWelcomeChannel(
+export async function initializeWelcomeChannel(
   queryClient: ReturnType<typeof useQueryClient>,
   {
     focus,

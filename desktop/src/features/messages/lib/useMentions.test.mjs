@@ -13,6 +13,11 @@ test("matches @Name after whitespace", () => {
   assert.equal(hasMention("hey @Alice", "Alice"), true);
 });
 
+test("matches the first member in a parenthesized team expansion", () => {
+  assert.equal(hasMention("Launch Team(@Planner @Builder)", "Planner"), true);
+  assert.equal(hasMention("Launch Team(@Planner @Builder)", "Builder"), true);
+});
+
 test("matches @Name at end of string", () => {
   assert.equal(hasMention("hello @Alice", "Alice"), true);
 });

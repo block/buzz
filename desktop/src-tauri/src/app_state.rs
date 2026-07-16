@@ -93,9 +93,9 @@ pub struct AppState {
     /// In-process mesh-llm node started by Buzz Desktop.
     #[cfg(feature = "mesh-llm")]
     pub mesh_llm_runtime: AsyncMutex<Option<crate::mesh_llm::DesktopMeshRuntime>>,
-    /// Runtime-owned relay-mesh control plane (call-me-now listener + connect
-    /// request publish/retry). Installed once at identity-set time so the
-    /// listener is up before any restore/create can request a connection.
+    /// Runtime-owned shared-compute coordinator. It publishes member-signed
+    /// discovery status and reconciles MeshLLM's admission roster; MeshLLM
+    /// itself owns direct QUIC/iroh connection establishment.
     #[cfg(feature = "mesh-llm")]
     pub mesh_coordinator: AsyncMutex<Option<crate::mesh_llm::MeshCoordinator>>,
     /// `(creator_pubkey_hex, channel_id)` pairs for channels the *named*
@@ -328,18 +328,9 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
     Ok(())
 }
 
-/// Service name for the desktop OS keyring. Shared by the human identity key
-/// and managed-agent keys (each addressed by a distinct key name within it).
-///
-/// Debug builds use a distinct service name so dev and production keyring
-/// entries never collide on the same machine.
-pub(crate) fn keyring_service() -> &'static str {
-    if cfg!(debug_assertions) {
-        "buzz-desktop-dev"
-    } else {
-        "buzz-desktop"
-    }
-}
+#[path = "app_state_keyring.rs"]
+mod keyring_config;
+pub(crate) use keyring_config::keyring_service;
 
 /// Keyring key name for the human identity nsec.
 const IDENTITY_KEY_NAME: &str = "identity";
@@ -855,7 +846,10 @@ pub(crate) fn persist_imported_identity(
 
 /// Path of the migration-completed marker within `data_dir`.
 fn migration_marker_path(data_dir: &std::path::Path) -> std::path::PathBuf {
-    data_dir.join(MIGRATION_MARKER_NAME)
+    data_dir.join(keyring_config::migration_marker_name(
+        keyring_service(),
+        MIGRATION_MARKER_NAME,
+    ))
 }
 
 /// Atomically write (and fsync) the migration-completed marker. The content is

@@ -18,6 +18,7 @@ type PersonaModelFieldProps = {
   model: string;
   modelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
   modelDropdownOptions: readonly PersonaDropdownOption[];
+  showSharedComputeAutoHint: boolean;
   modelSelectValue: string;
   onCustomModelChange: (value: string) => void;
   onModelValueChange: (value: string) => void;
@@ -32,6 +33,7 @@ export function PersonaModelField({
   modelDiscoveryStatus,
   modelDropdownOptions,
   modelSelectValue,
+  showSharedComputeAutoHint,
   onCustomModelChange,
   onModelValueChange,
   showCustomModelInput,
@@ -87,6 +89,11 @@ export function PersonaModelField({
               value={model}
             />
           </div>
+        ) : null}
+        {showSharedComputeAutoHint ? (
+          <p className="text-xs text-muted-foreground">
+            Buzz will choose an available shared model when the agent starts.
+          </p>
         ) : null}
         {modelDiscoveryStatus ? (
           <p

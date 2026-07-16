@@ -1340,8 +1340,13 @@ function createMarkdownComponents(
     href,
     ...props
   }: React.ComponentPropsWithoutRef<"a">) {
-    const { channels, imetaByUrl, onOpenMessageLink, onImportSnapshotFromUrl } =
-      useMarkdownRuntime();
+    const {
+      channels,
+      imetaByUrl,
+      onOpenMessageLink,
+      onImportSnapshotFromUrl,
+      snapshotSharedBy,
+    } = useMarkdownRuntime();
     if (!interactive) {
       return <span className="font-medium text-current">{children}</span>;
     }
@@ -1365,8 +1370,10 @@ function createMarkdownComponents(
     if (snapshotCard) {
       return (
         <AgentSnapshotCard
+          displayName={snapshotCard.displayName}
           href={snapshotCard.href}
           filename={snapshotCard.filename}
+          sharedBy={snapshotSharedBy}
           size={snapshotCard.size}
           sha256={snapshotCard.sha256}
           snapshotKind={snapshotCard.snapshotKind}
@@ -1822,6 +1829,7 @@ function MarkdownInner({
   mentionNames,
   mentionPubkeysByName,
   searchQuery,
+  snapshotSharedBy,
   videoReviewContext,
 }: MarkdownProps) {
   const { channels: rawChannels } = useChannelNavigation();
@@ -1865,6 +1873,7 @@ function MarkdownInner({
       mentionPubkeysByName,
       onOpenChannel,
       onOpenMessageLink,
+      snapshotSharedBy,
       onImportSnapshotFromUrl: (
         fileBytes: number[],
         fileName: string,
@@ -1881,6 +1890,7 @@ function MarkdownInner({
       mentionPubkeysByName,
       onOpenChannel,
       onOpenMessageLink,
+      snapshotSharedBy,
       goAgents,
     ],
   );
@@ -1984,6 +1994,7 @@ export const Markdown = React.memo(
     prev.imetaByUrl === next.imetaByUrl &&
     prev.configNudgeAuthorPubkey === next.configNudgeAuthorPubkey &&
     prev.searchQuery === next.searchQuery &&
+    prev.snapshotSharedBy === next.snapshotSharedBy &&
     prev.videoReviewContext === next.videoReviewContext,
 );
 Markdown.displayName = "Markdown";

@@ -32,6 +32,8 @@ export type MarkdownRuntime = {
   mentionPubkeysByName?: Record<string, string>;
   onOpenChannel: (channelId: string) => void;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
+  /** Display name of the message author sharing an agent snapshot. */
+  snapshotSharedBy?: string;
   /**
    * Called by AgentSnapshotCard after a successful verified in-memory fetch.
    * The implementation should navigate to /agents and trigger the existing
@@ -58,6 +60,8 @@ export type MarkdownProps = {
   mentionPubkeysByName?: Record<string, string>;
   mediaInset?: boolean;
   searchQuery?: string;
+  /** Display name shown in shared-agent card metadata. */
+  snapshotSharedBy?: string;
   videoReviewContext?: VideoReviewContext;
   /**
    * When set and the nudge payload's agent_pubkey matches, renders the

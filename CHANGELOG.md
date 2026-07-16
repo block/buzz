@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.4.6
+
+- Polish agent and team sharing and snapshots ([#1852](https://github.com/block/buzz/pull/1852)) ([`2f3fa586f`](https://github.com/block/buzz/commit/2f3fa586f3bd12b26b8a9dc69a424d5c28b1e27e))
+- fix(desktop): filter punctuation from avatar initials ([#1904](https://github.com/block/buzz/pull/1904)) ([`63e099709`](https://github.com/block/buzz/commit/63e099709667669be41426e7144a4a9057f8537b))
+- fix(desktop): preserve snapshot attachment URLs ([#1905](https://github.com/block/buzz/pull/1905)) ([`1ab7bbfe4`](https://github.com/block/buzz/commit/1ab7bbfe453d10cfd3522c358e5ed18931f1e1ec))
+- Chat-first agent creation via portable buzz CLI drafts ([#1878](https://github.com/block/buzz/pull/1878)) ([`54e174b5e`](https://github.com/block/buzz/commit/54e174b5e1424c13fe7451c86a418ba8b9c01f1c))
+- feat(desktop): enable community rail by default ([#1902](https://github.com/block/buzz/pull/1902)) ([`55a46b063`](https://github.com/block/buzz/commit/55a46b063e291862c034d4ce685b3d3a92804951))
+- feat(desktop): redesign Nostr bind verification flow ([#1850](https://github.com/block/buzz/pull/1850)) ([`abfe78aaf`](https://github.com/block/buzz/commit/abfe78aafb131c9100f33ed361850fb9cfeb0881))
+- fix(desktop): simplify sign out settings row ([#1903](https://github.com/block/buzz/pull/1903)) ([`3e8dae7ff`](https://github.com/block/buzz/commit/3e8dae7ff3c73b1b2b1ae26d5a4bed5db17cb269))
+- feat(desktop): Send feedback modal + profile presence chip ([#1756](https://github.com/block/buzz/pull/1756)) ([`f5c33d333`](https://github.com/block/buzz/commit/f5c33d3335fc3fa7e304bb51a9931d4cc741d255))
+- fix(desktop): seed timeline virtualization row heights ([#1887](https://github.com/block/buzz/pull/1887)) ([`406cf7911`](https://github.com/block/buzz/commit/406cf7911ee1f335fdf0be131ee057ea2c455037))
+- fix(desktop): dedupe react-dismissable-layer to stop modal menu → dialog freezes ([#1899](https://github.com/block/buzz/pull/1899)) ([`366567ac2`](https://github.com/block/buzz/commit/366567ac20b4786c1ca8e754ac5c45f0e7d59122))
+- fix(desktop): clean up Remind me later dialog footer and loading state ([#1898](https://github.com/block/buzz/pull/1898)) ([`40fe65095`](https://github.com/block/buzz/commit/40fe6509583e93054eab04906aacde834c5fcc68))
+- fix(desktop): let sidebar action card description wrap over multiple lines ([#1891](https://github.com/block/buzz/pull/1891)) ([`b36ee3e30`](https://github.com/block/buzz/commit/b36ee3e30203b4cc4ec8056ae4d9c57acf26891e))
+- mesh: upgrade runtime, enforce membership, add shared compute provider ([#1656](https://github.com/block/buzz/pull/1656)) ([`54638ff4b`](https://github.com/block/buzz/commit/54638ff4bb5af2d3d3759b44118b43052f814bb1))
+
+
 ## v0.4.5
 
 - test(desktop): remove stale collapsed home chrome check ([#1871](https://github.com/block/buzz/pull/1871)) ([`395a3f149`](https://github.com/block/buzz/commit/395a3f1492807b065f8edbee9bb9c8d51018095a))

@@ -508,7 +508,7 @@ test("day divider appears in timeline", async ({ page }) => {
   await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
 });
 
-test("send message to DM channel", async ({ page }) => {
+test("send message to DM channel p-tags the recipient", async ({ page }) => {
   const message = `DM message ${Date.now()}`;
 
   await page.goto("/");
@@ -519,6 +519,21 @@ test("send message to DM channel", async ({ page }) => {
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("message-timeline")).toContainText(message);
+  await expect
+    .poll(() =>
+      page.evaluate((content) => {
+        const events = (
+          window as Window & {
+            __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+              content: string;
+              tags: string[][];
+            }>;
+          }
+        ).__BUZZ_E2E_SIGNED_EVENTS__;
+        return events?.find((event) => event.content === content)?.tags ?? [];
+      }, message),
+    )
+    .toContainEqual(["p", TEST_IDENTITIES.alice.pubkey]);
 });
 
 test("shows your avatar on your own message when profile avatar is set", async ({

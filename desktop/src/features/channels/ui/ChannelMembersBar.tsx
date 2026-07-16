@@ -6,10 +6,10 @@ import { HuddleIndicator } from "@/features/huddle/components/HuddleIndicator";
 import { buildHuddleChannelName } from "@/features/huddle/lib/huddleChannelName";
 import {
   useAvailableAcpRuntimes,
-  useBackendProvidersQuery,
   useManagedAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useChannelMembersQuery } from "@/features/channels/hooks";
 import { canStartHuddleInChannel } from "@/features/channels/lib/huddleAvailability";
 import type { Channel } from "@/shared/api/types";
@@ -58,7 +58,6 @@ export function ChannelMembersBar({
   const queryClient = useQueryClient();
   const membersQuery = useChannelMembersQuery(channel.id);
   const providersQuery = useAvailableAcpRuntimes();
-  const backendProvidersQuery = useBackendProvidersQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
   const members = membersQuery.data ?? [];
@@ -205,9 +204,13 @@ export function ChannelMembersBar({
       {controls}
 
       <AddChannelBotDialog
-        backendProviders={backendProvidersQuery.data ?? []}
-        backendProvidersLoading={backendProvidersQuery.isLoading}
         channelId={channel.id}
+        onCreateAgent={() => {
+          requestOpenCreateAgent({
+            channelId: channel.id,
+            channelName: channel.name,
+          });
+        }}
         onOpenChange={setIsAddBotOpen}
         open={isAddBotOpen}
         providers={providers}

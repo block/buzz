@@ -523,12 +523,6 @@ pub struct AppState {
     /// Key: (community_id, agent pubkey bytes). Value: (count, window_start).
     /// 100 events/sec per agent — prevents relay/DB pressure from bursty telemetry.
     pub observer_rate_limiter: Arc<ScopedRateLimiter>,
-    /// Per-requester sliding-window rate limiter for mesh connect requests
-    /// (kind 24621). Key: (community_id, requester pubkey bytes). Value: (count,
-    /// window_start). Bounds the 1→2 call-me-now amplification: a member is
-    /// trusted, but a buggy desktop loop shouldn't make the relay sign+fan
-    /// unboundedly. 20/sec is far above any real interactive use.
-    pub mesh_connect_rate_limiter: Arc<ScopedRateLimiter>,
     /// Per-uploader sliding-window rate limiter for media upload starts.
     /// Key: (community_id, uploader pubkey bytes). Value: (count, window_start).
     pub media_upload_rate_limiter: Arc<ScopedRateLimiter>,
@@ -687,7 +681,6 @@ impl AppState {
             started_at: Instant::now(),
             nip98_replay,
             observer_rate_limiter: Arc::new(DashMap::new()),
-            mesh_connect_rate_limiter: Arc::new(DashMap::new()),
             media_upload_rate_limiter: Arc::new(DashMap::new()),
             invite_claim_rate_limiter: Arc::new(
                 moka::sync::Cache::builder()

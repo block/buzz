@@ -174,8 +174,12 @@ test.describe("edit agent dialog", () => {
     await expect(page.locator("#edit-agent-model")).toHaveText(
       "Inherit build default (claude-opus-4-8)",
     );
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
     await expect(
-      page.getByText("Using build defaults: effort high"),
+      defaults.getByText("Anthropic", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      defaults.getByText("claude-opus-4-8", { exact: true }),
     ).toBeVisible();
   });
 
@@ -202,13 +206,17 @@ test.describe("edit agent dialog", () => {
     await openEditDialog(page);
 
     await expect(page.locator("#edit-agent-llm-provider")).toHaveText(
-      "Inherit global default (anthropic)",
+      "Use AI defaults (anthropic)",
     );
     await expect(page.locator("#edit-agent-model")).toHaveText(
-      "Inherit global default (claude-opus-4-5)",
+      "Use AI defaults (claude-opus-4-5)",
     );
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
     await expect(
-      page.getByText("Using global defaults: effort low"),
+      defaults.getByText("Anthropic", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      defaults.getByText("claude-opus-4-5", { exact: true }),
     ).toBeVisible();
   });
 

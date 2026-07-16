@@ -411,11 +411,7 @@ export function ChannelGroupSection({
     items.length > 0 ? (
       <SidebarMenu data-testid={listTestId}>
         {items.map((channel) => (
-          // modal={false}: menu items (e.g. Leave channel) open a modal
-          // AlertDialog. A modal ContextMenu would leave `pointer-events: none`
-          // stuck on <body> when it closes as the dialog mounts, freezing the
-          // whole app. Non-modal avoids installing that body guard entirely.
-          <ContextMenu key={channel.id} modal={false}>
+          <ContextMenu key={channel.id}>
             <ContextMenuTrigger asChild>
               <SidebarMenuItem className="content-visibility-auto-row">
                 {draggable ? (
@@ -610,10 +606,7 @@ export function CustomChannelSection({
             )}
             data-section-actions-open={actionsMenuOpen || undefined}
           >
-            {/* modal={false}: Rename/Delete section open a modal dialog;
-                a modal ContextMenu would leave `pointer-events: none` stuck on
-                <body> after it closes, freezing the app. */}
-            <ContextMenu modal={false}>
+            <ContextMenu>
               <ContextMenuTrigger asChild>
                 <div className="relative" {...dragHandleProps}>
                   <SidebarGroupLabel asChild>
@@ -702,10 +695,7 @@ export function CustomChannelSection({
                 {channels.length > 0 ? (
                   <SidebarMenu>
                     {channels.map((channel) => (
-                      // modal={false}: see note on the other channel ContextMenu
-                      // above — avoids the pointer-events lockup when Leave
-                      // channel's AlertDialog opens.
-                      <ContextMenu key={channel.id} modal={false}>
+                      <ContextMenu key={channel.id}>
                         <ContextMenuTrigger asChild>
                           <SidebarMenuItem>
                             <DraggableChannelRow channelId={channel.id}>

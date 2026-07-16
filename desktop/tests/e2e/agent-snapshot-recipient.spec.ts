@@ -3,12 +3,24 @@
  *
  * These tests exercise the AgentSnapshotCard rendered in a message timeline
  * when an .agent.json or .agent.png attachment is detected, and the full
- * Import agent → preview → confirm flow.
+ * Add agent → preview → confirm flow.
  */
 import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 
 type CommandLogEntry = { command: string; payload: unknown };
+
+function hasVisibleBoxShadow(boxShadow: string) {
+  if (boxShadow === "none") return false;
+
+  const colors = [...boxShadow.matchAll(/rgba?\(([^)]+)\)/gu)];
+  if (colors.length === 0) return true;
+
+  return colors.some(([, channels]) => {
+    const values = channels.split(",").map((value) => value.trim());
+    return values.length < 4 || Number(values[3]) > 0;
+  });
+}
 
 async function readCommandLog(page: import("@playwright/test").Page) {
   return page.evaluate(
@@ -129,16 +141,81 @@ test("recipient_timeline_renders_agent_snapshot_card_not_file_card", async ({
   // The sent attachment must render as AgentSnapshotCard.
   const card = page.getByTestId("agent-snapshot-card").last();
   await expect(card).toBeVisible({ timeout: 5000 });
+  await expect(card).toHaveAttribute("data-slot", "attachment");
 
-  // Must show filename.
-  await expect(card).toContainText("e2e-agent.agent.json");
+  // Show the agent name without the snapshot file extension.
+  const title = card.locator('[data-slot="attachment-title"]');
+  await expect(title).toBeVisible();
+  await expect(title).toHaveText("E2e Agent");
+  await expect(card).not.toContainText("e2e-agent.agent.json");
 
-  // Must show "Agent snapshot" label (untrusted until decode).
-  await expect(card).toContainText("Agent snapshot");
+  const mediaBox = await card
+    .locator('[data-slot="attachment-media"]')
+    .boundingBox();
+  expect(mediaBox?.width).toBe(mediaBox?.height);
+
+  // Metadata names the sharer and keeps the file size.
+  await expect(card).toContainText("Shared by npub1mock... · 1.2 KB");
+  await expect(card).not.toContainText("Agent snapshot");
 
   // Both actions must be present.
   await expect(card.getByTestId("agent-snapshot-card-import")).toBeVisible();
   await expect(card.getByTestId("agent-snapshot-card-download")).toBeVisible();
+  await expect(card.locator('[data-slot="attachment-action"]')).toHaveCount(2);
+  const actions = card.locator('[data-slot="attachment-actions"] button');
+  await expect(actions.nth(0)).toHaveAccessibleName("Download E2e Agent");
+  await expect(actions.nth(0)).toHaveText("");
+  await expect(actions.nth(1)).toHaveText("Add agent");
+
+  const addAgentButton = actions.nth(1);
+  const restingButtonStyle = await addAgentButton.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      backgroundColor: style.backgroundColor,
+      boxShadow: style.boxShadow,
+      color: style.color,
+    };
+  });
+  expect(restingButtonStyle.color).not.toBe(restingButtonStyle.backgroundColor);
+  expect(hasVisibleBoxShadow(restingButtonStyle.boxShadow)).toBe(false);
+
+  await addAgentButton.hover();
+  await expect
+    .poll(async () =>
+      hasVisibleBoxShadow(
+        await addAgentButton.evaluate(
+          (element) => getComputedStyle(element).boxShadow,
+        ),
+      ),
+    )
+    .toBe(false);
+
+  const [contentBox, downloadBox, addAgentBox] = await Promise.all([
+    card.locator('[data-slot="attachment-content"]').boundingBox(),
+    actions.nth(0).boundingBox(),
+    addAgentButton.boundingBox(),
+  ]);
+  expect(
+    (downloadBox?.x ?? 0) - ((contentBox?.x ?? 0) + (contentBox?.width ?? 0)),
+  ).toBeGreaterThanOrEqual(28);
+  expect(
+    (addAgentBox?.x ?? 0) - ((downloadBox?.x ?? 0) + (downloadBox?.width ?? 0)),
+  ).toBeGreaterThanOrEqual(8);
+
+  const [titleElement, descriptionElement] = await Promise.all([
+    title.elementHandle(),
+    card.locator('[data-slot="attachment-description"]').elementHandle(),
+  ]);
+  expect(
+    await titleElement?.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+  expect(
+    await descriptionElement?.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
 
   // Generic FileCard must NOT be present for this attachment.
   await expect(page.getByTestId("file-card")).toHaveCount(0);
@@ -163,7 +240,7 @@ test("recipient_download_invokes_download_file_only", async ({ page }) => {
   expect(fetchSnapshotCmds.length).toBe(0);
 });
 
-// ── Import agent: fetch → navigate to agents → open preview ──────────────────
+// ── Add agent: fetch → navigate to agents → open preview ─────────────────────
 
 test("recipient_import_navigates_to_agents_and_opens_preview", async ({
   page,
@@ -173,7 +250,7 @@ test("recipient_import_navigates_to_agents_and_opens_preview", async ({
   const card = page.getByTestId("agent-snapshot-card").last();
   await expect(card).toBeVisible({ timeout: 5000 });
 
-  // Click Import agent.
+  // Click Add agent.
   await card.getByTestId("agent-snapshot-card-import").click();
 
   // fetch_snapshot_bytes must have been called.
@@ -183,7 +260,7 @@ test("recipient_import_navigates_to_agents_and_opens_preview", async ({
     expect(fetchCmds.length).toBeGreaterThanOrEqual(1);
   }).toPass({ timeout: 5000 });
 
-  // download_file must NOT have been called for Import.
+  // download_file must NOT have been called for Add agent.
   const log = await readCommandLog(page);
   const downloadCmds = log.filter((e) => e.command === "download_file");
   expect(downloadCmds.length).toBe(0);
@@ -257,7 +334,7 @@ test("recipient_double_click_import_opens_one_preview", async ({ page }) => {
   await expect(card).toBeVisible({ timeout: 5000 });
   const importBtn = card.getByTestId("agent-snapshot-card-import");
 
-  // Click Import agent.
+  // Click Add agent.
   await importBtn.click();
 
   // Import dialog must open exactly once (not duplicated by rapid clicks).

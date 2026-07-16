@@ -1,4 +1,3 @@
-import { Bot, X } from "lucide-react";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -9,15 +8,9 @@ import {
 import type { Channel } from "@/shared/api/types";
 import { useSendMessageMutation } from "@/features/messages/hooks";
 import { getKeyboardSearchSelection } from "@/features/profile/lib/userCandidateSearch";
-import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import {
-  POOF_ORIGIN_CLASS,
-  POOF_TRIGGER_CLASS,
-} from "@/shared/ui/PoofBurstProvider";
-import { PubKey } from "@/shared/ui/PubKey";
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { Skeleton } from "@/shared/ui/skeleton";
 
@@ -344,95 +337,25 @@ export function NewMessageScreen() {
                   To:
                 </span>
                 {selectedUsers.map((user) => (
-                  <div
-                    className="inline-flex h-7 max-w-56 items-center gap-1.5 rounded-full bg-muted px-1.5 pr-2.5 text-sm transition-colors hover:bg-muted/80"
+                  <SelectedRecipientChip
+                    disabled={isPending}
+                    inspectionOpen={inspectedRecipientPubkey === user.pubkey}
                     key={user.pubkey}
-                  >
-                    <button
-                      aria-label={`Remove ${formatRecipientName(user)}`}
-                      className={cn(
-                        "group/remove-recipient relative h-5 w-5 shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
-                        POOF_TRIGGER_CLASS,
-                        POOF_ORIGIN_CLASS,
-                      )}
-                      data-testid={`new-dm-selected-${user.pubkey}`}
-                      disabled={isPending}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        handleRemoveUser(user.pubkey);
-                      }}
-                      onPointerDown={(event) => {
-                        if (event.button !== 0) {
-                          return;
-                        }
-                        event.stopPropagation();
-                        handleRemoveUser(user.pubkey);
-                      }}
-                      type="button"
-                    >
-                      <ProfileAvatar
-                        avatarUrl={user.avatarUrl}
-                        className="h-5 w-5 text-3xs shadow-none transition-opacity group-hover/remove-recipient:opacity-0 group-focus-visible/remove-recipient:opacity-0"
-                        iconClassName="h-2.5 w-2.5"
-                        label={formatRecipientName(user)}
-                      />
-                      <span className="absolute inset-0 flex items-center justify-center rounded-full bg-foreground text-background opacity-0 transition-opacity group-hover/remove-recipient:opacity-100 group-focus-visible/remove-recipient:opacity-100">
-                        <X aria-hidden="true" className="h-3 w-3" />
-                      </span>
-                    </button>
-                    <Popover
-                      onOpenChange={(open) => {
-                        setInspectedRecipientPubkey(open ? user.pubkey : null);
-                      }}
-                      open={inspectedRecipientPubkey === user.pubkey}
-                    >
-                      <PopoverAnchor asChild>
-                        <button
-                          aria-expanded={
-                            inspectedRecipientPubkey === user.pubkey
-                          }
-                          aria-haspopup="dialog"
-                          aria-label={`Verify ${formatRecipientName(user)} public key`}
-                          className="min-w-0 cursor-pointer truncate rounded font-medium hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-                          data-testid={`new-dm-recipient-name-${user.pubkey}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setInspectedRecipientPubkey((current) =>
-                              current === user.pubkey ? null : user.pubkey,
-                            );
-                          }}
-                          type="button"
-                        >
-                          {formatRecipientName(user)}
-                        </button>
-                      </PopoverAnchor>
-                      <PopoverContent
-                        align="start"
-                        className="w-96 max-w-[90vw] space-y-2"
-                        data-new-dm-key-popover=""
-                        data-testid={`new-dm-selected-key-popover-${user.pubkey}`}
-                        onOpenAutoFocus={(event) => event.preventDefault()}
-                      >
-                        <p className="text-sm font-medium">
-                          Verify {formatRecipientName(user)}
-                        </p>
-                        <PubKey
-                          pubkey={user.pubkey}
-                          testId={`new-dm-selected-pubkey-${user.pubkey}`}
-                          variant="full"
-                        />
-                        <p className="break-all font-mono text-xs text-muted-foreground">
-                          {user.pubkey}
-                        </p>
-                      </PopoverContent>
-                    </Popover>
-                    {user.isAgent ? (
-                      <Bot
-                        aria-label="agent"
-                        className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-                      />
-                    ) : null}
-                  </div>
+                    label={formatRecipientName(user)}
+                    onInspectionOpenChange={(inspectionOpen) => {
+                      setInspectedRecipientPubkey(
+                        inspectionOpen ? user.pubkey : null,
+                      );
+                    }}
+                    onRemove={() => handleRemoveUser(user.pubkey)}
+                    testIds={{
+                      chip: `new-dm-selected-${user.pubkey}`,
+                      keyPopover: `new-dm-selected-key-popover-${user.pubkey}`,
+                      name: `new-dm-recipient-name-${user.pubkey}`,
+                      pubkey: `new-dm-selected-pubkey-${user.pubkey}`,
+                    }}
+                    user={user}
+                  />
                 ))}
                 <input
                   aria-activedescendant={
@@ -562,7 +485,7 @@ export function NewMessageScreen() {
                 if (
                   target instanceof Element &&
                   (toFieldRef.current?.contains(target) ||
-                    Boolean(target.closest("[data-new-dm-key-popover]")))
+                    Boolean(target.closest("[data-recipient-key-popover]")))
                 ) {
                   event.preventDefault();
                 }

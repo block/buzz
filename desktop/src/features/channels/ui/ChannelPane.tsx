@@ -437,21 +437,25 @@ export const ChannelPane = React.memo(function ChannelPane({
 
     const actions = [];
     if (isWelcomeChannel(activeChannel)) {
+      if (onAddAgent) {
+        actions.push({
+          icon: <Bot aria-hidden className="h-6 w-6" />,
+          label: "Create an agent",
+          onClick: () =>
+            onAddAgent({
+              beforeSend: () =>
+                messageTimelineRef.current?.scrollToBottomOnNextUpdate(),
+            }),
+          testId: "welcome-intro-action-create-agent",
+        });
+      }
+
       if (onCreateChannel) {
         actions.push({
           icon: <Plus aria-hidden className="h-6 w-6" />,
           label: "Create a channel",
           onClick: onCreateChannel,
           testId: "welcome-intro-action-create-channel",
-        });
-      }
-
-      if (onAddAgent) {
-        actions.push({
-          icon: <Bot aria-hidden className="h-6 w-6" />,
-          label: "Create a custom agent",
-          onClick: onAddAgent,
-          testId: "welcome-intro-action-create-agent",
         });
       }
 

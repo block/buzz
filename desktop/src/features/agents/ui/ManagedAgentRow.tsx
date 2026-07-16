@@ -26,6 +26,7 @@ import { AgentConfigPanel } from "./AgentConfigPanel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
+import { SubsectionLabel } from "@/shared/ui/PageHeader";
 
 export function ManagedAgentRow({
   agent,
@@ -358,9 +359,7 @@ function StatusBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
-        Status
-      </p>
+      <SubsectionLabel className="lg:hidden">Status</SubsectionLabel>
       <AgentStatusBadge
         isWorking={isWorking}
         presenceLoaded={presenceLoaded}
@@ -394,9 +393,7 @@ function RuntimeBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
-        Runtime
-      </p>
+      <SubsectionLabel className="lg:hidden">Runtime</SubsectionLabel>
       <p className="truncate font-mono text-xs text-foreground">
         {agent.agentCommand}
       </p>

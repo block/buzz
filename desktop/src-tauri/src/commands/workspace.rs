@@ -183,6 +183,11 @@ pub async fn apply_workspace(
         let app = restore_app.clone();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
+            #[cfg(feature = "mesh-llm")]
+            if let Err(error) = crate::commands::mesh_llm::restore_mesh_sharing(&app, &state).await
+            {
+                eprintln!("buzz-desktop: failed to restore Share Compute: {error}");
+            }
             if let Err(error) =
                 restore_managed_agents_on_launch(&app, &state.shutdown_started).await
             {

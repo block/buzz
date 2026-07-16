@@ -61,9 +61,9 @@ export function RelayDirectorySection({
         ) : (
           <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
         )}
-        <h3 className="text-sm font-semibold tracking-tight">
+        <h2 className="text-lg font-semibold tracking-tight">
           Relay directory
-        </h3>
+        </h2>
         <span className="text-sm text-muted-foreground">
           ({otherAgents.length} other agent{otherAgents.length !== 1 ? "s" : ""}
           )
@@ -95,7 +95,7 @@ export function RelayDirectorySection({
                   className="w-full border-collapse text-left text-sm"
                   data-testid="relay-directory-table"
                 >
-                  <thead className="bg-muted/35 text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                  <thead className="bg-muted/35 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
                     <tr>
                       <th className="px-4 py-3">Agent</th>
                       <th className="px-4 py-3">Status</th>

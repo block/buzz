@@ -37,8 +37,10 @@ test("resolveSnapshotAvatarPng: emoji SVG is rasterized onto a canvas", async ()
     },
   };
 
+  const emojiSvg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="256" fill="#ffcc00"/><text>✨</text></svg>';
   const result = await resolveSnapshotAvatarPng(
-    "data:image/svg+xml,%3Csvg%2F%3E",
+    `data:image/svg+xml,${encodeURIComponent(emojiSvg)}`,
     {
       createCanvas: () => canvas,
       createImage: () => image,
@@ -46,7 +48,12 @@ test("resolveSnapshotAvatarPng: emoji SVG is rasterized onto a canvas", async ()
   );
 
   assert.equal(result, "data:image/png;base64,cmFzdGVyaXplZA==");
-  assert.equal(image.src, "data:image/svg+xml,%3Csvg%2F%3E");
+  const rasterizedSvg = decodeURIComponent(image.src.split(",", 2)[1]);
+  assert.match(
+    rasterizedSvg,
+    /<rect width="512" height="512" fill="#ffcc00"\/>/u,
+  );
+  assert.doesNotMatch(rasterizedSvg, /rx="256"/u);
   assert.equal(canvas.width, 512);
   assert.equal(canvas.height, 512);
   assert.deepEqual(draws, [[image, 0, 0, 512, 512]]);

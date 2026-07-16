@@ -118,12 +118,12 @@ test("resolveInheritedRuntimeSubmission preserves a user-edited provider + env w
   assert.equal(result.model, null);
 });
 
-test("resolveInheritedRuntimeSubmission clears an already-inheriting agent's provider override when the user picks Default", () => {
-  // Regression: an already-inheriting agent had a saved provider override
-  // (databricks). The user picks the "Default" option → empty local provider.
-  // Because the agent was NOT harness-pinned at open, this is a deliberate
-  // clear, not the inherit-transition — persist null (runtime default), do NOT
-  // resurrect the persona provider.
+test("resolveInheritedRuntimeSubmission clears an already-inheriting agent's persona-backed provider and model to AI defaults", () => {
+  // Regression: an already-inheriting agent is linked to a persona with a
+  // provider and model. The user picks "Use AI defaults" for both fields.
+  // Because the agent was NOT harness-pinned at open, these empty local values
+  // are deliberate clears, not an inherit-transition — persist null for both
+  // rather than resurrecting the persona values.
   const result = resolveInheritedRuntimeSubmission({
     inheritHarness: true,
     agentWasHarnessPinned: false,
@@ -135,6 +135,7 @@ test("resolveInheritedRuntimeSubmission clears an already-inheriting agent's pro
     personaEnvVars: { ANTHROPIC_API_KEY: "sk-persona" },
   });
   assert.equal(result.provider, null);
+  assert.equal(result.model, null);
   assert.deepEqual(result.envVars, {});
 });
 

@@ -7,6 +7,60 @@ use crate::managed_agents::{
 };
 use crate::util;
 
+/// Install SIGINT/SIGTERM/SIGHUP cleanup on ctrlc's dedicated handler thread.
+#[cfg(unix)]
+pub(crate) fn install_signal_handler(
+    app: tauri::AppHandle,
+    shutdown_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+
+    if let Err(error) = ctrlc::set_handler(move || {
+        app.state::<AppState>()
+            .shutdown_started
+            .store(true, Ordering::SeqCst);
+        if !shutdown_done.swap(true, Ordering::SeqCst) {
+            let _ = shutdown_managed_agents(&app);
+            #[cfg(feature = "mesh-llm")]
+            shutdown_mesh_runtime(&app);
+        }
+        #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+        hard_exit_after_mesh_shutdown();
+        #[cfg(not(all(feature = "mesh-llm", target_os = "macos")))]
+        std::process::exit(0);
+    }) {
+        eprintln!("buzz-desktop: failed to register signal handler: {error}");
+    }
+}
+
+#[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+pub(crate) fn hard_exit_after_mesh_shutdown() -> ! {
+    // SAFETY: all Buzz-managed subprocesses and the embedded Mesh runtime have
+    // been stopped. `_exit` intentionally skips only process-global C++
+    // destructors and buffered stdio; no application state remains observable.
+    unsafe { libc::_exit(0) }
+}
+
+#[cfg(feature = "mesh-llm")]
+pub(crate) fn shutdown_mesh_runtime(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let runtime = state.mesh_llm_runtime.lock().await.take();
+        let result = match runtime {
+            Some(runtime) => runtime.stop().await,
+            None => Ok(()),
+        };
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("buzz-desktop: failed to stop Mesh runtime: {error}"),
+        Err(error) => eprintln!("buzz-desktop: timed out stopping Mesh runtime: {error}"),
+    }
+}
+
 pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _restore_transition = state

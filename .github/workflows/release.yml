@@ -137,7 +137,7 @@ jobs:
         id: mesh_rev
         run: |
           set -euo pipefail
-          REV=$(grep -oE 'mesh-llm\.git\?rev=[0-9a-f]{40}' Cargo.lock | head -1 | grep -oE '[0-9a-f]{40}')
+          REV=$(python3 -c 'import tomllib; d=tomllib.load(open("Cargo.lock", "rb")); p=next(p for p in d["package"] if p["name"] == "mesh-llm-sdk"); print(p["source"].rsplit("#", 1)[1])')
           [[ -n "$REV" ]] || { echo "::error::could not resolve mesh-llm rev from Cargo.lock"; exit 1; }
           echo "rev=$REV" >> "$GITHUB_OUTPUT"
           echo "short=${REV:0:7}" >> "$GITHUB_OUTPUT"
@@ -203,6 +203,10 @@ jobs:
           DMG_PATH: ${{ steps.unsigned.outputs.dmg }}
         run: desktop/scripts/set-dmg-finder-text-size.sh "$DMG_PATH" 14
 
+      # mdx-ios-codesign-helper discovers this file by its exact lowercase basename.
+      - name: Stage signing entitlements
+        run: cp desktop/src-tauri/Entitlements.plist "${RUNNER_TEMP}/entitlements.plist"
+
       - name: Codesign and Notarize
         id: codesign
         uses: block/apple-codesign-action@679535d1ab7c5a7c18e6f9afcba3464512cc3dde # v1.1.0
@@ -210,7 +214,7 @@ jobs:
           osx-codesign-role: ${{ secrets.OSX_CODESIGN_ROLE }}
           codesign-s3-bucket: ${{ secrets.CODESIGN_S3_BUCKET }}
           unsigned-artifact-path: ${{ steps.unsigned.outputs.dmg }}
-          entitlements-plist-path: desktop/src-tauri/Entitlements.plist
+          entitlements-plist-path: ${{ runner.temp }}/entitlements.plist
           artifact-name: buzz-${{ github.sha }}-${{ github.run_id }}-arm64
 
       - name: Replace DMG and rebuild updater archive
@@ -246,6 +250,8 @@ jobs:
           codesign --verify --deep --strict --verbose=2 \
             desktop/src-tauri/target/release/bundle/macos/Buzz.app
           spctl --assess --type execute --verbose=4 \
+            desktop/src-tauri/target/release/bundle/macos/Buzz.app
+          desktop/scripts/verify-macos-entitlements.sh \
             desktop/src-tauri/target/release/bundle/macos/Buzz.app
 
       - name: Locate build artifacts
@@ -369,6 +375,10 @@ jobs:
           DMG_PATH: ${{ steps.unsigned.outputs.dmg }}
         run: desktop/scripts/set-dmg-finder-text-size.sh "$DMG_PATH" 14
 
+      # mdx-ios-codesign-helper discovers this file by its exact lowercase basename.
+      - name: Stage signing entitlements
+        run: cp desktop/src-tauri/Entitlements.plist "${RUNNER_TEMP}/entitlements.plist"
+
       - name: Codesign and Notarize
         id: codesign
         uses: block/apple-codesign-action@679535d1ab7c5a7c18e6f9afcba3464512cc3dde # v1.1.0
@@ -376,7 +386,7 @@ jobs:
           osx-codesign-role: ${{ secrets.OSX_CODESIGN_ROLE }}
           codesign-s3-bucket: ${{ secrets.CODESIGN_S3_BUCKET }}
           unsigned-artifact-path: ${{ steps.unsigned.outputs.dmg }}
-          entitlements-plist-path: desktop/src-tauri/Entitlements.plist
+          entitlements-plist-path: ${{ runner.temp }}/entitlements.plist
           artifact-name: buzz-${{ github.sha }}-${{ github.run_id }}-x64
 
       - name: Replace DMG and rebuild updater archive
@@ -411,6 +421,7 @@ jobs:
           APP_DIR="desktop/src-tauri/target/${TARGET}/release/bundle/macos/Buzz.app"
           codesign --verify --deep --strict --verbose=2 "$APP_DIR"
           spctl --assess --type execute --verbose=4 "$APP_DIR"
+          desktop/scripts/verify-macos-entitlements.sh "$APP_DIR"
 
       - name: Locate updater archive
         id: artifacts

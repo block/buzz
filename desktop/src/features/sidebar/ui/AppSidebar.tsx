@@ -118,6 +118,7 @@ type AppSidebarProps = {
     templateId?: string;
   }) => Promise<void>;
   onOpenAddCommunity: () => void;
+  onSendFeedback?: () => void;
   onHideDm: (channelId: string) => void;
   onMarkChannelUnread: (channelId: string) => void;
   onMarkChannelRead: (
@@ -189,6 +190,7 @@ export function AppSidebar({
   onCreateChannel,
   onCreateForum,
   onOpenAddCommunity,
+  onSendFeedback,
   onHideDm,
   onMarkChannelUnread,
   onMarkChannelRead,
@@ -835,6 +837,7 @@ export function AppSidebar({
                   isPresencePending={isPresencePending}
                   onOpenAddCommunity={onOpenAddCommunity}
                   onOpenSettings={onSelectSettings}
+                  onSendFeedback={onSendFeedback}
                   onRemoveCommunity={onRemoveCommunity}
                   onSetPresenceStatus={onSetPresenceStatus}
                   onSetUserStatus={onSetUserStatus}

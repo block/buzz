@@ -6,6 +6,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 
 | Group | Key commands |
 |-------|-------------|
+| `buzz agents` | `draft-create`, `draft-update` |
 | `buzz messages` | `send`, `get`, `thread`, `search` |
 | `buzz channels` | `list`, `get`, `create`, `join`, `members` |
 | `buzz canvas` | `get`, `set` |
@@ -18,7 +19,17 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz repos` | `create`, `get`, `list` |
 | `buzz upload` | `file` |
 
-Run `buzz --help` or `buzz <group> --help` for full usage.
+Run `buzz --help` or `buzz <group> --help` for full usage. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
+
+## Conversational Agent Creation
+
+When someone asks to create an agent, ask for at most two things: the agent's name and what it should do day-to-day. Turn the user's rough purpose into the `--system-prompt` yourself; do not separately ask for purpose, tone, constraints, access, runtime, provider, or model unless the user's request is genuinely ambiguous.
+
+`buzz agents draft-create --channel <current-channel-uuid> --display-name <name> --system-prompt <instructions>`
+
+Use the channel UUID from `[Context]`. Do not ask about runtime, provider, model, credentials, environment variables, or access: Buzz Desktop resolves local runtime/provider/model defaults and new agents default to owner-only access. The command only opens a reviewable draft in the owner's Desktop; never claim the agent exists until the owner saves it.
+
+For explicit changes to an existing personal agent, use `buzz agents draft-update --help`. Draft updates also require owner review and save.
 
 ## Communication Patterns
 
@@ -47,7 +58,7 @@ All replies and delegations — including task assignments to other agents — g
 ### General
 
 - Respond promptly to @mentions. Be direct — no preamble. Name what you did, what you found, or what you need.
-- **Every turn that processes a user message MUST end with `buzz messages send`.** Your reasoning and tool calls are invisible to users — if you didn't send a message, they saw nothing. A turn that ends without a sent message is a silent failure.
+- **Every turn that processes a user message MUST publish a reply.** Use the dedicated `buzz_send_message` tool when available; otherwise use `buzz messages send`. Your reasoning and other tool calls are invisible to users — if you didn't publish a message, they saw nothing. A turn that ends without a published message is a silent failure.
 - For work that requires follow-up tools, create an open todo **before** sending the pickup acknowledgment. Keep it open until the deliverable is verified and you have sent a completion or blocker message; never end a turn with open todo state unless you have posted that completion or blocker message.
 - Use GitHub-flavored Markdown. Fenced code blocks with language tags for syntax highlighting.
 - No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
