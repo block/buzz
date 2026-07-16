@@ -20,8 +20,12 @@
 
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use buzz_test_client::{BuzzTestClient, RelayMessage, TestClientError};
 use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 fn relay_url() -> String {
     std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
@@ -37,6 +41,124 @@ fn relay_http_url() -> String {
         .replace("ws://", "http://")
         .trim_end_matches('/')
         .to_string()
+}
+
+fn test_owner_keys() -> Keys {
+    std::env::var("BUZZ_TEST_OWNER_PRIVATE_KEY")
+        .ok()
+        .and_then(|secret| Keys::parse(&secret).ok())
+        .unwrap_or_else(Keys::generate)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    hex::encode(digest)
+}
+
+fn nip98_post_header(keys: &Keys, url: &str, body: &str) -> String {
+    let event = EventBuilder::new(Kind::Custom(27_235), "")
+        .tags(vec![
+            Tag::parse(["u", url]).unwrap(),
+            Tag::parse(["method", "POST"]).unwrap(),
+            Tag::parse(["payload", &sha256_hex(body.as_bytes())]).unwrap(),
+            Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .expect("sign NIP-98 event");
+    format!(
+        "Nostr {}",
+        BASE64.encode(serde_json::to_string(&event).expect("serialize NIP-98 event"))
+    )
+}
+
+async fn e2e_db_pool() -> sqlx::Pool<sqlx::Postgres> {
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect to e2e Postgres")
+}
+
+async fn ensure_test_community(host: &str) -> uuid::Uuid {
+    let pool = e2e_db_pool().await;
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO communities (id, host) \
+         VALUES ($1, $2) \
+         ON CONFLICT (lower(host)) DO NOTHING",
+    )
+    .bind(id)
+    .bind(host)
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed community {host}: {e}"));
+
+    sqlx::query_scalar("SELECT id FROM communities WHERE lower(host) = lower($1)")
+        .bind(host)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("lookup community {host}: {e}"))
+}
+
+async fn seed_relay_member(host: &str, keys: &Keys, role: &str) {
+    let pool = e2e_db_pool().await;
+    let community_id = ensure_test_community(host).await;
+    sqlx::query(
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+         VALUES ($1, $2, $3, NULL) \
+         ON CONFLICT (community_id, pubkey) DO UPDATE \
+         SET role = $3, updated_at = now()",
+    )
+    .bind(community_id)
+    .bind(keys.public_key().to_hex())
+    .bind(role)
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed relay member {role}: {e}"));
+}
+
+async fn seed_relay_owner(keys: &Keys) {
+    seed_relay_member("localhost:3000", keys, "owner").await;
+}
+
+fn http_origin_for_host(host: &str) -> String {
+    let scheme = if relay_http_url().starts_with("https://") {
+        "https"
+    } else {
+        "http"
+    };
+    format!("{scheme}://{host}")
+}
+
+async fn invite_post(keys: &Keys, path: &str, body: &str) -> reqwest::Response {
+    invite_post_with_host(keys, None, path, body).await
+}
+
+async fn invite_post_with_host(
+    keys: &Keys,
+    host: Option<&str>,
+    path: &str,
+    body: &str,
+) -> reqwest::Response {
+    let client = reqwest::Client::new();
+    let connection_url = format!("{}{}", relay_http_url(), path);
+    let signed_url = host
+        .map(|host| format!("{}{}", http_origin_for_host(host), path))
+        .unwrap_or_else(|| connection_url.clone());
+    let mut request = client
+        .post(&connection_url)
+        .header("Authorization", nip98_post_header(keys, &signed_url, body))
+        .header("Content-Type", "application/json");
+    if let Some(host) = host {
+        request = request.header(reqwest::header::HOST, host);
+    }
+    request
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("POST {path} failed: {e}"))
 }
 
 /// Create a real channel via a signed kind:9007 event submitted to POST /events.
@@ -90,6 +212,103 @@ async fn test_connect_and_authenticate() {
         .expect("should connect and authenticate");
 
     client.disconnect().await.expect("clean disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_mint_and_claim_admits_new_pubkey() {
+    let owner = test_owner_keys();
+    let joiner = Keys::generate();
+    seed_relay_owner(&owner).await;
+
+    let mint_response = invite_post(&owner, "/api/invites", "{}").await;
+    assert_eq!(mint_response.status(), reqwest::StatusCode::OK);
+    let mint_json: serde_json::Value = mint_response.json().await.expect("mint JSON");
+    let code = mint_json
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .expect("mint response includes code");
+    assert_eq!(
+        mint_json.get("url").and_then(serde_json::Value::as_str),
+        Some(format!("{}/invite/{code}", relay_http_url()).as_str()),
+        "minted URL should be the shareable HTTPS/HTTP invite URL"
+    );
+
+    let claim_body = serde_json::json!({ "code": code }).to_string();
+    let claim_response = invite_post(&joiner, "/api/invites/claim", &claim_body).await;
+    assert_eq!(claim_response.status(), reqwest::StatusCode::OK);
+    let claim_json: serde_json::Value = claim_response.json().await.expect("claim JSON");
+    assert_eq!(
+        claim_json.get("status").and_then(serde_json::Value::as_str),
+        Some("joined")
+    );
+    assert_eq!(
+        claim_json.get("role").and_then(serde_json::Value::as_str),
+        Some("member")
+    );
+
+    let repeat_response = invite_post(&joiner, "/api/invites/claim", &claim_body).await;
+    assert_eq!(repeat_response.status(), reqwest::StatusCode::OK);
+    let repeat_json: serde_json::Value = repeat_response.json().await.expect("repeat claim JSON");
+    assert_eq!(
+        repeat_json
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("already_member")
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_claim_rejects_invalid_code() {
+    let joiner = Keys::generate();
+    let body = serde_json::json!({ "code": "garbage.code" }).to_string();
+
+    let response = invite_post(&joiner, "/api/invites/claim", &body).await;
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    let json: serde_json::Value = response.json().await.expect("error JSON");
+    assert_eq!(
+        json.get("error").and_then(serde_json::Value::as_str),
+        Some("invite_invalid")
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_mint_requires_owner_or_admin() {
+    let member = Keys::generate();
+    seed_relay_member("localhost:3000", &member, "member").await;
+
+    let response = invite_post(&member, "/api/invites", "{}").await;
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let outsider = Keys::generate();
+    let response = invite_post(&outsider, "/api/invites", "{}").await;
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_code_minted_for_one_host_fails_on_another() {
+    let host_a = format!("invites-a-{}.example", Uuid::new_v4().simple());
+    let host_b = format!("invites-b-{}.example", Uuid::new_v4().simple());
+    let owner = Keys::generate();
+    let joiner = Keys::generate();
+    ensure_test_community(&host_b).await;
+    seed_relay_member(&host_a, &owner, "owner").await;
+
+    let mint_response = invite_post_with_host(&owner, Some(&host_a), "/api/invites", "{}").await;
+    assert_eq!(mint_response.status(), reqwest::StatusCode::OK);
+    let mint_json: serde_json::Value = mint_response.json().await.expect("mint JSON");
+    let code = mint_json
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .expect("mint response includes code");
+
+    let claim_body = serde_json::json!({ "code": code }).to_string();
+    let claim_response =
+        invite_post_with_host(&joiner, Some(&host_b), "/api/invites/claim", &claim_body).await;
+    assert_eq!(claim_response.status(), reqwest::StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

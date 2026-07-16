@@ -22,6 +22,7 @@ export function useIndependentThreadPanel(args: {
   members: ChannelMember[] | undefined;
   personaLookup: Map<string, string>;
   respondToLookup: Map<string, RespondToMode>;
+  relaySelfPubkey: string | null | undefined;
 }) {
   // Depend on the individual fields, NOT the `args` object — callers pass a
   // fresh object literal every render, so `[args]` never memoizes and the
@@ -46,6 +47,7 @@ export function useIndependentThreadPanel(args: {
         args.members,
         args.personaLookup,
         args.respondToLookup,
+        args.relaySelfPubkey,
       ),
     [
       args.channelEvents,
@@ -60,6 +62,7 @@ export function useIndependentThreadPanel(args: {
       args.members,
       args.personaLookup,
       args.respondToLookup,
+      args.relaySelfPubkey,
     ],
   );
 }

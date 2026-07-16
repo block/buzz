@@ -64,12 +64,20 @@ export function WelcomeSetup({
     setPage(nextPage);
   }, []);
 
+  const handleDefaultCommunity = React.useCallback(() => {
+    communityOnboarding.start({
+      source: "first-community",
+      relayUrl: defaultRelayUrl,
+    });
+  }, [communityOnboarding, defaultRelayUrl]);
+
   const handleInviteRedeem = React.useCallback(
-    (relayWsUrl: string, code: string) => {
+    (relayWsUrl: string, code: string, policyReceipt?: string) => {
       communityOnboarding.start({
         source: "first-community",
         relayUrl: relayWsUrl,
         inviteCode: code,
+        policyReceipt,
       });
     },
     [communityOnboarding],
@@ -107,6 +115,15 @@ export function WelcomeSetup({
               Choose how you want to get started.
             </p>
             <div className="mt-8 flex w-full flex-col gap-3">
+              {isLocalDevRelayUrl(defaultRelayUrl) ? null : (
+                <Button
+                  className="h-10 w-full"
+                  onClick={handleDefaultCommunity}
+                  type="button"
+                >
+                  Join default community
+                </Button>
+              )}
               <Button
                 className="h-10 w-full"
                 onClick={() => showPage("join")}

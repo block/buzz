@@ -2689,6 +2689,30 @@ impl Db {
         relay_members::add_relay_member(&self.pool, community, pubkey, role, added_by).await
     }
 
+    /// Claims relay membership via an invite and atomically persists the
+    /// accepted policy version when a policy is configured.
+    pub async fn claim_relay_membership(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        role: &str,
+        policy_version: Option<&str>,
+    ) -> Result<bool> {
+        relay_members::claim_relay_membership(&self.pool, community, pubkey, role, policy_version)
+            .await
+    }
+
+    /// Returns whether a member has persisted acceptance evidence for a policy version.
+    pub async fn has_join_policy_acceptance(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        policy_version: &str,
+    ) -> Result<bool> {
+        relay_members::has_join_policy_acceptance(&self.pool, community, pubkey, policy_version)
+            .await
+    }
+
     /// Removes a relay member from `community` atomically, refusing to delete the owner.
     pub async fn remove_relay_member(
         &self,

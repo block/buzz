@@ -4,6 +4,7 @@ import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
 import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandlers";
+import { useMessageEventProfilePubkeys } from "@/features/channels/useMessageEventProfilePubkeys";
 import { useThreadTargetSync } from "@/features/channels/useThreadTargetSync";
 import {
   useChannelMembersQuery,
@@ -37,12 +38,7 @@ import {
   useSendMessageMutation,
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
-import {
-  collectMessageAuthorPubkeys,
-  collectMessageMentionPubkeys,
-  collectReactionActorPubkeys,
-  formatTimelineMessages,
-} from "@/features/messages/lib/formatTimelineMessages";
+import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import {
   channelWindowThreadSummaries,
   type ChannelWindowThreadSummary,
@@ -59,6 +55,7 @@ import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import type { RelayEvent, RespondToMode, SearchHit } from "@/shared/api/types";
 import { useChannelFind } from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
@@ -158,6 +155,7 @@ export function ChannelScreen({
   const mainInsetRef = useMainInsetRef();
   const currentPubkey = currentIdentity?.pubkey;
   const activeChannelId = activeChannel?.id ?? null;
+  const relaySelfPubkey = useRelaySelfQuery(activeChannel !== null).data;
   const effectiveOpenThreadHeadId =
     optimisticOpenThreadHeadId === undefined
       ? openThreadHeadId
@@ -249,16 +247,11 @@ export function ChannelScreen({
     return extraEvents.reduce(mergeMessages, currentMessages);
   }, [activeChannel, findEvents, messagesQuery.data, targetMessageEvents]);
   const threadReplyEvents = threadRepliesQuery.data ?? EMPTY_RELAY_EVENTS;
-  const messageEventProfilePubkeys = React.useMemo(() => {
-    const events = [...resolvedMessages, ...threadReplyEvents];
-    return [
-      ...new Set([
-        ...collectMessageAuthorPubkeys(events),
-        ...collectMessageMentionPubkeys(events),
-        ...collectReactionActorPubkeys(events),
-      ]),
-    ];
-  }, [resolvedMessages, threadReplyEvents]);
+  const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
+    resolvedMessages,
+    threadReplyEvents,
+    relaySelfPubkey,
+  );
   const latestMessageEvent = React.useMemo(
     () => resolvedMessages[resolvedMessages.length - 1] ?? null,
     [resolvedMessages],
@@ -267,6 +260,7 @@ export function ChannelScreen({
     activeChannel,
     currentPubkey,
     latestMessageEvent,
+    relaySelfPubkey,
   );
   const activeDmParticipantPubkeys = React.useMemo(
     () =>
@@ -396,6 +390,7 @@ export function ChannelScreen({
         channelMembers,
         personaLookup,
         respondToLookup,
+        relaySelfPubkey,
       ),
     [
       activeChannel,
@@ -404,6 +399,7 @@ export function ChannelScreen({
       currentPubkey,
       messageProfiles,
       personaLookup,
+      relaySelfPubkey,
       respondToLookup,
       resolvedMessages,
     ],
@@ -442,6 +438,7 @@ export function ChannelScreen({
     members: channelMembers,
     personaLookup,
     respondToLookup,
+    relaySelfPubkey,
   });
   const {
     firstUnreadMessageId,

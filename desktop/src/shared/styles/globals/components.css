@@ -214,6 +214,15 @@
     width: 100%;
   }
 
+  .buzz-onboarding-neutral-theme.buzz-startup-shell {
+    background-image: linear-gradient(to bottom, #d7d72e, #d7e7f6);
+  }
+
+  .buzz-onboarding-neutral-theme.buzz-startup-shell.buzz-onboarding-welcome {
+    background-color: #d7d72e;
+    background-image: none;
+  }
+
   .buzz-onboarding-neutral-theme {
     --background: 0 0% 100%;
     --foreground: 0 0% 9%;
@@ -233,7 +242,7 @@
     --buzz-onboarding-emoji-picker-input: 255, 255, 255;
   }
 
-  .dark .buzz-onboarding-neutral-theme {
+  .dark .buzz-onboarding-neutral-theme:not(.buzz-startup-shell) {
     --background: 0 0% 3.9%;
     --foreground: 0 0% 98%;
     --primary: 0 0% 98%;
@@ -271,7 +280,9 @@
     --buzz-onboarding-emoji-picker-input: 255, 255, 255;
   }
 
-  .buzz-onboarding-neutral-theme[data-system-color-scheme="dark"] {
+  .buzz-onboarding-neutral-theme[data-system-color-scheme="dark"]:not(
+    .buzz-startup-shell
+  ) {
     --background: 0 0% 3.9%;
     --foreground: 0 0% 98%;
     --primary: 0 0% 98%;

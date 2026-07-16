@@ -2,8 +2,17 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type { StartCommunityOnboardingInput } from "@/features/onboarding/communityOnboarding";
 
+export type AddCommunityDeepLinkPayload = {
+  relayUrl: string;
+  name?: string;
+};
+
 export interface DeepLinkDeps {
   startCommunityOnboarding: (input: StartCommunityOnboardingInput) => boolean;
+  openAddCommunity: (
+    payload: AddCommunityDeepLinkPayload & { requestId: string },
+  ) => boolean;
+  onAddCommunityAvailable: (listener: () => void) => () => void;
 }
 
 /**
@@ -37,24 +46,36 @@ export type NostrBindDeepLinkPayload = {
 export type JoinDeepLinkPayload = {
   relayUrl: string;
   code: string;
+  policyReceipt: string | null;
 };
 
 type PendingCommunityDeepLink = {
   id: string;
-  kind: "connect" | "join";
+  kind: "connect" | "join" | "add-community";
   relayUrl: string;
   code: string | null;
+  name: string | null;
+  policyReceipt: string | null;
 };
 
 function acceptPendingCommunityDeepLink(
   pending: PendingCommunityDeepLink,
   deps: DeepLinkDeps,
 ) {
-  const accepted = deps.startCommunityOnboarding({
-    source: pending.kind === "join" ? "deep-link-join" : "deep-link-connect",
-    relayUrl: pending.relayUrl,
-    inviteCode: pending.code ?? undefined,
-  });
+  const accepted =
+    pending.kind === "add-community"
+      ? deps.openAddCommunity({
+          requestId: pending.id,
+          relayUrl: pending.relayUrl,
+          name: pending.name ?? undefined,
+        })
+      : deps.startCommunityOnboarding({
+          source:
+            pending.kind === "join" ? "deep-link-join" : "deep-link-connect",
+          relayUrl: pending.relayUrl,
+          inviteCode: pending.code ?? undefined,
+          policyReceipt: pending.policyReceipt ?? undefined,
+        });
   return accepted
     ? invoke<boolean>("acknowledge_pending_community_deep_link", {
         id: pending.id,
@@ -69,6 +90,7 @@ async function drainPendingCommunityDeepLinks(deps: DeepLinkDeps) {
     );
     if (!pending) return;
     if (!(await acceptPendingCommunityDeepLink(pending, deps))) return;
+    if (pending.kind === "add-community") return;
   }
 }
 
@@ -91,16 +113,41 @@ async function drainPendingCommunityDeepLinks(deps: DeepLinkDeps) {
 export async function listenForDeepLinks(
   deps: DeepLinkDeps,
 ): Promise<UnlistenFn> {
+  let drainRunning = false;
+  let drainRequested = false;
   const drain = () => {
-    void drainPendingCommunityDeepLinks(deps).catch((error: unknown) => {
-      console.warn("Failed to drain pending community deep links", error);
-    });
+    drainRequested = true;
+    if (drainRunning) return;
+    drainRunning = true;
+    void (async () => {
+      try {
+        while (drainRequested) {
+          drainRequested = false;
+          await drainPendingCommunityDeepLinks(deps);
+        }
+      } catch (error: unknown) {
+        console.warn("Failed to drain pending community deep links", error);
+      } finally {
+        drainRunning = false;
+        if (drainRequested) drain();
+      }
+    })();
   };
+  const stopAvailabilityListener = deps.onAddCommunityAvailable(drain);
   const connectPromise = listen<string>("deep-link-connect", drain);
   const joinPromise = listen<JoinDeepLinkPayload>("deep-link-join", drain);
-  const unlistens = await Promise.all([connectPromise, joinPromise]);
+  const addCommunityPromise = listen<AddCommunityDeepLinkPayload>(
+    "deep-link-add-community",
+    drain,
+  );
+  const unlistens = await Promise.all([
+    connectPromise,
+    joinPromise,
+    addCommunityPromise,
+  ]);
   drain();
   return () => {
+    stopAvailabilityListener();
     for (const unlisten of unlistens) unlisten();
   };
 }

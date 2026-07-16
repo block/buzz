@@ -1,7 +1,10 @@
 import * as React from "react";
 
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
-import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
+import {
+  inviteErrorMessage,
+  isInviteExpiredError,
+} from "@/shared/api/inviteHelpers";
 import { claimInvite } from "@/shared/api/invites";
 
 /**
@@ -23,12 +26,23 @@ export function useClaimInvite() {
       return;
     }
     setIsPending(true);
-    void claimInvite(transaction.relayUrl, transaction.inviteCode ?? "")
+    void claimInvite(
+      transaction.relayUrl,
+      transaction.inviteCode ?? "",
+      transaction.policyReceipt,
+    )
       .then(() => {
         update({ stage: "connecting", error: undefined }, transaction.id);
       })
       .catch((error: unknown) =>
-        update({ error: inviteErrorMessage(error) }, transaction.id),
+        update(
+          {
+            error: isInviteExpiredError(error)
+              ? "This invite code has expired — ask for a new one."
+              : inviteErrorMessage(error),
+          },
+          transaction.id,
+        ),
       )
       .finally(() => setIsPending(false));
   }, [isPending, transaction, update]);

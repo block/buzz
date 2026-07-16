@@ -251,6 +251,7 @@ pub struct ThreadSummary {
 pub struct ForumMessageInfo {
     pub event_id: String,
     pub pubkey: String,
+    pub sig: String,
     pub content: String,
     pub kind: u32,
     pub created_at: i64,
@@ -272,6 +273,7 @@ pub struct ForumPostsResponse {
 pub struct ForumThreadReplyInfo {
     pub event_id: String,
     pub pubkey: String,
+    pub sig: String,
     pub content: String,
     pub kind: u32,
     pub created_at: i64,

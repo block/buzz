@@ -54,6 +54,7 @@ import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useActiveDraftCount } from "@/features/messages/ui/DraftsPanel";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import {
   countDueReminders,
@@ -124,6 +125,7 @@ export function HomeView({
   onOpenContext,
   onRefresh,
 }: HomeViewProps) {
+  const relaySelfPubkey = useRelaySelfQuery().data;
   const [homeInboxRef, homeInboxWidthPx] = useElementWidth<HTMLDivElement>();
   const isNarrowHomeViewport =
     homeInboxWidthPx > 0 &&
@@ -471,6 +473,10 @@ export function HomeView({
       currentPubkey,
       currentUserAvatarUrl,
       feedProfiles,
+      undefined,
+      undefined,
+      undefined,
+      relaySelfPubkey,
     );
 
     return timelineMessages.map((message) =>
@@ -485,6 +491,7 @@ export function HomeView({
     channelMessages,
     currentPubkey,
     feedProfiles,
+    relaySelfPubkey,
     selectedChannel,
     selectedEventId,
     selectedItem,

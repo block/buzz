@@ -876,15 +876,25 @@ fn apply_inbound_team(teams: &mut Vec<TeamRecord>, d_tag: String, inbound: TeamE
         Some(local) => {
             local.name = inbound.name;
             local.description = inbound.description;
-            local.instructions = inbound.instructions;
-            local.persona_ids = inbound.persona_ids;
+            // `None` means the event came from a client that predates
+            // always-publish — its true value is unknown, so preserve
+            // local. Only `Some` (including the explicit-clear variants)
+            // overwrites. See `TeamEventContent` for the wire rules.
+            if let Some(instructions) = inbound.instructions {
+                local.instructions = instructions;
+            }
+            if let Some(persona_ids) = inbound.persona_ids {
+                local.persona_ids = persona_ids;
+            }
         }
         None => teams.push(TeamRecord {
             id: d_tag,
             name: inbound.name,
             description: inbound.description,
-            instructions: inbound.instructions,
-            persona_ids: inbound.persona_ids,
+            // Fresh insert has no local value to preserve; `None` from a
+            // pre-fix client simply means no known value.
+            instructions: inbound.instructions.unwrap_or_default(),
+            persona_ids: inbound.persona_ids.unwrap_or_default(),
             is_builtin: false,
             source_dir: None,
             is_symlink: false,

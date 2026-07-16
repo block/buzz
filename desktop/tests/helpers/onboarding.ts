@@ -20,6 +20,5 @@ export async function seedActiveIdentity(
 export async function passThroughBackupStep(page: Page) {
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("nsec-value")).toBeVisible();
-  await page.getByTestId("backup-acknowledge").check();
   await page.getByTestId("onboarding-next").click();
 }
