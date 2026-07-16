@@ -2749,16 +2749,19 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
 ///   mid-handshake) and `ResetWithoutClosingHandshake` (abrupt reset).
 /// - `WebSocket(Http(resp))` — non-101 HTTP response; terminal unless the
 ///   status is `408`, `429`, or `5xx` (server-side transient conditions).
-/// - `WebSocket(Tls)` — deterministic TLS validation/config failures
-///   (`InvalidDnsName`, invalid/expired certificates). On our rustls build
-///   the only connect-time `Tls` is deterministic; transport-level TLS loss
-///   surfaces as `Io` (transient).
+/// - `WebSocket(Tls)` — deterministic TLS config failures. On our rustls
+///   build the only connect-time `Tls` is `InvalidDnsName`.
+/// - `WebSocket(Io)` with a `rustls::Error` in the source chain — terminal.
+///   `tokio-rustls` wraps all rustls handshake failures (invalid/expired
+///   certificate, hostname mismatch, protocol errors) as `io::Error` with
+///   the `rustls::Error` as source; `tokio-tungstenite` then surfaces them
+///   as `Error::Io`. These are deterministic validation failures.
 /// - `AuthFailed` — split by [`is_terminal_auth_failure`].
 ///
 /// **Transient (retry):**
-/// - `WebSocket(Io)`, `WebSocket(ConnectionClosed)` — link-level failures.
-///   TLS transport loss also surfaces here: on our rustls build,
-///   `tokio-tungstenite` maps mid-handshake I/O failures to `Error::Io`.
+/// - `WebSocket(Io)` without a rustls source — plain transport failures
+///   (reset, EOF, timeout, refused, mid-handshake TLS transport loss).
+/// - `WebSocket(ConnectionClosed)` — link-level closure.
 /// - `WebSocket(AlreadyClosed)`, `WebSocket(WriteBufferFull)` — unreachable
 ///   during `connect_async`; kept fail-safe transient.
 /// - `NoAuthChallenge`, `ConnectionClosed`, `Timeout` — timing/link noise.
@@ -2798,17 +2801,49 @@ fn is_terminal_ws_error(err: &tokio_tungstenite::tungstenite::Error) -> bool {
             ProtocolError::HandshakeIncomplete | ProtocolError::ResetWithoutClosingHandshake
         ),
 
-        // Link-level / timing failures.
-        WsError::Io(_) | WsError::ConnectionClosed => false,
+        // Io: split by error source. tokio-rustls wraps all rustls handshake
+        // failures (invalid/expired cert, hostname mismatch, protocol errors)
+        // as io::Error with the rustls::Error as source. Those are terminal —
+        // deterministic validation failures that retry cannot fix. Plain
+        // transport Io (reset, EOF, timeout, refused) stays transient.
+        // Relies on a single rustls version in the dep tree (0.23.40);
+        // a version split would break the downcast.
+        WsError::Io(e) => has_rustls_source(e),
 
-        // Deterministic TLS validation/config failures. On our rustls build
-        // the only connect-time Tls is InvalidDnsName; transport-level TLS
-        // loss surfaces as Io (transient via the arm above).
+        WsError::ConnectionClosed => false,
+
+        // Deterministic TLS config failures. On our rustls build the only
+        // connect-time Tls variant is InvalidDnsName; certificate validation
+        // failures arrive wrapped inside Io (terminal via source-chain
+        // downcast above).
         WsError::Tls(_) => true,
 
         // Unreachable during connect_async; kept fail-safe transient.
         WsError::AlreadyClosed | WsError::WriteBufferFull(_) => false,
     }
+}
+
+/// Walks the `std::error::Error::source()` chain of an `io::Error` looking
+/// for a `rustls::Error`. Returns `true` if found — the error originated
+/// from a deterministic TLS validation failure, not a transport problem.
+fn has_rustls_source(err: &std::io::Error) -> bool {
+    use std::error::Error as _;
+    // First check the direct inner error (io::Error stores the custom error
+    // as its payload, accessible via get_ref — source() skips to *its* source).
+    if let Some(inner) = err.get_ref() {
+        if inner.downcast_ref::<rustls::Error>().is_some() {
+            return true;
+        }
+    }
+    // Walk the source chain for deeper wrapping.
+    let mut source = err.source();
+    while let Some(e) = source {
+        if e.downcast_ref::<rustls::Error>().is_some() {
+            return true;
+        }
+        source = e.source();
+    }
+    false
 }
 
 /// Whether a relay's `OK false <message>` denial during NIP-42 auth is
@@ -4224,31 +4259,80 @@ mod tests {
                 )),
                 false,
             ),
-            // ── WebSocket inner: transient ──
+            // ── WebSocket(Io): transport (transient) ──
             (
-                "WebSocket(Io): dropped connection is link noise",
+                "Io(other): plain transport failure is transient",
                 ws(WsError::Io(std::io::Error::other("reset"))),
                 false,
+            ),
+            (
+                "Io(ConnectionReset): transport reset is transient",
+                ws(WsError::Io(std::io::ErrorKind::ConnectionReset.into())),
+                false,
+            ),
+            (
+                "Io(UnexpectedEof): transport EOF is transient",
+                ws(WsError::Io(std::io::ErrorKind::UnexpectedEof.into())),
+                false,
+            ),
+            (
+                "Io(TimedOut): transport timeout is transient",
+                ws(WsError::Io(std::io::ErrorKind::TimedOut.into())),
+                false,
+            ),
+            // ── WebSocket(Io): rustls-sourced (terminal) ──
+            // Production shape: tokio-rustls wraps rustls errors as
+            // io::Error(InvalidData, rustls::Error). These are deterministic
+            // validation failures that retry cannot fix.
+            (
+                "Io(rustls InvalidCertificate(Expired)): production-shaped expired cert is terminal",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::Expired),
+                ))),
+                true,
+            ),
+            (
+                "Io(rustls InvalidCertificate(NotValidForName)): hostname mismatch is terminal",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::NotValidForName,
+                    ),
+                ))),
+                true,
+            ),
+            (
+                "Io(rustls General): general rustls error is terminal",
+                ws(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::General("protocol error".into()),
+                ))),
+                true,
             ),
             (
                 "WebSocket(ConnectionClosed): link-level closure",
                 ws(WsError::ConnectionClosed),
                 false,
             ),
+            // ── WebSocket(Tls): deterministic config (terminal, pins the arm) ──
+            // These shapes are constructible but not reachable through our
+            // rustls production connector — cert failures arrive as Io above.
+            // Kept to pin the Tls(_) => true arm.
             (
-                "WebSocket(Tls(Rustls(General))): deterministic TLS config error",
+                "Tls(Rustls(General)): pins Tls arm terminal",
                 ws(WsError::Tls(
                     rustls::Error::General("tls handshake failed".into()).into(),
                 )),
                 true,
             ),
             (
-                "WebSocket(Tls(InvalidDnsName)): invalid DNS name",
+                "Tls(InvalidDnsName): only reachable connect-time Tls variant",
                 ws(WsError::Tls(TlsError::InvalidDnsName)),
                 true,
             ),
             (
-                "WebSocket(Tls(Rustls(InvalidCertificate(Expired)))): expired certificate",
+                "Tls(Rustls(InvalidCertificate(Expired))): pins Tls arm terminal",
                 ws(WsError::Tls(
                     rustls::Error::InvalidCertificate(rustls::CertificateError::Expired).into(),
                 )),
