@@ -655,4 +655,42 @@ test.describe("Doctor panel state screenshots", () => {
       "Couldn't connect Codex: The browser could not be opened.",
     );
   });
+
+  test("10-terminal-auth-completion-guidance", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        {
+          ...CODEX_NOT_INSTALLED,
+          availability: "available",
+          auth_status: { status: "logged_out" },
+        },
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      acpAuthMethods: {
+        codex: {
+          methods: [
+            {
+              id: "terminal-login",
+              name: "Sign in from Terminal",
+              type: "terminal",
+            },
+          ],
+        },
+      },
+      connectAcpRuntimeResult: { launched: true },
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "agents");
+
+    await page.getByTestId("doctor-runtime-menu-codex").click();
+    await page.getByRole("menuitem", { name: "Sign in from Terminal" }).click();
+    await expect(
+      page.getByTestId("doctor-runtime-terminal-guidance-codex"),
+    ).toContainText(
+      "Finish signing in from the Terminal window, then click Check again to re-check Codex.",
+    );
+  });
 });

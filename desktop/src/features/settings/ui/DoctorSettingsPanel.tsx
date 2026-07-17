@@ -240,6 +240,9 @@ function RuntimeRow({
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
+  const [terminalLaunchMethodId, setTerminalLaunchMethodId] = React.useState<
+    string | null
+  >(null);
   const canConnectAccount =
     runtime.availability === "available" &&
     runtime.authStatus.status === "logged_out";
@@ -276,12 +279,22 @@ function RuntimeRow({
           installSuccess={installSuccess}
           isConnecting={connectMutation.isPending}
           isInstalling={isInstalling}
-          onConnect={(method) =>
-            connectMutation.mutate({
-              runtimeId: runtime.id,
-              methodId: method.id,
-            })
-          }
+          onConnect={(method) => {
+            setTerminalLaunchMethodId(null);
+            connectMutation.mutate(
+              {
+                runtimeId: runtime.id,
+                methodId: method.id,
+              },
+              {
+                onSuccess: (result) => {
+                  if (result.launched && method.type === "terminal") {
+                    setTerminalLaunchMethodId(method.id);
+                  }
+                },
+              },
+            );
+          }}
           onInstall={onInstall}
           runtime={runtime}
         />
@@ -302,6 +315,15 @@ function RuntimeRow({
             data-testid={`doctor-runtime-error-${runtime.id}`}
           >
             {connectionError}
+          </p>
+        ) : null}
+        {canConnectAccount && terminalLaunchMethodId ? (
+          <p
+            className="mt-2 rounded-lg border border-border/60 bg-background/60 px-3 py-1.5 text-sm text-muted-foreground"
+            data-testid={`doctor-runtime-terminal-guidance-${runtime.id}`}
+          >
+            Finish signing in from the Terminal window, then click Check again
+            to re-check {runtime.label}.
           </p>
         ) : null}
       </div>
