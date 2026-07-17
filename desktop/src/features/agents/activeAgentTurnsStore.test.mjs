@@ -293,6 +293,64 @@ describe("activeAgentTurnsStore", () => {
       assert.equal(channels.size, 1);
       assert.ok(channels.has("c1"));
     });
+
+    it("agent_panic with an explicit turnId removes only that turn", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({ seq: 2, turnId: "t2", channelId: "c1" }),
+        makeEvent({
+          seq: 3,
+          kind: "agent_panic",
+          turnId: "t2",
+          channelId: "c1",
+        }),
+      ]);
+
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        1,
+        "the explicit panic must preserve the other live turn",
+      );
+
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 4,
+          kind: "turn_completed",
+          turnId: "t1",
+          channelId: "c1",
+        }),
+      ]);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+    });
+
+    it("turn_error with an explicit turnId removes only that turn", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({ seq: 2, turnId: "t2", channelId: "c1" }),
+        makeEvent({
+          seq: 3,
+          kind: "turn_error",
+          turnId: "t2",
+          channelId: "c1",
+        }),
+      ]);
+
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        1,
+        "the explicit error must preserve the other live turn",
+      );
+
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 4,
+          kind: "turn_completed",
+          turnId: "t1",
+          channelId: "c1",
+        }),
+      ]);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+    });
   });
 
   describe("listener notifications", () => {
@@ -670,11 +728,10 @@ describe("activeAgentTurnsStore", () => {
     // to it, so elapsed time is exactly what mock.timers.tick advances.
     const EPOCH = Date.parse("2024-01-01T00:00:00Z");
     const at = (ms) => new Date(EPOCH + ms).toISOString();
-    // Mirrors the store's REMOVE_AFTER_MS (LIVENESS_INTERVAL_MS * 2.5) and
-    // PRUNE_INTERVAL_MS. Not exported — kept in lockstep here so the prune
-    // bound stays asserted from the consumer's perspective.
-    const REMOVE_AFTER_MS = 25_000;
+    // Mirrors the store's private timing constants. Keep these consumer-level
+    // tests deterministic without exporting implementation details.
     const PRUNE_INTERVAL_MS = 5_000;
+    const PRUNE_PAUSE_MAX_MS = 3 * 60_000;
 
     let unsubscribe;
 
@@ -716,11 +773,9 @@ describe("activeAgentTurnsStore", () => {
       );
     });
 
-    it("prunes a dead turn at the bound while a live sibling keeps the stream fresh", () => {
-      // The no-regression case for the all-stale pause: a turn dies (no more
-      // liveness) but ANOTHER turn keeps refreshing. The pause gates on the MAX
-      // lastActivityAt, so the live sibling keeps it fresh and the dead turn
-      // still prunes at 25s — the pause only engages when EVERY turn is stale.
+    it("prunes a stale turn at the bound when its tracked sibling stays fresh", () => {
+      // A same-agent tracked sibling keeps the agent's max lastActivityAt
+      // fresh, so the stale turn is genuinely dead and must still prune at 25s.
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({
           seq: 1,
@@ -756,41 +811,75 @@ describe("activeAgentTurnsStore", () => {
       assert.ok(channels.has("c2"), "the live sibling must survive");
     });
 
-    it("pauses pruning when EVERY tracked turn goes stale at once (relay drop)", () => {
-      // The "all at once" drop signature: all liveness stops simultaneously.
-      // No turn refreshes the max, so the pause engages before the 25s prune
-      // and the badges stay visible through the transient drop.
+    it("pauses an agent's stale turns while another agent stays fresh", () => {
+      // Agent B keeps reporting tracked-turn activity, but that must not cause
+      // agent A's fully stale stream to prune at 25s.
       syncAgentTurnsFromEvents(AGENT, [
-        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
-        makeEvent({ seq: 2, turnId: "t2", channelId: "c2", timestamp: at(0) }),
+        makeEvent({
+          seq: 1,
+          turnId: "stale",
+          channelId: "a",
+          timestamp: at(0),
+        }),
       ]);
-      assert.equal(getActiveTurnsForAgent(AGENT).length, 2);
+      syncAgentTurnsFromEvents(AGENT_2, [
+        makeEvent({ seq: 1, turnId: "live", channelId: "b", timestamp: at(0) }),
+      ]);
 
-      // Silence past the bound — the pause must hold both badges.
-      mock.timers.tick(REMOVE_AFTER_MS + PRUNE_INTERVAL_MS);
+      for (let t = 10_000; t <= 30_000; t += 10_000) {
+        mock.timers.tick(10_000);
+        syncAgentTurnsFromEvents(AGENT_2, [
+          makeEvent({
+            seq: t / 10_000 + 1,
+            kind: "turn_liveness",
+            turnId: "live",
+            channelId: "b",
+            timestamp: at(t),
+          }),
+        ]);
+      }
 
-      assert.equal(
-        getActiveTurnsForAgent(AGENT).length,
-        2,
-        "all-stale-at-once must pause the prune so badges survive a drop",
+      assert.ok(
+        channelIdsOf(getActiveTurnsForAgent(AGENT)).has("a"),
+        "a fully stale agent must stay visible while another agent remains fresh",
+      );
+
+      // Keep B's tracked turn fresh until A passes the bounded 3-minute pause.
+      for (let t = 40_000; t <= PRUNE_PAUSE_MAX_MS; t += 10_000) {
+        mock.timers.tick(10_000);
+        syncAgentTurnsFromEvents(AGENT_2, [
+          makeEvent({
+            seq: t / 10_000 + 1,
+            kind: "turn_liveness",
+            turnId: "live",
+            channelId: "b",
+            timestamp: at(t),
+          }),
+        ]);
+      }
+      mock.timers.tick(PRUNE_INTERVAL_MS);
+
+      assert.ok(
+        !channelIdsOf(getActiveTurnsForAgent(AGENT)).has("a"),
+        "the stale agent must prune after the 3-minute pause cap",
+      );
+      assert.ok(
+        channelIdsOf(getActiveTurnsForAgent(AGENT_2)).has("b"),
+        "the fresh agent must stay active",
       );
     });
 
-    it("holds a lone silent turn past the bound until the next frame (residual)", () => {
-      // The accepted residual: a single turn whose host dies (kill -9) under a
-      // HEALTHY relay is indistinguishable from a drop with one live turn, so
-      // its badge lingers past 25s. It clears the instant any frame arrives.
+    it("prunes a lone silent turn after the 3-minute pause cap", () => {
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
       ]);
-      assert.equal(getActiveTurnsForAgent(AGENT).length, 1);
 
-      mock.timers.tick(REMOVE_AFTER_MS + PRUNE_INTERVAL_MS);
+      mock.timers.tick(PRUNE_PAUSE_MAX_MS);
 
       assert.equal(
         getActiveTurnsForAgent(AGENT).length,
-        1,
-        "a lone silent turn lingers (pause engages) — accepted residual",
+        0,
+        "the pause backstop must clear a dead lone agent at the 3-minute cap",
       );
     });
 
@@ -991,7 +1080,6 @@ describe("activeAgentTurnsStore", () => {
   describe("resurrection after a prune (A) gated by completion (C)", () => {
     const EPOCH = Date.parse("2024-01-01T00:00:00Z");
     const at = (ms) => new Date(EPOCH + ms).toISOString();
-    const REMOVE_AFTER_MS = 25_000;
     const PRUNE_INTERVAL_MS = 5_000;
 
     let unsubscribe;
@@ -1006,43 +1094,121 @@ describe("activeAgentTurnsStore", () => {
       mock.timers.reset();
     });
 
-    it("resurrects a lone turn pruned out from under a still-running host", () => {
-      // The lone-crash residual self-heals: the badge is pruned during silence,
-      // then a recovered liveness frame for the same turn revives it.
+    it("resurrects a pruned turn at startedAt from the first recovered ACP frame", () => {
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
       ]);
-      mock.timers.tick(REMOVE_AFTER_MS + PRUNE_INTERVAL_MS);
 
-      // A live sibling appears, which lets the prune fire and clear the lone
-      // stale turn; then a recovered liveness for t1 must revive its badge.
+      // A fresh tracked sibling permits pruning stale t1 at the normal bound.
+      mock.timers.tick(30_000);
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({
           seq: 2,
           turnId: "t2",
           channelId: "c2",
-          timestamp: at(40_000),
+          timestamp: at(30_000),
         }),
       ]);
       mock.timers.tick(PRUNE_INTERVAL_MS);
       assert.ok(
         !channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c1"),
-        "the stale lone turn must prune once a live sibling unblocks the sweep",
+        "the stale turn must prune before its activity recovers",
       );
 
+      mock.timers.tick(10_000);
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({
           seq: 3,
-          kind: "turn_liveness",
+          kind: "acp_read",
           turnId: "t1",
           channelId: "c1",
           timestamp: at(45_000),
+          startedAt: at(0),
         }),
       ]);
-      assert.ok(
-        channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c1"),
-        "a recovered liveness must resurrect the pruned turn's badge",
+
+      const resurrected = getActiveTurnsForAgent(AGENT).find(
+        (turn) => turn.channelId === "c1",
       );
+      assert.equal(
+        Date.now() - resurrected.anchorAt,
+        45_000,
+        "the first recovered ACP frame must preserve elapsed time from the original turn start",
+      );
+    });
+
+    it("preserves a valid Unix-epoch startedAt envelope timestamp", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          kind: "turn_liveness",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(0),
+          startedAt: "1970-01-01T00:00:00.000Z",
+        }),
+      ]);
+
+      const [resurrected] = getActiveTurnsForAgent(AGENT);
+      assert.equal(
+        resurrected.anchorAt,
+        0,
+        "a valid zero timestamp must not be replaced with the recovery time",
+      );
+    });
+
+    it("falls back to the frame timestamp when startedAt is absent or invalid", () => {
+      for (const invalidStartedAt of [
+        undefined,
+        null,
+        "not-a-timestamp",
+        "future",
+      ]) {
+        resetActiveAgentTurnsStore();
+        const startedAtMs = Date.now();
+        const iso = (offset) => new Date(startedAtMs + offset).toISOString();
+        const startedAt =
+          invalidStartedAt === "future" ? iso(46_000) : invalidStartedAt;
+
+        syncAgentTurnsFromEvents(AGENT, [
+          makeEvent({
+            seq: 1,
+            turnId: "t1",
+            channelId: "c1",
+            timestamp: iso(0),
+          }),
+        ]);
+        mock.timers.tick(30_000);
+        syncAgentTurnsFromEvents(AGENT, [
+          makeEvent({
+            seq: 2,
+            turnId: "t2",
+            channelId: "c2",
+            timestamp: iso(30_000),
+          }),
+        ]);
+        mock.timers.tick(PRUNE_INTERVAL_MS);
+        mock.timers.tick(10_000);
+        syncAgentTurnsFromEvents(AGENT, [
+          makeEvent({
+            seq: 3,
+            kind: "turn_liveness",
+            turnId: "t1",
+            channelId: "c1",
+            timestamp: iso(45_000),
+            startedAt,
+          }),
+        ]);
+
+        const resurrected = getActiveTurnsForAgent(AGENT).find(
+          (turn) => turn.channelId === "c1",
+        );
+        assert.equal(
+          Date.now() - resurrected.anchorAt,
+          0,
+          "old or malformed frames must retain the existing recovery anchor",
+        );
+      }
     });
 
     it("does NOT resurrect a turn whose liveness is older than its completion", () => {

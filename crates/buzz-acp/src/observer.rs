@@ -26,6 +26,8 @@ pub struct ObserverContext {
     pub session_id: Option<String>,
     /// Local UUID for one prompt turn.
     pub turn_id: Option<String>,
+    /// RFC3339 timestamp at which the current turn began, when known.
+    pub started_at: Option<String>,
 }
 
 /// Handle used by the harness to publish local observer events.
@@ -69,6 +71,9 @@ pub struct ObserverEvent {
     pub session_id: Option<String>,
     /// Local UUID for one prompt turn.
     pub turn_id: Option<String>,
+    /// RFC3339 timestamp at which the current turn began, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
     /// Raw or semantic event payload.
     pub payload: serde_json::Value,
 }
@@ -111,6 +116,7 @@ impl ObserverHandle {
             channel_id: context.channel_id.clone(),
             session_id: context.session_id.clone(),
             turn_id: context.turn_id.clone(),
+            started_at: context.started_at.clone(),
             payload,
         };
 
@@ -140,5 +146,21 @@ pub fn context_for(
         channel_id: channel_id.map(|id| id.to_string()),
         session_id,
         turn_id,
+        started_at: None,
+    }
+}
+
+/// Attach the authoritative start timestamp to every observer frame for a turn.
+pub fn context_for_turn(
+    channel_id: Option<uuid::Uuid>,
+    session_id: Option<String>,
+    turn_id: String,
+    started_at: String,
+) -> ObserverContext {
+    ObserverContext {
+        channel_id: channel_id.map(|id| id.to_string()),
+        session_id,
+        turn_id: Some(turn_id),
+        started_at: Some(started_at),
     }
 }

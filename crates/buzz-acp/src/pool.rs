@@ -20,11 +20,11 @@
 //! `AcpClient` is NOT Clone — ownership moves out on claim and back on return.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -47,6 +47,8 @@ use crate::relay::{ChannelInfo, RestClient};
 pub struct TaskMeta {
     pub agent_index: usize,
     pub channel_id: Option<Uuid>,
+    /// Identifies terminal events when the task panics before returning a result.
+    pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
     pub recoverable_batch: Option<FlushBatch>,
     /// Control signal for the in-flight prompt task.
@@ -176,6 +178,8 @@ pub struct AgentPool {
 pub struct PromptResult {
     pub agent: OwnedAgent,
     pub source: PromptSource,
+    /// Identifies the completed turn for observer terminal events.
+    pub turn_id: String,
     pub outcome: PromptOutcome,
     /// Present on failure in Queue mode, for requeue.
     pub batch: Option<FlushBatch>,
@@ -1106,6 +1110,7 @@ fn with_canvas(prompt: Option<String>, canvas: Option<&str>) -> Option<String> {
 /// On the happy path the read loop has already called `take()`, so this is a no-op.
 fn send_prompt_result(
     result_tx: &mpsc::UnboundedSender<PromptResult>,
+    turn_id: &str,
     mut agent: OwnedAgent,
     source: PromptSource,
     outcome: PromptOutcome,
@@ -1115,6 +1120,7 @@ fn send_prompt_result(
     let _ = result_tx.send(PromptResult {
         agent,
         source,
+        turn_id: turn_id.to_owned(),
         outcome,
         batch,
     });
@@ -1139,21 +1145,23 @@ pub async fn run_prompt_task(
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
+    turn_id: String,
 ) {
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.channel_id),
         None => PromptSource::Heartbeat,
     };
-    let turn_id = uuid::Uuid::new_v4().to_string();
     let observer_channel_id = match &source {
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
     };
-    agent.acp.set_observer_context(observer::context_for(
+    let turn_started_at = chrono::Utc::now().to_rfc3339();
+    agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         None,
-        Some(turn_id.clone()),
+        turn_id.clone(),
+        turn_started_at.clone(),
     ));
     let triggering_event_ids: Vec<String> = batch
         .as_ref()
@@ -1170,6 +1178,45 @@ pub async fn run_prompt_task(
         }),
     );
 
+    // Emits `turn_completed` on any exit path. Captures observer handle and
+    // metadata now, before the agent is moved into PromptResult. It must be
+    // declared before `liveness_guard`: Rust drops locals in reverse order, so
+    // liveness is aborted before completion makes the turn terminal.
+    let _turn_guard = TurnCompletionGuard::new(
+        agent.acp.observer_handle(),
+        agent.acp.observer_agent_index(),
+        observer_channel_id,
+        turn_id.clone(),
+    );
+
+    // Start liveness with `turn_started`, not the final session/prompt call:
+    // session creation, context fetches, and an initial message can themselves
+    // take longer than the desktop's bounded prune pause. This future is pinned
+    // for the whole task and dropped with the turn on every exit path.
+    //
+    // `liveness_state` is shared with `LivenessGuard`: see its docs for why a
+    // bare `abort()` alone cannot prevent a `turn_liveness` frame emitted after
+    // `turn_completed`. Once the session resolves below, `set_session_id`
+    // updates the same shared state so later ticks stop carrying `None`.
+    let liveness_state = Arc::new(Mutex::new(LivenessState {
+        closed: false,
+        session_id: None,
+    }));
+    let liveness = run_turn_liveness(
+        agent.acp.observer_handle(),
+        agent.acp.observer_agent_index(),
+        observer::context_for_turn(
+            observer_channel_id,
+            None,
+            turn_id.clone(),
+            turn_started_at.clone(),
+        ),
+        ctx.turn_liveness_interval,
+        Arc::clone(&liveness_state),
+    );
+    let liveness_handle = tokio::spawn(liveness);
+    let liveness_guard = LivenessGuard::new(liveness_handle, liveness_state);
+
     // Collects event IDs up front. On drop (any exit path — normal, early
     // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
@@ -1178,15 +1225,6 @@ pub async fn run_prompt_task(
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
-
-    // Emits `turn_completed` on any exit path. Captures observer handle and
-    // metadata now, before the agent is moved into PromptResult.
-    let _turn_guard = TurnCompletionGuard::new(
-        agent.acp.observer_handle(),
-        agent.acp.observer_agent_index(),
-        observer_channel_id,
-        turn_id.clone(),
-    );
 
     //
     // Core memory is delivered inside the system prompt the harness already
@@ -1334,6 +1372,7 @@ pub async fn run_prompt_task(
                         agent.state.invalidate_all();
                         send_prompt_result(
                             &result_tx,
+                            &turn_id,
                             agent,
                             source,
                             PromptOutcome::AgentExited,
@@ -1346,6 +1385,7 @@ pub async fn run_prompt_task(
                         // so the next retry will re-fetch a fresh revision.
                         send_prompt_result(
                             &result_tx,
+                            &turn_id,
                             agent,
                             source,
                             PromptOutcome::Error(e),
@@ -1374,6 +1414,7 @@ pub async fn run_prompt_task(
                         agent.state.invalidate_all();
                         send_prompt_result(
                             &result_tx,
+                            &turn_id,
                             agent,
                             source,
                             PromptOutcome::AgentExited,
@@ -1384,6 +1425,7 @@ pub async fn run_prompt_task(
                     Err(e) => {
                         send_prompt_result(
                             &result_tx,
+                            &turn_id,
                             agent,
                             source,
                             PromptOutcome::Error(e),
@@ -1395,11 +1437,15 @@ pub async fn run_prompt_task(
             }
         }
     };
-    agent.acp.set_observer_context(observer::context_for(
+    agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         Some(session_id.clone()),
-        Some(turn_id.clone()),
+        turn_id.clone(),
+        turn_started_at,
     ));
+    // Backfill liveness's shared session ID so ticks after this point carry
+    // it too, matching every other observer frame for this turn.
+    liveness_guard.set_session_id(session_id.clone());
     agent.acp.observe(
         "session_resolved",
         serde_json::json!({
@@ -1449,6 +1495,7 @@ pub async fn run_prompt_task(
                     agent.state.invalidate_all();
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
                         PromptOutcome::AgentExited,
@@ -1474,6 +1521,7 @@ pub async fn run_prompt_task(
                             agent.state.invalidate_all();
                             send_prompt_result(
                                 &result_tx,
+                                &turn_id,
                                 agent,
                                 source,
                                 PromptOutcome::AgentExited,
@@ -1491,6 +1539,7 @@ pub async fn run_prompt_task(
                     }
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
@@ -1507,6 +1556,7 @@ pub async fn run_prompt_task(
                     agent.state.invalidate_all();
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Hard),
@@ -1522,6 +1572,7 @@ pub async fn run_prompt_task(
                     agent.state.invalidate(&source);
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
                         PromptOutcome::Error(e),
@@ -1598,6 +1649,7 @@ pub async fn run_prompt_task(
         tracing::error!("run_prompt_task: no batch and no prompt_text — returning agent");
         send_prompt_result(
             &result_tx,
+            &turn_id,
             agent,
             source,
             PromptOutcome::Error(AcpError::Protocol("no batch and no prompt_text".into())),
@@ -1633,22 +1685,6 @@ pub async fn run_prompt_task(
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
     //
-    // The liveness future emits `turn_liveness` pings on an interval and never
-    // resolves; it rides every prompt-await path as a non-winning select arm so
-    // a turn stays alive on the desktop while it runs. Built from a captured
-    // observer handle (not `&agent.acp`) because the prompt holds `&mut agent.acp`.
-    let liveness = run_turn_liveness(
-        agent.acp.observer_handle(),
-        agent.acp.observer_agent_index(),
-        observer::context_for(
-            observer_channel_id,
-            Some(session_id.clone()),
-            Some(turn_id.clone()),
-        ),
-        ctx.turn_liveness_interval,
-    );
-    tokio::pin!(liveness);
-
     let prompt_result = match control_rx {
         None => {
             // Heartbeat / non-cancellable path.
@@ -1660,7 +1696,6 @@ pub async fn run_prompt_task(
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
-                _ = &mut liveness => unreachable!("liveness future never resolves"),
             }
         }
         Some(rx) => {
@@ -1672,7 +1707,6 @@ pub async fn run_prompt_task(
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
-                _ = &mut liveness => unreachable!("liveness future never resolves"),
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
                     // Land the model switch before any cancel/requeue work: setting
@@ -1710,6 +1744,7 @@ pub async fn run_prompt_task(
                                 .await;
                                 send_prompt_result(
                                     &result_tx,
+                                    &turn_id,
                                     agent,
                                     source,
                                     PromptOutcome::Cancelled,
@@ -1745,6 +1780,7 @@ pub async fn run_prompt_task(
                                 .await;
                                 send_prompt_result(
                                     &result_tx,
+                                    &turn_id,
                                     agent,
                                     source,
                                     failure.outcome,
@@ -1799,6 +1835,7 @@ pub async fn run_prompt_task(
                         .await;
                         send_prompt_result(
                             &result_tx,
+                            &turn_id,
                             agent,
                             source,
                             PromptOutcome::Ok(StopReason::EndTurn),
@@ -1861,6 +1898,7 @@ pub async fn run_prompt_task(
 
             send_prompt_result(
                 &result_tx,
+                &turn_id,
                 agent,
                 source,
                 PromptOutcome::Ok(stop_reason),
@@ -1882,6 +1920,7 @@ pub async fn run_prompt_task(
             .await;
             send_prompt_result(
                 &result_tx,
+                &turn_id,
                 agent,
                 source,
                 PromptOutcome::AgentExited,
@@ -1915,6 +1954,7 @@ pub async fn run_prompt_task(
                     // session state will be discarded with the old agent.
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
@@ -1940,6 +1980,7 @@ pub async fn run_prompt_task(
                     .await;
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
                         PromptOutcome::AgentExited,
@@ -1964,6 +2005,7 @@ pub async fn run_prompt_task(
                     .await;
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
@@ -1991,6 +2033,7 @@ pub async fn run_prompt_task(
             .await;
             send_prompt_result(
                 &result_tx,
+                &turn_id,
                 agent,
                 source,
                 PromptOutcome::Timeout(TimeoutKind::Hard),
@@ -2017,6 +2060,7 @@ pub async fn run_prompt_task(
             .await;
             send_prompt_result(
                 &result_tx,
+                &turn_id,
                 agent,
                 source,
                 PromptOutcome::Error(e),
@@ -2966,23 +3010,29 @@ impl Drop for ReactionGuard {
 
 // Periodically emits a `turn_liveness` observer event while a turn is in-flight,
 // so the desktop can prune turns whose host died without unwinding (kill -9 /
-// crash) far sooner than the no-activity backstop. Runs as a non-resolving
-// `select!` arm in `run_prompt_task`: it lives and dies with the prompt future,
-// so emission stops on every exit path (complete / cancel / error / panic) with
-// no separate teardown to forget.
+// crash) far sooner than the no-activity backstop. `run_prompt_task` runs it in
+// a background task from `turn_started` until `LivenessGuard` drops, covering
+// session setup as well as the final prompt call. When `interval` is zero,
+// liveness is disabled and the future parks forever without emitting.
 //
-// Takes a captured `ObserverHandle` rather than `&agent.acp` because the prompt
-// future holds `&mut agent.acp` for its whole duration — a second borrow would
-// not compile.
+// `state` is the other half of `LivenessGuard`'s shutdown mutex (see its
+// docs): held here across the check-then-emit, so a `LivenessGuard::drop`
+// racing an in-flight tick either observes `state.closed == true` and skips
+// the emit, or is blocked on the same lock until this tick's emit has
+// already landed. Either way `turn_completed` cannot pass a live
+// `turn_liveness` frame on the wire — the race is closed, not narrowed.
 //
-// This future never resolves; callers must race it against the prompt and rely
-// on drop for teardown. When `interval` is zero, liveness is disabled and the
-// future parks forever without emitting.
+// `context`'s `session_id` starts `None` (liveness begins before session
+// creation) and is filled in from `state.session_id` on each tick — set once
+// by `run_prompt_task` after session resolution — so pings emitted for the
+// remainder of the turn carry the real session, matching every other
+// observer frame for this turn instead of a permanent `None`.
 async fn run_turn_liveness(
     observer: Option<observer::ObserverHandle>,
     agent_index: Option<usize>,
-    context: observer::ObserverContext,
+    mut context: observer::ObserverContext,
     interval: Duration,
+    state: Arc<Mutex<LivenessState>>,
 ) {
     let Some(observer) = observer else {
         return std::future::pending::<()>().await;
@@ -2997,12 +3047,83 @@ async fn run_turn_liveness(
     ticker.tick().await;
     loop {
         ticker.tick().await;
+        // Nothing awaitable between the lock and the emit: `LivenessGuard::drop`
+        // takes this same lock before its `abort()`, so the guard can only ever
+        // observe this tick fully emitted or not yet started — never mid-emit.
+        let guard = match state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.closed {
+            return;
+        }
+        context.session_id = guard.session_id.clone();
         observer.emit(
             "turn_liveness",
             agent_index,
             &context,
             serde_json::json!({}),
         );
+        drop(guard);
+    }
+}
+
+/// Shared shutdown/session state between `run_turn_liveness` and its
+/// `LivenessGuard`. A single lock covers both fields so a tick's
+/// check-session/emit and a guard's set-closed/abort can never interleave.
+struct LivenessState {
+    closed: bool,
+    session_id: Option<String>,
+}
+
+/// Owns the background liveness task for one `run_prompt_task` invocation.
+///
+/// Dropping the guard aborts the non-resolving task, so liveness covers all
+/// pre-prompt setup yet cannot survive a completed, cancelled, or panicked turn.
+///
+/// `abort()` alone leaves a race: tokio's cooperative cancellation only takes
+/// effect at the next `.await` point inside the aborted task, so a tick that
+/// has already passed its await and is mid-`observer.emit` when `drop` runs
+/// can still complete that emit — a `turn_liveness` frame lands on the wire
+/// after `turn_completed`, reviving a finished turn's badge for up to the
+/// desktop's bounded prune-pause window. `state` shares a lock with
+/// `run_turn_liveness`'s check-then-emit (see its docs): setting `closed`
+/// and aborting under the same lock the emitter holds during its tick means
+/// `drop` either sees the flag land before that tick's lock is taken (emit
+/// skipped) or blocks until the in-flight emit under the lock has finished
+/// (then aborts, so there is no next tick) — no interleaving emits a frame
+/// after this guard has dropped.
+struct LivenessGuard {
+    handle: JoinHandle<()>,
+    state: Arc<Mutex<LivenessState>>,
+}
+
+impl LivenessGuard {
+    fn new(handle: JoinHandle<()>, state: Arc<Mutex<LivenessState>>) -> Self {
+        Self { handle, state }
+    }
+
+    /// Record the turn's session ID once known, so subsequent liveness ticks
+    /// stamp it on the emitted `turn_liveness` frame instead of `None`.
+    fn set_session_id(&self, session_id: String) {
+        let mut guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.session_id = Some(session_id);
+    }
+}
+
+impl Drop for LivenessGuard {
+    fn drop(&mut self) {
+        {
+            let mut guard = match self.state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.closed = true;
+        }
+        self.handle.abort();
     }
 }
 
@@ -4391,9 +4512,6 @@ mod tests {
     }
 
     // ── turn liveness emission ───────────────────────────────────────────────
-    // `run_turn_liveness` is raced against a "prompt" future the same way
-    // `run_prompt_task` does it: the prompt wins the select and the liveness
-    // future is dropped. We assert what the observer saw.
 
     fn liveness_count(handle: &observer::ObserverHandle) -> usize {
         handle
@@ -4403,47 +4521,174 @@ mod tests {
             .count()
     }
 
+    fn open_liveness_state() -> Arc<Mutex<LivenessState>> {
+        Arc::new(Mutex::new(LivenessState {
+            closed: false,
+            session_id: None,
+        }))
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn test_liveness_fires_while_prompt_pends_then_stops() {
+    async fn test_liveness_stops_before_completion_frame() {
         let observer = observer::ObserverHandle::in_process();
-        let context = observer::context_for(None, None, Some("t-1".into()));
-        let liveness = run_turn_liveness(
-            Some(observer.clone()),
-            Some(0),
-            context,
-            Duration::from_secs(10),
+        let context =
+            observer::context_for_turn(None, None, "t-1".into(), "2026-07-14T21:00:00Z".into());
+        let completion_context = observer::context_for(None, None, Some("t-1".into()));
+        let completion_observer = observer.clone();
+        let completion_handle = tokio::spawn(async move {
+            let state = open_liveness_state();
+            let _liveness_guard = LivenessGuard::new(
+                tokio::spawn(run_turn_liveness(
+                    Some(observer.clone()),
+                    Some(0),
+                    context,
+                    Duration::from_secs(10),
+                    Arc::clone(&state),
+                )),
+                state,
+            );
+            tokio::time::sleep(Duration::from_secs(25)).await;
+            observer.emit(
+                "turn_completed",
+                Some(0),
+                &completion_context,
+                serde_json::json!({}),
+            );
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(25)).await;
+        completion_handle.await.unwrap();
+        tokio::task::yield_now().await;
+
+        let events = completion_observer.snapshot();
+        let completion_index = events
+            .iter()
+            .position(|event| event.kind == "turn_completed")
+            .expect("turn must complete");
+        assert!(
+            events[..completion_index]
+                .iter()
+                .all(|event| event.kind != "turn_liveness"
+                    || event.turn_id.as_deref() == Some("t-1")),
+            "pre-completion liveness must belong to the active turn"
         );
-        tokio::pin!(liveness);
+        assert!(
+            events[completion_index + 1..]
+                .iter()
+                .all(|event| event.kind != "turn_liveness"),
+            "liveness must be aborted before a completion frame is emitted"
+        );
+    }
 
-        // Prompt pends for 25s, then completes — first liveness tick at 10s,
-        // second at 20s, so the observer must see exactly two pings.
-        tokio::select! {
-            biased;
-            () = tokio::time::sleep(Duration::from_secs(25)) => {}
-            _ = &mut liveness => unreachable!("liveness future never resolves"),
-        }
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_fires_until_guard_drops() {
+        let observer = observer::ObserverHandle::in_process();
+        let started_at = "2026-07-14T21:00:00Z".to_string();
+        let context = observer::context_for_turn(None, None, "t-1".into(), started_at.clone());
+        let state = open_liveness_state();
+        let guard = LivenessGuard::new(
+            tokio::spawn(run_turn_liveness(
+                Some(observer.clone()),
+                Some(0),
+                context,
+                Duration::from_secs(10),
+                Arc::clone(&state),
+            )),
+            state,
+        );
+        tokio::task::yield_now().await;
 
+        // First liveness tick at 10s and the second at 20s.
+        tokio::time::advance(Duration::from_secs(25)).await;
+        tokio::task::yield_now().await;
         assert_eq!(liveness_count(&observer), 2);
 
-        // The turn carried the live turn_id on each ping.
         let pings: Vec<_> = observer
             .snapshot()
             .into_iter()
             .filter(|e| e.kind == "turn_liveness")
             .collect();
-        assert!(pings.iter().all(|e| e.turn_id.as_deref() == Some("t-1")));
+        assert!(pings
+            .iter()
+            .all(|event| event.turn_id.as_deref() == Some("t-1")));
+        assert!(pings
+            .iter()
+            .all(|event| event.started_at.as_deref() == Some(&started_at)));
+        assert!(pings
+            .iter()
+            .all(|event| event.payload == serde_json::json!({})));
+        assert_eq!(
+            serde_json::to_value(&pings[0]).unwrap()["startedAt"],
+            started_at,
+            "turn start must serialize in the observer envelope"
+        );
 
-        // After the prompt wins the select, the liveness future is dropped —
-        // advancing the clock further produces no new pings.
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        // The guard is owned by `run_prompt_task`; dropping it aborts liveness
+        // so completed, cancelled, and errored turns cannot emit late pings.
+        drop(guard);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
         assert_eq!(liveness_count(&observer), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_backfills_session_id_after_resolution() {
+        let observer = observer::ObserverHandle::in_process();
+        let context =
+            observer::context_for_turn(None, None, "t-1".into(), "2026-07-14T21:00:00Z".into());
+        let state = open_liveness_state();
+        let guard = LivenessGuard::new(
+            tokio::spawn(run_turn_liveness(
+                Some(observer.clone()),
+                Some(0),
+                context,
+                Duration::from_secs(10),
+                Arc::clone(&state),
+            )),
+            state,
+        );
+        tokio::task::yield_now().await;
+
+        // First tick at 10s fires before the session resolves — must carry
+        // no session ID, matching every other pre-resolution observer frame.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+        guard.set_session_id("sess-1".to_string());
+
+        // Second tick at 20s fires after resolution — must carry it.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+
+        let pings: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.kind == "turn_liveness")
+            .collect();
+        assert_eq!(pings.len(), 2);
+        assert_eq!(
+            pings[0].session_id, None,
+            "pre-resolution ping must not carry a session ID"
+        );
+        assert_eq!(
+            pings[1].session_id.as_deref(),
+            Some("sess-1"),
+            "post-resolution ping must carry the resolved session ID"
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_liveness_disabled_when_interval_zero_emits_nothing() {
         let observer = observer::ObserverHandle::in_process();
         let context = observer::context_for(None, None, Some("t-1".into()));
-        let liveness = run_turn_liveness(Some(observer.clone()), Some(0), context, Duration::ZERO);
+        let liveness = run_turn_liveness(
+            Some(observer.clone()),
+            Some(0),
+            context,
+            Duration::ZERO,
+            open_liveness_state(),
+        );
         tokio::pin!(liveness);
 
         tokio::select! {
@@ -4460,7 +4705,13 @@ mod tests {
         // A turn that never started has no observer handle — the future must
         // park without emitting or panicking.
         let context = observer::context_for(None, None, Some("t-1".into()));
-        let liveness = run_turn_liveness(None, None, context, Duration::from_secs(10));
+        let liveness = run_turn_liveness(
+            None,
+            None,
+            context,
+            Duration::from_secs(10),
+            open_liveness_state(),
+        );
         tokio::pin!(liveness);
 
         tokio::select! {
@@ -4469,6 +4720,88 @@ mod tests {
             _ = &mut liveness => unreachable!("handle-less liveness future never resolves"),
         }
         // No observer to assert against — reaching here without panic is the test.
+    }
+
+    // These two tests pin the shutdown mechanism itself (F1), not timing.
+    // The existing paused-clock tests above only prove liveness stops
+    // *eventually* after a guard drop — under `tokio::time::pause`, the
+    // scheduler never actually interleaves a drop with an in-flight emit, so
+    // they cannot catch a real cross-thread race between `LivenessGuard::drop`
+    // and `run_turn_liveness`'s tick. These assert the two halves of the
+    // contract directly: the check gates the emit with the flag pre-set (no
+    // `LivenessGuard` involved), and `drop` cannot return while the shared
+    // lock is held by an in-flight tick (real OS threads, no cooperative
+    // scheduling to serialize the race away).
+
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_emits_nothing_once_closed_flag_is_set() {
+        let observer = observer::ObserverHandle::in_process();
+        let context =
+            observer::context_for_turn(None, None, "t-1".into(), "2026-07-14T21:00:00Z".into());
+        // Set directly, bypassing `LivenessGuard` — isolates the read side of
+        // the contract: the check under the lock must gate the emit on its own.
+        let state = Arc::new(Mutex::new(LivenessState {
+            closed: true,
+            session_id: None,
+        }));
+        let liveness = run_turn_liveness(
+            Some(observer.clone()),
+            Some(0),
+            context,
+            Duration::from_secs(10),
+            state,
+        );
+        tokio::time::timeout(Duration::from_secs(60), liveness)
+            .await
+            .expect("run_turn_liveness must return once closed, not park forever");
+
+        assert_eq!(
+            liveness_count(&observer),
+            0,
+            "the pre-set closed flag must suppress every tick's emit"
+        );
+    }
+
+    #[test]
+    fn test_liveness_guard_drop_blocks_while_emit_lock_is_held() {
+        // Standing in for a tick that has already entered its critical
+        // section: hold the shared lock before the guard drops.
+        let state = Arc::new(Mutex::new(LivenessState {
+            closed: false,
+            session_id: None,
+        }));
+        let held = state.lock().unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let handle = rt.spawn(std::future::pending::<()>());
+        let guard = LivenessGuard::new(handle, Arc::clone(&state));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let drop_thread = std::thread::spawn(move || {
+            drop(guard);
+            tx.send(()).unwrap();
+        });
+
+        // While the emit lock is held, `drop` cannot have completed: it takes
+        // the same lock before it sets the flag and aborts. A bounded timeout
+        // proves non-completion by construction of the lock, not the clock —
+        // `recv_timeout` returning `Timeout` here only holds because the
+        // mutex is genuinely contended; it cannot pass by scheduling luck.
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "drop must block while the tick's emit lock is held"
+        );
+
+        // Release the lock — drop can now acquire it, set the flag, and abort.
+        drop(held);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("drop must complete once the emit lock is released");
+        drop_thread.join().unwrap();
+        assert!(
+            state.lock().unwrap().closed,
+            "closed flag must be set by the time drop has returned"
+        );
     }
 
     // ── steer_rx invariant tests ──────────────────────────────────────────
@@ -4521,6 +4854,7 @@ mod tests {
         let source = PromptSource::Heartbeat;
         send_prompt_result(
             &result_tx,
+            "test-turn-id",
             agent,
             source,
             PromptOutcome::Error(AcpError::Protocol("simulated session-create error".into())),
@@ -4576,6 +4910,7 @@ mod tests {
         let source = PromptSource::Heartbeat;
         send_prompt_result(
             &result_tx,
+            "test-turn-id",
             agent,
             source,
             PromptOutcome::Ok(StopReason::EndTurn),
