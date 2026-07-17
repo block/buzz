@@ -88,12 +88,25 @@ async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Even
 }
 
 /// Resolve the admission roster by intersecting member-signed mesh status
-/// reporters with the current NIP-43 direct-member list. Missing membership or
-/// a failed query returns an empty roster, which the runtime normalizes to
-/// self-only admission.
-pub(crate) async fn resolve_trusted_owner_ids(state: &AppState) -> Vec<String> {
-    match query_mesh_discovery_events(state).await {
-        Ok(events) => mesh_llm::owner_ids_from_events(&events),
+/// reporters with the current NIP-43 direct-member list.
+///
+/// Returns `Err` when the relay query fails. Callers MUST distinguish this from
+/// an `Ok(empty)` roster (a genuinely empty community): a failed query must
+/// never be collapsed into "self-only", or a transient relay blip de-admits
+/// every other member. `reconcile_roster` relies on this to keep the current
+/// allowlist on error instead of restarting the node down to self-only.
+pub(crate) async fn resolve_trusted_owner_ids(state: &AppState) -> Result<Vec<String>, String> {
+    let events = query_mesh_discovery_events(state).await?;
+    Ok(mesh_llm::owner_ids_from_events(&events))
+}
+
+/// Resolve the roster for an initial node *start*, failing closed to self-only
+/// (an empty roster) when the relay query fails. This is safe only at start:
+/// there is no established allowlist to preserve yet. The periodic
+/// `reconcile_roster` path must NOT use this — it has a live roster to keep.
+pub(crate) async fn resolve_trusted_owner_ids_or_self_only(state: &AppState) -> Vec<String> {
+    match resolve_trusted_owner_ids(state).await {
+        Ok(owners) => owners,
         Err(error) => {
             eprintln!("buzz-mesh: roster query failed; allowing only this node: {error}");
             Vec::new()
@@ -117,7 +130,7 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
         model_id: Some(config.model_id),
         max_vram_gb: config.max_vram_gb,
         join_token: None,
-        trusted_owner_ids: Some(resolve_trusted_owner_ids(state).await),
+        trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
     };
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
@@ -137,7 +150,7 @@ pub async fn mesh_start_node(
     // Frontend requests never carry a roster; resolve it here so every
     // UI-started node enforces the member allowlist.
     if request.trusted_owner_ids.is_none() {
-        request.trusted_owner_ids = Some(resolve_trusted_owner_ids(&state).await);
+        request.trusted_owner_ids = Some(resolve_trusted_owner_ids_or_self_only(&state).await);
     }
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {
@@ -268,7 +281,7 @@ pub(crate) async fn ensure_client_node_for_model(
         model_id: None,
         max_vram_gb: None,
         join_token: Some(join_token),
-        trusted_owner_ids: Some(resolve_trusted_owner_ids(state).await),
+        trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
     };
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {

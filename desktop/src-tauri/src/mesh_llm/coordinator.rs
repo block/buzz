@@ -73,6 +73,37 @@ pub async fn start_coordinator(app: AppHandle) {
     }
 }
 
+/// Outcome of a roster reconcile decision: either keep the running allowlist
+/// untouched, or restart the node with a freshly resolved one.
+#[derive(Debug, PartialEq, Eq)]
+enum RosterReconcileAction {
+    Keep,
+    Restart(Vec<String>),
+}
+
+/// Pure decision for `reconcile_roster`, extracted so the transient-failure
+/// invariant is unit-testable without a live relay.
+///
+/// Rules:
+/// - query failed (`Err`)         → `Keep` (never de-admit on a relay blip)
+/// - resolved roster == current   → `Keep` (no-op)
+/// - resolved roster != current   → `Restart` with the new roster
+fn roster_reconcile_action(
+    current_owners: &[String],
+    query: Result<Vec<String>, String>,
+) -> RosterReconcileAction {
+    match query {
+        Err(error) => {
+            eprintln!(
+                "buzz-mesh: roster reconcile query failed; keeping current allowlist: {error}"
+            );
+            RosterReconcileAction::Keep
+        }
+        Ok(fresh) if fresh == current_owners => RosterReconcileAction::Keep,
+        Ok(fresh) => RosterReconcileAction::Restart(fresh),
+    }
+}
+
 async fn reconcile_roster(state: &AppState) -> Result<(), String> {
     let current_request = {
         let runtime = state.mesh_llm_runtime.lock().await;
@@ -84,10 +115,15 @@ async fn reconcile_roster(state: &AppState) -> Result<(), String> {
     let Some(current_owners) = current_request.trusted_owner_ids.as_ref() else {
         return Ok(());
     };
-    let fresh = crate::commands::mesh_llm::resolve_trusted_owner_ids(state).await;
-    if &fresh == current_owners {
-        return Ok(());
-    }
+    // A failed roster query must NOT be treated as "the roster became empty":
+    // doing so would restart the node down to self-only and de-admit every
+    // other member on a transient relay blip (the flapping restart loop). Keep
+    // the current allowlist and try again on the next poll.
+    let query = crate::commands::mesh_llm::resolve_trusted_owner_ids(state).await;
+    let fresh = match roster_reconcile_action(current_owners, query) {
+        RosterReconcileAction::Keep => return Ok(()),
+        RosterReconcileAction::Restart(fresh) => fresh,
+    };
 
     let mut request = current_request;
     request.trusted_owner_ids = Some(fresh);
@@ -226,6 +262,46 @@ mod tests {
     use nostr::JsonUtil;
 
     use super::*;
+
+    // Regression: a transient roster-query failure must never restart the node
+    // down to self-only. Before the fix, `resolve_trusted_owner_ids` returned
+    // an empty Vec on error, which `reconcile_roster` read as "roster changed
+    // to empty" and restarted — de-admitting every other member and flapping
+    // the node on each relay blip. See #2000 follow-up.
+    #[test]
+    fn failed_roster_query_keeps_current_allowlist() {
+        let current = vec!["owner-a".to_string(), "owner-b".to_string()];
+        let action = roster_reconcile_action(&current, Err("relay returned 503".to_string()));
+        assert_eq!(
+            action,
+            RosterReconcileAction::Keep,
+            "a failed query must keep the running allowlist, never de-admit members"
+        );
+    }
+
+    #[test]
+    fn unchanged_roster_is_a_noop() {
+        let current = vec!["owner-a".to_string()];
+        let action = roster_reconcile_action(&current, Ok(vec!["owner-a".to_string()]));
+        assert_eq!(action, RosterReconcileAction::Keep);
+    }
+
+    #[test]
+    fn genuinely_changed_roster_restarts_with_fresh_owners() {
+        let current = vec!["owner-a".to_string()];
+        let fresh = vec!["owner-a".to_string(), "owner-c".to_string()];
+        let action = roster_reconcile_action(&current, Ok(fresh.clone()));
+        assert_eq!(action, RosterReconcileAction::Restart(fresh));
+    }
+
+    // An `Ok(empty)` — a genuinely empty community, distinct from a failed
+    // query — is still allowed to shrink the allowlist to self-only.
+    #[test]
+    fn genuinely_empty_roster_restarts_to_self_only() {
+        let current = vec!["owner-a".to_string()];
+        let action = roster_reconcile_action(&current, Ok(Vec::new()));
+        assert_eq!(action, RosterReconcileAction::Restart(Vec::new()));
+    }
 
     #[test]
     fn member_heartbeat_leaves_room_before_admission_status_expires() {
