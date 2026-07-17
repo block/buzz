@@ -27,6 +27,42 @@ test("mediaProxyUrl: uses the IPv4 loopback literal for the localhost proxy", ()
   );
 });
 
+test("relay-origin store: publishes are canonicalized at the store boundary", () => {
+  // The store must hold the invariant that `cachedRelayOrigin` is always a
+  // canonical URL origin — consumers compare `new URL(src).origin` against it
+  // (isRelayDownloadable), which is safe only by this construction, not by
+  // call-site convention.
+  resetMediaCaches();
+  let notifications = 0;
+  const unsubscribe = subscribeRelayOrigin(() => notifications++);
+
+  // Uppercase host + trailing slash + explicit default port → canonical form.
+  beginRelayOriginFetch()("https://RELAY.Example:443/");
+  assert.equal(getCachedRelayOrigin(), "https://relay.example");
+  assert.equal(notifications, 1);
+
+  // A differently-shaped publish of the same canonical origin is a no-op for
+  // both the snapshot and the listeners.
+  beginRelayOriginFetch()("https://relay.example");
+  assert.equal(getCachedRelayOrigin(), "https://relay.example");
+  assert.equal(notifications, 1);
+
+  // Invalid non-null input fails closed to null (does not retain the previous
+  // origin, does not publish an arbitrary string) and notifies the change.
+  beginRelayOriginFetch()("not a url");
+  assert.equal(getCachedRelayOrigin(), null);
+  assert.equal(notifications, 2);
+
+  // Stale-generation publishes are still rejected before canonicalization.
+  const stale = beginRelayOriginFetch();
+  resetMediaCaches();
+  stale("https://STALE.example/");
+  assert.equal(getCachedRelayOrigin(), null);
+
+  unsubscribe();
+  resetMediaCaches();
+});
+
 test("relay-origin store: a resolved origin publishes and notifies subscribers", () => {
   resetMediaCaches();
   let notifications = 0;

@@ -69,13 +69,18 @@ function notifyRelayOriginListeners(): void {
 
 /**
  * Publish a resolved relay origin, but only if `generation` is still current
- * (the fetch wasn't superseded by a workspace switch). Notifies subscribers
- * only on an actual snapshot change so `useSyncExternalStore` doesn't churn.
+ * (the fetch wasn't superseded by a workspace switch). The stored snapshot is
+ * always canonicalized (see `canonicalOrigin`) regardless of what shape the
+ * publisher was handed, so consumers comparing `URL.origin === relayOrigin`
+ * (e.g. `isRelayDownloadable`) hold by construction, not by call-site
+ * convention. Notifies subscribers only on an actual snapshot change so
+ * `useSyncExternalStore` doesn't churn.
  */
 function setRelayOrigin(origin: string | null, generation: number): void {
   if (generation !== cacheGeneration) return;
-  if (cachedRelayOrigin === origin) return;
-  cachedRelayOrigin = origin;
+  const canonical = origin === null ? null : canonicalOrigin(origin);
+  if (cachedRelayOrigin === canonical) return;
+  cachedRelayOrigin = canonical;
   notifyRelayOriginListeners();
 }
 
