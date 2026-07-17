@@ -47,10 +47,19 @@ fn blossom_auth_header(event: &nostr::Event) -> String {
 }
 
 async fn upload(client: &Client, keys: &Keys, body: &[u8]) -> reqwest::Response {
+    upload_to_path(client, keys, "/upload", body).await
+}
+
+async fn upload_to_path(
+    client: &Client,
+    keys: &Keys,
+    path: &str,
+    body: &[u8],
+) -> reqwest::Response {
     let sha256 = hex::encode(Sha256::digest(body));
     let auth = sign_blossom_auth(keys, &sha256);
     client
-        .put(format!("{}/media/upload", relay_http_url()))
+        .put(format!("{}{path}", relay_http_url()))
         .header("Authorization", blossom_auth_header(&auth))
         .header("X-SHA-256", &sha256)
         .body(body.to_vec())
@@ -137,7 +146,7 @@ async fn upload_with_auth(
     body: &[u8],
 ) -> reqwest::Response {
     client
-        .put(format!("{}/media/upload", relay_http_url()))
+        .put(format!("{}/upload", relay_http_url()))
         .header("Authorization", blossom_auth_header(auth_event))
         .header("X-SHA-256", sha256)
         .body(body.to_vec())
@@ -406,6 +415,43 @@ async fn test_upload_pdf_accepted() {
     let desc: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(desc["type"].as_str().unwrap(), "application/pdf");
     println!("✅ PDF → 200");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_legacy_media_route_rejects_non_media() {
+    let client = http_client();
+    let keys = Keys::generate();
+    let pdf = b"%PDF-1.4 fake pdf content here for testing";
+    let resp = upload_to_path(&client, &keys, "/media/upload", pdf).await;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "legacy media route must not accept generic attachments"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_legacy_media_route_still_accepts_canonical_media() {
+    let client = http_client();
+    let keys = Keys::generate();
+    let resp = upload_to_path(&client, &keys, "/media/upload", &tiny_jpeg()).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_standard_upload_rejects_recognized_audio() {
+    let client = http_client();
+    let keys = Keys::generate();
+    let mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00";
+    let resp = upload(&client, &keys, mp3).await;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "recognized audio must not bypass the location policy as an attachment"
+    );
 }
 
 #[tokio::test]

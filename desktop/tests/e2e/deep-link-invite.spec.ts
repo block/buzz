@@ -250,6 +250,15 @@ test("Welcome failure can be skipped without abandoning community onboarding", a
   );
   await page.goto("/");
 
+  for (const name of ["fizz", "honey", "bumble"]) {
+    const character = page.getByTestId(`starter-persona-${name}`);
+    await expect(character).toBeVisible();
+    await expect(character).toHaveAttribute(
+      "src",
+      `/onboarding/starter-team/${name}.png`,
+    );
+  }
+
   await page.getByRole("button", { name: "Enter hive" }).click();
 
   await expect(page.getByText(welcomeError)).toBeVisible();

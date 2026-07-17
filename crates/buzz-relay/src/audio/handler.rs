@@ -25,7 +25,7 @@ use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use nostr::{EventBuilder, Kind, Tag};
 use serde::Deserialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -45,6 +45,11 @@ const MAX_AUDIO_FRAME_BYTES: usize = 4096;
 
 /// Maximum text frame size: 8 KB bounds auth/control JSON parsing.
 const MAX_TEXT_FRAME_BYTES: usize = 8192;
+
+/// Parser-level cap for this route. Text auth/control frames are the largest
+/// message type audio accepts; binary Opus frames are bounded more tightly
+/// after parsing.
+const MAX_WEBSOCKET_MESSAGE_BYTES: usize = MAX_TEXT_FRAME_BYTES;
 
 /// Heartbeat interval.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -81,7 +86,36 @@ pub async fn ws_audio_handler(
                 .into_response();
         }
     };
-    ws.on_upgrade(move |socket| handle_audio_connection(socket, state, tenant, channel_id))
+
+    let permit = match acquire_audio_connection_permit(&state.conn_semaphore) {
+        Some(permit) => permit,
+        None => {
+            warn!(channel_id = %channel_id, "Connection limit reached, rejecting audio WebSocket");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "relay: connection limit reached",
+            )
+                .into_response();
+        }
+    };
+
+    // Keep the parser boundary at the largest message this route accepts. The
+    // checks in the receive loop still distinguish text from binary policy, but
+    // they run after tungstenite has assembled a message.
+    limit_audio_websocket(ws).on_upgrade(move |socket| {
+        handle_audio_connection(socket, state, tenant, channel_id, permit)
+    })
+}
+
+fn acquire_audio_connection_permit(
+    conn_semaphore: &Arc<Semaphore>,
+) -> Option<OwnedSemaphorePermit> {
+    Arc::clone(conn_semaphore).try_acquire_owned().ok()
+}
+
+fn limit_audio_websocket<F>(ws: WebSocketUpgrade<F>) -> WebSocketUpgrade<F> {
+    ws.max_message_size(MAX_WEBSOCKET_MESSAGE_BYTES)
+        .max_frame_size(MAX_WEBSOCKET_MESSAGE_BYTES)
 }
 
 /// Highest huddle audio protocol version this relay understands. Clients are
@@ -112,6 +146,7 @@ async fn handle_audio_connection(
     state: Arc<AppState>,
     tenant: TenantContext,
     channel_id: Uuid,
+    _permit: OwnedSemaphorePermit,
 ) {
     let cancel = CancellationToken::new();
     let community_id = tenant.community();
@@ -1296,6 +1331,100 @@ async fn emit_participant_event(
             event_id = %event_id_hex,
             channel_id = %parent_channel_id,
             "audio: failed to publish lifecycle event: {e}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use axum::{routing::get, Router};
+    use futures_util::SinkExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    use super::*;
+
+    #[test]
+    fn audio_connection_permits_share_the_global_websocket_budget() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let first = acquire_audio_connection_permit(&semaphore).expect("first permit");
+
+        assert!(
+            acquire_audio_connection_permit(&semaphore).is_none(),
+            "audio connections must stop when the global WebSocket budget is exhausted"
+        );
+
+        drop(first);
+        assert!(
+            acquire_audio_connection_permit(&semaphore).is_some(),
+            "dropping an audio connection must return its global permit"
+        );
+    }
+
+    async fn handler_receives_message_of_size(size: usize) -> bool {
+        let (received_tx, received_rx) = oneshot::channel();
+        let received_tx = Arc::new(Mutex::new(Some(received_tx)));
+        let app = Router::new().route(
+            "/",
+            get({
+                let received_tx = Arc::clone(&received_tx);
+                move |ws: WebSocketUpgrade| {
+                    let received_tx = Arc::clone(&received_tx);
+                    async move {
+                        limit_audio_websocket(ws).on_upgrade(move |mut socket| async move {
+                            let received = matches!(socket.recv().await, Some(Ok(_)));
+                            if let Some(tx) =
+                                received_tx.lock().expect("result lock poisoned").take()
+                            {
+                                let _ = tx.send(received);
+                            }
+                        })
+                    }
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test WebSocket listener");
+        let addr = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test WebSocket server");
+        });
+
+        let (mut client, _) = connect_async(format!("ws://{addr}/"))
+            .await
+            .expect("connect test WebSocket client");
+        client
+            .send(Message::Text("x".repeat(size).into()))
+            .await
+            .expect("send test WebSocket message");
+
+        let received = tokio::time::timeout(Duration::from_secs(2), received_rx)
+            .await
+            .expect("server should process the test message")
+            .expect("server should report whether it received the message");
+
+        server.abort();
+        let _ = server.await;
+
+        received
+    }
+
+    #[tokio::test]
+    async fn audio_websocket_parser_rejects_oversized_messages_before_handler_reads_them() {
+        assert!(
+            handler_receives_message_of_size(MAX_WEBSOCKET_MESSAGE_BYTES).await,
+            "messages at the audio route limit should still reach the handler"
+        );
+        assert!(
+            !handler_receives_message_of_size(MAX_WEBSOCKET_MESSAGE_BYTES + 1).await,
+            "oversized messages must be rejected by the WebSocket parser before the handler sees them"
         );
     }
 }

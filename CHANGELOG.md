@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.4.14
+
+- fix(desktop): restore Doctor ACP login discovery ([#2017](https://github.com/block/buzz/pull/2017)) ([`e179f88ad`](https://github.com/block/buzz/commit/e179f88ada02eadb636afea88f2d5b5cb82621fb))
+- feat(desktop): animate starter team onboarding ([#2032](https://github.com/block/buzz/pull/2032)) ([`1aab50e95`](https://github.com/block/buzz/commit/1aab50e950f2b7ef75cc6ec6e6055de681a4bff7))
+- fix(desktop): include exe dir and ~/.local/bin in provider discovery ([#2007](https://github.com/block/buzz/pull/2007)) ([`ac404ba67`](https://github.com/block/buzz/commit/ac404ba67f2f6fb0a986e865ded4402e445fd009))
+- fix(desktop): close mention popup after an exact name + trailing space ([#2030](https://github.com/block/buzz/pull/2030)) ([`fb0a4d5e7`](https://github.com/block/buzz/commit/fb0a4d5e7490aaf10eda1b37c138b737232de78d))
+- test(desktop): harden observer archive policy regression coverage ([#1994](https://github.com/block/buzz/pull/1994)) ([`fd2eaac73`](https://github.com/block/buzz/commit/fd2eaac73b2c3125ab242b4e931b54769303a9f0))
+- Bug-bash: mention/code-span, feed titles, autocomplete, edit-mentions, draft routing, and right-click media Download ([#2027](https://github.com/block/buzz/pull/2027)) ([`084e442d2`](https://github.com/block/buzz/commit/084e442d2dea0125742f5d410fb2ac99c3af225c))
+- fix(desktop): keep mesh allowlist on transient roster query failure ([#2024](https://github.com/block/buzz/pull/2024)) ([`f205e6693`](https://github.com/block/buzz/commit/f205e669306da82a4188fc8ace08cccc0399244d))
+- Polish Buzz theme and sidebar ([#1971](https://github.com/block/buzz/pull/1971)) ([`2121fd045`](https://github.com/block/buzz/commit/2121fd0452afd212caaaa6962c8710606417658a))
+- Welcome new users with a live agent team kickoff ([#1998](https://github.com/block/buzz/pull/1998)) ([`85fc64835`](https://github.com/block/buzz/commit/85fc64835e79a0310990e253877abe1b3d6a654c))
+
+
+## v0.4.13
+
+- fix(desktop): compare relay media origins case-insensitively so uploads render when the saved community URL has uppercase characters
+- fix(desktop): invalidate stale media lookups so an in-flight relay-origin fetch cannot repopulate caches after a community reset
+
+## v0.4.12
+
+- fix(desktop): proxy authenticated relay media after cold-start community initialization
+- fix(desktop): keep shared-compute consumers admitted (WIP: multi-workspace publishing) ([#2000](https://github.com/block/buzz/pull/2000)) ([`5d77fa57`](https://github.com/block/buzz/commit/5d77fa57))
+- feat(desktop): reskin provider, config, community, profile, and team onboarding pages ([#2003](https://github.com/block/buzz/pull/2003)) ([`f054df73`](https://github.com/block/buzz/commit/f054df73))
+
+
+## v0.4.11
+
+- Fix policy receipts for cold-launch invite links ([#2005](https://github.com/block/buzz/pull/2005)) ([`1d8d006a`](https://github.com/block/buzz/commit/1d8d006aaf078ffd5b92eae06334b7bb908b680e))
+- Preserve persistent agent audience order ([#1989](https://github.com/block/buzz/pull/1989)) ([`fb8e6827`](https://github.com/block/buzz/commit/fb8e6827c758c73c9c6e16965dcdcecd00a5827c))
+- feat(desktop): create channels in sections ([#1996](https://github.com/block/buzz/pull/1996)) ([`9b649740`](https://github.com/block/buzz/commit/9b6497402f343e380f6c79b97a01c2d52bd12f17))
+- feat(desktop): graduate community rail ([#1995](https://github.com/block/buzz/pull/1995)) ([`f06b59ff`](https://github.com/block/buzz/commit/f06b59ff13bef0c031c8e4c3bdf979e120ea76d5))
+
+
 ## v0.4.10
 
 - feat(desktop): onboarding step dots, identity/key page restyle, overflow scroll ([#1993](https://github.com/block/buzz/pull/1993)) ([`f2522995c`](https://github.com/block/buzz/commit/f2522995cbea67c96b79d5de6c19c665e465027d))

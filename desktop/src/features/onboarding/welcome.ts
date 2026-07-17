@@ -26,6 +26,7 @@ const WELCOME_CHANNEL_ENSURED_STORAGE_KEY = "buzz-welcome-channel-ensured.v2";
 
 type WelcomeChannelClient = {
   createChannel: (input: CreateChannelInput) => Promise<Channel>;
+  deleteChannel?: (channelId: string) => Promise<void>;
   getChannels: () => Promise<Channel[]>;
   getChannelMembers?: (channelId: string) => Promise<ChannelMember[]>;
   updateChannel?: (input: UpdateChannelInput) => Promise<Channel>;
@@ -44,6 +45,8 @@ export type StarterChannelsResult = {
 
 type WelcomeChannelOptions = {
   allowedMemberPubkeys?: readonly string[];
+  /** Development-only replay mode: replace Welcome instead of reusing history. */
+  replaceExisting?: boolean;
 };
 
 type PendingWelcomeChannel = {
@@ -225,12 +228,26 @@ export async function ensureWelcomeChannel(
 ) {
   const channels = await client.getChannels();
   const existingWelcome = findPrivateWelcomeChannel(channels, options);
+  if (options.replaceExisting && existingWelcome) {
+    if (!client.deleteChannel) {
+      throw new Error("Replacing Welcome requires deleteChannel.");
+    }
+    await client.deleteChannel(existingWelcome.id);
+    return client.createChannel(welcomeChannelInput);
+  }
   if (existingWelcome) {
     return ensureCurrentWelcomeChannelMetadata(client, existingWelcome);
   }
 
   for (const channel of channels.filter(isPrivateWelcomeChannelCandidate)) {
     if (await hasOnlyCurrentHumanMember(client, channel)) {
+      if (options.replaceExisting) {
+        if (!client.deleteChannel) {
+          throw new Error("Replacing Welcome requires deleteChannel.");
+        }
+        await client.deleteChannel(channel.id);
+        return client.createChannel(welcomeChannelInput);
+      }
       return ensureCurrentWelcomeChannelMetadata(client, channel);
     }
   }

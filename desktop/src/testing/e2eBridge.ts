@@ -241,6 +241,19 @@ type E2eConfig = {
     // snake_case wire shape the Rust backend returns so tests can drive the
     // LocalArchiveSettingsCard without a real SQLite database.
     observerArchiveDefaultEnabled?: boolean;
+    /**
+     * Delay (ms) applied to `observer_archive_default_enabled` so E2E tests
+     * can observe the pending-reconciliation state (toggle disabled, no
+     * archive-manager `list_save_subscriptions` call) before the policy
+     * resolves. 0/undefined = instant.
+     */
+    observerArchiveDefaultEnabledDelayMs?: number;
+    /**
+     * When set, `observer_archive_default_enabled` throws with this message
+     * instead of resolving — drives the fail-closed `.catch()` path in
+     * `useObserverArchiveReconciliation` / `LocalArchiveSettingsCard`.
+     */
+    observerArchiveDefaultEnabledError?: string;
     agentMetricArchiveDefaultEnabled?: boolean;
     saveSubscriptions?: Array<{
       scope_type: string;
@@ -701,6 +714,10 @@ const GLOBAL_MOCK_SUBSCRIPTION = "*";
 type MockSubscription = {
   channelId: string;
   kinds: number[] | null;
+  /** `#p` values from the REQ filters, if any — lets specs assert an
+   *  owner-scoped live subscription (e.g. the observer-archive `24200`
+   *  reconciliation gate) independently of channel-scoped ones. */
+  ownerPubkeys: string[];
 };
 
 type MockFilter = {
@@ -828,6 +845,10 @@ declare global {
     __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
       channelName: string;
       kind?: number;
+    }) => boolean;
+    __BUZZ_E2E_HAS_MOCK_OWNER_KIND_SUBSCRIPTION__?: (input: {
+      ownerPubkey: string;
+      kind: number;
     }) => boolean;
     __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
       channelName: string;
@@ -2544,6 +2565,28 @@ let mockWebsocketSendMutexWedged = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 
+// Mutable `save_subscriptions` table mirror — TEST-ONLY.
+//
+// Cloned from `activeConfig.mock.saveSubscriptions` at install time, then
+// mutated by `create_save_subscription` / `delete_save_subscription` /
+// `merge_save_subscription_kinds` / `remove_save_subscription_kind` exactly
+// as the real SQLite-backed Rust commands would (see `archive/store.rs`).
+// This lets E2E specs drive the fresh-internal-repair path (start from `[]`,
+// reconcile, observe a kind-24200 row appear) and OSS toggle ON/OFF, neither
+// of which an immutable seed can represent.
+type MockSaveSubscriptionRow = {
+  scope_type: string;
+  scope_value: string;
+  kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
+};
+let mockSaveSubscriptions: MockSaveSubscriptionRow[] = [];
+
+function resetMockSaveSubscriptions(config: E2eConfig | undefined) {
+  mockSaveSubscriptions = (config?.mock?.saveSubscriptions ?? []).map((s) => ({
+    ...s,
+  }));
+}
+
 // Mesh-compute mock state — TEST-ONLY.
 //
 // This entire module (e2eBridge.ts) is loaded only when `window.__BUZZ_E2E__`
@@ -3565,6 +3608,28 @@ function hasMockLiveSubscription(channelId: string, kind?: number) {
         (kind === undefined ||
           !subscription.kinds ||
           subscription.kinds.includes(kind))
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * True iff a live REQ subscription is open with an `#p` filter containing
+ * `ownerPubkey` and a `kinds` filter containing `kind`. Used to assert the
+ * observer-archive reconciliation gate actually opens an owner-scoped live
+ * filter (not just that `list_save_subscriptions` was called) once the
+ * gate resolves.
+ */
+function hasMockOwnerKindSubscription(ownerPubkey: string, kind: number) {
+  for (const socket of mockSockets.values()) {
+    for (const subscription of socket.subscriptions.values()) {
+      if (
+        subscription.ownerPubkeys.includes(ownerPubkey) &&
+        (subscription.kinds?.includes(kind) ?? false)
       ) {
         return true;
       }
@@ -7272,6 +7337,7 @@ async function handleStartManagedAgent(
   agent.updated_at = now;
   agent.last_started_at = now;
   agent.last_error = null;
+  setMockPresenceStatus(agent.pubkey, "online");
   agent.log_lines.push(
     agent.backend.type === "provider"
       ? `deployed mock provider harness at ${now}`
@@ -7290,6 +7356,7 @@ async function handleStopManagedAgent(args: {
   agent.pid = null;
   agent.updated_at = now;
   agent.last_stopped_at = now;
+  setMockPresenceStatus(agent.pubkey, "offline");
   agent.log_lines.push(`stopped mock harness at ${now}`);
   syncMockRelayAgentsFromManagedAgents();
   return cloneManagedAgent(agent);
@@ -7696,6 +7763,10 @@ async function handleSendManagedAgentChannelMessage(
     channelId: string;
     content: string;
     marker?: string | null;
+    markerScope?: "agent" | "channel" | null;
+    mentionPubkeys?: string[] | null;
+    parentEventId?: string | null;
+    additionalMarkers?: string[] | null;
   },
   _config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -7704,25 +7775,41 @@ async function handleSendManagedAgentChannelMessage(
   if (marker) {
     const existing = getMockMessageStore(args.channelId).find(
       (event) =>
-        event.pubkey === agent.pubkey &&
+        (args.markerScope === "channel" || event.pubkey === agent.pubkey) &&
         event.tags.some((tag) => tag[0] === "client" && tag[1] === marker),
     );
     if (existing) {
       return {
         event_id: existing.id,
-        parent_event_id: null,
-        root_event_id: null,
-        depth: 0,
+        parent_event_id: args.parentEventId ?? null,
+        root_event_id: args.parentEventId ?? null,
+        depth: args.parentEventId ? 1 : 0,
         created_at: existing.created_at,
       };
     }
   }
 
   const createdAt = Math.floor(Date.now() / 1000);
+  const tags = args.parentEventId
+    ? buildReplyMessageTags(
+        args.channelId,
+        agent.pubkey,
+        args.parentEventId,
+        args.parentEventId,
+        args.mentionPubkeys ?? undefined,
+      )
+    : buildTopLevelMessageTags(
+        args.channelId,
+        args.mentionPubkeys ?? undefined,
+        agent.pubkey,
+      );
+  for (const clientMarker of [marker, ...(args.additionalMarkers ?? [])]) {
+    if (clientMarker?.trim()) tags.push(["client", clientMarker.trim()]);
+  }
   const event = createMockEvent(
     9,
     args.content.trim(),
-    [["h", args.channelId], ...(marker ? [["client", marker]] : [])],
+    tags,
     agent.pubkey,
     createdAt,
   );
@@ -7731,9 +7818,9 @@ async function handleSendManagedAgentChannelMessage(
 
   return {
     event_id: event.id,
-    parent_event_id: null,
-    root_event_id: null,
-    depth: 0,
+    parent_event_id: args.parentEventId ?? null,
+    root_event_id: args.parentEventId ?? null,
+    depth: args.parentEventId ? 1 : 0,
     created_at: createdAt,
   };
 }
@@ -8125,11 +8212,15 @@ function sendToMockSocket(args: {
       // Collect channel IDs from all filters in the REQ
       const channelIds = new Set<string>();
       const kinds = new Set<number>();
+      const ownerPubkeys = new Set<string>();
       for (const f of filters) {
         const cid = f["#h"]?.[0];
         if (cid) channelIds.add(cid);
         for (const kind of f.kinds ?? []) {
           kinds.add(kind);
+        }
+        for (const p of f["#p"] ?? []) {
+          ownerPubkeys.add(p);
         }
       }
       const onlyChannelId =
@@ -8139,6 +8230,7 @@ function sendToMockSocket(args: {
       socket.subscriptions.set(subId, {
         channelId: onlyChannelId ?? GLOBAL_MOCK_SUBSCRIPTION,
         kinds: kinds.size > 0 ? [...kinds] : null,
+        ownerPubkeys: [...ownerPubkeys],
       });
       sendWsText(socket.handler, ["EOSE", subId]);
       return;
@@ -8361,6 +8453,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockWorkflows();
   resetMockMesh();
   resetMockUserStatuses();
+  resetMockSaveSubscriptions(config);
   resetMockPendingCommunityDeepLinks(config);
   mockWebsocketSendMutexWedged = false;
   mockWindows("main");
@@ -8420,6 +8513,10 @@ export function maybeInstallE2eTauriMocks() {
 
     return hasMockLiveSubscription(channel.id, kind);
   };
+  window.__BUZZ_E2E_HAS_MOCK_OWNER_KIND_SUBSCRIPTION__ = ({
+    ownerPubkey,
+    kind,
+  }) => hasMockOwnerKindSubscription(ownerPubkey, kind);
   window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ = (item) => {
     const category = item.category === "mention" ? "mentions" : item.category;
     mockFeedOverrides[category].unshift(item);
@@ -9267,6 +9364,8 @@ export function maybeInstallE2eTauriMocks() {
         return handleStopManagedAgent(
           payload as Parameters<typeof handleStopManagedAgent>[0],
         );
+      case "set_agent_managed_profiles":
+        return undefined;
       case "set_managed_agent_auto_restart":
         return handleSetManagedAgentAutoRestart(
           payload as Parameters<typeof handleSetManagedAgentAutoRestart>[0],
@@ -9519,6 +9618,22 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleSendChannelMessage>[0],
           activeConfig,
         );
+      case "has_managed_agent_channel_message_marker": {
+        const args = payload as {
+          channelId: string;
+          marker: string;
+          agentPubkey?: string | null;
+          markerScope?: "agent" | "channel" | null;
+        };
+        return getMockMessageStore(args.channelId).some(
+          (event) =>
+            (args.markerScope === "channel" ||
+              event.pubkey === args.agentPubkey) &&
+            event.tags.some(
+              (tag) => tag[0] === "client" && tag[1] === args.marker,
+            ),
+        );
+      }
       case "send_managed_agent_channel_message":
         return handleSendManagedAgentChannelMessage(
           payload as Parameters<typeof handleSendManagedAgentChannelMessage>[0],
@@ -9776,6 +9891,8 @@ export function maybeInstallE2eTauriMocks() {
         // The spec only verifies UI state, not the submitted request shape;
         // returning null mirrors the Rust submit_event success path.
         return null;
+      case "set_canvas":
+        return { ok: true, event_id: mockEventId() };
       case "get_canvas": {
         const canvasReadError = activeConfig?.mock?.canvasReadError;
         if (canvasReadError) {
@@ -9786,9 +9903,12 @@ export function maybeInstallE2eTauriMocks() {
       }
       // ── Local-save archive ──────────────────────────────────────────────
       // These stubs drive the LocalArchiveSettingsCard in screenshot / UI tests
-      // without requiring a real SQLite backend. `activeConfig.mock.saveSubscriptions`
-      // seeds the initial list; create/delete return success shapes so the
-      // component's reload path behaves correctly.
+      // without requiring a real SQLite backend. `mockSaveSubscriptions` is a
+      // mutable clone of `activeConfig.mock.saveSubscriptions` (reset on
+      // install); create/merge/delete/remove mutate it with the same
+      // union / delete-row-when-empty semantics as the real Rust commands
+      // (see `archive/store.rs::merge_owner_p_kinds` / `remove_owner_p_kind`)
+      // so specs can drive fresh-internal-repair and toggle ON/OFF flows.
       case "list_save_subscriptions": {
         const win = window as unknown as Record<string, unknown>;
         if (!win.__BUZZ_E2E_IPC_COUNTERS__) {
@@ -9801,7 +9921,7 @@ export function maybeInstallE2eTauriMocks() {
         ipcCounters.list_save_subscriptions =
           (ipcCounters.list_save_subscriptions ?? 0) + 1;
         const ident = activeConfig?.identity ?? DEFAULT_MOCK_IDENTITY;
-        return (activeConfig?.mock?.saveSubscriptions ?? []).map((s) => ({
+        return mockSaveSubscriptions.map((s) => ({
           identity_pubkey: ident.pubkey,
           relay_url: DEFAULT_RELAY_WS_URL,
           scope_type: s.scope_type,
@@ -9810,24 +9930,100 @@ export function maybeInstallE2eTauriMocks() {
           created_at: Math.floor(Date.now() / 1000),
         }));
       }
-      case "create_save_subscription":
-        // UI calls this then re-fetches via list_save_subscriptions; returning
-        // null (Rust Ok(())) is sufficient to let the component proceed.
+      case "create_save_subscription": {
+        const req = payload as {
+          scopeType: string;
+          scopeValue: string;
+          kinds: number[];
+        };
+        const kindsJson = JSON.stringify(req.kinds);
+        const existing = mockSaveSubscriptions.find(
+          (s) =>
+            s.scope_type === req.scopeType && s.scope_value === req.scopeValue,
+        );
+        if (existing) {
+          existing.kinds = kindsJson;
+        } else {
+          mockSaveSubscriptions.push({
+            scope_type: req.scopeType,
+            scope_value: req.scopeValue,
+            kinds: kindsJson,
+          });
+        }
         return null;
-      case "delete_save_subscription":
-        // Returns true == row removed; mirrors Rust success path.
-        return true;
+      }
+      case "delete_save_subscription": {
+        const req = payload as { scopeType: string; scopeValue: string };
+        const before = mockSaveSubscriptions.length;
+        mockSaveSubscriptions = mockSaveSubscriptions.filter(
+          (s) =>
+            !(
+              s.scope_type === req.scopeType && s.scope_value === req.scopeValue
+            ),
+        );
+        return mockSaveSubscriptions.length < before;
+      }
       case "archive_events":
         // Returns the ArchiveBatchResult shape the UI expects.
         return { persisted: 0, dropped: 0 };
-      case "observer_archive_default_enabled":
+      case "observer_archive_default_enabled": {
+        const delayMs =
+          activeConfig?.mock?.observerArchiveDefaultEnabledDelayMs;
+        if (delayMs && delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
+        const error = activeConfig?.mock?.observerArchiveDefaultEnabledError;
+        if (error) {
+          throw new Error(error);
+        }
         return activeConfig?.mock?.observerArchiveDefaultEnabled ?? false;
+      }
       case "agent_metric_archive_default_enabled":
         return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;
-      case "merge_save_subscription_kinds":
+      case "merge_save_subscription_kinds": {
+        // Mirrors `merge_owner_p_kinds`: union `kind` into the owner_p row's
+        // kinds, creating the row if it doesn't exist yet.
+        const { kind } = payload as { kind: number };
+        const ident = activeConfig?.identity ?? DEFAULT_MOCK_IDENTITY;
+        const row = mockSaveSubscriptions.find(
+          (s) => s.scope_type === "owner_p" && s.scope_value === ident.pubkey,
+        );
+        if (row) {
+          const kinds: number[] = JSON.parse(row.kinds);
+          if (!kinds.includes(kind)) {
+            row.kinds = JSON.stringify([...kinds, kind]);
+          }
+        } else {
+          mockSaveSubscriptions.push({
+            scope_type: "owner_p",
+            scope_value: ident.pubkey,
+            kinds: JSON.stringify([kind]),
+          });
+        }
         return null;
-      case "remove_save_subscription_kind":
+      }
+      case "remove_save_subscription_kind": {
+        // Mirrors `remove_owner_p_kind`: remove `kind` from the owner_p row's
+        // kinds, deleting the row entirely once its kinds list is empty.
+        const { kind } = payload as { kind: number };
+        const ident = activeConfig?.identity ?? DEFAULT_MOCK_IDENTITY;
+        const row = mockSaveSubscriptions.find(
+          (s) => s.scope_type === "owner_p" && s.scope_value === ident.pubkey,
+        );
+        if (row) {
+          const kinds: number[] = JSON.parse(row.kinds).filter(
+            (k: number) => k !== kind,
+          );
+          if (kinds.length === 0) {
+            mockSaveSubscriptions = mockSaveSubscriptions.filter(
+              (s) => s !== row,
+            );
+          } else {
+            row.kinds = JSON.stringify(kinds);
+          }
+        }
         return null;
+      }
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }

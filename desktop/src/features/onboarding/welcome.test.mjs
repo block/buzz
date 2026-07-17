@@ -96,6 +96,28 @@ test("ensureWelcomeChannel creates a private Welcome channel when one is missing
   ]);
 });
 
+test("ensureWelcomeChannel replaces existing Welcome in forced-fresh development mode", async () => {
+  const existingChannel = makeChannel({ id: "old-welcome" });
+  const calls = [];
+
+  const result = await ensureWelcomeChannel(
+    {
+      getChannels: async () => [existingChannel],
+      deleteChannel: async (channelId) => {
+        calls.push(["delete", channelId]);
+      },
+      createChannel: async () => {
+        calls.push(["create"]);
+        return makeChannel({ id: "fresh-welcome" });
+      },
+    },
+    { replaceExisting: true },
+  );
+
+  assert.equal(result.id, "fresh-welcome");
+  assert.deepEqual(calls, [["delete", "old-welcome"], ["create"]]);
+});
+
 test("ensureWelcomeChannel clears ttl on an existing ephemeral Welcome channel", async () => {
   const existingChannel = makeChannel({
     description:

@@ -10,9 +10,11 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
 import 'media_auth.dart';
+import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
 
-const _mediaUploadPath = '/media/upload';
+const _mediaUploadPath = '/upload';
+const _legacyMediaUploadPath = '/media/upload';
 const _mediaUploadPlatformChannelName = 'buzz/media_upload';
 const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';
@@ -197,16 +199,8 @@ class MediaUploadService {
       );
     }
 
-    // Read first 32 bytes to check if it's already an MP4 container.
-    final header = await _readFileHeader(pickedVideo.path, 32);
-
-    if (_isAlreadyMp4Container(header)) {
-      // Already MP4 — upload directly.
-      final bytes = await pickedVideo.readAsBytes();
-      return uploadBytes(bytes, mimeType: 'video/mp4');
-    }
-
-    // Non-MP4 container (e.g. QuickTime .mov) — remux to MP4 via platform.
+    // Always rebuild the container. Passing an existing MP4 through would retain
+    // QuickTime GPS, global metadata, chapters, or non-A/V tracks.
     String? transcodedPath;
     try {
       transcodedPath = await _transcodeVideoToMp4(pickedVideo.path);
@@ -241,14 +235,26 @@ class MediaUploadService {
     }
 
     final sha256 = _sha256Hex(bytes);
-    final request = _buildUploadRequest(
+    var request = _buildUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
       sha256: sha256,
+      path: _mediaUploadPath,
     );
 
-    final streamed = await _http.send(request);
-    final response = await http.Response.fromStream(streamed);
+    var streamed = await _http.send(request);
+    var response = await http.Response.fromStream(streamed);
+    if (response.statusCode == HttpStatus.notFound ||
+        response.statusCode == HttpStatus.methodNotAllowed) {
+      request = _buildUploadRequest(
+        bytes: bytes,
+        mimeType: mimeType,
+        sha256: sha256,
+        path: _legacyMediaUploadPath,
+      );
+      streamed = await _http.send(request);
+      response = await http.Response.fromStream(streamed);
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception(
         'upload failed (${response.statusCode}): ${response.body}',
@@ -264,11 +270,9 @@ class MediaUploadService {
     required Uint8List bytes,
     required String mimeType,
     required String sha256,
+    required String path,
   }) {
-    final request = http.Request(
-      'PUT',
-      Uri.parse(_baseUrl).resolve(_mediaUploadPath),
-    );
+    final request = http.Request('PUT', Uri.parse(_baseUrl).resolve(path));
     request.bodyBytes = bytes;
     request.headers.addAll(
       _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
@@ -500,7 +504,9 @@ bool _isAnimatedWebp(Uint8List bytes) {
 
 bool _shouldSanitizePickedImage(String mimeType) {
   return _supportsNativeUploadImageProcessing() &&
-      (mimeType == 'image/jpeg' || mimeType == 'image/png');
+      (mimeType == 'image/jpeg' ||
+          mimeType == 'image/png' ||
+          mimeType == 'image/webp');
 }
 
 bool _supportsNativeUploadImageProcessing() {
@@ -574,36 +580,6 @@ int _readUint32LittleEndian(Uint8List bytes, int offset) {
 /// Always returns `video/mp4` — the relay only accepts MP4 and does its own
 /// magic-byte validation. Most iPhone `.mov` files are ftyp-isom containers
 /// that the relay accepts as MP4.
-/// Known MP4 ftyp major brands. If the file's major brand (bytes 8–11)
-/// matches one of these, it's already an MP4-compatible container.
-const _mp4FtypBrands = {'isom', 'mp41', 'mp42', 'M4V ', 'avc1', 'iso5'};
-
-/// Checks whether [bytes] (at least 12 bytes of file header) represent
-/// an MP4-family container by inspecting the ftyp box major brand.
-///
-/// Exposed for testing as [isAlreadyMp4Container].
-@visibleForTesting
-bool isAlreadyMp4Container(Uint8List bytes) => _isAlreadyMp4Container(bytes);
-
-bool _isAlreadyMp4Container(Uint8List bytes) {
-  if (bytes.length < 12) return false;
-  if (!_matchesAscii(bytes, 4, 'ftyp')) return false;
-  final brand = ascii.decode(bytes.sublist(8, 12), allowInvalid: true);
-  return _mp4FtypBrands.contains(brand);
-}
-
-/// Reads the first [count] bytes of a file without loading it entirely.
-Future<Uint8List> _readFileHeader(String path, int count) async {
-  final file = File(path);
-  final raf = await file.open(mode: FileMode.read);
-  try {
-    final bytes = await raf.read(count);
-    return bytes;
-  } finally {
-    await raf.close();
-  }
-}
-
 Future<Uint8List?> _readPlatformClipboardImage() async {
   return _mediaUploadPlatformChannel.invokeMethod<Uint8List>(
     _readClipboardImageMethod,
@@ -617,6 +593,24 @@ Future<String> _transcodePickedVideoToMp4(String filePath) async {
   );
   if (result == null || result.isEmpty) {
     throw Exception('Failed to convert video to MP4.');
+  }
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    final source = File(result);
+    final destination = File(
+      '$result.faststart-${DateTime.now().microsecondsSinceEpoch}.mp4',
+    );
+    try {
+      await rewriteMp4ForFastStart(source, destination);
+      await source.delete();
+      return destination.path;
+    } catch (_) {
+      try {
+        await destination.delete();
+      } on FileSystemException {
+        // Best-effort cleanup; preserve the original platform error.
+      }
+      rethrow;
+    }
   }
   return result;
 }

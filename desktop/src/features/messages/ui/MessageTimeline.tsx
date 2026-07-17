@@ -1,5 +1,4 @@
 import * as React from "react";
-import { Hash } from "lucide-react";
 
 import {
   isDeferredTimelineSnapshotStale,
@@ -18,6 +17,7 @@ import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
+import { ChannelIntroBlock, type ChannelIntro } from "./ChannelIntroBlock";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import type { TimelineVirtualizerApi } from "./TimelineMessageList";
@@ -51,6 +51,8 @@ type MessageTimelineProps = {
     participants: DirectMessageIntroParticipant[];
   } | null;
   isLoading?: boolean;
+  entranceMessageId?: string | null;
+  onEntranceMessageComplete?: (messageId: string) => void;
   emptyTitle?: string;
   emptyDescription?: string;
   currentPubkey?: string;
@@ -111,22 +113,6 @@ type MessageTimelineProps = {
   threadUnreadCounts?: ReadonlyMap<string, number>;
 };
 
-type ChannelIntroAction = {
-  description?: string;
-  icon: React.ReactNode;
-  label: string;
-  onClick: () => void;
-  testId?: string;
-};
-
-type ChannelIntro = {
-  actions?: ChannelIntroAction[];
-  channelKindLabel: string;
-  channelName: string;
-  description?: string | null;
-  icon?: React.ReactNode;
-};
-
 /** Stable empty reference used as the `useDeferredValue` initial value so the
  *  first render on channel entry stays light instead of blocking on the full
  *  message list. Must be module-level so its identity never changes. */
@@ -166,6 +152,8 @@ const MessageTimelineBase = React.forwardRef<
     mainEntries,
     threadSummaries,
     isLoading = false,
+    entranceMessageId = null,
+    onEntranceMessageComplete,
     emptyTitle = "No messages yet",
     emptyDescription = "Send the first message to start the thread.",
     currentPubkey,
@@ -282,6 +270,7 @@ const MessageTimelineBase = React.forwardRef<
 
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
+    hasPersistentIntro: channelIntro !== null || directMessageIntro !== null,
     isLoading: isLoading || isDeferredSnapshotStale,
     liveCount: messages.length,
   });
@@ -427,6 +416,7 @@ const MessageTimelineBase = React.forwardRef<
     activeDirectMessageIntro !== null || activeChannelIntro !== null;
   const showGenericEmpty = timelineBodySurface === "empty" && !showIntro;
   const showMessageList = timelineBodySurface === "list";
+  const showChannelIntroOnly = activeChannelIntro !== null && !showMessageList;
 
   const prepareForOwnMessage = React.useCallback(() => {
     // The user's own send is the deliberate Zulip exception: release buffered
@@ -581,70 +571,7 @@ const MessageTimelineBase = React.forwardRef<
   const virtualizedLeadingContent = React.useMemo(
     () =>
       activeChannelIntro ? (
-        <div
-          className="flex w-full flex-col items-start px-3 pb-4 pt-2 text-left"
-          data-testid="message-channel-intro"
-        >
-          <div className="flex h-[60px] w-[60px] items-center justify-center rounded-2xl border border-border/70 bg-muted/40 text-muted-foreground">
-            {activeChannelIntro.icon ?? (
-              <Hash aria-hidden className="h-7 w-7" />
-            )}
-          </div>
-          <p className="mt-4 max-w-2xl truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
-            #{activeChannelIntro.channelName}
-          </p>
-          <p className="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
-            This is the beginning of the{" "}
-            <span className="font-medium text-foreground">
-              {activeChannelIntro.channelKindLabel}
-            </span>
-            .
-          </p>
-          {activeChannelIntro.description ? (
-            <p className="mt-2 max-w-xl text-sm leading-5 text-muted-foreground">
-              {activeChannelIntro.description}
-            </p>
-          ) : null}
-          {activeChannelIntro.actions?.length ? (
-            <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto pb-1">
-              {activeChannelIntro.actions.map((action) => (
-                <button
-                  className={cn(
-                    "flex shrink-0 border border-border/70 bg-background/70 text-left transition-colors hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                    action.description
-                      ? "h-56 w-[13.75rem] flex-col rounded-2xl p-4"
-                      : "h-28 w-64 flex-col rounded-2xl p-4",
-                  )}
-                  data-testid={action.testId}
-                  key={action.label}
-                  onClick={action.onClick}
-                  type="button"
-                >
-                  <span
-                    className={cn(
-                      "flex shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground",
-                      action.description
-                        ? "h-12 w-12 [&_svg]:h-6 [&_svg]:w-6"
-                        : "h-10 w-10 [&_svg]:h-4 [&_svg]:w-4",
-                    )}
-                  >
-                    {action.icon}
-                  </span>
-                  <span className="mt-auto min-w-0">
-                    <span className="block whitespace-normal break-words text-base font-medium leading-6 text-foreground">
-                      {action.label}
-                    </span>
-                    {action.description ? (
-                      <span className="mt-1 block whitespace-normal break-words text-sm leading-5 text-muted-foreground">
-                        {action.description}
-                      </span>
-                    ) : null}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </div>
+        <ChannelIntroBlock className="pb-4 pt-2" intro={activeChannelIntro} />
       ) : activeDirectMessageIntro ? (
         <div
           className="mb-2 flex w-full flex-col items-start px-3 pb-2 pt-2 text-left"
@@ -686,6 +613,8 @@ const MessageTimelineBase = React.forwardRef<
       huddleMemberPubkeysPending={huddleMemberPubkeysPending}
       isFollowingThreadById={isFollowingThreadById}
       isMessageUnreadById={isMessageUnreadById}
+      entranceMessageId={entranceMessageId}
+      onEntranceMessageComplete={onEntranceMessageComplete}
       messageFooters={messageFooters}
       mainEntries={renderedMessages === messages ? mainEntries : undefined}
       leadingContent={virtualizedLeadingContent}
@@ -787,20 +716,25 @@ const MessageTimelineBase = React.forwardRef<
             <div
               className={cn(
                 "flex w-full flex-col gap-2",
-                channelChrome.contentPadding,
+                showChannelIntroOnly
+                  ? "pt-[var(--channel-top-chrome-height,4.5rem)]"
+                  : channelChrome.contentPadding,
                 (showIntro || showGenericEmpty || showMessageList) &&
                   "min-h-full",
               )}
               ref={contentRef}
             >
-              <div ref={topSentinelRef} aria-hidden className="h-px" />
+              {showChannelIntroOnly ? null : (
+                <div ref={topSentinelRef} aria-hidden className="h-px" />
+              )}
 
-              {/* Fixed-height slot: an always-mounted height keeps the virtual
-                  spacer's offset stable across the load-older fetch toggle, so
-                  `scrollMargin` doesn't shift mid-fetch and yank the restore. The
-                  visible fetch spinner lives in the absolute overlay above, which
-                  does not occupy inline flow. */}
-              <div aria-hidden className="h-8" />
+              {/* Fixed-height history slot keeps the virtual spacer's offset
+                  stable across load-older fetches. The intro-only state has no
+                  history to anchor, so omitting it matches the virtualized
+                  leading row's top geometry when the first message arrives. */}
+              {showChannelIntroOnly ? null : (
+                <div aria-hidden className="h-8" />
+              )}
 
               <div
                 className={cn(
@@ -838,96 +772,12 @@ const MessageTimelineBase = React.forwardRef<
                 ) : null}
 
                 {activeChannelIntro ? (
-                  <div
-                    className="mt-auto flex w-full flex-col items-start px-3 py-2 text-left"
-                    data-testid="message-channel-intro"
-                  >
-                    <div
-                      className="flex h-[60px] w-[60px] items-center justify-center rounded-2xl border border-border/70 bg-muted/40 text-muted-foreground"
-                      data-testid="message-channel-intro-icon"
-                    >
-                      {activeChannelIntro.icon ?? (
-                        <Hash aria-hidden className="h-7 w-7" />
-                      )}
-                    </div>
-                    <p className="mt-4 max-w-2xl truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
-                      #{activeChannelIntro.channelName}
-                    </p>
-                    <p className="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
-                      This is the beginning of the{" "}
-                      <span className="font-medium text-foreground">
-                        {activeChannelIntro.channelKindLabel}
-                      </span>
-                      .
-                    </p>
-                    {activeChannelIntro.description ? (
-                      <p className="mt-2 max-w-xl text-sm leading-5 text-muted-foreground">
-                        {activeChannelIntro.description}
-                      </p>
-                    ) : null}
-                    {activeChannelIntro.actions?.length ? (
-                      <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto pb-1">
-                        {activeChannelIntro.actions.map((action) => {
-                          const hasDescription = Boolean(action.description);
-
-                          return (
-                            <button
-                              className={cn(
-                                "flex shrink-0 border border-border/70 bg-background/70 text-left transition-colors hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                                hasDescription
-                                  ? "h-56 w-[13.75rem] flex-col rounded-2xl p-4"
-                                  : "h-28 w-64 flex-col rounded-2xl p-4",
-                              )}
-                              data-testid={action.testId}
-                              key={action.label}
-                              onClick={action.onClick}
-                              type="button"
-                            >
-                              <span
-                                className={cn(
-                                  "flex shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground",
-                                  hasDescription
-                                    ? "h-12 w-12 [&_svg]:h-6 [&_svg]:w-6"
-                                    : "h-10 w-10 [&_svg]:h-4 [&_svg]:w-4",
-                                )}
-                                data-testid={
-                                  action.testId
-                                    ? `${action.testId}-icon`
-                                    : undefined
-                                }
-                              >
-                                {action.icon}
-                              </span>
-                              <span className="mt-auto min-w-0">
-                                <span
-                                  className="block whitespace-normal break-words text-base font-medium leading-6 text-foreground"
-                                  data-testid={
-                                    action.testId
-                                      ? `${action.testId}-title`
-                                      : undefined
-                                  }
-                                >
-                                  {action.label}
-                                </span>
-                                {action.description ? (
-                                  <span
-                                    className="mt-1 block whitespace-normal break-words text-sm leading-5 text-muted-foreground"
-                                    data-testid={
-                                      action.testId
-                                        ? `${action.testId}-description`
-                                        : undefined
-                                    }
-                                  >
-                                    {action.description}
-                                  </span>
-                                ) : null}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </div>
+                  /* Top-anchored like the virtualized leading row, so the
+                     first message arrives below with zero layout shift. */
+                  <ChannelIntroBlock
+                    className="py-2"
+                    intro={activeChannelIntro}
+                  />
                 ) : null}
 
                 {showGenericEmpty ? (

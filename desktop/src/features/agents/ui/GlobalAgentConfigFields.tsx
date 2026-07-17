@@ -23,8 +23,11 @@ import {
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   getPersonaProviderOptions,
+  getProviderApiKeyEnvVar,
+  requiredCredentialEnvKeys,
 } from "@/features/agents/ui/personaDialogPickers";
 import { AgentModelField } from "@/features/agents/ui/personaProviderModelFields";
+import { PersonaProviderApiKeyField } from "@/features/agents/ui/PersonaProviderApiKeyField";
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
 import {
   BUZZ_AGENT_THINKING_EFFORT,
@@ -100,6 +103,25 @@ export function GlobalAgentConfigFields({
 
   const providerValue = config.provider ?? "";
   const providerForDiscovery = isCustomProvider ? "" : providerValue;
+  const credentialProvider = isCustomProvider ? "" : effectiveProvider;
+  const requiredEnvKeys = requiredCredentialEnvKeys(
+    "buzz-agent",
+    credentialProvider,
+  );
+  const apiKeyEnvVar = getProviderApiKeyEnvVar(credentialProvider);
+  const advancedRequiredEnvKeys = requiredEnvKeys.filter(
+    (key) =>
+      key !== apiKeyEnvVar && !bakedEnv.some((entry) => entry.key === key),
+  );
+  const apiKeyValue = apiKeyEnvVar ? (config.env_vars[apiKeyEnvVar] ?? "") : "";
+  const bakedEnvKeys = React.useMemo(
+    () => bakedEnv.map((entry) => entry.key),
+    [bakedEnv],
+  );
+  const apiKeyInherited =
+    apiKeyEnvVar !== null &&
+    apiKeyValue.length === 0 &&
+    bakedEnvKeys.includes(apiKeyEnvVar);
 
   const {
     discoveredModelOptions,
@@ -131,21 +153,32 @@ export function GlobalAgentConfigFields({
   });
 
   function handleProviderChange(value: string) {
+    const previousApiKey = getProviderApiKeyEnvVar(effectiveProvider);
     if (value === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
+      const nextEnvVars = { ...config.env_vars };
+      if (previousApiKey) delete nextEnvVars[previousApiKey];
       onIsCustomProviderChange(true);
+      onConfigChange({ ...config, env_vars: nextEnvVars, provider: null });
       return;
     }
-    if (value === AUTO_PROVIDER_DROPDOWN_VALUE || value === "") {
-      onIsCustomProviderChange(false);
-      onConfigChange({ ...config, provider: null });
-    } else {
-      onIsCustomProviderChange(false);
-      onConfigChange({
-        ...config,
-        provider: value,
-        model: value === "relay-mesh" ? config.model || "auto" : config.model,
-      });
+    const nextProvider =
+      value === AUTO_PROVIDER_DROPDOWN_VALUE || value === "" ? null : value;
+    const nextApiKey = getProviderApiKeyEnvVar(
+      nextProvider ?? bakedProvider ?? "",
+    );
+    const nextEnvVars = { ...config.env_vars };
+    if (previousApiKey && previousApiKey !== nextApiKey) {
+      delete nextEnvVars[previousApiKey];
     }
+
+    onIsCustomProviderChange(false);
+    onConfigChange({
+      ...config,
+      env_vars: nextEnvVars,
+      provider: nextProvider,
+      model:
+        nextProvider === "relay-mesh" ? config.model || "auto" : config.model,
+    });
   }
 
   function handleCustomProviderInput(value: string) {
@@ -168,10 +201,6 @@ export function GlobalAgentConfigFields({
     onConfigChange({ ...config, env_vars: merged });
   }
 
-  const bakedEnvKeys = React.useMemo(
-    () => bakedEnv.map((e) => e.key),
-    [bakedEnv],
-  );
   // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
   // migration rewrites v1→v2. Hide the legacy v1 option so it is not offered
   // for new selections; OSS builds show it.
@@ -237,6 +266,29 @@ export function GlobalAgentConfigFields({
         </p>
       </div>
 
+      {apiKeyEnvVar ? (
+        <div className="p-3">
+          <PersonaProviderApiKeyField
+            disabled={false}
+            inheritedLabel="Provided by this build"
+            isInherited={apiKeyInherited}
+            isRequired={!apiKeyInherited && apiKeyValue.length === 0}
+            label={
+              effectiveProvider === "anthropic"
+                ? "Anthropic API Key"
+                : "OpenAI API Key"
+            }
+            onValueChange={(value) =>
+              onConfigChange({
+                ...config,
+                env_vars: { ...config.env_vars, [apiKeyEnvVar]: value },
+              })
+            }
+            value={apiKeyValue}
+          />
+        </div>
+      ) : null}
+
       {/* Model field */}
       <div className="space-y-1.5 p-3">
         <AgentModelField
@@ -295,10 +347,12 @@ export function GlobalAgentConfigFields({
       <div className="p-3">
         <EnvVarsEditor
           helperText="Injected into all agents as the lowest-priority layer. Per-agent values override these."
+          hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
           inheritedRows={bakedGenericRows}
           inheritedRowsLabel="build"
           label="Global environment variables"
           onChange={handleEnvVarsChange}
+          requiredKeys={advancedRequiredEnvKeys}
           value={Object.fromEntries(
             Object.entries(config.env_vars).filter(
               ([k]) => k !== BUZZ_AGENT_THINKING_EFFORT,

@@ -20,6 +20,7 @@ export default defineConfig({
       name: "smoke",
       testMatch: [
         "**/smoke.spec.ts",
+        "**/onboarding-docked-cta-screenshots.spec.ts",
         "**/navigation.spec.ts",
         "**/channels.spec.ts",
         "**/channel-shared-header-backdrop.spec.ts",

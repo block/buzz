@@ -39,6 +39,12 @@ function getStoreSnapshot(): number {
  */
 export { subscribeToStore, getStoreSnapshot };
 
+export type DraftMentionRef = {
+  displayName: string;
+  pubkey: string;
+  isAgent: boolean;
+};
+
 export type DraftState = {
   content: string;
   selectionStart: number;
@@ -56,6 +62,8 @@ export type DraftState = {
   updatedAt: string;
   /** Pasted/uploaded image attachments, preserved across channel-switch. */
   pendingImeta: ImetaMedia[];
+  /** Stable identity references for autocomplete-selected mentions in content. */
+  mentionRefs?: DraftMentionRef[];
   /** URLs of imeta attachments marked as spoilered. */
   spoileredAttachmentUrls: string[];
   /**
@@ -170,6 +178,25 @@ function isValidDraftState(v: unknown): v is DraftState {
   ) {
     return false;
   }
+  // Migration: drafts written before mention routing was persisted have no
+  // mentionRefs. Preserve them as ordinary drafts with no selected identities.
+  if (d.mentionRefs === undefined) {
+    (d as DraftState).mentionRefs = [];
+  } else if (
+    !Array.isArray(d.mentionRefs) ||
+    d.mentionRefs.some(
+      (ref) =>
+        typeof ref !== "object" ||
+        ref === null ||
+        typeof ref.displayName !== "string" ||
+        ref.displayName.trim().length === 0 ||
+        typeof ref.pubkey !== "string" ||
+        ref.pubkey.trim().length === 0 ||
+        typeof ref.isAgent !== "boolean",
+    )
+  ) {
+    return false;
+  }
   // Migration: entries written before the status field was introduced have no
   // status field. Treat absent status as "active" to avoid data loss on the
   // first run after the upgrade.
@@ -254,6 +281,7 @@ function draftStatesEqual(a: DraftState, b: DraftState): boolean {
     a.updatedAt !== b.updatedAt ||
     a.status !== b.status ||
     a.pendingImeta.length !== b.pendingImeta.length ||
+    (a.mentionRefs?.length ?? 0) !== (b.mentionRefs?.length ?? 0) ||
     a.spoileredAttachmentUrls.length !== b.spoileredAttachmentUrls.length
   ) {
     return false;
@@ -274,6 +302,19 @@ function draftStatesEqual(a: DraftState, b: DraftState): boolean {
       am.image !== bm.image ||
       am.filename !== bm.filename ||
       am.displayLabel !== bm.displayLabel
+    ) {
+      return false;
+    }
+  }
+  const aMentionRefs = a.mentionRefs ?? [];
+  const bMentionRefs = b.mentionRefs ?? [];
+  for (let i = 0; i < aMentionRefs.length; i++) {
+    const ar = aMentionRefs[i];
+    const br = bMentionRefs[i];
+    if (
+      ar.displayName !== br.displayName ||
+      ar.pubkey !== br.pubkey ||
+      ar.isAgent !== br.isAgent
     ) {
       return false;
     }
@@ -345,6 +386,7 @@ export function persistDraftEntry(
   channelId: string,
   pendingImeta: ImetaMedia[],
   spoileredAttachmentUrls: string[],
+  mentionRefs: DraftMentionRef[] = [],
 ): void {
   const hasContent = content.trim().length > 0 || pendingImeta.length > 0;
   if (hasContent) {
@@ -359,6 +401,7 @@ export function persistDraftEntry(
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       pendingImeta,
+      mentionRefs,
       spoileredAttachmentUrls,
       status: "active",
     });
@@ -457,6 +500,7 @@ export function useDrafts() {
       channelId: string,
       pendingImeta: ImetaMedia[],
       spoileredAttachmentUrls: string[],
+      mentionRefs: DraftMentionRef[] = [],
     ) =>
       persistDraftEntry(
         draftKey,
@@ -464,6 +508,7 @@ export function useDrafts() {
         channelId,
         pendingImeta,
         spoileredAttachmentUrls,
+        mentionRefs,
       ),
     [],
   );

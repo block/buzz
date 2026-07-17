@@ -68,6 +68,11 @@ export type MeshCatalogEntry = {
   fit: MeshModelFit;
   installed: boolean;
   recommended: boolean;
+  /**
+   * Buzz-curated pick — known to survive the agent harness. Curated entries
+   * render above the fold; everything else is "advanced".
+   */
+  curated: boolean;
 };
 
 export type MeshModelCatalog = {
@@ -75,7 +80,7 @@ export type MeshModelCatalog = {
   vramDisplay: string;
   vramGb: number;
   recommended: string | null;
-  /** Ranked: recommended first, then by fit, then larger first within a fit. */
+  /** Ranked: recommended first, then curated, then by fit, larger first. */
   entries: MeshCatalogEntry[];
 };
 

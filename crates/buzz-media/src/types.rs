@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Blossom BlobDescriptor — returned by PUT /media/upload.
+/// Blossom BlobDescriptor — returned by `PUT /upload` and the legacy media alias.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobDescriptor {
     /// Full URL to the blob.

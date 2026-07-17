@@ -4,8 +4,8 @@ import {
   AlertTriangle,
   Check,
   ExternalLink,
+  Info,
   Plus,
-  RefreshCw,
   TerminalSquare,
 } from "lucide-react";
 
@@ -15,32 +15,21 @@ import {
   useGitBashPrerequisiteQuery,
 } from "@/features/agents/hooks";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
-import {
-  GlobalAgentConfigFields,
-  EMPTY_GLOBAL_CONFIG,
-} from "@/features/agents/ui/GlobalAgentConfigFields";
-import { createSaveCoalescer } from "./saveCoalescer";
-import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
-import {
-  getGlobalAgentConfig,
-  setGlobalAgentConfig,
-} from "@/shared/api/tauriGlobalAgentConfig";
-import type {
-  AcpRuntimeCatalogEntry,
-  GlobalAgentConfig,
-} from "@/shared/api/types";
+import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Spinner } from "@/shared/ui/spinner";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { OnboardingFooter } from "./OnboardingFooter";
 import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
 import type { SetupStepActions, SetupStepState } from "./types";
-import { resolveAgentReadiness } from "./agentReadiness";
 
 type SetupStepProps = {
   actions: SetupStepActions;
@@ -57,150 +46,6 @@ type InstallResultState = {
   error: string | null;
   success: boolean;
 };
-
-function AgentDefaultsSection() {
-  const runtimesQuery = useAcpRuntimesQuery();
-  const [config, setConfig] =
-    React.useState<GlobalAgentConfig>(EMPTY_GLOBAL_CONFIG);
-  const [isLoading, setIsLoading] = React.useState(true);
-  const [isCustomProvider, setIsCustomProvider] = React.useState(false);
-  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
-  const [bakedEnv, setBakedEnv] = React.useState<BakedEnvEntry[]>([]);
-  const coalescerRef = React.useRef<{
-    enqueue: (value: GlobalAgentConfig) => void;
-    cancel: () => void;
-  } | null>(null);
-
-  React.useEffect(() => {
-    let unmounted = false;
-
-    getGlobalAgentConfig()
-      .then((loaded) => {
-        if (!unmounted) {
-          setConfig(loaded);
-          setIsLoading(false);
-        }
-      })
-      .catch(() => {
-        if (!unmounted) setIsLoading(false);
-      });
-    getBakedBuildEnv()
-      .then((env) => {
-        if (!unmounted) setBakedEnv(env);
-      })
-      .catch(() => undefined);
-
-    // The coalescer serializes autosaves and drains any edit that arrived
-    // while a previous save was in flight. Cancel on unmount so a slow
-    // in-flight request never calls setState on an unmounted component.
-    const coalescer = createSaveCoalescer<GlobalAgentConfig>(
-      // set_global_agent_config returns a save result (config + restart
-      // counts); the coalescer round-trips the persisted config only.
-      async (next) => (await setGlobalAgentConfig(next)).config,
-      () => undefined, // saving state not surfaced in this autosave UX
-      (saved) => {
-        if (!unmounted) setConfig(saved);
-      },
-    );
-    coalescerRef.current = coalescer;
-
-    return () => {
-      unmounted = true;
-      coalescer.cancel();
-    };
-  }, []);
-
-  const buzzAgentRuntime = React.useMemo(
-    () => (runtimesQuery.data ?? []).find((r) => r.id === "buzz-agent"),
-    [runtimesQuery.data],
-  );
-
-  const readiness = resolveAgentReadiness(runtimesQuery.data ?? [], config);
-
-  return (
-    <section className="space-y-4">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1">
-          <h2 className="text-xl font-semibold tracking-tight text-foreground">
-            Agent defaults
-          </h2>
-          <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-            Configure the LLM provider and credentials that buzz-agent uses, or
-            connect a CLI harness like Claude or Goose above.
-          </p>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-2">
-          {readiness.ready ? (
-            <Badge
-              className="border border-primary/20 bg-primary/10 text-primary"
-              data-testid="agent-readiness-badge"
-              variant="outline"
-            >
-              {readiness.reason === "cli"
-                ? `${readiness.runtimeLabel} ready`
-                : "buzz-agent configured"}
-            </Badge>
-          ) : (
-            <Badge
-              className="border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-              data-testid="agent-readiness-badge"
-              variant="outline"
-            >
-              Not configured
-            </Badge>
-          )}
-          <Button
-            className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-            data-testid="agent-readiness-recheck"
-            disabled={runtimesQuery.isFetching}
-            onClick={() => void runtimesQuery.refetch()}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
-            {runtimesQuery.isFetching ? (
-              <Spinner className="h-3 w-3 border-[1.5px]" />
-            ) : (
-              <RefreshCw className="h-3 w-3" />
-            )}
-            Re-check
-          </Button>
-        </div>
-      </div>
-
-      {isLoading ? (
-        <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
-          <Spinner className="h-4 w-4 border-2" />
-          Loading…
-        </div>
-      ) : (
-        <GlobalAgentConfigFields
-          bakedEnv={bakedEnv}
-          buzzAgentRuntime={buzzAgentRuntime}
-          config={config}
-          isCustomModelEditing={isCustomModelEditing}
-          isCustomProvider={isCustomProvider}
-          onConfigChange={(next) => {
-            // Always apply optimistically so the UI never reverts mid-save,
-            // then enqueue the persist — the coalescer serialises multiple
-            // rapid edits into a single trailing request.
-            setConfig(next);
-            coalescerRef.current?.enqueue(next);
-          }}
-          onCustomModelEditingChange={setIsCustomModelEditing}
-          onIsCustomProviderChange={setIsCustomProvider}
-        />
-      )}
-
-      {!readiness.ready ? (
-        <p className="text-sm text-muted-foreground">
-          You can finish now and configure agents later in Settings.
-        </p>
-      ) : null}
-    </section>
-  );
-}
 
 function useSetupStepState(): SetupStepState {
   const runtimesQuery = useAcpRuntimesQuery();
@@ -225,25 +70,24 @@ function RuntimeIcon({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 
   if (runtime.avatarUrl && !imageFailed) {
     return (
-      <div className="flex h-9 w-9 items-center justify-center rounded-md border border-border/45 bg-background/80">
-        <img
-          alt=""
-          className={cn(
-            "h-7 w-7 rounded-sm object-contain",
-            shouldForceForegroundColor &&
-              (isDark ? "brightness-0 invert" : "brightness-0"),
-          )}
-          onError={() => setImageFailed(true)}
-          src={runtime.avatarUrl}
-        />
-      </div>
+      <img
+        alt=""
+        className={cn(
+          "h-12 w-12 rounded-md object-contain",
+          shouldForceForegroundColor &&
+            (isDark ? "brightness-0 invert" : "brightness-0"),
+        )}
+        onError={() => setImageFailed(true)}
+        src={runtime.avatarUrl}
+      />
     );
   }
 
   return (
-    <div className="flex h-9 w-9 items-center justify-center rounded-md border border-border/45 bg-background/80 text-muted-foreground">
-      <TerminalSquare className="h-4 w-4" />
-    </div>
+    <TerminalSquare
+      className="h-12 w-12 text-muted-foreground"
+      strokeWidth={1.25}
+    />
   );
 }
 
@@ -264,7 +108,7 @@ function RuntimeStatus({
     return (
       <div
         aria-label={`Installing ${runtime.label}`}
-        className="flex h-8 shrink-0 items-center justify-center"
+        className="flex h-8 w-8 items-center justify-center"
         role="status"
       >
         <Spinner className="h-4 w-4 border-2 text-foreground" />
@@ -274,7 +118,7 @@ function RuntimeStatus({
 
   if (installError) {
     return (
-      <div className="flex h-8 shrink-0 items-center justify-center">
+      <div className="flex h-8 w-8 items-center justify-center">
         <AlertTriangle className="h-4 w-4 text-destructive" />
       </div>
     );
@@ -282,8 +126,15 @@ function RuntimeStatus({
 
   if (runtime.availability === "available" || installSuccess) {
     return (
-      <div className="flex h-8 shrink-0 items-center justify-center">
-        <Check className="h-4 w-4 text-primary" />
+      <div
+        aria-label={`${runtime.label} available`}
+        className="flex h-6 w-6 items-center justify-center rounded-full bg-primary shadow-sm"
+        role="img"
+      >
+        <Check
+          className="h-3.5 w-3.5 text-primary-foreground"
+          strokeWidth={3}
+        />
       </div>
     );
   }
@@ -292,7 +143,7 @@ function RuntimeStatus({
     return (
       <Button
         aria-label={`Install ${runtime.label}`}
-        className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+        className="h-8 w-8 text-muted-foreground hover:text-foreground"
         data-testid={`onboarding-runtime-install-${runtime.id}`}
         onClick={onInstall}
         size="icon"
@@ -307,7 +158,7 @@ function RuntimeStatus({
   return (
     <Button
       aria-label={`View ${runtime.label} setup instructions`}
-      className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+      className="h-8 w-8 text-muted-foreground hover:text-foreground"
       data-testid={`onboarding-runtime-instructions-${runtime.id}`}
       onClick={() => void openUrl(runtime.installInstructionsUrl)}
       size="icon"
@@ -331,7 +182,7 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
     );
     return (
       <>
-        <p className="mt-2 text-sm leading-5 text-muted-foreground">
+        <p className="text-sm leading-5 text-muted-foreground">
           {description.charAt(0).toUpperCase() + description.slice(1)}
         </p>
         {runtime.defaultArgs.length > 0 ? (
@@ -347,7 +198,7 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   if (runtime.availability === "adapter_missing") {
     return (
       <>
-        <p className="mt-2 text-sm leading-5 text-muted-foreground">
+        <p className="text-sm leading-5 text-muted-foreground">
           CLI detected; ACP adapter missing.
         </p>
         <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
@@ -360,7 +211,7 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   if (runtime.availability === "adapter_outdated") {
     return (
       <>
-        <p className="mt-2 text-sm leading-5 text-muted-foreground">
+        <p className="text-sm leading-5 text-muted-foreground">
           ACP adapter detected but outdated — reinstall required.
         </p>
         <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
@@ -383,7 +234,7 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   if (runtime.availability === "cli_missing") {
     return (
       <>
-        <p className="mt-2 text-sm leading-5 text-muted-foreground">
+        <p className="text-sm leading-5 text-muted-foreground">
           ACP adapter detected; CLI missing.
         </p>
         <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
@@ -395,7 +246,7 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 
   return (
     <>
-      <p className="mt-2 text-sm leading-5 text-muted-foreground">
+      <p className="text-sm leading-5 text-muted-foreground">
         Not installed yet.
       </p>
       <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
@@ -403,6 +254,30 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
       </p>
     </>
   );
+}
+
+function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
+  if (
+    runtime.availability === "available" &&
+    runtime.command &&
+    runtime.binaryPath
+  ) {
+    const description = describeResolvedCommand(
+      runtime.command,
+      runtime.binaryPath,
+    );
+    return description.charAt(0).toUpperCase() + description.slice(1);
+  }
+  if (runtime.availability === "adapter_missing") {
+    return "CLI detected; ACP adapter missing.";
+  }
+  if (runtime.availability === "adapter_outdated") {
+    return "ACP adapter detected but outdated — reinstall required.";
+  }
+  if (runtime.availability === "cli_missing") {
+    return "ACP adapter detected; CLI missing.";
+  }
+  return "Not installed yet.";
 }
 
 function RuntimeCard({
@@ -423,54 +298,64 @@ function RuntimeCard({
   return (
     <div
       className={cn(
-        "grid min-h-28 grid-cols-[auto_1fr_auto] items-start gap-3 rounded-lg border bg-background p-3 text-left transition-colors sm:p-4",
+        "relative flex min-h-40 w-40 flex-col items-center justify-center gap-3 rounded-2xl bg-white/85 p-4 text-center",
         isAvailable
-          ? "border-primary/25 bg-primary/[0.055] shadow-[0_12px_30px_hsl(var(--primary)/0.08)] dark:bg-primary/[0.08]"
-          : installError
-            ? "border-destructive/45 bg-destructive/5 shadow-xs"
-            : "border-2 border-dashed border-muted-foreground/35 bg-muted/20 shadow-none",
+          ? "shadow-[0_0_55px_25px_rgba(255,255,255,0.85)]"
+          : "shadow-[0_0_45px_18px_rgba(255,255,255,0.55)] opacity-90",
+        installError && "ring-1 ring-destructive/40",
       )}
       data-testid={`onboarding-runtime-${runtime.id}`}
     >
+      <div className="absolute right-2 top-2">
+        <RuntimeStatus
+          installError={installError}
+          installSuccess={installSuccess}
+          isInstalling={isInstalling}
+          onInstall={onInstall}
+          runtime={runtime}
+        />
+      </div>
+
+      <div className="absolute left-2 top-2">
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button
+              aria-label={`${runtime.label} details`}
+              className="h-6 w-6 text-muted-foreground/70 hover:text-foreground"
+              data-testid={`onboarding-runtime-details-${runtime.id}`}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <Info className="h-3.5 w-3.5" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="start" className="w-80 text-left">
+            <RuntimeDetails runtime={runtime} />
+          </PopoverContent>
+        </Popover>
+      </div>
+
       <RuntimeIcon runtime={runtime} />
 
       <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-base font-medium leading-6 text-foreground">
-            {runtime.label}
-          </h2>
-          {isAvailable ? (
-            <Badge
-              className="border border-primary/20 bg-primary/10 text-primary"
-              variant="outline"
-            >
-              Installed
-            </Badge>
-          ) : null}
-        </div>
-
-        <RuntimeDetails runtime={runtime} />
-
+        <h2 className="text-sm font-medium leading-5 text-foreground">
+          {runtime.label}
+        </h2>
+        {!isAvailable && !installError ? (
+          <p className="mt-1 text-2xs leading-4 text-muted-foreground">
+            {runtimeDetailText(runtime)}
+          </p>
+        ) : null}
         {installError ? (
-          <p className="mt-3 whitespace-pre-line rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
+          <p className="mt-1 text-2xs leading-4 text-destructive">
             {installError}
           </p>
         ) : null}
-
         {installSuccess && runtime.availability !== "available" ? (
-          <p className="mt-3 rounded-md border border-primary/25 bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">
-            Installed successfully. You can finish onboarding now.
-          </p>
+          <p className="mt-1 text-2xs leading-4 text-primary">Installed</p>
         ) : null}
       </div>
-
-      <RuntimeStatus
-        installError={installError}
-        installSuccess={installSuccess}
-        isInstalling={isInstalling}
-        onInstall={onInstall}
-        runtime={runtime}
-      />
     </div>
   );
 }
@@ -483,10 +368,10 @@ function GitBashPrerequisiteCard() {
   return (
     <div
       className={cn(
-        "rounded-lg border p-3 text-left sm:p-4",
+        "mx-auto w-full max-w-[560px] rounded-2xl bg-white/85 p-3 text-left sm:p-4",
         prerequisite.available
-          ? "border-primary/25 bg-primary/[0.055]"
-          : "border-amber-500/30 bg-amber-500/5",
+          ? "shadow-[0_0_45px_18px_rgba(255,255,255,0.7)]"
+          : "ring-1 ring-amber-500/40 shadow-[0_0_45px_18px_rgba(255,255,255,0.55)]",
       )}
       data-testid="onboarding-git-bash"
     >
@@ -572,23 +457,21 @@ function RuntimeProvidersSection({
   }
 
   return (
-    <section className="space-y-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight text-foreground">
-            Agent harnesses
-          </h1>
-          <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-            Buzz can launch local ACP-compatible agent harnesses. Install or
-            verify the runtimes this desktop app can see.
-          </p>
-        </div>
+    <section className="flex w-full flex-col items-center gap-8">
+      <div className="w-full max-w-[520px] text-center">
+        <h1 className="text-title font-normal text-foreground">
+          Use the models that fit the task
+        </h1>
+        <p className="mt-3 text-sm leading-6 text-foreground/80">
+          These are the local agent harnesses Buzz detected. You choose a
+          harness when creating each agent.
+        </p>
       </div>
 
       <GitBashPrerequisiteCard />
 
       {items.length > 0 ? (
-        <div className="grid gap-3 lg:grid-cols-2">
+        <div className="flex flex-wrap items-stretch justify-center gap-4">
           {items.map((runtime) => (
             <RuntimeCard
               installError={installResults[runtime.id]?.error ?? null}
@@ -604,12 +487,12 @@ function RuntimeProvidersSection({
           ))}
         </div>
       ) : isChecking ? (
-        <div className="rounded-lg border border-border/70 bg-background px-4 py-6 text-sm text-muted-foreground">
+        <div className="rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground">
           Looking for compatible runtimes...
         </div>
       ) : errorMessage ? null : (
         <p
-          className="rounded-lg border border-border/70 bg-background px-4 py-6 text-sm text-muted-foreground"
+          className="max-w-[560px] rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground"
           data-testid="onboarding-acp-empty"
         >
           No compatible ACP runtimes detected yet. You can finish setup now and
@@ -618,7 +501,7 @@ function RuntimeProvidersSection({
       )}
 
       {errorMessage ? (
-        <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+        <p className="max-w-[560px] rounded-2xl bg-destructive/10 px-6 py-3 text-sm text-destructive">
           {errorMessage}
         </p>
       ) : null}
@@ -635,27 +518,27 @@ function SetupStepContent({
 
   return (
     <OnboardingSlideTransition
-      className="space-y-7 text-left"
+      // pb clears the always-docked footer: the provider list can overflow on
+      // short windows, so reserve room to scroll clear of the fixed CTA group.
+      className="flex w-full flex-col items-center pb-20"
       data-testid="onboarding-page-2"
       direction={direction}
       transitionKey={`setup-${direction}`}
     >
       <RuntimeProvidersSection runtimeProviders={runtimeProviders} />
 
-      <AgentDefaultsSection />
-
-      <div className="mx-auto flex w-full max-w-md flex-col gap-3">
+      <OnboardingFooter>
         <Button
-          className="h-10 w-full"
-          data-testid="onboarding-finish"
-          onClick={actions.complete}
+          className={ONBOARDING_PRIMARY_CTA_CLASS}
+          data-testid="onboarding-setup-next"
+          onClick={actions.next}
           type="button"
         >
-          Finish
+          Next
         </Button>
 
         <Button
-          className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
+          className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
           data-testid="onboarding-back"
           onClick={actions.back}
           type="button"
@@ -663,7 +546,7 @@ function SetupStepContent({
         >
           Back
         </Button>
-      </div>
+      </OnboardingFooter>
     </OnboardingSlideTransition>
   );
 }

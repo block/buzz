@@ -113,8 +113,8 @@ export function getPersistentAgentAudienceScope({
 }: PersistentAgentAudienceScopeInput): string | null {
   const owner = ownerPubkey.trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(owner) || !channelId) return null;
-  const conversation = threadRootId ? `thread:${threadRootId}` : "timeline";
-  return `${owner}:${channelId}:${conversation}`;
+  if (!threadRootId) return null;
+  return `${owner}:${channelId}:thread:${threadRootId}`;
 }
 
 export function getPersistentAgentAudienceGeneration(): number {
@@ -123,6 +123,14 @@ export function getPersistentAgentAudienceGeneration(): number {
 
 export function getPersistentAgentAudienceRevision(scope: string): number {
   return revisions.get(scope) ?? defaultRevision;
+}
+
+export function initializePersistentAgentAudience(
+  scope: string,
+  pubkeys: Iterable<string>,
+): void {
+  if (!enabled || !scope || Object.hasOwn(audiences, scope)) return;
+  setPersistentAgentAudience(scope, pubkeys);
 }
 
 export function setPersistentAgentAudience(
@@ -208,6 +216,7 @@ export function usePersistentAgentAudience(scope: string | null): {
   promotePubkeys: typeof promotePersistentAgentAudience;
   removePubkey: (pubkey: string) => void;
   clear: () => void;
+  initialize: (pubkeys: Iterable<string>) => void;
 } {
   const state = React.useSyncExternalStore(
     subscribe,
@@ -230,6 +239,10 @@ export function usePersistentAgentAudience(scope: string | null): {
     ),
     clear: React.useCallback(
       () => setPersistentAgentAudience(resolvedScope, []),
+      [resolvedScope],
+    ),
+    initialize: React.useCallback(
+      (pubkeys) => initializePersistentAgentAudience(resolvedScope, pubkeys),
       [resolvedScope],
     ),
   };

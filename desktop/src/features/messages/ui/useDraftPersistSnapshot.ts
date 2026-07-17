@@ -1,7 +1,10 @@
 import * as React from "react";
 
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
-import type { DraftState } from "@/features/messages/lib/useDrafts";
+import type {
+  DraftMentionRef,
+  DraftState,
+} from "@/features/messages/lib/useDrafts";
 
 type UseDraftPersistLifecycleParams = {
   effectiveDraftKey: string | null | undefined;
@@ -15,7 +18,12 @@ type UseDraftPersistLifecycleParams = {
     channelId: string,
     pendingImeta: ImetaMedia[],
     spoileredAttachmentUrls: string[],
+    mentionRefs: DraftMentionRef[],
   ) => void;
+  /** Snapshot selected mention identities still present in current content. */
+  getMentionRefs: (content: string) => DraftMentionRef[];
+  /** Replace mention routing/highlight state when a draft is restored or cleared. */
+  restoreMentionRefs: (refs: readonly DraftMentionRef[]) => void;
   /** Live `pendingImeta` from React state — used for render-time ref sync. */
   livePendingImeta: ImetaMedia[];
   /** Async setter for pendingImeta — called after the synchronous snapshot. */
@@ -68,6 +76,8 @@ export function useDraftPersistLifecycle({
   channelId,
   loadDraft,
   persistDraft,
+  getMentionRefs,
+  restoreMentionRefs,
   livePendingImeta,
   setPendingImeta,
   setContent,
@@ -92,6 +102,7 @@ export function useDraftPersistLifecycle({
     const saved = effectiveDraftKey ? loadDraft(effectiveDraftKey) : undefined;
     if (saved) {
       setContent(saved.content);
+      restoreMentionRefs(saved.mentionRefs ?? []);
       // Set the persist-snapshot ref SYNCHRONOUSLY before calling the async
       // state setter, so the cleanup closure (which may fire before the state
       // update commits in React StrictMode's simulate-unmount pass) reads the
@@ -101,6 +112,7 @@ export function useDraftPersistLifecycle({
       setSpoileredAttachmentUrls(new Set(saved.spoileredAttachmentUrls));
     } else {
       clearContent();
+      restoreMentionRefs([]);
       // Same synchronous snapshot on the empty path.
       pendingImetaForPersistRef.current = [];
       setPendingImeta([]);
@@ -109,12 +121,14 @@ export function useDraftPersistLifecycle({
 
     return () => {
       if (effectiveDraftKey) {
+        const content = syncComposerContentFromEditor();
         persistDraft(
           effectiveDraftKey,
-          syncComposerContentFromEditor(),
+          content,
           channelId ?? effectiveDraftKey,
           [...pendingImetaForPersistRef.current],
           [...spoileredAttachmentUrlsRef.current],
+          getMentionRefs(content),
         );
       }
     };

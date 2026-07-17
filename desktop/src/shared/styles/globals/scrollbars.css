@@ -3,7 +3,11 @@
 }
 
 .buzz-sidebar-scrollbar:hover {
-  scrollbar-color: hsl(var(--sidebar-border) / 0.8) transparent;
+  scrollbar-color: var(
+      --buzz-sidebar-scrollbar-thumb,
+      hsl(var(--sidebar-border) / 0.8)
+    )
+    transparent;
 }
 
 .buzz-sidebar-scrollbar::-webkit-scrollbar {
@@ -23,7 +27,10 @@
 }
 
 .buzz-sidebar-scrollbar:hover::-webkit-scrollbar-thumb {
-  background-color: hsl(var(--sidebar-border) / 0.8);
+  background-color: var(
+    --buzz-sidebar-scrollbar-thumb,
+    hsl(var(--sidebar-border) / 0.8)
+  );
 }
 
 /*

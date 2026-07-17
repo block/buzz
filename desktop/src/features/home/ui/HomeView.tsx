@@ -769,6 +769,7 @@ export function HomeView({
               item={selectedItem}
               latchedDefaultParentId={latchedDefaultParentId}
               messages={contextMessages}
+              profiles={feedProfiles}
               selectedEventId={selectedEventId}
               onBack={
                 isSinglePanelDetailView

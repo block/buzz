@@ -1,5 +1,4 @@
 import * as React from "react";
-
 import {
   useManagedAgentsQuery,
   usePersonasQuery,
@@ -37,6 +36,7 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { flushMentionDebounce } from "./flushMentionDebounce";
 import { hasMention } from "./hasMention";
+import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
@@ -46,34 +46,26 @@ import {
   type MentionCandidate,
   mentionCandidateLabel,
 } from "./mentionCandidates";
-
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
-
 export type PersonaMentionTarget = {
   displayName: string;
   persona: AgentPersona;
 };
-
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
-
 function formatSearchUserDisplayName(user: UserSearchResult) {
   return user.displayName?.trim() || user.nip05Handle?.trim() || null;
 }
-
 function formatSearchUserSecondaryLabel(user: UserSearchResult) {
   const displayName = user.displayName?.trim();
   const nip05Handle = user.nip05Handle?.trim();
-
   if (displayName && nip05Handle) {
     return nip05Handle;
   }
-
   return null;
 }
-
 function appendUniqueName(current: string[], name: string): string[] {
   return current.some(
     (candidate) => candidate.toLowerCase() === name.toLowerCase(),
@@ -81,7 +73,6 @@ function appendUniqueName(current: string[], name: string): string[] {
     ? current
     : [...current, name];
 }
-
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -96,10 +87,11 @@ export function useMentions(
   >([]);
   const [selectedAgentMentionNames, setSelectedAgentMentionNames] =
     React.useState<string[]>([]);
+  const selectedAgentMentionNamesRef = React.useRef<string[]>([]);
+  selectedAgentMentionNamesRef.current = selectedAgentMentionNames;
   const mentionMapRef = React.useRef<Map<string, string>>(new Map());
   const personaMentionMapRef = React.useRef<Map<string, string>>(new Map());
   const previousSuggestionsRef = React.useRef<MentionSuggestion[]>([]);
-
   void options?.channelType;
   const mentionSearchQuery = mentionQuery?.trim() ?? "";
   const canSearchGlobalPeople = mentionSearchQuery.length > 0;
@@ -245,7 +237,6 @@ export function useMentions(
       new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
     [members],
   );
-
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
     const candidatesByPubkey = new Map<string, MentionCandidate>();
 
@@ -514,13 +505,11 @@ export function useMentions(
     return names;
   }, [selectedAgentMentionNames]);
 
-  /** Lower-cased searchable names, used for case-insensitive prefix matching. */
   const searchableNamesLower = React.useMemo<string[]>(
     () => searchableNames.map((n) => n.toLowerCase()),
     [searchableNames],
   );
 
-  // --- Debounce infrastructure for updateMentionQuery ---
   const debounceTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -529,12 +518,10 @@ export function useMentions(
   const flushedMentionStartIndexRef = React.useRef<number | null>(null);
   const searchableNamesLowerRef = React.useRef<string[]>(searchableNamesLower);
 
-  // Keep the known-names ref in sync so the debounced callback never reads stale data.
   React.useEffect(() => {
     searchableNamesLowerRef.current = searchableNamesLower;
   }, [searchableNamesLower]);
 
-  // Clean up any pending debounce timer on unmount.
   React.useEffect(() => {
     return () => {
       if (debounceTimerRef.current !== null) {
@@ -622,7 +609,6 @@ export function useMentions(
 
   const insertMention = React.useCallback(
     (suggestion: MentionSuggestion, selectionEnd: number): AutocompleteEdit => {
-      // Cancel any pending debounced detection — user already selected
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
@@ -666,12 +652,14 @@ export function useMentions(
       if (isAgentMention) {
         setSelectedAgentMentionNames((current) => {
           const known = new Set(current.map((name) => name.toLowerCase()));
-          return [
+          const next = [
             ...current,
             ...selectedMentions
               .map((selected) => selected.displayName)
               .filter((name) => !known.has(name.toLowerCase())),
           ];
+          selectedAgentMentionNamesRef.current = next;
+          return next;
         });
       }
       trimMapToSize(mentions, 200);
@@ -707,9 +695,11 @@ export function useMentions(
       );
 
       if (options?.isAgent) {
-        setSelectedAgentMentionNames((current) =>
-          appendUniqueName(current, trimmedName),
-        );
+        setSelectedAgentMentionNames((current) => {
+          const next = appendUniqueName(current, trimmedName);
+          selectedAgentMentionNamesRef.current = next;
+          return next;
+        });
       }
     },
     [],
@@ -768,20 +758,20 @@ export function useMentions(
       managedAgentPubkeys.has(normalizePubkey(pubkey)),
     [managedAgentPubkeys],
   );
-
+  const autocompleteGenerationRef = React.useRef(0);
   const updateMentionQuery = React.useCallback(
     (value: string, cursorPosition: number) => {
-      // Stash the latest values so the debounced callback always uses fresh data.
+      const generation = ++autocompleteGenerationRef.current;
       latestValueRef.current = value;
       latestCursorRef.current = cursorPosition;
 
-      // Clear any previously scheduled detection.
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
       }
 
       debounceTimerRef.current = setTimeout(() => {
         debounceTimerRef.current = null;
+        if (generation !== autocompleteGenerationRef.current) return;
 
         const mention = detectPrefixQuery(
           "@",
@@ -798,7 +788,6 @@ export function useMentions(
         }
       }, MENTION_DEBOUNCE_MS);
     },
-    // Stable: refs are used inside the timeout, so no reactive deps needed.
     [],
   );
 
@@ -866,18 +855,35 @@ export function useMentions(
     [activePersonaById],
   );
 
-  const clearMentions = React.useCallback(() => {
+  const cancelMentionAutocomplete = React.useCallback(() => {
+    autocompleteGenerationRef.current += 1;
     if (debounceTimerRef.current !== null) {
       clearTimeout(debounceTimerRef.current);
       debounceTimerRef.current = null;
     }
-    mentionMapRef.current.clear();
-    personaMentionMapRef.current.clear();
-    setSelectedMentionNames([]);
-    setSelectedAgentMentionNames([]);
+    flushedMentionStartIndexRef.current = null;
     setMentionQuery(null);
     setMentionSelectedIndex(0);
   }, []);
+
+  const clearMentions = React.useCallback(() => {
+    cancelMentionAutocomplete();
+    mentionMapRef.current.clear();
+    personaMentionMapRef.current.clear();
+    selectedAgentMentionNamesRef.current = [];
+    setSelectedMentionNames([]);
+    setSelectedAgentMentionNames([]);
+  }, [cancelMentionAutocomplete]);
+
+  const { getDraftMentionRefs, restoreDraftMentionRefs } =
+    useDraftMentionRouting({
+      mentionMapRef,
+      personaMentionMapRef,
+      selectedAgentNamesRef: selectedAgentMentionNamesRef,
+      cancelAutocomplete: cancelMentionAutocomplete,
+      setSelectedNames: setSelectedMentionNames,
+      setSelectedAgentNames: setSelectedAgentMentionNames,
+    });
 
   const handleMentionKeyDown = React.useCallback(
     (
@@ -913,8 +919,6 @@ export function useMentions(
       ) {
         event.preventDefault();
 
-        // If a debounce is pending, the suggestions array reflects a stale query.
-        // Flush: re-detect synchronously and re-derive the correct suggestion.
         if (debounceTimerRef.current !== null) {
           const flushed = flushMentionDebounce({
             debounceTimerRef,
@@ -937,7 +941,6 @@ export function useMentions(
             setMentionQuery(null);
             return { handled: true };
           }
-          // Plain `@` after flush intentionally falls through to existing suggestions.
         }
 
         return { handled: true, suggestion: suggestions[mentionSelectedIndex] };
@@ -965,9 +968,11 @@ export function useMentions(
   );
 
   return {
+    cancelMentionAutocomplete,
     clearMentions,
     extractMentionPersonas,
     extractMentionPubkeys,
+    getDraftMentionRefs,
     getMentionDisplayName,
     handleMentionKeyDown,
     hasResolvedMembers: members !== undefined,
@@ -981,6 +986,7 @@ export function useMentions(
     memberPubkeys,
     mentionSelectedIndex,
     registerMentionPubkey,
+    restoreDraftMentionRefs,
     suggestions,
     fetchMoreSuggestions,
     hasMoreSuggestions: Boolean(userSearchQuery.hasNextPage),

@@ -1,4 +1,7 @@
-use std::process::{Command, Stdio};
+use std::{
+    path::Path,
+    process::{Command, Stdio},
+};
 
 use serde_json::Value;
 
@@ -116,18 +119,72 @@ fn run_buzz_acp_auth_command<const N: usize>(
         .or_else(|| resolve_command("buzz-acp"))
         .ok_or_else(|| "buzz-acp helper not found".to_string())?;
 
-    let agent_args = normalize_agent_args(adapter_command.0, Vec::new());
+    let augmented_path = auth_command_path();
+    run_buzz_acp_auth_command_with_paths(
+        &acp_path,
+        adapter_command.0,
+        &adapter_command.1,
+        args,
+        augmented_path.as_deref(),
+    )
+}
+
+/// PATH for the buzz-acp auth helper child process.
+///
+/// Uses the augmented agent PATH so `#!/usr/bin/env node` adapter shims
+/// resolve the Buzz-managed Node runtime — the same PATH normal agent
+/// launches and readiness probes use.
+///
+/// On Windows, `login_shell_path()` is intentionally `None`, so the augmented
+/// PATH contains only Buzz-managed directories and the exe parent. Buzz does
+/// not ship a managed Node runtime on Windows, and npm `.cmd` adapters need
+/// the user's normal PATH to find `node` (and often `claude`/`codex`), so the
+/// inherited process PATH is appended there instead of being replaced.
+fn auth_command_path() -> Option<String> {
+    let augmented = crate::managed_agents::readiness::cli_probe::augmented_path();
+    if !cfg!(windows) {
+        return augmented;
+    }
+    let inherited = std::env::var("PATH").ok().filter(|path| !path.is_empty());
+    append_inherited_path(augmented, inherited)
+}
+
+/// Append `inherited` PATH entries after `augmented` ones. Returns `None`
+/// when `augmented` is `None` so the child simply inherits the process
+/// environment unchanged (the pre-augmentation behavior on Windows).
+fn append_inherited_path(augmented: Option<String>, inherited: Option<String>) -> Option<String> {
+    let augmented = augmented?;
+    let Some(inherited) = inherited else {
+        return Some(augmented);
+    };
+    let parts: Vec<std::path::PathBuf> = std::env::split_paths(&augmented)
+        .chain(std::env::split_paths(&inherited))
+        .collect();
+    std::env::join_paths(parts)
+        .ok()
+        .map(|joined| joined.to_string_lossy().into_owned())
+        .or(Some(augmented))
+}
+
+fn run_buzz_acp_auth_command_with_paths<const N: usize>(
+    acp_path: &Path,
+    adapter_name: &str,
+    adapter_path: &Path,
+    args: [&str; N],
+    augmented_path: Option<&str>,
+) -> Result<std::process::Output, String> {
+    let agent_args = normalize_agent_args(adapter_name, Vec::new());
     let mut command = Command::new(acp_path);
     command
         .args(args)
-        .env("BUZZ_ACP_AGENT_COMMAND", adapter_command.1.as_os_str())
+        .env("BUZZ_ACP_AGENT_COMMAND", adapter_path.as_os_str())
         .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(workdir) = default_agent_workdir() {
         command.current_dir(workdir);
     }
-    if let Some(ref path) = crate::managed_agents::login_shell_path() {
+    if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
 
@@ -340,8 +397,101 @@ fn applescript_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_terminal_argv, shell_escape, shell_join, windows_terminal_args, AcpAuthMethod,
+        adapter_terminal_argv, append_inherited_path, run_buzz_acp_auth_command_with_paths,
+        shell_escape, shell_join, windows_terminal_args, AcpAuthMethod,
     };
+
+    /// Windows regression: the augmented PATH there holds only Buzz-managed
+    /// dirs and the exe parent (no login-shell PATH, no managed Node), so the
+    /// user's inherited PATH must be appended for npm `.cmd` adapters to find
+    /// `node`/`claude`/`codex`.
+    #[test]
+    fn append_inherited_path_appends_after_augmented() {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        let augmented = format!("{0}buzz-bin{1}{0}exe-dir", std::path::MAIN_SEPARATOR, sep);
+        let inherited = format!(
+            "{0}user-bin{1}{0}system-bin",
+            std::path::MAIN_SEPARATOR,
+            sep
+        );
+        let joined = append_inherited_path(Some(augmented.clone()), Some(inherited.clone()))
+            .expect("joined PATH");
+        assert_eq!(joined, format!("{augmented}{sep}{inherited}"));
+    }
+
+    #[test]
+    fn append_inherited_path_falls_back_to_inheritance_without_augmented() {
+        // With no augmented PATH the helper must not set PATH at all, letting
+        // the child inherit the process environment unchanged.
+        assert_eq!(append_inherited_path(None, Some("anything".into())), None);
+    }
+
+    #[test]
+    fn append_inherited_path_keeps_augmented_without_inherited() {
+        assert_eq!(
+            append_inherited_path(Some("only-augmented".into()), None),
+            Some("only-augmented".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_command_uses_augmented_path_for_node_adapter() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let interpreter_dir = temp.path().join("interpreter-bin");
+        fs::create_dir_all(&interpreter_dir).expect("interpreter dir");
+
+        let marker_path = temp.path().join("fake-node-ran");
+        let node_path = interpreter_dir.join("node");
+        fs::write(
+            &node_path,
+            format!(
+                "#!/bin/sh\nprintf 'fake node ran\\n' > '{}' || exit 1\nprintf '{{\"methods\":[]}}\\n'\n",
+                marker_path.display()
+            ),
+        )
+        .expect("write fake node");
+        fs::set_permissions(&node_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake node");
+
+        let adapter_path = temp.path().join("claude-agent-acp");
+        fs::write(&adapter_path, "#!/usr/bin/env node\n").expect("write adapter");
+        fs::set_permissions(&adapter_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod adapter");
+
+        let acp_path = temp.path().join("buzz-acp");
+        fs::write(&acp_path, "#!/bin/sh\nexec \"$BUZZ_ACP_AGENT_COMMAND\"\n")
+            .expect("write buzz-acp");
+        fs::set_permissions(&acp_path, fs::Permissions::from_mode(0o755)).expect("chmod buzz-acp");
+
+        let augmented_path = std::env::join_paths([interpreter_dir.as_path()])
+            .expect("join augmented PATH")
+            .to_string_lossy()
+            .into_owned();
+        let output = run_buzz_acp_auth_command_with_paths(
+            &acp_path,
+            "claude-agent-acp",
+            &adapter_path,
+            ["auth-methods", "--json"],
+            Some(&augmented_path),
+        )
+        .expect("run auth command");
+
+        assert!(
+            output.status.success(),
+            "auth command should find node through augmented PATH: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(marker_path.exists(), "the fake node interpreter should run");
+        assert_eq!(
+            output.stdout,
+            br#"{"methods":[]}
+"#
+        );
+    }
 
     #[test]
     fn shell_join_escapes_spaces_and_quotes() {

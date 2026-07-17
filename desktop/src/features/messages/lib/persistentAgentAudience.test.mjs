@@ -32,35 +32,35 @@ function savedAudiences() {
 
 test("conversation scopes isolate identities, channels, and threads", async () => {
   const store = await loadStore();
-  const channelA = store.getPersistentAgentAudienceScope({
-    ownerPubkey: ownerA,
-    channelId: "channel-a",
-  });
-  const channelB = store.getPersistentAgentAudienceScope({
-    ownerPubkey: ownerA,
-    channelId: "channel-b",
-  });
-  const threadA1 = store.getPersistentAgentAudienceScope({
-    ownerPubkey: ownerA,
-    channelId: "channel-a",
-    threadRootId: "root-1",
-  });
-  const threadA2 = store.getPersistentAgentAudienceScope({
-    ownerPubkey: ownerA,
-    channelId: "channel-a",
-    threadRootId: "root-2",
-  });
-  const otherIdentity = store.getPersistentAgentAudienceScope({
-    ownerPubkey: ownerB,
-    channelId: "channel-a",
-  });
+  const scopes = [
+    store.getPersistentAgentAudienceScope({
+      ownerPubkey: ownerA,
+      channelId: "channel-a",
+      threadRootId: "root-1",
+    }),
+    store.getPersistentAgentAudienceScope({
+      ownerPubkey: ownerA,
+      channelId: "channel-a",
+      threadRootId: "root-2",
+    }),
+    store.getPersistentAgentAudienceScope({
+      ownerPubkey: ownerA,
+      channelId: "channel-b",
+      threadRootId: "root-1",
+    }),
+    store.getPersistentAgentAudienceScope({
+      ownerPubkey: ownerB,
+      channelId: "channel-a",
+      threadRootId: "root-1",
+    }),
+  ];
 
-  for (const scope of [channelA, channelB, threadA1, threadA2, otherIdentity]) {
+  for (const scope of scopes) {
     assert.ok(scope);
     store.setPersistentAgentAudience(scope, [agentA]);
   }
 
-  assert.equal(new Set(Object.keys(savedAudiences())).size, 5);
+  assert.equal(new Set(Object.keys(savedAudiences())).size, 4);
 });
 
 test("successful fast send promotes without a persisted draft key", async () => {
@@ -68,6 +68,7 @@ test("successful fast send promotes without a persisted draft key", async () => 
   const scope = store.getPersistentAgentAudienceScope({
     ownerPubkey: ownerA,
     channelId: "channel-a",
+    threadRootId: "root",
   });
   store.setPersistentAgentAudienceEnabled(true);
 
@@ -206,42 +207,26 @@ test("new recipients retain explicit mention order", async () => {
   assert.deepEqual(savedAudiences(), { [scope]: [agentB, agentA] });
 });
 
-test("first new-message send resolves its destination after capturing generation", async () => {
+test("timeline scope is intentionally unsupported", async () => {
   const store = await loadStore(7);
-  const capturedGeneration = store.getPersistentAgentAudienceGeneration();
-  store.setPersistentAgentAudienceEnabled(true);
-  const scope = store.getPersistentAgentAudienceScope({
-    ownerPubkey: ownerA,
-    channelId: "resolved-dm",
-  });
-
-  store.promotePersistentAgentAudience({
-    expectedGeneration: capturedGeneration,
-    expectedRevision: null,
-    scope,
-    explicitAgentPubkeys: [agentA],
-  });
-
-  assert.deepEqual(savedAudiences(), { [scope]: [agentA] });
+  assert.equal(
+    store.getPersistentAgentAudienceScope({
+      ownerPubkey: ownerA,
+      channelId: "channel-a",
+    }),
+    null,
+  );
 });
 
-test("disable during new-message destination preparation invalidates promotion", async () => {
-  const store = await loadStore(8);
+test("thread root audience initializes once and explicit clear wins on reopen", async () => {
+  const store = await loadStore(10);
+  const scope = `${ownerA}:channel-a:thread:root`;
   store.setPersistentAgentAudienceEnabled(true);
-  const capturedGeneration = store.getPersistentAgentAudienceGeneration();
-  store.setPersistentAgentAudienceEnabled(false);
-  store.setPersistentAgentAudienceEnabled(true);
-  const scope = store.getPersistentAgentAudienceScope({
-    ownerPubkey: ownerA,
-    channelId: "resolved-dm",
-  });
 
-  store.promotePersistentAgentAudience({
-    expectedGeneration: capturedGeneration,
-    expectedRevision: null,
-    scope,
-    explicitAgentPubkeys: [agentA],
-  });
+  store.initializePersistentAgentAudience(scope, [agentB, agentA]);
+  assert.deepEqual(savedAudiences(), { [scope]: [agentB, agentA] });
 
-  assert.deepEqual(savedAudiences(), {});
+  store.setPersistentAgentAudience(scope, []);
+  store.initializePersistentAgentAudience(scope, [agentA]);
+  assert.deepEqual(savedAudiences(), { [scope]: [] });
 });

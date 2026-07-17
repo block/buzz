@@ -1,7 +1,8 @@
 //! Blossom-compatible media upload, retrieval, and existence check handlers.
 //!
 //! Routes:
-//!   PUT  /media/upload          — BUD-02 upload (auth required)
+//!   PUT  /upload                — BUD-02 exact-byte upload (auth required)
+//!   PUT  /media/upload          — temporary media-only legacy alias
 //!   GET  /media/{sha256_ext}    — BUD-01 serve blob
 //!   HEAD /media/{sha256_ext}    — BUD-01 existence check
 
@@ -35,7 +36,27 @@ pub(crate) struct AuthenticatedUpload {
     /// this HTTP door), identical to the WS door in `router.rs` and the bridge
     /// door in `bridge.rs`. Server-resolved, never client-supplied.
     tenant: TenantContext,
+    route_mode: UploadRouteMode,
     _upload_permit: UploadPermit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadRouteMode {
+    Upload,
+    LegacyMedia,
+}
+
+fn should_stream_as_video(sniff: &[u8]) -> bool {
+    infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
+        || buzz_media::looks_like_iso_bmff(sniff)
+}
+
+fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
+    match path {
+        "/upload" => Ok(UploadRouteMode::Upload),
+        "/media/upload" => Ok(UploadRouteMode::LegacyMedia),
+        _ => Err(MediaError::NotFound),
+    }
 }
 
 struct MediaReadAuth {
@@ -145,6 +166,8 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
             .await
             .map_err(|_| MediaError::NotFound)?;
 
+        let route_mode = upload_route_mode(parts.uri.path())?;
+
         // 2. Extract and validate Blossom auth event against the bound host.
         let auth_event = extract_blossom_auth(headers)?;
         // Use the permissive window (3600s) here because we don't know the
@@ -208,6 +231,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         Ok(AuthenticatedUpload {
             auth_event,
             tenant,
+            route_mode,
             _upload_permit: upload_permit,
         })
     }
@@ -259,7 +283,7 @@ async fn upload_attribution(
     })
 }
 
-/// PUT /media/upload — Blossom BUD-02 upload.
+/// PUT `/upload` or the temporary media-only `/media/upload` alias.
 ///
 /// Auth is validated via the [`AuthenticatedUpload`] extractor BEFORE the body
 /// is read, preventing unauthenticated clients from forcing body buffering.
@@ -271,7 +295,8 @@ async fn upload_attribution(
 /// Expects:
 ///   - `Authorization: Nostr <base64(kind:24242 event)>` — Blossom auth
 ///   - `X-SHA-256: <hex>` — Required per BUD-11
-///   - `Content-Type: video/mp4` — routes to video validation path; all other types use image path
+///   - `Content-Type` is advisory only; a bounded body prefix selects the
+///     streaming video path from actual bytes
 ///   - Raw binary body (the file bytes)
 ///
 /// Returns a [`BlobDescriptor`] JSON on success.
@@ -283,14 +308,34 @@ pub async fn upload_blob(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<Json<BlobDescriptor>, MediaError> {
-    let content_type = headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
     let attribution = upload_attribution(&state, &auth, &headers).await;
 
-    let mut descriptor = if content_type.starts_with("video/") {
+    if auth.route_mode == UploadRouteMode::LegacyMedia {
+        metrics::counter!("buzz_media_legacy_upload_route_total").increment(1);
+    }
+
+    // Probe actual bytes without trusting Content-Type. Keep the chunks used
+    // for the bounded probe and replay them into the selected pipeline so the
+    // stored/hash-verified body remains byte-identical.
+    use futures_util::StreamExt;
+    const SNIFF_BYTES: usize = 4096;
+    let mut source = body.into_data_stream();
+    let mut replay_chunks = Vec::new();
+    let mut sniff = Vec::with_capacity(SNIFF_BYTES);
+    while sniff.len() < SNIFF_BYTES {
+        match source.next().await {
+            Some(Ok(chunk)) => {
+                let needed = SNIFF_BYTES - sniff.len();
+                sniff.extend_from_slice(&chunk[..chunk.len().min(needed)]);
+                replay_chunks.push(chunk);
+            }
+            Some(Err(error)) => return Err(MediaError::Io(error.to_string())),
+            None => break,
+        }
+    }
+    let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
+
+    let mut descriptor = if should_stream_as_video(&sniff) {
         // Video path: stream body directly to disk — never fully buffered in RAM.
         let content_length = headers
             .get("content-length")
@@ -301,7 +346,7 @@ pub async fn upload_blob(
             &state.config.media,
             &auth.tenant,
             &auth.auth_event,
-            body.into_data_stream(),
+            replay,
             content_length,
             attribution,
         )
@@ -309,15 +354,15 @@ pub async fn upload_blob(
     } else {
         // Non-video path: buffer the body (bounded by the larger of the image
         // and generic-file caps), then decide image-vs-generic by sniffed MIME.
-        // Images go through the thumbnailing pipeline; everything else (docs,
-        // archives, audio, text, data) takes the generic file path and is
-        // served as a download.
+        // Images go through the thumbnailing pipeline; non-media attachments
+        // (docs, archives, text, data) take the generic file path and are
+        // served as downloads. Recognized audio/video cannot fall through it.
         let max = state
             .config
             .media
             .max_image_bytes
             .max(state.config.media.max_file_bytes);
-        let bytes = axum::body::to_bytes(body, max as usize)
+        let bytes = axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
             .await
             .map_err(|_| MediaError::FileTooLarge { size: 0, max })?;
 
@@ -336,6 +381,11 @@ pub async fn upload_blob(
                 attribution,
             )
             .await?
+        } else if auth.route_mode == UploadRouteMode::LegacyMedia {
+            let mime = infer::get(&bytes)
+                .map(|kind| kind.mime_type().to_string())
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            return Err(MediaError::DisallowedContentType(mime));
         } else {
             buzz_media::process_file_upload(
                 &state.media_storage,
@@ -862,6 +912,29 @@ mod tests {
     use uuid::Uuid;
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    #[test]
+    fn upload_routes_distinguish_standard_and_legacy_modes() {
+        assert_eq!(
+            upload_route_mode("/upload").expect("standard upload route"),
+            UploadRouteMode::Upload
+        );
+        assert_eq!(
+            upload_route_mode("/media/upload").expect("legacy upload route"),
+            UploadRouteMode::LegacyMedia
+        );
+        assert!(matches!(
+            upload_route_mode("/media"),
+            Err(MediaError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn proprietary_iso_bmff_brand_still_uses_video_pipeline() {
+        let bytes = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
+        assert!(infer::get(bytes).is_none());
+        assert!(should_stream_as_video(bytes));
+    }
 
     async fn test_state() -> Arc<AppState> {
         test_state_with_media_get_auth(false).await

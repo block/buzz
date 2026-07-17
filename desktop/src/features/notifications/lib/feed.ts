@@ -1,8 +1,30 @@
-import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
   formatNotificationTitle,
   truncateNotificationBody,
 } from "@/features/notifications/lib/notificationFormat";
+
+export type NotificationChannel = Pick<Channel, "id" | "name" | "channelType">;
+
+export function enrichFeedItemChannel(
+  item: FeedItem,
+  channels: readonly NotificationChannel[],
+): FeedItem {
+  if (!item.channelId || item.channelName.trim()) {
+    return item;
+  }
+
+  const channel = channels.find((candidate) => candidate.id === item.channelId);
+  if (!channel) {
+    return item;
+  }
+
+  return {
+    ...item,
+    channelName: channel.name,
+    channelType: item.channelType ?? channel.channelType,
+  };
+}
 
 export function notificationTitle(item: FeedItem, senderName?: string) {
   const channelLabel =

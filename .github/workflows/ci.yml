@@ -10,6 +10,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  BUZZ_TEST_POSTGRES_PASSWORD: buzz_dev
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
 
 jobs:
@@ -28,9 +29,12 @@ jobs:
       mobile: ${{ steps.filter.outputs.mobile }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 2
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: filter
         with:
+          token: ''
           filters: |
             rust:
               - 'crates/**'
@@ -55,6 +59,8 @@ jobs:
             mobile:
               - 'mobile/**'
               - '.github/workflows/ci.yml'
+      - name: Release workflow source contract
+        run: scripts/test-release-ref-contract.sh
 
   rust-lint:
     name: Rust Lint
@@ -451,12 +457,15 @@ jobs:
         run: |
           chmod +x ./target/ci/buzz-relay
           nohup env \
-            DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
+            DATABASE_URL="postgres://buzz:${BUZZ_TEST_POSTGRES_PASSWORD}@localhost:5432/buzz" \
             REDIS_URL=redis://localhost:6379 \
             RELAY_URL=ws://localhost:3000 \
             BUZZ_BIND_ADDR=0.0.0.0:3000 \
             BUZZ_REQUIRE_AUTH_TOKEN=false \
             BUZZ_RECONCILE_CHANNELS=true \
+            BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN=100000 \
+            BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN=100000 \
+            BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC=10000 \
             BUZZ_GIT_PROBE_WRITERS=8 \
             SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS=1 \
             ./target/ci/buzz-relay > /tmp/buzz-relay.log 2>&1 &
@@ -608,7 +617,7 @@ jobs:
         run: |
           chmod +x ./target/ci/buzz-relay
           nohup env \
-            DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
+            DATABASE_URL="postgres://buzz:${BUZZ_TEST_POSTGRES_PASSWORD}@localhost:5432/buzz" \
             REDIS_URL=redis://localhost:6379 \
             RELAY_URL=ws://localhost:3000 \
             BUZZ_BIND_ADDR=0.0.0.0:3000 \
@@ -635,7 +644,7 @@ jobs:
         run: |
           cargo test --profile ci -p buzz-relay claim_ -- --ignored --nocapture
         env:
-          DATABASE_URL: postgres://buzz:buzz_dev@localhost:5432/buzz
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
       - name: NIP-ER reminder e2e
         # Feature e2e for NIP-ER (Event Reminders, kind:30300): write-path
         # validation, author-only read filtering, and scheduler delivery against

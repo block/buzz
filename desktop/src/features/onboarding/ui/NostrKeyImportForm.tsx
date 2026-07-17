@@ -6,6 +6,8 @@ import { nsecToNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { OnboardingFooter } from "./OnboardingFooter";
 
 const NOSTR_KEY_FILE_MAX_BYTES = 1024;
 
@@ -87,6 +89,14 @@ export function NostrKeyImportForm({
   }, []);
 
   const handleSubmit = React.useCallback(async () => {
+    // Guard here, not just on the submit button: the button now lives in the
+    // portaled footer as type="button", so the single-field form still submits
+    // on Enter. Without this, pressing Enter during an in-flight import fires a
+    // second concurrent onImport (double keyring write).
+    if (isInteractionDisabled) {
+      return;
+    }
+
     if (!previewNpub) {
       setImportError(
         "That doesn't look like a valid nsec. Paste an nsec1 key.",
@@ -106,7 +116,7 @@ export function NostrKeyImportForm({
     } finally {
       setIsImporting(false);
     }
-  }, [onImport, previewNpub, trimmedInput]);
+  }, [isInteractionDisabled, onImport, previewNpub, trimmedInput]);
 
   return (
     <form
@@ -261,20 +271,21 @@ export function NostrKeyImportForm({
         <p className="text-center text-sm text-destructive">{errorMessage}</p>
       ) : null}
 
-      <div
-        className={
-          variant === "spotlight"
-            ? "mt-4 flex w-full flex-col items-center gap-3"
-            : "flex w-full flex-col gap-3 pt-1"
-        }
-      >
+      <OnboardingFooter>
         <Button
           className={
-            variant === "spotlight" ? "h-10 rounded-full px-8" : "h-10 w-full"
+            // Only the spotlight (onboarding) treatment gets the docked pill CTA.
+            // The default variant renders outside the onboarding footer provider
+            // (e.g. KeyringLockedScreen) and must stay full-width to match its
+            // sibling Back button.
+            variant === "spotlight"
+              ? ONBOARDING_PRIMARY_CTA_CLASS
+              : "h-10 w-full"
           }
           data-testid="nostr-import-submit"
           disabled={!isValid || isInteractionDisabled}
-          type="submit"
+          onClick={() => void handleSubmit()}
+          type="button"
         >
           {isImporting ? (
             <Spinner aria-label="Importing key" className="h-4 w-4 border-2" />
@@ -298,7 +309,7 @@ export function NostrKeyImportForm({
         >
           {backLabel}
         </Button>
-      </div>
+      </OnboardingFooter>
     </form>
   );
 }

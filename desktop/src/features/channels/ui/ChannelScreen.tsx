@@ -25,8 +25,10 @@ import {
   usePersonasQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import { mergeChannelKnownAgentPubkeys } from "@/features/agents/knownAgentPubkeys";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { pickWelcomeGuideAgent } from "@/features/onboarding/welcomeGuide";
+import { useWelcomeKickoffEntrance } from "@/features/onboarding/useWelcomeKickoffEntrance";
 import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
 import {
   mergeMessages,
@@ -247,6 +249,14 @@ export function ChannelScreen({
     return extraEvents.reduce(mergeMessages, currentMessages);
   }, [activeChannel, findEvents, messagesQuery.data, targetMessageEvents]);
   const threadReplyEvents = threadRepliesQuery.data ?? EMPTY_RELAY_EVENTS;
+  const {
+    entranceMessageId: welcomeEntranceMessageId,
+    handleEntranceComplete: handleWelcomeEntranceComplete,
+  } = useWelcomeKickoffEntrance(
+    activeChannel,
+    resolvedMessages,
+    threadReplyEvents,
+  );
   const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
     resolvedMessages,
     threadReplyEvents,
@@ -284,21 +294,11 @@ export function ChannelScreen({
   });
   const relayAgentsQuery = useRelayAgentsQuery();
   const relayAgents = relayAgentsQuery.data ?? [];
-  const knownAgentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set<string>();
-    for (const member of channelMembers ?? []) {
-      if (member.role === "bot" || member.isAgent) {
-        pubkeys.add(normalizePubkey(member.pubkey));
-      }
-    }
-    for (const agent of managedAgents) {
-      pubkeys.add(normalizePubkey(agent.pubkey));
-    }
-    for (const agent of relayAgents) {
-      pubkeys.add(normalizePubkey(agent.pubkey));
-    }
-    return pubkeys;
-  }, [channelMembers, managedAgents, relayAgents]);
+  const knownAgentPubkeys = React.useMemo(
+    () =>
+      mergeChannelKnownAgentPubkeys(channelMembers, managedAgents, relayAgents),
+    [channelMembers, managedAgents, relayAgents],
+  );
   const messageProfilePubkeys = React.useMemo(
     () => [
       ...new Set([
@@ -840,6 +840,8 @@ export function ChannelScreen({
                   onCreateChannel={openCreateChannel}
                   onOpenMembers={handleOpenMembersSidebar}
                   isFetchingOlder={isFetchingOlder}
+                  entranceMessageId={welcomeEntranceMessageId}
+                  onEntranceMessageComplete={handleWelcomeEntranceComplete}
                   editTarget={
                     editTargetMessage
                       ? {

@@ -112,6 +112,7 @@ export type RawManagedAgent = {
   pubkey: string;
   name: string;
   persona_id: string | null;
+  team_id?: string | null;
   relay_url: string;
   acp_command: string;
   agent_command: string;
@@ -366,8 +367,11 @@ export async function getCanvas(channelId: string): Promise<CanvasResponse> {
   });
   return {
     content: response.content,
-    updatedAt: response.updated_at,
-    author: response.author,
+    // Normalize absent keys to null: ensureWelcomeCanvas treats null as
+    // "no canvas yet", and `undefined !== null` would make every fresh
+    // channel look already-seeded.
+    updatedAt: response.updated_at ?? null,
+    author: response.author ?? null,
   };
 }
 
@@ -567,6 +571,7 @@ export async function editMessage(
   content: string,
   mediaTags?: string[][],
   emojiTags?: string[][],
+  mentionPubkeys?: string[],
 ): Promise<void> {
   await invokeTauri("edit_message", {
     channelId,
@@ -574,6 +579,7 @@ export async function editMessage(
     content,
     mediaTags: mediaTags ?? [],
     emojiTags: emojiTags ?? [],
+    mentionPubkeys: mentionPubkeys ?? null,
   });
 }
 
@@ -636,6 +642,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     pubkey: agent.pubkey,
     name: agent.name,
     personaId: agent.persona_id,
+    teamId: agent.team_id ?? null,
     relayUrl: agent.relay_url,
     acpCommand: agent.acp_command,
     agentCommand: agent.agent_command,
@@ -649,7 +656,6 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
-    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
@@ -1061,12 +1067,14 @@ export async function applyCommunity(
   nsec?: string,
   token?: string,
   reposDir?: string,
+  agentManagedProfiles?: boolean,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
     nsec: nsec ?? null,
     token: token ?? null,
     reposDir: reposDir ?? null,
+    agentManagedProfiles: agentManagedProfiles ?? false,
   });
 }
 
@@ -1078,6 +1086,9 @@ export async function validateReposDir(dir: string): Promise<void> {
 
 export const setPreventSleepActive = (active: boolean) =>
   invokeTauri("set_prevent_sleep_active", { active });
+
+export const setAgentManagedProfiles = (enabled: boolean) =>
+  invokeTauri("set_agent_managed_profiles", { enabled });
 
 /** Returns true on macOS, Windows, and Linux AppImage installs.
  *  Returns false on Linux non-AppImage packages (e.g. .deb) where

@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 
 const RELAY_URL = "ws://localhost:3000";
 
@@ -32,11 +33,20 @@ async function seedCommunities(
 }
 
 test.describe("community rail", () => {
-  test("shows a button per community and highlights the active one", async ({
+  test("shows the rail with multiple communities despite a stale opt-out", async ({
     page,
   }) => {
-    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await installMockBridge(page, undefined, {
+      seedPreviewFeatures: false,
+      skipCommunitySeed: true,
+    });
     await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((overridesKey) => {
+      window.localStorage.setItem(
+        overridesKey,
+        JSON.stringify({ workspaceRail: false }),
+      );
+    }, FEATURE_OVERRIDES_STORAGE_KEY);
     await page.goto("/");
 
     const rail = page.getByTestId("community-rail");
