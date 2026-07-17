@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { relayClient } from "@/shared/api/relayClient";
 import { applyCommunity, getDefaultRelayUrl } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
+import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
 import { initDraftStore } from "@/features/messages/lib/useDrafts";
@@ -157,6 +158,7 @@ export function useCommunityInit(
           undefined,
           activeCommunity.token,
           activeCommunity.reposDir,
+          getOverrides().agentManagedProfiles === true,
         );
       } catch (error) {
         // A bad `repos_dir` no longer reaches here — `apply_workspace` treats

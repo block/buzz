@@ -991,7 +991,11 @@ pub async fn start_managed_agent(
     // profile is published on the relay. This self-heals cases where the initial
     // profile sync at creation time failed silently. For legacy records (pre-PR-921)
     // with no persisted avatar, this also backfills the avatar from the relay.
-    if result.is_ok() {
+    if result.is_ok()
+        && state
+            .managed_agent_profile_reconcile_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
+    {
         let reconcile_pubkey = pubkey.clone();
         let reconcile_app = app.clone();
         tauri::async_runtime::spawn(async move {

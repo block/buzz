@@ -1061,12 +1061,14 @@ export async function applyCommunity(
   nsec?: string,
   token?: string,
   reposDir?: string,
+  agentManagedProfiles?: boolean,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
     nsec: nsec ?? null,
     token: token ?? null,
     reposDir: reposDir ?? null,
+    agentManagedProfiles: agentManagedProfiles ?? false,
   });
 }
 
@@ -1078,6 +1080,9 @@ export async function validateReposDir(dir: string): Promise<void> {
 
 export const setPreventSleepActive = (active: boolean) =>
   invokeTauri("set_prevent_sleep_active", { active });
+
+export const setAgentManagedProfiles = (enabled: boolean) =>
+  invokeTauri("set_agent_managed_profiles", { enabled });
 
 /** Returns true on macOS, Windows, and Linux AppImage installs.
  *  Returns false on Linux non-AppImage packages (e.g. .deb) where
