@@ -230,13 +230,14 @@ pub async fn process_upload(
     .await
 }
 
-/// Process a generic (non-image, non-video) file upload end-to-end.
+/// Process a generic non-media file upload end-to-end.
 ///
-/// This is the catch-all attachment path: documents, archives, audio, text,
-/// data — anything that isn't a previewable image or an H.264 MP4. The body is
-/// fully buffered in RAM (bounded by `config.max_file_bytes` at the transport
-/// layer), validated against the deny-list + size cap, stored, and recorded in
-/// a minimal sidecar. No thumbnail, no dimensions, no duration.
+/// This is the catch-all attachment path for documents, archives, text, and
+/// data. Recognized image, video, and audio formats fail closed instead of
+/// entering exact-byte storage without their format-specific location policy.
+/// The body is fully buffered in RAM (bounded by `config.max_file_bytes` at the
+/// transport layer), validated against the deny-list + size cap, stored, and
+/// recorded in a minimal sidecar. No thumbnail, dimensions, or duration.
 ///
 /// The resulting blob is served with `Content-Disposition: attachment`, so the
 /// client always downloads it rather than rendering it inline.

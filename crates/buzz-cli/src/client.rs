@@ -581,13 +581,13 @@ impl BuzzClient {
             URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
         );
 
-        // 7. PUT request to /media/upload — with generous per-request timeout.
+        // 7. PUT request to the BUD-02 /upload endpoint with a generous timeout.
         let upload_timeout = if mime.starts_with("video/") {
             Duration::from_secs(600)
         } else {
             Duration::from_secs(120)
         };
-        let url = format!("{}/media/upload", self.relay_url);
+        let url = format!("{}/upload", self.relay_url);
         let req = self
             .http
             .put(&url)

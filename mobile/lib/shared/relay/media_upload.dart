@@ -12,7 +12,7 @@ import 'package:pointycastle/digests/sha256.dart';
 import 'media_auth.dart';
 import 'relay_provider.dart';
 
-const _mediaUploadPath = '/media/upload';
+const _mediaUploadPath = '/upload';
 const _mediaUploadPlatformChannelName = 'buzz/media_upload';
 const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';

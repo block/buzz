@@ -62,8 +62,8 @@ pub enum MediaError {
     UploadRateLimitExceeded,
     #[error("upload concurrency limit reached")]
     UploadConcurrencyLimitReached,
-    /// Video codec is not H.264 (avc1).
-    #[error("unsupported video codec: only H.264 (avc1) is accepted")]
+    /// A video/audio track does not use the canonical H.264/AAC codecs.
+    #[error("unsupported media codec: only H.264 video and AAC audio are accepted")]
     WrongCodec,
     /// Video duration exceeds the 600-second limit.
     #[error("video too long: duration exceeds 600 seconds")]
@@ -142,20 +142,57 @@ impl IntoResponse for MediaError {
             Self::UploadRateLimitExceeded | Self::UploadConcurrencyLimitReached => {
                 (StatusCode::TOO_MANY_REQUESTS, self.to_string())
             }
-            Self::UnsupportedContainer => (StatusCode::UNSUPPORTED_MEDIA_TYPE, self.to_string()),
-            Self::WrongCodec
-            | Self::DurationTooLong
+            Self::UnknownContentType | Self::UnsupportedContainer | Self::WrongCodec => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, self.to_string())
+            }
+            Self::DurationTooLong
             | Self::ResolutionTooHigh
             | Self::MoovNotAtFront
-            | Self::InvalidVideo => (StatusCode::BAD_REQUEST, self.to_string()),
-            Self::UnknownContentType | Self::InvalidImage | Self::MetadataForbidden => {
-                (StatusCode::BAD_REQUEST, self.to_string())
-            }
+            | Self::InvalidVideo
+            | Self::InvalidImage
+            | Self::MetadataForbidden => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             Self::Io(_) | Self::StorageError(_) | Self::Internal => {
                 tracing::error!(error = %self, "media storage error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
             }
         };
         (status, axum::Json(serde_json::json!({"error": msg}))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_media_maps_to_415() {
+        for error in [
+            MediaError::UnknownContentType,
+            MediaError::DisallowedContentType("audio/mpeg".to_string()),
+            MediaError::UnsupportedContainer,
+            MediaError::WrongCodec,
+        ] {
+            assert_eq!(
+                error.into_response().status(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_or_noncanonical_media_maps_to_422() {
+        for error in [
+            MediaError::InvalidImage,
+            MediaError::InvalidVideo,
+            MediaError::MetadataForbidden,
+            MediaError::MoovNotAtFront,
+            MediaError::DurationTooLong,
+            MediaError::ResolutionTooHigh,
+        ] {
+            assert_eq!(
+                error.into_response().status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
     }
 }

@@ -7,6 +7,26 @@
 
 use crate::managed_agents::resolve_command;
 
+/// Build an ffmpeg command without inheriting user-controlled process knobs.
+///
+/// The binary path is resolved before this point, so a shell and `PATH` are not
+/// needed. Windows keeps only the OS variables required for process/DLL lookup.
+fn ffmpeg_command(path: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(path);
+    #[cfg(target_os = "windows")]
+    let required_windows_env: Vec<(&'static str, std::ffi::OsString)> =
+        ["SystemRoot", "WINDIR", "TEMP", "TMP"]
+            .into_iter()
+            .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
+            .collect();
+    command.env_clear().env("LANG", "C");
+    #[cfg(target_os = "windows")]
+    for (name, value) in required_windows_env {
+        command.env(name, value);
+    }
+    command
+}
+
 /// Locate ffmpeg using the same discovery logic as managed agents
 /// (login shell PATH, /opt/homebrew/bin, /usr/local/bin, etc.).
 /// Returns the resolved absolute path on success.
@@ -20,7 +40,7 @@ pub(super) fn find_ffmpeg() -> Result<std::path::PathBuf, String> {
             .to_string()
     })?;
 
-    match std::process::Command::new(&ffmpeg_path)
+    match ffmpeg_command(&ffmpeg_path)
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -168,8 +188,15 @@ pub(super) fn transcode_to_mp4(
     let output = std::env::temp_dir().join(format!("buzz-transcode-{}.mp4", uuid::Uuid::new_v4()));
 
     let result = run_ffmpeg_with_timeout(
-        std::process::Command::new(ffmpeg)
-            .args(["-y", "-loglevel", "error"]) // suppress progress spam — prevents stderr pipe deadlock
+        ffmpeg_command(ffmpeg)
+            .args([
+                "-y",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-protocol_whitelist",
+                "file,pipe",
+            ]) // suppress progress spam — prevents stderr pipe deadlock
             .arg("-i")
             .arg(source) // OsStr — handles non-UTF-8 paths on Unix
             .args([
@@ -197,6 +224,8 @@ pub(super) fn transcode_to_mp4(
                 "23",
                 "-pix_fmt",
                 "yuv420p",
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -246,8 +275,15 @@ pub(super) fn transcode_heic_to_jpeg(
     let heic_timeout = std::time::Duration::from_secs(60);
 
     let result = run_ffmpeg_with_timeout(
-        std::process::Command::new(ffmpeg)
-            .args(["-y", "-loglevel", "error"]) // suppress progress spam — prevents stderr pipe deadlock
+        ffmpeg_command(ffmpeg)
+            .args([
+                "-y",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-protocol_whitelist",
+                "file,pipe",
+            ]) // suppress progress spam — prevents stderr pipe deadlock
             .arg("-i")
             .arg(source) // OsStr — handles non-UTF-8 paths on Unix
             .args([
@@ -314,8 +350,15 @@ pub(super) fn extract_poster_frame(
 
     // Try seeking to 1s first (avoids black first frames from fade-ins).
     let result = run_ffmpeg_with_timeout(
-        std::process::Command::new(ffmpeg)
-            .args(["-y", "-loglevel", "error"])
+        ffmpeg_command(ffmpeg)
+            .args([
+                "-y",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-protocol_whitelist",
+                "file,pipe",
+            ])
             .arg("-ss")
             .arg("1")
             .arg("-i")
@@ -338,8 +381,15 @@ pub(super) fn extract_poster_frame(
         }
         let _ = std::fs::remove_file(&output);
         let fallback = run_ffmpeg_with_timeout(
-            std::process::Command::new(ffmpeg)
-                .args(["-y", "-loglevel", "error"])
+            ffmpeg_command(ffmpeg)
+                .args([
+                    "-y",
+                    "-nostdin",
+                    "-loglevel",
+                    "error",
+                    "-protocol_whitelist",
+                    "file,pipe",
+                ])
                 .arg("-i")
                 .arg(mp4_path)
                 .args(["-vframes", "1", "-vf", "scale=640:-2", "-q:v", "2"])

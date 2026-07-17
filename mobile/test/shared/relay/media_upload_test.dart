@@ -360,7 +360,7 @@ void main() {
       expect(capturedRequest, isNotNull);
       expect(
         capturedRequest!.url.toString(),
-        'https://relay.example:8443/media/upload',
+        'https://relay.example:8443/upload',
       );
       expect(capturedRequest!.headers['Content-Type'], 'image/png');
       expect(capturedRequest!.headers['X-SHA-256'], isNotEmpty);

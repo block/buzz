@@ -97,8 +97,8 @@ fn file_mime_to_ext(mime: &str) -> Option<&'static str> {
 
 /// Validate uploaded bytes for the **generic file** upload path.
 ///
-/// This is the catch-all path for non-image, non-video attachments (documents,
-/// archives, audio, text, data). It enforces three things:
+/// This is the catch-all path for non-media attachments (documents, archives,
+/// text, data). It enforces three things:
 ///   1. A size cap (`config.max_file_bytes`).
 ///   2. A *deny* list — known active-content and executable MIME types are
 ///      rejected even though safe headers already neutralise them.
@@ -127,8 +127,14 @@ pub fn validate_file_content(
     match infer::get(bytes) {
         Some(kind) => {
             let mime = kind.mime_type().to_string();
-            // Media signatures must use the media path, where metadata policy is enforced.
-            if mime.starts_with("image/") || mime.starts_with("video/") {
+            // Recognized media must never fall through exact-byte attachment
+            // storage. Images and video use their canonical media validators;
+            // audio is rejected until Buzz has an explicit sanitizer and
+            // location-metadata validator for its container.
+            if mime.starts_with("image/")
+                || mime.starts_with("video/")
+                || mime.starts_with("audio/")
+            {
                 return Err(MediaError::DisallowedContentType(mime));
             }
             // 3. Deny dangerous active-content / executable types.
@@ -217,7 +223,8 @@ pub fn validate_content(bytes: &[u8], config: &MediaConfig) -> Result<String, Me
 ///
 /// Checks:
 /// - Container is MP4 (ftyp brand is not QuickTime `qt  `)
-/// - First video track codec is `avc1` (H.264 only — rejects HEVC, VP9, AV1)
+/// - Exactly one video track using `avc1` (H.264 only — rejects HEVC, VP9, AV1)
+/// - At most one audio track, using `mp4a` (AAC)
 /// - Duration ≤ 600 seconds (from mvhd timescale, not edit lists)
 /// - Resolution ≤ 3840×2160
 /// - moov atom precedes mdat (fast-start / web-optimised)
@@ -265,13 +272,15 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
         match track.track_type().map_err(|_| MediaError::InvalidVideo)? {
             mp4::TrackType::Video => {
                 if video_meta.is_some() {
-                    // Already found a video track — use the first one only.
-                    continue;
+                    // Alternate video tracks can carry telemetry or other content
+                    // that the client did not intend to publish. Canonical uploads
+                    // contain exactly one video track.
+                    return Err(MediaError::MetadataForbidden);
                 }
 
                 // Codec check: only H.264 (avc1).
                 // media_type() reads the handler type and sample entry box type.
-                let media_type = track.media_type().map_err(|_| MediaError::InvalidVideo)?;
+                let media_type = track.media_type().map_err(|_| MediaError::WrongCodec)?;
                 if media_type != mp4::MediaType::H264 {
                     return Err(MediaError::WrongCodec);
                 }
@@ -308,6 +317,16 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
                 });
             }
             mp4::TrackType::Audio => {
+                if has_audio {
+                    // Reject alternate audio tracks for the same reason as
+                    // alternate video tracks: only the canonical primary stream
+                    // produced by the client sanitizer is permitted.
+                    return Err(MediaError::MetadataForbidden);
+                }
+                let media_type = track.media_type().map_err(|_| MediaError::WrongCodec)?;
+                if media_type != mp4::MediaType::AAC {
+                    return Err(MediaError::WrongCodec);
+                }
                 has_audio = true;
             }
             _ => return Err(MediaError::MetadataForbidden),
@@ -847,6 +866,160 @@ mod tests {
         out
     }
 
+    /// Deterministic little-endian TIFF payload with a real EXIF GPS IFD.
+    /// Coordinates are synthetic: 37°46'30" N, 122°25'10" W.
+    fn gps_exif_tiff() -> Vec<u8> {
+        let mut tiff = b"II\x2a\0\x08\0\0\0".to_vec();
+        // IFD0: one GPSInfo pointer (tag 0x8825) to offset 26.
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x8825u16.to_le_bytes());
+        tiff.extend_from_slice(&4u16.to_le_bytes()); // LONG
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&26u32.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // next IFD
+
+        // GPS IFD: latitude ref/value and longitude ref/value.
+        tiff.extend_from_slice(&4u16.to_le_bytes());
+        for (tag, field_type, count, value) in [
+            (1u16, 2u16, 2u32, u32::from_le_bytes(*b"N\0\0\0")),
+            (2, 5, 3, 80),
+            (3, 2, 2, u32::from_le_bytes(*b"W\0\0\0")),
+            (4, 5, 3, 104),
+        ] {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&field_type.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // next GPS IFD
+        for value in [37u32, 46, 30, 122, 25, 10] {
+            tiff.extend_from_slice(&value.to_le_bytes());
+            tiff.extend_from_slice(&1u32.to_le_bytes());
+        }
+        tiff
+    }
+
+    /// Independent minimal EXIF parser used to prove the fixture really has a
+    /// GPSInfo pointer and latitude/longitude entries before policy validation.
+    fn assert_exif_fixture_has_gps(tiff: &[u8]) {
+        assert_eq!(&tiff[..4], b"II\x2a\0");
+        let read_u16 = |offset: usize| u16::from_le_bytes([tiff[offset], tiff[offset + 1]]);
+        let read_u32 = |offset: usize| {
+            u32::from_le_bytes([
+                tiff[offset],
+                tiff[offset + 1],
+                tiff[offset + 2],
+                tiff[offset + 3],
+            ])
+        };
+        let ifd0 = read_u32(4) as usize;
+        let ifd0_entries = read_u16(ifd0) as usize;
+        let gps_offset = (0..ifd0_entries)
+            .map(|index| ifd0 + 2 + index * 12)
+            .find(|&entry| read_u16(entry) == 0x8825)
+            .map(|entry| read_u32(entry + 8) as usize)
+            .expect("fixture must contain an EXIF GPSInfo pointer");
+        let gps_entries = read_u16(gps_offset) as usize;
+        let tags: Vec<u16> = (0..gps_entries)
+            .map(|index| read_u16(gps_offset + 2 + index * 12))
+            .collect();
+        assert!(tags.contains(&1) && tags.contains(&2));
+        assert!(tags.contains(&3) && tags.contains(&4));
+    }
+
+    #[test]
+    fn test_real_exif_gps_is_rejected_in_image_containers() {
+        let tiff = gps_exif_tiff();
+        assert_exif_fixture_has_gps(&tiff);
+
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        let jpeg_payload_len = 6 + tiff.len();
+        jpeg.extend_from_slice(&((jpeg_payload_len + 2) as u16).to_be_bytes());
+        jpeg.extend_from_slice(b"Exif\0\0");
+        jpeg.extend_from_slice(&tiff);
+        jpeg.extend_from_slice(&TINY_JPEG[2..]);
+        assert!(matches!(
+            validate_jpeg_metadata_free(&jpeg),
+            Err(MediaError::MetadataForbidden)
+        ));
+
+        let mut png = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+        png.extend_from_slice(&png_chunk(b"eXIf", &tiff));
+        png.extend_from_slice(&TINY_PNG[TINY_PNG.len() - 12..]);
+        assert!(matches!(
+            validate_png_metadata_free(&png),
+            Err(MediaError::MetadataForbidden)
+        ));
+
+        let mut webp_body = b"WEBP".to_vec();
+        let mut webp_exif = b"Exif\0\0".to_vec();
+        webp_exif.extend_from_slice(&tiff);
+        webp_body.extend_from_slice(b"EXIF");
+        webp_body.extend_from_slice(&(webp_exif.len() as u32).to_le_bytes());
+        webp_body.extend_from_slice(&webp_exif);
+        if !webp_exif.len().is_multiple_of(2) {
+            webp_body.push(0);
+        }
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&(webp_body.len() as u32).to_le_bytes());
+        webp.extend_from_slice(&webp_body);
+        assert!(matches!(
+            validate_webp_metadata_free(&webp),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
+    #[test]
+    fn test_real_xmp_location_is_rejected_in_image_containers() {
+        let xmp = br#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+          <rdf:Description xmlns:exif="http://ns.adobe.com/exif/1.0/"
+            exif:GPSLatitude="37,46.500N" exif:GPSLongitude="122,25.167W"/>
+        </x:xmpmeta>"#;
+        assert!(xmp
+            .windows(b"GPSLatitude".len())
+            .any(|window| window == b"GPSLatitude"));
+        assert!(xmp
+            .windows(b"GPSLongitude".len())
+            .any(|window| window == b"GPSLongitude"));
+
+        let namespace = b"http://ns.adobe.com/xap/1.0/\0";
+        let mut jpeg_payload = namespace.to_vec();
+        jpeg_payload.extend_from_slice(xmp);
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        jpeg.extend_from_slice(&((jpeg_payload.len() + 2) as u16).to_be_bytes());
+        jpeg.extend_from_slice(&jpeg_payload);
+        jpeg.extend_from_slice(&TINY_JPEG[2..]);
+        assert!(matches!(
+            validate_jpeg_metadata_free(&jpeg),
+            Err(MediaError::MetadataForbidden)
+        ));
+
+        let mut itxt = b"XML:com.adobe.xmp\0\0\0\0\0".to_vec();
+        itxt.extend_from_slice(xmp);
+        let mut png = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+        png.extend_from_slice(&png_chunk(b"iTXt", &itxt));
+        png.extend_from_slice(&TINY_PNG[TINY_PNG.len() - 12..]);
+        assert!(matches!(
+            validate_png_metadata_free(&png),
+            Err(MediaError::MetadataForbidden)
+        ));
+
+        let mut webp_body = b"WEBP".to_vec();
+        webp_body.extend_from_slice(b"XMP ");
+        webp_body.extend_from_slice(&(xmp.len() as u32).to_le_bytes());
+        webp_body.extend_from_slice(xmp);
+        if !xmp.len().is_multiple_of(2) {
+            webp_body.push(0);
+        }
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&(webp_body.len() as u32).to_le_bytes());
+        webp.extend_from_slice(&webp_body);
+        assert!(matches!(
+            validate_webp_metadata_free(&webp),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
     #[test]
     fn test_rejects_png_metadata_and_trailing_payload() {
         let config = test_config();
@@ -983,6 +1156,36 @@ mod tests {
     }
 
     #[test]
+    fn test_generic_file_path_rejects_recognized_audio() {
+        let config = test_config();
+        let fixtures: &[(&str, &[u8])] = &[
+            ("mp3", b"ID3\x04\x00\x00\x00\x00\x00\x00"),
+            ("flac", b"fLaC\x00\x00\x00\x22"),
+            ("wav", b"RIFF\x24\x00\x00\x00WAVEfmt "),
+            ("ogg", b"OggS\x00\x02\x00\x00\x00\x00\x00\x00"),
+            ("m4a", b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A "),
+            ("aac", b"\xff\xf1\x50\x80\x00\x1f\xfc"),
+        ];
+
+        for (name, bytes) in fixtures {
+            let detected = infer::get(bytes)
+                .unwrap_or_else(|| panic!("{name} fixture must be recognized as audio"));
+            assert!(
+                detected.mime_type().starts_with("audio/"),
+                "{name} fixture detected as {}",
+                detected.mime_type()
+            );
+            assert!(
+                matches!(
+                    validate_file_content(bytes, &config),
+                    Err(MediaError::DisallowedContentType(mime)) if mime.starts_with("audio/")
+                ),
+                "generic path accepted {name}"
+            );
+        }
+    }
+
+    #[test]
     fn test_validate_svg_rejected() {
         let config = test_config();
         // SVG starts with XML declaration — infer won't detect it as image
@@ -1104,6 +1307,21 @@ mod tests {
     /// Build an MP4 with audio track.
     fn build_mp4_with_audio() -> Vec<u8> {
         build_mp4_bytes(true, b"avc1", 1_000, 320, 240, true)
+    }
+
+    /// Insert a child box at the end of the top-level `moov` box.
+    fn append_box_to_moov(mut bytes: Vec<u8>, child: &[u8]) -> Vec<u8> {
+        const FTYP_SIZE: usize = 20;
+        let moov_size = u32::from_be_bytes(
+            bytes[FTYP_SIZE..FTYP_SIZE + 4]
+                .try_into()
+                .expect("moov size bytes"),
+        ) as usize;
+        let moov_end = FTYP_SIZE + moov_size;
+        bytes.splice(moov_end..moov_end, child.iter().copied());
+        let new_moov_size = (moov_size + child.len()) as u32;
+        bytes[FTYP_SIZE..FTYP_SIZE + 4].copy_from_slice(&new_moov_size.to_be_bytes());
+        bytes
     }
 
     /// Construct a minimal but parseable MP4 byte stream.
@@ -1774,6 +1992,73 @@ mod tests {
             Ok(meta) => assert!(meta.has_audio),
             Err(e) => panic!("expected Ok, got {e:?}"),
         }
+    }
+
+    #[test]
+    fn test_validate_video_rejects_alternate_video_track() {
+        let config = test_config();
+        let extra_video = build_video_trak(2, 1_000, 1_000, b"avc1", 320, 240);
+        let mp4_bytes = append_box_to_moov(build_minimal_mp4_moov_first(), &extra_video);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+        assert!(matches!(
+            validate_video_file(tmp.path(), &config),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
+    #[test]
+    fn test_validate_video_rejects_alternate_audio_track() {
+        let config = test_config();
+        let extra_audio = build_audio_trak(3, 1_000, 1_000);
+        let mp4_bytes = append_box_to_moov(build_mp4_with_audio(), &extra_audio);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+        assert!(matches!(
+            validate_video_file(tmp.path(), &config),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
+    #[test]
+    fn test_validate_video_rejects_real_quicktime_iso6709_location() {
+        // QuickTime stores ISO-6709 coordinates in a ©xyz child of moov/udta.
+        let coordinates = b"+37.7750-122.4183+015.000/";
+        let location = box_wrap(b"\xa9xyz", coordinates);
+        let udta = box_wrap(b"udta", &location);
+        let mp4_bytes = append_box_to_moov(build_minimal_mp4_moov_first(), &udta);
+
+        // Independently prove this source contains the expected location box
+        // and coordinates before exercising the validator.
+        assert!(mp4_bytes.windows(4).any(|window| window == b"\xa9xyz"));
+        assert!(mp4_bytes
+            .windows(coordinates.len())
+            .any(|window| window == coordinates));
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+        assert!(matches!(
+            validate_video_file(tmp.path(), &test_config()),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
+    #[test]
+    fn test_validate_video_rejects_timed_metadata_track() {
+        // Start from a parseable audio track and change its handler from
+        // `soun` to `meta`, representing a timed telemetry/GPS track.
+        let mut telemetry_track = build_audio_trak(2, 1_000, 1_000);
+        let handler = telemetry_track
+            .windows(4)
+            .position(|window| window == b"soun")
+            .expect("audio fixture must contain a soun handler");
+        telemetry_track[handler..handler + 4].copy_from_slice(b"meta");
+        assert!(telemetry_track.windows(4).any(|window| window == b"meta"));
+
+        let mp4_bytes = append_box_to_moov(build_minimal_mp4_moov_first(), &telemetry_track);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+        assert!(validate_video_file(tmp.path(), &test_config()).is_err());
     }
 
     #[test]

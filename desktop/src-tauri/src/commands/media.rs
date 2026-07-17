@@ -153,6 +153,65 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
     }
 }
 
+/// Return true when a PNG/WebP payload declares animation.
+///
+/// Animated payloads are left byte-identical here so frame timing, looping,
+/// and disposal semantics are preserved. The relay's structural validator is
+/// still the authority that rejects any metadata-bearing animation.
+fn is_animated_image(body: &[u8], mime: &str) -> bool {
+    match mime {
+        "image/png" if body.starts_with(b"\x89PNG\r\n\x1a\n") => {
+            let mut offset = 8usize;
+            while offset.checked_add(12).is_some_and(|end| end <= body.len()) {
+                let length = u32::from_be_bytes([
+                    body[offset],
+                    body[offset + 1],
+                    body[offset + 2],
+                    body[offset + 3],
+                ]) as usize;
+                let Some(end) = offset.checked_add(12).and_then(|v| v.checked_add(length)) else {
+                    return false;
+                };
+                if end > body.len() {
+                    return false;
+                }
+                if &body[offset + 4..offset + 8] == b"acTL" {
+                    return true;
+                }
+                offset = end;
+            }
+            false
+        }
+        "image/webp"
+            if body.len() >= 12 && body.starts_with(b"RIFF") && &body[8..12] == b"WEBP" =>
+        {
+            let mut offset = 12usize;
+            while offset.checked_add(8).is_some_and(|end| end <= body.len()) {
+                let chunk = &body[offset..offset + 4];
+                if chunk == b"ANIM" || chunk == b"ANMF" {
+                    return true;
+                }
+                let length = u32::from_le_bytes([
+                    body[offset + 4],
+                    body[offset + 5],
+                    body[offset + 6],
+                    body[offset + 7],
+                ]) as usize;
+                let padded = length.checked_add(length & 1);
+                let Some(end) = padded.and_then(|v| offset.checked_add(8 + v)) else {
+                    return false;
+                };
+                if end > body.len() {
+                    return false;
+                }
+                offset = end;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec<u8>, String> {
     let format = match mime {
         "image/jpeg" => image::ImageFormat::Jpeg,
@@ -160,8 +219,25 @@ fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec<u8>, Strin
         "image/webp" => image::ImageFormat::WebP,
         _ => return Ok(body),
     };
-    let image = image::load_from_memory_with_format(&body, format)
+
+    if is_animated_image(&body, mime) {
+        return Ok(body);
+    }
+
+    use image::ImageDecoder;
+    let reader = image::ImageReader::with_format(std::io::Cursor::new(&body), format);
+    let mut decoder = reader
+        .into_decoder()
         .map_err(|_| "failed to decode image for metadata removal".to_string())?;
+    decoder
+        .set_limits(image::Limits::default())
+        .map_err(|_| "image exceeds safe decoding limits".to_string())?;
+    let orientation = decoder
+        .orientation()
+        .map_err(|_| "failed to read image orientation".to_string())?;
+    let mut image = image::DynamicImage::from_decoder(decoder)
+        .map_err(|_| "failed to decode image for metadata removal".to_string())?;
+    image.apply_orientation(orientation);
     let mut output = std::io::Cursor::new(Vec::new());
     image
         .write_to(&mut output, format)
@@ -301,7 +377,7 @@ async fn do_upload(
     );
     let req = state
         .http_client
-        .put(format!("{base_url}/media/upload"))
+        .put(format!("{base_url}/upload"))
         .header("Authorization", &auth_header)
         .header("Content-Type", mime)
         .header("X-SHA-256", &sha256);
@@ -736,6 +812,61 @@ mod tests {
     fn test_detect_and_validate_mime_rejects_html() {
         let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
         assert!(detect_and_validate_mime(html).is_err());
+    }
+
+    #[test]
+    fn test_image_sanitizer_bakes_exif_orientation() {
+        let source = image::RgbImage::from_fn(2, 3, |x, y| {
+            image::Rgb([(x * 80) as u8, (y * 60) as u8, 32])
+        });
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 95)
+            .encode_image(&source)
+            .unwrap();
+
+        // Minimal little-endian Exif IFD with Orientation=6 (rotate 90°).
+        let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0".to_vec();
+        exif.extend_from_slice(&[
+            0x12, 0x01, // Orientation tag
+            0x03, 0x00, // SHORT
+            0x01, 0x00, 0x00, 0x00, // count=1
+            0x06, 0x00, 0x00, 0x00, // value=6
+            0x00, 0x00, 0x00, 0x00, // next IFD
+        ]);
+        let segment_len = (exif.len() + 2) as u16;
+        let mut oriented = encoded[..2].to_vec();
+        oriented.extend_from_slice(&[0xff, 0xe1]);
+        oriented.extend_from_slice(&segment_len.to_be_bytes());
+        oriented.extend_from_slice(&exif);
+        oriented.extend_from_slice(&encoded[2..]);
+
+        let sanitized = sanitize_image_for_upload(oriented, "image/jpeg").unwrap();
+        let decoded =
+            image::load_from_memory_with_format(&sanitized, image::ImageFormat::Jpeg).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (3, 2));
+        assert!(!sanitized.windows(6).any(|bytes| bytes == b"Exif\0\0"));
+    }
+
+    #[test]
+    fn test_animated_png_and_webp_are_not_flattened() {
+        let mut apng = b"\x89PNG\r\n\x1a\n".to_vec();
+        apng.extend_from_slice(&8u32.to_be_bytes());
+        apng.extend_from_slice(b"acTL");
+        apng.extend_from_slice(&[0; 8]);
+        apng.extend_from_slice(&[0; 4]);
+        assert!(is_animated_image(&apng, "image/png"));
+        assert_eq!(
+            sanitize_image_for_upload(apng.clone(), "image/png").unwrap(),
+            apng
+        );
+
+        let mut webp = b"RIFF\x0c\0\0\0WEBPANIM".to_vec();
+        webp.extend_from_slice(&0u32.to_le_bytes());
+        assert!(is_animated_image(&webp, "image/webp"));
+        assert_eq!(
+            sanitize_image_for_upload(webp.clone(), "image/webp").unwrap(),
+            webp
+        );
     }
 
     #[test]
