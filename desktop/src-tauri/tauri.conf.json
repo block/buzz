@@ -54,10 +54,10 @@
     "targets": "all",
     "externalBin": [
       "binaries/buzz-acp",
-      "binaries/buzz-agent",
       "binaries/buzz-dev-mcp",
       "binaries/git-credential-nostr",
-      "binaries/buzz"
+      "binaries/buzz",
+      "binaries/goose-acp"
     ],
     "icon": [
       "icons/32x32.png",

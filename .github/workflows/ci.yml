@@ -24,6 +24,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       desktop: ${{ steps.filter.outputs.desktop }}
       desktop-rust: ${{ steps.filter.outputs.desktop-rust }}
+      goose_acp: ${{ steps.filter.outputs.goose_acp }}
       web: ${{ steps.filter.outputs.web }}
       mobile: ${{ steps.filter.outputs.mobile }}
     steps:
@@ -49,6 +50,10 @@ jobs:
               - 'pnpm-lock.yaml'
             desktop-rust:
               - 'desktop/src-tauri/**'
+            goose_acp:
+              - 'goose-acp/**'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
             web:
               - 'web/**'
               - 'pnpm-lock.yaml'
@@ -78,6 +83,29 @@ jobs:
         run: just desktop-tauri-fmt-check
       - name: Clippy
         run: just clippy
+
+  goose-acp:
+    name: Bundled Goose ACP
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.goose_acp == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: goose-acp
+          key: goose-acp
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Format bundled Goose wrapper
+        run: cargo fmt --manifest-path goose-acp/Cargo.toml --all -- --check
+      - name: Lint bundled Goose wrapper
+        run: cargo clippy --locked --manifest-path goose-acp/Cargo.toml --all-targets -- -D warnings
+      - name: Exercise a complete bundled Goose turn
+        run: cargo test --locked --manifest-path goose-acp/Cargo.toml --test stdio_turn
 
   unit-tests:
     name: Unit Tests
@@ -892,7 +920,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/binaries
-          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+          for bin in buzz-acp buzz-dev-mcp git-credential-nostr buzz goose-acp; do
             touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
           done
       - name: Clippy (workspace)
@@ -965,10 +993,10 @@ jobs:
           TARGET=$(rustc -vV | sed -n 's|host: ||p')
           mkdir -p desktop/src-tauri/binaries
           touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
-          touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
           touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
           touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
           touch "desktop/src-tauri/binaries/buzz-$TARGET"
+          touch "desktop/src-tauri/binaries/goose-acp-$TARGET"
       # Mesh rev is derived from Cargo.lock so a dependency bump needs no
       # lockstep edit here; the cache key tracks it automatically.
       - name: Resolve mesh-llm rev

@@ -73,25 +73,25 @@ test("getPersonaProviderOptions appends (current) tail for an unknown saved prov
   assert.equal(tail?.label, "my-custom-llm (current)");
 });
 
-// ── getDefaultPersonaRuntime — buzz-agent first ───────────────────────────────
+// ── getDefaultPersonaRuntime — bundled Goose first ───────────────────────────
 
-test("getDefaultPersonaRuntime returns buzz-agent over goose when both are available", () => {
+test("getDefaultPersonaRuntime returns goose over buzz-agent when both are available", () => {
   const runtimes = [
     makeRuntime("goose"),
     makeRuntime("buzz-agent"),
     makeRuntime("claude"),
   ];
   const result = getDefaultPersonaRuntime(runtimes);
-  assert.equal(result?.id, "buzz-agent");
+  assert.equal(result?.id, "goose");
 });
 
-test("getDefaultPersonaRuntime falls back to goose when buzz-agent is unavailable", () => {
+test("getDefaultPersonaRuntime falls back to buzz-agent when goose is unavailable", () => {
   const runtimes = [
-    makeRuntime("buzz-agent", "not_installed"),
-    makeRuntime("goose"),
+    makeRuntime("goose", "not_installed"),
+    makeRuntime("buzz-agent"),
   ];
   const result = getDefaultPersonaRuntime(runtimes);
-  assert.equal(result?.id, "goose");
+  assert.equal(result?.id, "buzz-agent");
 });
 
 test("getDefaultPersonaRuntime returns first available when neither buzz-agent nor goose is available", () => {

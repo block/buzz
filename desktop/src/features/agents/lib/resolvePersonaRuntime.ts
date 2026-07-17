@@ -2,7 +2,7 @@ import type { AcpRuntime, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 
 /**
  * Select the best default runtime from a catalog, using the same preference
- * order as the UI picker: buzz-agent first (bundled sidecar), then goose,
+ * order as the UI picker: Goose first (bundled sidecar), then buzz-agent,
  * then the first available entry, then null when nothing is available.
  *
  * Generic so that passing AcpRuntime[] (the already-filtered start-path
@@ -17,8 +17,8 @@ export function getDefaultPersonaRuntime<T extends AcpRuntimeCatalogEntry>(
     (runtime) => runtime.availability === "available",
   );
   return (
-    available.find((runtime) => runtime.id === "buzz-agent") ??
     available.find((runtime) => runtime.id === "goose") ??
+    available.find((runtime) => runtime.id === "buzz-agent") ??
     available[0] ??
     null
   );

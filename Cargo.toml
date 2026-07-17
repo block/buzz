@@ -28,7 +28,9 @@ members = [
     "crates/buzz-dev-mcp",
     "examples/countdown-bot",
 ]
-exclude = ["desktop/src-tauri"]
+# goose-acp is excluded so Goose's dependency graph and fast-moving ACP/MCP
+# versions stay out of the workspace lockfile — see goose-acp/Cargo.toml.
+exclude = ["desktop/src-tauri", "goose-acp"]
 resolver = "2"
 
 [workspace.package]

@@ -1,6 +1,7 @@
 # Build artifacts
 /target/
 /dist/
+/goose-acp/target/
 
 # lefthook-generated hook scripts (machine-specific)
 .hooks/

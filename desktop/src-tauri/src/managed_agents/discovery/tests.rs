@@ -45,11 +45,11 @@ fn returns_none_for_unknown_commands() {
 }
 
 #[test]
-fn default_agent_command_resolves_bundled_buzz_agent() {
-    // The create-path default must be the bundled buzz-agent, never the
-    // bare `goose` that isn't on PATH on a stock Windows install.
-    assert_eq!(default_agent_command(), "buzz-agent");
-    // And buzz-agent takes no `acp` arg — confirm no arg leakage from the default.
+fn default_agent_command_resolves_bundled_goose() {
+    // The create-path default must be the bundled sidecar, never the bare
+    // `goose` that isn't on PATH on a stock install.
+    assert_eq!(default_agent_command(), "goose-acp");
+    // goose-acp is already an ACP server and takes no `acp` subcommand.
     assert_eq!(
         normalize_agent_args(&default_agent_command(), vec!["acp".into()]),
         Vec::<String>::new()
@@ -144,13 +144,13 @@ fn explicit_path_resolution_ignores_non_executable_files() {
 #[test]
 fn classifies_available_when_adapter_found() {
     let (status, cmd, path) = classify_runtime(
-        Some(("goose", PathBuf::from("/usr/local/bin/goose"))),
+        Some(("goose-acp", PathBuf::from("/app/goose-acp"))),
         None,
         false,
     );
     assert_eq!(status, AcpAvailabilityStatus::Available);
-    assert_eq!(cmd.as_deref(), Some("goose"));
-    assert_eq!(path.as_deref(), Some("/usr/local/bin/goose"));
+    assert_eq!(cmd.as_deref(), Some("goose-acp"));
+    assert_eq!(path.as_deref(), Some("/app/goose-acp"));
 }
 
 #[test]
@@ -305,7 +305,7 @@ fn record_agent_command_legacy_persona_fallback() {
     // the legacy persona path unchanged.
     let personas = vec![persona_with_runtime("p1", Some("goose"))];
     let record = record_with(None, Some("p1"), None);
-    assert_eq!(record_agent_command(&record, &personas), "goose");
+    assert_eq!(record_agent_command(&record, &personas), "goose-acp");
 }
 
 #[test]
@@ -330,7 +330,7 @@ fn effective_agent_command_empty_override_is_inherit() {
     let personas = vec![persona_with_runtime("p1", Some("goose"))];
     assert_eq!(
         effective_agent_command(Some("p1"), &personas, Some("   ")),
-        "goose"
+        "goose-acp"
     );
 }
 
@@ -406,15 +406,15 @@ fn divergent_override_none_for_empty_or_absent_pick() {
 fn create_time_override_none_when_persona_runtime_not_installed() {
     // CRITICAL-3 (Case 3): a `claude`-persona agent created on a machine
     // where the claude adapter isn't installed. `resolvePersonaRuntime`
-    // falls back to the default (`buzz-agent`) and sends THAT command with
+    // falls back to the default (`goose-acp`) and sends THAT command with
     // `harness_override` false (the user did not pick it). At create this
     // is a fallback, not a deliberate pin — it must store `None` so the
     // agent inherits the persona's runtime once it's installed and the
-    // persona is re-edited. Baking `Some("buzz-agent")` here is the exact
+    // persona is re-edited. Baking `Some("goose-acp")` here is the exact
     // bug this resolver chain exists to kill.
     let personas = vec![persona_with_runtime("p1", Some("claude"))];
     assert_eq!(
-        create_time_agent_command_override(Some("p1"), &personas, Some("buzz-agent"), false),
+        create_time_agent_command_override(Some("p1"), &personas, Some("goose-acp"), false),
         None
     );
 }
@@ -576,7 +576,7 @@ fn apply_agent_command_update_inherit_sentinel_clears_pin_and_runtime() {
 
     assert_eq!(record.agent_command_override, None);
     assert_eq!(record.runtime, None);
-    assert_eq!(record_agent_command(&record, &personas), "goose");
+    assert_eq!(record_agent_command(&record, &personas), "goose-acp");
 }
 
 #[test]

@@ -1274,13 +1274,13 @@ mod tests {
         );
     }
 
-    /// buzz-agent has no install commands on any platform.
+    /// buzz-agent has no automatic install commands on any platform.
     #[test]
     fn test_buzz_agent_has_no_install_commands() {
         let buzz = crate::managed_agents::known_acp_runtime_exact("buzz-agent").unwrap();
         assert!(
             buzz.cli_install_commands_for_os().is_empty(),
-            "buzz-agent ships with the app — must never have install commands"
+            "buzz-agent is source-built — it must not expose install commands"
         );
     }
 }

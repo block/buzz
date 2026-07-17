@@ -67,8 +67,8 @@ export function AddTeamToChannelDialog({
   );
 
   const runtimes = providersQuery.data ?? [];
-  // Use the buzz-agent-first preference so the team-deploy fallback mirrors the
-  // single-agent start path (buzz-agent → goose → first available).
+  // Use the bundled-Goose-first preference so the team-deploy fallback mirrors
+  // the single-agent start path (goose → buzz-agent → first available).
   const defaultProvider = getDefaultPersonaRuntime(runtimes);
 
   const teamPersonaResolution = React.useMemo(

@@ -134,7 +134,8 @@ jobs:
 
       - name: Build sidecars
         run: |
-          cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release -p buzz-acp -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release --locked --manifest-path goose-acp/Cargo.toml
           ./scripts/bundle-sidecars.sh
 
       # Mesh rev derived from Cargo.lock (no lockstep edit on dep bump); cache key tracks it.
@@ -353,7 +354,8 @@ jobs:
 
       - name: Build sidecars
         run: |
-          cargo build --release --target "$TARGET" -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release --target "$TARGET" -p buzz-acp -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release --locked --target "$TARGET" --manifest-path goose-acp/Cargo.toml
           ./scripts/bundle-sidecars.sh "$TARGET"
 
       - name: Build unsigned Tauri app
@@ -611,7 +613,8 @@ jobs:
 
       - name: Build sidecars
         run: |
-          cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release -p buzz-acp -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release --locked --manifest-path goose-acp/Cargo.toml
           ./scripts/bundle-sidecars.sh
 
       - name: Generate release config
@@ -773,7 +776,8 @@ jobs:
       - name: Build sidecars
         shell: bash
         run: |
-          cargo build --release --target "$TARGET" -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release --target "$TARGET" -p buzz-acp -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release --locked --target "$TARGET" --manifest-path goose-acp/Cargo.toml
           ./scripts/bundle-sidecars.sh "$TARGET"
 
       - name: Build Windows NSIS installer (unsigned)

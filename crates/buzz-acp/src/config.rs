@@ -611,8 +611,10 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
-        "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        // The bundled slim goose (goose-acp/) is already the ACP stdio
+        // server — no subcommand needed.
+        "goose-acp" | "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp"
+        | "claude-code" | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
 }
@@ -1437,6 +1439,24 @@ mod tests {
     fn normalizes_goose_args_to_acp() {
         assert_eq!(normalize_agent_args("goose", Vec::new()), vec!["acp"]);
         assert_eq!(normalize_agent_args("goose", vec!["".into()]), vec!["acp"]);
+    }
+
+    #[test]
+    fn bundled_goose_acp_takes_no_subcommand() {
+        // The bundled slim goose (goose-acp/) is already the ACP stdio
+        // server; passing `acp` would be an unknown-argument error.
+        assert_eq!(
+            normalize_agent_args("goose-acp", Vec::new()),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            normalize_agent_args("goose-acp", vec!["acp".into()]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            normalize_agent_args("/path/to/goose-acp", vec!["".into()]),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

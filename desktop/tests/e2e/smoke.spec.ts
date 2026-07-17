@@ -198,7 +198,7 @@ test("create agent persists Buzz shared compute with auto model", async ({
   }, agentName);
 
   expect(createPayload).toMatchObject({
-    agentCommand: "buzz-agent",
+    agentCommand: "goose",
     model: "auto",
     provider: "relay-mesh",
     spawnAfterCreate: true,

@@ -7,8 +7,9 @@ pub const RELAY_MESH_PROVIDER_ID: &str = "relay-mesh";
 pub const RELAY_MESH_AUTO_MODEL_ID: &str = "auto";
 
 /// Translate the native Buzz shared compute provider into the OpenAI-compatible
-/// transport understood by buzz-agent. These are derived runtime details, not
-/// user-owned agent configuration.
+/// transport understood by Buzz's agent runtimes. These are derived runtime
+/// details, not user-owned agent configuration. Goose's native variable names
+/// are added later by `apply_goose_runtime_env` when Goose is the runtime.
 #[cfg(feature = "mesh-llm")]
 pub fn apply_relay_mesh_env(
     env: &mut std::collections::BTreeMap<String, String>,
@@ -204,6 +205,41 @@ mod tests {
             env.get("BUZZ_AGENT_THINKING_EFFORT").map(String::as_str),
             Some("none")
         );
+    }
+
+    #[test]
+    fn bundled_goose_receives_the_native_shared_compute_transport() {
+        let mut rec = fixture();
+        rec.runtime = Some("goose".to_string());
+        rec.provider = Some(RELAY_MESH_PROVIDER_ID.to_string());
+        rec.model = Some("Qwen3".to_string());
+        let runtime = crate::managed_agents::known_acp_runtime_exact("goose");
+
+        let effective = crate::managed_agents::resolve_effective_agent_env(
+            &rec,
+            &[],
+            runtime,
+            &Default::default(),
+        );
+
+        assert_eq!(effective.effective_command, "goose-acp");
+        assert_eq!(
+            effective.env.get("GOOSE_PROVIDER").map(String::as_str),
+            Some("openai")
+        );
+        assert_eq!(
+            effective.env.get("GOOSE_MODEL").map(String::as_str),
+            Some("Qwen3")
+        );
+        assert_eq!(
+            effective.env.get("OPENAI_BASE_URL").map(String::as_str),
+            Some(RELAY_MESH_API_BASE_URL)
+        );
+        assert_eq!(
+            effective.env.get("OPENAI_API_KEY").map(String::as_str),
+            Some(RELAY_MESH_API_KEY_PLACEHOLDER)
+        );
+        assert!(crate::managed_agents::agent_readiness(&effective).is_ready());
     }
 
     #[test]

@@ -275,23 +275,14 @@ test("row 6: unfetched query refetches instead of resolving empty", async () => 
   );
 });
 
-// ── item-13 regression: buzz-agent-first default runtime ─────────────────────
-//
-// Before this fix, resolveStartRuntimeForDefinition used runtimes[0] (catalog
-// order: goose, claude, codex, buzz-agent), so an installed goose would beat
-// the bundled buzz-agent sidecar as the default for runtime-less personas.
-// The fix applies the preference order: buzz-agent → goose → first available.
+// ── Bundled-Goose default runtime ─────────────────────────────────────────────
 
-test("item-13: goose+buzz-agent both available — persona with no runtime resolves buzz-agent", () => {
+test("goose+buzz-agent both available — persona with no runtime resolves goose", () => {
   const { runtime, warnings } = resolveStartRuntimeForDefinition(
     persona({ runtime: undefined }),
     [gooseRuntime, claudeRuntime, buzzAgentRuntime],
   );
-  assert.equal(
-    runtime.id,
-    "buzz-agent",
-    "buzz-agent must win over catalog-first goose for runtime-less personas",
-  );
+  assert.equal(runtime.id, "goose");
   assert.deepEqual(warnings, []);
 });
 

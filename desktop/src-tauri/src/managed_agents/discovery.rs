@@ -142,12 +142,16 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     KnownAcpRuntime {
         id: "goose",
         label: "Goose",
-        commands: &["goose"],
+        // Prefer the bundled slim ACP sidecar. A full user-installed Goose
+        // remains a fallback and can still be selected by explicit path.
+        commands: &["goose-acp", "goose"],
         aliases: &[],
         avatar_url: GOOSE_AVATAR_URL,
         mcp_command: None,
         mcp_hooks: false,
-        underlying_cli: Some("goose"),
+        // Both commands are complete ACP agents; goose-acp does not depend on
+        // a separate full Goose installation.
+        underlying_cli: None,
         cli_install_commands: &["curl -fsSL https://github.com/block-open-source/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
         cli_install_commands_windows: &[], // goose install script is already Windows-aware
         adapter_install_commands: &[],
@@ -246,7 +250,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         cli_install_commands_windows: &[],
         adapter_install_commands: &[],
         install_instructions_url: "https://github.com/block/buzz",
-        cli_install_hint: "Ships with the Buzz desktop app.",
+        cli_install_hint: "Available from Buzz source builds.",
         adapter_install_hint: "",
         skill_dir: None,
         supports_acp_model_switching: true,
@@ -335,18 +339,12 @@ pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRunti
     KNOWN_ACP_RUNTIMES.iter().find(|p| p.id == id)
 }
 
-/// The agent command a freshly-created agent defaults to when the create
-/// request supplies none. Resolves the bundled `buzz-agent` from the catalog so
-/// the default cannot drift from the provider definition. Falls back to the id
-/// if the catalog entry is missing.
-///
-/// The previous default was the bare global `goose`, which is not on PATH on a
-/// stock Windows install: every worker failed with `program not found`. The
-/// bundled `buzz-agent` ships with the app and resolves on every platform.
+/// Resolve a fresh agent's command from the bundled-Goose catalog entry,
+/// falling back to its stable sidecar name if the entry is missing.
 pub fn default_agent_command() -> String {
-    known_acp_runtime_exact("buzz-agent")
+    known_acp_runtime_exact("goose")
         .and_then(|p| p.commands.first().copied())
-        .unwrap_or("buzz-agent")
+        .unwrap_or("goose-acp")
         .to_string()
 }
 
@@ -419,8 +417,8 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
-        "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        "goose-acp" | "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp"
+        | "claude-code" | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
 }
@@ -458,7 +456,9 @@ fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
 }
 
 fn command_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = profile_target_dirs(&workspace_root_dir()).to_vec();
+    let workspace_root = workspace_root_dir();
+    let mut dirs = profile_target_dirs(&workspace_root).to_vec();
+    dirs.extend(profile_target_dirs(&workspace_root.join("goose-acp")));
     if let Ok(current_dir) = std::env::current_dir() {
         dirs.extend(profile_target_dirs(&current_dir));
     }

@@ -393,7 +393,9 @@ fn agent_command_override_beats_definition_runtime_change() {
 fn missing_definition_leaves_materialized_runtime_in_hash() {
     let mut rec = record();
     rec.persona_id = Some("missing".into());
-    rec.runtime = Some("goose".into()); // materialized runtime
+    // Use a non-default runtime: `None` now resolves to bundled Goose, so a
+    // Goose-vs-None fixture would correctly hash to the same spawn command.
+    rec.runtime = Some("claude".into()); // materialized runtime
 
     let no_personas: &[AgentDefinition] = &[];
 

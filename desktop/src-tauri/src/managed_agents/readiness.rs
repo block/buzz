@@ -135,10 +135,14 @@ pub(crate) fn resolve_effective_agent_env(
     );
     env.extend(user_env);
 
-    // Buzz shared compute is a native Buzz provider. Translate it to buzz-agent's
-    // OpenAI-compatible transport only in the effective runtime environment.
+    // Buzz shared compute is a native Buzz provider. Translate it to the
+    // OpenAI-compatible transport used by the selected agent runtime.
     #[cfg(feature = "mesh-llm")]
     super::apply_relay_mesh_env(&mut env, effective_provider, effective_model);
+
+    if runtime.is_some_and(|candidate| candidate.id == "goose") {
+        super::apply_goose_runtime_env(&mut env, effective_provider, effective_model);
+    }
 
     EffectiveAgentEnv {
         env,
@@ -464,7 +468,9 @@ fn goose_requirements(
             });
         }
         Some("openai")
-            if env_key_missing("OPENAI_COMPAT_API_KEY")
+            if env_key_missing("OPENAI_API_KEY")
+                && env_key_missing("OPENAI_COMPAT_API_KEY")
+                && !file_key_present("OPENAI_API_KEY")
                 && !file_key_present("OPENAI_COMPAT_API_KEY") =>
         {
             missing.push(Requirement::EnvKey {
@@ -1603,6 +1609,26 @@ mod goose_file_config_tests {
                 key: "ANTHROPIC_API_KEY".to_string()
             }),
             "ANTHROPIC_API_KEY must remain required when not in file extra"
+        );
+    }
+
+    #[test]
+    fn goose_file_config_accepts_upstream_openai_key_name() {
+        let cfg = RuntimeFileConfig {
+            provider: Some("openai".to_string()),
+            model: Some("gpt-5".to_string()),
+            extra: BTreeMap::from([(
+                "OPENAI_API_KEY".to_string(),
+                "configured-secret".to_string(),
+            )]),
+            ..Default::default()
+        };
+
+        let result = goose_requirements(&empty_env(), Some(&cfg));
+
+        assert!(
+            result.is_empty(),
+            "native Goose OpenAI config should be ready"
         );
     }
 

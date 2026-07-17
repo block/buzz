@@ -1841,9 +1841,8 @@ pub fn spawn_agent_child(
         &global.env_vars,
         &super::env_vars::live_persona_env(&personas, record.persona_id.as_deref()),
     );
-    for (key, value) in super::env_vars::merged_user_env(&persona_over_global, &record.env_vars) {
-        command.env(key, value);
-    }
+    let mut merged_user_env =
+        super::env_vars::merged_user_env(&persona_over_global, &record.env_vars);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
     // transport at spawn time and scrub any unrelated ambient OpenAI key.
@@ -1852,9 +1851,15 @@ pub fn spawn_agent_child(
         let mut mesh_env = std::collections::BTreeMap::new();
         super::apply_relay_mesh_env(&mut mesh_env, effective_provider, effective_model);
         command.env_remove("OPENAI_API_KEY");
-        for (key, value) in mesh_env {
-            command.env(key, value);
-        }
+        merged_user_env.extend(mesh_env);
+    }
+
+    if runtime_meta.is_some_and(|candidate| candidate.id == "goose") {
+        super::apply_goose_runtime_env(&mut merged_user_env, effective_provider, effective_model);
+    }
+
+    for (key, value) in merged_user_env {
+        command.env(key, value);
     }
 
     // Mark as Buzz-managed *and* which desktop instance owns us, so the
