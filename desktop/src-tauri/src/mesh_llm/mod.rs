@@ -8,7 +8,9 @@ mod discovery;
 pub use discovery::{
     availability_from_events, mesh_status_filter, owner_ids_from_events, relay_membership_filter,
 };
-pub(crate) use discovery::{current_member_pubkeys, MESH_STATUS_PAGE_SIZE};
+pub(crate) use discovery::{
+    current_member_pubkeys, has_membership_snapshot, MESH_STATUS_PAGE_SIZE,
+};
 use discovery::{device_name_from_status, endpoint_id_from_status, enrich_status_payload_identity};
 
 mod catalog;

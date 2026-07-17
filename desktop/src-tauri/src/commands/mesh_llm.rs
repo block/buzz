@@ -64,6 +64,17 @@ async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Even
     let mut events = relay::query_relay(state, &[mesh_llm::relay_membership_filter()]).await?;
     let member_pubkeys = mesh_llm::current_member_pubkeys(&events);
     if member_pubkeys.is_empty() {
+        // Distinguish "relay returned a membership snapshot listing zero
+        // members" (authoritative empty — allowed to shrink the roster to
+        // self-only) from "no membership snapshot came back at all" (a
+        // transient gap / replication lag). The relay publishes an explicit
+        // kind:13534 event even for a zero-member community, so its absence
+        // means the query is incomplete: surface it as an error so the
+        // reconcile loop keeps the current allowlist instead of flapping the
+        // node down to self-only on a successful-but-empty response.
+        if !mesh_llm::has_membership_snapshot(&events) {
+            return Err("relay returned no membership snapshot".to_string());
+        }
         return Ok(events);
     }
     let mut status_filter = mesh_llm::mesh_status_filter();

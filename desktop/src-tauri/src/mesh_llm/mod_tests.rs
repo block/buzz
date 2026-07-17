@@ -215,6 +215,34 @@ fn signed_membership_event(members: &[String]) -> nostr::Event {
 }
 
 #[test]
+fn has_membership_snapshot_distinguishes_empty_from_missing() {
+    // A zero-member community still publishes an explicit kind:13534 event, so
+    // its presence — not the member count — is what makes an empty roster
+    // authoritative. No snapshot at all means the query was incomplete.
+    let zero_member_snapshot = signed_membership_event(&[]);
+    assert!(
+        super::has_membership_snapshot(std::slice::from_ref(&zero_member_snapshot)),
+        "an explicit zero-member snapshot counts as present"
+    );
+
+    let member = nostr::Keys::parse(&"1".repeat(64))
+        .unwrap()
+        .public_key()
+        .to_hex();
+    let populated = signed_membership_event(std::slice::from_ref(&member));
+    assert!(super::has_membership_snapshot(std::slice::from_ref(
+        &populated
+    )));
+
+    // A response with only status events (or nothing) has no snapshot.
+    assert!(!super::has_membership_snapshot(&[]));
+    let status_only = signed_reporter_status(&"2".repeat(64), "owner-x");
+    assert!(!super::has_membership_snapshot(std::slice::from_ref(
+        &status_only
+    )));
+}
+
+#[test]
 fn owner_ids_from_events_collects_sorted_deduped_roster() {
     let secret_a = "1".repeat(64);
     let secret_b = "2".repeat(64);

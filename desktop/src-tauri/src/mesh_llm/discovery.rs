@@ -93,6 +93,20 @@ pub(crate) fn current_member_pubkeys(events: &[nostr::Event]) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether the relay actually returned a NIP-43 membership snapshot (kind
+/// 13534) in `events`.
+///
+/// The relay publishes an explicit membership event even for a zero-member
+/// community, so its presence is what makes an empty roster *authoritative*.
+/// Callers use this to distinguish "the community genuinely has no members"
+/// (snapshot present, zero `member` tags) from "no snapshot came back at all"
+/// (a transient relay gap / replication lag). Only the former may shrink the
+/// admission roster; the latter must be surfaced as an error so the reconcile
+/// loop keeps the current allowlist instead of restarting to self-only.
+pub(crate) fn has_membership_snapshot(events: &[nostr::Event]) -> bool {
+    events.iter().any(|event| event.kind.as_u16() == 13_534)
+}
+
 fn owner_id_from_status_event(event: &nostr::Event) -> Option<String> {
     let content = serde_json::from_str::<serde_json::Value>(&event.content).ok()?;
     let owner_id = content
