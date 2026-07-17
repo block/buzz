@@ -151,6 +151,82 @@ test("successful Claude sign-in selects it as preferred", async ({ page }) => {
   expect(savedConfig?.preferred_runtime).toBe("claude");
 });
 
+test("successful Codex sign-in hides API key auth and selects it as preferred", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [availableRuntime("codex", { status: "logged_out" })],
+      acpAuthMethods: {
+        codex: {
+          methods: [
+            {
+              id: "api-key",
+              name: "Use API key",
+              description: null,
+              type: "input",
+            },
+            {
+              id: "chat-gpt",
+              name: "Sign in with ChatGPT",
+              description: null,
+              type: "browser",
+            },
+          ],
+        },
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await waitForAnimations(page);
+
+  const card = page.getByTestId("onboarding-runtime-codex");
+  await expect(card.getByRole("button", { name: "Use API key" })).toHaveCount(
+    0,
+  );
+  await expect(card.getByLabel("Codex available")).toHaveCount(0);
+  await card
+    .getByRole("button", { name: "Sign in with ChatGPT" })
+    .click({ force: true });
+  await expect(card.getByText("Preferred")).toBeVisible();
+  await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
+
+  const savedConfig = await page.evaluate(() =>
+    (
+      window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload: unknown,
+        ) => Promise<{ preferred_runtime: string | null }>;
+      }
+    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+  );
+  expect(savedConfig?.preferred_runtime).toBe("codex");
+});
+
+test("runtime checkmarks only show for configured harnesses", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("claude", { status: "logged_out" }),
+        availableRuntime("codex", { status: "logged_in" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await expect(page.getByLabel("Claude available")).toHaveCount(0);
+  await expect(page.getByLabel("codex available")).toBeVisible();
+});
+
 for (const authStatus of [
   { status: "logged_out" as const },
   { status: "unknown" as const },

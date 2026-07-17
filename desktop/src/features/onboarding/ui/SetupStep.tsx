@@ -104,13 +104,11 @@ function RuntimeIcon({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 
 function RuntimeStatus({
   installError,
-  installSuccess,
   isInstalling,
   onInstall,
   runtime,
 }: {
   installError: string | null;
-  installSuccess: boolean;
   isInstalling: boolean;
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
@@ -135,7 +133,7 @@ function RuntimeStatus({
     );
   }
 
-  if (runtime.availability === "available" || installSuccess) {
+  if (runtime.availability === "available" && runtimeCanBeSelected(runtime)) {
     return (
       <div
         aria-label={`${runtime.label} available`}
@@ -291,6 +289,14 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   return "Not installed yet.";
 }
 
+function isSupportedOnboardingAuthMethod(
+  runtime: AcpRuntimeCatalogEntry,
+  method: { id: string; name: string },
+) {
+  if (runtime.id !== "codex") return true;
+  return !/api[-_ ]?key/i.test(`${method.id} ${method.name}`);
+}
+
 function RuntimeAuthActions({
   onAuthenticated,
   runtime,
@@ -336,7 +342,9 @@ function RuntimeAuthActions({
   }
   if (runtime.authStatus.status !== "logged_out") return null;
 
-  const methods = methodsQuery.data?.methods ?? [];
+  const methods = (methodsQuery.data?.methods ?? []).filter((method) =>
+    isSupportedOnboardingAuthMethod(runtime, method),
+  );
   return (
     <div className="mt-2 flex flex-col items-center gap-1.5">
       {methodsQuery.isLoading ? (
@@ -355,7 +363,9 @@ function RuntimeAuthActions({
                 },
                 {
                   onSuccess: () => {
-                    if (runtime.id === "claude") onAuthenticated();
+                    if (runtime.id === "claude" || runtime.id === "codex") {
+                      onAuthenticated();
+                    }
                   },
                 },
               );
@@ -445,7 +455,6 @@ function RuntimeCard({
       <div className="absolute right-2 top-2">
         <RuntimeStatus
           installError={installError}
-          installSuccess={installSuccess}
           isInstalling={isInstalling}
           onInstall={onInstall}
           runtime={runtime}
