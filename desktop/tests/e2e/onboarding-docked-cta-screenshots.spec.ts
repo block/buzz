@@ -100,12 +100,15 @@ test("machine key import remains usable in a short viewport", async ({
       headingBottom: heading?.bottom ?? 0,
       inputBottom: input?.bottom ?? 0,
       inputTop: input?.top ?? 0,
+      clientWidth: document.documentElement.clientWidth,
       scrollHeight: document.documentElement.scrollHeight,
+      scrollWidth: document.documentElement.scrollWidth,
     };
   });
   expect(layout.inputTop).toBeGreaterThan(layout.headingBottom);
   expect(layout.footerTop).toBeGreaterThan(layout.inputBottom);
   expect(layout.scrollHeight).toBeGreaterThanOrEqual(620);
+  expect(layout.scrollWidth).toBe(layout.clientWidth);
 });
 
 test("relay onboarding: profile and avatar docked CTAs", async ({ page }) => {
