@@ -23,7 +23,10 @@ import {
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
-import { ownsAuthorAgent } from "@/features/profile/lib/identity";
+import {
+  formatOwnerLabel,
+  ownsAuthorAgent,
+} from "@/features/profile/lib/identity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
@@ -205,6 +208,11 @@ export function UserProfilePopover({
     (a) => a.pubkey === pubkey,
   );
   const profile = profileQuery.data;
+  const ownerPubkey = profile?.ownerPubkey ?? null;
+  const ownerProfileQuery = useUsersBatchQuery(
+    ownerPubkey ? [ownerPubkey] : [],
+    { enabled: open && Boolean(ownerPubkey) },
+  );
   const normalizedPubkey = normalizePubkey(pubkey);
   const isAgentByOaOwner = Boolean(
     usersBatchQuery.data?.profiles[normalizedPubkey]?.isAgent,
@@ -232,6 +240,13 @@ export function UserProfilePopover({
   const isOwner = useIsManagedAgent(isBotProfile ? pubkey : null);
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey;
+  const ownerLabel = isBotProfile
+    ? formatOwnerLabel(
+        ownerPubkey,
+        currentPubkey,
+        ownerProfileQuery.data?.profiles,
+      )
+    : null;
   const isSelf =
     currentPubkey !== undefined &&
     currentPubkey.toLowerCase() === pubkey.toLowerCase();
@@ -511,6 +526,14 @@ export function UserProfilePopover({
             />
           ) : null}
         </div>
+        {isBotProfile && ownerLabel ? (
+          <p
+            className="mt-0.5 truncate text-xs leading-4 text-muted-foreground"
+            data-testid={`user-profile-popover-owner-${pubkey}`}
+          >
+            owned by {ownerLabel}
+          </p>
+        ) : null}
         {profileSubheader ? (
           <p
             className="mt-0.5 truncate text-xs leading-4 text-muted-foreground"
