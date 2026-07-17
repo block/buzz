@@ -17,13 +17,13 @@ import {
   OnboardingFooter,
   OnboardingFooterProvider,
 } from "@/features/onboarding/ui/OnboardingFooter";
+import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
 import { getIdentity } from "@/shared/api/tauriIdentity";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { pubkeyToNpub } from "@/shared/lib/nostrUtils";
+import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
-import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
-import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
-import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type WelcomeSetupPage = "welcome" | "join" | "invite";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
@@ -117,7 +117,7 @@ export function WelcomeSetup({
                   Join or create a community
                 </h1>
                 <p className="mt-3 text-sm leading-6 text-foreground/80">
-                  Choose how you’d like to get started. If you have an invite
+                  Choose how you'd like to get started. If you have an invite
                   link, you can open it directly to continue setup.
                 </p>
               </div>
@@ -183,7 +183,7 @@ export function WelcomeSetup({
                           className={`${ONBOARDING_KEY_TEXT_CLASS} block`}
                           data-testid="welcome-join-npub"
                         >
-                          {npub || "Loading…"}
+                          {npub || "Loading..."}
                         </code>
                       </div>
                       <Button

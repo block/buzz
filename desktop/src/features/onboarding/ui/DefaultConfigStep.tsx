@@ -21,7 +21,6 @@ import {
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
 import type { DefaultConfigStepActions } from "./types";
-import { resolveAgentReadiness } from "./agentReadiness";
 
 type DefaultConfigStepProps = {
   actions: DefaultConfigStepActions;
@@ -44,21 +43,24 @@ function AgentDefaultsSection() {
   React.useEffect(() => {
     let unmounted = false;
 
-    getGlobalAgentConfig()
-      .then((loaded) => {
-        if (!unmounted) {
-          setConfig(loaded);
-          setIsLoading(false);
-        }
-      })
-      .catch(() => {
-        if (!unmounted) setIsLoading(false);
-      });
-    getBakedBuildEnv()
-      .then((env) => {
-        if (!unmounted) setBakedEnv(env);
-      })
-      .catch(() => undefined);
+    async function loadDefaults() {
+      const [configResult, bakedEnvResult] = await Promise.allSettled([
+        getGlobalAgentConfig(),
+        getBakedBuildEnv(),
+      ]);
+
+      if (unmounted) return;
+
+      if (configResult.status === "fulfilled") {
+        setConfig(configResult.value);
+      }
+      if (bakedEnvResult.status === "fulfilled") {
+        setBakedEnv(bakedEnvResult.value);
+      }
+      setIsLoading(false);
+    }
+
+    void loadDefaults();
 
     // The coalescer serializes autosaves and drains any edit that arrived
     // while a previous save was in flight. Cancel on unmount so a slow
@@ -88,45 +90,49 @@ function AgentDefaultsSection() {
     [config.preferred_runtime, runtimesQuery.data],
   );
 
-  const readiness = resolveAgentReadiness(
-    runtimesQuery.data ?? [],
-    config,
-    "preferred",
-  );
-
   return (
-    <section className="w-full space-y-4 text-left">
+    <section className="w-full text-left text-sm">
       {isLoading ? (
         <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
           <Spinner className="h-4 w-4 border-2" />
           Loading…
         </div>
       ) : (
-        <div className="rounded-2xl bg-white/85 p-2 shadow-[0_0_55px_25px_rgba(255,255,255,0.6)]">
-          <GlobalAgentConfigFields
-            bakedEnv={bakedEnv}
-            selectedRuntime={selectedRuntime}
-            config={config}
-            isCustomModelEditing={isCustomModelEditing}
-            isCustomProvider={isCustomProvider}
-            onConfigChange={(next) => {
-              // Always apply optimistically so the UI never reverts mid-save,
-              // then enqueue the persist — the coalescer serialises multiple
-              // rapid edits into a single trailing request.
-              setConfig(next);
-              coalescerRef.current?.enqueue(next);
-            }}
-            onCustomModelEditingChange={setIsCustomModelEditing}
-            onIsCustomProviderChange={setIsCustomProvider}
-          />
-        </div>
+        <GlobalAgentConfigFields
+          bakedEnv={bakedEnv}
+          selectedRuntime={selectedRuntime}
+          config={config}
+          isCustomModelEditing={isCustomModelEditing}
+          isCustomProvider={isCustomProvider}
+          autoSelectModelOnProviderChange
+          disableModelSelectDuringDiscovery={false}
+          effortPlaceholderLabel="Select effort level"
+          keepSelectedModelValueLabel
+          modelPlaceholderLabel="Select a model"
+          onConfigChange={(next) => {
+            // Always apply optimistically so the UI never reverts mid-save,
+            // then enqueue the persist — the coalescer serialises multiple
+            // rapid edits into a single trailing request.
+            setConfig(next);
+            coalescerRef.current?.enqueue(next);
+          }}
+          onCustomModelEditingChange={setIsCustomModelEditing}
+          onIsCustomProviderChange={setIsCustomProvider}
+          effortLabel="Effort"
+          providerLabel="Provider"
+          requireProviderForModelAndEffort
+          selectClassName="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
+          showAdvancedFields={false}
+          showCustomModelOption={false}
+          showCustomProviderOption={false}
+          showDescriptions={false}
+          showRequiredIndicators={false}
+          showProviderPlaceholderOption={false}
+          showUnavailableEffortOptions={false}
+          unstyled
+          useCustomSelect
+        />
       )}
-
-      {!readiness.ready ? (
-        <p className="text-center text-sm text-muted-foreground">
-          You can finish now and configure agents later in Settings.
-        </p>
-      ) : null}
     </section>
   );
 }
@@ -142,9 +148,7 @@ export function DefaultConfigStep({
 }: DefaultConfigStepProps) {
   return (
     <OnboardingSlideTransition
-      // pb clears the always-docked footer: the config fields can overflow on
-      // short windows, so reserve room to scroll clear of the fixed CTA group.
-      className="flex w-full flex-col items-center pb-20"
+      className="flex min-h-full w-full flex-col items-center"
       data-testid="onboarding-page-config"
       direction={direction}
       transitionKey={`default-config-${direction}`}
@@ -153,19 +157,21 @@ export function DefaultConfigStep({
         <h1 className="text-title font-normal text-foreground">
           Configure your default model settings
         </h1>
-        <p className="mt-3 text-sm leading-6 text-foreground/80">
-          This will be set as your default model configuration across Buzz. You
-          can always change this in your Settings.
+        <p className="mx-auto mt-3 max-w-[440px] text-sm leading-5 text-foreground/80">
+          These settings will be used by your agents in Buzz. You can always
+          change them in your Settings.
         </p>
       </div>
 
-      <div className="mt-8 w-full max-w-[560px]">
-        <AgentDefaultsSection />
+      <div className="flex w-full flex-1 items-center justify-center py-10">
+        <div className="w-full max-w-[328px]">
+          <AgentDefaultsSection />
+        </div>
       </div>
 
       <OnboardingFooter>
         <Button
-          className={ONBOARDING_PRIMARY_CTA_CLASS}
+          className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
           data-testid="onboarding-finish"
           onClick={actions.complete}
           type="button"
@@ -174,7 +180,7 @@ export function DefaultConfigStep({
         </Button>
 
         <Button
-          className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+          className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
           data-testid="onboarding-back"
           onClick={actions.back}
           type="button"

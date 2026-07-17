@@ -4,10 +4,13 @@
  * Both CreateAgentDialog (local mode) and AgentInstanceEditDialog import these
  * instead of duplicating the picker logic.
  */
-import type * as React from "react";
+import * as React from "react";
+import { Check, ChevronDown } from "lucide-react";
 
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -23,17 +26,160 @@ import {
 import { MODEL_DISCOVERY_LOADING_VALUE } from "./usePersonaModelDiscovery";
 import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
 
+export type AgentDropdownOption = {
+  disabled?: boolean;
+  label: React.ReactNode;
+  value: string;
+};
+
+function optionTestId(testId: string | undefined, value: string) {
+  if (!testId) return undefined;
+  return `${testId}-option-${value || "empty"}`;
+}
+
+export function AgentDropdownSelect({
+  ariaRequired,
+  className,
+  disabled = false,
+  id,
+  onValueChange,
+  options,
+  placeholder = "Select",
+  placeholderClassName,
+  placeholderValue,
+  selectedLabel,
+  testId,
+  value,
+}: {
+  ariaRequired?: boolean;
+  className?: string;
+  disabled?: boolean;
+  id: string;
+  onValueChange: (value: string) => void;
+  options: readonly AgentDropdownOption[];
+  placeholder?: string;
+  placeholderClassName?: string;
+  placeholderValue?: string;
+  selectedLabel?: React.ReactNode;
+  testId?: string;
+  value: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const selectedOption = options.find((option) => option.value === value);
+  const isPlaceholderSelection =
+    selectedLabel === undefined &&
+    (selectedOption === undefined ||
+      (placeholderValue !== undefined &&
+        selectedOption.value === placeholderValue));
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          aria-controls={`${id}-listbox`}
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          aria-required={ariaRequired}
+          className={cn(
+            "flex h-9 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-left text-sm font-normal shadow-xs transition-colors hover:bg-background/90 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+            className,
+          )}
+          data-testid={testId}
+          data-value={value}
+          disabled={disabled}
+          id={id}
+          role="combobox"
+          type="button"
+        >
+          <span
+            className={cn(
+              "min-w-0 truncate",
+              isPlaceholderSelection &&
+                (placeholderClassName ?? "text-foreground/45"),
+            )}
+          >
+            {selectedLabel ?? selectedOption?.label ?? placeholder}
+          </span>
+          <ChevronDown
+            aria-hidden="true"
+            className={cn(
+              "ml-3 h-4 w-4 shrink-0 transition-transform duration-150",
+              disabled ? "text-foreground/30" : "text-foreground",
+              open && "rotate-180",
+            )}
+          />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="max-h-72 overflow-y-auto rounded-2xl border-foreground/10 bg-white p-1.5 text-foreground"
+        sideOffset={8}
+        style={{
+          boxShadow: "0 16px 36px rgb(0 0 0 / 0.12)",
+          width: "var(--radix-popover-trigger-width)",
+        }}
+      >
+        <div
+          aria-labelledby={id}
+          className="space-y-1"
+          id={`${id}-listbox`}
+          role="listbox"
+        >
+          {options.map((option) => {
+            const selected = option.value === value;
+            return (
+              <button
+                aria-disabled={option.disabled || undefined}
+                aria-selected={selected}
+                className={cn(
+                  "flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm leading-5 transition-colors hover:bg-foreground/5 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-foreground/30",
+                  selected && "bg-[var(--buzz-welcome-chartreuse)]/35",
+                  option.disabled &&
+                    "cursor-not-allowed opacity-40 hover:bg-transparent",
+                )}
+                data-testid={optionTestId(testId, option.value)}
+                data-value={option.value}
+                disabled={option.disabled}
+                key={option.value}
+                onClick={() => {
+                  if (option.disabled) return;
+                  onValueChange(option.value);
+                  setOpen(false);
+                }}
+                role="option"
+                type="button"
+              >
+                <span className="min-w-0 truncate">{option.label}</span>
+                <Check
+                  aria-hidden="true"
+                  className={cn(
+                    "h-4 w-4 shrink-0 text-foreground transition-opacity",
+                    selected ? "opacity-100" : "opacity-0",
+                  )}
+                  strokeWidth={2.5}
+                />
+              </button>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function RequiredFieldLabel({
+  className,
   children,
   htmlFor,
   isRequired,
 }: {
+  className?: string;
   children: React.ReactNode;
   htmlFor: string;
   isRequired: boolean;
 }) {
   return (
-    <label className="text-sm font-medium" htmlFor={htmlFor}>
+    <label className={cn("text-sm font-medium", className)} htmlFor={htmlFor}>
       {children}
       {isRequired ? (
         <span className="ml-1 text-destructive" aria-hidden="true">
@@ -50,6 +196,8 @@ export function AgentModelField({
   globalModel,
   allowDefaultModel = true,
   defaultModelLabel,
+  disableSelectDuringDiscovery = true,
+  keepSelectedModelValueLabel = false,
   id = "agent-model",
   isCustomModelEditing,
   isRequired,
@@ -58,7 +206,16 @@ export function AgentModelField({
   modelDiscoveryStatus,
   onIsCustomModelEditingChange,
   onModelChange,
+  placeholder = "Select model",
   provider,
+  fieldClassName,
+  labelClassName,
+  selectClassName,
+  testId,
+  useCustomSelect = false,
+  showStatusMessage = true,
+  showCustomModelOption = true,
+  useChevronIcon = false,
 }: {
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
@@ -68,6 +225,10 @@ export function AgentModelField({
   allowDefaultModel?: boolean;
   /** Source-aware label for the empty/default option. */
   defaultModelLabel?: string;
+  /** Disable the trigger while live model discovery refreshes the option list. */
+  disableSelectDuringDiscovery?: boolean;
+  /** Keep the closed trigger from swapping to discovered display labels. */
+  keepSelectedModelValueLabel?: boolean;
   /** DOM id for the model select. Defaults to `"agent-model"`. Override in
    *  contexts where multiple instances coexist on the same page (e.g. the
    *  global-config settings card) to avoid duplicate DOM ids. */
@@ -79,7 +240,25 @@ export function AgentModelField({
   modelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
   onIsCustomModelEditingChange: (value: boolean) => void;
   onModelChange: (value: string) => void;
+  /** Trigger placeholder shown when there is no selected model option. */
+  placeholder?: string;
   provider?: string;
+  /** Optional class override for the field wrapper. */
+  fieldClassName?: string;
+  /** Optional class override for the label. */
+  labelClassName?: string;
+  /** Optional class override for contexts with custom visual treatments. */
+  selectClassName?: string;
+  /** Optional test id for custom dropdown trigger/options. */
+  testId?: string;
+  /** Render the polished app dropdown instead of the native select. */
+  useCustomSelect?: boolean;
+  /** Hide the helper/status line in compact presentations. */
+  showStatusMessage?: boolean;
+  /** Hide the explicit custom-model escape hatch in compact presentations. */
+  showCustomModelOption?: boolean;
+  /** Render a controlled chevron instead of the native select indicator. */
+  useChevronIcon?: boolean;
 }) {
   const trimmedModel = model.trim();
   const isSharedCompute = provider?.trim() === "relay-mesh";
@@ -97,12 +276,23 @@ export function AgentModelField({
   const discoveredWithoutDefault = (discoveredModelOptions ?? []).filter(
     (option) => option.id.trim() !== "",
   );
-  const effectiveModelOptions = isSharedCompute
+  const baseModelOptions = isSharedCompute
     ? [defaultOption, ...discoveredWithoutDefault]
     : [
         ...(allowDefaultModel ? [defaultOption] : []),
         ...discoveredWithoutDefault,
       ];
+  const shouldShowPendingModelOption =
+    !isSharedCompute &&
+    !isCustomModelEditing &&
+    modelDiscoveryLoading &&
+    discoveredModelOptions === null &&
+    trimmedModel.length > 0;
+  const effectiveModelOptions =
+    shouldShowPendingModelOption &&
+    !baseModelOptions.some((option) => option.id === trimmedModel)
+      ? [...baseModelOptions, { id: trimmedModel, label: trimmedModel }]
+      : baseModelOptions;
 
   // isModelCustom: true when the current model isn't in any known option set.
   // We check discovered options (when available) or runtime-static options so
@@ -122,56 +312,112 @@ export function AgentModelField({
 
   // The select is only disabled for mutation pending — never for missing discovery.
   // Default/custom options remain usable regardless of discovery state.
-  const selectDisabled = disabled || modelDiscoveryLoading;
+  const selectDisabled =
+    disabled || (disableSelectDuringDiscovery && modelDiscoveryLoading);
 
   // Show the custom model input whenever custom mode is active or the current
   // model is already custom — not gated on discovery having returned.
   const showCustomModelInput =
     !isSharedCompute && (isCustomModelEditing || isModelCustom);
 
+  const handleModelSelectChange = (nextValue: string) => {
+    if (nextValue === AUTO_MODEL_DROPDOWN_VALUE) {
+      onIsCustomModelEditingChange(false);
+      onModelChange(isSharedCompute ? "auto" : "");
+      return;
+    }
+    if (nextValue === CUSTOM_MODEL_DROPDOWN_VALUE) {
+      onIsCustomModelEditingChange(true);
+      return;
+    }
+    onIsCustomModelEditingChange(false);
+    onModelChange(nextValue);
+  };
+
+  const modelOptions: AgentDropdownOption[] = [
+    ...effectiveModelOptions.map((option) => ({
+      label: option.label,
+      value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
+    })),
+    ...(modelDiscoveryLoading && discoveredModelOptions === null
+      ? [
+          {
+            disabled: true,
+            label: "Loading models...",
+            value: MODEL_DISCOVERY_LOADING_VALUE,
+          },
+        ]
+      : []),
+    ...(!isSharedCompute &&
+    (showCustomModelOption || modelSelectValue === CUSTOM_MODEL_DROPDOWN_VALUE)
+      ? [{ label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE }]
+      : []),
+  ];
+  const stableSelectedModelLabel =
+    keepSelectedModelValueLabel &&
+    modelSelectValue === trimmedModel &&
+    trimmedModel.length > 0
+      ? trimmedModel
+      : undefined;
+
+  const modelSelect = useCustomSelect ? (
+    <AgentDropdownSelect
+      ariaRequired={isRequired}
+      className={selectClassName}
+      disabled={selectDisabled}
+      id={id}
+      onValueChange={handleModelSelectChange}
+      options={modelOptions}
+      placeholder={placeholder}
+      selectedLabel={stableSelectedModelLabel}
+      testId={testId ?? id}
+      value={modelSelectValue}
+    />
+  ) : (
+    <select
+      aria-required={isRequired}
+      className={cn(
+        "flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60",
+        useChevronIcon && "appearance-none pr-10",
+        selectClassName,
+      )}
+      disabled={selectDisabled}
+      id={id}
+      onChange={(event) => handleModelSelectChange(event.target.value)}
+      value={modelSelectValue}
+    >
+      {modelOptions.map((option) => (
+        <option
+          disabled={option.disabled}
+          key={option.value}
+          value={option.value}
+        >
+          {option.label}
+        </option>
+      ))}
+    </select>
+  );
+
   return (
-    <div className="space-y-1.5">
-      <RequiredFieldLabel htmlFor={id} isRequired={isRequired}>
+    <div className={cn("space-y-1.5", fieldClassName)}>
+      <RequiredFieldLabel
+        className={labelClassName}
+        htmlFor={id}
+        isRequired={isRequired}
+      >
         Model
       </RequiredFieldLabel>
-      <select
-        aria-required={isRequired}
-        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
-        disabled={selectDisabled}
-        id={id}
-        onChange={(event) => {
-          const nextValue = event.target.value;
-          if (nextValue === AUTO_MODEL_DROPDOWN_VALUE) {
-            onIsCustomModelEditingChange(false);
-            onModelChange(isSharedCompute ? "auto" : "");
-            return;
-          }
-          if (nextValue === CUSTOM_MODEL_DROPDOWN_VALUE) {
-            onIsCustomModelEditingChange(true);
-            return;
-          }
-          onIsCustomModelEditingChange(false);
-          onModelChange(nextValue);
-        }}
-        value={modelSelectValue}
-      >
-        {effectiveModelOptions.map((option) => (
-          <option
-            key={option.id}
-            value={option.id || AUTO_MODEL_DROPDOWN_VALUE}
-          >
-            {option.label}
-          </option>
-        ))}
-        {modelDiscoveryLoading && discoveredModelOptions === null ? (
-          <option disabled value={MODEL_DISCOVERY_LOADING_VALUE}>
-            Loading models...
-          </option>
-        ) : null}
-        {!isSharedCompute ? (
-          <option value={CUSTOM_MODEL_DROPDOWN_VALUE}>Custom model...</option>
-        ) : null}
-      </select>
+      {!useCustomSelect && useChevronIcon ? (
+        <div className="relative">
+          {modelSelect}
+          <ChevronDown
+            aria-hidden="true"
+            className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground"
+          />
+        </div>
+      ) : (
+        modelSelect
+      )}
       {showCustomModelInput ? (
         <Input
           aria-label="Custom model ID"
@@ -182,15 +428,17 @@ export function AgentModelField({
           value={model}
         />
       ) : null}
-      <p className="text-xs text-muted-foreground">
-        {modelDiscoveryLoading
-          ? "Loading models..."
-          : modelDiscoveryStatus !== null
-            ? modelDiscoveryStatus.message
-            : discoveredModelOptions !== null
-              ? "Saved changes take effect on the next start."
-              : "Select a provider above to see available models."}
-      </p>
+      {showStatusMessage ? (
+        <p className="text-xs text-muted-foreground">
+          {modelDiscoveryLoading
+            ? "Loading models..."
+            : modelDiscoveryStatus !== null
+              ? modelDiscoveryStatus.message
+              : discoveredModelOptions !== null
+                ? "Saved changes take effect on the next start."
+                : "Select a provider above to see available models."}
+        </p>
+      ) : null}
     </div>
   );
 }

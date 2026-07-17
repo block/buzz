@@ -215,9 +215,11 @@ function CommunityQueryProvider({ children }: { children: ReactNode }) {
 function AppReady({
   isSharedIdentity,
   isCommunitySwitch,
+  onBackToAgentDefaults,
 }: {
   isSharedIdentity: boolean;
   isCommunitySwitch: boolean;
+  onBackToAgentDefaults: () => void;
 }) {
   const onboarding = useAppOnboardingState(isSharedIdentity);
 
@@ -236,7 +238,10 @@ function AppReady({
   if (onboarding.stage === "onboarding") {
     return (
       <OnboardingFlow
-        actions={onboarding.flow.actions}
+        actions={{
+          ...onboarding.flow.actions,
+          backToAgentDefaults: onBackToAgentDefaults,
+        }}
         identityLost={onboarding.identityLost}
         initialProfile={onboarding.flow.initialProfile}
         key={onboarding.currentPubkey ?? "anonymous"}
@@ -383,6 +388,7 @@ function CommunityApp({
         isCommunitySwitch={isCommunitySwitch}
         key={communityKey}
         isSharedIdentity={sharedIdentity}
+        onBackToAgentDefaults={onBackToMachineConfig}
       />
       {showBootSplashOverlay ? (
         <div

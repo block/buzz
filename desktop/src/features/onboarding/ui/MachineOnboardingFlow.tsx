@@ -31,6 +31,25 @@ export type MachineOnboardingPage =
   | "setup"
   | "config";
 
+function readDevInitialMachinePage(): MachineOnboardingPage | null {
+  if (!import.meta.env.DEV || typeof window === "undefined") return null;
+
+  const requestedPage =
+    new URL(window.location.href).searchParams.get("machineOnboardingPage") ??
+    import.meta.env.VITE_MACHINE_ONBOARDING_PAGE;
+
+  switch (requestedPage) {
+    case "identity":
+    case "key-import":
+    case "backup":
+    case "setup":
+    case "config":
+      return requestedPage;
+    default:
+      return null;
+  }
+}
+
 export function MachineOnboardingFlow({
   complete,
   continueWithIdentity,
@@ -45,7 +64,10 @@ export function MachineOnboardingFlow({
   queryClient: QueryClient;
 }) {
   const [page, setPage] = React.useState<MachineOnboardingPage>(
-    identityLost ? "key-import" : (initialPage ?? "identity"),
+    () =>
+      initialPage ??
+      readDevInitialMachinePage() ??
+      (identityLost ? "key-import" : "identity"),
   );
   const [error, setError] = React.useState<string | null>(null);
   const [isPending, setIsPending] = React.useState(false);
@@ -53,11 +75,8 @@ export function MachineOnboardingFlow({
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
-  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState<
-    string | null
-  >(null);
-  const [pendingRuntimeId, setPendingRuntimeId] = React.useState<string | null>(
-    null,
+  const [selectedRuntimeIds, setSelectedRuntimeIds] = React.useState<string[]>(
+    [],
   );
   const [isRuntimeSelectionSaving, setIsRuntimeSelectionSaving] =
     React.useState(false);
@@ -66,30 +85,29 @@ export function MachineOnboardingFlow({
   >(null);
   const runtimeSaveSequence = React.useRef(0);
 
-  const persistPreferredRuntime = React.useCallback(
-    async (runtimeId: string) => {
+  const persistHarnessSelection = React.useCallback(
+    async (runtimeIds: readonly string[]) => {
+      const nextRuntimeIds = Array.from(new Set(runtimeIds));
       const sequence = runtimeSaveSequence.current + 1;
       runtimeSaveSequence.current = sequence;
-      setPendingRuntimeId(runtimeId);
+      setSelectedRuntimeIds(nextRuntimeIds);
       setRuntimeSelectionError(null);
       setIsRuntimeSelectionSaving(true);
       try {
         const current = await getGlobalAgentConfig();
-        const result = await setGlobalAgentConfig({
+        await setGlobalAgentConfig({
           ...current,
-          preferred_runtime: runtimeId,
+          preferred_runtime: nextRuntimeIds[0] ?? null,
         });
         if (runtimeSaveSequence.current === sequence) {
-          setSelectedRuntimeId(result.config.preferred_runtime);
-          setPendingRuntimeId(null);
+          setSelectedRuntimeIds(nextRuntimeIds);
         }
       } catch (cause) {
         if (runtimeSaveSequence.current === sequence) {
-          setPendingRuntimeId(null);
           setRuntimeSelectionError(
             cause instanceof Error
               ? cause.message
-              : "Couldn’t save your preferred runtime.",
+              : "Couldn’t save your harness selection.",
           );
         }
       } finally {
@@ -171,7 +189,7 @@ export function MachineOnboardingFlow({
       <OnboardingFooterProvider>
         <div
           className={`relative flex w-full max-w-[920px] flex-col items-center text-center ${
-            page === "identity" ? "my-auto" : ""
+            page === "identity" ? "my-auto" : "buzz-onboarding-step-frame"
           }`}
         >
           {page === "identity" ? (
@@ -257,10 +275,12 @@ export function MachineOnboardingFlow({
                 back: () =>
                   setPage(identityWasImported ? "key-import" : "backup"),
                 next: () => {
-                  if (!selectedRuntimeId) return;
+                  if (selectedRuntimeIds.length === 0) return;
                   if (
-                    selectedRuntimeId === "claude" ||
-                    selectedRuntimeId === "codex"
+                    selectedRuntimeIds.every(
+                      (runtimeId) =>
+                        runtimeId === "claude" || runtimeId === "codex",
+                    )
                   ) {
                     complete(selectedPubkey ?? undefined);
                     return;
@@ -270,11 +290,11 @@ export function MachineOnboardingFlow({
               }}
               direction="forward"
               isSelectionSaving={isRuntimeSelectionSaving}
-              onSelectedRuntimeChange={(runtimeId) => {
-                void persistPreferredRuntime(runtimeId);
+              onSelectedRuntimeIdsChange={(runtimeIds) => {
+                void persistHarnessSelection(runtimeIds);
               }}
               selectionError={runtimeSelectionError}
-              selectedRuntimeId={pendingRuntimeId ?? selectedRuntimeId}
+              selectedRuntimeIds={selectedRuntimeIds}
             />
           ) : (
             <DefaultConfigStep

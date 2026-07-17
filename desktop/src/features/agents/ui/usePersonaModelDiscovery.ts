@@ -73,8 +73,14 @@ export function usePersonaModelDiscovery({
 }) {
   const [modelDiscoveryData, setModelDiscoveryData] =
     React.useState<AgentModelsResponse | null>(null);
+  const [modelDiscoveryDataKey, setModelDiscoveryDataKey] = React.useState<
+    string | null
+  >(null);
   const [modelDiscoveryStatus, setModelDiscoveryStatus] =
     React.useState<PersonaModelDiscoveryStatus | null>(null);
+  const [modelDiscoveryStatusKey, setModelDiscoveryStatusKey] = React.useState<
+    string | null
+  >(null);
   const [modelDiscoveryLoading, setModelDiscoveryLoading] =
     React.useState(false);
   const modelDiscoveryCacheRef = React.useRef(
@@ -129,6 +135,7 @@ export function usePersonaModelDiscovery({
     if (modelDiscoveryKey === null || discoveryAgentCommand === null) {
       modelDiscoveryRequestRef.current += 1;
       setModelDiscoveryData(null);
+      setModelDiscoveryDataKey(null);
       // When the runtime exists but is not available, surface a status message
       // so the model dropdown explains why no live models can be loaded.
       if (
@@ -141,8 +148,10 @@ export function usePersonaModelDiscovery({
             trimmedProvider,
           ),
         );
+        setModelDiscoveryStatusKey(null);
       } else {
         setModelDiscoveryStatus(null);
+        setModelDiscoveryStatusKey(null);
       }
       setModelDiscoveryLoading(false);
       return;
@@ -155,13 +164,17 @@ export function usePersonaModelDiscovery({
     const cached = modelDiscoveryCacheRef.current.get(activeModelDiscoveryKey);
     if (cached) {
       setModelDiscoveryData(cached);
+      setModelDiscoveryDataKey(activeModelDiscoveryKey);
       setModelDiscoveryStatus(null);
+      setModelDiscoveryStatusKey(activeModelDiscoveryKey);
       setModelDiscoveryLoading(false);
       return;
     }
 
     setModelDiscoveryData(null);
+    setModelDiscoveryDataKey(null);
     setModelDiscoveryStatus(null);
+    setModelDiscoveryStatusKey(activeModelDiscoveryKey);
     setModelDiscoveryLoading(true);
     function runModelDiscovery() {
       void discoverAgentModels({
@@ -176,16 +189,20 @@ export function usePersonaModelDiscovery({
           }
           modelDiscoveryCacheRef.current.set(activeModelDiscoveryKey, response);
           setModelDiscoveryData(response);
+          setModelDiscoveryDataKey(activeModelDiscoveryKey);
           setModelDiscoveryStatus(null);
+          setModelDiscoveryStatusKey(activeModelDiscoveryKey);
         })
         .catch((error) => {
           if (modelDiscoveryRequestRef.current !== requestId) {
             return;
           }
           setModelDiscoveryData(null);
+          setModelDiscoveryDataKey(null);
           setModelDiscoveryStatus(
             formatModelDiscoveryErrorStatus(error, trimmedProvider),
           );
+          setModelDiscoveryStatusKey(activeModelDiscoveryKey);
         })
         .finally(() => {
           if (modelDiscoveryRequestRef.current === requestId) {
@@ -221,17 +238,36 @@ export function usePersonaModelDiscovery({
     trimmedProvider,
   ]);
 
+  const activeModelDiscoveryData =
+    modelDiscoveryKey !== null && modelDiscoveryDataKey === modelDiscoveryKey
+      ? modelDiscoveryData
+      : null;
+  const activeModelDiscoveryStatus =
+    modelDiscoveryKey === null
+      ? modelDiscoveryStatus
+      : modelDiscoveryStatusKey === modelDiscoveryKey
+        ? modelDiscoveryStatus
+        : null;
   const discoveredModelOptions = React.useMemo(
-    () => getDiscoveredPersonaModelOptions(modelDiscoveryData, trimmedProvider),
-    [modelDiscoveryData, trimmedProvider],
+    () =>
+      getDiscoveredPersonaModelOptions(
+        activeModelDiscoveryData,
+        trimmedProvider,
+      ),
+    [activeModelDiscoveryData, trimmedProvider],
   );
+  const modelDiscoveryPending =
+    modelDiscoveryLoading ||
+    (modelDiscoveryKey !== null &&
+      activeModelDiscoveryData === null &&
+      activeModelDiscoveryStatus === null);
 
   return {
     discoveredModelOptions,
-    modelDiscoveryLoading,
+    modelDiscoveryLoading: modelDiscoveryPending,
     modelDiscoveryStatus:
-      modelDiscoveryLoading || discoveredModelOptions !== null
+      modelDiscoveryPending || discoveredModelOptions !== null
         ? null
-        : modelDiscoveryStatus,
+        : activeModelDiscoveryStatus,
   };
 }

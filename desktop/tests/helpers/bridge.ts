@@ -116,6 +116,7 @@ export type MockAgentMemoryListing = {
 
 type MockBridgeOptions = {
   acpRuntimesCatalog?: Record<string, unknown>[];
+  acpRuntimesDelayMs?: number;
   acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
   connectAcpRuntimeResult?: { launched: boolean };
   connectAcpRuntimeDelayMs?: number;
@@ -346,6 +347,8 @@ type MockBridgeOptions = {
     masked: boolean;
     value: string;
   }>;
+  /** Delay (ms) for `get_baked_build_env` so specs can verify load gating. */
+  bakedBuildEnvDelayMs?: number;
   /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
    *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
   setGlobalAgentConfigDelayMs?: number;

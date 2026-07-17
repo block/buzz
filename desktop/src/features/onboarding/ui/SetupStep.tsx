@@ -4,8 +4,6 @@ import {
   AlertTriangle,
   Check,
   ExternalLink,
-  Info,
-  Plus,
   TerminalSquare,
 } from "lucide-react";
 
@@ -16,18 +14,22 @@ import {
   useInstallAcpRuntimeMutation,
   useGitBashPrerequisiteQuery,
 } from "@/features/agents/hooks";
-import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
+import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { Spinner } from "@/shared/ui/spinner";
 import { runtimeCanBeSelected } from "./onboardingRuntimeSelection";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
+import chatgptLogoUrl from "../assets/harness-logos/chatgpt.png";
+import claudeLogoUrl from "../assets/harness-logos/claude.png";
+import geminiLogoUrl from "../assets/harness-logos/gemini.png";
+import gooseLogoUrl from "../assets/harness-logos/goose.png";
 import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
@@ -38,18 +40,18 @@ type SetupStepProps = {
   actions: SetupStepActions;
   direction: OnboardingTransitionDirection;
   isSelectionSaving: boolean;
-  onSelectedRuntimeChange: (runtimeId: string) => void;
+  onSelectedRuntimeIdsChange: (runtimeIds: readonly string[]) => void;
   selectionError: string | null;
-  selectedRuntimeId: string | null;
+  selectedRuntimeIds: readonly string[];
 };
 
 type SetupStepContentProps = {
   actions: SetupStepActions;
   direction: OnboardingTransitionDirection;
   isSelectionSaving: boolean;
-  onSelectedRuntimeChange: (runtimeId: string) => void;
+  onSelectedRuntimeIdsChange: (runtimeIds: readonly string[]) => void;
   selectionError: string | null;
-  selectedRuntimeId: string | null;
+  selectedRuntimeIds: readonly string[];
   state: SetupStepState;
 };
 
@@ -57,6 +59,39 @@ type InstallResultState = {
   error: string | null;
   success: boolean;
 };
+
+const RUNTIME_LOGOS: Record<string, string> = {
+  chatgpt: chatgptLogoUrl,
+  claude: claudeLogoUrl,
+  "claude-code": claudeLogoUrl,
+  codex: chatgptLogoUrl,
+  gemini: geminiLogoUrl,
+  goose: gooseLogoUrl,
+  openai: chatgptLogoUrl,
+};
+
+function isBuzzRuntime(runtime: AcpRuntimeCatalogEntry): boolean {
+  const runtimeId = runtime.id.trim().toLowerCase();
+  const runtimeLabel = runtime.label.trim().toLowerCase();
+  return runtimeId === "buzz-agent" || runtimeLabel === "buzz";
+}
+
+function getRuntimeLogoUrl(runtime: AcpRuntimeCatalogEntry): string | null {
+  const runtimeId = runtime.id.trim().toLowerCase();
+  const runtimeLabel = runtime.label.trim().toLowerCase();
+  return (
+    RUNTIME_LOGOS[runtimeId] ??
+    (runtimeLabel.includes("claude")
+      ? claudeLogoUrl
+      : runtimeLabel.includes("goose")
+        ? gooseLogoUrl
+        : runtimeLabel.includes("gemini")
+          ? geminiLogoUrl
+          : runtimeLabel.includes("codex") || runtimeLabel.includes("chatgpt")
+            ? chatgptLogoUrl
+            : null)
+  );
+}
 
 function useSetupStepState(): SetupStepState {
   const runtimesQuery = useAcpRuntimesQuery();
@@ -74,219 +109,148 @@ function useSetupStepState(): SetupStepState {
   };
 }
 
-function RuntimeIcon({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+function RuntimeIcon({
+  className = "h-8 w-8",
+  runtime,
+}: {
+  className?: string;
+  runtime: AcpRuntimeCatalogEntry;
+}) {
   const [imageFailed, setImageFailed] = React.useState(false);
   const { isDark } = useTheme();
-  const shouldForceForegroundColor = runtime.id === "goose";
+  const runtimeLogoUrl = getRuntimeLogoUrl(runtime);
+  const imageUrl = runtimeLogoUrl ?? runtime.avatarUrl;
+  const shouldForceForegroundColor = !runtimeLogoUrl && runtime.id === "goose";
 
-  if (runtime.avatarUrl && !imageFailed) {
+  if (isBuzzRuntime(runtime)) {
+    return <BuzzMark className="h-8 w-12 text-foreground" />;
+  }
+
+  if (imageUrl && !imageFailed) {
     return (
       <img
         alt=""
         className={cn(
-          "h-12 w-12 rounded-md object-contain",
+          "rounded-md object-contain",
+          className,
           shouldForceForegroundColor &&
             (isDark ? "brightness-0 invert" : "brightness-0"),
         )}
         onError={() => setImageFailed(true)}
-        src={runtime.avatarUrl}
+        src={imageUrl}
       />
     );
   }
 
   return (
     <TerminalSquare
-      className="h-12 w-12 text-muted-foreground"
+      className={cn(className, "text-foreground")}
       strokeWidth={1.25}
     />
   );
 }
 
-function RuntimeStatus({
+function RuntimeSelectionIndicator({
+  runtime,
+  selected,
+}: {
+  runtime: AcpRuntimeCatalogEntry;
+  selected: boolean;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "buzz-onboarding-runtime-check pointer-events-none absolute right-3 top-3 flex h-8 w-8 scale-90 items-center justify-center rounded-full border border-[var(--buzz-welcome-chartreuse)] bg-white/75 opacity-0 transition-[background-color,opacity,transform] duration-200 ease-out group-hover:scale-100 group-hover:opacity-100 group-focus-visible:scale-100 group-focus-visible:opacity-100",
+        selected &&
+          "scale-100 bg-[var(--buzz-welcome-chartreuse)] opacity-100 group-hover:opacity-100",
+      )}
+      data-testid={`onboarding-runtime-check-${runtime.id}`}
+    >
+      <Check
+        className={cn(
+          "buzz-onboarding-runtime-checkmark h-4 w-4 text-foreground transition-[opacity,transform] duration-150 ease-out",
+          selected ? "scale-100 opacity-100" : "scale-50 opacity-0",
+        )}
+        data-testid={`onboarding-runtime-checkmark-${runtime.id}`}
+        strokeWidth={3}
+      />
+    </span>
+  );
+}
+
+function runtimeIsReadyForOnboarding(
+  runtime: AcpRuntimeCatalogEntry,
+  installSuccess: boolean,
+) {
+  if (installSuccess) return true;
+  if (runtime.availability !== "available") return false;
+  return (
+    runtime.authStatus.status === "logged_in" ||
+    runtime.authStatus.status === "not_applicable"
+  );
+}
+
+function runtimeNeedsInstallSetup(
+  runtime: AcpRuntimeCatalogEntry,
+  installSuccess: boolean,
+) {
+  return runtime.availability !== "available" && !installSuccess;
+}
+
+function RuntimeSetupPill({
   installError,
+  installSuccess,
   isInstalling,
-  onInstall,
   runtime,
 }: {
   installError: string | null;
+  installSuccess: boolean;
   isInstalling: boolean;
-  onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
+  const isReady = runtimeIsReadyForOnboarding(runtime, installSuccess);
+
+  if (isReady) {
+    return (
+      <span
+        className="buzz-onboarding-runtime-pill inline-flex h-5 items-center rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono font-normal text-foreground"
+        data-testid={`onboarding-runtime-installed-${runtime.id}`}
+      >
+        INSTALLED
+      </span>
+    );
+  }
+
   if (isInstalling) {
     return (
       <div
         aria-label={`Installing ${runtime.label}`}
-        className="flex h-8 w-8 items-center justify-center"
+        className="buzz-onboarding-runtime-pill flex h-5 items-center gap-2 rounded-full bg-white/60 px-2.5 font-mono font-normal text-foreground"
         role="status"
       >
-        <Spinner className="h-4 w-4 border-2 text-foreground" />
+        <Spinner className="h-3 w-3 border-2 text-foreground" />
+        INSTALLING
       </div>
-    );
-  }
-
-  if (installError) {
-    return (
-      <div className="flex h-8 w-8 items-center justify-center">
-        <AlertTriangle className="h-4 w-4 text-destructive" />
-      </div>
-    );
-  }
-
-  if (runtime.availability === "available" && runtimeCanBeSelected(runtime)) {
-    return (
-      <div
-        aria-label={`${runtime.label} available`}
-        className="flex h-6 w-6 items-center justify-center rounded-full bg-primary shadow-sm"
-        role="img"
-      >
-        <Check
-          className="h-3.5 w-3.5 text-primary-foreground"
-          strokeWidth={3}
-        />
-      </div>
-    );
-  }
-
-  if (runtime.canAutoInstall) {
-    return (
-      <Button
-        aria-label={`Install ${runtime.label}`}
-        className="h-8 w-8 text-muted-foreground hover:text-foreground"
-        data-testid={`onboarding-runtime-install-${runtime.id}`}
-        onClick={onInstall}
-        size="icon"
-        type="button"
-        variant="ghost"
-      >
-        <Plus className="h-4 w-4" />
-      </Button>
     );
   }
 
   return (
-    <Button
-      aria-label={`View ${runtime.label} setup instructions`}
-      className="h-8 w-8 text-muted-foreground hover:text-foreground"
-      data-testid={`onboarding-runtime-instructions-${runtime.id}`}
-      onClick={() => void openUrl(runtime.installInstructionsUrl)}
-      size="icon"
-      type="button"
-      variant="ghost"
+    <span
+      className={cn(
+        "buzz-onboarding-runtime-pill inline-flex h-5 items-center rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono font-normal text-foreground",
+        installError && "bg-destructive/10 text-destructive",
+      )}
+      data-runtime-setup
+      data-testid={
+        runtime.canAutoInstall
+          ? `onboarding-runtime-install-${runtime.id}`
+          : `onboarding-runtime-instructions-${runtime.id}`
+      }
     >
-      <ExternalLink className="h-4 w-4" />
-    </Button>
+      {installError ? "RETRY" : "SET UP"}
+    </span>
   );
-}
-
-function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
-  if (
-    runtime.availability === "available" &&
-    runtime.command &&
-    runtime.binaryPath
-  ) {
-    const description = describeResolvedCommand(
-      runtime.command,
-      runtime.binaryPath,
-    );
-    return (
-      <>
-        <p className="text-sm leading-5 text-muted-foreground">
-          {description.charAt(0).toUpperCase() + description.slice(1)}
-        </p>
-        {runtime.defaultArgs.length > 0 ? (
-          <p className="mt-1 text-xs text-muted-foreground/80">
-            Args:{" "}
-            <code className="font-mono">{runtime.defaultArgs.join(", ")}</code>
-          </p>
-        ) : null}
-      </>
-    );
-  }
-
-  if (runtime.availability === "adapter_missing") {
-    return (
-      <>
-        <p className="text-sm leading-5 text-muted-foreground">
-          CLI detected; ACP adapter missing.
-        </p>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
-          {runtime.installHint}
-        </p>
-      </>
-    );
-  }
-
-  if (runtime.availability === "adapter_outdated") {
-    return (
-      <>
-        <p className="text-sm leading-5 text-muted-foreground">
-          ACP adapter detected but outdated — reinstall required.
-        </p>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
-          This updates the machine-global{" "}
-          <code className="rounded bg-muted px-0.5 text-2xs">codex-acp</code>{" "}
-          adapter. Older Buzz releases using the legacy adapter contract may
-          lose community access until{" "}
-          <code className="rounded bg-muted px-0.5 text-2xs">
-            @zed-industries/codex-acp@0.16.0
-          </code>{" "}
-          is restored.
-        </p>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
-          {runtime.installHint}
-        </p>
-      </>
-    );
-  }
-
-  if (runtime.availability === "cli_missing") {
-    return (
-      <>
-        <p className="text-sm leading-5 text-muted-foreground">
-          ACP adapter detected; CLI missing.
-        </p>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
-          {runtime.installHint}
-        </p>
-      </>
-    );
-  }
-
-  return (
-    <>
-      <p className="text-sm leading-5 text-muted-foreground">
-        Not installed yet.
-      </p>
-      <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
-        {runtime.installHint}
-      </p>
-    </>
-  );
-}
-
-function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
-  if (
-    runtime.availability === "available" &&
-    runtime.command &&
-    runtime.binaryPath
-  ) {
-    const description = describeResolvedCommand(
-      runtime.command,
-      runtime.binaryPath,
-    );
-    return description.charAt(0).toUpperCase() + description.slice(1);
-  }
-  if (runtime.availability === "adapter_missing") {
-    return "CLI detected; ACP adapter missing.";
-  }
-  if (runtime.availability === "adapter_outdated") {
-    return "ACP adapter detected but outdated — reinstall required.";
-  }
-  if (runtime.availability === "cli_missing") {
-    return "ACP adapter detected; CLI missing.";
-  }
-  return "Not installed yet.";
 }
 
 function isSupportedOnboardingAuthMethod(
@@ -322,24 +286,25 @@ function RuntimeAuthActions({
 
   if (runtime.authStatus.status === "config_invalid") {
     return (
-      <p className="mt-2 text-2xs leading-4 text-destructive">
+      <p className="mt-1 max-w-[15rem] text-center text-2xs leading-4 text-destructive">
         {runtime.authStatus.diagnostic}
       </p>
     );
   }
+
   if (runtime.authStatus.status === "unknown") {
     return (
-      <div className="mt-2 flex flex-col items-center gap-1.5">
+      <div className="mt-1 flex flex-col items-center gap-1.5">
         <span className="text-2xs text-muted-foreground">
           Couldn’t verify authentication.
         </span>
         <Button
+          className="h-6 rounded-full px-2 text-2xs"
           disabled={runtimesQuery.isFetching}
           onClick={(event) => {
             event.stopPropagation();
             void runtimesQuery.refetch();
           }}
-          size="sm"
           type="button"
           variant="ghost"
         >
@@ -348,18 +313,21 @@ function RuntimeAuthActions({
       </div>
     );
   }
+
   if (runtime.authStatus.status !== "logged_out") return null;
 
   const methods = (methodsQuery.data?.methods ?? []).filter((method) =>
     isSupportedOnboardingAuthMethod(runtime, method),
   );
+
   return (
-    <div className="mt-2 flex flex-col items-center gap-1.5">
+    <div className="mt-1 flex flex-col items-center gap-1.5">
       {methodsQuery.isLoading ? (
         <span className="text-2xs text-muted-foreground">Loading sign-in…</span>
       ) : methods.length > 0 ? (
         methods.map((method) => (
           <Button
+            className="h-6 rounded-full px-2 text-2xs"
             disabled={connectMutation.isPending}
             key={method.id}
             onClick={(event) => {
@@ -378,7 +346,6 @@ function RuntimeAuthActions({
                 },
               );
             }}
-            size="sm"
             type="button"
             variant="outline"
           >
@@ -400,12 +367,12 @@ function RuntimeAuthActions({
         </span>
       ) : null}
       <Button
+        className="h-6 rounded-full px-2 text-2xs"
         disabled={runtimesQuery.isFetching}
         onClick={(event) => {
           event.stopPropagation();
           void Promise.all([runtimesQuery.refetch(), methodsQuery.refetch()]);
         }}
-        size="sm"
         type="button"
         variant="ghost"
       >
@@ -421,8 +388,8 @@ function RuntimeCard({
   isInstalling,
   onInstall,
   onSelect,
+  onToggle,
   runtime,
-  selectionDisabled,
   selected,
 }: {
   installError: string | null;
@@ -430,88 +397,91 @@ function RuntimeCard({
   isInstalling: boolean;
   onInstall: () => void;
   onSelect: () => void;
+  onToggle: () => void;
   runtime: AcpRuntimeCatalogEntry;
-  selectionDisabled: boolean;
   selected: boolean;
 }) {
-  const isAvailable = runtime.availability === "available" || installSuccess;
-  const canSelect = runtimeCanBeSelected(runtime) && !selectionDisabled;
+  const needsInstallSetup = runtimeNeedsInstallSetup(runtime, installSuccess);
+  const isReady = runtimeIsReadyForOnboarding(runtime, installSuccess);
+  const canSelect = runtimeCanBeSelected(runtime);
+  const canSetup = needsInstallSetup && !isInstalling;
+  const showStatusPill =
+    selected ||
+    !isReady ||
+    installSuccess ||
+    Boolean(installError) ||
+    isInstalling;
+
+  function handleSetup() {
+    if (runtime.canAutoInstall) {
+      onInstall();
+      return;
+    }
+    void openUrl(runtime.installInstructionsUrl);
+  }
 
   return (
-    // biome-ignore lint/a11y/useSemanticElements: Cannot use <input> because this card contains nested setup and details buttons, which require interactive content
+    // biome-ignore lint/a11y/useSemanticElements: Cannot use <input> because this card contains nested setup and auth buttons.
     <div
       aria-checked={selected}
       aria-disabled={!canSelect}
       className={cn(
-        "relative flex min-h-40 w-40 flex-col items-center justify-center gap-3 rounded-2xl bg-white/85 p-4 text-center",
-        isAvailable
-          ? "shadow-[0_0_55px_25px_rgba(255,255,255,0.85)]"
-          : "shadow-[0_0_45px_18px_rgba(255,255,255,0.55)] opacity-90",
+        "group relative flex aspect-[288/132] min-h-[96px] w-full select-none flex-col items-center justify-center rounded-2xl border-0 bg-white/75 px-3 py-1.5 text-center outline-none transition-colors duration-150 ease-out hover:bg-white/80 active:bg-white/90 focus-visible:ring-2 focus-visible:ring-foreground/40",
+        selected && "bg-white/90 hover:bg-white/90",
         installError && "ring-1 ring-destructive/40",
-        selected && "ring-2 ring-primary",
-        canSelect && "cursor-pointer hover:bg-white",
+        canSelect ? "cursor-pointer" : "cursor-default",
+        canSetup && "cursor-pointer",
       )}
       data-testid={`onboarding-runtime-${runtime.id}`}
-      onClick={canSelect ? onSelect : undefined}
+      onClick={(event) => {
+        const target =
+          event.target instanceof HTMLElement ? event.target : null;
+        if (canSetup && target?.closest("[data-runtime-setup]")) {
+          handleSetup();
+          return;
+        }
+        if (canSelect) onToggle();
+      }}
       onKeyDown={(event) => {
-        if (canSelect && (event.key === "Enter" || event.key === " ")) {
+        if (event.repeat || (event.key !== "Enter" && event.key !== " ")) {
+          return;
+        }
+        if (canSetup) {
           event.preventDefault();
-          onSelect();
+          handleSetup();
+          return;
+        }
+        if (canSelect) {
+          event.preventDefault();
+          onToggle();
         }
       }}
-      role="radio"
-      tabIndex={canSelect ? 0 : -1}
+      role="checkbox"
+      tabIndex={canSelect || canSetup ? 0 : -1}
     >
-      <div className="absolute right-2 top-2">
-        <RuntimeStatus
-          installError={installError}
-          isInstalling={isInstalling}
-          onInstall={onInstall}
-          runtime={runtime}
-        />
-      </div>
+      <RuntimeSelectionIndicator runtime={runtime} selected={selected} />
 
-      <div className="absolute left-2 top-2">
-        <Popover>
-          <PopoverTrigger asChild>
-            <Button
-              aria-label={`${runtime.label} details`}
-              className="h-6 w-6 text-muted-foreground/70 hover:text-foreground"
-              data-testid={`onboarding-runtime-details-${runtime.id}`}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              <Info className="h-3.5 w-3.5" />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent align="start" className="w-80 text-left">
-            <RuntimeDetails runtime={runtime} />
-          </PopoverContent>
-        </Popover>
-      </div>
-
-      <RuntimeIcon runtime={runtime} />
-
-      <div className="min-w-0">
-        <h2 className="text-sm font-medium leading-5 text-foreground">
-          {runtime.label}
-        </h2>
-        {!isAvailable && !installError ? (
-          <p className="mt-1 text-2xs leading-4 text-muted-foreground">
-            {runtimeDetailText(runtime)}
-          </p>
+      <div className="flex flex-col items-center gap-2">
+        <div className="flex items-center justify-center gap-3">
+          <RuntimeIcon className="h-8 w-8" runtime={runtime} />
+          {!isBuzzRuntime(runtime) ? (
+            <h2 className="text-sm font-normal leading-5 text-foreground">
+              {runtime.label}
+            </h2>
+          ) : null}
+        </div>
+        {showStatusPill ? (
+          <RuntimeSetupPill
+            installError={installError}
+            installSuccess={installSuccess}
+            isInstalling={isInstalling}
+            runtime={runtime}
+          />
         ) : null}
-        {installError ? (
-          <p className="mt-1 text-2xs leading-4 text-destructive">
+        {selected && installError ? (
+          <p className="max-w-[22rem] text-2xs leading-4 text-destructive">
             {installError}
           </p>
-        ) : null}
-        {installSuccess && runtime.availability !== "available" ? (
-          <p className="mt-1 text-2xs leading-4 text-primary">Installed</p>
-        ) : null}
-        {selected ? (
-          <p className="mt-1 text-2xs font-medium text-primary">Preferred</p>
         ) : null}
         <RuntimeAuthActions onAuthenticated={onSelect} runtime={runtime} />
       </div>
@@ -527,10 +497,8 @@ function GitBashPrerequisiteCard() {
   return (
     <div
       className={cn(
-        "mx-auto w-full max-w-[560px] rounded-2xl bg-white/85 p-3 text-left sm:p-4",
-        prerequisite.available
-          ? "shadow-[0_0_45px_18px_rgba(255,255,255,0.7)]"
-          : "ring-1 ring-amber-500/40 shadow-[0_0_45px_18px_rgba(255,255,255,0.55)]",
+        "mx-auto w-full max-w-[560px] rounded-2xl bg-white/75 p-3 text-left sm:p-4",
+        !prerequisite.available && "ring-1 ring-amber-500/40",
       )}
       data-testid="onboarding-git-bash"
     >
@@ -577,16 +545,32 @@ function GitBashPrerequisiteCard() {
   );
 }
 
+function RuntimeProvidersLoadingState() {
+  return (
+    <div
+      aria-live="polite"
+      className="flex min-h-[260px] w-full items-center justify-center"
+      data-testid="onboarding-runtime-loading"
+      role="status"
+    >
+      <div className="flex flex-col items-center text-foreground/35">
+        <FlappingBee className="h-auto w-16" />
+        <p className="mt-5 text-2xl font-normal leading-8">
+          Finding your providers...
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function RuntimeProvidersSection({
-  isSelectionSaving,
-  onSelectedRuntimeChange,
+  onSelectedRuntimeIdsChange,
   runtimeProviders,
-  selectedRuntimeId,
+  selectedRuntimeIds,
 }: {
-  isSelectionSaving: boolean;
-  onSelectedRuntimeChange: (runtimeId: string) => void;
+  onSelectedRuntimeIdsChange: (runtimeIds: readonly string[]) => void;
   runtimeProviders: SetupStepState["runtimeProviders"];
-  selectedRuntimeId: string | null;
+  selectedRuntimeIds: readonly string[];
 }) {
   const { errorMessage, isChecking, items } = runtimeProviders;
   const runtimeOrder = ["claude", "codex", "goose", "buzz-agent"];
@@ -602,6 +586,25 @@ function RuntimeProvidersSection({
   const [installResults, setInstallResults] = React.useState<
     Record<string, InstallResultState>
   >({});
+  const selectedRuntimeIdSet = React.useMemo(
+    () => new Set(selectedRuntimeIds),
+    [selectedRuntimeIds],
+  );
+
+  function handleRuntimeToggle(runtimeId: string) {
+    if (selectedRuntimeIdSet.has(runtimeId)) {
+      onSelectedRuntimeIdsChange(
+        selectedRuntimeIds.filter((selectedId) => selectedId !== runtimeId),
+      );
+      return;
+    }
+    onSelectedRuntimeIdsChange([...selectedRuntimeIds, runtimeId]);
+  }
+
+  function handleRuntimeSelect(runtimeId: string) {
+    if (selectedRuntimeIdSet.has(runtimeId)) return;
+    onSelectedRuntimeIdsChange([...selectedRuntimeIds, runtimeId]);
+  }
 
   function handleInstall(runtimeId: string) {
     setInstallResults((current) => ({
@@ -631,61 +634,61 @@ function RuntimeProvidersSection({
   }
 
   return (
-    <section className="flex w-full flex-col items-center gap-8">
-      <div className="w-full max-w-[520px] text-center">
+    <section className="flex min-h-full w-full flex-col items-center">
+      <div className="w-full max-w-[620px] text-center">
         <h1 className="text-title font-normal text-foreground">
           Use the models that fit the task
         </h1>
-        <p className="mt-3 text-sm leading-6 text-foreground/80">
-          These are the local agent harnesses Buzz detected. You choose a
-          harness when creating each agent.
+        <p className="mx-auto mt-3 max-w-[520px] text-sm leading-6 text-foreground/90">
+          Connect different model providers so each agent can use the right
+          model for the work.
+        </p>
+        <p className="mt-4 text-sm leading-5 text-foreground/90">
+          Choose at least one to start using Buzz.
         </p>
       </div>
 
-      <GitBashPrerequisiteCard />
+      <div className="flex w-full flex-1 flex-col items-center justify-center gap-8 py-10">
+        <GitBashPrerequisiteCard />
 
-      {items.length > 0 ? (
-        <div
-          aria-label="Preferred agent harness"
-          className="flex flex-wrap items-stretch justify-center gap-4"
-          role="radiogroup"
-        >
-          {orderedItems.map((runtime) => (
-            <RuntimeCard
-              installError={installResults[runtime.id]?.error ?? null}
-              installSuccess={installResults[runtime.id]?.success ?? false}
-              isInstalling={
-                installMutation.isPending &&
-                installMutation.variables === runtime.id
-              }
-              key={runtime.id}
-              onInstall={() => handleInstall(runtime.id)}
-              onSelect={() => onSelectedRuntimeChange(runtime.id)}
-              runtime={runtime}
-              selectionDisabled={isSelectionSaving}
-              selected={selectedRuntimeId === runtime.id}
-            />
-          ))}
-        </div>
-      ) : isChecking ? (
-        <div className="rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground">
-          Looking for compatible runtimes...
-        </div>
-      ) : errorMessage ? null : (
-        <p
-          className="max-w-[560px] rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground"
-          data-testid="onboarding-acp-empty"
-        >
-          No compatible ACP runtimes detected yet. You can finish setup now and
-          come back later in Settings &gt; Doctor.
-        </p>
-      )}
+        {items.length > 0 ? (
+          <fieldset className="grid min-w-0 w-full max-w-[640px] grid-cols-1 gap-4 border-0 p-0 md:grid-cols-2">
+            <legend className="sr-only">Agent harnesses</legend>
+            {orderedItems.map((runtime) => (
+              <RuntimeCard
+                installError={installResults[runtime.id]?.error ?? null}
+                installSuccess={installResults[runtime.id]?.success ?? false}
+                isInstalling={
+                  installMutation.isPending &&
+                  installMutation.variables === runtime.id
+                }
+                key={runtime.id}
+                onInstall={() => handleInstall(runtime.id)}
+                onSelect={() => handleRuntimeSelect(runtime.id)}
+                onToggle={() => handleRuntimeToggle(runtime.id)}
+                runtime={runtime}
+                selected={selectedRuntimeIdSet.has(runtime.id)}
+              />
+            ))}
+          </fieldset>
+        ) : isChecking ? (
+          <RuntimeProvidersLoadingState />
+        ) : errorMessage ? null : (
+          <p
+            className="max-w-[560px] rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground"
+            data-testid="onboarding-acp-empty"
+          >
+            No compatible ACP runtimes detected yet. You can finish setup now
+            and come back later in Settings &gt; Doctor.
+          </p>
+        )}
 
-      {errorMessage ? (
-        <p className="max-w-[560px] rounded-2xl bg-destructive/10 px-6 py-3 text-sm text-destructive">
-          {errorMessage}
-        </p>
-      ) : null}
+        {errorMessage ? (
+          <p className="max-w-[560px] rounded-2xl bg-destructive/10 px-6 py-3 text-sm text-destructive">
+            {errorMessage}
+          </p>
+        ) : null}
+      </div>
     </section>
   );
 }
@@ -694,42 +697,37 @@ function SetupStepContent({
   actions,
   direction,
   isSelectionSaving,
-  onSelectedRuntimeChange,
+  onSelectedRuntimeIdsChange,
   selectionError,
-  selectedRuntimeId,
+  selectedRuntimeIds,
   state,
 }: SetupStepContentProps) {
   const { runtimeProviders } = state;
 
   return (
     <OnboardingSlideTransition
-      // pb clears the always-docked footer: the provider list can overflow on
-      // short windows, so reserve room to scroll clear of the fixed CTA group.
-      className="flex w-full flex-col items-center pb-20"
+      className="flex min-h-full w-full flex-col items-center"
       data-testid="onboarding-page-2"
       direction={direction}
       transitionKey={`setup-${direction}`}
     >
       <RuntimeProvidersSection
-        isSelectionSaving={isSelectionSaving}
-        onSelectedRuntimeChange={onSelectedRuntimeChange}
+        onSelectedRuntimeIdsChange={onSelectedRuntimeIdsChange}
         runtimeProviders={runtimeProviders}
-        selectedRuntimeId={selectedRuntimeId}
+        selectedRuntimeIds={selectedRuntimeIds}
       />
 
       <OnboardingFooter>
         {selectionError ? (
-          <p
-            className="max-w-sm text-center text-xs text-destructive"
-            role="alert"
-          >
+          <p className="max-w-[24rem] text-center text-sm text-destructive">
             {selectionError}
           </p>
         ) : null}
+
         <Button
-          className={ONBOARDING_PRIMARY_CTA_CLASS}
+          className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
           data-testid="onboarding-setup-next"
-          disabled={!selectedRuntimeId || isSelectionSaving}
+          disabled={selectedRuntimeIds.length === 0 || isSelectionSaving}
           onClick={actions.next}
           type="button"
         >
@@ -737,7 +735,7 @@ function SetupStepContent({
         </Button>
 
         <Button
-          className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+          className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
           data-testid="onboarding-back"
           onClick={actions.back}
           type="button"
@@ -754,9 +752,9 @@ export function SetupStep({
   actions,
   direction,
   isSelectionSaving,
-  onSelectedRuntimeChange,
+  onSelectedRuntimeIdsChange,
   selectionError,
-  selectedRuntimeId,
+  selectedRuntimeIds,
 }: SetupStepProps) {
   const state = useSetupStepState();
 
@@ -765,9 +763,9 @@ export function SetupStep({
       actions={actions}
       direction={direction}
       isSelectionSaving={isSelectionSaving}
-      onSelectedRuntimeChange={onSelectedRuntimeChange}
+      onSelectedRuntimeIdsChange={onSelectedRuntimeIdsChange}
       selectionError={selectionError}
-      selectedRuntimeId={selectedRuntimeId}
+      selectedRuntimeIds={selectedRuntimeIds}
       state={state}
     />
   );
