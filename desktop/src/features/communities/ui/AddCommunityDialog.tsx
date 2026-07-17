@@ -147,10 +147,14 @@ export function AddCommunityDialog({
         }
         if (
           policy &&
-          (policy.termsMarkdown || policy.privacyMarkdown) &&
+          (policy.contentGuidelinesMarkdown ||
+            policy.termsMarkdown ||
+            policy.privacyMarkdown) &&
           !agreementConfirmed
         ) {
-          setInviteError("Agree to the Terms of Service and Privacy Policy.");
+          setInviteError(
+            "Confirm that you have read the Content Guidelines and agree to the Terms of Service and Privacy Policy.",
+          );
           return;
         }
 
@@ -399,7 +403,9 @@ export function AddCommunityDialog({
                 Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed) ||
                 Boolean(
                   joinPolicy &&
-                    (joinPolicy.termsMarkdown || joinPolicy.privacyMarkdown) &&
+                    (joinPolicy.contentGuidelinesMarkdown ||
+                      joinPolicy.termsMarkdown ||
+                      joinPolicy.privacyMarkdown) &&
                     !agreementConfirmed,
                 )
               }

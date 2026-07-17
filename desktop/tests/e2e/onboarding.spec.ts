@@ -1641,6 +1641,7 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
       contentType: "application/json",
       body: JSON.stringify({
         policy: {
+          content_guidelines_markdown: "# Content Guidelines",
           terms_markdown: "# Terms",
           privacy_markdown: "# Privacy",
           age_attestation_required: true,
@@ -1690,7 +1691,9 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
   await expect(page.getByText("I am 18 years of age or older.")).toBeVisible();
   await page.getByLabel("I am 18 years of age or older.").check();
   await page
-    .getByLabel("I agree to the Buzz Terms of Service and Privacy Policy.")
+    .getByLabel(
+      "I have read the Content Guidelines and agree to the Buzz Terms of Service and Privacy Policy.",
+    )
     .check();
   await page.getByTestId("invite-redeem-submit").click();
 

@@ -87,6 +87,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Policy documents as standalone pages — desktop opens these in the
         // system browser instead of rendering the Markdown in-app.
         .route(
+            "/api/join-policy/content-guidelines",
+            get(api::invites::join_policy_content_guidelines),
+        )
+        .route(
             "/api/join-policy/terms",
             get(api::invites::join_policy_terms),
         )

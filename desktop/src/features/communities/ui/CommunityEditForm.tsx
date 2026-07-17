@@ -126,10 +126,14 @@ export function CommunityEditForm({
             return;
           }
           if (
-            (policy.termsMarkdown || policy.privacyMarkdown) &&
+            (policy.contentGuidelinesMarkdown ||
+              policy.termsMarkdown ||
+              policy.privacyMarkdown) &&
             !agreementConfirmed
           ) {
-            setError("Agree to the Terms of Service and Privacy Policy.");
+            setError(
+              "Confirm that you have read the Content Guidelines and agree to the Terms of Service and Privacy Policy.",
+            );
             return;
           }
         } catch (policyError) {
@@ -311,7 +315,9 @@ export function CommunityEditForm({
             Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed) ||
             Boolean(
               joinPolicy &&
-                (joinPolicy.termsMarkdown || joinPolicy.privacyMarkdown) &&
+                (joinPolicy.contentGuidelinesMarkdown ||
+                  joinPolicy.termsMarkdown ||
+                  joinPolicy.privacyMarkdown) &&
                 !agreementConfirmed,
             )
           }

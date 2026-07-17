@@ -68,6 +68,7 @@ test("automatically shows relay join requirements near the relay URL", async ({
         contentType: "application/json",
         body: JSON.stringify({
           policy: {
+            content_guidelines_markdown: "# Content Guidelines",
             terms_markdown: "# Terms",
             privacy_markdown: "# Privacy",
             age_attestation_required: true,
@@ -85,10 +86,37 @@ test("automatically shows relay join requirements near the relay URL", async ({
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
-    "I agree to the Buzz Terms of Service and Privacy Policy.",
+    "I have read the Content Guidelines and agree to the Buzz Terms of Service and Privacy Policy.",
   );
   await expect(ageConfirmation).toBeVisible();
   await expect(agreementConfirmation).toBeVisible();
+  for (const [name, path] of [
+    ["Content Guidelines", "content-guidelines"],
+    ["Terms of Service", "terms"],
+    ["Privacy Policy", "privacy"],
+  ] as const) {
+    await page.getByRole("button", { name }).click();
+    await expect
+      .poll(() =>
+        page.evaluate((expectedPath) => {
+          const log = (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{
+                command: string;
+                payload: { url?: string };
+              }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__;
+          return log?.some(
+            (entry) =>
+              entry.command === "plugin:opener|open_url" &&
+              entry.payload?.url ===
+                `https://policy.example.com/api/join-policy/${expectedPath}`,
+          );
+        }, path),
+      )
+      .toBe(true);
+  }
   await expect(
     page.getByText("Review this relay's join policy below."),
   ).toHaveCount(0);

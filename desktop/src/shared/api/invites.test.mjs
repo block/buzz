@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getJoinPolicy } from "./invites.ts";
+import { getJoinPolicy, joinPolicyDocumentUrl } from "./invites.ts";
 
 function withFetch(response, run) {
   const originalFetch = globalThis.fetch;
@@ -14,11 +14,27 @@ function withFetch(response, run) {
   });
 }
 
+test("joinPolicyDocumentUrl creates independent document URLs", () => {
+  assert.equal(
+    joinPolicyDocumentUrl("wss://relay.example", "content-guidelines"),
+    "https://relay.example/api/join-policy/content-guidelines",
+  );
+  assert.equal(
+    joinPolicyDocumentUrl("wss://relay.example", "terms"),
+    "https://relay.example/api/join-policy/terms",
+  );
+  assert.equal(
+    joinPolicyDocumentUrl("wss://relay.example", "privacy"),
+    "https://relay.example/api/join-policy/privacy",
+  );
+});
+
 test("getJoinPolicy maps relay-hosted Markdown and age requirements", async () => {
   await withFetch(
     new Response(
       JSON.stringify({
         policy: {
+          content_guidelines_markdown: "# Content Guidelines",
           terms_markdown: "# Terms",
           privacy_markdown: "# Privacy",
           age_attestation_required: true,
@@ -29,6 +45,7 @@ test("getJoinPolicy maps relay-hosted Markdown and age requirements", async () =
     ),
     async () => {
       assert.deepEqual(await getJoinPolicy("wss://relay.example"), {
+        contentGuidelinesMarkdown: "# Content Guidelines",
         termsMarkdown: "# Terms",
         privacyMarkdown: "# Privacy",
         ageAttestationRequired: true,

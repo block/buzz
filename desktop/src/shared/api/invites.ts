@@ -24,6 +24,7 @@ export type MintedInvite = {
 };
 
 export type JoinPolicy = {
+  contentGuidelinesMarkdown?: string;
   termsMarkdown?: string;
   privacyMarkdown?: string;
   ageAttestationRequired: boolean;
@@ -100,7 +101,7 @@ async function invitePost<T>(
 /** Absolute URL of a relay-hosted policy document page (system-browser target). */
 export function joinPolicyDocumentUrl(
   relayWsUrl: string,
-  document: "terms" | "privacy",
+  document: "content-guidelines" | "terms" | "privacy",
 ): string {
   const base = relayHttpFromWs(relayWsUrl);
   return `${base.replace(/\/+$/, "")}/api/join-policy/${document}`;
@@ -132,6 +133,7 @@ export async function getJoinPolicy(
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const raw = (await response.json()) as {
     policy?: {
+      content_guidelines_markdown?: string;
       terms_markdown?: string;
       privacy_markdown?: string;
       age_attestation_required: boolean;
@@ -140,6 +142,7 @@ export async function getJoinPolicy(
   };
   return raw.policy
     ? {
+        contentGuidelinesMarkdown: raw.policy.content_guidelines_markdown,
         termsMarkdown: raw.policy.terms_markdown,
         privacyMarkdown: raw.policy.privacy_markdown,
         ageAttestationRequired: raw.policy.age_attestation_required,

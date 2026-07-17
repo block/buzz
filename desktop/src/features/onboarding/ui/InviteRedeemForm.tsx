@@ -133,10 +133,14 @@ export function InviteRedeemForm({
           return;
         }
         if (
-          (policy.termsMarkdown || policy.privacyMarkdown) &&
+          (policy.contentGuidelinesMarkdown ||
+            policy.termsMarkdown ||
+            policy.privacyMarkdown) &&
           !agreementConfirmed
         ) {
-          setPolicyError("Agree to the Terms of Service and Privacy Policy.");
+          setPolicyError(
+            "Confirm that you have read the Content Guidelines and agree to the Terms of Service and Privacy Policy.",
+          );
           return;
         }
 
@@ -296,7 +300,9 @@ export function InviteRedeemForm({
           Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed) ||
           Boolean(
             joinPolicy &&
-              (joinPolicy.termsMarkdown || joinPolicy.privacyMarkdown) &&
+              (joinPolicy.contentGuidelinesMarkdown ||
+                joinPolicy.termsMarkdown ||
+                joinPolicy.privacyMarkdown) &&
               !agreementConfirmed,
           )
         }

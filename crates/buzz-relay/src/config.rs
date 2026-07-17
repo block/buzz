@@ -27,6 +27,8 @@ pub enum ConfigError {
 /// Relay-hosted policy content presented on join surfaces.
 #[derive(Debug, Clone)]
 pub struct JoinPolicyConfig {
+    /// Operator-provided Content Guidelines document in Markdown.
+    pub content_guidelines_markdown: Option<String>,
     /// Operator-provided Terms of Service document in Markdown.
     pub terms_markdown: Option<String>,
     /// Operator-provided Privacy Policy document in Markdown.
@@ -665,21 +667,28 @@ impl Config {
             }
             Ok(value)
         };
+        let content_guidelines_markdown = read_policy_markdown("BUZZ_CONTENT_GUIDELINES_MARKDOWN")?;
         let terms_markdown = read_policy_markdown("BUZZ_TERMS_OF_SERVICE_MARKDOWN")?;
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
-        let join_policy = if terms_markdown.is_none()
+        let join_policy = if content_guidelines_markdown.is_none()
+            && terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
         {
             None
         } else {
             let mut hasher = Sha256::new();
+            if let Some(markdown) = &content_guidelines_markdown {
+                hasher.update(markdown.as_bytes());
+                hasher.update([0]);
+            }
             hasher.update(terms_markdown.as_deref().unwrap_or_default().as_bytes());
             hasher.update([0]);
             hasher.update(privacy_markdown.as_deref().unwrap_or_default().as_bytes());
             hasher.update([0, u8::from(age_attestation_required)]);
             Some(JoinPolicyConfig {
+                content_guidelines_markdown,
                 terms_markdown,
                 privacy_markdown,
                 age_attestation_required,
@@ -822,6 +831,42 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+    }
+
+    #[test]
+    fn content_guidelines_enable_join_policy_and_change_its_version() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let env_names = [
+            "BUZZ_CONTENT_GUIDELINES_MARKDOWN",
+            "BUZZ_TERMS_OF_SERVICE_MARKDOWN",
+            "BUZZ_PRIVACY_POLICY_MARKDOWN",
+            "BUZZ_AGE_ATTESTATION_REQUIRED",
+        ];
+        let previous = env_names.map(|name| (name, std::env::var_os(name)));
+        for name in env_names {
+            std::env::remove_var(name);
+        }
+
+        std::env::set_var("BUZZ_CONTENT_GUIDELINES_MARKDOWN", "# Guidelines v1");
+        let first = Config::from_env().expect("content guidelines policy");
+        std::env::set_var("BUZZ_CONTENT_GUIDELINES_MARKDOWN", "# Guidelines v2");
+        let second = Config::from_env().expect("updated content guidelines policy");
+
+        for (name, value) in previous {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+
+        let first = first.join_policy.expect("join policy enabled");
+        let second = second.join_policy.expect("join policy enabled");
+        assert_eq!(
+            first.content_guidelines_markdown.as_deref(),
+            Some("# Guidelines v1")
+        );
+        assert_ne!(first.version, second.version);
     }
 
     #[test]

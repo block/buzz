@@ -18,8 +18,9 @@ type JoinPolicyNoticeProps = {
 /**
  * Join-policy consent block shown on every join surface.
  *
- * The Terms/Privacy links open the relay-hosted document pages
- * (`/api/join-policy/terms|privacy`) in the system browser via the OS
+ * The Content Guidelines, Terms, and Privacy links open the relay-hosted
+ * document pages (`/api/join-policy/content-guidelines|terms|privacy`) in the
+ * system browser via the OS
  * opener. They must NOT navigate or render in-app: these surfaces exist
  * before onboarding completes, where the router (required by the message
  * Markdown component) is not mounted — an in-app render tears down the
@@ -57,9 +58,12 @@ export function JoinPolicyNotice({
         </div>
       ) : null}
 
-      {policy.termsMarkdown || policy.privacyMarkdown ? (
+      {policy.contentGuidelinesMarkdown ||
+      policy.termsMarkdown ||
+      policy.privacyMarkdown ? (
         <div className="flex items-start gap-3">
           <Checkbox
+            aria-label="I have read the Content Guidelines and agree to the Buzz Terms of Service and Privacy Policy."
             checked={agreementConfirmed}
             className="mt-0.5"
             id={agreementConfirmationId}
@@ -71,7 +75,25 @@ export function JoinPolicyNotice({
             className="cursor-pointer text-xs leading-5 text-muted-foreground"
             htmlFor={agreementConfirmationId}
           >
-            I agree to the Buzz{" "}
+            I have read the{" "}
+            {policy.contentGuidelinesMarkdown ? (
+              <Button
+                className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
+                onClick={(event) => {
+                  event.preventDefault();
+                  void openUrl(
+                    joinPolicyDocumentUrl(relayWsUrl, "content-guidelines"),
+                  );
+                }}
+                type="button"
+                variant="link"
+              >
+                Content Guidelines
+              </Button>
+            ) : (
+              "Content Guidelines"
+            )}{" "}
+            and agree to the Buzz{" "}
             {policy.termsMarkdown ? (
               <Button
                 className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
@@ -84,8 +106,10 @@ export function JoinPolicyNotice({
               >
                 Terms of Service
               </Button>
-            ) : null}
-            {policy.termsMarkdown && policy.privacyMarkdown ? " and " : null}
+            ) : (
+              "Terms of Service"
+            )}{" "}
+            and{" "}
             {policy.privacyMarkdown ? (
               <Button
                 className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
@@ -98,7 +122,9 @@ export function JoinPolicyNotice({
               >
                 Privacy Policy
               </Button>
-            ) : null}
+            ) : (
+              "Privacy Policy"
+            )}
             .
           </label>
         </div>

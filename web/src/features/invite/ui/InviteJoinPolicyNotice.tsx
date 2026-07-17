@@ -1,6 +1,7 @@
 import * as React from "react";
 
 type InviteJoinPolicy = {
+  content_guidelines_markdown?: string;
   terms_markdown?: string;
   privacy_markdown?: string;
   age_attestation_required: boolean;
@@ -111,13 +112,33 @@ export function InviteJoinPolicyNotice({
         </PolicyCheckbox>
       ) : null}
 
-      {policy.terms_markdown || policy.privacy_markdown ? (
+      {policy.content_guidelines_markdown ||
+      policy.terms_markdown ||
+      policy.privacy_markdown ? (
         <PolicyCheckbox
-          accessibleLabel="I agree to the Buzz Terms of Service and Privacy Policy."
+          accessibleLabel="I have read the Content Guidelines and agree to the Buzz Terms of Service and Privacy Policy."
           checked={agreementConfirmed}
           onCheckedChange={onAgreementConfirmedChange}
         >
-          I agree to the Buzz{" "}
+          I have read the{" "}
+          {policy.content_guidelines_markdown ? (
+            <button
+              className="text-black no-underline underline-offset-4 hover:text-black/70 hover:underline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-black"
+              type="button"
+              onClick={(event) =>
+                stopLabelActivation(
+                  event,
+                  "Content Guidelines",
+                  policy.content_guidelines_markdown ?? "",
+                )
+              }
+            >
+              Content Guidelines
+            </button>
+          ) : (
+            "Content Guidelines"
+          )}{" "}
+          and agree to the Buzz{" "}
           {policy.terms_markdown ? (
             <button
               className="text-black no-underline underline-offset-4 hover:text-black/70 hover:underline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-black"

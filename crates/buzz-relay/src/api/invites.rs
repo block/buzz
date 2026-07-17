@@ -76,6 +76,7 @@ pub async fn join_policy(State(state): State<Arc<AppState>>) -> Json<Value> {
     match &state.config.join_policy {
         Some(policy) => Json(serde_json::json!({
             "policy": {
+                "content_guidelines_markdown": policy.content_guidelines_markdown,
                 "terms_markdown": policy.terms_markdown,
                 "privacy_markdown": policy.privacy_markdown,
                 "age_attestation_required": policy.age_attestation_required,
@@ -84,6 +85,15 @@ pub async fn join_policy(State(state): State<Arc<AppState>>) -> Json<Value> {
         })),
         None => Json(serde_json::json!({})),
     }
+}
+
+/// `GET /api/join-policy/content-guidelines` — Content Guidelines as a standalone HTML page.
+pub async fn join_policy_content_guidelines(
+    State(state): State<Arc<AppState>>,
+) -> Result<Html<String>, (StatusCode, Json<Value>)> {
+    policy_document_page(&state, "Content Guidelines", |policy| {
+        policy.content_guidelines_markdown.as_deref()
+    })
 }
 
 /// `GET /api/join-policy/terms` — Terms of Service as a standalone HTML page.
@@ -675,6 +685,7 @@ mod tests {
         let mut state_inner = (*state).clone();
         let mut config = state_inner.config.as_ref().clone();
         config.join_policy = Some(crate::config::JoinPolicyConfig {
+            content_guidelines_markdown: Some("# Content Guidelines".to_string()),
             terms_markdown: Some("# Terms".to_string()),
             privacy_markdown: Some("# Privacy".to_string()),
             age_attestation_required: true,
@@ -1264,16 +1275,21 @@ mod tests {
             }
         };
 
-        // Unconfigured relay: both documents 404.
+        // Unconfigured relay: all documents 404.
+        let response = get_page(state.clone(), "/api/join-policy/content-guidelines").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let response = get_page(state.clone(), "/api/join-policy/terms").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let response = get_page(state.clone(), "/api/join-policy/privacy").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-        // Configure terms only — terms serves HTML, privacy still 404s.
+        // Configure guidelines and terms — both serve HTML, privacy still 404s.
         let mut state_inner = (*state).clone();
         let mut config = state_inner.config.as_ref().clone();
         config.join_policy = Some(crate::config::JoinPolicyConfig {
+            content_guidelines_markdown: Some(
+                "# Content Guidelines\n\nBe kind to people and agents.".to_string(),
+            ),
             terms_markdown: Some("# Terms\n\nNo funny business.".to_string()),
             privacy_markdown: None,
             age_attestation_required: false,
@@ -1281,6 +1297,15 @@ mod tests {
         });
         state_inner.config = Arc::new(config);
         let state = Arc::new(state_inner);
+
+        let response = get_page(state.clone(), "/api/join-policy/content-guidelines").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read body");
+        let page = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(page.contains("<h1>Content Guidelines</h1>"), "{page}");
+        assert!(page.contains("Be kind to people and agents."), "{page}");
 
         let response = get_page(state.clone(), "/api/join-policy/terms").await;
         assert_eq!(response.status(), StatusCode::OK);

@@ -19,6 +19,7 @@ test("invite requires age and legal consent before opening Buzz", async ({
       contentType: "application/json",
       body: JSON.stringify({
         policy: {
+          content_guidelines_markdown: "# Content Guidelines",
           terms_markdown: "# Terms",
           privacy_markdown: "# Privacy",
           age_attestation_required: true,
@@ -31,7 +32,7 @@ test("invite requires age and legal consent before opening Buzz", async ({
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
-    "I agree to the Buzz Terms of Service and Privacy Policy.",
+    "I have read the Content Guidelines and agree to the Buzz Terms of Service and Privacy Policy.",
   );
   const acceptInvite = page.getByRole("button", {
     name: "Accept invite in Buzz",
@@ -41,8 +42,12 @@ test("invite requires age and legal consent before opening Buzz", async ({
   await expect(agreementConfirmation).toBeVisible();
   await expect(acceptInvite).toBeDisabled();
 
+  const contentGuidelinesLink = page.getByRole("button", {
+    name: "Content Guidelines",
+  });
   const termsLink = page.getByRole("button", { name: "Terms of Service" });
   const privacyLink = page.getByRole("button", { name: "Privacy Policy" });
+  await expect(contentGuidelinesLink).toHaveCSS("text-decoration-line", "none");
   await expect(termsLink).toHaveCSS("text-decoration-line", "none");
   await expect(privacyLink).toHaveCSS("text-decoration-line", "none");
   await termsLink.hover();
@@ -50,6 +55,14 @@ test("invite requires age and legal consent before opening Buzz", async ({
   await page.mouse.move(0, 0);
   await privacyLink.hover();
   await expect(privacyLink).toHaveCSS("text-decoration-line", "underline");
+
+  await contentGuidelinesLink.click();
+  const guidelinesDialog = page.getByRole("dialog", {
+    name: "Content Guidelines",
+  });
+  await expect(guidelinesDialog).toBeVisible();
+  await expect(guidelinesDialog).toContainText("Content Guidelines");
+  await page.getByRole("button", { name: "Close" }).click();
 
   await page
     .locator("label")
@@ -60,7 +73,8 @@ test("invite requires age and legal consent before opening Buzz", async ({
   await page
     .locator("label")
     .filter({
-      hasText: "I agree to the Buzz Terms of Service and Privacy Policy.",
+      hasText:
+        "I have read the Content Guidelines and agree to the Buzz Terms of Service and Privacy Policy.",
     })
     .click({ position: { x: 8, y: 8 } });
   await expect(agreementConfirmation).toBeChecked();

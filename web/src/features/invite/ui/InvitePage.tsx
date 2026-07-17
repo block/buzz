@@ -9,6 +9,7 @@ import { InviteJoinPolicyNotice } from "./InviteJoinPolicyNotice";
 
 const DOWNLOAD_URL = "https://github.com/block/buzz/releases/latest";
 type JoinPolicy = {
+  content_guidelines_markdown?: string;
   terms_markdown?: string;
   privacy_markdown?: string;
   age_attestation_required: boolean;
@@ -70,12 +71,15 @@ export function InvitePage({ code }: { code: string }) {
     Boolean(policy?.age_attestation_required && !ageConfirmed) ||
     Boolean(
       policy &&
-        (policy.terms_markdown || policy.privacy_markdown) &&
+        (policy.content_guidelines_markdown ||
+          policy.terms_markdown ||
+          policy.privacy_markdown) &&
         !agreementConfirmed,
     );
   const hasPolicyRequirements = Boolean(
     policy &&
       (policy.age_attestation_required ||
+        policy.content_guidelines_markdown ||
         policy.terms_markdown ||
         policy.privacy_markdown),
   );
