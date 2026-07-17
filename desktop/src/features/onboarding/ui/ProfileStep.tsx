@@ -8,6 +8,8 @@ import { cn } from "@/shared/lib/cn";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { OnboardingFooter } from "./OnboardingFooter";
 import {
   type OnboardingTransitionDirection,
   type OnboardingTransitionEffect,
@@ -216,10 +218,10 @@ export function ProfileStep({
       transitionKey={`profile-${direction}`}
     >
       <div className="w-full max-w-2xl">
-        <h1 className="text-3xl font-semibold text-foreground">
+        <h1 className="text-title font-normal text-foreground">
           What should we call you?
         </h1>
-        <p className="mt-3 text-sm leading-6 text-muted-foreground">
+        <p className="mt-5 text-sm leading-6 text-muted-foreground">
           Pick the name people and agents will see in Buzz. You can change it
           anytime.
         </p>
@@ -275,9 +277,9 @@ export function ProfileStep({
         <ErrorBanner isSaving={isSaving} message={saveRecovery.errorMessage} />
       ) : null}
 
-      <div className="mt-12 flex w-full max-w-[500px] flex-col gap-3">
+      <OnboardingFooter>
         <Button
-          className="h-10 w-full"
+          className={ONBOARDING_PRIMARY_CTA_CLASS}
           data-testid="onboarding-next"
           disabled={!canSubmit}
           onClick={submit}
@@ -340,7 +342,7 @@ export function ProfileStep({
           ) : null}
           <div className="flex-1" />
         </div>
-      </div>
+      </OnboardingFooter>
     </OnboardingSlideTransition>
   );
 }

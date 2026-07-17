@@ -6,6 +6,8 @@ import { nsecToNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { OnboardingFooter } from "./OnboardingFooter";
 
 const NOSTR_KEY_FILE_MAX_BYTES = 1024;
 
@@ -261,20 +263,13 @@ export function NostrKeyImportForm({
         <p className="text-center text-sm text-destructive">{errorMessage}</p>
       ) : null}
 
-      <div
-        className={
-          variant === "spotlight"
-            ? "mt-4 flex w-full flex-col items-center gap-3"
-            : "flex w-full flex-col gap-3 pt-1"
-        }
-      >
+      <OnboardingFooter>
         <Button
-          className={
-            variant === "spotlight" ? "h-10 rounded-full px-8" : "h-10 w-full"
-          }
+          className={ONBOARDING_PRIMARY_CTA_CLASS}
           data-testid="nostr-import-submit"
           disabled={!isValid || isInteractionDisabled}
-          type="submit"
+          onClick={() => void handleSubmit()}
+          type="button"
         >
           {isImporting ? (
             <Spinner aria-label="Importing key" className="h-4 w-4 border-2" />
@@ -298,7 +293,7 @@ export function NostrKeyImportForm({
         >
           {backLabel}
         </Button>
-      </div>
+      </OnboardingFooter>
     </form>
   );
 }

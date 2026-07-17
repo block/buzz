@@ -19,6 +19,8 @@ import {
   GlobalAgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/GlobalAgentConfigFields";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { OnboardingFooter } from "./OnboardingFooter";
 import { createSaveCoalescer } from "./saveCoalescer";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import {
@@ -575,7 +577,7 @@ function RuntimeProvidersSection({
     <section className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight text-foreground">
+          <h1 className="text-title font-normal text-foreground">
             Agent harnesses
           </h1>
           <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
@@ -644,9 +646,9 @@ function SetupStepContent({
 
       <AgentDefaultsSection />
 
-      <div className="mx-auto flex w-full max-w-md flex-col gap-3">
+      <OnboardingFooter>
         <Button
-          className="h-10 w-full"
+          className={ONBOARDING_PRIMARY_CTA_CLASS}
           data-testid="onboarding-finish"
           onClick={actions.complete}
           type="button"
@@ -663,7 +665,7 @@ function SetupStepContent({
         >
           Back
         </Button>
-      </div>
+      </OnboardingFooter>
     </OnboardingSlideTransition>
   );
 }
