@@ -10,6 +10,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
 import 'media_auth.dart';
+import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
 
 const _mediaUploadPath = '/upload';
@@ -581,6 +582,24 @@ Future<String> _transcodePickedVideoToMp4(String filePath) async {
   );
   if (result == null || result.isEmpty) {
     throw Exception('Failed to convert video to MP4.');
+  }
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    final source = File(result);
+    final destination = File(
+      '$result.faststart-${DateTime.now().microsecondsSinceEpoch}.mp4',
+    );
+    try {
+      await rewriteMp4ForFastStart(source, destination);
+      await source.delete();
+      return destination.path;
+    } catch (_) {
+      try {
+        await destination.delete();
+      } on FileSystemException {
+        // Best-effort cleanup; preserve the original platform error.
+      }
+      rethrow;
+    }
   }
   return result;
 }
