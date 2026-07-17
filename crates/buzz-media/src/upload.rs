@@ -13,7 +13,8 @@ use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
-    mime_to_ext, validate_content, validate_file_content, validate_video_file,
+    looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content,
+    validate_video_file,
 };
 
 /// Shared buffered-upload pipeline for the image and generic-file paths.
@@ -392,15 +393,13 @@ pub async fn process_video_upload(
         (sha256_hex, total, sniff_buf)
     };
 
-    // --- 2. Magic-byte check (video/mp4 only) ---
-    // sniff_buf has up to MIN_SNIFF_BYTES (4 KiB) of leading bytes — enough for
-    // infer::get() to detect MP4 ftyp even if the first network chunk was tiny.
-    let mime = infer::get(&first_bytes)
-        .map(|t| t.mime_type().to_string())
-        .ok_or(MediaError::UnknownContentType)?;
-    if mime != "video/mp4" {
-        return Err(MediaError::DisallowedContentType(mime));
+    // --- 2. ISO-BMFF/MP4 structural check ---
+    // Do not depend on `infer`'s finite major-brand list: valid MP4 producers
+    // may use a proprietary major brand while declaring `isom` compatibility.
+    if !looks_like_mp4_iso_bmff(&first_bytes) {
+        return Err(MediaError::UnsupportedContainer);
     }
+    let mime = "video/mp4".to_string();
 
     // --- 3. Verify Blossom auth: x tag must match computed SHA-256 ---
     let auth = auth_event.clone();

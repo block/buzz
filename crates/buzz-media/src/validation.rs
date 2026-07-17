@@ -14,6 +14,52 @@ use crate::error::MediaError;
 /// `video/mp4` and `validate_content()` rejects it here.
 const ALLOWED_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
+const MP4_BRANDS: &[[u8; 4]] = &[
+    *b"isom", *b"iso2", *b"iso3", *b"iso4", *b"iso5", *b"iso6", *b"iso7", *b"iso8", *b"iso9",
+    *b"mp41", *b"mp42", *b"avc1", *b"dash", *b"M4V ",
+];
+
+fn iso_bmff_ftyp_payload(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return None;
+    }
+    let compact = u32::from_be_bytes(bytes[..4].try_into().ok()?) as u64;
+    let (declared_size, header_size) = if compact == 1 {
+        if bytes.len() < 24 {
+            return None;
+        }
+        (u64::from_be_bytes(bytes[8..16].try_into().ok()?), 16usize)
+    } else if compact == 0 {
+        (bytes.len() as u64, 8usize)
+    } else {
+        (compact, 8usize)
+    };
+    if declared_size < (header_size + 8) as u64 {
+        return None;
+    }
+    let available_end = usize::try_from(declared_size)
+        .unwrap_or(usize::MAX)
+        .min(bytes.len());
+    (available_end >= header_size + 8).then_some(&bytes[header_size..available_end])
+}
+
+/// Return whether the leading bytes contain a structurally valid ISO-BMFF
+/// `ftyp` box, independent of the request MIME type or `infer`'s brand list.
+pub fn looks_like_iso_bmff(bytes: &[u8]) -> bool {
+    iso_bmff_ftyp_payload(bytes).is_some()
+}
+
+pub(crate) fn looks_like_mp4_iso_bmff(bytes: &[u8]) -> bool {
+    let Some(payload) = iso_bmff_ftyp_payload(bytes) else {
+        return false;
+    };
+    let major = payload[..4].try_into().ok();
+    major.is_some_and(|brand| MP4_BRANDS.contains(&brand))
+        || payload[8..]
+            .chunks_exact(4)
+            .any(|brand| MP4_BRANDS.iter().any(|candidate| brand == candidate))
+}
+
 /// MIME types blocked from the generic file-upload path.
 ///
 /// These are the formats a browser (or the desktop webview) will *execute* or
@@ -120,6 +166,16 @@ pub fn validate_file_content(
             size: bytes.len() as u64,
             max: config.max_file_bytes,
         });
+    }
+
+    // ISO-BMFF permits arbitrary major brands, so `infer` cannot enumerate all
+    // valid MP4 signatures. Never let an `ftyp` container fall through as an
+    // opaque attachment merely because its brand is unfamiliar.
+    if looks_like_iso_bmff(bytes) {
+        let mime = infer::get(bytes)
+            .map(|kind| kind.mime_type().to_string())
+            .unwrap_or_else(|| "application/iso-bmff".to_string());
+        return Err(MediaError::DisallowedContentType(mime));
     }
 
     // 2. Sniff. `None` means no magic signature (text/csv/json/source) — that's
@@ -333,7 +389,13 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
         }
     }
 
-    let mut meta = video_meta.ok_or(MediaError::InvalidVideo)?;
+    let mut meta = video_meta.ok_or_else(|| {
+        if has_audio {
+            MediaError::DisallowedContentType("audio/mp4".to_string())
+        } else {
+            MediaError::InvalidVideo
+        }
+    })?;
     meta.has_audio = has_audio;
     Ok(meta)
 }
@@ -1158,6 +1220,14 @@ mod tests {
         assert!(
             matches!(validate_file_content(MP4_FTYP_MAGIC, &config), Err(MediaError::DisallowedContentType(m)) if m == "video/mp4")
         );
+
+        let proprietary_major = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
+        assert!(infer::get(proprietary_major).is_none());
+        assert!(looks_like_iso_bmff(proprietary_major));
+        assert!(looks_like_mp4_iso_bmff(proprietary_major));
+        assert!(
+            matches!(validate_file_content(proprietary_major, &config), Err(MediaError::DisallowedContentType(m)) if m == "application/iso-bmff")
+        );
     }
 
     #[test]
@@ -1942,6 +2012,18 @@ mod tests {
             }
             Err(e) => panic!("expected Ok, got {e:?}"),
         }
+    }
+
+    #[test]
+    fn test_validate_video_accepts_proprietary_major_with_isom_compatibility() {
+        let mut mp4_bytes = build_minimal_mp4_moov_first();
+        mp4_bytes[8..12].copy_from_slice(b"PRIV");
+        assert!(infer::get(&mp4_bytes).is_none());
+        assert!(looks_like_mp4_iso_bmff(&mp4_bytes));
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+        assert!(validate_video_file(tmp.path(), &test_config()).is_ok());
     }
 
     #[test]

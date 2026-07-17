@@ -46,6 +46,11 @@ enum UploadRouteMode {
     LegacyMedia,
 }
 
+fn should_stream_as_video(sniff: &[u8]) -> bool {
+    infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
+        || buzz_media::looks_like_iso_bmff(sniff)
+}
+
 fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
     match path {
         "/upload" => Ok(UploadRouteMode::Upload),
@@ -328,10 +333,9 @@ pub async fn upload_blob(
             None => break,
         }
     }
-    let sniffed_mime = infer::get(&sniff).map(|kind| kind.mime_type().to_string());
     let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
 
-    let mut descriptor = if sniffed_mime.as_deref() == Some("video/mp4") {
+    let mut descriptor = if should_stream_as_video(&sniff) {
         // Video path: stream body directly to disk — never fully buffered in RAM.
         let content_length = headers
             .get("content-length")
@@ -923,6 +927,13 @@ mod tests {
             upload_route_mode("/media"),
             Err(MediaError::NotFound)
         ));
+    }
+
+    #[test]
+    fn proprietary_iso_bmff_brand_still_uses_video_pipeline() {
+        let bytes = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
+        assert!(infer::get(bytes).is_none());
+        assert!(should_stream_as_video(bytes));
     }
 
     async fn test_state() -> Arc<AppState> {
