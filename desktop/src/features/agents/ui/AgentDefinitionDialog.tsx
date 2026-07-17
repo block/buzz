@@ -522,9 +522,9 @@ export function AgentDefinitionDialog({
     [runtimes],
   );
   const blankRuntimeOptionLabel = runtimesLoading
-    ? "Loading engines..."
+    ? "Loading harnesses..."
     : isCreateMode
-      ? "Choose an engine"
+      ? "Choose a harness"
       : "No preference (use app default)";
   const runtimeDropdownOptions: PersonaDropdownOption[] = [
     ...(!isCreateMode
@@ -797,7 +797,7 @@ export function AgentDefinitionDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="persona-runtime"
               >
-                Agent engine
+                Agent harness
               </label>
               <PersonaDropdownField
                 disabled={isPending || runtimesLoading}
