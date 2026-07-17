@@ -253,15 +253,3 @@ export async function ensureWelcomeTeam(
   await ensureWelcomeTeamMembership(channelId, welcomeAgents);
   return welcomeAgents;
 }
-
-/**
- * Compatibility entry point for the former solo-guide provisioning flow.
- * The kickoff orchestrator now owns introductions, so this sends no message.
- */
-export async function ensureWelcomeGuideIntro(
-  channelId: string,
-  relayUrl?: string | null,
-) {
-  const agents = await ensureWelcomeTeam(channelId, relayUrl);
-  return agents[0];
-}
