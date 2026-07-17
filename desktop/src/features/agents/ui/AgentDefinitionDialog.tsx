@@ -31,6 +31,7 @@ import {
   emptyPersonaBehaviorDraft,
   personaBehaviorDraftValid,
 } from "./personaBehaviorDraft";
+import { personaSubmitBlock } from "./personaSubmitBlock";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -428,9 +429,12 @@ export function AgentDefinitionDialog({
   // Customize pins a complete provider/model pair. Shared compute's concrete
   // automatic-routing value is the only valid non-model-id choice.
   const isExplicitModelRequired = aiConfigurationMode === "custom";
+  // Codex/Claude hide the provider picker (they drive their own provider), so
+  // Customize must not require a provider there — only Buzz Agent/Goose do.
   const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
     aiConfigurationMode,
     { provider, model },
+    runtimeSupportsLlmProviderSelection(runtime),
   );
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
@@ -451,6 +455,29 @@ export function AgentDefinitionDialog({
     localModeSatisfied &&
     customAiPairSatisfied &&
     !isAvatarUploadPending;
+
+  // Derive the single, deterministic reason the action is disabled from the
+  // same gate outputs that feed canSubmit — no policy is recomputed here.
+  // Precedence mirrors canSubmit's term order, so the reason is `null` exactly
+  // when the form can be submitted (transient Saving/Uploading states aside).
+  const submitBlockReason = personaSubmitBlock({
+    isPending,
+    isAvatarUploadPending,
+    displayNameEmpty: displayName.trim().length === 0,
+    isCreateMode,
+    runtimeChosen: runtime.trim().length > 0,
+    runtimeAvailable: selectedRuntimeIsAvailable,
+    createBackendBlocked: createSubmitBlocked,
+    allowlistEmpty: !personaBehaviorDraftValid(behaviorDraft),
+    aiConfigurationMode,
+    localModeSatisfied,
+    localModeMissingFields: localModeGate.missingNormalizedFields,
+    localModeMissingEnvKeys: localModeGate.missingEnvKeys,
+    customAiPairSatisfied,
+    runtimeNeedsProviderSelection: runtimeSupportsLlmProviderSelection(runtime),
+    customProviderEmpty: provider.trim().length === 0,
+    customModelEmpty: model.trim().length === 0,
+  });
 
   // Merge global env as the base layer so credential keys satisfied via global
   // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
@@ -700,7 +727,16 @@ export function AgentDefinitionDialog({
         title={title}
         footer={
           <div className="flex w-full items-center justify-between gap-3">
-            <div className="flex min-h-9 items-center" />
+            <div className="flex min-h-9 items-center">
+              {submitBlockReason ? (
+                <p
+                  className="text-2xs text-muted-foreground"
+                  data-testid="persona-dialog-submit-reason"
+                >
+                  {submitBlockReason}
+                </p>
+              ) : null}
+            </div>
 
             <div className="flex items-center gap-2">
               <Button

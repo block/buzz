@@ -90,6 +90,18 @@ type MockPersonaSeed = {
   isActive?: boolean;
   sourceTeam?: string | null;
   envVars?: Record<string, string>;
+  /**
+   * Runtime the persona is pinned to (e.g. "goose", "codex", "claude"). Lets a
+   * spec seed a CLI-login runtime whose provider picker is hidden, so the Edit
+   * dialog's provider-aware submit gate can be driven end-to-end. Omitted →
+   * null (definition inherits the app default at open).
+   */
+  runtime?: string | null;
+  /** Model pinned on the persona (a custom model id for Customize mode). */
+  model?: string | null;
+  /** Provider pinned on the persona. Leave empty for Codex/Claude runtimes. */
+  provider?: string | null;
+  namePool?: string[];
 };
 
 type MockTeamSeed = {
