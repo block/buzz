@@ -1,7 +1,5 @@
-// Deep async call chains (mesh ensure→download→start under Tauri command
-// futures) exceed the default query depth when computing layouts.
+// Deep async call chains under Tauri command futures exceed the default query depth when computing layouts.
 #![recursion_limit = "256"]
-
 mod app_state;
 mod archive;
 mod commands;

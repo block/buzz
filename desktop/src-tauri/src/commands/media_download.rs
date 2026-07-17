@@ -1,10 +1,9 @@
-use std::sync::Mutex;
-
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
-use tauri::{Manager, State};
+use tauri::State;
 
 use crate::app_state::AppState;
+use crate::commands::clipboard::with_clipboard;
 use crate::commands::export_util::save_bytes_with_dialog;
 use crate::commands::media::{detect_and_validate_mime, mint_media_get_auth, sanitize_filename};
 use crate::commands::{
@@ -22,39 +21,6 @@ const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Download request timeout.
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// App-lifetime clipboard ownership keeps copied data available on Linux and
-/// serializes access on Windows. All operations still run on Tauri's main
-/// thread for macOS/AppKit safety.
-pub struct ClipboardState(Mutex<Option<arboard::Clipboard>>);
-
-impl ClipboardState {
-    pub fn new() -> Self {
-        Self(Mutex::new(None))
-    }
-
-    pub fn release(&self) {
-        if let Ok(mut clipboard) = self.0.lock() {
-            clipboard.take();
-        }
-    }
-}
-
-fn with_clipboard<T>(
-    app: &tauri::AppHandle,
-    operation: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
-) -> Result<T, String> {
-    let state = app.state::<ClipboardState>();
-    let mut stored = state
-        .0
-        .lock()
-        .map_err(|_| "clipboard state lock poisoned".to_string())?;
-    if stored.is_none() {
-        *stored = Some(arboard::Clipboard::new().map_err(|e| format!("clipboard error: {e}"))?);
-    }
-    operation(stored.as_mut().expect("clipboard initialized"))
-        .map_err(|e| format!("clipboard error: {e}"))
-}
 
 /// Validate that a URL is a legitimate relay media URL.
 ///
