@@ -84,7 +84,7 @@ fn connect_acp_runtime_blocking(
         .find(|candidate| candidate.id == request.method_id)
         .ok_or_else(|| "auth method is no longer advertised by this adapter".to_string())?;
 
-    if method.method_type.as_deref() == Some("terminal") {
+    if uses_terminal_auth(method)? {
         launch_terminal_auth(&request.runtime_id, method)?;
         return Ok(ConnectAcpRuntimeResult { launched: true });
     }
@@ -251,6 +251,11 @@ fn adapter_terminal_argv(
     Ok(argv)
 }
 
+fn uses_terminal_auth(method: &AcpAuthMethod) -> Result<bool, String> {
+    Ok(method.method_type.as_deref() == Some("terminal")
+        || terminal_auth_meta_command(method)?.is_some())
+}
+
 fn terminal_auth_meta_command(method: &AcpAuthMethod) -> Result<Option<Vec<String>>, String> {
     let Some(meta) = method.meta.as_ref() else {
         return Ok(None);
@@ -398,7 +403,7 @@ fn applescript_string(value: &str) -> String {
 mod tests {
     use super::{
         adapter_terminal_argv, append_inherited_path, run_buzz_acp_auth_command_with_paths,
-        shell_escape, shell_join, windows_terminal_args, AcpAuthMethod,
+        shell_escape, shell_join, uses_terminal_auth, windows_terminal_args, AcpAuthMethod,
     };
 
     /// Windows regression: the augmented PATH there holds only Buzz-managed
@@ -530,6 +535,14 @@ mod tests {
         let method: AcpAuthMethod = serde_json::from_str(raw).unwrap();
         assert_eq!(method.method_type.as_deref(), Some("terminal"));
         assert_eq!(method.command[0], "claude");
+    }
+
+    #[test]
+    fn claude_terminal_meta_routes_around_unimplemented_authenticate() {
+        let raw = r#"{"_meta":{"terminal-auth":{"args":["/tmp/claude-cli.js"],"command":"node","label":"Claude Login"}},"description":"Run `claude /login` in the terminal","id":"claude-login","name":"Log in with Claude"}"#;
+        let method: AcpAuthMethod = serde_json::from_str(raw).unwrap();
+        assert_eq!(method.method_type, None);
+        assert!(uses_terminal_auth(&method).unwrap());
     }
 
     #[test]

@@ -290,6 +290,7 @@ type E2eConfig = {
       env_vars: Record<string, string>;
       provider: string | null;
       model: string | null;
+      preferred_runtime?: string | null;
     };
     /** Baked build env returned by the display and key-name Tauri commands. */
     bakedBuildEnv?: Array<{
@@ -6696,6 +6697,12 @@ async function handleConnectAcpRuntime(
 // re-evaluated via addInitScript, so the counter starts at 0 for every test.
 let installCallCount = 0;
 let addChannelMembersCallCount = 0;
+let mockGlobalAgentConfig: {
+  env_vars: Record<string, string>;
+  provider: string | null;
+  model: string | null;
+  preferred_runtime?: string | null;
+} | null = null;
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
@@ -8444,6 +8451,9 @@ export function maybeInstallE2eTauriMocks() {
     return;
   }
 
+  mockGlobalAgentConfig = config.mock?.globalAgentConfig
+    ? { ...config.mock.globalAgentConfig }
+    : null;
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
@@ -9456,13 +9466,13 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       }
       case "get_global_agent_config": {
-        // Return the mock global agent config if provided; otherwise return
-        // an empty config (no global provider, model, or env vars).
+        // Return the mutable persisted mock value, seeded from the test config.
         return (
-          config?.mock?.globalAgentConfig ?? {
+          mockGlobalAgentConfig ?? {
             env_vars: {},
             provider: null,
             model: null,
+            preferred_runtime: null,
           }
         );
       }
@@ -9476,6 +9486,7 @@ export function maybeInstallE2eTauriMocks() {
               env_vars: Record<string, string>;
               provider: string | null;
               model: string | null;
+              preferred_runtime: string | null;
             };
           }
         ).config;
@@ -9490,6 +9501,7 @@ export function maybeInstallE2eTauriMocks() {
         if (saveDelayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, saveDelayMs));
         }
+        mockGlobalAgentConfig = savedConfig;
         // In the E2E environment there are no running agents to restart, so
         // the counts default to 0 unless a spec drives them explicitly.
         return {

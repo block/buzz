@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   activateWelcomeTeamPersonasSequentially,
+  buildWelcomeStarterCreateInput,
   LEGACY_WELCOME_GUIDE_SYSTEM_PROMPT,
   pickWelcomeGuideAgent,
   pickWelcomeGuideAgentForRelay,
@@ -150,6 +151,58 @@ test("starter persona activation is serialized to protect the shared store", asy
   );
 
   assert.deepEqual(calls, ["builtin:fizz", "builtin:honey", "builtin:bumble"]);
+});
+
+test("all Welcome starters use the onboarding runtime preference", async () => {
+  const claude = {
+    id: "claude",
+    label: "Claude",
+    avatarUrl: "https://runtime/claude.png",
+    availability: "available",
+    command: "claude-code-acp",
+    binaryPath: "/bin/claude-code-acp",
+    defaultArgs: [],
+    mcpCommand: null,
+    installHint: "",
+    installInstructionsUrl: "",
+    canAutoInstall: false,
+    underlyingCliPath: "/bin/claude",
+  };
+  const buzzAgent = {
+    ...claude,
+    id: "buzz-agent",
+    label: "Buzz Agent",
+    command: "buzz-agent",
+  };
+
+  for (const starter of WELCOME_TEAM_STARTERS) {
+    const input = await buildWelcomeStarterCreateInput(
+      starter,
+      {
+        id: starter.personaId,
+        displayName: starter.name,
+        systemPrompt: `${starter.name} prompt`,
+        model: null,
+        provider: null,
+        runtime: null,
+        avatarUrl: null,
+        envVars: {},
+        isBuiltIn: true,
+        isActive: true,
+      },
+      [buzzAgent, claude],
+      "claude",
+      RELAY_A,
+    );
+
+    assert.equal(input.agentCommand, "claude-code-acp");
+    assert.equal(input.harnessOverride, true);
+    assert.equal(input.personaId, starter.personaId);
+    assert.equal(input.teamId, WELCOME_TEAM_ID);
+    assert.equal(input.relayUrl, RELAY_A);
+    assert.equal(input.spawnAfterCreate, false);
+    assert.equal(input.startOnAppLaunch, false);
+  }
 });
 
 test("welcome team starter definitions and role identities are stable", () => {

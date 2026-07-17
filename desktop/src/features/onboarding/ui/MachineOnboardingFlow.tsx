@@ -2,6 +2,10 @@ import * as React from "react";
 import type { QueryClient } from "@tanstack/react-query";
 
 import {
+  getGlobalAgentConfig,
+  setGlobalAgentConfig,
+} from "@/shared/api/tauriGlobalAgentConfig";
+import {
   getIdentity,
   importIdentity,
   persistCurrentIdentity,
@@ -40,6 +44,50 @@ export function MachineOnboardingFlow({
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
+  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState<string | null>(
+    null,
+  );
+  const [pendingRuntimeId, setPendingRuntimeId] = React.useState<string | null>(
+    null,
+  );
+  const [isRuntimeSelectionSaving, setIsRuntimeSelectionSaving] =
+    React.useState(false);
+  const [runtimeSelectionError, setRuntimeSelectionError] = React.useState<
+    string | null
+  >(null);
+  const runtimeSaveSequence = React.useRef(0);
+
+  const persistPreferredRuntime = React.useCallback(async (runtimeId: string) => {
+    const sequence = runtimeSaveSequence.current + 1;
+    runtimeSaveSequence.current = sequence;
+    setPendingRuntimeId(runtimeId);
+    setRuntimeSelectionError(null);
+    setIsRuntimeSelectionSaving(true);
+    try {
+      const current = await getGlobalAgentConfig();
+      const result = await setGlobalAgentConfig({
+        ...current,
+        preferred_runtime: runtimeId,
+      });
+      if (runtimeSaveSequence.current === sequence) {
+        setSelectedRuntimeId(result.config.preferred_runtime);
+        setPendingRuntimeId(null);
+      }
+    } catch (cause) {
+      if (runtimeSaveSequence.current === sequence) {
+        setPendingRuntimeId(null);
+        setRuntimeSelectionError(
+          cause instanceof Error
+            ? cause.message
+            : "Couldn’t save your preferred runtime.",
+        );
+      }
+    } finally {
+      if (runtimeSaveSequence.current === sequence) {
+        setIsRuntimeSelectionSaving(false);
+      }
+    }
+  }, []);
 
   const loadFreshIdentity = React.useCallback(async () => {
     setIsPending(true);
@@ -188,9 +236,25 @@ export function MachineOnboardingFlow({
               actions={{
                 back: () =>
                   setPage(identityWasImported ? "key-import" : "backup"),
-                next: () => setPage("config"),
+                next: () => {
+                  if (!selectedRuntimeId) return;
+                  if (
+                    selectedRuntimeId === "claude" ||
+                    selectedRuntimeId === "codex"
+                  ) {
+                    complete(selectedPubkey ?? undefined);
+                    return;
+                  }
+                  setPage("config");
+                },
               }}
               direction="forward"
+              isSelectionSaving={isRuntimeSelectionSaving}
+              onSelectedRuntimeChange={(runtimeId) => {
+                void persistPreferredRuntime(runtimeId);
+              }}
+              selectionError={runtimeSelectionError}
+              selectedRuntimeId={pendingRuntimeId ?? selectedRuntimeId}
             />
           ) : (
             <DefaultConfigStep

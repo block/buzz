@@ -5,6 +5,31 @@ import { passThroughBackupStep } from "../helpers/onboarding";
 
 const SHOTS = "test-results/screenshots-onboarding";
 
+function availableRuntime(
+  id: "buzz-agent" | "claude" | "codex" | "goose",
+  authStatus:
+    | { status: "config_invalid"; diagnostic: string }
+    | { status: "logged_in" | "logged_out" | "not_applicable" | "unknown" },
+) {
+  return {
+    id,
+    label: id === "buzz-agent" ? "Buzz Agent" : id,
+    avatar_url: "",
+    availability: "available",
+    command: id,
+    binary_path: `/usr/local/bin/${id}`,
+    default_args: [],
+    mcp_command: null,
+    install_hint: "",
+    install_instructions_url: "https://example.com",
+    can_auto_install: false,
+    underlying_cli_path: null,
+    node_required: false,
+    auth_status: authStatus,
+    login_hint: `Sign in to ${id}`,
+  };
+}
+
 /** Drive to the harness setup page (page 3) via the full onboarding flow. */
 async function navigateToSetupPage(
   page: Parameters<typeof installMockBridge>[0],
@@ -19,8 +44,109 @@ async function navigateToConfigPage(
   page: Parameters<typeof installMockBridge>[0],
 ) {
   await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-runtime-buzz-agent").click();
+  await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
   await page.getByTestId("onboarding-setup-next").click();
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+}
+
+test("requires a preferred runtime and routes detailed runtimes to config", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("buzz-agent", { status: "not_applicable" }),
+      ],
+      setGlobalAgentConfigDelayMs: 200,
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const next = page.getByTestId("onboarding-setup-next");
+  await expect(next).toBeDisabled();
+  await page.getByTestId("onboarding-runtime-buzz-agent").click();
+  await expect(next).toHaveText("Saving…");
+  await expect(next).toBeDisabled();
+  await expect(next).toBeEnabled();
+  await next.click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+});
+
+test("authenticated Claude persists as preferred and skips detailed config", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("claude", { status: "logged_in" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await page.getByTestId("onboarding-runtime-claude").click();
+  await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("machine-onboarding-gate")).toHaveCount(0);
+
+  const savedConfig = await page.evaluate(() =>
+    (
+      window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload: unknown,
+        ) => Promise<{ preferred_runtime: string | null }>;
+      }
+    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+  );
+  expect(savedConfig?.preferred_runtime).toBe("claude");
+});
+
+for (const authStatus of [
+  { status: "logged_out" as const },
+  { status: "unknown" as const },
+  { status: "config_invalid" as const, diagnostic: "Fix Claude config" },
+]) {
+  test(`Claude ${authStatus.status} state cannot be selected`, async ({ page }) => {
+    await installMockBridge(
+      page,
+      {
+        acpRuntimesCatalog: [availableRuntime("claude", authStatus)],
+        acpAuthMethods: {
+          claude: {
+            methods: [
+              {
+                id: "login",
+                name: "Sign in",
+                description: null,
+                type: "terminal",
+              },
+            ],
+          },
+        },
+      },
+      { skipCommunitySeed: true, skipOnboardingSeed: true },
+    );
+    await page.goto("/");
+    await navigateToSetupPage(page);
+
+    const card = page.getByTestId("onboarding-runtime-claude");
+    await expect(card).toHaveAttribute("aria-disabled", "true");
+    if (authStatus.status === "logged_out") {
+      await expect(card.getByRole("button", { name: "Sign in" })).toBeVisible();
+    } else if (authStatus.status === "unknown") {
+      await expect(card.getByText("Couldn’t verify authentication")).toBeVisible();
+    } else {
+      await expect(card.getByText("Fix Claude config")).toBeVisible();
+    }
+  });
 }
 
 test("config page shows Agent defaults form", async ({ page }) => {
@@ -43,13 +169,16 @@ test("config page shows Agent defaults form", async ({ page }) => {
   });
 });
 
-test("config page shows configure-later hint when no CLI runtime or buzz-agent config", async ({
+test("config page shows configure-later hint without Buzz Agent model config", async ({
   page,
 }) => {
-  // Seed empty ACP runtimes so no CLI harness is available.
   await installMockBridge(
     page,
-    { acpRuntimesCatalog: [] },
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("buzz-agent", { status: "not_applicable" }),
+      ],
+    },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
@@ -74,7 +203,11 @@ test("Finish button is always enabled on config page regardless of readiness", a
 }) => {
   await installMockBridge(
     page,
-    { acpRuntimesCatalog: [] },
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("buzz-agent", { status: "not_applicable" }),
+      ],
+    },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
@@ -143,7 +276,12 @@ test("rapid consecutive provider changes both survive — later change wins", as
   // make a second edit before the first response arrives.
   await installMockBridge(
     page,
-    { acpRuntimesCatalog: [], setGlobalAgentConfigDelayMs: 300 },
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("buzz-agent", { status: "not_applicable" }),
+      ],
+      setGlobalAgentConfigDelayMs: 300,
+    },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");

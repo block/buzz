@@ -10,7 +10,9 @@ import {
 } from "lucide-react";
 
 import {
+  useAcpAuthMethodsQuery,
   useAcpRuntimesQuery,
+  useConnectAcpRuntimeMutation,
   useInstallAcpRuntimeMutation,
   useGitBashPrerequisiteQuery,
 } from "@/features/agents/hooks";
@@ -23,6 +25,7 @@ import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Spinner } from "@/shared/ui/spinner";
+import { runtimeCanBeSelected } from "./onboardingRuntimeSelection";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
 import {
@@ -34,11 +37,19 @@ import type { SetupStepActions, SetupStepState } from "./types";
 type SetupStepProps = {
   actions: SetupStepActions;
   direction: OnboardingTransitionDirection;
+  isSelectionSaving: boolean;
+  onSelectedRuntimeChange: (runtimeId: string) => void;
+  selectionError: string | null;
+  selectedRuntimeId: string | null;
 };
 
 type SetupStepContentProps = {
   actions: SetupStepActions;
   direction: OnboardingTransitionDirection;
+  isSelectionSaving: boolean;
+  onSelectedRuntimeChange: (runtimeId: string) => void;
+  selectionError: string | null;
+  selectedRuntimeId: string | null;
   state: SetupStepState;
 };
 
@@ -280,31 +291,142 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   return "Not installed yet.";
 }
 
+function RuntimeAuthActions({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+  const runtimesQuery = useAcpRuntimesQuery();
+  const methodsQuery = useAcpAuthMethodsQuery(runtime.id, {
+    enabled:
+      runtime.availability === "available" &&
+      runtime.authStatus.status === "logged_out",
+  });
+  const connectMutation = useConnectAcpRuntimeMutation();
+
+  if (runtime.authStatus.status === "config_invalid") {
+    return (
+      <p className="mt-2 text-2xs leading-4 text-destructive">
+        {runtime.authStatus.diagnostic}
+      </p>
+    );
+  }
+  if (runtime.authStatus.status === "unknown") {
+    return (
+      <div className="mt-2 flex flex-col items-center gap-1.5">
+        <span className="text-2xs text-muted-foreground">
+          Couldn’t verify authentication.
+        </span>
+        <Button
+          disabled={runtimesQuery.isFetching}
+          onClick={(event) => {
+            event.stopPropagation();
+            void runtimesQuery.refetch();
+          }}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          {runtimesQuery.isFetching ? "Checking…" : "Check again"}
+        </Button>
+      </div>
+    );
+  }
+  if (runtime.authStatus.status !== "logged_out") return null;
+
+  const methods = methodsQuery.data?.methods ?? [];
+  return (
+    <div className="mt-2 flex flex-col items-center gap-1.5">
+      {methodsQuery.isLoading ? (
+        <span className="text-2xs text-muted-foreground">Loading sign-in…</span>
+      ) : methods.length > 0 ? (
+        methods.map((method) => (
+          <Button
+            disabled={connectMutation.isPending}
+            key={method.id}
+            onClick={(event) => {
+              event.stopPropagation();
+              connectMutation.mutate({
+                methodId: method.id,
+                runtimeId: runtime.id,
+              });
+            }}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            {connectMutation.isPending ? "Opening…" : method.name || "Sign in"}
+          </Button>
+        ))
+      ) : (
+        <span className="text-2xs text-muted-foreground">
+          {methodsQuery.error instanceof Error
+            ? "Couldn’t load sign-in options."
+            : runtime.loginHint || "Sign in from the CLI."}
+        </span>
+      )}
+      {connectMutation.error instanceof Error ? (
+        <span className="text-2xs text-destructive">
+          {connectMutation.error.message}
+        </span>
+      ) : null}
+      <Button
+        disabled={runtimesQuery.isFetching}
+        onClick={(event) => {
+          event.stopPropagation();
+          void Promise.all([runtimesQuery.refetch(), methodsQuery.refetch()]);
+        }}
+        size="sm"
+        type="button"
+        variant="ghost"
+      >
+        {runtimesQuery.isFetching ? "Checking…" : "Check again"}
+      </Button>
+    </div>
+  );
+}
+
 function RuntimeCard({
   installError,
   installSuccess,
   isInstalling,
   onInstall,
+  onSelect,
   runtime,
+  selectionDisabled,
+  selected,
 }: {
   installError: string | null;
   installSuccess: boolean;
   isInstalling: boolean;
   onInstall: () => void;
+  onSelect: () => void;
   runtime: AcpRuntimeCatalogEntry;
+  selectionDisabled: boolean;
+  selected: boolean;
 }) {
   const isAvailable = runtime.availability === "available" || installSuccess;
+  const canSelect = runtimeCanBeSelected(runtime) && !selectionDisabled;
 
   return (
     <div
+      aria-checked={selected}
+      aria-disabled={!canSelect}
       className={cn(
         "relative flex min-h-40 w-40 flex-col items-center justify-center gap-3 rounded-2xl bg-white/85 p-4 text-center",
         isAvailable
           ? "shadow-[0_0_55px_25px_rgba(255,255,255,0.85)]"
           : "shadow-[0_0_45px_18px_rgba(255,255,255,0.55)] opacity-90",
         installError && "ring-1 ring-destructive/40",
+        selected && "ring-2 ring-primary",
+        canSelect && "cursor-pointer hover:bg-white",
       )}
       data-testid={`onboarding-runtime-${runtime.id}`}
+      onClick={canSelect ? onSelect : undefined}
+      onKeyDown={(event) => {
+        if (canSelect && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
+      role="radio"
+      tabIndex={canSelect ? 0 : -1}
     >
       <div className="absolute right-2 top-2">
         <RuntimeStatus
@@ -355,6 +477,10 @@ function RuntimeCard({
         {installSuccess && runtime.availability !== "available" ? (
           <p className="mt-1 text-2xs leading-4 text-primary">Installed</p>
         ) : null}
+        {selected ? (
+          <p className="mt-1 text-2xs font-medium text-primary">Preferred</p>
+        ) : null}
+        <RuntimeAuthActions runtime={runtime} />
       </div>
     </div>
   );
@@ -419,9 +545,15 @@ function GitBashPrerequisiteCard() {
 }
 
 function RuntimeProvidersSection({
+  isSelectionSaving,
+  onSelectedRuntimeChange,
   runtimeProviders,
+  selectedRuntimeId,
 }: {
+  isSelectionSaving: boolean;
+  onSelectedRuntimeChange: (runtimeId: string) => void;
   runtimeProviders: SetupStepState["runtimeProviders"];
+  selectedRuntimeId: string | null;
 }) {
   const { errorMessage, isChecking, items } = runtimeProviders;
   const installMutation = useInstallAcpRuntimeMutation();
@@ -471,7 +603,11 @@ function RuntimeProvidersSection({
       <GitBashPrerequisiteCard />
 
       {items.length > 0 ? (
-        <div className="flex flex-wrap items-stretch justify-center gap-4">
+        <div
+          aria-label="Preferred agent harness"
+          className="flex flex-wrap items-stretch justify-center gap-4"
+          role="radiogroup"
+        >
           {items.map((runtime) => (
             <RuntimeCard
               installError={installResults[runtime.id]?.error ?? null}
@@ -482,7 +618,10 @@ function RuntimeProvidersSection({
               }
               key={runtime.id}
               onInstall={() => handleInstall(runtime.id)}
+              onSelect={() => onSelectedRuntimeChange(runtime.id)}
               runtime={runtime}
+              selectionDisabled={isSelectionSaving}
+              selected={selectedRuntimeId === runtime.id}
             />
           ))}
         </div>
@@ -512,6 +651,10 @@ function RuntimeProvidersSection({
 function SetupStepContent({
   actions,
   direction,
+  isSelectionSaving,
+  onSelectedRuntimeChange,
+  selectionError,
+  selectedRuntimeId,
   state,
 }: SetupStepContentProps) {
   const { runtimeProviders } = state;
@@ -525,16 +668,27 @@ function SetupStepContent({
       direction={direction}
       transitionKey={`setup-${direction}`}
     >
-      <RuntimeProvidersSection runtimeProviders={runtimeProviders} />
+      <RuntimeProvidersSection
+        isSelectionSaving={isSelectionSaving}
+        onSelectedRuntimeChange={onSelectedRuntimeChange}
+        runtimeProviders={runtimeProviders}
+        selectedRuntimeId={selectedRuntimeId}
+      />
 
       <OnboardingFooter>
+        {selectionError ? (
+          <p className="max-w-sm text-center text-xs text-destructive" role="alert">
+            {selectionError}
+          </p>
+        ) : null}
         <Button
           className={ONBOARDING_PRIMARY_CTA_CLASS}
           data-testid="onboarding-setup-next"
+          disabled={!selectedRuntimeId || isSelectionSaving}
           onClick={actions.next}
           type="button"
         >
-          Next
+          {isSelectionSaving ? "Saving…" : "Next"}
         </Button>
 
         <Button
@@ -551,10 +705,25 @@ function SetupStepContent({
   );
 }
 
-export function SetupStep({ actions, direction }: SetupStepProps) {
+export function SetupStep({
+  actions,
+  direction,
+  isSelectionSaving,
+  onSelectedRuntimeChange,
+  selectionError,
+  selectedRuntimeId,
+}: SetupStepProps) {
   const state = useSetupStepState();
 
   return (
-    <SetupStepContent actions={actions} direction={direction} state={state} />
+    <SetupStepContent
+      actions={actions}
+      direction={direction}
+      isSelectionSaving={isSelectionSaving}
+      onSelectedRuntimeChange={onSelectedRuntimeChange}
+      selectionError={selectionError}
+      selectedRuntimeId={selectedRuntimeId}
+      state={state}
+    />
   );
 }

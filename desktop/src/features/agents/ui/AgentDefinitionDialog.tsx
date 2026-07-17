@@ -156,9 +156,17 @@ export function AgentDefinitionDialog({
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
+  const {
+    globalConfig,
+    inheritedDefaults: {
+      provider: inheritedProviderDefault,
+      model: inheritedModelDefault,
+    },
+    inheritedEnvVars: inheritedEnvVarsForAdvanced,
+  } = useAgentDialogDefaults({ open });
   const defaultRuntime = React.useMemo(
-    () => getDefaultPersonaRuntime(runtimes),
-    [runtimes],
+    () => getDefaultPersonaRuntime(runtimes, globalConfig.preferred_runtime),
+    [globalConfig.preferred_runtime, runtimes],
   );
   const shouldReduceMotion = useReducedMotion();
   const initialModelProviderEditableWithoutRuntime = Boolean(
@@ -331,14 +339,6 @@ export function AgentDefinitionDialog({
   // Used to silence requirements already satisfied there.
   const { data: runtimeFileConfig, isLoading: fileConfigLoading } =
     useRuntimeFileConfigQuery(runtime, { enabled: open });
-  const {
-    globalConfig,
-    inheritedDefaults: {
-      provider: inheritedProviderDefault,
-      model: inheritedModelDefault,
-    },
-    inheritedEnvVars: inheritedEnvVarsForAdvanced,
-  } = useAgentDialogDefaults({ open });
   function handleAiConfigurationModeChange(nextMode: AgentAiConfigurationMode) {
     setAiConfigurationMode(nextMode);
     setIsCustomProviderEditing(false);

@@ -25,6 +25,7 @@ import {
   useUpdateManagedAgentMutation,
   useUpdatePersonaMutation,
 } from "@/features/agents/hooks";
+import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { AddAgentToChannelDialog } from "@/features/agents/ui/AddAgentToChannelDialog";
 import {
   availableRuntimesForStart,
@@ -125,6 +126,7 @@ export function UserProfilePanel({
   widthPx,
   transparentChrome = false,
 }: UserProfilePanelProps) {
+  const { globalConfig } = useGlobalAgentConfig();
   const isOverlay = useIsThreadPanelOverlay();
   const isSplitLayout = layout === "split";
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
@@ -417,6 +419,7 @@ export function UserProfilePanel({
       const { runtime, warnings } = resolveStartRuntimeForDefinition(
         personaToStart,
         runtimes,
+        globalConfig.preferred_runtime,
       );
 
       for (const warning of warnings) {
@@ -436,6 +439,7 @@ export function UserProfilePanel({
     [
       availableRuntimesQuery,
       createAgentMutation.mutateAsync,
+      globalConfig.preferred_runtime,
       managedAgentsQuery.refetch,
       relayAgentsQuery.refetch,
     ],

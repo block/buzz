@@ -1,12 +1,23 @@
 import {
+  buildInstanceInputForDefinition,
+  resolveStartRuntimeForDefinition,
+} from "@/features/agents/lib/instanceInputForDefinition";
+import {
   addChannelMembers,
   createManagedAgent,
+  discoverAcpRuntimes,
   getChannelMembers,
   listManagedAgents,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { getGlobalAgentConfig } from "@/shared/api/tauriGlobalAgentConfig";
 import { listPersonas, setPersonaActive } from "@/shared/api/tauriPersonas";
-import type { ManagedAgent } from "@/shared/api/types";
+import type {
+  AcpRuntime,
+  AgentPersona,
+  CreateManagedAgentInput,
+  ManagedAgent,
+} from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export const WELCOME_GUIDE_AGENT_NAME = "Fizz";
@@ -195,6 +206,29 @@ async function ensureWelcomeTeamMembership(
   }
 }
 
+export async function buildWelcomeStarterCreateInput(
+  starter: WelcomeTeamStarterDefinition,
+  persona: AgentPersona,
+  runtimes: readonly AcpRuntime[],
+  preferredRuntimeId: string | null,
+  relayUrl?: string | null,
+): Promise<CreateManagedAgentInput> {
+  const { runtime } = resolveStartRuntimeForDefinition(
+    persona,
+    runtimes,
+    preferredRuntimeId,
+  );
+  return {
+    ...(await buildInstanceInputForDefinition(persona, runtime)),
+    name: starter.name,
+    teamId: WELCOME_TEAM_ID,
+    relayUrl: relayUrl ?? undefined,
+    spawnAfterCreate: false,
+    startOnAppLaunch: false,
+    respondTo: "owner-only",
+  };
+}
+
 /**
  * Ensure the complete built-in Welcome Team is ready for kickoff.
  * The team itself is Rust-seeded; this only activates personas, creates any
@@ -206,6 +240,15 @@ async function provisionWelcomeTeam(
 ): Promise<WelcomeTeamAgents> {
   const existingAgents = await listManagedAgents();
   await ensureWelcomeTeamPersonasActive();
+  const [personas, runtimeCatalog, globalConfig] = await Promise.all([
+    listPersonas(),
+    discoverAcpRuntimes(),
+    getGlobalAgentConfig(),
+  ]);
+  const personasById = new Map(personas.map((persona) => [persona.id, persona]));
+  const runtimes = runtimeCatalog.filter(
+    (runtime): runtime is AcpRuntime => runtime.availability === "available",
+  );
 
   const agents: ManagedAgent[] = [];
   for (const starter of WELCOME_TEAM_STARTERS) {
@@ -219,15 +262,19 @@ async function provisionWelcomeTeam(
       continue;
     }
 
-    const created = await createManagedAgent({
-      name: starter.name,
-      personaId: starter.personaId,
-      teamId: WELCOME_TEAM_ID,
-      relayUrl: relayUrl ?? undefined,
-      spawnAfterCreate: false,
-      startOnAppLaunch: false,
-      respondTo: "owner-only",
-    });
+    const persona = personasById.get(starter.personaId);
+    if (!persona) {
+      throw new Error(`${starter.name} agent not found.`);
+    }
+    const created = await createManagedAgent(
+      await buildWelcomeStarterCreateInput(
+        starter,
+        persona,
+        runtimes,
+        globalConfig.preferred_runtime,
+        relayUrl,
+      ),
+    );
     agents.push(created.agent);
   }
   const [lead, honey, bumble] = agents;

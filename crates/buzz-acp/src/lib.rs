@@ -1320,13 +1320,14 @@ async fn tokio_main() -> Result<()> {
 
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
+    let mut relay_observer_publisher = None;
     if config.relay_observer {
         if let (Some(observer), Some(owner_pubkey_hex)) =
             (observer.clone(), owner_cache.pubkey.clone())
         {
             match PublicKey::from_hex(&owner_pubkey_hex) {
                 Ok(owner_pubkey) => {
-                    relay_observer_publisher_task = Some(spawn_relay_observer_publisher(
+                    relay_observer_publisher = Some((
                         observer,
                         relay.event_publisher(),
                         config.keys.clone(),
@@ -1402,12 +1403,27 @@ async fn tokio_main() -> Result<()> {
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
+    let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
         if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
             tracing::warn!("failed to subscribe to channel {channel_id}: {e}");
         } else {
+            subscribed_channel_ids.insert(*channel_id);
             tracing::info!("subscribed to channel {channel_id}");
         }
+    }
+
+    if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
+        relay_observer_publisher.take()
+    {
+        relay_observer_publisher_task = Some(spawn_relay_observer_publisher(
+            observer,
+            publisher,
+            keys,
+            agent_pubkey,
+            owner_pubkey,
+            owner,
+        ));
     }
 
     // Online means the harness can receive work, not merely that its socket is
@@ -1788,15 +1804,20 @@ async fn tokio_main() -> Result<()> {
                                     // stripped for a legitimately re-added channel.
                                     removed_channels.remove(&ch);
 
-                                    if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                    if subscribed_channel_ids.contains(&ch) {
+                                        tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
+                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
+                                        } else {
+                                            subscribed_channel_ids.insert(ch);
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
                                     }
                                 } else {
+                                    subscribed_channel_ids.remove(&ch);
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");

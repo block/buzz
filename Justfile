@@ -11,6 +11,10 @@ web_dir := "web"
 # Turn on to test mesh compute features: `just mesh=1 dev` / `just mesh=1 staging`.
 mesh := ""
 
+# Reset only the current standalone desktop instance before launch.
+# Usage: `just fresh=1 desktop-standalone`.
+fresh := ""
+
 # List all available tasks
 default:
     @just --list
@@ -440,13 +444,20 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
     for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
         cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     unset BUZZ_PRIVATE_KEY BUZZ_SHARE_IDENTITY
+    if [[ -n "{{fresh}}" ]]; then
+        export BUZZ_RESET_WEBVIEW_STATE=1
+    fi
     source ../scripts/instance-env.sh
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
     export BUZZ_DEV_KEYRING_SERVICE="buzz-desktop-dev.${BUZZ_INSTANCE_SLUG:-main}"
+    if [[ -n "{{fresh}}" ]]; then
+        ../scripts/reset-desktop-standalone-state.sh "$INSTANCE_ID" "$BUZZ_DEV_KEYRING_SERVICE"
+    fi
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
     pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
