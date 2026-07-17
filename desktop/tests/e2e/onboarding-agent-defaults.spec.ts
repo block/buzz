@@ -82,9 +82,7 @@ test("authenticated Claude persists as preferred and skips detailed config", asy
   await installMockBridge(
     page,
     {
-      acpRuntimesCatalog: [
-        availableRuntime("claude", { status: "logged_in" }),
-      ],
+      acpRuntimesCatalog: [availableRuntime("claude", { status: "logged_in" })],
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
@@ -109,12 +107,58 @@ test("authenticated Claude persists as preferred and skips detailed config", asy
   expect(savedConfig?.preferred_runtime).toBe("claude");
 });
 
+test("successful Claude sign-in selects it as preferred", async ({ page }) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("claude", { status: "logged_out" }),
+      ],
+      acpAuthMethods: {
+        claude: {
+          methods: [
+            {
+              id: "claude-login",
+              name: "Sign in",
+              description: null,
+              type: "terminal",
+            },
+          ],
+        },
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await waitForAnimations(page);
+
+  const card = page.getByTestId("onboarding-runtime-claude");
+  await card.getByRole("button", { name: "Sign in" }).click({ force: true });
+  await expect(card.getByText("Preferred")).toBeVisible();
+  await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
+
+  const savedConfig = await page.evaluate(() =>
+    (
+      window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload: unknown,
+        ) => Promise<{ preferred_runtime: string | null }>;
+      }
+    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+  );
+  expect(savedConfig?.preferred_runtime).toBe("claude");
+});
+
 for (const authStatus of [
   { status: "logged_out" as const },
   { status: "unknown" as const },
   { status: "config_invalid" as const, diagnostic: "Fix Claude config" },
 ]) {
-  test(`Claude ${authStatus.status} state cannot be selected`, async ({ page }) => {
+  test(`Claude ${authStatus.status} state cannot be selected`, async ({
+    page,
+  }) => {
     await installMockBridge(
       page,
       {
@@ -142,7 +186,9 @@ for (const authStatus of [
     if (authStatus.status === "logged_out") {
       await expect(card.getByRole("button", { name: "Sign in" })).toBeVisible();
     } else if (authStatus.status === "unknown") {
-      await expect(card.getByText("Couldn’t verify authentication")).toBeVisible();
+      await expect(
+        card.getByText("Couldn’t verify authentication"),
+      ).toBeVisible();
     } else {
       await expect(card.getByText("Fix Claude config")).toBeVisible();
     }

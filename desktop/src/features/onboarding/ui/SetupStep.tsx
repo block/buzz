@@ -291,7 +291,13 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   return "Not installed yet.";
 }
 
-function RuntimeAuthActions({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+function RuntimeAuthActions({
+  onAuthenticated,
+  runtime,
+}: {
+  onAuthenticated: () => void;
+  runtime: AcpRuntimeCatalogEntry;
+}) {
   const runtimesQuery = useAcpRuntimesQuery();
   const methodsQuery = useAcpAuthMethodsQuery(runtime.id, {
     enabled:
@@ -342,10 +348,17 @@ function RuntimeAuthActions({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
             key={method.id}
             onClick={(event) => {
               event.stopPropagation();
-              connectMutation.mutate({
-                methodId: method.id,
-                runtimeId: runtime.id,
-              });
+              connectMutation.mutate(
+                {
+                  methodId: method.id,
+                  runtimeId: runtime.id,
+                },
+                {
+                  onSuccess: () => {
+                    if (runtime.id === "claude") onAuthenticated();
+                  },
+                },
+              );
             }}
             size="sm"
             type="button"
@@ -481,7 +494,7 @@ function RuntimeCard({
         {selected ? (
           <p className="mt-1 text-2xs font-medium text-primary">Preferred</p>
         ) : null}
-        <RuntimeAuthActions runtime={runtime} />
+        <RuntimeAuthActions onAuthenticated={onSelect} runtime={runtime} />
       </div>
     </div>
   );
@@ -678,7 +691,10 @@ function SetupStepContent({
 
       <OnboardingFooter>
         {selectionError ? (
-          <p className="max-w-sm text-center text-xs text-destructive" role="alert">
+          <p
+            className="max-w-sm text-center text-xs text-destructive"
+            role="alert"
+          >
             {selectionError}
           </p>
         ) : null}
