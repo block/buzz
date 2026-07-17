@@ -42,6 +42,7 @@ jobs:
               - 'deny.toml'
               - '.github/workflows/ci.yml'
               - 'scripts/run-tests.sh'
+              - 'scripts/tests/**'
               - 'justfile'
             desktop:
               - 'desktop/**'

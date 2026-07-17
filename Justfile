@@ -255,8 +255,12 @@ ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri
 test:
     ./scripts/run-tests.sh all
 
+# Validate the test runner's integration-step status and output handling
+test-runner-script:
+    ./scripts/tests/run-tests-test.sh
+
 # Run unit tests only (no infra needed)
-test-unit:
+test-unit: test-runner-script
     #!/usr/bin/env bash
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib

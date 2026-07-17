@@ -112,13 +112,8 @@ run_integration_tests() {
   run_test_step "buzz-db tests" \
     cargo test -p buzz-db -- --nocapture
 
-  run_test_step "buzz-auth integration tests" \
-    cargo test -p buzz-auth --test '*' -- --nocapture 2>/dev/null || \
-    run_test_step "buzz-auth (no integration tests found)" true
-
   run_test_step "workspace integration tests" \
-    cargo test --test '*' -- --nocapture 2>/dev/null || \
-    run_test_step "workspace integration tests (none found)" true
+    cargo test --test '*' -- --nocapture
 }
 
 # ---- Main -------------------------------------------------------------------
