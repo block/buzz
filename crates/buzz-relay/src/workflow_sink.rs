@@ -68,7 +68,31 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
 
     let chars: Vec<char> = text.chars().collect();
     let mut consumed = vec![false; chars.len()];
-    let lower: Vec<char> = text.to_lowercase().chars().collect();
+
+    // Case-insensitivity folds *both* sides through `char::to_lowercase`, which
+    // can change length: `İ` (U+0130) lowercases to two code points (`i` +
+    // U+0307 combining dot). Comparing a pre-lowercased copy of the whole text
+    // against a lowercased name by index silently desyncs once any earlier char
+    // expands. Instead, fold on the fly: walk the original `chars` at the
+    // candidate `@`, folding each char, and match against the folded-name char
+    // stream — tracking how many *original* chars were consumed so
+    // boundary/`consumed` accounting stays in original coordinates. `None` = no
+    // match; `Some(n)` = matched, consuming `n` original chars after the `@`.
+    let match_name_len = |start: usize, folded_name: &[char]| -> Option<usize> {
+        let mut ci = start;
+        let mut ni = 0;
+        while ni < folded_name.len() {
+            let c = *chars.get(ci)?;
+            for fc in c.to_lowercase() {
+                if folded_name.get(ni) != Some(&fc) {
+                    return None;
+                }
+                ni += 1;
+            }
+            ci += 1;
+        }
+        Some(ci - start)
+    };
 
     // A mention is anchored on `@` at a left boundary (start / whitespace / `(`)
     // and the matched name must not be followed by a name-continuation char —
@@ -83,20 +107,25 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     let mut hits: Vec<(usize, String)> = Vec::new();
 
     for (name, _) in &names {
-        let name_lower: Vec<char> = name.to_lowercase().chars().collect();
-        if name_lower.is_empty() {
+        let folded_name: Vec<char> = name.to_lowercase().chars().collect();
+        if folded_name.is_empty() {
             continue;
         }
-        // `@` + name length.
-        let span = 1 + name_lower.len();
         let mut at = 0;
-        while at + span <= chars.len() {
-            if chars[at] == '@'
-                && is_left_boundary(at)
-                && !consumed[at]
-                && lower[at + 1..at + span] == name_lower[..]
-                && chars[at + span..].first().is_none_or(|&c| !extends_name(c))
-            {
+        while at < chars.len() {
+            // Anchor on `@` at a left boundary and an unconsumed span; only then
+            // attempt the fold-match. `name_len` is measured in *original* chars,
+            // so `at + 1 + name_len` is the true position just past the name.
+            let name_len = (chars[at] == '@' && is_left_boundary(at) && !consumed[at])
+                .then(|| match_name_len(at + 1, &folded_name))
+                .flatten()
+                .filter(|&n| {
+                    chars[at + 1 + n..]
+                        .first()
+                        .is_none_or(|&c| !extends_name(c))
+                });
+            if let Some(name_len) = name_len {
+                let span = 1 + name_len;
                 if let Some(Some(pubkey)) = by_name.get(&name.to_lowercase()) {
                     hits.push((at, pubkey.clone()));
                 }
@@ -427,6 +456,77 @@ mod tests {
         assert_eq!(
             resolve_mention_pubkeys("welcome @Zoë!", &members),
             vec![pk('5')]
+        );
+    }
+
+    #[test]
+    fn lowercase_expansion_does_not_shift_later_mentions() {
+        // Regression (Wren's redteam counterexample): `İ` (U+0130) lowercases to
+        // TWO code points (`i` + U+0307). A design that pre-lowercases the whole
+        // text and indexes it in parallel with the original chars desyncs after
+        // the expansion, dropping every later valid mention. `@İ @Robby` must
+        // resolve BOTH members, in order.
+        let members = vec![m("İ", &pk('c')), m("Robby", &pk('a'))];
+        assert_eq!(
+            resolve_mention_pubkeys("@İ @Robby", &members),
+            vec![pk('c'), pk('a')]
+        );
+    }
+
+    #[test]
+    fn sharp_s_matches_case_insensitively() {
+        // `ẞ` (U+1E9E capital sharp s) lowercases to `ß` (U+00DF) — a single
+        // char, NOT `ss` (that's uppercase/full-case-fold behavior, not
+        // `char::to_lowercase`). Covers non-ASCII case-insensitive matching, and
+        // that a later mention still resolves after it.
+        let members = vec![m("ẞ", &pk('d')), m("Max", &pk('b'))];
+        assert_eq!(
+            resolve_mention_pubkeys("@ẞ and @Max", &members),
+            vec![pk('d'), pk('b')]
+        );
+    }
+
+    // Adversarial rows from Quinn's re-review (the two `ẞ→ss`-premised ones were
+    // dropped as vacuous — `ẞ` lowercases to `ß`, one char, so it never inverts
+    // original-vs-folded length; only `İ` does).
+
+    #[test]
+    fn combining_mark_in_name_matches() {
+        // A name carrying a combining mark (`é` as `e` + U+0301) matches the same
+        // sequence in text (1:1 folding) and terminates cleanly.
+        let members = vec![m("Jos\u{0065}\u{0301}", &pk('4'))]; // "José" decomposed
+        assert_eq!(
+            resolve_mention_pubkeys("hi @Jos\u{0065}\u{0301}!", &members),
+            vec![pk('4')]
+        );
+    }
+
+    #[test]
+    fn expanding_name_at_trailing_boundary() {
+        // Expansion at the very end: `@İ` with nothing after must match, and
+        // `@İx` (x extends the name, no `İx` member) must NOT match `İ`.
+        let members = vec![m("İ", &pk('5'))];
+        assert_eq!(resolve_mention_pubkeys("@İ", &members), vec![pk('5')]);
+        assert!(resolve_mention_pubkeys("@İx", &members).is_empty());
+    }
+
+    #[test]
+    fn back_to_back_at_is_one_mention() {
+        // `@İ@Robby`: the second `@` is preceded by a name char (`İ`), so it is
+        // NOT at a left boundary — same rule as `alice@Robby`. Back-to-back
+        // `@a@b` is intentionally one mention; a separator is required to wake
+        // both. The expanding first name (`İ` → 2 folded chars) also proves the
+        // span accounting stays in original coordinates.
+        let members = vec![m("İ", &pk('5')), m("Robby", &pk('a'))];
+        assert_eq!(resolve_mention_pubkeys("@İ@Robby", &members), vec![pk('5')]);
+        // ASCII control: same shape, same outcome — it's the boundary rule, not
+        // a Unicode span-accounting bug.
+        let ascii = vec![m("Sam", &pk('6')), m("Robby", &pk('a'))];
+        assert_eq!(resolve_mention_pubkeys("@Sam@Robby", &ascii), vec![pk('6')]);
+        // With a separator, both wake.
+        assert_eq!(
+            resolve_mention_pubkeys("@İ @Robby", &members),
+            vec![pk('5'), pk('a')]
         );
     }
 
