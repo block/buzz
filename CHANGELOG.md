@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.11
+
+- Fix policy receipts for cold-launch invite links ([#2005](https://github.com/block/buzz/pull/2005)) ([`1d8d006a`](https://github.com/block/buzz/commit/1d8d006aaf078ffd5b92eae06334b7bb908b680e))
+- Preserve persistent agent audience order ([#1989](https://github.com/block/buzz/pull/1989)) ([`fb8e6827`](https://github.com/block/buzz/commit/fb8e6827c758c73c9c6e16965dcdcecd00a5827c))
+- feat(desktop): create channels in sections ([#1996](https://github.com/block/buzz/pull/1996)) ([`9b649740`](https://github.com/block/buzz/commit/9b6497402f343e380f6c79b97a01c2d52bd12f17))
+- feat(desktop): graduate community rail ([#1995](https://github.com/block/buzz/pull/1995)) ([`f06b59ff`](https://github.com/block/buzz/commit/f06b59ff13bef0c031c8e4c3bdf979e120ea76d5))
+
+
 ## v0.4.10
 
 - feat(desktop): onboarding step dots, identity/key page restyle, overflow scroll ([#1993](https://github.com/block/buzz/pull/1993)) ([`f2522995c`](https://github.com/block/buzz/commit/f2522995cbea67c96b79d5de6c19c665e465027d))
