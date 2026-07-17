@@ -80,9 +80,12 @@ function AgentDefaultsSection() {
     };
   }, []);
 
-  const buzzAgentRuntime = React.useMemo(
-    () => (runtimesQuery.data ?? []).find((r) => r.id === "buzz-agent"),
-    [runtimesQuery.data],
+  const selectedRuntime = React.useMemo(
+    () =>
+      (runtimesQuery.data ?? []).find(
+        (runtime) => runtime.id === config.preferred_runtime,
+      ),
+    [config.preferred_runtime, runtimesQuery.data],
   );
 
   const readiness = resolveAgentReadiness(runtimesQuery.data ?? [], config);
@@ -98,7 +101,7 @@ function AgentDefaultsSection() {
         <div className="rounded-2xl bg-white/85 p-2 shadow-[0_0_55px_25px_rgba(255,255,255,0.6)]">
           <GlobalAgentConfigFields
             bakedEnv={bakedEnv}
-            buzzAgentRuntime={buzzAgentRuntime}
+            selectedRuntime={selectedRuntime}
             config={config}
             isCustomModelEditing={isCustomModelEditing}
             isCustomProvider={isCustomProvider}

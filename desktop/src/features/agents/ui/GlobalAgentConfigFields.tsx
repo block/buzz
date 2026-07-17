@@ -57,7 +57,7 @@ const BAKED_STRUCTURED_KEYS = new Set([
 
 export type GlobalAgentConfigFieldsProps = {
   bakedEnv: BakedEnvEntry[];
-  buzzAgentRuntime: AcpRuntimeCatalogEntry | undefined;
+  selectedRuntime: AcpRuntimeCatalogEntry | undefined;
   config: GlobalAgentConfig;
   isCustomModelEditing: boolean;
   isCustomProvider: boolean;
@@ -69,7 +69,7 @@ export type GlobalAgentConfigFieldsProps = {
 
 export function GlobalAgentConfigFields({
   bakedEnv,
-  buzzAgentRuntime,
+  selectedRuntime,
   config,
   isCustomModelEditing,
   isCustomProvider,
@@ -134,7 +134,7 @@ export function GlobalAgentConfigFields({
     modelFieldVisible: true,
     open: true,
     provider: providerForDiscovery,
-    selectedRuntime: buzzAgentRuntime,
+    selectedRuntime,
   });
 
   const currentEffortForAutoClear =

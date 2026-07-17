@@ -180,7 +180,7 @@ export function GlobalAgentConfigEditor({
       ) : (
         <GlobalAgentConfigFields
           bakedEnv={bakedEnv}
-          buzzAgentRuntime={buzzAgentRuntime}
+          selectedRuntime={buzzAgentRuntime}
           config={config}
           isCustomModelEditing={isCustomModelEditing}
           isCustomProvider={isCustomProvider}
