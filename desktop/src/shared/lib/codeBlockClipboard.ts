@@ -1,3 +1,5 @@
+import { copyTextToSystemClipboard } from "@/shared/api/tauriMedia";
+
 const BUZZ_CODE_BLOCK_ATTRIBUTE = "data-buzz-code-block";
 
 function escapeHtml(value: string) {
@@ -15,13 +17,10 @@ function createBuzzCodeBlockHtml(code: string) {
 
 export async function copyCodeBlockToClipboard(code: string) {
   const clipboard = navigator.clipboard;
-  if (!clipboard) {
-    throw new Error("Clipboard API is unavailable");
-  }
 
   if (
     typeof ClipboardItem !== "undefined" &&
-    typeof clipboard.write === "function"
+    typeof clipboard?.write === "function"
   ) {
     try {
       await clipboard.write([
@@ -38,7 +37,7 @@ export async function copyCodeBlockToClipboard(code: string) {
     }
   }
 
-  await clipboard.writeText(code);
+  await copyTextToSystemClipboard(code);
 }
 
 export function getBuzzCodeBlockClipboardText(

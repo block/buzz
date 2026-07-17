@@ -1,6 +1,7 @@
 import { Check, Copy, Eye, EyeOff } from "lucide-react";
 import * as React from "react";
 import { Button } from "@/shared/ui/button";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type NsecMaskedDisplayProps = {
   nsec: string;
@@ -43,7 +44,7 @@ export function NsecMaskedDisplay({
   }
 
   async function handleCopy() {
-    await navigator.clipboard.writeText(nsec);
+    await writeTextToClipboard(nsec);
     setIsCopied(true);
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
     copyTimerRef.current = setTimeout(() => setIsCopied(false), 2000);

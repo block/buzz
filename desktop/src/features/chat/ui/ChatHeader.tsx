@@ -18,6 +18,7 @@ import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Button } from "@/shared/ui/button";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type ChatHeaderProps = {
   actions?: React.ReactNode;
@@ -104,7 +105,7 @@ export function ChatHeader({
     if (!value) return;
 
     try {
-      await navigator.clipboard.writeText(value);
+      await writeTextToClipboard(value);
       toast.success("Channel name copied");
     } catch {
       toast.error("Failed to copy channel name");

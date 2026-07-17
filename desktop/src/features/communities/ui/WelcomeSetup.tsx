@@ -23,6 +23,7 @@ import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type WelcomeSetupPage = "welcome" | "join" | "invite";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
@@ -190,7 +191,7 @@ export function WelcomeSetup({
                         className="h-10 w-10 shrink-0 text-muted-foreground hover:text-foreground"
                         disabled={!npub}
                         onClick={() => {
-                          void navigator.clipboard.writeText(npub).then(() => {
+                          void writeTextToClipboard(npub).then(() => {
                             setCopied(true);
                             window.setTimeout(() => setCopied(false), 1500);
                           });

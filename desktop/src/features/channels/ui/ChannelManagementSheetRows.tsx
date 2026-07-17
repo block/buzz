@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Switch } from "@/shared/ui/switch";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 function getChannelIcon(channelType: Channel["channelType"]): LucideIcon {
   if (channelType === "forum") {
@@ -126,7 +127,7 @@ export function CopyFieldRow({
   testId?: string;
 }) {
   async function handleCopy() {
-    await navigator.clipboard.writeText(value);
+    await writeTextToClipboard(value);
     toast.success(`Copied ${label.toLowerCase()}`);
   }
 

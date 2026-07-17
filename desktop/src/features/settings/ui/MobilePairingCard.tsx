@@ -28,6 +28,7 @@ import {
 } from "@/shared/ui/dialog";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type PairingStep =
   | "generating"
@@ -168,7 +169,7 @@ function PairingDialog({
 
   async function handleCopy() {
     if (!qrUri) return;
-    await navigator.clipboard.writeText(qrUri);
+    await writeTextToClipboard(qrUri);
     toast.success("Copied to clipboard");
   }
 

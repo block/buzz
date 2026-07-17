@@ -2,6 +2,7 @@ import { Check, Copy } from "lucide-react";
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 /** Icon button that copies arbitrary text with a brief check feedback. */
 export function CopyTextButton({
@@ -15,7 +16,7 @@ export function CopyTextButton({
 }) {
   const [copied, setCopied] = React.useState(false);
   const handleCopy = React.useCallback(() => {
-    void navigator.clipboard.writeText(text).then(() => {
+    void writeTextToClipboard(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2_000);
     });
