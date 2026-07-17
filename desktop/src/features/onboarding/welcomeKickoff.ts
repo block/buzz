@@ -186,7 +186,7 @@ export async function waitForWelcomeTeammatesOnline(
   const pubkeys = teammates.map((agent) => agent.pubkey);
   let latestOnline: ManagedAgent[] = [];
 
-  while (!options.isCancelled() && Date.now() < deadline) {
+  while (!options.isCancelled()) {
     try {
       latestOnline = onlineWelcomeTeammates(
         teammates,
@@ -198,6 +198,7 @@ export async function waitForWelcomeTeammatesOnline(
     } catch (error) {
       console.warn("Welcome teammate presence check failed; retrying.", error);
     }
+    if (Date.now() >= deadline) break;
     await new Promise((resolve) => globalThis.setTimeout(resolve, pollMs));
   }
   return options.isCancelled() ? [] : latestOnline;

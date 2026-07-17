@@ -242,7 +242,7 @@ test("readiness wait returns the subset that became online by the deadline", asy
       [bumble.pubkey]: "offline",
     }),
     pollMs: 0,
-    waitMs: 1,
+    waitMs: 0,
   });
 
   assert.deepEqual(online, [honey]);
