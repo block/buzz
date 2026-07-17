@@ -12,6 +12,10 @@ type SettingsRouteSearch = {
 function validateSettingsSearch(
   search: Record<string, unknown>,
 ): SettingsRouteSearch {
+  if (search.section === "doctor") {
+    return { section: "agents" };
+  }
+
   return {
     section: isSettingsSection(search.section) ? search.section : undefined,
   };

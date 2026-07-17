@@ -127,6 +127,7 @@ type E2eConfig = {
     connectAcpRuntimeDelayMs?: number;
     connectAcpRuntimeError?: string;
     activePersonaIds?: string[];
+    installAcpRuntimeDelayMs?: number;
     installAcpRuntimeResult?: RawInstallRuntimeResult;
     /** Sequence of results for successive `install_acp_runtime` calls.
      *  Call N returns results[N]; when exhausted the last entry repeats.
@@ -6644,6 +6645,10 @@ async function handleInstallAcpRuntime(
   },
   config: E2eConfig | undefined,
 ): Promise<RawInstallRuntimeResult> {
+  const delayMs = config?.mock?.installAcpRuntimeDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
   const sequence = config?.mock?.installAcpRuntimeResults;
   if (sequence && sequence.length > 0) {
     const idx = Math.min(installCallCount, sequence.length - 1);

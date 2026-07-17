@@ -165,7 +165,7 @@ export function focusTargetForRequirement(
  * Routing:
  * (A) Any card with a `git_bash` requirement, or one whose requirements are all
  *     install-state `cli_login`, opens Settings → Doctor. A card-level
- *     "Open Doctor →" label in `AttachmentActions` confirms the action at rest.
+ *     Agent runtimes label in `AttachmentActions` confirms the action at rest.
  * (A-auth) A card whose requirements are all available `cli_login` surfaces is
  *     purely informational: Doctor cannot authenticate a CLI, and `setup_copy`
  *     already gives the needed command.
@@ -199,7 +199,7 @@ export function ConfigNudgeCard({
         "[ConfigNudgeCard] onOpenSettings is null — Doctor deep-link unavailable on this surface",
       );
     }
-    onOpenSettings?.("doctor");
+    onOpenSettings?.("agents");
   };
 
   const openEditAgent = (focus?: EditAgentFocusTarget) => {
@@ -270,7 +270,9 @@ export function ConfigNudgeCard({
           cards have none; other mixed cards render their own row CTAs. */}
       {opensDoctor && !informationalOnly && (
         <AttachmentActions className="items-end self-end">
-          <span className="text-xs text-muted-foreground">Open Doctor →</span>
+          <span className="text-xs text-muted-foreground">
+            Open Agent runtimes →
+          </span>
         </AttachmentActions>
       )}
       {/* Informational-only cards are purely informational — no trigger, no routing. */}
@@ -278,7 +280,7 @@ export function ConfigNudgeCard({
         <AttachmentTrigger
           aria-label={
             opensDoctor
-              ? `Open Doctor settings for ${nudge.agent_name}`
+              ? `Open Agent runtimes settings for ${nudge.agent_name}`
               : `Open Edit Agent for ${nudge.agent_name}`
           }
           onClick={handleOpen}
@@ -366,7 +368,7 @@ function RequirementRow({
               onClick={onOpenDoctor}
               type="button"
             >
-              Open Doctor →
+              Open Agent runtimes →
             </button>
           )}
         </div>

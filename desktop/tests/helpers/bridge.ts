@@ -120,6 +120,7 @@ type MockBridgeOptions = {
   connectAcpRuntimeResult?: { launched: boolean };
   connectAcpRuntimeDelayMs?: number;
   connectAcpRuntimeError?: string;
+  installAcpRuntimeDelayMs?: number;
   /** Override the result returned by the `install_acp_runtime` mock command.
    *  Pass `{ success: false, steps: [...] }` to exercise error/Retry states. */
   installAcpRuntimeResult?: {

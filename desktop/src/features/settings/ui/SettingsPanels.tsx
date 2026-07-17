@@ -16,7 +16,6 @@ import {
   ShieldAlert,
   Smartphone,
   Smile,
-  Stethoscope,
   Sun,
   SunMoon,
   UserRound,
@@ -82,8 +81,7 @@ export type SettingsSection =
   | "custom-emoji"
   | "local-archive"
   | "mobile"
-  | "updates"
-  | "doctor";
+  | "updates";
 
 export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
 
@@ -102,7 +100,6 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "local-archive",
   "mobile",
   "updates",
-  "doctor",
 ];
 
 export function isSettingsSection(value: unknown): value is SettingsSection {
@@ -208,12 +205,6 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "updates",
     label: "Updates",
     icon: Download,
-  },
-  {
-    value: "doctor",
-    label: "Doctor",
-    icon: Stethoscope,
-    featureGate: "doctor",
   },
 ];
 
@@ -716,6 +707,7 @@ export function renderSettingsSection(
       return (
         <div className="space-y-12">
           <PreventSleepSettingsCard />
+          <DoctorSettingsPanel />
           <GlobalAgentConfigSettingsCard />
         </div>
       );
@@ -741,8 +733,6 @@ export function renderSettingsSection(
       return <MobilePairingCard currentPubkey={props.currentPubkey} />;
     case "updates":
       return <UpdateChecker />;
-    case "doctor":
-      return <DoctorSettingsPanel />;
     default: {
       const exhaustiveCheck: never = section;
       return exhaustiveCheck;

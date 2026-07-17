@@ -13,6 +13,7 @@ type ProfileAvatarProps = {
   label: string;
   className?: string;
   iconClassName?: string;
+  imageClassName?: string;
   plain?: boolean;
   testId?: string;
 };
@@ -23,6 +24,7 @@ export function ProfileAvatar({
   label,
   className,
   iconClassName,
+  imageClassName,
   plain = false,
   testId,
 }: ProfileAvatarProps) {
@@ -67,7 +69,7 @@ export function ProfileAvatar({
       {src !== undefined ? (
         <AvatarImage
           alt={`${label} avatar`}
-          className="object-cover"
+          className={cn("object-cover", imageClassName)}
           data-testid={testId ? `${testId}-image` : undefined}
           onLoadingStatusChange={(status) => {
             if (status === "error") setFailedSrc(liveSrc);

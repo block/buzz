@@ -495,8 +495,8 @@ function RuntimeProvidersSection({
           className="max-w-[560px] rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground"
           data-testid="onboarding-acp-empty"
         >
-          No compatible ACP runtimes detected yet. You can finish setup now and
-          come back later in Settings &gt; Doctor.
+          No compatible agent runtimes detected yet. You can finish setup now
+          and come back later in Settings &gt; Agents.
         </p>
       )}
 

@@ -15,7 +15,7 @@ const SHOTS = "test-results/screenshots-doctor";
 const GOOSE_AVAILABLE = {
   id: "goose",
   label: "Goose",
-  avatar_url: "",
+  avatar_url: "https://goose-docs.ai/img/logo_dark.png",
   availability: "available",
   command: "goose",
   binary_path: "/usr/local/bin/goose",
@@ -54,7 +54,8 @@ const BUZZ_AGENT_AVAILABLE = {
 const CLAUDE_AVAILABLE_LOGGED_IN = {
   id: "claude",
   label: "Claude Code",
-  avatar_url: "",
+  avatar_url:
+    "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default",
   availability: "available",
   command: "claude-agent-acp",
   binary_path: "/usr/local/bin/claude-agent-acp",
@@ -76,7 +77,8 @@ const CLAUDE_AVAILABLE_LOGGED_IN = {
 const CODEX_NOT_INSTALLED = {
   id: "codex",
   label: "Codex",
-  avatar_url: "",
+  avatar_url:
+    "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default",
   availability: "not_installed",
   command: null,
   binary_path: null,
@@ -111,9 +113,116 @@ test.describe("Doctor panel state screenshots", () => {
   });
 
   /**
-   * 01 — available runtime that passed the auth probe: green "Authenticated"
-   * badge appears below the binary path.
+   * 00 — the runtime catalog reads as a set of individual status cards rather
+   * than one continuous table.
    */
+  test("00-runtime-card-layout", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        CODEX_NOT_INSTALLED,
+        BUZZ_AGENT_AVAILABLE,
+      ],
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "agents");
+
+    const runtimeList = page.getByTestId("doctor-runtime-list");
+    await expect(runtimeList).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("doctor-runtime-goose")).toBeVisible();
+    await expect(page.getByTestId("doctor-runtime-codex")).toBeVisible();
+    await expect(
+      runtimeList.locator(":scope > [data-testid^='doctor-runtime-']"),
+    ).toHaveCount(4);
+    expect(
+      await runtimeList
+        .locator(":scope > [data-testid^='doctor-runtime-']")
+        .evaluateAll((rows) =>
+          rows.map((row) => row.getAttribute("data-testid")),
+        ),
+    ).toEqual([
+      "doctor-runtime-buzz-agent",
+      "doctor-runtime-goose",
+      "doctor-runtime-claude",
+      "doctor-runtime-codex",
+    ]);
+    for (const runtimeId of ["goose", "claude", "codex", "buzz-agent"]) {
+      await expect(
+        page.getByTestId(`doctor-runtime-logo-${runtimeId}`),
+      ).toBeVisible();
+    }
+    const rowHeights = await Promise.all(
+      ["goose", "claude", "codex", "buzz-agent"].map((runtimeId) =>
+        page
+          .getByTestId(`doctor-runtime-${runtimeId}`)
+          .evaluate((element) =>
+            Math.round(element.getBoundingClientRect().height),
+          ),
+      ),
+    );
+    expect(new Set(rowHeights).size).toBe(1);
+    const [gooseColors, codexColors] = await Promise.all(
+      ["goose", "codex"].map((runtimeId) =>
+        page.getByTestId(`doctor-runtime-${runtimeId}`).evaluate((element) => {
+          const styles = getComputedStyle(element);
+          return {
+            backgroundColor: styles.backgroundColor,
+            borderColor: styles.borderColor,
+          };
+        }),
+      ),
+    );
+    expect(codexColors).toEqual(gooseColors);
+    await expect(
+      page
+        .getByRole("heading", { name: "Agent runtimes" })
+        .locator("..")
+        .locator(".."),
+    ).toHaveCSS("align-items", "center");
+    for (const runtimeId of ["goose", "claude", "buzz-agent"]) {
+      await expect(
+        page.getByTestId(`doctor-runtime-menu-${runtimeId}`),
+      ).toHaveCount(0);
+    }
+    await expect(
+      page.getByTestId("doctor-runtime-toggle-codex"),
+    ).not.toBeChecked();
+    await expect(page.getByTestId("doctor-runtime-toggle-codex")).toBeEnabled();
+    for (const runtimeId of ["goose", "codex"]) {
+      const toggle = page.getByTestId(`doctor-runtime-toggle-${runtimeId}`);
+      await expect(toggle).toHaveClass(/shadow-none/);
+      await expect(toggle.locator("span")).toHaveClass(/shadow-none/);
+    }
+    await expect(
+      page.getByRole("menuitem", { name: "Instructions" }),
+    ).toHaveCount(0);
+    await page.getByTestId("doctor-runtime-menu-codex").click();
+    await expect(
+      page.getByRole("menuitem", { name: "Instructions" }),
+    ).toBeVisible();
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: `${SHOTS}/00-runtime-overflow-menu.png`,
+    });
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("doctor-runtime-toggle-goose")).toBeChecked();
+    await expect(
+      page.getByTestId("doctor-runtime-toggle-goose"),
+    ).toBeDisabled();
+    await expect(page.getByTestId("doctor-runtime-codex")).not.toContainText(
+      "Not installed",
+    );
+
+    await runtimeList.scrollIntoViewIfNeeded();
+    await waitForAnimations(page);
+    await runtimeList.screenshot({
+      path: `${SHOTS}/00-runtime-card-layout.png`,
+    });
+  });
+
+  /** 01 — a ready runtime stays compact without redundant status copy. */
   test("01-auth-logged-in", async ({ page }) => {
     await installMockBridge(page, {
       acpRuntimesCatalog: [
@@ -125,11 +234,18 @@ test.describe("Doctor panel state screenshots", () => {
     });
 
     await page.goto("/", { waitUntil: "domcontentloaded" });
-    await openSettings(page, "doctor");
+    await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-claude");
     await expect(row).toBeVisible({ timeout: 10_000 });
-    await expect(row).toContainText("Authenticated");
+    await expect(
+      page.getByTestId("doctor-runtime-toggle-claude"),
+    ).toBeChecked();
+    await expect(row).not.toContainText("Authenticated");
+    await expect(row).not.toContainText("Available");
+    await expect(row).not.toContainText("claude-agent-acp");
+    await expect(row).not.toContainText("/usr/local/bin");
+    await expect(page.getByTestId("doctor-runtime-menu-claude")).toHaveCount(0);
 
     await row.scrollIntoViewIfNeeded();
     await waitForAnimations(page);
@@ -137,8 +253,8 @@ test.describe("Doctor panel state screenshots", () => {
   });
 
   /**
-   * 02 — available runtime that failed the auth probe: amber "Not
-   * authenticated" badge + login hint shown below the binary path.
+   * 02 — an available runtime that needs authentication stays the same height
+   * as the others and moves setup instructions into its overflow menu.
    */
   test("02-auth-logged-out", async ({ page }) => {
     await installMockBridge(page, {
@@ -159,12 +275,23 @@ test.describe("Doctor panel state screenshots", () => {
     });
 
     await page.goto("/", { waitUntil: "domcontentloaded" });
-    await openSettings(page, "doctor");
+    await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-codex");
     await expect(row).toBeVisible({ timeout: 10_000 });
-    await expect(row).toContainText("Not authenticated");
-    await expect(row).toContainText("Run `codex login` to authenticate.");
+    await expect(row).not.toContainText("Not authenticated");
+    await expect(row).not.toContainText("Run `codex login` to authenticate.");
+    await expect(row).toHaveCSS(
+      "height",
+      await page
+        .getByTestId("doctor-runtime-goose")
+        .evaluate((element) => getComputedStyle(element).height),
+    );
+    await page.getByTestId("doctor-runtime-menu-codex").click();
+    await expect(
+      page.getByRole("menuitem", { name: "Instructions" }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
 
     await row.scrollIntoViewIfNeeded();
     await waitForAnimations(page);
@@ -172,8 +299,8 @@ test.describe("Doctor panel state screenshots", () => {
   });
 
   /**
-   * 03 — available runtime whose CLI has a config-parse error: red "Config
-   * error" badge + diagnostic excerpt shown below the binary path.
+   * 03 — a runtime with invalid configuration remains compact and exposes its
+   * setup instructions from overflow instead of expanding the row.
    */
   test("03-auth-config-error", async ({ page }) => {
     const diagnostic =
@@ -192,12 +319,23 @@ test.describe("Doctor panel state screenshots", () => {
     });
 
     await page.goto("/", { waitUntil: "domcontentloaded" });
-    await openSettings(page, "doctor");
+    await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-claude");
     await expect(row).toBeVisible({ timeout: 10_000 });
-    await expect(row).toContainText("Config error");
-    await expect(row).toContainText("error loading configuration");
+    await expect(row).not.toContainText("Config error");
+    await expect(row).not.toContainText("error loading configuration");
+    await expect(row).toHaveCSS(
+      "height",
+      await page
+        .getByTestId("doctor-runtime-goose")
+        .evaluate((element) => getComputedStyle(element).height),
+    );
+    await page.getByTestId("doctor-runtime-menu-claude").click();
+    await expect(
+      page.getByRole("menuitem", { name: "Instructions" }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
 
     await row.scrollIntoViewIfNeeded();
     await waitForAnimations(page);
@@ -205,9 +343,8 @@ test.describe("Doctor panel state screenshots", () => {
   });
 
   /**
-   * 04 — adapter_missing runtime with node_required: true: the amber "Node.js
-   * is required…" callout replaces the Install button so the user cannot
-   * inadvertently trigger a doomed npm install.
+   * 04 — adapter_missing runtime with node_required: true: the off toggle is
+   * disabled, and the Node.js action moves into the overflow menu.
    */
   test("04-node-required", async ({ page }) => {
     await installMockBridge(page, {
@@ -227,15 +364,26 @@ test.describe("Doctor panel state screenshots", () => {
     });
 
     await page.goto("/", { waitUntil: "domcontentloaded" });
-    await openSettings(page, "doctor");
+    await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-codex");
     await expect(row).toBeVisible({ timeout: 10_000 });
-    await expect(row).toContainText("Node.js is required");
-    // Exact-name match so "Install Node.js" (inside the callout) is not counted.
+    const toggle = page.getByTestId("doctor-runtime-toggle-codex");
+    await expect(toggle).not.toBeChecked();
+    await expect(toggle).toBeDisabled();
+    await expect(row).not.toContainText("Adapter needed");
+    await expect(row).not.toContainText("Node.js is required");
+    await expect(row).toHaveCSS(
+      "height",
+      await page
+        .getByTestId("doctor-runtime-goose")
+        .evaluate((element) => getComputedStyle(element).height),
+    );
+    await page.getByTestId("doctor-runtime-menu-codex").click();
     await expect(
-      row.getByRole("button", { name: "Install", exact: true }),
-    ).toHaveCount(0);
+      page.getByRole("menuitem", { name: "Install Node.js" }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
 
     await row.scrollIntoViewIfNeeded();
     await waitForAnimations(page);
@@ -243,13 +391,13 @@ test.describe("Doctor panel state screenshots", () => {
   });
 
   /**
-   * 05 — a failed install renders a "Retry" button; clicking Retry succeeds.
+   * 05 — a failed toggle install returns to off; toggling again retries.
    *
    * The mock is configured with a two-call sequence:
    *   call 1 → failure (E404)
    *   call 2 → success
-   * This exercises the full Retry UX path: fail state → click Retry →
-   * spinner → success banner.
+   * This exercises the full retry path: fail state → toggle on again →
+   * success banner.
    */
   test("05-retry-after-failure", async ({ page }) => {
     await installMockBridge(page, {
@@ -263,6 +411,7 @@ test.describe("Doctor panel state screenshots", () => {
         },
         BUZZ_AGENT_AVAILABLE,
       ],
+      installAcpRuntimeDelayMs: 250,
       installAcpRuntimeResults: [
         {
           success: false,
@@ -294,19 +443,25 @@ test.describe("Doctor panel state screenshots", () => {
     });
 
     await page.goto("/", { waitUntil: "domcontentloaded" });
-    await openSettings(page, "doctor");
+    await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-codex");
     await expect(row).toBeVisible({ timeout: 10_000 });
+    await expect(row).not.toContainText("Not installed");
 
     // Trigger the first install — the mock returns a failure.
-    const installBtn = row.getByRole("button", { name: "Install Codex" });
-    await expect(installBtn).toBeVisible({ timeout: 5_000 });
-    await installBtn.click();
+    const toggle = page.getByTestId("doctor-runtime-toggle-codex");
+    await expect(toggle).not.toBeChecked();
+    await expect(toggle).toBeEnabled();
+    await toggle.click();
+    const loading = page.getByTestId("doctor-runtime-loading-codex");
+    await expect(loading).toBeVisible();
+    await expect(toggle).toHaveCount(0);
 
-    // After failure: Retry button appears and the error message is visible.
-    const retryBtn = row.getByRole("button", { name: "Retry Install Codex" });
-    await expect(retryBtn).toBeVisible({ timeout: 5_000 });
+    // After failure: the toggle returns to off and the error is visible.
+    await expect(loading).toHaveCount(0, { timeout: 5_000 });
+    await expect(toggle).not.toBeChecked({ timeout: 5_000 });
+    await expect(toggle).toBeEnabled();
     await expect(row).toContainText("Step");
     await expect(row).toContainText("failed");
 
@@ -314,17 +469,21 @@ test.describe("Doctor panel state screenshots", () => {
     await waitForAnimations(page);
     await row.screenshot({ path: `${SHOTS}/05-retry-after-failure.png` });
 
-    // Click Retry — the mock returns success on the second call.
-    await retryBtn.click();
+    // Toggle on again — the mock returns success on the second call.
+    await toggle.click();
+    await expect(loading).toBeVisible();
+    await expect(toggle).toHaveCount(0);
 
-    // Error paragraph must disappear and per-runtime spinner must appear,
-    // then the success banner must render.
+    // The error disappears, then the success banner and on state render.
+    await expect(loading).toHaveCount(0, { timeout: 5_000 });
     await expect(row).not.toContainText("failed", { timeout: 5_000 });
     await expect(
       row.getByText("Codex installed. Checking for sign-in options..."),
     ).toBeVisible({
       timeout: 10_000,
     });
+    await expect(toggle).toBeChecked();
+    await expect(toggle).toBeDisabled();
 
     await row.scrollIntoViewIfNeeded();
     await waitForAnimations(page);
@@ -332,9 +491,8 @@ test.describe("Doctor panel state screenshots", () => {
   });
 
   /**
-   * 06 — logged-out runtime with adapter-advertised auth methods: Doctor shows
-   * adapter-provided labels/descriptions and clicking one launches the
-   * vendor-owned flow through the mocked connect command.
+   * 06 — adapter-provided account methods appear in the overflow menu and
+   * launch the vendor-owned flow without expanding the runtime row.
    */
   test("06-connect-account-methods", async ({ page }) => {
     await installMockBridge(page, {
@@ -368,28 +526,36 @@ test.describe("Doctor panel state screenshots", () => {
     });
 
     await page.goto("/", { waitUntil: "domcontentloaded" });
-    await openSettings(page, "doctor");
+    await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-codex");
     await expect(row).toBeVisible({ timeout: 10_000 });
-    await expect(row).toContainText("Not authenticated");
-    await expect(row).toContainText("Sign in with ChatGPT");
-    await expect(row).toContainText(
-      "Use your Codex subscription in the browser.",
+    await expect(row).not.toContainText("Not authenticated");
+    await expect(row).toHaveCSS(
+      "height",
+      await page
+        .getByTestId("doctor-runtime-goose")
+        .evaluate((element) => getComputedStyle(element).height),
     );
-    await expect(row).toContainText("Credentials stay with Codex.");
-
-    await row.getByRole("button", { name: "Sign in with ChatGPT" }).click();
+    await page.getByTestId("doctor-runtime-menu-codex").click();
     await expect(
-      row.getByRole("button", { name: "Connecting..." }),
+      page.getByRole("menuitem", { name: "Sign in with ChatGPT" }),
     ).toBeVisible({
       timeout: 5_000,
     });
+    await page.getByRole("menuitem", { name: "Sign in with ChatGPT" }).click();
+    const loading = page.getByTestId("doctor-runtime-loading-codex");
+    await expect(loading).toBeVisible();
+    await expect(page.getByTestId("doctor-runtime-toggle-codex")).toHaveCount(
+      0,
+    );
+    await expect(loading).toHaveCount(0, { timeout: 5_000 });
+    await expect(page.getByTestId("doctor-runtime-toggle-codex")).toBeChecked();
   });
 
   /**
-   * 07 — old or constrained adapter with no advertised auth methods: Doctor
-   * falls back to manual instructions instead of inventing a login command.
+   * 07 — an adapter with no advertised auth methods shows only its manual
+   * instructions in overflow and keeps the row compact.
    */
   test("07-connect-account-no-methods", async ({ page }) => {
     await installMockBridge(page, {
@@ -409,14 +575,23 @@ test.describe("Doctor panel state screenshots", () => {
     });
 
     await page.goto("/", { waitUntil: "domcontentloaded" });
-    await openSettings(page, "doctor");
+    await openSettings(page, "agents");
 
     const row = page.getByTestId("doctor-runtime-claude");
     await expect(row).toBeVisible({ timeout: 10_000 });
-    await expect(row).toContainText("Not authenticated");
-    await expect(row).toContainText(
-      "This adapter did not advertise a built-in login flow.",
+    await expect(row).not.toContainText("Not authenticated");
+    await expect(row).toHaveCSS(
+      "height",
+      await page
+        .getByTestId("doctor-runtime-goose")
+        .evaluate((element) => getComputedStyle(element).height),
     );
-    await expect(row).not.toContainText("Connect account");
+    await page.getByTestId("doctor-runtime-menu-claude").click();
+    await expect(
+      page.getByRole("menuitem", { name: "Instructions" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("menuitem", { name: "Sign in with ChatGPT" }),
+    ).toHaveCount(0);
   });
 });

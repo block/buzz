@@ -1491,11 +1491,11 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   });
 });
 
-test("shows doctor checks for local CLI tooling", async ({ page }) => {
+test("shows agent runtimes in agent settings", async ({ page }) => {
   await page.goto("/");
 
-  await openSettings(page, "doctor");
+  await openSettings(page, "agents");
 
-  await expect(page.getByTestId("settings-doctor")).toBeVisible();
+  await expect(page.getByTestId("settings-agent-runtimes")).toBeVisible();
   await expect(page.getByTestId("doctor-runtime-goose")).toContainText("Goose");
 });
