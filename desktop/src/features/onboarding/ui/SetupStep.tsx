@@ -405,6 +405,7 @@ function RuntimeCard({
   const canSelect = runtimeCanBeSelected(runtime) && !selectionDisabled;
 
   return (
+    // biome-ignore lint/a11y/useSemanticElements: Cannot use <input> because this card contains nested setup and details buttons, which require interactive content
     <div
       aria-checked={selected}
       aria-disabled={!canSelect}

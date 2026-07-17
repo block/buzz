@@ -3,6 +3,9 @@ use std::{
     process::{Command, Stdio},
 };
 
+#[cfg(target_os = "macos")]
+use std::{fs, io::Write, os::unix::fs::PermissionsExt};
+
 use serde_json::Value;
 
 use serde::{Deserialize, Serialize};
@@ -308,6 +311,7 @@ fn terminal_auth_meta_command(method: &AcpAuthMethod) -> Result<Option<Vec<Strin
     Ok((!argv.is_empty()).then_some(argv))
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn spawn_without_stdio(mut command: Command) -> Result<(), String> {
     command
         .stdin(Stdio::null())
@@ -320,14 +324,36 @@ fn spawn_without_stdio(mut command: Command) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
-    let command = shell_join(argv);
-    let script = format!(
-        "tell application \"Terminal\"\n  activate\n  do script {}\nend tell",
-        applescript_string(&command)
-    );
-    let mut command = Command::new("osascript");
-    command.arg("-e").arg(script);
-    spawn_without_stdio(command)
+    let mut script = tempfile::Builder::new()
+        .prefix("buzz-auth-")
+        .suffix(".command")
+        .tempfile()
+        .map_err(|error| format!("failed to create terminal login script: {error}"))?;
+    writeln!(
+        script,
+        "#!/bin/sh\ntrap 'rm -f -- \"$0\"' EXIT\n{}",
+        shell_join(argv)
+    )
+    .map_err(|error| format!("failed to write terminal login script: {error}"))?;
+    fs::set_permissions(script.path(), fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("failed to prepare terminal login script: {error}"))?;
+    let script = script
+        .into_temp_path()
+        .keep()
+        .map_err(|error| format!("failed to preserve terminal login script: {error}"))?;
+
+    let status = Command::new("open")
+        .arg(&script)
+        .status()
+        .map_err(|error| format!("failed to open terminal: {error}"))?;
+    if !status.success() {
+        let _ = fs::remove_file(&script);
+        return Err(format!(
+            "failed to open terminal (exit {})",
+            status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -392,11 +418,6 @@ fn shell_escape(arg: &str) -> String {
         return arg.to_string();
     }
     format!("'{}'", arg.replace('\'', "'\\''"))
-}
-
-#[cfg(target_os = "macos")]
-fn applescript_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 #[cfg(test)]
