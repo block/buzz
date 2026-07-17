@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.13
+
+- fix(desktop): compare relay media origins case-insensitively so uploads render when the saved community URL has uppercase characters
+- fix(desktop): invalidate stale media lookups so an in-flight relay-origin fetch cannot repopulate caches after a community reset
+
 ## v0.4.12
 
 - fix(desktop): proxy authenticated relay media after cold-start community initialization

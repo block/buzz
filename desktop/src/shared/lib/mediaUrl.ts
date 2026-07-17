@@ -26,8 +26,31 @@ const RELAY_MEDIA_RE =
 let cachedPort: number | null = null;
 let portPromise: Promise<number | null> | null = null;
 
-/** Cached relay origin (e.g. "https://buzz-oss.stage.blox.sqprod.co"). */
+/**
+ * Cached relay origin (e.g. "https://buzz-oss.stage.blox.sqprod.co"),
+ * canonicalized via {@link canonicalOrigin} so comparisons are stable.
+ */
 let cachedRelayOrigin: string | null = null;
+
+/**
+ * Canonicalize a URL to its origin with a lowercased scheme/host.
+ *
+ * The relay always emits media URLs with a lowercased tenant host
+ * (`normalize_host` in buzz-core), but the saved community relay URL keeps
+ * whatever casing the user typed (DNS is case-insensitive, so an uppercase
+ * host connects fine). A raw string comparison between the two misclassifies
+ * the relay's own media URLs as external and skips the authenticated proxy.
+ * `new URL().origin` lowercases scheme + host and drops default ports.
+ *
+ * Returns null for unparseable input.
+ */
+function canonicalOrigin(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Monotonic cache generation. Async lookups capture the current generation and
@@ -52,7 +75,7 @@ async function fetchProxyPort(): Promise<number | null> {
     invoke<string>("get_relay_http_url")
       .then((url) => {
         if (generation === cacheGeneration) {
-          cachedRelayOrigin = url.replace(/\/+$/, "");
+          cachedRelayOrigin = canonicalOrigin(url);
         }
       })
       .catch(() => {});
@@ -117,8 +140,14 @@ export function rewriteRelayUrl(url: string): string {
   // (different origin) pass through unchanged — they work fine via WKWebView.
   // If the relay origin isn't cached yet, fall through to the rewrite path
   // as a safe default (relay URLs need the proxy to avoid Cloudflare 403s).
-  if (cachedRelayOrigin && !url.startsWith(`${cachedRelayOrigin}/`)) {
-    return url;
+  // Compare canonicalized origins: hosts are case-insensitive, and the relay
+  // always returns lowercased media URLs even when the saved community URL
+  // was typed with uppercase (e.g. wss://PENDING-SEED.communities.buzz.xyz).
+  if (cachedRelayOrigin) {
+    const urlOrigin = canonicalOrigin(url);
+    if (urlOrigin !== cachedRelayOrigin) {
+      return url;
+    }
   }
 
   if (cachedPort && cachedPort > 0) {
