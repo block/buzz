@@ -58,6 +58,7 @@ import {
   ANNOUNCEMENT_DEMO_PEOPLE,
   ANNOUNCEMENT_DEMO_PROJECT_SUBJECTS,
   ANNOUNCEMENT_DEMO_PROJECTS,
+  ANNOUNCEMENT_DEMO_STORY,
   type AnnouncementDemoAgentName,
   type AnnouncementDemoPersonKey,
 } from "@/testing/announcementDemoFixtures";
@@ -135,6 +136,8 @@ type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
     announcementDemo?: boolean;
+    /** Disable the cross-channel announcement story while retaining standalone demo fixtures. */
+    announcementDemoStory?: boolean;
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
@@ -2748,6 +2751,8 @@ const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 const pendingAnnouncementDemoAgentResponses = new Set<string>();
 const startedAnnouncementDemoLiveConversations = new Set<string>();
+let startedAnnouncementDemoStory = false;
+let announcementDemoStorySeq = Date.now();
 let mockGlobalAgentConfig: MockGlobalAgentConfig = {
   env_vars: {},
   provider: null,
@@ -4446,6 +4451,21 @@ async function requestAnnouncementDemoAgentReply(
   const provider = getAnnouncementDemoProviderConfig(agent);
   // The local Vite proxy keeps provider credentials out of the webview while
   // still allowing the native demo to use the settings entered in the app.
+  const scriptedReply =
+    sourceEvent.tags.some(
+      (tag) => tag[0] === "announcement-demo-story" && tag[1] === "retask",
+    ) ||
+    sourceEvent.tags.some(
+      (tag) => tag[0] === "announcement-demo-story" && tag[1] === "handoff",
+    )
+      ? ANNOUNCEMENT_DEMO_STORY.engineeringSequence.agentReplies[
+          agent.name as AnnouncementDemoAgentName
+        ]
+      : null;
+  if (scriptedReply) {
+    return scriptedReply;
+  }
+
   const response = await fetch("/__announcement-demo/agent-response", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -4509,6 +4529,15 @@ function publishAnnouncementDemoAgentReply(
     : buildTopLevelMessageTags(channelId, mentionPubkeys, agent.pubkey);
   if (isAgentChainEvent && continueAgentChain) {
     tags.push([ANNOUNCEMENT_DEMO_AGENT_CHAIN_TAG, "1"]);
+    if (
+      sourceEvent.tags.some(
+        (tag) =>
+          tag[0] === "announcement-demo-story" &&
+          (tag[1] === "retask" || tag[1] === "handoff"),
+      )
+    ) {
+      tags.push(["announcement-demo-story", "handoff"]);
+    }
   }
   const event = createMockEvent(
     9,
@@ -4526,12 +4555,15 @@ function publishAnnouncementDemoAgentReply(
       ANNOUNCEMENT_DEMO_AGENT_HANDOFF_DELAY_MS,
     );
   } else if (isAgentChainEvent && continueAgentChain) {
-    const humanClose = getAnnouncementDemoLiveConversation(channelId)
-      ?.humanClose ?? {
-      delayMs: 1_000,
-      author: "producer" as const,
-      content: "That’s the version. I can cut to that — nice swarm work 🐝",
-    };
+    const humanClose = sourceEvent.tags.some(
+      (tag) => tag[0] === "announcement-demo-story" && tag[1] === "handoff",
+    )
+      ? ANNOUNCEMENT_DEMO_STORY.engineeringSequence.humanClose
+      : (getAnnouncementDemoLiveConversation(channelId)?.humanClose ?? {
+          delayMs: 1_000,
+          author: "producer" as const,
+          content: "That’s the version. I can cut to that — nice swarm work 🐝",
+        });
     const closingAuthorPubkey = getAnnouncementDemoPersonPubkey(
       humanClose.author,
     );
@@ -4694,7 +4726,196 @@ function queueAnnouncementDemoAgentResponses(
   }
 }
 
+function startAnnouncementDemoStory() {
+  if (
+    startedAnnouncementDemoStory ||
+    !getConfig()?.mock?.announcementDemo ||
+    getConfig()?.mock?.announcementDemoStory === false
+  ) {
+    return;
+  }
+  startedAnnouncementDemoStory = true;
+  const pivotChannel = mockChannels.find(
+    (channel) => channel.name === ANNOUNCEMENT_DEMO_STORY.pivot.channelName,
+  );
+  if (pivotChannel) {
+    // The cross-channel story owns this channel from the moment the trigger is
+    // opened. Reserve it before background subscriptions can start the older
+    // standalone engineering conversation.
+    startedAnnouncementDemoLiveConversations.add(pivotChannel.id);
+  }
+  // Prime the feed notification hook with the empty baseline before the live
+  // mention arrives. Without this, a cold demo launch can classify the first
+  // alert as initial-load backlog and intentionally suppress its notification.
+  window.dispatchEvent(new CustomEvent("buzz:e2e-home-feed-updated"));
+
+  for (const cue of ANNOUNCEMENT_DEMO_STORY.workingTurns) {
+    const channel = mockChannels.find(
+      (candidate) => candidate.name === cue.channelName,
+    );
+    const agent = ANNOUNCEMENT_DEMO_AGENTS.find(
+      (candidate) => candidate.name === cue.agent,
+    );
+    if (!channel || !agent) {
+      continue;
+    }
+
+    announcementDemoStorySeq += 1;
+    const turnId = `announcement-demo-story-${cue.channelName}`;
+    const event = {
+      seq: announcementDemoStorySeq,
+      timestamp: new Date().toISOString(),
+      kind: "turn_started" as const,
+      agentIndex: 0,
+      channelId: channel.id,
+      sessionId: null,
+      turnId,
+      payload: null,
+    };
+    // Drive the same observer-derived store as a real harness turn. Unlike a
+    // typing fallback this works for background channels with no ChannelScreen
+    // mounted, which is exactly what the sidebar overview shot needs.
+    syncAgentTurnsFromEvents(agent.pubkey, [event]);
+    syncAgentObserverEvents(agent.pubkey, [event]);
+  }
+
+  const pivot = ANNOUNCEMENT_DEMO_STORY.pivot;
+  window.setTimeout(() => {
+    const channel = mockChannels.find(
+      (candidate) => candidate.name === pivot.channelName,
+    );
+    if (!channel) {
+      return;
+    }
+
+    const authorPubkey = getAnnouncementDemoPersonPubkey(pivot.author);
+    const viewerPubkey = getMockMemberPubkey(getConfig() ?? undefined);
+    const backgroundAgent = ANNOUNCEMENT_DEMO_AGENTS.find(
+      (candidate) => candidate.name === "Bumble",
+    );
+    if (backgroundAgent) {
+      announcementDemoStorySeq += 1;
+      const completed = {
+        seq: announcementDemoStorySeq,
+        timestamp: new Date().toISOString(),
+        kind: "turn_completed" as const,
+        agentIndex: 0,
+        channelId: channel.id,
+        sessionId: null,
+        turnId: `announcement-demo-story-${channel.name}`,
+        payload: null,
+      };
+      syncAgentTurnsFromEvents(backgroundAgent.pubkey, [completed]);
+      syncAgentObserverEvents(backgroundAgent.pubkey, [completed]);
+    }
+    // The story owns engineering; opening it after the notification must not
+    // also start its older standalone demo conversation.
+    startedAnnouncementDemoLiveConversations.add(channel.id);
+    const message = emitMockChannelMessage(
+      channel.id,
+      pivot.content,
+      null,
+      authorPubkey,
+      9,
+      [viewerPubkey],
+      [["announcement-demo-story", "pivot"]],
+      undefined,
+      mockEventId(),
+    );
+    mockFeedOverrides.mentions.unshift({
+      id: message.id,
+      kind: message.kind,
+      pubkey: message.pubkey,
+      content: message.content,
+      created_at: message.created_at,
+      channel_id: channel.id,
+      channel_name: channel.name,
+      tags: message.tags,
+      category: "mention",
+    });
+    // Refetching the feed exercises the production notification formatter,
+    // sound, native notification, and notification click-through path.
+    window.dispatchEvent(new CustomEvent("buzz:e2e-home-feed-updated"));
+
+    const sequence = ANNOUNCEMENT_DEMO_STORY.engineeringSequence;
+    window.setTimeout(() => {
+      emitMockTypingIndicator(
+        channel.id,
+        getAnnouncementDemoPersonPubkey(sequence.insight.author),
+      );
+      window.setTimeout(() => {
+        emitMockChannelMessage(
+          channel.id,
+          sequence.insight.content,
+          null,
+          getAnnouncementDemoPersonPubkey(sequence.insight.author),
+          9,
+          undefined,
+          [["announcement-demo-story", "insight"]],
+          undefined,
+          mockEventId(),
+        );
+      }, 700);
+    }, sequence.insight.delayMs);
+
+    window.setTimeout(() => {
+      emitMockTypingIndicator(channel.id, viewerPubkey);
+      window.setTimeout(() => {
+        const bumble = ANNOUNCEMENT_DEMO_AGENTS.find(
+          (candidate) => candidate.name === "Bumble",
+        );
+        if (!bumble) {
+          return;
+        }
+        emitMockChannelMessage(
+          channel.id,
+          sequence.retask.content,
+          null,
+          viewerPubkey,
+          9,
+          [bumble.pubkey],
+          [
+            [ANNOUNCEMENT_DEMO_AGENT_CHAIN_TAG, "1"],
+            ["announcement-demo-story", "retask"],
+          ],
+          undefined,
+          mockEventId(),
+        );
+      }, 900);
+    }, sequence.retask.delayMs);
+  }, pivot.delayMs);
+}
+
+function handleAnnouncementDemoStoryClick(event: MouseEvent) {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+  const triggerTestId = `channel-${ANNOUNCEMENT_DEMO_STORY.triggerChannelName}`;
+  if (event.target.closest(`[data-testid="${triggerTestId}"]`)) {
+    startAnnouncementDemoStory();
+  }
+}
+
 function maybeStartAnnouncementDemoLiveConversation(channelId: string) {
+  const channel = mockChannels.find((candidate) => candidate.id === channelId);
+  if (
+    channel?.name === ANNOUNCEMENT_DEMO_STORY.triggerChannelName &&
+    getConfig()?.mock?.announcementDemoStory !== false
+  ) {
+    // A live subscription can be created for the restored/default route before
+    // the viewer interacts with the sidebar. Reserve the pivot immediately so
+    // its standalone conversation cannot race the film, but wait for the
+    // viewer's actual sidebar click before starting any visible story beats.
+    const pivotChannel = mockChannels.find(
+      (candidate) =>
+        candidate.name === ANNOUNCEMENT_DEMO_STORY.pivot.channelName,
+    );
+    if (pivotChannel) {
+      startedAnnouncementDemoLiveConversations.add(pivotChannel.id);
+    }
+    return;
+  }
+
   if (
     startedAnnouncementDemoLiveConversations.has(channelId) ||
     !getConfig()?.mock?.announcementDemo
@@ -9541,6 +9762,12 @@ export function maybeInstallE2eTauriMocks() {
   resetMockUserStatuses();
   resetMockPendingCommunityDeepLinks(config);
   mockWebsocketSendMutexWedged = false;
+  if (config.mock?.announcementDemo) {
+    // Subscription creation is not proof of user intent: the app may restore
+    // or default to flight-path during startup. Gate the film on the actual
+    // sidebar click so the opening frame remains under the recorder's control.
+    window.addEventListener("click", handleAnnouncementDemoStoryClick);
+  }
   // The browser test harness has no Tauri globals, so install the complete
   // window mock there. The native announcement demo already has Tauri's
   // read-only `window.__TAURI_INTERNALS__` binding; attempting to replace it

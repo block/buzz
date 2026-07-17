@@ -66,6 +66,55 @@ export const ANNOUNCEMENT_DEMO_AGENTS = [
 export type AnnouncementDemoAgentName =
   (typeof ANNOUNCEMENT_DEMO_AGENTS)[number]["name"];
 
+/**
+ * Cross-channel cues for the short announcement film. Opening the trigger
+ * channel starts real observer-derived turns in the background channels, then
+ * delivers a live mention in the pivot channel. The mention is also inserted
+ * into the Home feed so the production notification path owns the native
+ * notification and click-through behavior.
+ */
+export const ANNOUNCEMENT_DEMO_STORY = {
+  triggerChannelName: "flight-path",
+  pivot: {
+    delayMs: 8_000,
+    channelName: "engineering",
+    author: "engineer",
+    content:
+      "@Alex Rivera — before this prototype gets any bigger, we should talk stack. We’re hand-rolling the iOS and Android views separately and it’s already drifting.",
+  },
+  engineeringSequence: {
+    insight: {
+      delayMs: 2_500,
+      author: "data",
+      content:
+        "Honestly? Move it to Flutter now. One codebase, both platforms, and we stop maintaining two of everything. Cheap to switch today, expensive in a month.",
+    },
+    retask: {
+      delayMs: 4_000,
+      content:
+        "@Bumble New direction, team — we’re moving the prototype to Flutter. Can you and the others re-plan the port and start scaffolding?",
+    },
+    agentReplies: {
+      Bumble:
+        "🫡 On it — mapping the current React views to Flutter widgets now. Handing the state layer to @Fizz.",
+      Fizz: "Got the state layer — porting the game loop to Flutter, keeping the tuned physics. @Honey, UI shell?",
+      Honey:
+        "Building the Flutter widget tree from the existing designs — same look, one codebase. 🍯",
+    },
+    humanClose: {
+      delayMs: 1_100,
+      author: "data",
+      content:
+        "That’s the version. One stack, both platforms — nice pivot, team. 🐝",
+    },
+  },
+  workingTurns: [
+    { channelName: "design", agent: "Honey" },
+    { channelName: "engineering", agent: "Bumble" },
+    { channelName: "marketing", agent: "Fizz" },
+  ],
+} as const;
+
 export const ANNOUNCEMENT_DEMO_LIVE_CONVERSATIONS = [
   {
     channelName: "flight-path",

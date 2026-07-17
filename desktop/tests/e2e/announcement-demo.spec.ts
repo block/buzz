@@ -61,6 +61,14 @@ test("announcement demo loads its workspace, people, and projects", async ({
     });
   });
   await page.goto("/?demo=announcement");
+  await page.evaluate(() => {
+    const config = (
+      window as Window & {
+        __BUZZ_E2E__?: { mock?: { announcementDemoStory?: boolean } };
+      }
+    ).__BUZZ_E2E__;
+    if (config?.mock) config.mock.announcementDemoStory = false;
+  });
   await page.waitForFunction(
     () =>
       typeof (
@@ -357,4 +365,152 @@ test("announcement demo loads its workspace, people, and projects", async ({
       ),
     ).toBeVisible();
   }
+});
+
+test("announcement story shows background work and pivots through a mention", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(30_000);
+  await context.grantPermissions(["notifications"]);
+  // The E2E bridge exposes Tauri internals, but Chromium reports Linux. Force
+  // the browser notification branch so its click target is inspectable here;
+  // the packaged Linux build uses the equivalent native backend action.
+  await page.addInitScript(() => {
+    const notificationLog: Array<{
+      body: string | null;
+      title: string;
+    }> = [];
+    const notifications: Array<{
+      body: string | null;
+      instance: Notification;
+      title: string;
+    }> = [];
+    class DemoNotification extends EventTarget {
+      static permission: NotificationPermission = "granted";
+      static async requestPermission() {
+        return DemoNotification.permission;
+      }
+      body: string | null;
+      onclick: ((event: Event) => void) | null = null;
+      title: string;
+      constructor(title: string, options?: NotificationOptions) {
+        super();
+        this.title = title;
+        this.body = options?.body ?? null;
+        notifications.push({ body: this.body, instance: this, title });
+        notificationLog.push({ body: this.body, title });
+      }
+      close() {}
+    }
+    Object.defineProperty(window, "Notification", {
+      configurable: true,
+      value: DemoNotification,
+    });
+    Object.assign(window, {
+      __BUZZ_E2E_CLICK_NOTIFICATION__: (index: number) => {
+        const notification = notifications[index]?.instance;
+        if (!notification) return false;
+        const event = new Event("click");
+        notification.dispatchEvent(event);
+        notification.onclick?.(event);
+        return true;
+      },
+      __BUZZ_E2E_NOTIFICATIONS__: notificationLog,
+    });
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      value: "MacIntel",
+    });
+  });
+  await page.goto("/?demo=announcement");
+  expect(
+    await page.evaluate(() => ({
+      permission: Notification.permission,
+      platform: navigator.platform,
+    })),
+  ).toEqual({ permission: "granted", platform: "MacIntel" });
+  await expect(page.getByText("The Hive", { exact: true })).toBeVisible();
+
+  // Startup may restore or default to flight-path and subscribe immediately;
+  // that must not start the film before the recorder's explicit sidebar click.
+  for (const channel of ["design", "engineering", "marketing"] as const) {
+    await expect(page.getByTestId(`channel-working-${channel}`)).toHaveCount(0);
+  }
+  await page.waitForTimeout(1_000);
+  for (const channel of ["design", "engineering", "marketing"] as const) {
+    await expect(page.getByTestId(`channel-working-${channel}`)).toHaveCount(0);
+  }
+
+  await page.getByTestId("channel-flight-path").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("flight-path");
+
+  for (const channel of ["design", "engineering", "marketing"] as const) {
+    const badge = page.getByTestId(`channel-working-${channel}`);
+    await expect(badge).toBeVisible();
+    await expect(badge).toContainText(/^\d+s$/);
+  }
+
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const win = window as Window & {
+            __BUZZ_E2E_NOTIFICATIONS__?: Array<{
+              body: string | null;
+              title: string;
+            }>;
+          };
+          return win.__BUZZ_E2E_NOTIFICATIONS__ ?? [];
+        }),
+      { timeout: 12_000 },
+    )
+    .toEqual([
+      {
+        body: expect.stringContaining("before this prototype gets any bigger"),
+        title: expect.stringContaining("mentioned you in #engineering"),
+      },
+    ]);
+
+  const clickedNotification = await page.evaluate(() => {
+    const win = window as Window & {
+      __BUZZ_E2E_CLICK_NOTIFICATION__?: (index: number) => boolean;
+    };
+    return win.__BUZZ_E2E_CLICK_NOTIFICATION__?.(0) ?? false;
+  });
+  expect(clickedNotification).toBe(true);
+
+  await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "it’s already drifting",
+  );
+  await expect(page.getByTestId("channel-working-engineering")).toHaveCount(0);
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "Move it to Flutter now",
+    { timeout: 5_000 },
+  );
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "we’re moving the prototype to Flutter",
+    { timeout: 7_000 },
+  );
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "mapping the current React views to Flutter widgets",
+    { timeout: 6_000 },
+  );
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "porting the game loop to Flutter",
+    { timeout: 6_000 },
+  );
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "Building the Flutter widget tree",
+    { timeout: 6_000 },
+  );
+  await expect(page.getByTestId("message-timeline")).not.toContainText(
+    "connection hiccup",
+  );
+  await expect(
+    page
+      .getByTestId("message-row")
+      .filter({ hasText: "One stack, both platforms" }),
+  ).toHaveCount(1);
 });
