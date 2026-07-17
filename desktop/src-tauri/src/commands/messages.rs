@@ -877,6 +877,10 @@ pub async fn edit_message(
     content: String,
     media_tags: Vec<Vec<String>>,
     emoji_tags: Option<Vec<Vec<String>>>,
+    // Pubkeys of mentions *newly added* by this edit (the composer diffs the
+    // edited body against the original). Only these get a `p` tag, so a typo-fix
+    // edit that leaves the mention set unchanged never re-wakes anyone.
+    mention_pubkeys: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
@@ -889,8 +893,16 @@ pub async fn edit_message(
         return Err("edit must have content or attachments".into());
     }
     let emoji = emoji_tags.unwrap_or_default();
-    let builder =
-        events::build_message_edit(channel_uuid, target_eid, trimmed, &media_tags, &emoji)?;
+    let mentions = mention_pubkeys.unwrap_or_default();
+    let mention_refs: Vec<&str> = mentions.iter().map(|s| s.as_str()).collect();
+    let builder = events::build_message_edit(
+        channel_uuid,
+        target_eid,
+        trimmed,
+        &media_tags,
+        &emoji,
+        &mention_refs,
+    )?;
     submit_event(builder, &state).await?;
     Ok(())
 }

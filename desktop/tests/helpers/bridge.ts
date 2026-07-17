@@ -219,6 +219,17 @@ type MockBridgeOptions = {
    * build (toggle functional). Drives LocalArchiveSettingsCard policy state.
    */
   observerArchiveDefaultEnabled?: boolean;
+  /**
+   * Delay (ms) applied to `observer_archive_default_enabled` so specs can
+   * assert the pending-reconciliation state (toggle disabled, no
+   * `list_save_subscriptions` call yet) before the policy resolves.
+   */
+  observerArchiveDefaultEnabledDelayMs?: number;
+  /**
+   * When set, `observer_archive_default_enabled` throws with this message —
+   * drives the fail-closed path when the policy check itself fails.
+   */
+  observerArchiveDefaultEnabledError?: string;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
   // tests/e2e/identity-archive.spec.ts.
   /**

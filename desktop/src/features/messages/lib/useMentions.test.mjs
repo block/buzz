@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { hasMention } from "./hasMention.ts";
+import { getMentionOffset, hasMention } from "./hasMention.ts";
 
 // ── Plain @mention ────────────────────────────────────────────────────
 
@@ -93,4 +93,45 @@ test("handles regex special characters in name", () => {
 test("does not false-positive on partial name match", () => {
   // "Al" should not match inside "@Alice"
   assert.equal(hasMention("@Alice", "Al"), false);
+});
+
+// ── Markdown code ─────────────────────────────────────────────────────
+
+test("ignores mentions in inline code", () => {
+  assert.equal(hasMention("run `notify @Alice now`", "Alice"), false);
+  assert.equal(hasMention("run ``notify `x` @Alice``", "Alice"), false);
+});
+
+test("ignores mentions in fenced code blocks", () => {
+  assert.equal(
+    hasMention("before\n```ts\nnotify(@Alice)\n```\nafter", "Alice"),
+    false,
+  );
+  assert.equal(hasMention("~~~\r\n@Alice\r\n~~~", "Alice"), false);
+});
+
+test("ignores mentions in indented code blocks", () => {
+  assert.equal(hasMention("before\n    @Alice\nafter", "Alice"), false);
+  assert.equal(hasMention("before\n\t@Alice\nafter", "Alice"), false);
+});
+
+test("still matches prose mentions around code", () => {
+  assert.equal(hasMention("`@Alice` then @Alice", "Alice"), true);
+  assert.equal(hasMention("```\n@Alice\n```\n@Alice", "Alice"), true);
+  assert.equal(hasMention("    @Alice\n@Alice", "Alice"), true);
+});
+
+test("preserves the original offset after masked code", () => {
+  const text = "`@Alice` then @Alice";
+  assert.equal(getMentionOffset(text, "Alice"), text.lastIndexOf("@Alice"));
+});
+
+test("does not treat escaped or unclosed backticks as code", () => {
+  assert.equal(hasMention("\\` @Alice", "Alice"), true);
+  assert.equal(hasMention("` @Alice", "Alice"), true);
+});
+
+test("requires matching inline-code delimiter lengths", () => {
+  assert.equal(hasMention("`` @Alice ` still code ``", "Alice"), false);
+  assert.equal(hasMention("`` @Alice `", "Alice"), true);
 });

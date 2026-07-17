@@ -18,6 +18,15 @@ use crate::managed_agents::ManagedAgentProcess;
 pub struct AppState {
     pub keys: Mutex<Keys>,
     pub http_client: reqwest::Client,
+    /// A no-redirect client for authenticated relay media fetches (download,
+    /// clipboard copy, snapshot, editor). Every caller pre-validates the URL
+    /// origin, but the app-wide `http_client` follows redirects by default, so
+    /// a relay `/media/` URL returning a 3xx to an off-origin or private host
+    /// would forward the minted media Authorization header across origins —
+    /// a redirect-hop SSRF. This client treats any 3xx as a non-success
+    /// response (surfaced as an error) so the auth token never leaves the
+    /// validated relay origin.
+    pub media_fetch_client: reqwest::Client,
     /// Workspace-provided relay URL override. Set by `apply_workspace` on app
     /// init and takes priority over env vars and compile-time defaults.
     pub relay_url_override: Mutex<Option<String>>,
@@ -141,6 +150,27 @@ fn identity_from_env() -> Option<Keys> {
     }
 }
 
+/// Build the no-redirect HTTP client used for authenticated relay media
+/// fetches (download / copy).
+///
+/// This client is a security boundary, not a convenience: it carries a minted
+/// media `Authorization` header, so it MUST NOT follow redirects. A relay 3xx
+/// to an off-origin or private host would otherwise forward that header across
+/// origins (a redirect-hop SSRF). `redirect::Policy::none()` returns the 3xx
+/// verbatim so the caller can reject it.
+///
+/// Returned as a `Result` so the fail-closed invariant is testable — callers
+/// must never substitute a redirect-following client on build failure. Shares
+/// the localhost `resolve`/pool config with the app-wide `http_client`.
+pub fn build_media_fetch_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .pool_idle_timeout(std::time::Duration::from_secs(10))
+        .pool_max_idle_per_host(1)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 pub fn build_app_state() -> AppState {
     // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
     // in setup() will replace the ephemeral placeholder with a persisted key.
@@ -163,6 +193,11 @@ pub fn build_app_state() -> AppState {
             .pool_max_idle_per_host(1)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
+        media_fetch_client: build_media_fetch_client().expect(
+            "media_fetch_client must build with redirect::Policy::none(); a \
+             redirect-following fallback would forward the minted media auth \
+             header across origins (redirect-hop SSRF)",
+        ),
         relay_url_override: Mutex::new(None),
         managed_agent_restore_pending: AtomicBool::new(false),
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),

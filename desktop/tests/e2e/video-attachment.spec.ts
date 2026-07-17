@@ -9,6 +9,14 @@ const PORTRAIT_VIDEO_SHA = "c".repeat(64);
 const PORTRAIT_VIDEO_URL = `http://localhost:3000/media/${PORTRAIT_VIDEO_SHA}.mp4`;
 const CONSTRAINED_LANDSCAPE_VIDEO_SHA = "d".repeat(64);
 const CONSTRAINED_LANDSCAPE_VIDEO_URL = `http://localhost:3000/media/${CONSTRAINED_LANDSCAPE_VIDEO_SHA}.mp4`;
+// Distinct-selector context-menu probes. The relay video is on the resolved
+// relay origin (localhost:3000) so it is Download-eligible once the origin
+// resolves; the off-relay video shares an identical /media/ path shape on a
+// different origin, so it renders and offers Copy link but never Download.
+const MENU_RELAY_VIDEO_SHA = "e".repeat(64);
+const MENU_RELAY_VIDEO_URL = `http://localhost:3000/media/${MENU_RELAY_VIDEO_SHA}.mp4`;
+const MENU_OFF_RELAY_VIDEO_SHA = "f".repeat(64);
+const MENU_OFF_RELAY_VIDEO_URL = `https://cdn.example.com/media/${MENU_OFF_RELAY_VIDEO_SHA}.mp4`;
 const VIDEO_REVIEW_NEUTRAL_ACCENT = "neutral";
 const VIDEO_REVIEW_LIGHT_THEME = "catppuccin-latte";
 // The fresh-profile default is the Buzz theme, which pins the neutral accent
@@ -891,4 +899,141 @@ test("dark accent uses a contrast-safe review foreground", async ({ page }) => {
   await expect(
     reviewDialog.getByTestId("video-review-comment-timecode").first(),
   ).toHaveCSS("color", VIDEO_REVIEW_INDIGO_FOREGROUND_RGB);
+});
+
+// Emit a video message with the imeta the renderer needs to pick the video
+// player and, for the relay case, a resolvable download URL.
+function emitVideoMessage(
+  page: Page,
+  { url, sha, filename }: { url: string; sha: string; filename: string },
+) {
+  return emitMockMessage(page, "general", `![video](${url})`, {
+    extraTags: [
+      [
+        "imeta",
+        `url ${url}`,
+        "m video/mp4",
+        `x ${sha}`,
+        "size 987654",
+        "dim 160x80",
+        "duration 12.5",
+        `image ${POSTER_DATA_URL}`,
+        `filename ${filename}`,
+      ],
+    ],
+  });
+}
+
+test("right-click menus expose distinct selectors for links, relay video, and off-relay video", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  // ── Link menu: Open link + Copy link, never image/video attributes ────────
+  await emitMockMessage(
+    page,
+    "general",
+    "Docs at https://example.com/handbook",
+  );
+  const link = page.getByRole("link", { name: "https://example.com/handbook" });
+  await expect(link).toBeVisible();
+  await link.scrollIntoViewIfNeeded();
+  // Fire a real bubbling `contextmenu` MouseEvent on the anchor rather than
+  // `.click({ button: "right" })`: the link is wrapped in a hover tooltip and a
+  // positional right-click can land on the tooltip layer (or merely select the
+  // text) without reaching the anchor's React `onContextMenuCapture`. An
+  // element-targeted bubbling event drives the capture handler deterministically.
+  await link.evaluate((el) =>
+    el.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+    ),
+  );
+
+  const linkMenu = page.locator("[data-link-context-menu]");
+  await expect(linkMenu).toBeVisible();
+  await expect(page.locator("[data-media-context-menu]")).toBeVisible();
+  await expect(
+    linkMenu.getByRole("button", { name: "Open link" }),
+  ).toBeVisible();
+  await expect(
+    linkMenu.getByRole("button", { name: "Copy link" }),
+  ).toBeVisible();
+  await expect(page.locator("[data-image-context-menu]")).toHaveCount(0);
+  await expect(page.locator("[data-video-context-menu]")).toHaveCount(0);
+  // Dismiss the menu before the next probe: the menu closes on any click.
+  await page.getByTestId("chat-title").click();
+  await expect(linkMenu).toHaveCount(0);
+
+  // ── Relay video menu: Download video + Copy link, appearing only once the
+  // relay origin resolves (the reactivity fix) ─────────────────────────────
+  await emitVideoMessage(page, {
+    url: MENU_RELAY_VIDEO_URL,
+    sha: MENU_RELAY_VIDEO_SHA,
+    filename: "relay-clip.mp4",
+  });
+  const relayPlayer = page.getByTestId("video-player").last();
+  await expect(relayPlayer).toBeVisible();
+  // Right-click the player surface. `force` skips the actionability guard: the
+  // Play-button overlay sits above the video, but the contextmenu event still
+  // capture-bubbles to the surface handler that opens the menu.
+  await relayPlayer.click({ button: "right", force: true });
+
+  const videoMenu = page.locator("[data-video-context-menu]");
+  await expect(videoMenu).toBeVisible();
+  await expect(page.locator("[data-media-context-menu]")).toBeVisible();
+  // Download eligibility is reactive: the relay origin resolves asynchronously
+  // (commonly after first render), and when it does the already-open menu
+  // recomputes to reveal Download — no re-navigation or menu re-open.
+  await expect(
+    videoMenu.getByRole("button", { name: "Download video" }),
+  ).toBeVisible();
+  await expect(
+    videoMenu.getByRole("button", { name: "Copy link" }),
+  ).toBeVisible();
+  await expect(page.locator("[data-image-context-menu]")).toHaveCount(0);
+  await expect(page.locator("[data-link-context-menu]")).toHaveCount(0);
+
+  // The Download action drives the native download_file command.
+  await videoMenu.getByRole("button", { name: "Download video" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("download_file");
+
+  // Dismiss the relay menu before the off-relay probe so `[data-video-context
+  // -menu]` refers unambiguously to the off-relay video's menu below. The menu
+  // closes on any click.
+  await page.getByTestId("chat-title").click();
+  await expect(page.locator("[data-video-context-menu]")).toHaveCount(0);
+
+  // ── Off-relay video control: renders and offers Copy link, never Download ─
+  await emitVideoMessage(page, {
+    url: MENU_OFF_RELAY_VIDEO_URL,
+    sha: MENU_OFF_RELAY_VIDEO_SHA,
+    filename: "external-clip.mp4",
+  });
+  const offRelayPlayer = page.getByTestId("video-player").last();
+  await expect(offRelayPlayer).toBeVisible();
+  await offRelayPlayer.click({ button: "right", force: true });
+
+  const offRelayMenu = page.locator("[data-video-context-menu]");
+  await expect(offRelayMenu).toBeVisible();
+  await expect(
+    offRelayMenu.getByRole("button", { name: "Copy link" }),
+  ).toBeVisible();
+  // An off-relay video would fail the download command's SSRF gate, so the
+  // menu must never offer Download for it.
+  await expect(
+    offRelayMenu.getByRole("button", { name: "Download video" }),
+  ).toHaveCount(0);
 });

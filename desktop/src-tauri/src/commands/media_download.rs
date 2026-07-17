@@ -264,14 +264,35 @@ async fn fetch_blob_bytes(url: &str, state: &State<'_, AppState>) -> Result<Vec<
     fetch_blob_bytes_with_cap(url, state, MAX_DOWNLOAD_BYTES).await
 }
 
+/// The command-facing error for a media-fetch response status, or `None` if
+/// the status is success and the body should be read.
+///
+/// A no-redirect client surfaces a relay 3xx as a redirection status rather
+/// than following it; that is reported explicitly as a redirect (not a bare
+/// "relay returned 302") so the failure is actionable and cannot be mistaken
+/// for an ordinary relay error — following it would forward the minted media
+/// auth header across origins. Pulled out of `fetch_blob_bytes_with_cap` so
+/// the redirect-refusal message is unit-testable without a Tauri `State`.
+fn redirect_refusal_error(status: reqwest::StatusCode) -> Option<String> {
+    status.is_redirection().then(|| {
+        format!(
+            "media fetch refused: relay returned a {status} redirect, which is \
+             not followed for authenticated downloads (redirect-hop SSRF guard)"
+        )
+    })
+}
+
 /// Core streaming fetcher with a caller-supplied byte cap.
 async fn fetch_blob_bytes_with_cap(
     url: &str,
     state: &State<'_, AppState>,
     cap: u64,
 ) -> Result<Vec<u8>, String> {
-    // Fetch bytes via the app's HTTP client (goes through WARP tunnel).
-    let mut req = state.http_client.get(url).timeout(DOWNLOAD_TIMEOUT);
+    // Fetch bytes via the no-redirect media client (goes through WARP tunnel).
+    // A no-redirect client keeps the minted media auth token from being
+    // forwarded across origins by a relay-issued 3xx (redirect-hop SSRF); a
+    // 3xx is returned verbatim and rejected by the `is_success` check below.
+    let mut req = state.media_fetch_client.get(url).timeout(DOWNLOAD_TIMEOUT);
 
     // Every caller pre-validates `url` against the relay origin via
     // `validate_download_url`, satisfying the mint_media_get_auth safety
@@ -282,6 +303,10 @@ async fn fetch_blob_bytes_with_cap(
     }
 
     let resp = req.send().await.map_err(|e| classify_request_error(&e))?;
+
+    if let Some(err) = redirect_refusal_error(resp.status()) {
+        return Err(err);
+    }
 
     if !resp.status().is_success() {
         return Err(relay_error_message(resp).await);
@@ -825,5 +850,144 @@ mod tests {
         let result = validate_download_url("https://relay.example.com/", RELAY_BASE);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("/media/"));
+    }
+
+    // Video Download reuses `download_file`, which runs the same
+    // `validate_download_url` gate as image download. `validate_download_url`
+    // is extension-agnostic (it only checks scheme, origin, and the `/media/`
+    // path prefix), so a relay-hosted mp4/webm passes exactly like an image,
+    // and an off-relay or private-host video is rejected exactly like an
+    // off-relay image. These cases pin that parity so a future change can't
+    // silently narrow the video download path's SSRF protection.
+    #[test]
+    fn test_validate_download_url_valid_relay_video_mp4() {
+        assert!(validate_download_url(
+            "https://relay.example.com/media/abcdef1234567890.mp4",
+            RELAY_BASE,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_validate_download_url_valid_relay_video_webm() {
+        assert!(
+            validate_download_url("https://relay.example.com/media/abc123.webm", RELAY_BASE)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_download_url_non_relay_video_rejected() {
+        let result = validate_download_url("https://evil.example.com/media/clip.mp4", RELAY_BASE);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("relay origin"));
+    }
+
+    #[test]
+    fn test_validate_download_url_private_host_video_rejected() {
+        // Off-relay private host serving a video must be rejected before any
+        // fetch — same SSRF gate as image download.
+        let result = validate_download_url("http://127.0.0.1/media/clip.mp4", RELAY_BASE);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("relay origin"));
+    }
+
+    /// Redirect-hop SSRF guard: the media fetch client must NOT follow a 3xx,
+    /// and the command-facing error must identify the refused redirect.
+    ///
+    /// `validate_download_url` only vets the *initial* URL, so a relay that
+    /// returned a redirect to an off-origin or private host would, under a
+    /// redirect-following client, forward the minted media Authorization
+    /// header across origins. The client `build_media_fetch_client()` produces
+    /// (the same one `fetch_blob_bytes_with_cap` uses via `AppState`) is built
+    /// with `redirect::Policy::none()`, so the 302 comes back verbatim and
+    /// `redirect_refusal_error` — the same mapping the command applies — turns
+    /// it into an actionable redirect error, not a silent cross-origin fetch.
+    ///
+    /// A loopback `std::net::TcpListener` (no extra tokio feature) serves one
+    /// raw `302` pointing at an off-origin target and records how many
+    /// connections it accepts.
+    #[tokio::test]
+    async fn media_fetch_client_does_not_follow_redirects() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+
+        let server_connections = Arc::clone(&connections);
+        let server = std::thread::spawn(move || {
+            // Accept exactly one connection; if the client followed the
+            // redirect it would open a second one to the (unrelated) target,
+            // but that target is never this server, so a second accept here
+            // would only happen on an unexpected retry. We serve one 302 and
+            // return, so the count stays at 1 for a compliant no-redirect client.
+            if let Ok((mut stream, _)) = listener.accept() {
+                server_connections.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let response = "HTTP/1.1 302 Found\r\n\
+                     Location: http://169.254.169.254/latest/meta-data/\r\n\
+                     Content-Length: 0\r\n\
+                     Connection: close\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        // Drive the exact client the command path uses, not an ad-hoc one.
+        let client = crate::app_state::build_media_fetch_client()
+            .expect("media fetch client must build with no-redirect policy");
+        let resp = client
+            .get(format!("http://{addr}/media/clip.mp4"))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .expect("request should complete without following the redirect");
+
+        // The 302 is returned verbatim — not the 169.254.x target's response.
+        assert_eq!(resp.status().as_u16(), 302);
+        assert!(!resp.status().is_success());
+
+        // The command maps that status through `redirect_refusal_error`; the
+        // user-facing error must name the redirect, not read as a generic
+        // relay failure.
+        let err = redirect_refusal_error(resp.status())
+            .expect("a 3xx must map to a redirect-refusal error");
+        assert!(
+            err.contains("redirect") && err.contains("302"),
+            "error must identify the refused 302 redirect, got: {err}",
+        );
+
+        server.join().unwrap();
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            1,
+            "exactly one request must be issued — the redirect must not be followed",
+        );
+    }
+
+    #[test]
+    fn build_media_fetch_client_succeeds_with_no_redirect_policy() {
+        // The fail-closed invariant: construction must not silently degrade to
+        // a redirect-following client. If this ever starts failing, startup
+        // panics loudly (see `build_app_state`) rather than substituting an
+        // insecure client.
+        assert!(
+            crate::app_state::build_media_fetch_client().is_ok(),
+            "media fetch client must build; a redirect-following fallback is forbidden",
+        );
+    }
+
+    #[test]
+    fn redirect_refusal_error_only_fires_for_3xx() {
+        // 3xx → redirect-identifying error; success/non-3xx → None (fall
+        // through to the normal success or relay-error handling).
+        assert!(redirect_refusal_error(reqwest::StatusCode::FOUND).is_some());
+        assert!(redirect_refusal_error(reqwest::StatusCode::TEMPORARY_REDIRECT).is_some());
+        assert!(redirect_refusal_error(reqwest::StatusCode::OK).is_none());
+        assert!(redirect_refusal_error(reqwest::StatusCode::NOT_FOUND).is_none());
     }
 }

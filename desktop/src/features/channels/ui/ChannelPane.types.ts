@@ -79,7 +79,11 @@ export type ChannelPaneProps = {
   onCloseThread: () => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
-  onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
+  onEditSave?: (
+    content: string,
+    mediaTags?: string[][],
+    mentionPubkeys?: string[],
+  ) => Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandThreadReplies: (message: TimelineMessage) => void;

@@ -905,3 +905,83 @@ test("renameDraftEntry identical records: legacy removed, canonical kept, one no
     "legacy key absent from localStorage",
   );
 });
+
+test("persist_draft_round_trips_stable_mention_refs_across_restart", () => {
+  setup("mention-owner");
+  const mentionRefs = [
+    {
+      displayName: "Agent Ada",
+      pubkey: "abcdef1234",
+      isAgent: true,
+    },
+    {
+      displayName: "Pat Person",
+      pubkey: "987654fedc",
+      isAgent: false,
+    },
+  ];
+
+  persistDraftEntry(
+    "chan-mentions",
+    "Hi @Agent Ada and @Pat Person",
+    "chan-mentions",
+    [],
+    [],
+    mentionRefs,
+  );
+  clearAllDrafts();
+  initDraftStore("mention-owner");
+
+  assert.deepEqual(loadDraftEntry("chan-mentions")?.mentionRefs, mentionRefs);
+});
+
+test("legacy_draft_without_mention_refs_migrates_to_empty_refs", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const now = new Date().toISOString();
+  storage.setItem(
+    "buzz-drafts.v1:legacy-owner",
+    JSON.stringify({
+      "chan-legacy": {
+        content: "legacy @Ada",
+        selectionStart: 11,
+        selectionEnd: 11,
+        channelId: "chan-legacy",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  initDraftStore("legacy-owner");
+  assert.deepEqual(loadDraftEntry("chan-legacy")?.mentionRefs, []);
+});
+
+test("invalid_mention_ref_rejects_corrupt_draft", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const now = new Date().toISOString();
+  storage.setItem(
+    "buzz-drafts.v1:corrupt-mention-owner",
+    JSON.stringify({
+      "chan-corrupt": {
+        content: "bad ref",
+        selectionStart: 7,
+        selectionEnd: 7,
+        channelId: "chan-corrupt",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        mentionRefs: [{ displayName: "Ada", pubkey: 123, isAgent: true }],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  initDraftStore("corrupt-mention-owner");
+  assert.equal(loadDraftEntry("chan-corrupt"), undefined);
+});

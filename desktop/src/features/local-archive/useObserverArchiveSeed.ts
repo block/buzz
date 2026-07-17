@@ -5,25 +5,22 @@ import {
   mergeSaveSubscriptionKinds,
   observerArchiveDefaultEnabled,
 } from "@/shared/api/tauriArchive";
-import { setExplicitObserverArchiveChoice } from "./observerArchivePreference";
 
 export interface ObserverArchiveSeedDeps {
   observerArchiveDefaultEnabled: () => Promise<boolean>;
   mergeSaveSubscriptionKinds: (kind: number) => Promise<void>;
-  setExplicitChoice: (pubkey: string, enabled: boolean) => void;
 }
 
 const defaultDeps: ObserverArchiveSeedDeps = {
   observerArchiveDefaultEnabled,
   mergeSaveSubscriptionKinds,
-  setExplicitChoice: setExplicitObserverArchiveChoice,
 };
 
 /**
- * Reconcile observer-feed archive state for `pubkey`.
+ * Reconcile observer-feed archive state for the current identity.
  *
  * Internal builds (policy flag ON): unconditionally ensure kind 24200 exists
- * in the DB subscription, regardless of localStorage marker state.
+ * in the DB subscription.
  *
  * OSS builds (policy flag OFF): no-op. The Settings toggle is the only
  * mutation path for OSS users.
@@ -32,14 +29,12 @@ const defaultDeps: ObserverArchiveSeedDeps = {
  * unreconciled state.
  */
 export async function reconcileObserverArchive(
-  pubkey: string,
   deps: ObserverArchiveSeedDeps = defaultDeps,
 ): Promise<void> {
   const policyOn = await deps.observerArchiveDefaultEnabled();
   if (!policyOn) return;
 
   await deps.mergeSaveSubscriptionKinds(KIND_AGENT_OBSERVER_FRAME);
-  deps.setExplicitChoice(pubkey, true);
 }
 
 /**
@@ -55,6 +50,40 @@ export function isReconciledFor(
     currentPubkey !== undefined &&
     reconciledPubkey === currentPubkey
   );
+}
+
+/**
+ * Orchestrates one reconciliation attempt for `pubkey` and reports success
+ * via `onReady`. Returns a `cancel()` that suppresses a still-pending
+ * completion — called on unmount or when `pubkey` changes mid-flight.
+ *
+ * Extracted from `useObserverArchiveReconciliation`'s effect body so the
+ * cancellation/stale-completion logic (the part a lifecycle regression would
+ * actually break) is directly testable without React mount infra. The hook
+ * below calls this verbatim; it does not duplicate the cancellation guard.
+ *
+ * On failure: does not call `onReady`; the caller's gate stays closed and a
+ * fresh reconciliation attempt on next mount will retry (no success marker
+ * is persisted anywhere).
+ */
+export function startReconciliation(
+  pubkey: string,
+  deps: ObserverArchiveSeedDeps,
+  onReady: (pubkey: string) => void,
+): () => void {
+  let cancelled = false;
+
+  reconcileObserverArchive(deps)
+    .then(() => {
+      if (!cancelled) onReady(pubkey);
+    })
+    .catch((err) => {
+      console.warn("[useObserverArchiveReconciliation] failed:", err);
+    });
+
+  return () => {
+    cancelled = true;
+  };
 }
 
 /**
@@ -78,20 +107,7 @@ export function useObserverArchiveReconciliation(
 
   React.useEffect(() => {
     if (!pubkey) return;
-
-    let cancelled = false;
-
-    reconcileObserverArchive(pubkey, deps)
-      .then(() => {
-        if (!cancelled) setReconciledPubkey(pubkey);
-      })
-      .catch((err) => {
-        console.warn("[useObserverArchiveReconciliation] failed:", err);
-      });
-
-    return () => {
-      cancelled = true;
-    };
+    return startReconciliation(pubkey, deps, setReconciledPubkey);
   }, [pubkey, deps]);
 
   return isReconciledFor(reconciledPubkey, pubkey);

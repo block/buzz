@@ -55,6 +55,8 @@ jobs:
             mobile:
               - 'mobile/**'
               - '.github/workflows/ci.yml'
+      - name: Release workflow source contract
+        run: scripts/test-release-ref-contract.sh
 
   rust-lint:
     name: Rust Lint
@@ -457,6 +459,9 @@ jobs:
             BUZZ_BIND_ADDR=0.0.0.0:3000 \
             BUZZ_REQUIRE_AUTH_TOKEN=false \
             BUZZ_RECONCILE_CHANNELS=true \
+            BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN=100000 \
+            BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN=100000 \
+            BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC=10000 \
             BUZZ_GIT_PROBE_WRITERS=8 \
             SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS=1 \
             ./target/ci/buzz-relay > /tmp/buzz-relay.log 2>&1 &

@@ -10,6 +10,8 @@ import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
   collectHomeAlertItems,
   eligibleFeedNotificationItems,
+  enrichFeedItemChannel,
+  type NotificationChannel,
   notificationBody,
   notificationTitle,
 } from "./lib/feed";
@@ -74,6 +76,7 @@ export function useFeedDesktopNotifications(
   setDesktopEnabled: (enabled: boolean) => Promise<boolean>,
   profiles?: UserProfileLookup,
   mutedChannelIds?: ReadonlySet<string>,
+  channels: readonly NotificationChannel[] = [],
 ) {
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
   const seenItemIdsRef = React.useRef<Set<string>>(
@@ -192,7 +195,8 @@ export function useFeedDesktopNotifications(
       void autoRequestPermissionIfNeeded();
     }
 
-    for (const item of newItems) {
+    for (const rawItem of newItems) {
+      const item = enrichFeedItemChannel(rawItem, channels);
       const resolvedLabel = profiles
         ? resolveUserLabel({
             pubkey: item.pubkey,
@@ -209,6 +213,7 @@ export function useFeedDesktopNotifications(
     }
   }, [
     feed,
+    channels,
     mutedChannelIds,
     normalizedPubkey,
     profiles,
