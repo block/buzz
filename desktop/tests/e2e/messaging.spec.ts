@@ -152,6 +152,68 @@ test("long autolink wraps without widening the timeline", async ({ page }) => {
     .toBeLessThanOrEqual(0);
 });
 
+test("markdown tables overflow wide content and fill the message when narrow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 900, height: 600 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  const longCell = "WIDE TABLE COLUMN VALUE ".repeat(8);
+  await page.evaluate(
+    ({ wide, narrow }) => {
+      const createdAt = Math.floor(Date.now() / 1000);
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: wide,
+        createdAt,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: narrow,
+        createdAt: createdAt + 1,
+      });
+    },
+    {
+      wide: `| ${longCell} | ${longCell} | ${longCell} |\n| --- | --- | --- |\n| ${longCell} | ${longCell} | ${longCell} |`,
+      narrow: "| NARROW TABLE | VALUE |\n| --- | --- |\n| alpha | beta |",
+    },
+  );
+
+  const wideTable = page
+    .getByTestId("message-row")
+    .filter({ hasText: "WIDE TABLE COLUMN VALUE" })
+    .locator("[data-table-block]");
+  const narrowTable = page
+    .getByTestId("message-row")
+    .filter({ hasText: "NARROW TABLE" })
+    .locator("[data-table-block]");
+  await expect(wideTable).toBeVisible();
+  await expect(narrowTable).toBeVisible();
+
+  await expect
+    .poll(() =>
+      wideTable.evaluate(
+        (element) => element.scrollWidth - element.clientWidth,
+      ),
+    )
+    .toBeGreaterThan(1);
+  await expect
+    .poll(() =>
+      narrowTable.evaluate((element) => {
+        const table = element.querySelector("table");
+        return table
+          ? Math.abs(table.getBoundingClientRect().width - element.clientWidth)
+          : Number.POSITIVE_INFINITY;
+      }),
+    )
+    .toBeLessThanOrEqual(1);
+});
+
 test("supported link previews keep the message link visible", async ({
   page,
 }) => {
