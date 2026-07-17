@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
+
 import { KIND_TYPING_INDICATOR } from "../../src/shared/constants/kinds";
 import {
   TEST_IDENTITIES,
@@ -2136,6 +2138,7 @@ test("collapsed custom section surfaces hidden unread state and mark-all clears 
   await expect(sectionLabel).toHaveAccessibleName(
     "Important Contains unread channels",
   );
+  await waitForAnimations(page);
   await page.screenshot({
     path: testInfo.outputPath("collapsed-custom-section-unread.png"),
     clip: { x: 0, y: 0, width: 300, height: 720 },
@@ -2208,6 +2211,7 @@ test("collapsed built-in sections show only their own unread state", async ({
   await expect(
     page.getByTestId("dm-list-section-unread-indicator"),
   ).toHaveCount(0);
+  await waitForAnimations(page);
   await page.screenshot({
     path: testInfo.outputPath("collapsed-built-in-section-unread.png"),
     clip: { x: 0, y: 0, width: 300, height: 720 },
