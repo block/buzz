@@ -191,9 +191,9 @@ async fn is_owner_or_sibling(
 
 /// Inbound author gate decision: does this author's event fire a turn?
 ///
-/// Coarse security policy applied before subscription rules. Both `OwnerOnly`
-/// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
-/// additionally accepts the explicit external pubkey list.
+/// Coarse security policy applied before subscription rules. `OwnerOnly`
+/// accepts exactly the registered owner. `Allowlist` accepts the owner,
+/// same-owner siblings, and the explicit external pubkey list.
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
@@ -204,7 +204,7 @@ async fn author_allowed(
     match respond_to {
         RespondTo::Anyone => true,
         RespondTo::Nobody => false,
-        RespondTo::OwnerOnly => is_owner_or_sibling(author, owner_cache, rest_client).await,
+        RespondTo::OwnerOnly => owner_cache.get() == Some(author),
         RespondTo::Allowlist => {
             allowlist.contains(author)
                 || is_owner_or_sibling(author, owner_cache, rest_client).await
@@ -1942,12 +1942,11 @@ async fn tokio_main() -> Result<()> {
                             // agent. Must be AFTER !shutdown (owner can always
                             // shut down regardless of gate mode).
                             //
-                            // Both OwnerOnly and Allowlist accept events from
-                            // "siblings" — pubkeys whose agent_owner_pubkey
-                            // matches this agent's owner (e.g. other bots
-                            // launched by the same human). Allowlist adds the
-                            // explicit pubkey list on top, for external people;
-                            // it never revokes same-owner team bots.
+                            // OwnerOnly accepts exactly the registered owner.
+                            // Allowlist additionally accepts explicit pubkeys
+                            // and "siblings" whose NIP-OA auth tag proves the
+                            // same owner (e.g. other bots launched by the same
+                            // human).
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
                                 let allowed = author_allowed(
@@ -3953,21 +3952,35 @@ mod author_gate_tests {
     }
 
     #[tokio::test]
-    async fn test_owner_only_admits_owner_and_sibling_to_steer() {
+    async fn test_owner_only_accepts_owner() {
         let cache = cache_with_sibling();
-        for (who, label) in [(OWNER, "owner"), (SIBLING, "sibling")] {
-            assert!(
-                author_allowed(
-                    &RespondTo::OwnerOnly,
-                    &HashSet::new(),
-                    who,
-                    &cache,
-                    &dummy_rest_client()
-                )
-                .await,
-                "under default OwnerOnly, the {label} must be admitted so steering can fire"
-            );
-        }
+        assert!(
+            author_allowed(
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                OWNER,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "under the default OwnerOnly, the registered owner must be admitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_owner_only_rejects_sibling() {
+        let cache = cache_with_sibling();
+        assert!(
+            !author_allowed(
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                SIBLING,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "under the default OwnerOnly, a same-owner sibling must be dropped"
+        );
     }
 }
 
