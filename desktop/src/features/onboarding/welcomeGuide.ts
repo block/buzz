@@ -245,7 +245,9 @@ async function provisionWelcomeTeam(
     discoverAcpRuntimes(),
     getGlobalAgentConfig(),
   ]);
-  const personasById = new Map(personas.map((persona) => [persona.id, persona]));
+  const personasById = new Map(
+    personas.map((persona) => [persona.id, persona]),
+  );
   const runtimes = runtimeCatalog.filter(
     (runtime): runtime is AcpRuntime => runtime.availability === "available",
   );

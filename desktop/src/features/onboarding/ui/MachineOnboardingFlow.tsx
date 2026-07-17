@@ -44,9 +44,9 @@ export function MachineOnboardingFlow({
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
-  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState<string | null>(
-    null,
-  );
+  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState<
+    string | null
+  >(null);
   const [pendingRuntimeId, setPendingRuntimeId] = React.useState<string | null>(
     null,
   );
@@ -57,37 +57,40 @@ export function MachineOnboardingFlow({
   >(null);
   const runtimeSaveSequence = React.useRef(0);
 
-  const persistPreferredRuntime = React.useCallback(async (runtimeId: string) => {
-    const sequence = runtimeSaveSequence.current + 1;
-    runtimeSaveSequence.current = sequence;
-    setPendingRuntimeId(runtimeId);
-    setRuntimeSelectionError(null);
-    setIsRuntimeSelectionSaving(true);
-    try {
-      const current = await getGlobalAgentConfig();
-      const result = await setGlobalAgentConfig({
-        ...current,
-        preferred_runtime: runtimeId,
-      });
-      if (runtimeSaveSequence.current === sequence) {
-        setSelectedRuntimeId(result.config.preferred_runtime);
-        setPendingRuntimeId(null);
+  const persistPreferredRuntime = React.useCallback(
+    async (runtimeId: string) => {
+      const sequence = runtimeSaveSequence.current + 1;
+      runtimeSaveSequence.current = sequence;
+      setPendingRuntimeId(runtimeId);
+      setRuntimeSelectionError(null);
+      setIsRuntimeSelectionSaving(true);
+      try {
+        const current = await getGlobalAgentConfig();
+        const result = await setGlobalAgentConfig({
+          ...current,
+          preferred_runtime: runtimeId,
+        });
+        if (runtimeSaveSequence.current === sequence) {
+          setSelectedRuntimeId(result.config.preferred_runtime);
+          setPendingRuntimeId(null);
+        }
+      } catch (cause) {
+        if (runtimeSaveSequence.current === sequence) {
+          setPendingRuntimeId(null);
+          setRuntimeSelectionError(
+            cause instanceof Error
+              ? cause.message
+              : "Couldn’t save your preferred runtime.",
+          );
+        }
+      } finally {
+        if (runtimeSaveSequence.current === sequence) {
+          setIsRuntimeSelectionSaving(false);
+        }
       }
-    } catch (cause) {
-      if (runtimeSaveSequence.current === sequence) {
-        setPendingRuntimeId(null);
-        setRuntimeSelectionError(
-          cause instanceof Error
-            ? cause.message
-            : "Couldn’t save your preferred runtime.",
-        );
-      }
-    } finally {
-      if (runtimeSaveSequence.current === sequence) {
-        setIsRuntimeSelectionSaving(false);
-      }
-    }
-  }, []);
+    },
+    [],
+  );
 
   const loadFreshIdentity = React.useCallback(async () => {
     setIsPending(true);

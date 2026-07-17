@@ -50,10 +50,7 @@ export function resolveStartRuntimeForDefinition(
   // Use the buzz-agent-first preference (buzz-agent → goose → first available)
   // so a freshly installed goose never beats the bundled buzz-agent sidecar
   // for runtime-less personas (item 13 regression guard).
-  const defaultRuntime = getDefaultPersonaRuntime(
-    runtimes,
-    preferredRuntimeId,
-  );
+  const defaultRuntime = getDefaultPersonaRuntime(runtimes, preferredRuntimeId);
   const { runtime, warnings, isOverridden }: ResolvePersonaRuntimeResult =
     resolvePersonaRuntime(persona.runtime, runtimes, defaultRuntime);
 
