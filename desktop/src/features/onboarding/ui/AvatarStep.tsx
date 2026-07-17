@@ -312,7 +312,11 @@ export function AvatarStep({
 
   return (
     <OnboardingSlideTransition
-      className="flex w-full flex-col items-center"
+      // pb clears the always-docked footer: the emoji/color grid is the tallest
+      // onboarding content and overflows on short windows, so the shell's own
+      // bottom reserve isn't enough to scroll the last rows out from under the
+      // fixed CTA group + scrim.
+      className="flex w-full flex-col items-center pb-20"
       data-testid="onboarding-page-avatar"
       direction={direction}
       transitionKey={`avatar-${direction}`}
