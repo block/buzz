@@ -128,23 +128,73 @@ fn validate_endpoint_addr(addr: &EndpointAddr, mode: &IrohRelayMode) -> anyhow::
             "mesh endpoint must contain 1..={MAX_ENDPOINT_TRANSPORT_ADDRS} transport addresses"
         );
     }
+    // An advertised endpoint routinely carries several transport candidates
+    // (relay + one or more direct IPs). They are *alternative* routes, not all
+    // required, so a single unusable candidate (e.g. a port-0 direct IP, which
+    // mesh-llm advertises alongside a valid relay) must NOT reject the whole
+    // endpoint — otherwise "find it any which way" collapses the moment one
+    // candidate is junk. Accept the endpoint if AT LEAST ONE candidate is
+    // usable; record why the rest were dropped for diagnosis.
+    let mut usable = 0usize;
+    let mut rejections: Vec<String> = Vec::new();
     for transport in &addr.addrs {
         match transport {
-            TransportAddr::Relay(relay) if relay_allowed(relay, mode) => {}
+            TransportAddr::Relay(relay) if relay_allowed(relay, mode) => usable += 1,
             TransportAddr::Relay(relay) => {
-                anyhow::bail!("mesh endpoint advertises unapproved relay URL {relay}")
+                rejections.push(format!("unapproved relay URL {relay}"));
             }
-            TransportAddr::Ip(socket) => validate_direct_socket(*socket)?,
-            _ => anyhow::bail!("mesh endpoint contains an unsupported transport address"),
+            TransportAddr::Ip(socket) => match validate_direct_socket(*socket) {
+                Ok(()) => usable += 1,
+                Err(error) => rejections.push(error.to_string()),
+            },
+            _ => rejections.push("unsupported transport address".to_string()),
         }
     }
+    if usable == 0 {
+        anyhow::bail!(
+            "mesh endpoint has no usable transport address (all {} rejected: {})",
+            addr.addrs.len(),
+            rejections.join("; ")
+        );
+    }
     Ok(())
+}
+
+/// mesh-llm's default public relay set (`RelayPolicy::DefaultPublic` in
+/// `mesh-llm-host-runtime`). A stock mesh-llm server with no custom relay
+/// config advertises endpoints on exactly these relays, so buzz's `Default`
+/// mode MUST accept them — otherwise shared compute rejects every out-of-the-box
+/// mesh-llm serving node (they are not in iroh's own prod relay map).
+///
+/// Kept in sync with `effective_relay_urls(RelayPolicy::DefaultPublic, &[])`.
+const MESH_LLM_DEFAULT_RELAYS: &[&str] = &[
+    "https://usw1-2.relay.michaelneale.mesh-llm.iroh.link./",
+    "https://aps1-1.relay.michaelneale.mesh-llm.iroh.link./",
+];
+
+/// Whether `relay` is one of mesh-llm's baked-in default public relays.
+/// Parses each known URL to a `RelayUrl` so comparison is normalization-safe
+/// (matches regardless of trailing-dot / trailing-slash formatting).
+fn is_mesh_llm_default_relay(relay: &RelayUrl) -> bool {
+    MESH_LLM_DEFAULT_RELAYS.iter().any(|candidate| {
+        candidate
+            .parse::<RelayUrl>()
+            .map(|known| &known == relay)
+            .unwrap_or(false)
+    })
 }
 
 fn relay_allowed(relay: &RelayUrl, mode: &IrohRelayMode) -> bool {
     match mode {
         IrohRelayMode::Disabled => false,
-        IrohRelayMode::Default => iroh::defaults::prod::default_relay_map().contains(relay),
+        // `Default` covers both iroh's own production relays AND mesh-llm's
+        // default public relays. Without the latter, a stock mesh-llm serving
+        // node is unreachable by default and shared compute silently fails with
+        // "no live member is serving this model" even though discovery found it.
+        IrohRelayMode::Default => {
+            iroh::defaults::prod::default_relay_map().contains(relay)
+                || is_mesh_llm_default_relay(relay)
+        }
         IrohRelayMode::Custom(urls) => urls.contains(relay),
     }
 }
@@ -211,6 +261,71 @@ mod tests {
         )
         .is_err());
         assert!(validate_advertised_endpoint_with_mode(&token, &IrohRelayMode::Disabled).is_err());
+    }
+
+    #[test]
+    fn default_mode_accepts_meshllm_default_relays() {
+        // Regression: a stock mesh-llm serving node advertises endpoints on
+        // mesh-llm's OWN default public relays (not iroh's prod relay map).
+        // Under `Default` mode these MUST be accepted, or shared compute rejects
+        // every out-of-the-box mesh-llm server with "no live member is serving
+        // this model" even though discovery found it. See mesh-llm
+        // effective_relay_urls(RelayPolicy::DefaultPublic, &[]).
+        for relay_url in MESH_LLM_DEFAULT_RELAYS {
+            let relay: RelayUrl = relay_url
+                .parse()
+                .unwrap_or_else(|e| panic!("mesh-llm default relay {relay_url:?} must parse: {e}"));
+            assert!(
+                relay_allowed(&relay, &IrohRelayMode::Default),
+                "Default mode must accept mesh-llm default relay {relay_url}"
+            );
+
+            // And end-to-end through the advertised-endpoint validator.
+            let token = endpoint_token_for_test([TransportAddr::Relay(relay)]);
+            assert!(
+                validate_advertised_endpoint_with_mode(&token, &IrohRelayMode::Default).is_ok(),
+                "Default mode must validate an endpoint on mesh-llm default relay {relay_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_with_one_good_and_one_junk_candidate_is_accepted() {
+        // Regression: a mesh-llm endpoint advertises a usable relay alongside a
+        // port-0 direct IP. The junk candidate must NOT reject the whole
+        // endpoint — as long as one route is usable the endpoint is valid.
+        let good_relay: RelayUrl = MESH_LLM_DEFAULT_RELAYS[0].parse().unwrap();
+        let token = endpoint_token_for_test([
+            TransportAddr::Relay(good_relay),
+            TransportAddr::Ip("180.181.228.108:0".parse().unwrap()), // port 0 = junk
+        ]);
+        assert!(
+            validate_advertised_endpoint_with_mode(&token, &IrohRelayMode::Default).is_ok(),
+            "endpoint with one usable candidate must be accepted despite a junk one"
+        );
+    }
+
+    #[test]
+    fn endpoint_with_all_junk_candidates_is_rejected() {
+        // Guard: if EVERY candidate is unusable, the endpoint must still fail.
+        let token = endpoint_token_for_test([
+            TransportAddr::Ip("180.181.228.108:0".parse().unwrap()), // port 0
+            TransportAddr::Ip("127.0.0.1:9337".parse().unwrap()),    // loopback
+        ]);
+        assert!(
+            validate_advertised_endpoint_with_mode(&token, &IrohRelayMode::Default).is_err(),
+            "endpoint with no usable candidate must be rejected"
+        );
+    }
+
+    #[test]
+    fn default_mode_still_rejects_unknown_relay() {
+        // Guard the fix doesn't over-open: a relay that is neither iroh-prod nor
+        // a mesh-llm default must still be rejected under Default mode.
+        let unknown: RelayUrl = "https://not-a-real-relay.example".parse().unwrap();
+        assert!(!relay_allowed(&unknown, &IrohRelayMode::Default));
+        let token = endpoint_token_for_test([TransportAddr::Relay(unknown)]);
+        assert!(validate_advertised_endpoint_with_mode(&token, &IrohRelayMode::Default).is_err());
     }
 
     #[test]
