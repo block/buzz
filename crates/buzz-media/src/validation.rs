@@ -695,6 +695,7 @@ fn validate_gif_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
 
 fn validate_mp4_metadata_free(path: &Path) -> Result<(), MediaError> {
     const MAX_BOXES: usize = 100_000;
+    const MAX_BOX_DEPTH: usize = 32;
     const EMPTY_FFMPEG_UDTA: &[u8] = &[
         0, 0, 0, 0x35, b'm', b'e', b't', b'a', 0, 0, 0, 0, 0, 0, 0, 0x21, b'h', b'd', b'l', b'r',
         0, 0, 0, 0, 0, 0, 0, 0, b'm', b'd', b'i', b'r', b'a', b'p', b'p', b'l', 0, 0, 0, 0, 0, 0,
@@ -729,8 +730,12 @@ fn validate_mp4_metadata_free(path: &Path) -> Result<(), MediaError> {
         start: u64,
         end: u64,
         count: &mut usize,
+        depth: usize,
     ) -> Result<(), MediaError> {
         use std::io::{Read, Seek, SeekFrom};
+        if depth > MAX_BOX_DEPTH {
+            return Err(MediaError::InvalidVideo);
+        }
         let mut off = start;
         while off < end {
             *count += 1;
@@ -771,7 +776,7 @@ fn validate_mp4_metadata_free(path: &Path) -> Result<(), MediaError> {
                     return Err(MediaError::MetadataForbidden);
                 }
             } else if CONTAINERS.contains(&kind) {
-                walk(file, off + header, off + size, count)?;
+                walk(file, off + header, off + size, count, depth + 1)?;
             }
             off += size;
         }
@@ -783,7 +788,7 @@ fn validate_mp4_metadata_free(path: &Path) -> Result<(), MediaError> {
         .map_err(|e| MediaError::Io(e.to_string()))?
         .len();
     let mut count = 0;
-    walk(&mut file, 0, end, &mut count)
+    walk(&mut file, 0, end, &mut count, 0)
 }
 
 /// Map MIME type to file extension.
@@ -1954,6 +1959,21 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), bytes).unwrap();
         assert!(validate_mp4_metadata_free(tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn test_rejects_excessive_mp4_box_nesting() {
+        let mut nested = box_wrap(b"free", b"");
+        // One level beyond the validator's intentionally generous bound.
+        for _ in 0..=32 {
+            nested = box_wrap(b"moov", &nested);
+        }
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), nested).unwrap();
+        assert!(matches!(
+            validate_mp4_metadata_free(tmp.path()),
+            Err(MediaError::InvalidVideo)
+        ));
     }
 
     #[test]
