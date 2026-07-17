@@ -865,7 +865,6 @@ export function AppShell() {
                           onCreateChannel={handleCreateChannel}
                           onCreateForum={handleCreateForum}
                           onHideDm={handleHideDm}
-                          onMarkAllChannelsRead={markAllChannelsRead}
                           onMarkChannelRead={markChannelRead}
                           onMarkChannelUnread={markChannelUnread}
                           onBrowseChannels={handleOpenBrowseChannels}

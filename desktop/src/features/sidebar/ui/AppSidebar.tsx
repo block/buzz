@@ -130,7 +130,6 @@ type AppSidebarProps = {
     channelId: string,
     lastMessageAt: string | null | undefined,
   ) => void;
-  onMarkAllChannelsRead: () => void;
   onBrowseChannels?: (onCreated?: (channelId: string) => void) => void;
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
   onUpdateCommunity: (
@@ -200,7 +199,6 @@ export function AppSidebar({
   onHideDm,
   onMarkChannelUnread,
   onMarkChannelRead,
-  onMarkAllChannelsRead,
   onBrowseChannels,
   onOpenDm,
   onUpdateCommunity,
@@ -732,7 +730,11 @@ export function AppSidebar({
                       quickCreateLabel="Add channel"
                       onQuickCreateClick={onBrowseChannels}
                       showQuickCreate
-                      onMarkAllRead={onMarkAllChannelsRead}
+                      onMarkAllRead={() => {
+                        for (const channel of sectionBuckets.unassigned) {
+                          onMarkChannelRead(channel.id, channel.lastMessageAt);
+                        }
+                      }}
                       onMarkChannelRead={onMarkChannelRead}
                       onMarkChannelUnread={onMarkChannelUnread}
                       onSelectChannel={onSelectChannel}
@@ -770,7 +772,11 @@ export function AppSidebar({
                       actionsTestId="section-actions-forums"
                       listTestId="forum-list"
                       onCreateClick={() => openCreateDialog("forum")}
-                      onMarkAllRead={onMarkAllChannelsRead}
+                      onMarkAllRead={() => {
+                        for (const channel of forumChannels) {
+                          onMarkChannelRead(channel.id, channel.lastMessageAt);
+                        }
+                      }}
                       onMarkChannelRead={onMarkChannelRead}
                       onMarkChannelUnread={onMarkChannelUnread}
                       onSelectChannel={onSelectChannel}
