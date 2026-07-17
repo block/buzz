@@ -8,6 +8,11 @@ type NsecMaskedDisplayProps = {
   variant?: "boxed" | "bare";
 };
 
+export const ONBOARDING_KEY_FRAME_CLASS =
+  "w-full min-w-0 rounded-xl bg-white/50 px-8 py-6";
+export const ONBOARDING_KEY_ROW_CLASS = "flex min-w-0 items-center gap-4";
+export const ONBOARDING_KEY_TEXT_CLASS = "buzz-onboarding-key-text";
+
 /**
  * Masked nsec display with reveal toggle and copy button.
  *
@@ -67,7 +72,11 @@ export function NsecMaskedDisplay({
       }
     >
       <div
-        className={`flex min-w-0 items-center ${isBare ? "gap-4" : "gap-2 px-3 py-2"}`}
+        className={
+          isBare
+            ? ONBOARDING_KEY_ROW_CLASS
+            : "flex min-w-0 items-center gap-2 px-3 py-2"
+        }
       >
         {/* Wrapping element is a block inside the flex item, not the flex item
             itself: WebKit (WKWebView) does not wrap a long unbroken string when
@@ -75,10 +84,8 @@ export function NsecMaskedDisplay({
             overflow-wrap. A plain block wraps reliably in every engine. */}
         <div className="min-w-0 flex-1">
           <p
-            className={`w-full break-all [overflow-wrap:anywhere] font-mono ${
-              isBare
-                ? "text-nsec-key text-[var(--buzz-onboarding-backup-ink)]"
-                : "text-xs leading-5"
+            className={`${
+              isBare ? ONBOARDING_KEY_TEXT_CLASS : "text-xs leading-5"
             } ${
               isRevealed
                 ? `select-text ${isBare ? "" : "text-foreground"}`

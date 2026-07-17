@@ -19,13 +19,17 @@ import { listPersonas } from "@/shared/api/tauriPersonas";
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { Input } from "@/shared/ui/input";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import {
   ONBOARDING_PRIMARY_CTA_CLASS,
   OnboardingChrome,
 } from "./OnboardingChrome";
 import { OnboardingFooter, OnboardingFooterProvider } from "./OnboardingFooter";
+import {
+  ONBOARDING_KEY_FRAME_CLASS,
+  ONBOARDING_KEY_ROW_CLASS,
+  ONBOARDING_KEY_TEXT_CLASS,
+} from "./NsecMaskedDisplay";
 
 const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
   Fizz: "/onboarding/starter-team/fizz.png",
@@ -55,7 +59,7 @@ function AvatarCircle({
   return (
     <button
       aria-label={hasAvatar ? "Change your avatar" : "Add an avatar"}
-      className="group mx-auto block rounded-full"
+      className="group block shrink-0 rounded-full"
       data-testid="community-avatar-open"
       onClick={onClick}
       type="button"
@@ -74,7 +78,7 @@ function AvatarCircle({
           label={previewName}
         />
       ) : (
-        <span className="flex h-28 w-28 items-center justify-center rounded-full bg-white/60 text-foreground/60 shadow-[0_0_35px_12px_rgba(255,255,255,0.5)] transition-colors group-hover:bg-white/80">
+        <span className="flex h-28 w-28 items-center justify-center rounded-full text-[var(--buzz-onboarding-backup-ink)] transition-colors group-hover:bg-white/25">
           <Plus className="h-8 w-8" aria-hidden="true" />
         </span>
       )}
@@ -97,6 +101,7 @@ export function CommunityOnboardingFlow({
     [],
   );
   const [isPending, setIsPending] = React.useState(false);
+  const nameInputRef = React.useRef<HTMLInputElement | null>(null);
 
   React.useEffect(() => {
     if (transaction?.stage !== "team-intro") return;
@@ -149,6 +154,16 @@ export function CommunityOnboardingFlow({
     }
   }, [finish, isPending, queryClient, relayUrl, update]);
 
+  const isProfileStage = transaction?.stage === "profile";
+  const isTeamStage =
+    transaction?.stage === "team-intro" || transaction?.stage === "finalizing";
+
+  React.useLayoutEffect(() => {
+    if (isProfileStage && !isAvatarEditorOpen) {
+      nameInputRef.current?.focus();
+    }
+  }, [isAvatarEditorOpen, isProfileStage]);
+
   if (!transaction) return null;
 
   const saveProfile = async () => {
@@ -167,13 +182,14 @@ export function CommunityOnboardingFlow({
     }
   };
 
-  const isProfileStage = transaction.stage === "profile";
-  const isTeamStage =
-    transaction.stage === "team-intro" || transaction.stage === "finalizing";
-
   return (
     <div
-      className="buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-y-auto px-4 pb-28 pt-[106px] text-foreground"
+      className={cn(
+        "buzz-onboarding-neutral-theme buzz-startup-shell flex h-dvh justify-center overflow-y-auto px-4 text-foreground",
+        isProfileStage || isTeamStage
+          ? "items-start pb-36 pt-[106px]"
+          : "items-stretch",
+      )}
       data-testid="community-onboarding-flow"
     >
       <StartupWindowDragRegion />
@@ -183,9 +199,17 @@ export function CommunityOnboardingFlow({
       <OnboardingFooterProvider>
         <div
           className={cn(
-            "relative my-auto w-full text-center",
-            isTeamStage ? "max-w-[760px]" : "max-w-[560px]",
+            "relative flex w-full flex-col justify-center text-center",
+            isProfileStage || isTeamStage
+              ? "min-h-[calc(100dvh-15.625rem)]"
+              : "min-h-dvh py-8",
+            isProfileStage
+              ? "max-w-4xl"
+              : isTeamStage
+                ? "max-w-[760px]"
+                : "max-w-[560px]",
           )}
+          data-testid="community-onboarding-body"
         >
           {transaction.stage === "claiming" ||
           transaction.stage === "connecting" ? (
@@ -217,7 +241,10 @@ export function CommunityOnboardingFlow({
             </>
           ) : isProfileStage ? (
             isAvatarEditorOpen ? (
-              <div className="relative rounded-3xl bg-white/85 px-6 py-8 shadow-[0_0_80px_50px_rgba(255,255,255,0.85)]">
+              <div
+                className={cn("relative", ONBOARDING_KEY_FRAME_CLASS)}
+                data-testid="community-avatar-editor-key-frame"
+              >
                 <Button
                   aria-label="Close avatar editor"
                   className="absolute -right-3 -top-3 h-9 w-9 rounded-full"
@@ -242,49 +269,80 @@ export function CommunityOnboardingFlow({
               </div>
             ) : (
               <>
-                <h1 className="text-title font-normal">Build your profile</h1>
-                <p className="mx-auto mt-3 max-w-[380px] text-sm leading-6 text-foreground/80">
-                  Add a name and avatar. They’ll show up on your messages,
-                  reactions, and agent handoffs.
-                </p>
-                <div className="mt-12">
-                  <AvatarCircle
-                    avatarUrl={avatarUrl}
-                    onClick={() => setIsAvatarEditorOpen(true)}
-                    previewName={displayName.trim() || "Your profile"}
-                  />
-                </div>
-                <div className="mx-auto mt-8 w-full max-w-[300px] text-left">
-                  <label
-                    className="text-sm font-medium"
-                    htmlFor="community-display-name"
-                  >
-                    Your name
-                  </label>
-                  <Input
-                    aria-label="Community display name"
-                    autoFocus
-                    className="mt-1.5 h-10 rounded-full bg-white/90 px-4"
-                    id="community-display-name"
-                    onChange={(event) => setDisplayName(event.target.value)}
-                    placeholder="First and last name"
-                    value={displayName}
-                  />
-                </div>
-                {transaction.error ? (
-                  <p className="mt-4 text-sm text-destructive">
-                    {transaction.error}
+                <div data-testid="community-profile-main">
+                  <h1 className="text-title font-normal">Build your profile</h1>
+                  <p className="mx-auto mt-3 max-w-[380px] text-sm leading-6 text-foreground/80">
+                    Add a name and avatar. They’ll show up on your messages,
+                    reactions, and agent handoffs.
                   </p>
-                ) : null}
+                  <div className="mt-10 w-full max-w-4xl">
+                    <div
+                      className={ONBOARDING_KEY_FRAME_CLASS}
+                      data-testid="community-profile-key-frame"
+                    >
+                      <div className={ONBOARDING_KEY_ROW_CLASS}>
+                        <AvatarCircle
+                          avatarUrl={avatarUrl}
+                          onClick={() => setIsAvatarEditorOpen(true)}
+                          previewName={displayName.trim() || "Your profile"}
+                        />
+                        <label
+                          className="min-w-0 flex-1"
+                          htmlFor="community-display-name"
+                        >
+                          <span className="sr-only">Your name</span>
+                          <input
+                            aria-label="Community display name"
+                            autoCapitalize="words"
+                            autoComplete="name"
+                            autoCorrect="off"
+                            className={cn(
+                              ONBOARDING_KEY_TEXT_CLASS,
+                              "border-0 bg-transparent p-0 shadow-none outline-none placeholder:text-[var(--buzz-onboarding-backup-ink)] placeholder:opacity-40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
+                            )}
+                            data-testid="community-profile-name-key"
+                            disabled={isPending || isUploadingAvatar}
+                            id="community-display-name"
+                            onChange={(event) =>
+                              setDisplayName(event.target.value)
+                            }
+                            placeholder="First and last name"
+                            ref={nameInputRef}
+                            spellCheck={false}
+                            type="text"
+                            value={displayName}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                  {transaction.error ? (
+                    <p className="mt-4 text-sm text-destructive">
+                      {transaction.error}
+                    </p>
+                  ) : null}
+                </div>
                 <OnboardingFooter>
                   <Button
                     className={ONBOARDING_PRIMARY_CTA_CLASS}
+                    data-testid="community-profile-next"
                     disabled={
                       !displayName.trim() || isPending || isUploadingAvatar
                     }
                     onClick={() => void saveProfile()}
+                    type="button"
                   >
-                    Continue
+                    Next
+                  </Button>
+                  <Button
+                    className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+                    data-testid="community-profile-back"
+                    disabled={isPending || isUploadingAvatar}
+                    onClick={clear}
+                    type="button"
+                    variant="ghost"
+                  >
+                    Back
                   </Button>
                 </OnboardingFooter>
               </>

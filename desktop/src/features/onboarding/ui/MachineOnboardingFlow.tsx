@@ -24,19 +24,26 @@ import { OnboardingFooterProvider } from "./OnboardingFooter";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
 
-type MachinePage = "identity" | "key-import" | "backup" | "setup" | "config";
+export type MachineOnboardingPage =
+  | "identity"
+  | "key-import"
+  | "backup"
+  | "setup"
+  | "config";
 
 export function MachineOnboardingFlow({
   complete,
   identityLost,
+  initialPage,
   queryClient,
 }: {
   complete: (pubkey?: string) => void;
   identityLost: boolean;
+  initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
 }) {
-  const [page, setPage] = React.useState<MachinePage>(
-    identityLost ? "key-import" : "identity",
+  const [page, setPage] = React.useState<MachineOnboardingPage>(
+    identityLost ? "key-import" : (initialPage ?? "identity"),
   );
   const [error, setError] = React.useState<string | null>(null);
   const [isPending, setIsPending] = React.useState(false);

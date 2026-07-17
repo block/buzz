@@ -273,6 +273,12 @@
     --buzz-onboarding-emoji-picker-input: 255, 255, 255;
   }
 
+  .buzz-onboarding-key-text {
+    @apply w-full break-all [overflow-wrap:anywhere] font-mono text-nsec-key;
+
+    color: var(--buzz-onboarding-backup-ink);
+  }
+
   .dark .buzz-onboarding-neutral-theme:not(.buzz-startup-shell) {
     --background: 0 0% 3.9%;
     --foreground: 0 0% 98%;

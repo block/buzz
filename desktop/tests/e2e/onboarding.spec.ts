@@ -63,6 +63,8 @@ async function setRelayConnectionState(
 }
 
 const HOME_SEEN_STORAGE_KEY_PREFIX = "buzz-home-feed-seen.v1:";
+const COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY =
+  "buzz-community-onboarding-transaction.v1";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const BLANK_TYLER_IDENTITY = {
   ...TEST_IDENTITIES.tyler,
@@ -104,6 +106,21 @@ async function readHomeSeenStorageKeys(page: Page) {
 
 async function expectNoHomeSeenEntries(page: Page) {
   await expect.poll(async () => readHomeSeenStorageKeys(page)).toEqual([]);
+}
+
+async function expectCommunityBranchFramePosition(page: Page, frame: Locator) {
+  const box = await frame.boundingBox();
+  const viewport = page.viewportSize();
+  if (!box || !viewport) {
+    throw new Error("Could not measure community branch frame position");
+  }
+  const chromeOffset = 106;
+  const footerOffset = 144;
+  const frameCenterY = box.y + box.height / 2;
+  const usableLaneCenterY =
+    chromeOffset + (viewport.height - chromeOffset - footerOffset) / 2;
+  expect(frameCenterY).toBeGreaterThan(usableLaneCenterY);
+  expect(box.y + box.height).toBeLessThan(viewport.height - footerOffset);
 }
 
 async function selectFirstEmojiFromPicker(page: Page) {
@@ -576,18 +593,17 @@ test("first-community choices expose npub and invite input", async ({
   await page.goto("/");
 
   await expect(
-    page.getByRole("button", { name: "Join default community" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Join a community" }),
+    page.getByRole("button", { name: "Add me to a community" }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "I have an invite link" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Create a community" }),
+    page.getByRole("button", { name: "I want to create a community" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Create a community" }).click();
+  await page
+    .getByRole("button", { name: "I want to create a community" })
+    .click();
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -605,20 +621,97 @@ test("first-community choices expose npub and invite input", async ({
     )
     .toMatchObject({ url: "https://buzz.xyz" });
 
-  await page.getByRole("button", { name: "Join a community" }).click();
+  await page.getByRole("button", { name: "Add me to a community" }).click();
   await expect(page.getByTestId("welcome-join-npub")).toHaveText(
     npubEncode(BLANK_TYLER_IDENTITY.pubkey),
   );
+  const joinKeyFrame = page.getByTestId("welcome-join-npub-frame");
+  const joinNpub = page.getByTestId("welcome-join-npub");
+  await expect(joinKeyFrame).toBeVisible();
+  await expect(joinNpub).toBeVisible();
+  await expectCommunityBranchFramePosition(page, joinKeyFrame);
+  const joinKeyFrameBox = await joinKeyFrame.boundingBox();
+  expect(joinKeyFrameBox?.width).toBeGreaterThan(700);
+  const joinKeyFrameStyles = await joinKeyFrame.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return {
+      backgroundColor: styles.backgroundColor,
+      borderRadius: styles.borderRadius,
+    };
+  });
+  expect(joinKeyFrameStyles.backgroundColor).toMatch(/(0\.5\)|\/ 0\.5\))/);
+  expect(joinKeyFrameStyles.borderRadius).toBe("12px");
+  await expect
+    .poll(() =>
+      joinNpub.evaluate((element) => {
+        const styles = window.getComputedStyle(element);
+        return {
+          color: styles.color,
+          fontFamily: styles.fontFamily,
+          fontSize: styles.fontSize,
+        };
+      }),
+    )
+    .toMatchObject({
+      color: "rgb(113, 113, 6)",
+      fontSize: "36px",
+    });
+  expect(
+    (
+      await joinNpub.evaluate((element) =>
+        window.getComputedStyle(element).fontFamily.toLowerCase(),
+      )
+    ).includes("mono"),
+  ).toBe(true);
   await page.getByRole("button", { name: "Back" }).click();
 
   await page.getByRole("button", { name: "I have an invite link" }).click();
   await expect(
-    page.getByRole("heading", { name: "I have an invite link" }),
+    page.getByRole("heading", { name: "Enter your invite link" }),
   ).toBeVisible();
-  await expect(page.getByTestId("invite-redeem-input")).toBeVisible();
+  const inviteInputFrame = page.getByTestId("invite-redeem-input-frame");
+  const inviteInput = page.getByTestId("invite-redeem-input");
+  await expect(inviteInputFrame).toBeVisible();
+  await expect(inviteInput).toBeVisible();
+  await expectCommunityBranchFramePosition(page, inviteInputFrame);
+  const inviteInputFrameBox = await inviteInputFrame.boundingBox();
+  expect(inviteInputFrameBox?.width).toBeGreaterThan(700);
+  const inviteInputFrameStyles = await inviteInputFrame.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return {
+      backgroundColor: styles.backgroundColor,
+      borderRadius: styles.borderRadius,
+    };
+  });
+  expect(inviteInputFrameStyles.backgroundColor).toMatch(/(0\.5\)|\/ 0\.5\))/);
+  expect(inviteInputFrameStyles.borderRadius).toBe("12px");
+  await expect
+    .poll(() =>
+      inviteInput.evaluate((element) => {
+        const styles = window.getComputedStyle(element);
+        return {
+          color: styles.color,
+          fontFamily: styles.fontFamily,
+          fontSize: styles.fontSize,
+        };
+      }),
+    )
+    .toMatchObject({
+      color: "rgb(113, 113, 6)",
+      fontSize: "36px",
+    });
+  expect(
+    (
+      await inviteInput.evaluate((element) =>
+        window.getComputedStyle(element).fontFamily.toLowerCase(),
+      )
+    ).includes("mono"),
+  ).toBe(true);
+  await expect(page.getByTestId("invite-redeem-submit")).toHaveText("Next");
+  await expect(page.getByTestId("invite-redeem-submit")).toBeDisabled();
 });
 
-test("first-community hides the default option for localhost", async ({
+test("first-community shows the scenario cards for localhost", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -639,8 +732,129 @@ test("first-community hides the default option for localhost", async ({
     page.getByRole("button", { name: "Join default community" }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Join a community" }),
+    page.getByRole("button", { name: "Add me to a community" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "I have an invite link" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "I want to create a community" }),
+  ).toBeVisible();
+
+  await page.getByTestId("welcome-setup-back").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+  await expect(
+    page.getByRole("heading", {
+      name: "Configure your default model settings",
+    }),
+  ).toBeVisible();
+});
+
+test("first-community profile step uses onboarding Next and Back controls", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript(
+    ({ pubkey, transactionStorageKey }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        transactionStorageKey,
+        JSON.stringify({
+          id: "txn-profile-step",
+          source: "first-community",
+          stage: "profile",
+          relayUrl: "wss://default.example.com",
+          communityName: "Default",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    {
+      pubkey: BLANK_TYLER_IDENTITY.pubkey,
+      transactionStorageKey: COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
+    },
+  );
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "wss://default.example.com",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.goto("/");
+
+  await expect(page.getByTestId("community-onboarding-flow")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  const profileMain = page.getByTestId("community-profile-main");
+  const profileMainBox = await profileMain.boundingBox();
+  const viewport = page.viewportSize();
+  if (!profileMainBox || !viewport) {
+    throw new Error("Could not measure community profile body position");
+  }
+  const chromeOffset = 106;
+  const footerOffset = 144;
+  const profileMainCenterY = profileMainBox.y + profileMainBox.height / 2;
+  const centeredInUsableLaneY =
+    chromeOffset + (viewport.height - chromeOffset - footerOffset) / 2;
+  expect(Math.abs(profileMainCenterY - centeredInUsableLaneY)).toBeLessThan(32);
+  const keyFrame = page.getByTestId("community-profile-key-frame");
+  const nameKey = page.getByTestId("community-profile-name-key");
+  await expect(keyFrame).toBeVisible();
+  await expect(nameKey).toBeVisible();
+  const keyFrameBox = await keyFrame.boundingBox();
+  expect(keyFrameBox?.width).toBeGreaterThan(700);
+  const keyFrameStyles = await keyFrame.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return {
+      backgroundColor: styles.backgroundColor,
+      borderRadius: styles.borderRadius,
+    };
+  });
+  expect(keyFrameStyles.backgroundColor).toMatch(/(0\.5\)|\/ 0\.5\))/);
+  expect(keyFrameStyles.borderRadius).toBe("12px");
+  await expect
+    .poll(() =>
+      nameKey.evaluate((element) => {
+        const styles = window.getComputedStyle(element);
+        return {
+          color: styles.color,
+          fontFamily: styles.fontFamily,
+          fontSize: styles.fontSize,
+        };
+      }),
+    )
+    .toMatchObject({
+      color: "rgb(113, 113, 6)",
+      fontSize: "36px",
+    });
+  expect(
+    (
+      await nameKey.evaluate((element) =>
+        window.getComputedStyle(element).fontFamily.toLowerCase(),
+      )
+    ).includes("mono"),
+  ).toBe(true);
+  await expect(page.getByTestId("community-profile-next")).toHaveText("Next");
+  await expect(page.getByTestId("community-profile-next")).toBeDisabled();
+  await expect(page.getByTestId("community-profile-back")).toHaveText("Back");
+
+  await page.getByTestId("community-profile-back").click();
+  await expect(
+    page.getByRole("button", { name: "Add me to a community" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
+      ),
+    )
+    .toBeNull();
 });
 
 test("identity fallback text does not count as a real onboarding name", async ({

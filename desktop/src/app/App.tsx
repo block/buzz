@@ -19,7 +19,10 @@ import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboardingFlow";
-import { MachineOnboardingFlow } from "@/features/onboarding/ui/MachineOnboardingFlow";
+import {
+  MachineOnboardingFlow,
+  type MachineOnboardingPage,
+} from "@/features/onboarding/ui/MachineOnboardingFlow";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
 import { PendingInviteGate } from "@/features/onboarding/ui/PendingInviteGate";
 import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
@@ -249,7 +252,13 @@ function AppReady({
   );
 }
 
-function CommunityApp({ sharedIdentity }: { sharedIdentity: boolean }) {
+function CommunityApp({
+  onBackToMachineConfig,
+  sharedIdentity,
+}: {
+  onBackToMachineConfig: () => void;
+  sharedIdentity: boolean;
+}) {
   const {
     activeCommunity,
     reinitKey,
@@ -325,7 +334,12 @@ function CommunityApp({ sharedIdentity }: { sharedIdentity: boolean }) {
 
   // Show welcome setup for first-run users with no communities
   if (community.needsSetup) {
-    return <WelcomeSetup defaultRelayUrl={community.defaultRelayUrl} />;
+    return (
+      <WelcomeSetup
+        defaultRelayUrl={community.defaultRelayUrl}
+        onBack={onBackToMachineConfig}
+      />
+    );
   }
 
   // Surface apply failures so the user can retry or change community.
@@ -391,6 +405,21 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     hasConfiguredCommunity: activeCommunity !== null,
     isSharedIdentity: sharedIdentity,
   });
+  const [machineInitialPage, setMachineInitialPage] =
+    useState<MachineOnboardingPage>();
+
+  const reopenMachineConfig = useCallback(() => {
+    setMachineInitialPage("config");
+    machine.reopen();
+  }, [machine.reopen]);
+
+  const completeMachineOnboarding = useCallback(
+    (pubkey?: string) => {
+      setMachineInitialPage(undefined);
+      machine.complete(pubkey);
+    },
+    [machine.complete],
+  );
 
   // Deep links are captured here — above the machine-onboarding gate — not in
   // CommunityApp. The Rust side queues them; draining into the persisted
@@ -413,7 +442,12 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   if (machine.stage === "relaunch-required") return <RelaunchRequiredScreen />;
   if (machine.stage === "blocking") return <AppLoadingGate />;
   if (machine.stage === "ready") {
-    return <CommunityApp sharedIdentity={sharedIdentity} />;
+    return (
+      <CommunityApp
+        onBackToMachineConfig={reopenMachineConfig}
+        sharedIdentity={sharedIdentity}
+      />
+    );
   }
 
   // A community deep link that arrived before machine onboarding finished is
@@ -428,8 +462,9 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   return (
     <>
       <MachineOnboardingFlow
-        complete={machine.complete}
+        complete={completeMachineOnboarding}
         identityLost={machine.identityLost}
+        initialPage={machineInitialPage}
         queryClient={machine.queryClient}
       />
       {shouldAcknowledgeDeepLink ? <PendingInviteGate /> : null}

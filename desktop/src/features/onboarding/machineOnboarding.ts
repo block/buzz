@@ -28,6 +28,13 @@ export function readMachineOnboardingCompletion(pubkey: string | null) {
   );
 }
 
+function clearMachineOnboardingCompletion(pubkey: string | null) {
+  if (typeof window === "undefined" || !pubkey) return;
+  window.localStorage.removeItem(
+    completionKey(MACHINE_ONBOARDING_COMPLETION_STORAGE_KEY, pubkey),
+  );
+}
+
 function forceMachineOnboarding() {
   if (!import.meta.env.DEV || typeof window === "undefined") return false;
   return (
@@ -150,6 +157,12 @@ export function useMachineOnboardingState({
     [currentPubkey],
   );
 
+  const reopen = React.useCallback(() => {
+    clearMachineOnboardingCompletion(currentPubkey);
+    setCompletedPubkey((pubkey) => (pubkey === currentPubkey ? null : pubkey));
+    setEvaluatedPubkey(currentPubkey);
+  }, [currentPubkey]);
+
   const relaunchRequired =
     ((bootedLost && !identityLost) || (bootedLocked && !identityLocked)) &&
     identityQuery.status === "success";
@@ -189,6 +202,7 @@ export function useMachineOnboardingState({
     currentPubkey,
     identityLost,
     queryClient,
+    reopen,
     stage,
   };
 }
