@@ -65,17 +65,27 @@ function TexturedCardDecoration() {
     <>
       <svg
         aria-hidden="true"
-        className="pointer-events-none absolute -inset-56 size-[calc(100%+28rem)] overflow-visible"
+        className="pointer-events-none absolute overflow-visible"
         focusable="false"
+        style={{
+          inset: -TEXTURE_BLEED_PX,
+          height: `calc(100% + ${TEXTURE_BLEED_PX * 2}px)`,
+          width: `calc(100% + ${TEXTURE_BLEED_PX * 2}px)`,
+        }}
       >
         <defs>
+          {/* The SVG wrapper already includes the full configured bleed, so
+              the filter only needs to cover that wrapper. Keeping the filter
+              region at its default bounds avoids rasterizing another large,
+              invisible percentage-based surface around it. */}
           <filter
             id={filterId}
-            x="-60%"
-            y="-140%"
-            width="220%"
-            height="380%"
+            x="0"
+            y="0"
+            width="100%"
+            height="100%"
             colorInterpolationFilters="sRGB"
+            filterUnits="userSpaceOnUse"
           >
             <feMorphology
               in="SourceAlpha"
