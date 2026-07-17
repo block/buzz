@@ -40,7 +40,10 @@ import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityAp
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
-import { listenForDeepLinks } from "@/shared/deep-link";
+import {
+  type AddCommunityDeepLinkPayload,
+  listenForDeepLinks,
+} from "@/shared/deep-link";
 import { cn } from "@/shared/lib/cn";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
@@ -421,6 +424,18 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     [machine.complete],
   );
 
+  const openAddCommunity = useCallback(
+    (payload: AddCommunityDeepLinkPayload & { requestId: string }) =>
+      activeCommunity
+        ? requestAddCommunityPrefill(payload)
+        : communityOnboarding.start({
+            source: "add-community",
+            relayUrl: payload.relayUrl,
+            communityName: payload.name,
+          }),
+    [activeCommunity, communityOnboarding.start],
+  );
+
   // Deep links are captured here — above the machine-onboarding gate — not in
   // CommunityApp. The Rust side queues them; draining into the persisted
   // community-onboarding transaction immediately means an invite opened on a
@@ -429,13 +444,13 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   useEffect(() => {
     const unlisten = listenForDeepLinks({
       startCommunityOnboarding: communityOnboarding.start,
-      openAddCommunity: requestAddCommunityPrefill,
+      openAddCommunity,
       onAddCommunityAvailable: onAddCommunityPrefillAvailable,
     });
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, [communityOnboarding.start]);
+  }, [communityOnboarding.start, openAddCommunity]);
 
   if (machine.stage === "reset-failed") return <ResetFailedScreen />;
   if (machine.stage === "keyring-locked") return <KeyringLockedScreen />;
