@@ -6,6 +6,7 @@ import {
   buildWelcomeKickoffCloser,
   buildWelcomeKickoffOpener,
   buildWelcomeKickoffOpenerSendInput,
+  classifyWelcomeKickoffResolution,
   createWelcomeKickoffCoordinator,
   resolveWelcomeAgentSet,
   selectWelcomeKickoffIntroTeammates,
@@ -245,4 +246,52 @@ test("readiness wait returns the subset that became online by the deadline", asy
   });
 
   assert.deepEqual(online, [honey]);
+});
+
+function relayEvent({ id, pubkey, createdAt = 1, tags = [], content = "" }) {
+  return {
+    id,
+    pubkey,
+    created_at: createdAt,
+    kind: 9,
+    tags,
+    content,
+    sig: "sig",
+  };
+}
+
+test("closer classification sees replies that arrive during the final beat", async () => {
+  const agentSet = { lead: fizz, teammates: [honey, bumble] };
+  const opener = relayEvent({
+    id: "opener",
+    pubkey: fizz.pubkey,
+    tags: [["client", "buzz-welcome-kickoff.opener.v1"]],
+  });
+  const events = [opener];
+
+  const beforeBeat = classifyWelcomeKickoffResolution(events, opener, agentSet);
+  assert.deepEqual(
+    beforeBeat.unresolved.map((agent) => agent.name),
+    ["Honey", "Bumble"],
+  );
+
+  const beat = waitForWelcomeKickoffBeat({ waitMs: 5 });
+  events.push(
+    relayEvent({
+      id: "honey-intro",
+      pubkey: honey.pubkey,
+      createdAt: 2,
+      tags: [
+        ["e", opener.id, "", "root"],
+        ["e", opener.id, "", "reply"],
+      ],
+    }),
+  );
+  assert.equal(await beat, true);
+
+  const afterBeat = classifyWelcomeKickoffResolution(events, opener, agentSet);
+  assert.deepEqual(
+    afterBeat.unresolved.map((agent) => agent.name),
+    ["Bumble"],
+  );
 });

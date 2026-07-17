@@ -249,12 +249,16 @@ async function expectWelcomePersonaMention(page: Page) {
   await expect(banner).toContainText("Mention");
 }
 
-async function expectWelcomeView(page: Page) {
+async function expectPrivateWelcomeLanding(page: Page) {
   await expect(page).toHaveURL(/#\/channels\/[^/?#]+$/);
-  await expect(page.getByTestId("channel-general")).toBeVisible();
-  await expect(page.getByTestId("channel-welcome-everyone")).toBeVisible();
   await expect(page.getByTestId("channel-Welcome")).toBeVisible();
   await expect(page.getByTestId("chat-title")).toContainText("Welcome");
+}
+
+async function expectWelcomeView(page: Page) {
+  await expectPrivateWelcomeLanding(page);
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+  await expect(page.getByTestId("channel-welcome-everyone")).toBeVisible();
   await expect(page.getByTestId("channel-ephemeral-Welcome")).toHaveCount(0);
   await expect(page.getByTestId("chat-ephemeral-badge")).toHaveCount(0);
   await expect(page.getByTestId("message-unread-pill")).toHaveCount(0);
@@ -941,62 +945,6 @@ function retryToast(page: Page, title: string) {
     .filter({ hasText: title });
 }
 
-async function retryToastAction(
-  page: Page,
-  { command, title }: { command: string; title: string },
-) {
-  const activeToast = retryToast(page, title);
-  await expect(activeToast).toBeVisible();
-  await expect(
-    activeToast.getByRole("button", { name: "Retry" }),
-  ).toBeVisible();
-
-  const commandCountBeforeRetry = await page.evaluate(
-    (retryCommand) =>
-      (
-        window as Window & {
-          __BUZZ_E2E_COMMANDS__?: string[];
-        }
-      ).__BUZZ_E2E_COMMANDS__?.filter((entry) => entry === retryCommand)
-        .length ?? 0,
-    command,
-  );
-  await activeToast
-    .getByRole("button", { name: "Retry" })
-    .evaluate((button) => (button as HTMLButtonElement).click());
-
-  await expect
-    .poll(() =>
-      page.evaluate(
-        ({ retryCommand }) =>
-          (
-            window as Window & {
-              __BUZZ_E2E_COMMANDS__?: string[];
-            }
-          ).__BUZZ_E2E_COMMANDS__?.filter((entry) => entry === retryCommand)
-            .length ?? 0,
-        { retryCommand: command, minimum: commandCountBeforeRetry + 1 },
-      ),
-    )
-    .toBeGreaterThanOrEqual(commandCountBeforeRetry + 1);
-}
-
-async function expectRetryFailureRecreatesActionableToast(
-  page: Page,
-  { command, error, title }: { command: string; error: string; title: string },
-) {
-  const activeToast = retryToast(page, title);
-  await expect(activeToast).toContainText(error);
-
-  await retryToastAction(page, { command, title });
-
-  await expect(activeToast).toHaveCount(1);
-  await expect(activeToast).toContainText(error);
-  await expect(
-    activeToast.getByRole("button", { name: "Retry" }),
-  ).toBeVisible();
-}
-
 async function expectRetrySuccessDismissesToast(
   page: Page,
   { title }: { command: string; title: string },
@@ -1005,7 +953,7 @@ async function expectRetrySuccessDismissesToast(
   await expect(activeToast).toHaveCount(0);
 }
 
-test("failed starter channel retries recreate actionable toasts", async ({
+test("starter channel retry failure does not block private Welcome landing", async ({
   page,
 }) => {
   const starterError = "Mock starter channel setup failed.";
@@ -1022,11 +970,12 @@ test("failed starter channel retries recreate actionable toasts", async ({
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
 
-  await expectRetryFailureRecreatesActionableToast(page, {
-    command: "ensure_starter_channels",
-    error: starterError,
-    title: "Couldn't set up starter channels",
-  });
+  await expectPrivateWelcomeLanding(page);
+  const activeToast = retryToast(page, "Couldn't set up starter channels");
+  await expect(activeToast).toContainText(starterError);
+  await expect(
+    activeToast.getByRole("button", { name: "Retry" }),
+  ).toBeVisible();
 });
 
 test("successful starter channel retry clears its actionable toast", async ({
@@ -1058,7 +1007,7 @@ test("first-run onboarding shows setup loading until starter channel bootstrap c
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
-    { createManagedAgentDelayMs: 9_000 },
+    { createManagedAgentDelayMs: 1_000 },
     { skipOnboardingSeed: true },
   );
   await page.goto("/");

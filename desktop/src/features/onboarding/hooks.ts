@@ -31,8 +31,10 @@ import {
   updateChannel,
 } from "@/shared/api/tauri";
 
+const STARTER_CHANNEL_SETUP_TOAST_ID = "starter-channel-setup-error";
+
 export type ChannelInitResult =
-  | { ok: true; focusChannelId?: string }
+  | { ok: true; focusChannelId?: string; warningReason?: string }
   | { ok: false; reason: string };
 
 export async function initializeStarterChannels(
@@ -48,10 +50,20 @@ export async function initializeStarterChannels(
   },
 ): Promise<ChannelInitResult> {
   try {
-    const starterChannels = await ensureStarterChannels({
-      ensureStarterChannels: ensureStarterChannelsCommand,
-      getChannels,
-    });
+    let starterChannels: Awaited<
+      ReturnType<typeof ensureStarterChannels>
+    > | null = null;
+    let starterChannelsError: unknown = null;
+    try {
+      starterChannels = await ensureStarterChannels({
+        ensureStarterChannels: ensureStarterChannelsCommand,
+        getChannels,
+      });
+    } catch (error) {
+      starterChannelsError = error;
+      console.warn("Failed to initialize public starter channels.", error);
+    }
+
     const welcomeChannel = await ensureWelcomeChannel(
       {
         createChannel,
@@ -65,14 +77,15 @@ export async function initializeStarterChannels(
       },
     );
 
+    const starterChannelList = starterChannels?.channels ?? [];
     queryClient.setQueryData<Channel[]>(channelsQueryKey, (channels = []) => {
       const ensuredIds = new Set(
-        starterChannels.channels.map((channel) => channel.id),
+        starterChannelList.map((channel) => channel.id),
       );
       ensuredIds.add(welcomeChannel.id);
       return [
-        ...starterChannels.channels,
-        ...(starterChannels.channels.some(
+        ...starterChannelList,
+        ...(starterChannelList.some(
           (channel) => channel.id === welcomeChannel.id,
         )
           ? []
@@ -101,7 +114,7 @@ export async function initializeStarterChannels(
       // the route can consume the pending private Welcome channel immediately.
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (channels = []) => {
         const byId = new Map(
-          [...channels, ...starterChannels.channels, welcomeChannel].map(
+          [...channels, ...starterChannelList, welcomeChannel].map(
             (channel) => [channel.id, channel],
           ),
         );
@@ -110,7 +123,16 @@ export async function initializeStarterChannels(
       rememberPendingWelcomeChannel(welcomeChannel.id);
       notifyWelcomeChannelReady(welcomeChannel.id);
     }
-    return { ok: true, focusChannelId: focus ? welcomeChannel.id : undefined };
+    return {
+      ok: true,
+      focusChannelId: focus ? welcomeChannel.id : undefined,
+      warningReason:
+        starterChannelsError instanceof Error
+          ? starterChannelsError.message
+          : starterChannelsError
+            ? "Failed to set up starter channels"
+            : undefined,
+    };
   } catch (error) {
     console.warn("Failed to initialize starter channels.", error);
     return {
@@ -553,12 +575,17 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   const showStarterRetryToast = React.useCallback(
     (reason: string) => {
       toast.error("Couldn't set up starter channels", {
+        id: STARTER_CHANNEL_SETUP_TOAST_ID,
         action: {
           label: "Retry",
           onClick: () => {
             void requestStarterChannels(true).then((result) => {
               if (!result.ok) {
                 showStarterRetryToast(result.reason);
+                return;
+              }
+              if (result.warningReason) {
+                showStarterRetryToast(result.warningReason);
               }
             });
           },
@@ -583,6 +610,9 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
         window.location.hash = `/channels/${encodeURIComponent(
           starterResult.focusChannelId,
         )}`;
+      }
+      if (starterResult.warningReason) {
+        showStarterRetryToast(starterResult.warningReason);
       }
     });
   }, [

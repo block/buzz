@@ -278,7 +278,7 @@ function failedAfterKickoff(agent: ManagedAgent, opener: RelayEvent) {
   );
 }
 
-function classifyWelcomeKickoffResolution(
+export function classifyWelcomeKickoffResolution(
   events: readonly RelayEvent[],
   opener: RelayEvent,
   agentSet: WelcomeAgentSet,
@@ -613,10 +613,6 @@ export function useWelcomeKickoff(
         const timeout = globalThis.setTimeout(() => {
           closerTimeouts.delete(channelId);
           if (focusedWelcomeChannelRef.current !== channelId) return;
-          const latestEvents = channelEventsRef.current;
-          if (markerEvent(latestEvents, closerMarker)) return;
-          const latestOpener =
-            markerEvent(latestEvents, openerMarker) ?? opener;
           const controller = new AbortController();
           closerAbortControllers.set(channelId, controller);
           closerInFlight.add(channelId);
@@ -631,6 +627,10 @@ export function useWelcomeKickoff(
             )
               return;
 
+            const latestEvents = channelEventsRef.current;
+            if (markerEvent(latestEvents, closerMarker)) return;
+            const latestOpener =
+              markerEvent(latestEvents, openerMarker) ?? opener;
             const latestAgentSet = await resolveLatestWelcomeAgentSet({
               fallback: agentSet,
               queryClient,
@@ -684,14 +684,16 @@ export function useWelcomeKickoff(
       )
         return;
 
+      const latestEvents = channelEventsRef.current;
+      const latestOpener = markerEvent(latestEvents, openerMarker) ?? opener;
       const latestAgentSet = await resolveLatestWelcomeAgentSet({
         fallback: agentSet,
         queryClient,
         relayUrl: activeCommunity?.relayUrl,
       });
       const latestResolution = classifyWelcomeKickoffResolution(
-        channelEventsRef.current,
-        opener,
+        latestEvents,
+        latestOpener,
         latestAgentSet,
       );
       await sendWelcomeKickoffCloser({
@@ -700,7 +702,7 @@ export function useWelcomeKickoff(
         content: buildWelcomeKickoffCloser(
           latestResolution.failed.map((agent) => agent.name),
         ),
-        opener,
+        opener: latestOpener,
       });
     })()
       .catch((error) => {
