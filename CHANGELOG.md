@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.15
+
+- fix(desktop): honor selected onboarding runtime config ([#2047](https://github.com/block/buzz/pull/2047)) ([`0bbcafe9e`](https://github.com/block/buzz/commit/0bbcafe9e6893dcc77f2f813e749ab655cbfc51d))
+- Polish community onboarding flow ([#2048](https://github.com/block/buzz/pull/2048)) ([`2ea71de24`](https://github.com/block/buzz/commit/2ea71de24c8adc1f506e5afaa9ec02dca7593340))
+- fix(desktop): retry transient runtime installs and repoint Goose to official upstream ([#2046](https://github.com/block/buzz/pull/2046)) ([`51c2d1ca6`](https://github.com/block/buzz/commit/51c2d1ca62947f4a89bab99b145daada6b2f310e))
+- fix(agents): anchor active-turn timer to authoritative start time ([#2033](https://github.com/block/buzz/pull/2033)) ([`4be5c6ae3`](https://github.com/block/buzz/commit/4be5c6ae32b0601331f81771c387e50e339b8770))
+- Add preferred runtime onboarding ([#2040](https://github.com/block/buzz/pull/2040)) ([`c19e0ce2d`](https://github.com/block/buzz/commit/c19e0ce2d4e87bf76ace7b1233fa0fd0793f31aa))
+- fix(desktop): limit channel composer blur to input ([#2038](https://github.com/block/buzz/pull/2038)) ([`0e0383601`](https://github.com/block/buzz/commit/0e038360185971a6e5132bae27007d28a032b330))
+- Bug-bash round 2: table scroll, Goose instructions, workflow mention wake ([#2034](https://github.com/block/buzz/pull/2034)) ([`64b8fea6d`](https://github.com/block/buzz/commit/64b8fea6dce3be684aa0bac5dbd701e46dc7e432))
+- feat(desktop): clean up Agents page copy and streamline agent defaults ([#2031](https://github.com/block/buzz/pull/2031)) ([`3e80b7666`](https://github.com/block/buzz/commit/3e80b76666f46f6e821ca8d0bcdd4ca1429fa031))
+
+
 ## v0.4.14
 
 - fix(desktop): restore Doctor ACP login discovery ([#2017](https://github.com/block/buzz/pull/2017)) ([`e179f88ad`](https://github.com/block/buzz/commit/e179f88ada02eadb636afea88f2d5b5cb82621fb))
