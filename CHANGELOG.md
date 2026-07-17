@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.4.14
+
+- fix(desktop): restore Doctor ACP login discovery ([#2017](https://github.com/block/buzz/pull/2017)) ([`e179f88ad`](https://github.com/block/buzz/commit/e179f88ada02eadb636afea88f2d5b5cb82621fb))
+- feat(desktop): animate starter team onboarding ([#2032](https://github.com/block/buzz/pull/2032)) ([`1aab50e95`](https://github.com/block/buzz/commit/1aab50e950f2b7ef75cc6ec6e6055de681a4bff7))
+- fix(desktop): include exe dir and ~/.local/bin in provider discovery ([#2007](https://github.com/block/buzz/pull/2007)) ([`ac404ba67`](https://github.com/block/buzz/commit/ac404ba67f2f6fb0a986e865ded4402e445fd009))
+- fix(desktop): close mention popup after an exact name + trailing space ([#2030](https://github.com/block/buzz/pull/2030)) ([`fb0a4d5e7`](https://github.com/block/buzz/commit/fb0a4d5e7490aaf10eda1b37c138b737232de78d))
+- test(desktop): harden observer archive policy regression coverage ([#1994](https://github.com/block/buzz/pull/1994)) ([`fd2eaac73`](https://github.com/block/buzz/commit/fd2eaac73b2c3125ab242b4e931b54769303a9f0))
+- Bug-bash: mention/code-span, feed titles, autocomplete, edit-mentions, draft routing, and right-click media Download ([#2027](https://github.com/block/buzz/pull/2027)) ([`084e442d2`](https://github.com/block/buzz/commit/084e442d2dea0125742f5d410fb2ac99c3af225c))
+- fix(desktop): keep mesh allowlist on transient roster query failure ([#2024](https://github.com/block/buzz/pull/2024)) ([`f205e6693`](https://github.com/block/buzz/commit/f205e669306da82a4188fc8ace08cccc0399244d))
+- Polish Buzz theme and sidebar ([#1971](https://github.com/block/buzz/pull/1971)) ([`2121fd045`](https://github.com/block/buzz/commit/2121fd0452afd212caaaa6962c8710606417658a))
+- Welcome new users with a live agent team kickoff ([#1998](https://github.com/block/buzz/pull/1998)) ([`85fc64835`](https://github.com/block/buzz/commit/85fc64835e79a0310990e253877abe1b3d6a654c))
+
+
 ## v0.4.13
 
 - fix(desktop): compare relay media origins case-insensitively so uploads render when the saved community URL has uppercase characters
