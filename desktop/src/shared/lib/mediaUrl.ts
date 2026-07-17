@@ -29,6 +29,13 @@ let portPromise: Promise<number | null> | null = null;
 /** Cached relay origin (e.g. "https://buzz-oss.stage.blox.sqprod.co"). */
 let cachedRelayOrigin: string | null = null;
 
+/**
+ * Monotonic cache generation. Async lookups capture the current generation and
+ * may only publish results while it is still current. This prevents a lookup
+ * started for the previous community from repopulating caches after reset.
+ */
+let cacheGeneration = 0;
+
 const POLL_INTERVAL_MS = 100;
 const POLL_TIMEOUT_MS = 5000;
 
@@ -38,20 +45,25 @@ const POLL_TIMEOUT_MS = 5000;
  * Returns the port, or null if the proxy never came up.
  */
 async function fetchProxyPort(): Promise<number | null> {
+  const generation = cacheGeneration;
+
   // Fetch relay origin in parallel — fire-and-forget, no retry needed.
   if (!cachedRelayOrigin) {
     invoke<string>("get_relay_http_url")
       .then((url) => {
-        cachedRelayOrigin = url.replace(/\/+$/, "");
+        if (generation === cacheGeneration) {
+          cachedRelayOrigin = url.replace(/\/+$/, "");
+        }
       })
       .catch(() => {});
   }
 
   const deadline = Date.now() + POLL_TIMEOUT_MS;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && generation === cacheGeneration) {
     try {
       const port = await invoke<number>("get_media_proxy_port");
       if (port > 0) {
+        if (generation !== cacheGeneration) return null;
         cachedPort = port;
         return port;
       }
@@ -75,6 +87,7 @@ if (typeof window !== "undefined") {
  * and relay origin for the new community.
  */
 export function resetMediaCaches(): void {
+  cacheGeneration += 1;
   cachedPort = null;
   portPromise = null;
   cachedRelayOrigin = null;
