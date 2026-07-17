@@ -12,11 +12,24 @@ export interface Report {
   createdAt: string;
 }
 
-export interface Feedback {
+export interface FeedbackSummary {
   id: string;
   communityId: string;
+  communityHost: string;
   submitterPubkey: string;
   category?: string;
   bodySummary: string;
+  receivedAt: string;
+}
+
+export interface FeedbackDetail {
+  id: string;
+  communityId: string;
+  communityHost: string;
+  eventId: string;
+  submitterPubkey: string;
+  category?: string;
+  body: string;
+  eventCreatedAt: string;
   receivedAt: string;
 }

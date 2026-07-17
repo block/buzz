@@ -434,6 +434,22 @@ impl Db {
         admin_moderation::get_report(&self.pool, id).await
     }
 
+    /// List feedback for the deployment-global read-only admin plane.
+    pub async fn admin_list_feedback(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<admin_moderation::AdminFeedback>> {
+        admin_moderation::list_feedback(&self.pool, limit).await
+    }
+
+    /// Fetch one feedback submission for the deployment-global admin plane.
+    pub async fn admin_get_feedback(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<admin_moderation::AdminFeedback>> {
+        admin_moderation::get_feedback(&self.pool, id).await
+    }
+
     /// Return total number of communities on this relay.
     pub async fn usage_community_count(&self) -> Result<i64> {
         usage::community_count(&self.pool).await

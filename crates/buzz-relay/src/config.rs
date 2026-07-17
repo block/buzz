@@ -1,7 +1,7 @@
 //! Relay configuration from environment variables.
 
+use std::net::SocketAddr;
 use std::time::Duration;
-use std::{collections::HashSet, net::SocketAddr};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -29,10 +29,6 @@ pub enum ConfigError {
 pub struct AdminConfig {
     /// Exact admin HTTP authority.
     pub host: String,
-    /// Trusted-ingress reviewer header.
-    pub reviewer_header: String,
-    /// Human reviewers permitted to use the surface.
-    pub reviewers: HashSet<String>,
     /// Optional admin SPA bundle directory.
     pub web_dir: Option<std::path::PathBuf>,
 }
@@ -321,19 +317,6 @@ fn ensure_git_repo_path(
         )));
     }
     Ok(git_repo_path)
-}
-
-fn parse_admin_header(name: &str, value: &str) -> Result<String, ConfigError> {
-    if value.is_empty()
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    {
-        return Err(ConfigError::InvalidValue(format!(
-            "{name} must be a lowercase HTTP header name"
-        )));
-    }
-    Ok(value.to_owned())
 }
 
 impl Config {
@@ -729,36 +712,6 @@ impl Config {
                         "BUZZ_ADMIN_HOST must be an exact authority".to_string(),
                     ));
                 }
-                let required = |name: &str| {
-                    std::env::var(name)
-                        .ok()
-                        .map(|value| value.trim().to_owned())
-                        .filter(|value| !value.is_empty())
-                        .ok_or_else(|| {
-                            ConfigError::InvalidValue(format!(
-                                "{name} is required when BUZZ_ADMIN_HOST is configured"
-                            ))
-                        })
-                };
-                let reviewer_header = parse_admin_header(
-                    "BUZZ_ADMIN_REVIEWER_HEADER",
-                    &required("BUZZ_ADMIN_REVIEWER_HEADER")?,
-                )?;
-                let reviewers: HashSet<_> = required("BUZZ_ADMIN_REVIEWERS")?
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .collect();
-                if reviewers.is_empty()
-                    || reviewers
-                        .iter()
-                        .any(|value| value.len() > 320 || value.chars().any(char::is_control))
-                {
-                    return Err(ConfigError::InvalidValue(
-                        "BUZZ_ADMIN_REVIEWERS must be a non-empty, bounded allowlist".to_string(),
-                    ));
-                }
                 let web_dir = std::env::var("BUZZ_ADMIN_WEB_DIR")
                     .ok()
                     .map(|value| std::path::PathBuf::from(value.trim()))
@@ -771,12 +724,7 @@ impl Config {
                         )));
                     }
                 }
-                Some(AdminConfig {
-                    host,
-                    reviewer_header,
-                    reviewers,
-                    web_dir,
-                })
+                Some(AdminConfig { host, web_dir })
             }
         };
 

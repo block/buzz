@@ -20,6 +20,7 @@ fn bounded_limit(limit: i64) -> i64 {
 
 /// Deployment-global moderation report.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AdminReport {
     /// Report row identifier.
     pub id: Uuid,
@@ -51,6 +52,30 @@ pub struct AdminReport {
     pub action_id: Option<Uuid>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
+}
+
+/// Deployment-global product feedback with source-community provenance.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminFeedback {
+    /// Feedback row identifier.
+    pub id: Uuid,
+    /// Source community identifier.
+    pub community_id: Uuid,
+    /// Source community host.
+    pub community_host: String,
+    /// Signed feedback event identifier.
+    pub event_id: String,
+    /// Submitter public key.
+    pub submitter_pubkey: String,
+    /// Optional feedback category.
+    pub category: Option<String>,
+    /// Full feedback body.
+    pub body: String,
+    /// Timestamp signed into the feedback event.
+    pub event_created_at: DateTime<Utc>,
+    /// Time accepted by this deployment.
+    pub received_at: DateTime<Utc>,
 }
 
 /// List reports across all communities by stable descending keyset.
@@ -147,5 +172,56 @@ fn row_to_report(row: sqlx::postgres::PgRow) -> Result<AdminReport> {
         resolved_at: row.try_get("resolved_at")?,
         action_id: row.try_get("action_id")?,
         created_at: row.try_get("created_at")?,
+    })
+}
+
+/// List product feedback across all communities, newest first.
+pub async fn list_feedback(pool: &PgPool, limit: i64) -> Result<Vec<AdminFeedback>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT f.id, f.community_id, c.host AS community_host, f.event_id,
+               f.submitter_pubkey, f.category, f.body,
+               f.event_created_at, f.received_at
+        FROM product_feedback f
+        JOIN communities c ON c.id = f.community_id
+        ORDER BY f.received_at DESC, f.id DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(bounded_limit(limit))
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(row_to_feedback).collect()
+}
+
+/// Fetch one feedback submission globally by its row id.
+pub async fn get_feedback(pool: &PgPool, id: Uuid) -> Result<Option<AdminFeedback>> {
+    let row = sqlx::query(
+        r#"
+        SELECT f.id, f.community_id, c.host AS community_host, f.event_id,
+               f.submitter_pubkey, f.category, f.body,
+               f.event_created_at, f.received_at
+        FROM product_feedback f
+        JOIN communities c ON c.id = f.community_id
+        WHERE f.id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(row_to_feedback).transpose()
+}
+
+fn row_to_feedback(row: sqlx::postgres::PgRow) -> Result<AdminFeedback> {
+    Ok(AdminFeedback {
+        id: row.try_get("id")?,
+        community_id: row.try_get("community_id")?,
+        community_host: row.try_get("community_host")?,
+        event_id: hex::encode(row.try_get::<Vec<u8>, _>("event_id")?),
+        submitter_pubkey: hex::encode(row.try_get::<Vec<u8>, _>("submitter_pubkey")?),
+        category: row.try_get("category")?,
+        body: row.try_get("body")?,
+        event_created_at: row.try_get("event_created_at")?,
+        received_at: row.try_get("received_at")?,
     })
 }

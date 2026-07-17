@@ -139,9 +139,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         merged = merged.merge(admin_router);
     }
 
-    // Serve both bundles from one fallback. The admin host is checked first and
-    // uses the API's full trusted-ingress/reviewer authorization, so static
-    // assets are not exposed merely because ingress happened to route them.
+    // Serve both bundles from one fallback. The admin host is checked first so
+    // it can never fall through to the public web bundle.
     let web_dir = state.config.web_dir.clone();
     if admin_web_dir.is_some() || web_dir.is_some() {
         let admin_index = admin_web_dir.as_ref().map(|dir| dir.join("index.html"));
@@ -159,22 +158,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             async move {
                 let path = req.uri().path();
                 let admin_host = api::admin::is_admin_host(&state, req.headers());
-                let admin_authorized =
-                    admin_host && api::admin::is_authorized_read(&state, req.headers());
-                match spa_target(admin_host, admin_authorized) {
-                    SpaTarget::Admin => {
-                        if let (Some(index), Some(files)) = (admin_index, admin_files) {
-                            if path.starts_with("/assets/") {
-                                return files.oneshot(req).await.map(IntoResponse::into_response);
-                            }
-                            if is_admin_spa_path(path) {
-                                return Ok(read_spa_index(&index).await);
-                            }
+                if admin_host {
+                    if let (Some(index), Some(files)) = (admin_index, admin_files) {
+                        if path.starts_with("/assets/") {
+                            return files.oneshot(req).await.map(IntoResponse::into_response);
                         }
-                        return Ok(StatusCode::NOT_FOUND.into_response());
+                        if is_admin_spa_path(path) {
+                            return Ok(read_spa_index(&index).await);
+                        }
                     }
-                    SpaTarget::Denied => return Ok(StatusCode::NOT_FOUND.into_response()),
-                    SpaTarget::Public => {}
+                    return Ok(StatusCode::NOT_FOUND.into_response());
                 }
 
                 if let (Some(index), Some(files)) = (web_index, web_files) {
@@ -195,21 +188,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(middleware::from_fn(track_metrics))
         .layer(TraceLayer::new_for_http())
         .layer(build_cors_layer(&state.config.cors_origins))
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum SpaTarget {
-    Admin,
-    Denied,
-    Public,
-}
-
-fn spa_target(admin_host: bool, admin_authorized: bool) -> SpaTarget {
-    match (admin_host, admin_authorized) {
-        (true, true) => SpaTarget::Admin,
-        (true, false) => SpaTarget::Denied,
-        (false, _) => SpaTarget::Public,
-    }
 }
 
 fn is_admin_spa_path(path: &str) -> bool {
@@ -278,7 +256,7 @@ async fn nip11_or_ws_handler(
     // Short-circuit the exact admin authority here and never let it serve the
     // public web bundle, NIP-11 document, or WebSocket endpoint.
     if api::admin::is_admin_host(&state, &headers) {
-        if !accept.contains("text/html") || !api::admin::is_authorized_read(&state, &headers) {
+        if !accept.contains("text/html") {
             return StatusCode::NOT_FOUND.into_response();
         }
         let Some(index) = state
@@ -432,17 +410,7 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_git_web_gui_path, is_invite_landing_path, should_serve_spa, spa_target, SpaTarget,
-    };
-
-    #[test]
-    fn admin_host_never_falls_through_to_public_web_bundle() {
-        assert_eq!(spa_target(true, true), SpaTarget::Admin);
-        assert_eq!(spa_target(true, false), SpaTarget::Denied);
-        assert_eq!(spa_target(false, false), SpaTarget::Public);
-        assert_eq!(spa_target(false, true), SpaTarget::Public);
-    }
+    use super::{is_git_web_gui_path, is_invite_landing_path, should_serve_spa};
 
     #[test]
     fn invite_landing_path_requires_exactly_one_nonempty_code_segment() {
