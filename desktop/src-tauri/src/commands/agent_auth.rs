@@ -1,4 +1,7 @@
-use std::process::{Command, Stdio};
+use std::{
+    path::Path,
+    process::{Command, Stdio},
+};
 
 use serde_json::Value;
 
@@ -116,18 +119,35 @@ fn run_buzz_acp_auth_command<const N: usize>(
         .or_else(|| resolve_command("buzz-acp"))
         .ok_or_else(|| "buzz-acp helper not found".to_string())?;
 
-    let agent_args = normalize_agent_args(adapter_command.0, Vec::new());
+    let augmented_path = crate::managed_agents::readiness::cli_probe::augmented_path();
+    run_buzz_acp_auth_command_with_paths(
+        &acp_path,
+        adapter_command.0,
+        &adapter_command.1,
+        args,
+        augmented_path.as_deref(),
+    )
+}
+
+fn run_buzz_acp_auth_command_with_paths<const N: usize>(
+    acp_path: &Path,
+    adapter_name: &str,
+    adapter_path: &Path,
+    args: [&str; N],
+    augmented_path: Option<&str>,
+) -> Result<std::process::Output, String> {
+    let agent_args = normalize_agent_args(adapter_name, Vec::new());
     let mut command = Command::new(acp_path);
     command
         .args(args)
-        .env("BUZZ_ACP_AGENT_COMMAND", adapter_command.1.as_os_str())
+        .env("BUZZ_ACP_AGENT_COMMAND", adapter_path.as_os_str())
         .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(workdir) = default_agent_workdir() {
         command.current_dir(workdir);
     }
-    if let Some(ref path) = crate::managed_agents::login_shell_path() {
+    if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
 
@@ -340,8 +360,68 @@ fn applescript_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_terminal_argv, shell_escape, shell_join, windows_terminal_args, AcpAuthMethod,
+        adapter_terminal_argv, run_buzz_acp_auth_command_with_paths, shell_escape, shell_join,
+        windows_terminal_args, AcpAuthMethod,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_command_uses_augmented_path_for_node_adapter() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let interpreter_dir = temp.path().join("interpreter-bin");
+        fs::create_dir_all(&interpreter_dir).expect("interpreter dir");
+
+        let marker_path = temp.path().join("fake-node-ran");
+        let node_path = interpreter_dir.join("node");
+        fs::write(
+            &node_path,
+            format!(
+                "#!/bin/sh\nprintf 'fake node ran\\n' > '{}' || exit 1\nprintf '{{\"methods\":[]}}\\n'\n",
+                marker_path.display()
+            ),
+        )
+        .expect("write fake node");
+        fs::set_permissions(&node_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake node");
+
+        let adapter_path = temp.path().join("claude-agent-acp");
+        fs::write(&adapter_path, "#!/usr/bin/env node\n").expect("write adapter");
+        fs::set_permissions(&adapter_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod adapter");
+
+        let acp_path = temp.path().join("buzz-acp");
+        fs::write(&acp_path, "#!/bin/sh\nexec \"$BUZZ_ACP_AGENT_COMMAND\"\n")
+            .expect("write buzz-acp");
+        fs::set_permissions(&acp_path, fs::Permissions::from_mode(0o755)).expect("chmod buzz-acp");
+
+        let augmented_path = std::env::join_paths([interpreter_dir.as_path()])
+            .expect("join augmented PATH")
+            .to_string_lossy()
+            .into_owned();
+        let output = run_buzz_acp_auth_command_with_paths(
+            &acp_path,
+            "claude-agent-acp",
+            &adapter_path,
+            ["auth-methods", "--json"],
+            Some(&augmented_path),
+        )
+        .expect("run auth command");
+
+        assert!(
+            output.status.success(),
+            "auth command should find node through augmented PATH: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(marker_path.exists(), "the fake node interpreter should run");
+        assert_eq!(
+            output.stdout,
+            br#"{"methods":[]}
+"#
+        );
+    }
 
     #[test]
     fn shell_join_escapes_spaces_and_quotes() {
