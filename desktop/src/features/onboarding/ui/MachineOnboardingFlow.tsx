@@ -215,28 +215,34 @@ export function MachineOnboardingFlow({
             </OnboardingSlideTransition>
           ) : page === "key-import" ? (
             <OnboardingSlideTransition
-              className="flex w-full max-w-[640px] flex-col items-center text-center"
+              className="flex min-h-[calc(100dvh-13.25rem)] w-full max-w-[837px] flex-col items-center text-center"
               direction="forward"
               transitionKey="machine-key-import"
             >
-              <h1 className="text-title font-normal text-foreground">
-                {identityLost ? "Re-import your key" : "Enter your private key"}
-              </h1>
-              <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
-                {identityLost
-                  ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
-                  : "If you already have a Nostr account, enter your private key below to get started."}
-              </p>
-              <NostrKeyImportForm
-                backLabel={identityLost ? "Start new identity" : "Back"}
-                onBack={
-                  identityLost
-                    ? () => void replaceLostIdentity()
-                    : () => setPage("identity")
-                }
-                onImport={importExistingIdentity}
-                variant="spotlight"
-              />
+              <div className="shrink-0">
+                <h1 className="text-title font-normal text-foreground">
+                  {identityLost
+                    ? "Re-import your key"
+                    : "Enter your private key"}
+                </h1>
+                <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                  {identityLost
+                    ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
+                    : "If you already have a Nostr account, enter your private key below to get started."}
+                </p>
+              </div>
+              <div className="absolute left-1/2 top-[calc(50dvh-6.625rem)] w-full -translate-x-1/2 -translate-y-1/2">
+                <NostrKeyImportForm
+                  backLabel={identityLost ? "Start new identity" : "Back"}
+                  onBack={
+                    identityLost
+                      ? () => void replaceLostIdentity()
+                      : () => setPage("identity")
+                  }
+                  onImport={importExistingIdentity}
+                  variant="spotlight"
+                />
+              </div>
             </OnboardingSlideTransition>
           ) : page === "backup" ? (
             <BackupStep

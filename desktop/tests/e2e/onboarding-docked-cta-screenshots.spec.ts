@@ -27,6 +27,33 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/01-landing.png` });
 
+  await page.getByRole("button", { name: "Enter a key" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Enter your private key" }),
+  ).toBeVisible();
+  const importCard = page.getByTestId("nostr-import-card");
+  await expect(importCard).toBeVisible();
+  // Outer card is transparent/borderless — the SVG texture layer and the
+  // white surface span own the visuals.
+  await expect(importCard).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(importCard).toHaveCSS("border-top-width", "0px");
+  await expect(importCard.locator("svg")).toHaveCount(1);
+  // Figma texture recipe: dilated+blurred alpha ramp dithered by per-pixel
+  // fractal noise (no displaced hard rectangle).
+  await expect(importCard.locator("feTurbulence")).toHaveAttribute(
+    "baseFrequency",
+    "0.999",
+  );
+  await expect(importCard.locator("feGaussianBlur")).toHaveCount(1);
+  await expect(importCard.locator("feDisplacementMap")).toHaveCount(0);
+  // Static texture — no animated noise.
+  await expect(importCard.locator("feTurbulence animate")).toHaveCount(0);
+  await expect(importCard.locator('[data-card-surface="true"]')).toHaveCount(1);
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOT_DIR}/01b-enter-key.png` });
+
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
   await page.getByRole("button", { name: "Get started" }).click();
   await expect(
     page.getByRole("heading", {
