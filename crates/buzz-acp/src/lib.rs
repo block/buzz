@@ -984,7 +984,7 @@ struct RespawnResult {
     /// Tuple: (initialized client, protocol version, supports_goose_steer).
     /// The third element is always `true` — the supervisor uses
     /// try-and-tolerate for the steer extension.
-    result: Result<(AcpClient, u32, bool)>,
+    result: Result<(AcpClient, u32, String)>,
 }
 
 /// Outcome of a non-cancelling steer attempt, forwarded from a per-attempt
@@ -1028,7 +1028,7 @@ impl RespawnGuard {
     /// Send the result and disarm the guard. Uses `try_send` (sync) so there
     /// is no await boundary between marking `sent` and actually enqueueing —
     /// cancellation cannot slip between the two.
-    fn send(mut self, result: Result<(AcpClient, u32, bool)>) {
+    fn send(mut self, result: Result<(AcpClient, u32, String)>) {
         // Invariant: try_send succeeds because the channel capacity equals the
         // slot count, and respawn_in_flight guarantees at most one outstanding
         // result per slot. If this ever fails, the channel sizing or the
@@ -1198,6 +1198,7 @@ async fn tokio_main() -> Result<()> {
                                 "initializeResult": init_result,
                             }),
                         );
+                        let agent_name = normalized_agent_name(&init_result);
                         agent_slots.push(Some(OwnedAgent {
                             index: i,
                             acp,
@@ -1205,6 +1206,8 @@ async fn tokio_main() -> Result<()> {
                             model_capabilities: None,
                             desired_model: config.model.clone(),
                             model_overridden: false,
+                            agent_name,
+                            goose_system_prompt_supported: None,
                             protocol_version,
                         }));
                     }
@@ -1640,7 +1643,7 @@ async fn tokio_main() -> Result<()> {
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
-                Ok((acp, protocol_version, _)) => {
+                Ok((acp, protocol_version, agent_name)) => {
                     let agent = OwnedAgent {
                         index: rr.index,
                         acp,
@@ -1648,6 +1651,8 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         model_overridden: false,
+                        agent_name,
+                        goose_system_prompt_supported: None,
                         protocol_version,
                     };
                     pool.return_agent(agent);
@@ -3199,10 +3204,6 @@ fn dispatch_heartbeat(
         .heartbeat_prompt
         .clone()
         .unwrap_or_else(default_heartbeat_prompt);
-    // For legacy agents (protocol_version < 2), prepend base_prompt to the
-    // heartbeat user message since they don't receive it via session/new.
-    let prompt_text =
-        pool::prepend_base_for_legacy(agent.protocol_version, ctx.base_prompt, &prompt_text);
     let result_tx = pool.result_tx();
     let ctx_clone = Arc::clone(ctx);
     let agent_index = agent.index;
@@ -3315,6 +3316,17 @@ fn spawn_respawn_task(
     true
 }
 
+fn normalized_agent_name(init_result: &serde_json::Value) -> String {
+    init_result
+        .get("agentInfo")
+        .or_else(|| init_result.get("serverInfo"))
+        .and_then(|info| info.get("name"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+        .trim()
+        .to_ascii_lowercase()
+}
+
 // ── spawn_and_init ────────────────────────────────────────────────────────────
 /// Spawn an agent subprocess and run the MCP `initialize` handshake.
 ///
@@ -3327,7 +3339,7 @@ async fn spawn_and_init(
     has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
-) -> Result<(AcpClient, u32, bool)> {
+) -> Result<(AcpClient, u32, String)> {
     let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
@@ -3344,7 +3356,8 @@ async fn spawn_and_init(
                     "initializeResult": init_result,
                 }),
             );
-            Ok((acp, protocol_version, true))
+            let agent_name = normalized_agent_name(&init_result);
+            Ok((acp, protocol_version, agent_name))
         }
         Err(e) => {
             // Explicitly shut down the spawned child to prevent zombie/leak.
@@ -4287,6 +4300,22 @@ mod error_outcome_emission_tests {
         }
     }
 
+    #[test]
+    fn normalizes_agent_name_from_initialize_result() {
+        assert_eq!(
+            normalized_agent_name(&serde_json::json!({
+                "agentInfo": { "name": " Goose ", "version": "1.43.0" }
+            })),
+            "goose"
+        );
+        assert_eq!(
+            normalized_agent_name(&serde_json::json!({
+                "serverInfo": { "name": "buzz-agent" }
+            })),
+            "buzz-agent"
+        );
+    }
+
     /// Spawn a real but inert agent subprocess (`cat`) so the error paths have
     /// an `OwnedAgent` to move into respawn or return to the pool. The error
     /// branches never talk to the subprocess.
@@ -4300,6 +4329,8 @@ mod error_outcome_emission_tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,

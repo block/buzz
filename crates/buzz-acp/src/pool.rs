@@ -154,9 +154,48 @@ pub struct OwnedAgent {
     /// desktop reader to distinguish a genuine runtime override from a stale
     /// session whose persona model was edited. Reset on spawn/restart.
     pub model_overridden: bool,
+    /// Normalized agent name from initialize (`agentInfo.name`/`serverInfo.name`).
+    pub agent_name: String,
+    /// Whether Goose accepted its custom system-prompt method. `None` probes on
+    /// the first session; method-not-found is cached as `Some(false)` so legacy
+    /// user-message framing is used for this process thereafter.
+    pub goose_system_prompt_supported: Option<bool>,
     /// Protocol version reported by the agent in its initialize response.
-    /// Agents declaring >= 2 support `systemPrompt` in session/new.
     pub protocol_version: u32,
+}
+
+fn has_system_prompt_support(
+    protocol_version: u32,
+    agent_name: &str,
+    goose_system_prompt_supported: Option<bool>,
+) -> bool {
+    if agent_name == "goose" {
+        goose_system_prompt_supported == Some(true)
+    } else {
+        protocol_version >= 2
+    }
+}
+
+fn session_new_system_prompt(
+    is_goose: bool,
+    protocol_version: u32,
+    prompt: Option<&str>,
+) -> Option<&str> {
+    if is_goose || protocol_version < 2 {
+        None
+    } else {
+        prompt
+    }
+}
+
+impl OwnedAgent {
+    pub(crate) fn has_system_prompt_support(&self) -> bool {
+        has_system_prompt_support(
+            self.protocol_version,
+            &self.agent_name,
+            self.goose_system_prompt_supported,
+        )
+    }
 }
 
 /// Pool of agents with take-and-return ownership semantics.
@@ -702,36 +741,56 @@ async fn create_session_and_apply_model(
     agent_core: Option<&str>,
     agent_canvas: Option<&str>,
 ) -> Result<String, AcpError> {
-    // Combine base_prompt + system_prompt + agent core + canvas metadata into a
-    // single systemPrompt value for the session/new request. Only sent when the
-    // agent declares protocol version >= 2 (supports systemPrompt); legacy agents
-    // ignore it and receive the same content as user-message sections via
-    // `format_prompt`. Core carries its own `[Agent Memory — core]` header, and
-    // canvas carries its own `[Channel Canvas]` header; both are appended with a
-    // blank-line separator.
-    let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
-        with_canvas(
-            with_core(
-                with_team(
-                    framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
-                    ctx.team_instructions.as_deref(),
-                ),
-                agent_core,
+    // Build base_prompt + system_prompt + agent core + canvas metadata into a
+    // single prompt. Standard protocol-v2 agents receive it in `session/new`;
+    // Goose receives it through the custom request below. Legacy agents receive
+    // the same content as user-message sections via `format_prompt`. Core carries
+    // its own `[Agent Memory — core]` header, and canvas carries its own
+    // `[Channel Canvas]` header; both are appended with a blank-line separator.
+    let is_goose = agent.agent_name == "goose";
+    let combined_system_prompt = with_canvas(
+        with_core(
+            with_team(
+                framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                ctx.team_instructions.as_deref(),
             ),
-            agent_canvas,
-        )
-    } else {
-        None
-    };
+            agent_core,
+        ),
+        agent_canvas,
+    );
 
     let resp = agent
         .acp
         .session_new_full(
             &ctx.cwd,
             ctx.mcp_servers.clone(),
-            combined_system_prompt.as_deref(),
+            session_new_system_prompt(
+                is_goose,
+                agent.protocol_version,
+                combined_system_prompt.as_deref(),
+            ),
         )
         .await?;
+
+    if is_goose && agent.goose_system_prompt_supported != Some(false) {
+        if let Some(prompt) = combined_system_prompt.as_deref() {
+            match agent
+                .acp
+                .session_set_goose_system_prompt(&resp.session_id, prompt)
+                .await
+            {
+                Ok(_) => agent.goose_system_prompt_supported = Some(true),
+                Err(AcpError::AgentError { code: -32601, .. }) => {
+                    agent.goose_system_prompt_supported = Some(false);
+                    tracing::warn!(
+                        target: "pool::session",
+                        "Goose does not support its system-prompt extension; using user-message framing"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
 
     // Populate model capabilities on first session creation.
     if agent.model_capabilities.is_none() {
@@ -1421,10 +1480,21 @@ pub async fn run_prompt_task(
             // Canvas is also injected here for legacy agents: protocol-v2 agents
             // already have it in systemPrompt; legacy agents need it before the
             // first prompt, matching the "every turn" per-turn delivery semantics.
-            let init_msg =
-                prepend_base_for_legacy(agent.protocol_version, ctx.base_prompt, initial_msg);
+            let init_msg = prepend_base_for_legacy(
+                if agent.has_system_prompt_support() {
+                    2
+                } else {
+                    1
+                },
+                ctx.base_prompt,
+                initial_msg,
+            );
             let init_msg = prepend_canvas_for_legacy(
-                agent.protocol_version,
+                if agent.has_system_prompt_support() {
+                    2
+                } else {
+                    1
+                },
                 agent_canvas.as_deref(),
                 &init_msg,
             );
@@ -1540,7 +1610,17 @@ pub async fn run_prompt_task(
     // follows as a second block.
     let mut slash_command: Option<String> = None;
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
-        // Pre-built prompt (heartbeat or legacy path) — a single block.
+        // Heartbeats create their session before this point, so a Goose method-not-found
+        // probe has already selected the correct framing for this process.
+        let text = prepend_base_for_legacy(
+            if agent.has_system_prompt_support() {
+                2
+            } else {
+                1
+            },
+            ctx.base_prompt,
+            &text,
+        );
         vec![text]
     } else if let Some(ref b) = batch {
         // Build prompt from batch with context enrichment.
@@ -1585,7 +1665,7 @@ pub async fn run_prompt_task(
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
                 profile_lookup: profile_lookup.as_ref(),
-                has_system_prompt_support: agent.protocol_version >= 2,
+                has_system_prompt_support: agent.has_system_prompt_support(),
                 base_prompt: ctx.base_prompt,
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
@@ -3422,6 +3502,27 @@ mod tests {
     }
 
     #[test]
+    fn goose_uses_system_prompt_only_after_custom_method_succeeds() {
+        assert!(!has_system_prompt_support(2, "goose", None));
+        assert!(!has_system_prompt_support(2, "goose", Some(false)));
+        assert!(has_system_prompt_support(2, "goose", Some(true)));
+        assert!(has_system_prompt_support(1, "goose", Some(true)));
+        assert!(has_system_prompt_support(2, "buzz-agent", None));
+        assert_eq!(
+            session_new_system_prompt(true, 2, Some("instructions")),
+            None
+        );
+        assert_eq!(
+            session_new_system_prompt(false, 2, Some("instructions")),
+            Some("instructions")
+        );
+        assert_eq!(
+            session_new_system_prompt(false, 1, Some("instructions")),
+            None
+        );
+    }
+
+    #[test]
     fn test_initial_message_legacy_agent_without_base_is_unchanged() {
         // No base_prompt configured: nothing to prepend regardless of version.
         let composed = prepend_base_for_legacy(1, None, "hello channel");
@@ -4507,6 +4608,8 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
             protocol_version: 2,
         };
 
@@ -4562,6 +4665,8 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
             protocol_version: 2,
         };
 
