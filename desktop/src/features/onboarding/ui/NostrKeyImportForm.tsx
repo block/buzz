@@ -128,14 +128,15 @@ export function NostrKeyImportForm({
       }}
     >
       <div className="space-y-1.5 text-left">
-        {variant === "spotlight" ? null : (
-          <label
-            className="text-sm font-medium text-foreground"
-            htmlFor="nostr-private-key"
-          >
-            Private key
-          </label>
-        )}
+        <label
+          className={cn(
+            "text-sm font-medium text-foreground",
+            variant === "spotlight" && "sr-only",
+          )}
+          htmlFor="nostr-private-key"
+        >
+          Private key
+        </label>
         {variant === "spotlight" ? (
           <Card
             className="w-full px-8 py-12"

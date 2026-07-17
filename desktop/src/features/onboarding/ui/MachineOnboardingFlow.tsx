@@ -231,7 +231,7 @@ export function MachineOnboardingFlow({
                     : "If you already have a Nostr account, enter your private key below to get started."}
                 </p>
               </div>
-              <div className="absolute left-1/2 top-[calc(50dvh-6.625rem)] w-full -translate-x-1/2 -translate-y-1/2">
+              <div className="buzz-onboarding-key-import-position w-full">
                 <NostrKeyImportForm
                   backLabel={identityLost ? "Start new identity" : "Back"}
                   onBack={
