@@ -88,7 +88,11 @@ fn connect_acp_runtime_blocking(
         .ok_or_else(|| "auth method is no longer advertised by this adapter".to_string())?;
 
     if uses_terminal_auth(method)? {
-        launch_terminal_auth(&request.runtime_id, method)?;
+        if method.id == "claude-login" && terminal_auth_meta_command(method)?.is_some() {
+            run_claude_login(&request.runtime_id, method)?;
+        } else {
+            launch_terminal_auth(&request.runtime_id, method)?;
+        }
         return Ok(ConnectAcpRuntimeResult { launched: true });
     }
 
@@ -211,6 +215,29 @@ fn command_error(label: &str, output: &std::process::Output) -> String {
     }
 }
 
+fn run_claude_login(runtime_id: &str, method: &AcpAuthMethod) -> Result<(), String> {
+    let runtime = known_acp_runtime_exact(runtime_id)
+        .ok_or_else(|| format!("unknown ACP runtime: {runtime_id}"))?;
+    let argv = adapter_terminal_argv(runtime.label, method, "")?;
+    let (command, args) = argv
+        .split_first()
+        .ok_or_else(|| "Claude login command is empty".to_string())?;
+    let status = Command::new(command)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| format!("failed to run Claude login: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "Claude login failed (exit {})",
+            status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(())
+}
+
 fn launch_terminal_auth(runtime_id: &str, method: &AcpAuthMethod) -> Result<(), String> {
     let runtime = known_acp_runtime_exact(runtime_id)
         .ok_or_else(|| format!("unknown ACP runtime: {runtime_id}"))?;
@@ -251,6 +278,9 @@ fn adapter_terminal_argv(
         .unwrap_or_else(|| command.to_string());
     let mut argv = vec![command_path];
     argv.extend(args.iter().cloned());
+    if method.id == "claude-login" && terminal_auth_meta_command(method)?.is_some() {
+        argv.extend(["auth".to_string(), "login".to_string()]);
+    }
     Ok(argv)
 }
 
@@ -564,6 +594,24 @@ mod tests {
         let method: AcpAuthMethod = serde_json::from_str(raw).unwrap();
         assert_eq!(method.method_type, None);
         assert!(uses_terminal_auth(&method).unwrap());
+    }
+
+    #[test]
+    fn claude_terminal_meta_starts_login_flow() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        let method: AcpAuthMethod = serde_json::from_str(
+            r#"{"_meta":{"terminal-auth":{"args":["/tmp/claude-cli.js"],"command":"definitely-not-on-path-node"}},"id":"claude-login","name":"Log in with Claude"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            adapter_terminal_argv("Claude Code", &method, "unused").unwrap(),
+            vec![
+                "definitely-not-on-path-node".to_string(),
+                "/tmp/claude-cli.js".to_string(),
+                "auth".to_string(),
+                "login".to_string(),
+            ]
+        );
     }
 
     #[test]
