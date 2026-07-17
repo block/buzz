@@ -119,7 +119,7 @@ fn run_buzz_acp_auth_command<const N: usize>(
         .or_else(|| resolve_command("buzz-acp"))
         .ok_or_else(|| "buzz-acp helper not found".to_string())?;
 
-    let augmented_path = crate::managed_agents::readiness::cli_probe::augmented_path();
+    let augmented_path = auth_command_path();
     run_buzz_acp_auth_command_with_paths(
         &acp_path,
         adapter_command.0,
@@ -127,6 +127,43 @@ fn run_buzz_acp_auth_command<const N: usize>(
         args,
         augmented_path.as_deref(),
     )
+}
+
+/// PATH for the buzz-acp auth helper child process.
+///
+/// Uses the augmented agent PATH so `#!/usr/bin/env node` adapter shims
+/// resolve the Buzz-managed Node runtime — the same PATH normal agent
+/// launches and readiness probes use.
+///
+/// On Windows, `login_shell_path()` is intentionally `None`, so the augmented
+/// PATH contains only Buzz-managed directories and the exe parent. Buzz does
+/// not ship a managed Node runtime on Windows, and npm `.cmd` adapters need
+/// the user's normal PATH to find `node` (and often `claude`/`codex`), so the
+/// inherited process PATH is appended there instead of being replaced.
+fn auth_command_path() -> Option<String> {
+    let augmented = crate::managed_agents::readiness::cli_probe::augmented_path();
+    if !cfg!(windows) {
+        return augmented;
+    }
+    let inherited = std::env::var("PATH").ok().filter(|path| !path.is_empty());
+    append_inherited_path(augmented, inherited)
+}
+
+/// Append `inherited` PATH entries after `augmented` ones. Returns `None`
+/// when `augmented` is `None` so the child simply inherits the process
+/// environment unchanged (the pre-augmentation behavior on Windows).
+fn append_inherited_path(augmented: Option<String>, inherited: Option<String>) -> Option<String> {
+    let augmented = augmented?;
+    let Some(inherited) = inherited else {
+        return Some(augmented);
+    };
+    let parts: Vec<std::path::PathBuf> = std::env::split_paths(&augmented)
+        .chain(std::env::split_paths(&inherited))
+        .collect();
+    std::env::join_paths(parts)
+        .ok()
+        .map(|joined| joined.to_string_lossy().into_owned())
+        .or(Some(augmented))
 }
 
 fn run_buzz_acp_auth_command_with_paths<const N: usize>(
@@ -360,9 +397,42 @@ fn applescript_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_terminal_argv, run_buzz_acp_auth_command_with_paths, shell_escape, shell_join,
-        windows_terminal_args, AcpAuthMethod,
+        adapter_terminal_argv, append_inherited_path, run_buzz_acp_auth_command_with_paths,
+        shell_escape, shell_join, windows_terminal_args, AcpAuthMethod,
     };
+
+    /// Windows regression: the augmented PATH there holds only Buzz-managed
+    /// dirs and the exe parent (no login-shell PATH, no managed Node), so the
+    /// user's inherited PATH must be appended for npm `.cmd` adapters to find
+    /// `node`/`claude`/`codex`.
+    #[test]
+    fn append_inherited_path_appends_after_augmented() {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        let augmented = format!("{0}buzz-bin{1}{0}exe-dir", std::path::MAIN_SEPARATOR, sep);
+        let inherited = format!(
+            "{0}user-bin{1}{0}system-bin",
+            std::path::MAIN_SEPARATOR,
+            sep
+        );
+        let joined = append_inherited_path(Some(augmented.clone()), Some(inherited.clone()))
+            .expect("joined PATH");
+        assert_eq!(joined, format!("{augmented}{sep}{inherited}"));
+    }
+
+    #[test]
+    fn append_inherited_path_falls_back_to_inheritance_without_augmented() {
+        // With no augmented PATH the helper must not set PATH at all, letting
+        // the child inherit the process environment unchanged.
+        assert_eq!(append_inherited_path(None, Some("anything".into())), None);
+    }
+
+    #[test]
+    fn append_inherited_path_keeps_augmented_without_inherited() {
+        assert_eq!(
+            append_inherited_path(Some("only-augmented".into()), None),
+            Some("only-augmented".into())
+        );
+    }
 
     #[cfg(unix)]
     #[test]
