@@ -288,8 +288,20 @@ export function SectionActionsMenu({
   );
 }
 
+function SectionUnreadIndicator({ testId }: { testId: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="h-2 w-2 shrink-0 rounded-full bg-primary"
+      data-testid={testId}
+      title="Contains unread channels"
+    />
+  );
+}
+
 function ChannelSectionHeader({
   contentId,
+  hasUnread,
   isCollapsed,
   onToggleCollapsed,
   title,
@@ -297,6 +309,7 @@ function ChannelSectionHeader({
   actions,
 }: {
   contentId: string;
+  hasUnread?: boolean;
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
   title: string;
@@ -315,6 +328,14 @@ function ChannelSectionHeader({
           type="button"
         >
           <span data-sidebar-section-title>{title}</span>
+          {isCollapsed && hasUnread ? (
+            <>
+              <SectionUnreadIndicator
+                testId={`${testId}-section-unread-indicator`}
+              />
+              <span className="sr-only">Contains unread channels</span>
+            </>
+          ) : null}
           <span aria-hidden="true" className={SECTION_LABEL_CHEVRON_CLASS}>
             <ChevronDown
               className={cn(
@@ -493,6 +514,7 @@ export function ChannelGroupSection({
     >
       <ChannelSectionHeader
         contentId={contentId}
+        hasUnread={hasUnread}
         isCollapsed={isCollapsed}
         onToggleCollapsed={onToggleCollapsed}
         title={title}
@@ -663,6 +685,16 @@ export function CustomChannelSection({
                       >
                         {section.name}
                       </span>
+                      {isCollapsed && hasUnread ? (
+                        <>
+                          <SectionUnreadIndicator
+                            testId={`section-unread-indicator-${section.id}`}
+                          />
+                          <span className="sr-only">
+                            Contains unread channels
+                          </span>
+                        </>
+                      ) : null}
                       <span
                         aria-hidden="true"
                         className={SECTION_LABEL_CHEVRON_CLASS}

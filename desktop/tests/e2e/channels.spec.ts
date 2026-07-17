@@ -10,6 +10,7 @@ import {
 } from "../helpers/bridge";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
 // Relay-only agent owned by the mock viewer (see e2eBridge.ts
@@ -2080,6 +2081,115 @@ test("typing indicator shows avatars and maintains stable name order", async ({
   await expect(
     page.getByTestId("message-typing-indicator-label"),
   ).toContainText("alice and bob are typing");
+});
+
+test("collapsed custom section surfaces hidden unread state and mark-all clears it", async ({
+  page,
+}, testInfo) => {
+  const sectionId = "unread-section";
+  await page.addInitScript(
+    ({ channelId, pubkey, sectionId }) => {
+      window.localStorage.setItem(
+        `buzz-channel-sections.v1:${pubkey}`,
+        JSON.stringify({
+          version: 1,
+          sections: [
+            { id: sectionId, name: "Important", icon: "🔔", order: 0 },
+          ],
+          assignments: { [channelId]: sectionId },
+        }),
+      );
+    },
+    {
+      channelId: RANDOM_CHANNEL_ID,
+      pubkey: MOCK_IDENTITY_PUBKEY,
+      sectionId,
+    },
+  );
+
+  await page.goto("/");
+  await waitForMockLiveSubscription(page, "random");
+
+  const sectionLabel = page
+    .getByTestId(`section-title-${sectionId}`)
+    .locator("..");
+  await sectionLabel.click();
+  await expect(sectionLabel).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByTestId("channel-random")).toHaveCount(0);
+  await expect(
+    page.getByTestId(`section-unread-indicator-${sectionId}`),
+  ).toHaveCount(0);
+
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "random",
+      content: "Hidden unread update for Important",
+      kind: 40002,
+      pubkey,
+    });
+  }, TEST_IDENTITIES.alice.pubkey);
+
+  const sectionUnread = page.getByTestId(
+    `section-unread-indicator-${sectionId}`,
+  );
+  await expect(sectionUnread).toBeVisible();
+  await expect(sectionLabel).toHaveAccessibleName(
+    "Important Contains unread channels",
+  );
+  await page.screenshot({
+    path: testInfo.outputPath("collapsed-custom-section-unread.png"),
+  });
+
+  await sectionLabel.hover();
+  await page.getByTestId(`section-actions-${sectionId}`).click();
+  await page.getByRole("menuitem", { name: "Mark all as read" }).click();
+  await expect(sectionUnread).toHaveCount(0);
+
+  await sectionLabel.click();
+  await expect(sectionLabel).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTestId("channel-random")).toBeVisible();
+});
+
+test("collapsed built-in sections show only their own unread state", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/");
+  await waitForMockLiveSubscription(page, "random");
+
+  // The shared mock fixture seeds older unread activity. Clear it so this test
+  // isolates the live event below rather than depending on fixture history.
+  await page.getByTestId("section-actions-channels").click();
+  await page.getByRole("menuitem", { name: "Mark all as read" }).click();
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
+
+  const channelsLabel = page.getByTestId("stream-list-section-label");
+  const forumsLabel = page.getByTestId("forum-list-section-label");
+  const dmLabel = page.getByTestId("dm-list-section-label");
+  await channelsLabel.click();
+  await forumsLabel.click();
+  await dmLabel.click();
+
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "random",
+      content: "Unread update scoped to Channels",
+      kind: 40002,
+      pubkey,
+    });
+  }, TEST_IDENTITIES.alice.pubkey);
+
+  await expect(
+    page.getByTestId("stream-list-section-unread-indicator"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("forum-list-section-unread-indicator"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("dm-list-section-unread-indicator"),
+  ).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath("collapsed-built-in-section-unread.png"),
+  });
 });
 
 test("sidebar shows unread indicator for newly active channels", async ({

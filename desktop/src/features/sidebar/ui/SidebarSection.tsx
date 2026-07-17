@@ -343,6 +343,7 @@ export function SidebarSection({
   emptyState,
   items,
   channelLabels,
+  hasUnread = false,
   isCollapsed,
   isActiveChannel,
   presenceByChannelId,
@@ -367,6 +368,7 @@ export function SidebarSection({
   emptyState?: React.ReactNode;
   items: Channel[];
   channelLabels?: Record<string, string>;
+  hasUnread?: boolean;
   isCollapsed?: boolean;
   isActiveChannel: boolean;
   presenceByChannelId?: Record<string, PresenceStatus>;
@@ -412,6 +414,17 @@ export function SidebarSection({
               type="button"
             >
               <span data-sidebar-section-title>{title}</span>
+              {isCollapsed && hasUnread ? (
+                <>
+                  <span
+                    aria-hidden="true"
+                    className="h-2 w-2 shrink-0 rounded-full bg-primary"
+                    data-testid={`${testId}-section-unread-indicator`}
+                    title="Contains unread channels"
+                  />
+                  <span className="sr-only">Contains unread channels</span>
+                </>
+              ) : null}
               <span aria-hidden="true" className={SECTION_LABEL_CHEVRON_CLASS}>
                 <ChevronDown
                   className={cn(

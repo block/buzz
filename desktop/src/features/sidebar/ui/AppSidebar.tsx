@@ -481,6 +481,15 @@ export function AppSidebar({
       ),
     [directMessages, dmChannelLabels, sortModeFor],
   );
+  const unassignedChannelsHaveUnread = sectionBuckets.unassigned.some(
+    (channel) => unreadChannelIds.has(channel.id),
+  );
+  const forumsHaveUnread = forumChannels.some((channel) =>
+    unreadChannelIds.has(channel.id),
+  );
+  const directMessagesHaveUnread = sortedDirectMessages.some((channel) =>
+    unreadChannelIds.has(channel.id),
+  );
   const sidebarLoadingShape = useSidebarLoadingShape({
     activeCommunityId: activeCommunity?.id,
     currentPubkey,
@@ -709,7 +718,7 @@ export function AppSidebar({
                     ))}
                     <ChannelGroupSection
                       draggable
-                      hasUnread={unreadChannelIds.size > 0}
+                      hasUnread={unassignedChannelsHaveUnread}
                       isCollapsed={collapsedGroups.channels}
                       isActiveChannel={selectedView === "channel"}
                       activeWorkingByChannelId={activeWorkingByChannelId}
@@ -749,7 +758,7 @@ export function AppSidebar({
                   <FeatureGate feature="forum">
                     <ChannelGroupSection
                       createLabel="New forum"
-                      hasUnread={unreadChannelIds.size > 0}
+                      hasUnread={forumsHaveUnread}
                       isCollapsed={collapsedGroups.forums}
                       isActiveChannel={selectedView === "channel"}
                       activeWorkingByChannelId={activeWorkingByChannelId}
@@ -787,6 +796,15 @@ export function AppSidebar({
                           sectionLabel="direct messages"
                           testId="section-actions-dms"
                           onOpenChange={setDmActionsMenuOpen}
+                          hasUnread={directMessagesHaveUnread}
+                          onMarkAllRead={() => {
+                            for (const channel of sortedDirectMessages) {
+                              onMarkChannelRead(
+                                channel.id,
+                                channel.lastMessageAt,
+                              );
+                            }
+                          }}
                           onNewMessage={onNewMessage}
                           sortMode={sortModeFor("dms")}
                           onSortModeChange={(mode) =>
@@ -796,6 +814,7 @@ export function AppSidebar({
                       </div>
                     }
                     dmParticipantsByChannelId={dmParticipantsByChannelId}
+                    hasUnread={directMessagesHaveUnread}
                     isCollapsed={collapsedGroups.directMessages}
                     isActiveChannel={selectedView === "channel"}
                     activeWorkingByChannelId={activeWorkingByChannelId}
