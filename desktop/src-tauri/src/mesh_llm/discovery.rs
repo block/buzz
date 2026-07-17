@@ -214,11 +214,12 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
             .unwrap_or_default()
             .into_iter()
             .filter_map(|mut target| {
-                let endpoint_id =
+                let validated =
                     super::transport_policy::validate_advertised_endpoint(&target.endpoint_addr)
                         .ok()?;
+                target.endpoint_addr = validated.join_token;
                 if target.endpoint_id.is_none() {
-                    target.endpoint_id = Some(endpoint_id);
+                    target.endpoint_id = Some(validated.endpoint_id);
                 }
                 if target.device_id.is_none() {
                     target.device_id = target.endpoint_id.clone();
@@ -336,7 +337,9 @@ pub(super) fn device_name_from_status(
 }
 
 fn endpoint_id_from_invite_token(invite_token: &str) -> Option<String> {
-    super::transport_policy::validate_advertised_endpoint(invite_token).ok()
+    super::transport_policy::validate_advertised_endpoint(invite_token)
+        .ok()
+        .map(|validated| validated.endpoint_id)
 }
 
 fn string_value(value: &serde_json::Value, key: &str) -> Option<String> {

@@ -72,7 +72,15 @@ fn parse_configured_relay_url(raw: &str) -> anyhow::Result<RelayUrl> {
         .map_err(|error| anyhow::anyhow!("invalid iroh relay URL {raw:?}: {error}"))
 }
 
-pub(super) fn validate_advertised_endpoint(invite_token: &str) -> anyhow::Result<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ValidatedEndpoint {
+    pub endpoint_id: String,
+    pub join_token: String,
+}
+
+pub(super) fn validate_advertised_endpoint(
+    invite_token: &str,
+) -> anyhow::Result<ValidatedEndpoint> {
     let mode = iroh_relay_mode()?;
     validate_advertised_endpoint_with_mode(invite_token, &mode)
 }
@@ -80,7 +88,7 @@ pub(super) fn validate_advertised_endpoint(invite_token: &str) -> anyhow::Result
 pub(super) fn validate_advertised_endpoint_with_mode(
     invite_token: &str,
     mode: &IrohRelayMode,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ValidatedEndpoint> {
     let token = invite_token.trim();
     if token.is_empty() {
         anyhow::bail!("mesh invite token is empty");
@@ -92,72 +100,102 @@ pub(super) fn validate_advertised_endpoint_with_mode(
         .decode(token)
         .map_err(|error| anyhow::anyhow!("invalid mesh invite encoding: {error}"))?;
 
-    let addrs = if let Ok(addr) = serde_json::from_slice::<EndpointAddr>(&payload) {
-        vec![addr]
-    } else {
-        let signed = serde_json::from_slice::<SignedBootstrapToken>(&payload)
-            .map_err(|error| anyhow::anyhow!("invalid mesh invite payload: {error}"))?;
-        signed
-            .verify()
-            .map_err(|reason| anyhow::anyhow!("invalid signed mesh invite: {}", reason.code()))?;
-        if signed.serialized_addrs.is_empty() || signed.serialized_addrs.len() > MAX_BOOTSTRAP_ADDRS
-        {
-            anyhow::bail!(
-                "signed mesh invite must contain 1..={MAX_BOOTSTRAP_ADDRS} endpoint addresses"
-            );
-        }
-        signed
-            .serialized_addrs
-            .iter()
-            .map(|bytes| {
-                serde_json::from_slice::<EndpointAddr>(bytes)
-                    .map_err(|error| anyhow::anyhow!("invalid signed endpoint address: {error}"))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?
-    };
-
-    for addr in &addrs {
-        validate_endpoint_addr(addr, mode)?;
+    if let Ok(mut addr) = serde_json::from_slice::<EndpointAddr>(&payload) {
+        retain_usable_transports(&mut addr, mode)?;
+        let endpoint_id = addr.id.to_string();
+        let join_token = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&addr)?);
+        return Ok(ValidatedEndpoint {
+            endpoint_id,
+            join_token,
+        });
     }
-    Ok(addrs[0].id.to_string())
+
+    let signed = serde_json::from_slice::<SignedBootstrapToken>(&payload)
+        .map_err(|error| anyhow::anyhow!("invalid mesh invite payload: {error}"))?;
+    signed
+        .verify()
+        .map_err(|reason| anyhow::anyhow!("invalid signed mesh invite: {}", reason.code()))?;
+    if signed.serialized_addrs.is_empty() || signed.serialized_addrs.len() > MAX_BOOTSTRAP_ADDRS {
+        anyhow::bail!(
+            "signed mesh invite must contain 1..={MAX_BOOTSTRAP_ADDRS} endpoint addresses"
+        );
+    }
+    let addrs = signed
+        .serialized_addrs
+        .iter()
+        .map(|bytes| {
+            serde_json::from_slice::<EndpointAddr>(bytes)
+                .map_err(|error| anyhow::anyhow!("invalid signed endpoint address: {error}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // Rewriting a signed token would invalidate its signature. Keep the signed
+    // envelope intact only when every advertised transport is policy-approved;
+    // mixed signed tokens fail closed rather than leaking rejected dial targets.
+    for addr in &addrs {
+        validate_signed_transports(addr, mode)?;
+    }
+    Ok(ValidatedEndpoint {
+        endpoint_id: addrs[0].id.to_string(),
+        join_token: token.to_string(),
+    })
 }
 
-fn validate_endpoint_addr(addr: &EndpointAddr, mode: &IrohRelayMode) -> anyhow::Result<()> {
+fn retain_usable_transports(addr: &mut EndpointAddr, mode: &IrohRelayMode) -> anyhow::Result<()> {
+    validate_transport_count(addr)?;
+    let mut rejections = Vec::new();
+    addr.addrs
+        .retain(|transport| match validate_transport(transport, mode) {
+            Ok(()) => true,
+            Err(error) => {
+                rejections.push(error.to_string());
+                false
+            }
+        });
+    if addr.addrs.is_empty() {
+        anyhow::bail!(
+            "mesh endpoint has no usable transport address (all rejected: {})",
+            rejections.join("; ")
+        );
+    }
+    Ok(())
+}
+
+fn validate_signed_transports(addr: &EndpointAddr, mode: &IrohRelayMode) -> anyhow::Result<()> {
+    validate_transport_count(addr)?;
+    let mut usable = 0usize;
+    for transport in &addr.addrs {
+        match validate_transport(transport, mode) {
+            Ok(()) => usable += 1,
+            // mesh-llm currently signs its own port-0 placeholder alongside a
+            // valid relay. It is non-dialable, so preserving it is safe and
+            // necessary for stock signed tokens to remain usable.
+            Err(_) if matches!(transport, TransportAddr::Ip(socket) if socket.port() == 0) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if usable == 0 {
+        anyhow::bail!("signed mesh endpoint has no usable transport address");
+    }
+    Ok(())
+}
+
+fn validate_transport_count(addr: &EndpointAddr) -> anyhow::Result<()> {
     if addr.addrs.is_empty() || addr.addrs.len() > MAX_ENDPOINT_TRANSPORT_ADDRS {
         anyhow::bail!(
             "mesh endpoint must contain 1..={MAX_ENDPOINT_TRANSPORT_ADDRS} transport addresses"
         );
     }
-    // An advertised endpoint routinely carries several transport candidates
-    // (relay + one or more direct IPs). They are *alternative* routes, not all
-    // required, so a single unusable candidate (e.g. a port-0 direct IP, which
-    // mesh-llm advertises alongside a valid relay) must NOT reject the whole
-    // endpoint — otherwise "find it any which way" collapses the moment one
-    // candidate is junk. Accept the endpoint if AT LEAST ONE candidate is
-    // usable; record why the rest were dropped for diagnosis.
-    let mut usable = 0usize;
-    let mut rejections: Vec<String> = Vec::new();
-    for transport in &addr.addrs {
-        match transport {
-            TransportAddr::Relay(relay) if relay_allowed(relay, mode) => usable += 1,
-            TransportAddr::Relay(relay) => {
-                rejections.push(format!("unapproved relay URL {relay}"));
-            }
-            TransportAddr::Ip(socket) => match validate_direct_socket(*socket) {
-                Ok(()) => usable += 1,
-                Err(error) => rejections.push(error.to_string()),
-            },
-            _ => rejections.push("unsupported transport address".to_string()),
-        }
-    }
-    if usable == 0 {
-        anyhow::bail!(
-            "mesh endpoint has no usable transport address (all {} rejected: {})",
-            addr.addrs.len(),
-            rejections.join("; ")
-        );
-    }
     Ok(())
+}
+
+fn validate_transport(transport: &TransportAddr, mode: &IrohRelayMode) -> anyhow::Result<()> {
+    match transport {
+        TransportAddr::Relay(relay) if relay_allowed(relay, mode) => Ok(()),
+        TransportAddr::Relay(relay) => anyhow::bail!("unapproved relay URL {relay}"),
+        TransportAddr::Ip(socket) => validate_direct_socket(*socket),
+        _ => anyhow::bail!("unsupported transport address"),
+    }
 }
 
 /// mesh-llm's default public relay set (`RelayPolicy::DefaultPublic` in
@@ -290,18 +328,23 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_with_one_good_and_one_junk_candidate_is_accepted() {
-        // Regression: a mesh-llm endpoint advertises a usable relay alongside a
-        // port-0 direct IP. The junk candidate must NOT reject the whole
-        // endpoint — as long as one route is usable the endpoint is valid.
+    fn endpoint_with_one_good_and_one_junk_candidate_is_sanitized() {
+        // A mesh-llm endpoint can advertise a usable relay alongside an
+        // unusable direct IP. Keep the endpoint reachable, but never pass the
+        // rejected candidate through to iroh's parallel dialer.
         let good_relay: RelayUrl = MESH_LLM_DEFAULT_RELAYS[0].parse().unwrap();
+        let unsafe_socket = "169.254.169.254:80".parse().unwrap();
         let token = endpoint_token_for_test([
-            TransportAddr::Relay(good_relay),
-            TransportAddr::Ip("180.181.228.108:0".parse().unwrap()), // port 0 = junk
+            TransportAddr::Relay(good_relay.clone()),
+            TransportAddr::Ip(unsafe_socket),
         ]);
-        assert!(
-            validate_advertised_endpoint_with_mode(&token, &IrohRelayMode::Default).is_ok(),
-            "endpoint with one usable candidate must be accepted despite a junk one"
+        let validated =
+            validate_advertised_endpoint_with_mode(&token, &IrohRelayMode::Default).unwrap();
+        let payload = URL_SAFE_NO_PAD.decode(validated.join_token).unwrap();
+        let sanitized: EndpointAddr = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(
+            sanitized.addrs,
+            [TransportAddr::Relay(good_relay)].into_iter().collect()
         );
     }
 
@@ -378,8 +421,57 @@ mod tests {
         .expect("sign test bootstrap token");
         let token = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&signed).unwrap());
         assert_eq!(
-            validate_advertised_endpoint_with_mode(&token, &IrohRelayMode::Default).unwrap(),
+            validate_advertised_endpoint_with_mode(&token, &IrohRelayMode::Default)
+                .unwrap()
+                .endpoint_id,
             endpoint.id.to_string()
+        );
+
+        let good_relay: RelayUrl = MESH_LLM_DEFAULT_RELAYS[0].parse().unwrap();
+        let placeholder_endpoint = EndpointAddr {
+            id: endpoint.id,
+            addrs: [
+                TransportAddr::Relay(good_relay.clone()),
+                TransportAddr::Ip("180.181.228.108:0".parse().unwrap()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let placeholder_signed = SignedBootstrapToken::sign(
+            vec![serde_json::to_vec(&placeholder_endpoint).unwrap()],
+            &signed_policy,
+            None,
+            &owner,
+        )
+        .expect("sign placeholder test bootstrap token");
+        let placeholder_token =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&placeholder_signed).unwrap());
+        assert!(
+            validate_advertised_endpoint_with_mode(&placeholder_token, &IrohRelayMode::Default)
+                .is_ok(),
+            "signed stock token with a port-0 placeholder must remain usable"
+        );
+
+        let mixed_endpoint = EndpointAddr {
+            id: endpoint.id,
+            addrs: [
+                TransportAddr::Relay(good_relay),
+                TransportAddr::Ip("169.254.169.254:80".parse().unwrap()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mixed_signed = SignedBootstrapToken::sign(
+            vec![serde_json::to_vec(&mixed_endpoint).unwrap()],
+            &signed_policy,
+            None,
+            &owner,
+        )
+        .expect("sign mixed test bootstrap token");
+        let mixed_token = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&mixed_signed).unwrap());
+        assert!(
+            validate_advertised_endpoint_with_mode(&mixed_token, &IrohRelayMode::Default).is_err(),
+            "signed mixed-candidate tokens must fail closed because they cannot be rewritten"
         );
 
         let mut tampered = signed;

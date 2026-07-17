@@ -272,8 +272,8 @@ async fn ensure_model_downloaded(model: &str) -> anyhow::Result<()> {
 }
 
 impl DesktopMeshRuntime {
-    pub async fn start(request: StartMeshNodeRequest) -> anyhow::Result<Self> {
-        validate_no_leak_request(&request)?;
+    pub async fn start(mut request: StartMeshNodeRequest) -> anyhow::Result<Self> {
+        sanitize_no_leak_request(&mut request)?;
         initialize_mesh_native_runtime().await?;
         let model_id = request
             .model_id
@@ -422,8 +422,8 @@ impl DesktopMeshRuntime {
 
     pub async fn dial_endpoint_addr(&self, endpoint_addr: impl Into<String>) -> anyhow::Result<()> {
         let endpoint_addr = endpoint_addr.into();
-        validate_advertised_endpoint(&endpoint_addr)?;
-        self.handle.join_token(endpoint_addr).await
+        let validated = validate_advertised_endpoint(&endpoint_addr)?;
+        self.handle.join_token(validated.join_token).await
     }
 
     pub async fn installed_models(&self) -> anyhow::Result<Vec<MeshModelOption>> {
@@ -505,9 +505,9 @@ fn normalized_roster(
     Some(owners)
 }
 
-fn validate_no_leak_request(request: &StartMeshNodeRequest) -> anyhow::Result<()> {
-    if let Some(join_token) = request.join_token.as_deref() {
-        validate_advertised_endpoint(join_token)?;
+fn sanitize_no_leak_request(request: &mut StartMeshNodeRequest) -> anyhow::Result<()> {
+    if let Some(join_token) = request.join_token.as_mut() {
+        *join_token = validate_advertised_endpoint(join_token)?.join_token;
     }
     Ok(())
 }
