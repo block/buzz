@@ -54,6 +54,15 @@ export function detectPrefixQuery(
         break;
       }
       const lowerCandidate = candidate.toLowerCase();
+      // A trailing space after an exact known name means the mention is
+      // complete — don't keep the query open just because a longer name
+      // (e.g. a team) shares the prefix.
+      if (
+        lowerCandidate.endsWith(" ") &&
+        knownNamesLower.includes(lowerCandidate.trimEnd())
+      ) {
+        break;
+      }
       const isPrefix = knownNamesLower.some((name) =>
         name.startsWith(lowerCandidate),
       );

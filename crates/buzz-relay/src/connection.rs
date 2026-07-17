@@ -14,7 +14,7 @@ use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
-use buzz_auth::{generate_challenge, AuthContext};
+use buzz_auth::{generate_challenge, AuthContext, LimitType};
 use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
@@ -495,6 +495,10 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
         }
     };
 
+    if !enforce_ws_admission(&msg, &conn, &state).await {
+        return;
+    }
+
     match msg {
         ClientMessage::Auth(event) => {
             // Auth is synchronous in the WS loop — no span context is lost.
@@ -575,6 +579,86 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
         }
         ClientMessage::Close(sub_id) => {
             handlers::close::handle_close(sub_id, Arc::clone(&conn), Arc::clone(&state)).await;
+        }
+    }
+}
+
+async fn enforce_ws_admission(
+    msg: &ClientMessage,
+    conn: &ConnectionState,
+    state: &AppState,
+) -> bool {
+    let is_event = matches!(msg, ClientMessage::Event(_));
+    if !is_event && !matches!(msg, ClientMessage::Req { .. } | ClientMessage::Count { .. }) {
+        return true;
+    }
+
+    let (pubkey, is_agent) = {
+        let auth = conn.auth_state.read().await;
+        match &*auth {
+            AuthState::Authenticated(ctx) => (ctx.pubkey, ctx.agent_owner_pubkey.is_some()),
+            _ => return true,
+        }
+    };
+
+    let limits = &state.auth.config().rate_limits;
+    let (ws_window_secs, ws_limit) =
+        crate::admission::ws_admission_budget(limits.human_ws_events_per_sec);
+    let ws_result = crate::admission::check_principal(
+        state.admission_rate_limiter.as_ref(),
+        &conn.tenant,
+        &pubkey,
+        LimitType::WsEvents,
+        ws_window_secs,
+        ws_limit,
+    )
+    .await;
+    if !send_admission_result(conn, ws_result) {
+        return false;
+    }
+
+    if is_event {
+        let message_limit = if is_agent {
+            limits.agent_standard_messages_per_min
+        } else {
+            limits.human_messages_per_min
+        };
+        let message_result = crate::admission::check_principal(
+            state.admission_rate_limiter.as_ref(),
+            &conn.tenant,
+            &pubkey,
+            LimitType::Messages,
+            60,
+            message_limit,
+        )
+        .await;
+        if !send_admission_result(conn, message_result) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn send_admission_result(
+    conn: &ConnectionState,
+    result: Result<(), crate::admission::AdmissionError>,
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota").increment(1);
+            conn.send(RelayMessage::notice(&format!(
+                "rate-limited: quota exceeded; retry in {reset_in_secs}s"
+            )));
+            false
+        }
+        Err(crate::admission::AdmissionError::Unavailable) => {
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable").increment(1);
+            conn.send(RelayMessage::notice(
+                "rate-limited: shared admission unavailable",
+            ));
+            false
         }
     }
 }

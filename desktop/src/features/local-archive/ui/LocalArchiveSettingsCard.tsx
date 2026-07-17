@@ -26,7 +26,6 @@ import {
 } from "@/features/settings/ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { observerArchiveDefaultEnabled } from "@/shared/api/tauriArchive";
-import { setExplicitObserverArchiveChoice } from "../observerArchivePreference";
 import { setExplicitAgentMetricArchiveChoice } from "../agentMetricArchivePreference";
 
 import {
@@ -474,7 +473,6 @@ export function LocalArchiveSettingsCard() {
         } else {
           await removeSaveSubscriptionKind(KIND_AGENT_OBSERVER_FRAME);
         }
-        setExplicitObserverArchiveChoice(pubkey, checked);
         toast.success(
           checked
             ? "Observer feed archive enabled."

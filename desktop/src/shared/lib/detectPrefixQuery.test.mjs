@@ -96,6 +96,30 @@ test("multi-word: glued-to-word prefix still rejected", () => {
   assert.equal(at("#", "x#buzz de", CHANNELS), null);
 });
 
+// ── Completed mention: exact name + trailing space closes the query ───────────
+
+test("exact name followed by space does not stay open for a longer name", () => {
+  // "pinky" is complete; "pinky and the brain" sharing the prefix must not
+  // keep the popup open and steal Enter/Tab.
+  const names = ["pinky", "brain", "pinky and the brain"];
+  assert.equal(at("@", "@pinky ", names), null);
+});
+
+test("typing past the space toward the longer name re-opens the query", () => {
+  const names = ["pinky", "brain", "pinky and the brain"];
+  assert.deepEqual(at("@", "@pinky a", names), {
+    query: "pinky a",
+    startIndex: 0,
+  });
+});
+
+test("multi-word name still completes word by word when no shorter exact match", () => {
+  assert.deepEqual(at("@", "@bob ", PEOPLE), {
+    query: "bob ",
+    startIndex: 0,
+  });
+});
+
 // ── Empty / no-match guards unchanged ─────────────────────────────────────────
 
 test("bare prefix after ( yields empty single-word query, not multi-word", () => {

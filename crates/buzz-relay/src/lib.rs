@@ -2,6 +2,8 @@
 #![warn(missing_docs)]
 //! NIP-01 WebSocket relay for Buzz private team communication.
 
+mod admission;
+
 /// REST API route handlers.
 pub mod api;
 /// WebSocket audio relay for huddle voice channels.

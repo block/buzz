@@ -241,8 +241,9 @@ async fn nip11_or_ws_handler(
         }
     };
 
+    let max_frame_bytes = state.config.max_frame_bytes;
     match WebSocketUpgrade::from_request(req, &state).await {
-        Ok(ws) => ws
+        Ok(ws) => limit_relay_websocket(ws, max_frame_bytes)
             .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
             .into_response(),
         Err(_) => {
@@ -261,6 +262,16 @@ async fn nip11_or_ws_handler(
             Json(nip11_document(&state, raw_host).await).into_response()
         }
     }
+}
+
+fn limit_relay_websocket<F>(
+    ws: WebSocketUpgrade<F>,
+    max_frame_bytes: usize,
+) -> WebSocketUpgrade<F> {
+    // recv_loop keeps the application-level check as defense in depth, but
+    // parser limits must be set before tungstenite assembles the message.
+    ws.max_message_size(max_frame_bytes)
+        .max_frame_size(max_frame_bytes)
 }
 
 async fn health_handler() -> impl IntoResponse {
@@ -355,7 +366,13 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_git_web_gui_path, is_invite_landing_path, should_serve_spa};
+    use axum::{routing::get, Router};
+    use futures_util::SinkExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    use super::*;
 
     #[test]
     fn invite_landing_path_requires_exactly_one_nonempty_code_segment() {
@@ -385,5 +402,62 @@ mod tests {
         assert!(should_serve_spa("/", true));
         assert!(should_serve_spa("/repos/example", true));
         assert!(!should_serve_spa("/arbitrary", true));
+    }
+
+    async fn handler_receives_message_with_limit(limit: usize, size: usize) -> bool {
+        let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/",
+            get(move |ws: WebSocketUpgrade| {
+                let received_tx = received_tx.clone();
+                async move {
+                    limit_relay_websocket(ws, limit).on_upgrade(move |mut socket| async move {
+                        let _ = received_tx.send(matches!(socket.recv().await, Some(Ok(_))));
+                    })
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test WebSocket listener");
+        let addr = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test WebSocket server");
+        });
+
+        let (mut client, _) = connect_async(format!("ws://{addr}/"))
+            .await
+            .expect("connect test WebSocket client");
+        client
+            .send(Message::Text("x".repeat(size).into()))
+            .await
+            .expect("send test WebSocket message");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), received_rx.recv())
+            .await
+            .expect("server should process the test message")
+            .expect("server should report whether it received the message");
+
+        server.abort();
+        let _ = server.await;
+
+        received
+    }
+
+    #[tokio::test]
+    async fn relay_websocket_parser_rejects_oversized_messages_before_handler_reads_them() {
+        let limit = 64;
+
+        assert!(
+            handler_receives_message_with_limit(limit, limit).await,
+            "messages at the relay limit should still reach the handler"
+        );
+        assert!(
+            !handler_receives_message_with_limit(limit, limit + 1).await,
+            "oversized messages must be rejected by the WebSocket parser before the handler sees them"
+        );
     }
 }
