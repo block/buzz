@@ -15,6 +15,16 @@ import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/shared/ui/alert-dialog";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -111,14 +121,14 @@ function RuntimeOverflowMenu({
           </DropdownMenuItem>
         ))}
         {runtime.nodeRequired ? (
-          <DropdownMenuItem onClick={() => void openUrl("https://nodejs.org")}>
+          <DropdownMenuItem onSelect={() => void openUrl("https://nodejs.org")}>
             <ExternalLink className="h-4 w-4" />
             Install Node.js
           </DropdownMenuItem>
         ) : null}
         {hasInstructions ? (
           <DropdownMenuItem
-            onClick={() => void openUrl(runtime.installInstructionsUrl)}
+            onSelect={() => void openUrl(runtime.installInstructionsUrl)}
           >
             <ExternalLink className="h-4 w-4" />
             Instructions
@@ -165,7 +175,7 @@ function RuntimeActions({
       {isWorking ? (
         <div className="flex h-5 w-9 items-center justify-center text-muted-foreground">
           <Spinner
-            aria-label={`${runtime.label} connecting`}
+            aria-label={`${runtime.label} ${isInstalling ? "installing" : "connecting"}`}
             className="h-4 w-4 border-2"
             data-testid={`doctor-runtime-loading-${runtime.id}`}
           />
@@ -185,6 +195,44 @@ function RuntimeActions({
         />
       )}
     </div>
+  );
+}
+
+function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+  const label =
+    runtime.authStatus.status === "config_invalid"
+      ? "Config error"
+      : runtime.availability === "adapter_missing"
+        ? "Adapter needed"
+        : runtime.availability === "adapter_outdated"
+          ? "Update needed"
+          : runtime.availability === "cli_missing"
+            ? "CLI needed"
+            : null;
+
+  if (!label) {
+    return null;
+  }
+
+  const isConfigError = runtime.authStatus.status === "config_invalid";
+
+  return (
+    <>
+      <span aria-hidden="true" className="text-muted-foreground/50">
+        ·
+      </span>
+      <span
+        className={cn(
+          "inline-flex shrink-0 items-center rounded-md px-2 py-0.5 text-xs font-medium",
+          isConfigError
+            ? "bg-destructive/10 text-destructive"
+            : "bg-muted text-muted-foreground",
+        )}
+        data-testid={`doctor-runtime-status-${runtime.id}`}
+      >
+        {label}
+      </span>
+    </>
   );
 }
 
@@ -211,7 +259,10 @@ function RuntimeHeader({
     <div className="flex items-center justify-between gap-4">
       <div className="flex min-w-0 items-center gap-3">
         <RuntimeLogo runtime={runtime} />
-        <p className="min-w-0 text-sm font-medium">{runtime.label}</p>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <p className="min-w-0 text-sm font-medium">{runtime.label}</p>
+          <RuntimeStatusChip runtime={runtime} />
+        </div>
       </div>
       <RuntimeActions
         authMethods={authMethods}
@@ -243,6 +294,7 @@ function RuntimeRow({
   const [terminalLaunchMethodId, setTerminalLaunchMethodId] = React.useState<
     string | null
   >(null);
+  const [isUpdateWarningOpen, setIsUpdateWarningOpen] = React.useState(false);
   const canConnectAccount =
     runtime.availability === "available" &&
     runtime.authStatus.status === "logged_out";
@@ -295,9 +347,24 @@ function RuntimeRow({
               },
             );
           }}
-          onInstall={onInstall}
+          onInstall={() => {
+            if (runtime.availability === "adapter_outdated") {
+              setIsUpdateWarningOpen(true);
+              return;
+            }
+            onInstall();
+          }}
           runtime={runtime}
         />
+
+        {runtime.authStatus.status === "config_invalid" ? (
+          <p
+            className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
+            data-testid={`doctor-runtime-config-error-${runtime.id}`}
+          >
+            Config error: {runtime.authStatus.diagnostic}
+          </p>
+        ) : null}
 
         {installSuccess && runtime.availability !== "available" ? (
           <p className="mt-2 rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-1.5 text-sm text-green-700 dark:text-green-400">
@@ -327,6 +394,30 @@ function RuntimeRow({
           </p>
         ) : null}
       </div>
+      <AlertDialog
+        onOpenChange={setIsUpdateWarningOpen}
+        open={isUpdateWarningOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Update {runtime.label} adapter?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This replaces the machine-wide codex-acp adapter. Older Buzz
+              releases using the legacy adapter may lose community access until
+              @zed-industries/codex-acp@0.16.0 is restored.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={onInstall}
+              data-testid={`doctor-runtime-confirm-update-${runtime.id}`}
+            >
+              Update
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -377,9 +468,10 @@ function GitBashCard({
           ) : null}
         </div>
         {!prerequisite.available ? (
-          <p className="mt-3 text-sm text-muted-foreground">
-            Required for buzz-agent shell tools on Windows.
-          </p>
+          <div className="mt-3 space-y-1 text-sm text-muted-foreground">
+            <p>Required for buzz-agent shell tools on Windows.</p>
+            <p>{prerequisite.installHint}</p>
+          </div>
         ) : null}
       </div>
     </div>

@@ -15,7 +15,7 @@ const SHOTS = "test-results/screenshots-doctor";
 const GOOSE_AVAILABLE = {
   id: "goose",
   label: "Goose",
-  avatar_url: "https://goose-docs.ai/img/logo_dark.png",
+  avatar_url: "",
   availability: "available",
   command: "goose",
   binary_path: "/usr/local/bin/goose",
@@ -54,8 +54,7 @@ const BUZZ_AGENT_AVAILABLE = {
 const CLAUDE_AVAILABLE_LOGGED_IN = {
   id: "claude",
   label: "Claude Code",
-  avatar_url:
-    "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default",
+  avatar_url: "",
   availability: "available",
   command: "claude-agent-acp",
   binary_path: "/usr/local/bin/claude-agent-acp",
@@ -77,8 +76,7 @@ const CLAUDE_AVAILABLE_LOGGED_IN = {
 const CODEX_NOT_INSTALLED = {
   id: "codex",
   label: "Codex",
-  avatar_url:
-    "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default",
+  avatar_url: "",
   availability: "not_installed",
   command: null,
   binary_path: null,
@@ -299,8 +297,8 @@ test.describe("Doctor panel state screenshots", () => {
   });
 
   /**
-   * 03 — a runtime with invalid configuration remains compact and exposes its
-   * setup instructions from overflow instead of expanding the row.
+   * 03 — a runtime with invalid configuration exposes its diagnostic and keeps
+   * setup instructions in overflow.
    */
   test("03-auth-config-error", async ({ page }) => {
     const diagnostic =
@@ -323,13 +321,13 @@ test.describe("Doctor panel state screenshots", () => {
 
     const row = page.getByTestId("doctor-runtime-claude");
     await expect(row).toBeVisible({ timeout: 10_000 });
-    await expect(row).not.toContainText("Config error");
-    await expect(row).not.toContainText("error loading configuration");
-    await expect(row).toHaveCSS(
-      "height",
-      await page
-        .getByTestId("doctor-runtime-goose")
-        .evaluate((element) => getComputedStyle(element).height),
+    await expect(page.getByTestId("doctor-runtime-status-claude")).toHaveText(
+      "Config error",
+    );
+    await expect(
+      page.getByTestId("doctor-runtime-config-error-claude"),
+    ).toContainText(
+      "Config error: error loading configuration: ~/.claude/settings.json: unknown key foo",
     );
     await page.getByTestId("doctor-runtime-menu-claude").click();
     await expect(
@@ -371,7 +369,9 @@ test.describe("Doctor panel state screenshots", () => {
     const toggle = page.getByTestId("doctor-runtime-toggle-codex");
     await expect(toggle).not.toBeChecked();
     await expect(toggle).toBeDisabled();
-    await expect(row).not.toContainText("Adapter needed");
+    await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
+      "Adapter needed",
+    );
     await expect(row).not.toContainText("Node.js is required");
     await expect(row).toHaveCSS(
       "height",
@@ -456,6 +456,7 @@ test.describe("Doctor panel state screenshots", () => {
     await toggle.click();
     const loading = page.getByTestId("doctor-runtime-loading-codex");
     await expect(loading).toBeVisible();
+    await expect(loading).toContainText("Codex installing");
     await expect(toggle).toHaveCount(0);
 
     // After failure: the toggle returns to off and the error is visible.
@@ -546,6 +547,7 @@ test.describe("Doctor panel state screenshots", () => {
     await page.getByRole("menuitem", { name: "Sign in with ChatGPT" }).click();
     const loading = page.getByTestId("doctor-runtime-loading-codex");
     await expect(loading).toBeVisible();
+    await expect(loading).toContainText("Codex connecting");
     await expect(page.getByTestId("doctor-runtime-toggle-codex")).toHaveCount(
       0,
     );
@@ -692,5 +694,45 @@ test.describe("Doctor panel state screenshots", () => {
     ).toContainText(
       "Finish signing in from the Terminal window, then click Check again to re-check Codex.",
     );
+  });
+
+  test("11-outdated-adapter-warning", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        {
+          ...CODEX_NOT_INSTALLED,
+          availability: "adapter_outdated",
+          binary_path: "/usr/local/bin/codex-acp",
+          underlying_cli_path: "/usr/local/bin/codex",
+          can_auto_install: true,
+        },
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      installAcpRuntimeDelayMs: 250,
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "agents");
+
+    await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
+      "Update needed",
+    );
+    await page.getByTestId("doctor-runtime-toggle-codex").click();
+
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("Update Codex adapter?");
+    await expect(dialog).toContainText(
+      "Older Buzz releases using the legacy adapter may lose community access",
+    );
+    await expect(page.getByTestId("doctor-runtime-loading-codex")).toHaveCount(
+      0,
+    );
+
+    await page.getByTestId("doctor-runtime-confirm-update-codex").click();
+    const loading = page.getByTestId("doctor-runtime-loading-codex");
+    await expect(loading).toBeVisible();
+    await expect(loading).toContainText("Codex installing");
   });
 });
