@@ -123,6 +123,7 @@ type E2eConfig = {
   mock?: {
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
+    acpAuthMethodsErrors?: Record<string, string>;
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
     connectAcpRuntimeDelayMs?: number;
     connectAcpRuntimeError?: string;
@@ -6606,6 +6607,10 @@ async function handleDiscoverAcpAuthMethods(
   config: E2eConfig | undefined,
 ): Promise<RawAcpAuthMethodsResult> {
   const runtimeId = args.runtimeId ?? "";
+  const error = config?.mock?.acpAuthMethodsErrors?.[runtimeId];
+  if (error) {
+    throw new Error(error);
+  }
   const configured = config?.mock?.acpAuthMethods?.[runtimeId];
   if (configured) {
     return configured;

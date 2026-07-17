@@ -113,7 +113,7 @@ pub(crate) enum RequirementPayload {
         /// One-line stderr excerpt identifying the parse error.
         diagnostic: String,
     },
-    /// Git for Windows is missing; open Doctor for the installation guide.
+    /// Git for Windows is missing; open Agent runtimes for the installation guide.
     GitBash,
 }
 
@@ -139,7 +139,7 @@ impl RequirementPayload {
                         .map(String::as_str)
                         .unwrap_or("the agent");
                     format!(
-                        "install the {} ACP adapter (open Doctor in Settings to diagnose)",
+                        "install the {} ACP adapter (open Agent runtimes in Settings to diagnose)",
                         harness
                     )
                 }
@@ -149,7 +149,7 @@ impl RequirementPayload {
                         .map(String::as_str)
                         .unwrap_or("the agent");
                     format!(
-                        "reinstall the {} ACP adapter — the installed version is outdated (open Doctor in Settings to diagnose)",
+                        "reinstall the {} ACP adapter — the installed version is outdated (open Agent runtimes in Settings to diagnose)",
                         harness
                     )
                 }
@@ -159,7 +159,7 @@ impl RequirementPayload {
                         .map(String::as_str)
                         .unwrap_or("the agent");
                     format!(
-                        "install {} CLI (open Doctor in Settings to diagnose)",
+                        "install {} CLI (open Agent runtimes in Settings to diagnose)",
                         harness
                     )
                 }
@@ -168,7 +168,10 @@ impl RequirementPayload {
                         .first()
                         .map(String::as_str)
                         .unwrap_or("the agent");
-                    format!("install {} (open Doctor in Settings to diagnose)", harness)
+                    format!(
+                        "install {} (open Agent runtimes in Settings to diagnose)",
+                        harness
+                    )
                 }
             },
             RequirementPayload::CliConfigInvalid {
@@ -184,7 +187,7 @@ impl RequirementPayload {
                 )
             }
             RequirementPayload::GitBash => {
-                "install Git for Windows (open Doctor in Settings to diagnose)".to_string()
+                "install Git for Windows (open Agent runtimes in Settings to diagnose)".to_string()
             }
         }
     }
@@ -264,7 +267,7 @@ impl SetupPayload {
                 .any(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
 
             let footer = if has_doctor_requirement {
-                "Open Doctor in the Buzz app, install Git for Windows, then re-check and restart the agent.".to_string()
+                "Open Agent runtimes in Settings, install Git for Windows, then re-check and restart the agent.".to_string()
             } else if all_external {
                 // All requirements are external config files — Edit Agent cannot
                 // help. Don't send the user there.
@@ -740,6 +743,53 @@ mod tests {
         assert!(
             body.contains("codex login"),
             "codex nudge must mention `codex login`; got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn nudge_body_runtime_install_copy_points_to_agent_runtimes() {
+        for availability in [
+            AcpAvailabilityStatus::AdapterMissing,
+            AcpAvailabilityStatus::AdapterOutdated,
+            AcpAvailabilityStatus::CliMissing,
+            AcpAvailabilityStatus::NotInstalled,
+        ] {
+            let payload = SetupPayload {
+                agent_name: "Codex".to_string(),
+                agent_pubkey: "test".to_string(),
+                requirements: vec![RequirementPayload::CliLogin {
+                    probe_args: vec!["codex".to_string()],
+                    setup_copy: "run `codex login`".to_string(),
+                    availability,
+                }],
+            };
+            let body = payload.nudge_body();
+            assert!(
+                body.contains("Agent runtimes in Settings"),
+                "runtime install nudge must point to Agent runtimes; got: {body:?}"
+            );
+            assert!(
+                !body.contains("Doctor"),
+                "runtime install nudge must not point to the removed Doctor section; got: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nudge_body_git_bash_copy_points_to_agent_runtimes() {
+        let payload = SetupPayload {
+            agent_name: "Buzz Agent".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![RequirementPayload::GitBash],
+        };
+        let body = payload.nudge_body();
+        assert!(
+            body.contains("Open Agent runtimes in Settings"),
+            "Git Bash nudge must point to Agent runtimes; got: {body:?}"
+        );
+        assert!(
+            !body.contains("Doctor"),
+            "Git Bash nudge must not point to the removed Doctor section; got: {body:?}"
         );
     }
 

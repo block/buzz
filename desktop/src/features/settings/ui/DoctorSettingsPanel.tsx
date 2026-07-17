@@ -58,32 +58,25 @@ function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 }
 
 function RuntimeOverflowMenu({
+  authMethods,
   connectingMethodId,
   isConnecting,
   onConnect,
   runtime,
 }: {
+  authMethods: AcpAuthMethod[];
   connectingMethodId: string | null;
   isConnecting: boolean;
   onConnect: (method: AcpAuthMethod) => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
-  const canConnectAccount =
-    runtime.availability === "available" &&
-    runtime.authStatus.status === "logged_out";
-  const authMethodsQuery = useAcpAuthMethodsQuery(runtime.id, {
-    enabled: canConnectAccount,
-  });
-  const methods = canConnectAccount
-    ? (authMethodsQuery.data?.methods ?? [])
-    : [];
   const hasInstructions =
     runtime.installInstructionsUrl.trim().length > 0 &&
     (runtime.availability !== "available" ||
       runtime.authStatus.status === "logged_out" ||
       runtime.authStatus.status === "config_invalid");
   const hasActions =
-    runtime.nodeRequired || hasInstructions || methods.length > 0;
+    runtime.nodeRequired || hasInstructions || authMethods.length > 0;
 
   if (!hasActions) {
     return null;
@@ -105,7 +98,7 @@ function RuntimeOverflowMenu({
         align="end"
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
-        {methods.map((method) => (
+        {authMethods.map((method) => (
           <DropdownMenuItem
             disabled={isConnecting}
             key={method.id}
@@ -137,34 +130,36 @@ function RuntimeOverflowMenu({
 }
 
 function RuntimeActions({
+  authMethods,
+  connectingMethodId,
   installSuccess,
+  isConnecting,
   isInstalling,
+  onConnect,
   onInstall,
   runtime,
 }: {
+  authMethods: AcpAuthMethod[];
+  connectingMethodId: string | null;
   installSuccess: boolean;
+  isConnecting: boolean;
   isInstalling: boolean;
+  onConnect: (method: AcpAuthMethod) => void;
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
   const isAvailable = runtime.availability === "available";
   const canInstall = runtime.canAutoInstall && !runtime.nodeRequired;
   const isOn = isAvailable || installSuccess;
-  const connectMutation = useConnectAcpRuntimeMutation();
-  const isConnecting = connectMutation.isPending;
   const isWorking = isInstalling || isConnecting;
 
   return (
     <div className="ml-auto flex shrink-0 items-center justify-end gap-1">
       <RuntimeOverflowMenu
-        connectingMethodId={connectMutation.variables?.methodId ?? null}
+        authMethods={authMethods}
+        connectingMethodId={connectingMethodId}
         isConnecting={isConnecting}
-        onConnect={(method) =>
-          connectMutation.mutate({
-            runtimeId: runtime.id,
-            methodId: method.id,
-          })
-        }
+        onConnect={onConnect}
         runtime={runtime}
       />
       {isWorking ? (
@@ -194,13 +189,21 @@ function RuntimeActions({
 }
 
 function RuntimeHeader({
+  authMethods,
+  connectingMethodId,
   installSuccess,
+  isConnecting,
   isInstalling,
+  onConnect,
   onInstall,
   runtime,
 }: {
+  authMethods: AcpAuthMethod[];
+  connectingMethodId: string | null;
   installSuccess: boolean;
+  isConnecting: boolean;
   isInstalling: boolean;
+  onConnect: (method: AcpAuthMethod) => void;
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
@@ -211,8 +214,12 @@ function RuntimeHeader({
         <p className="min-w-0 text-sm font-medium">{runtime.label}</p>
       </div>
       <RuntimeActions
+        authMethods={authMethods}
+        connectingMethodId={connectingMethodId}
         installSuccess={installSuccess}
+        isConnecting={isConnecting}
         isInstalling={isInstalling}
+        onConnect={onConnect}
         onInstall={onInstall}
         runtime={runtime}
       />
@@ -233,6 +240,30 @@ function RuntimeRow({
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
+  const canConnectAccount =
+    runtime.availability === "available" &&
+    runtime.authStatus.status === "logged_out";
+  const authMethodsQuery = useAcpAuthMethodsQuery(runtime.id, {
+    enabled: canConnectAccount,
+  });
+  const authMethods = canConnectAccount
+    ? (authMethodsQuery.data?.methods ?? [])
+    : [];
+  const connectMutation = useConnectAcpRuntimeMutation();
+  const connectionError = connectMutation.error
+    ? `Couldn't connect ${runtime.label}: ${
+        connectMutation.error instanceof Error
+          ? connectMutation.error.message
+          : "Connection failed."
+      }`
+    : authMethodsQuery.error
+      ? `Couldn't load sign-in options: ${
+          authMethodsQuery.error instanceof Error
+            ? authMethodsQuery.error.message
+            : "Request failed."
+        }`
+      : null;
+
   return (
     <div
       className="min-h-16 rounded-2xl border border-border/60 bg-muted/20 px-4 py-3.5 text-sm"
@@ -240,8 +271,17 @@ function RuntimeRow({
     >
       <div className="min-w-0">
         <RuntimeHeader
+          authMethods={authMethods}
+          connectingMethodId={connectMutation.variables?.methodId ?? null}
           installSuccess={installSuccess}
+          isConnecting={connectMutation.isPending}
           isInstalling={isInstalling}
+          onConnect={(method) =>
+            connectMutation.mutate({
+              runtimeId: runtime.id,
+              methodId: method.id,
+            })
+          }
           onInstall={onInstall}
           runtime={runtime}
         />
@@ -254,6 +294,14 @@ function RuntimeRow({
         {installError ? (
           <p className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
             {installError}
+          </p>
+        ) : null}
+        {connectionError ? (
+          <p
+            className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
+            data-testid={`doctor-runtime-error-${runtime.id}`}
+          >
+            {connectionError}
           </p>
         ) : null}
       </div>

@@ -594,4 +594,65 @@ test.describe("Doctor panel state screenshots", () => {
       page.getByRole("menuitem", { name: "Sign in with ChatGPT" }),
     ).toHaveCount(0);
   });
+
+  test("08-auth-method-discovery-error", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        {
+          ...CODEX_NOT_INSTALLED,
+          availability: "available",
+          auth_status: { status: "logged_out" },
+        },
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      acpAuthMethodsErrors: {
+        codex: "Could not inspect the Codex adapter.",
+      },
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "agents");
+
+    await expect(page.getByTestId("doctor-runtime-error-codex")).toContainText(
+      "Couldn't load sign-in options: Could not inspect the Codex adapter.",
+    );
+  });
+
+  test("09-connect-account-error", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        {
+          ...CODEX_NOT_INSTALLED,
+          availability: "available",
+          auth_status: { status: "logged_out" },
+        },
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      acpAuthMethods: {
+        codex: {
+          methods: [
+            {
+              id: "chat-gpt",
+              name: "Sign in with ChatGPT",
+              type: "browser",
+            },
+          ],
+        },
+      },
+      connectAcpRuntimeError: "The browser could not be opened.",
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "agents");
+
+    await page.getByTestId("doctor-runtime-menu-codex").click();
+    await page.getByRole("menuitem", { name: "Sign in with ChatGPT" }).click();
+    await expect(page.getByTestId("doctor-runtime-error-codex")).toContainText(
+      "Couldn't connect Codex: The browser could not be opened.",
+    );
+  });
 });
