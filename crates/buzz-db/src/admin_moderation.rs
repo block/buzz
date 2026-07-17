@@ -72,6 +72,8 @@ pub struct AdminFeedback {
     pub category: Option<String>,
     /// Full feedback body.
     pub body: String,
+    /// Full source tags, including attachment metadata.
+    pub tags: serde_json::Value,
     /// Timestamp signed into the feedback event.
     pub event_created_at: DateTime<Utc>,
     /// Time accepted by this deployment.
@@ -180,7 +182,7 @@ pub async fn list_feedback(pool: &PgPool, limit: i64) -> Result<Vec<AdminFeedbac
     let rows = sqlx::query(
         r#"
         SELECT f.id, f.community_id, c.host AS community_host, f.event_id,
-               f.submitter_pubkey, f.category, f.body,
+               f.submitter_pubkey, f.category, f.body, f.tags,
                f.event_created_at, f.received_at
         FROM product_feedback f
         JOIN communities c ON c.id = f.community_id
@@ -199,7 +201,7 @@ pub async fn get_feedback(pool: &PgPool, id: Uuid) -> Result<Option<AdminFeedbac
     let row = sqlx::query(
         r#"
         SELECT f.id, f.community_id, c.host AS community_host, f.event_id,
-               f.submitter_pubkey, f.category, f.body,
+               f.submitter_pubkey, f.category, f.body, f.tags,
                f.event_created_at, f.received_at
         FROM product_feedback f
         JOIN communities c ON c.id = f.community_id
@@ -221,6 +223,7 @@ fn row_to_feedback(row: sqlx::postgres::PgRow) -> Result<AdminFeedback> {
         submitter_pubkey: hex::encode(row.try_get::<Vec<u8>, _>("submitter_pubkey")?),
         category: row.try_get("category")?,
         body: row.try_get("body")?,
+        tags: row.try_get("tags")?,
         event_created_at: row.try_get("event_created_at")?,
         received_at: row.try_get("received_at")?,
     })

@@ -23,6 +23,11 @@ button {
   font: inherit;
 }
 
+input,
+select {
+  font: inherit;
+}
+
 button {
   color: white;
   background: #231e1e;
@@ -174,6 +179,80 @@ h1 {
   gap: 0.8rem;
 }
 
+.feedback-filters {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) repeat(3, auto);
+  gap: 0.75rem;
+  align-items: end;
+  margin-bottom: 0.75rem;
+  padding: 1rem;
+  border: 1px solid rgb(35 30 30 / 10%);
+  border-radius: 1.25rem;
+  background: rgb(255 255 255 / 45%);
+  backdrop-filter: blur(12px);
+}
+
+.feedback-filters label {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.feedback-filters label > span {
+  color: rgb(35 30 30 / 48%);
+  font-size: 0.7rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.feedback-filters input,
+.feedback-filters select {
+  min-height: 2.75rem;
+  border: 1px solid rgb(35 30 30 / 12%);
+  border-radius: 999px;
+  outline: none;
+  color: #231e1e;
+  background: white;
+}
+
+.feedback-filters input:focus,
+.feedback-filters select:focus {
+  border-color: #231e1e;
+  box-shadow: 0 0 0 3px rgb(35 30 30 / 10%);
+}
+
+.feedback-filters select {
+  padding: 0 2.25rem 0 1rem;
+}
+
+.search-field > div {
+  position: relative;
+}
+
+.search-field input {
+  width: 100%;
+  padding: 0 1rem 0 2.6rem;
+}
+
+.search-field svg {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 1rem;
+  width: 1rem;
+  height: 1rem;
+  transform: translateY(-50%);
+  fill: none;
+  stroke: rgb(35 30 30 / 45%);
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+.result-count {
+  margin: 0 0 0.75rem;
+  color: rgb(35 30 30 / 48%);
+  font-size: 0.78rem;
+}
+
 .card-link {
   display: block;
   border-radius: 1.6rem;
@@ -197,6 +276,47 @@ h1 {
   transition:
     transform 180ms ease,
     box-shadow 180ms ease;
+}
+
+.feedback-record {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+}
+
+.feedback-main-link {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 1.4rem;
+}
+
+.record-open-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.2rem;
+}
+
+.feedback-status {
+  min-width: 5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: rgb(35 30 30 / 62%);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.feedback-status input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: #231e1e;
+}
+
+.record-open-link {
+  display: grid;
+  place-items: center;
+  padding: 0.5rem;
+  border-radius: 999px;
+  color: rgb(35 30 30 / 30%);
 }
 
 .card-link:hover .record-card {
@@ -249,6 +369,20 @@ h1 {
   font-size: 0.7rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.tag {
+  gap: 0.3rem;
+}
+
+.tag svg {
+  width: 0.78rem;
+  height: 0.78rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .record-primary strong {
@@ -375,6 +509,106 @@ dd {
   white-space: pre-wrap;
 }
 
+.attachments {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.image-attachment {
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid rgb(35 30 30 / 10%);
+  border-radius: 1rem;
+  background: #f6f6f1;
+}
+
+.image-attachment a {
+  display: block;
+}
+
+.image-attachment img {
+  width: 100%;
+  max-height: 32rem;
+  display: block;
+  object-fit: contain;
+  background: rgb(35 30 30 / 4%);
+}
+
+.image-attachment figcaption,
+.file-attachment {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+}
+
+.image-attachment figcaption {
+  justify-content: space-between;
+}
+
+.image-attachment figcaption span,
+.file-attachment strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.82rem;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feedback-main-link:hover strong {
+  text-decoration: underline;
+  text-underline-offset: 0.2rem;
+}
+
+.image-attachment small,
+.file-attachment small {
+  color: rgb(35 30 30 / 48%);
+  font-size: 0.7rem;
+}
+
+.file-attachment {
+  align-self: start;
+  border: 1px solid rgb(35 30 30 / 10%);
+  border-radius: 1rem;
+  background: #f6f6f1;
+}
+
+.file-attachment:hover strong {
+  text-decoration: underline;
+  text-underline-offset: 0.15rem;
+}
+
+.file-attachment > svg:first-child {
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.file-attachment > span {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+  gap: 0.2rem;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .state {
   min-height: 14rem;
   display: grid;
@@ -420,6 +654,32 @@ dd {
 
   .record-card {
     grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .feedback-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .feedback-record {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .feedback-main-link {
+    grid-column: 1 / -1;
+  }
+
+  .feedback-status {
+    grid-column: 1;
+    flex-wrap: wrap;
+  }
+
+  .feedback-record .record-date {
+    grid-column: 1;
+  }
+
+  .record-open-link {
+    grid-column: 2;
+    grid-row: 2 / span 2;
   }
 
   .record-date {

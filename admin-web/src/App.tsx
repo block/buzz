@@ -1,4 +1,11 @@
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import {
+  type ChangeEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { ApiFailure, request } from "./api";
 import type { FeedbackDetail, FeedbackSummary, Report } from "./types";
 import { useResource } from "./useResource";
@@ -174,6 +181,24 @@ function FeedbackList() {
     () => request<FeedbackSummary[]>("/feedback"),
     "feedback",
   );
+  const [query, setQuery] = useState("");
+  const [community, setCommunity] = useState("all");
+  const [timeRange, setTimeRange] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [statuses, setStatuses] = useState(loadFeedbackStatuses);
+
+  const updateStatus = (id: string, event: ChangeEvent<HTMLInputElement>) => {
+    const checked = event.target.checked;
+    setStatuses((current) => {
+      const next = {
+        ...current,
+        [id]: checked,
+      };
+      saveFeedbackStatuses(next);
+      return next;
+    });
+  };
+
   return (
     <Page
       eyebrow="Product"
@@ -181,45 +206,183 @@ function FeedbackList() {
       description="Recent product feedback from across Buzz."
     >
       <StateView resource={resource}>
-        {(items) =>
-          items.length ? (
-            <div className="cards">
-              {items.map((item) => (
-                <Link
-                  key={item.id}
-                  href={`/feedback/${item.id}`}
-                  className="card-link"
-                >
-                  <article className="record-card feedback-card">
-                    <span className="record-icon feedback-icon">
-                      <FeedbackIcon />
-                    </span>
-                    <div className="record-primary">
-                      <span className="tag">
-                        {item.category ?? "uncategorized"}
-                      </span>
-                      <strong>{item.bodySummary}</strong>
-                      <span className="record-provenance">
-                        {item.communityHost}
-                        <code>{short(item.submitterPubkey)}</code>
-                      </span>
-                    </div>
-                    <div className="record-date">
+        {(items) => {
+          if (!items.length) return <Empty />;
+          return (
+            <FeedbackResults
+              items={items}
+              query={query}
+              community={community}
+              timeRange={timeRange}
+              statusFilter={statusFilter}
+              statuses={statuses}
+            >
+              {({ communities, filtered }) => (
+                <>
+                  <div className="feedback-filters">
+                    <label className="search-field">
+                      <span>Search feedback</span>
+                      <div>
+                        <SearchIcon />
+                        <input
+                          type="search"
+                          placeholder="Search feedback"
+                          value={query}
+                          onChange={(event) => setQuery(event.target.value)}
+                        />
+                      </div>
+                    </label>
+                    <label>
+                      <span>Community</span>
+                      <select
+                        value={community}
+                        onChange={(event) => setCommunity(event.target.value)}
+                      >
+                        <option value="all">All communities</option>
+                        {communities.map((host) => (
+                          <option key={host} value={host}>
+                            {host}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
                       <span>Received</span>
-                      <time>{date(item.receivedAt)}</time>
+                      <select
+                        value={timeRange}
+                        onChange={(event) => setTimeRange(event.target.value)}
+                      >
+                        <option value="all">Any time</option>
+                        <option value="day">Last 24 hours</option>
+                        <option value="week">Last 7 days</option>
+                        <option value="month">Last 30 days</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Status</span>
+                      <select
+                        value={statusFilter}
+                        onChange={(event) =>
+                          setStatusFilter(event.target.value)
+                        }
+                      >
+                        <option value="all">Any status</option>
+                        <option value="pending">Needs action</option>
+                        <option value="acted-on">Acted on</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p className="result-count" aria-live="polite">
+                    {filtered.length} of {items.length} submissions
+                  </p>
+                  {filtered.length ? (
+                    <div className="cards">
+                      {filtered.map((item) => (
+                        <article
+                          key={item.id}
+                          className="record-card feedback-card feedback-record"
+                        >
+                          <Link
+                            href={`/feedback/${item.id}`}
+                            className="feedback-main-link"
+                          >
+                            <span className="record-icon feedback-icon">
+                              <CategoryIcon category={item.category} />
+                            </span>
+                            <div className="record-primary">
+                              <CategoryTag category={item.category} />
+                              <strong>{item.bodySummary}</strong>
+                              <span className="record-provenance">
+                                {item.communityHost}
+                                <code>{short(item.submitterPubkey)}</code>
+                              </span>
+                            </div>
+                          </Link>
+                          <label className="feedback-status">
+                            <input
+                              type="checkbox"
+                              checked={statuses[item.id] ?? false}
+                              onChange={(event) => updateStatus(item.id, event)}
+                            />
+                            Acted on
+                            <span className="visually-hidden">
+                              feedback from {item.communityHost}
+                            </span>
+                          </label>
+                          <div className="record-date">
+                            <span>Received</span>
+                            <time>{date(item.receivedAt)}</time>
+                          </div>
+                          <Link
+                            href={`/feedback/${item.id}`}
+                            className="record-open-link"
+                          >
+                            <span className="visually-hidden">
+                              Open feedback from {item.communityHost}
+                            </span>
+                            <ArrowIcon />
+                          </Link>
+                        </article>
+                      ))}
                     </div>
-                    <ArrowIcon />
-                  </article>
-                </Link>
-              ))}
-            </div>
-          ) : (
-            <Empty />
-          )
-        }
+                  ) : (
+                    <div className="state">No matching feedback.</div>
+                  )}
+                </>
+              )}
+            </FeedbackResults>
+          );
+        }}
       </StateView>
     </Page>
   );
+}
+
+function FeedbackResults({
+  items,
+  query,
+  community,
+  timeRange,
+  statusFilter,
+  statuses,
+  children,
+}: {
+  items: FeedbackSummary[];
+  query: string;
+  community: string;
+  timeRange: string;
+  statusFilter: string;
+  statuses: FeedbackStatuses;
+  children: (results: {
+    communities: string[];
+    filtered: FeedbackSummary[];
+  }) => ReactNode;
+}) {
+  const results = useMemo(() => {
+    const communities = [...new Set(items.map((item) => item.communityHost))]
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right));
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    const after = timeRangeStart(timeRange);
+    const filtered = items.filter((item) => {
+      if (community !== "all" && item.communityHost !== community) return false;
+      if (statusFilter === "pending" && statuses[item.id]) return false;
+      if (statusFilter === "acted-on" && !statuses[item.id]) return false;
+      if (after !== undefined) {
+        const receivedAt = new Date(item.receivedAt).valueOf();
+        if (Number.isNaN(receivedAt) || receivedAt < after) return false;
+      }
+      if (!normalizedQuery) return true;
+      return [
+        item.bodySummary,
+        item.communityHost,
+        item.category ?? "uncategorized",
+        item.submitterPubkey,
+      ].some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
+    });
+    return { communities, filtered };
+  }, [items, query, community, timeRange, statusFilter, statuses]);
+  return children(results);
 }
 
 function FeedbackDetailView({ id }: { id: string }) {
@@ -236,40 +399,212 @@ function FeedbackDetailView({ id }: { id: string }) {
       backLabel="Back to feedback"
     >
       <StateView resource={resource}>
-        {(feedback) => (
-          <article className="detail">
-            <div className="detail-heading">
-              <span className="record-icon feedback-icon">
-                <FeedbackIcon />
-              </span>
-              <div>
-                <span className="tag">
-                  {feedback.category ?? "uncategorized"}
+        {(feedback) => {
+          const attachments = feedbackAttachments(
+            feedback.tags,
+            feedback.communityHost,
+          );
+          const body = stripAttachmentMarkdown(feedback.body, attachments);
+          return (
+            <article className="detail">
+              <div className="detail-heading">
+                <span className="record-icon feedback-icon">
+                  <CategoryIcon category={feedback.category} />
                 </span>
-                <h2>{feedback.communityHost}</h2>
+                <div>
+                  <CategoryTag category={feedback.category} />
+                  <h2>{feedback.communityHost}</h2>
+                </div>
               </div>
-            </div>
-            <dl>
-              <dt>Feedback</dt>
-              <dd className="sensitive feedback-body">{feedback.body}</dd>
-              <dt>Submitted by</dt>
-              <dd>
-                <code>{feedback.submitterPubkey}</code>
-              </dd>
-              <dt>Event</dt>
-              <dd>
-                <code>{feedback.eventId}</code>
-              </dd>
-              <dt>Created</dt>
-              <dd>{date(feedback.eventCreatedAt)}</dd>
-              <dt>Received</dt>
-              <dd>{date(feedback.receivedAt)}</dd>
-            </dl>
-          </article>
-        )}
+              <dl>
+                <dt>Feedback</dt>
+                <dd className="sensitive feedback-body">{body}</dd>
+                {attachments.length ? (
+                  <>
+                    <dt>Attachments</dt>
+                    <dd className="attachments">
+                      {attachments.map((attachment) => (
+                        <Attachment
+                          key={`${attachment.hash}-${attachment.url}`}
+                          attachment={attachment}
+                        />
+                      ))}
+                    </dd>
+                  </>
+                ) : null}
+                <dt>Submitted by</dt>
+                <dd>
+                  <code>{feedback.submitterPubkey}</code>
+                </dd>
+                <dt>Event</dt>
+                <dd>
+                  <code>{feedback.eventId}</code>
+                </dd>
+                <dt>Created</dt>
+                <dd>{date(feedback.eventCreatedAt)}</dd>
+                <dt>Received</dt>
+                <dd>{date(feedback.receivedAt)}</dd>
+              </dl>
+            </article>
+          );
+        }}
       </StateView>
     </Page>
   );
+}
+
+type FeedbackStatuses = Record<string, boolean>;
+
+interface FeedbackAttachment {
+  url: string;
+  mimeType: string;
+  hash: string;
+  size?: number;
+  dimensions?: string;
+  filename?: string;
+}
+
+const FEEDBACK_STATUS_KEY = "buzz-admin-feedback-status";
+
+function loadFeedbackStatuses(): FeedbackStatuses {
+  try {
+    const stored = localStorage.getItem(FEEDBACK_STATUS_KEY);
+    return stored ? (JSON.parse(stored) as FeedbackStatuses) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveFeedbackStatuses(statuses: FeedbackStatuses) {
+  try {
+    localStorage.setItem(FEEDBACK_STATUS_KEY, JSON.stringify(statuses));
+  } catch {
+    // The controls remain useful for the current session if storage is blocked.
+  }
+}
+
+function timeRangeStart(range: string) {
+  const durations: Record<string, number> = {
+    day: 24 * 60 * 60 * 1000,
+    week: 7 * 24 * 60 * 60 * 1000,
+    month: 30 * 24 * 60 * 60 * 1000,
+  };
+  const duration = durations[range];
+  return duration ? Date.now() - duration : undefined;
+}
+
+function feedbackAttachments(
+  tags: string[][],
+  communityHost: string,
+): FeedbackAttachment[] {
+  return tags.flatMap((tag) => {
+    if (tag[0] !== "imeta") return [];
+    const values = new Map<string, string>();
+    for (const entry of tag.slice(1)) {
+      const separator = entry.indexOf(" ");
+      if (separator > 0) {
+        values.set(entry.slice(0, separator), entry.slice(separator + 1));
+      }
+    }
+    const url = values.get("url");
+    const mimeType = values.get("m");
+    const hash = values.get("x");
+    const safeUrl = url && safeAttachmentUrl(url, communityHost);
+    if (!safeUrl || !mimeType || !hash) return [];
+    const parsedSize = Number(values.get("size"));
+    return [
+      {
+        url: safeUrl,
+        mimeType,
+        hash,
+        size:
+          Number.isFinite(parsedSize) && parsedSize > 0
+            ? parsedSize
+            : undefined,
+        dimensions: values.get("dim"),
+        filename: values.get("filename"),
+      },
+    ];
+  });
+}
+
+function safeAttachmentUrl(value: string, communityHost: string) {
+  try {
+    const url = new URL(value, `${location.protocol}//${communityHost}`);
+    return ["http:", "https:"].includes(url.protocol) &&
+      url.host.toLocaleLowerCase() === communityHost.toLocaleLowerCase() &&
+      url.pathname.startsWith("/media/")
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function stripAttachmentMarkdown(
+  body: string,
+  attachments?: FeedbackAttachment[],
+) {
+  const knownUrls = attachments
+    ? new Set(attachments.map((attachment) => attachment.url))
+    : undefined;
+  return body
+    .replace(/!?\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (match, url) => {
+      const isMedia = knownUrls ? knownUrls.has(url) : url.includes("/media/");
+      return isMedia ? "" : match;
+    })
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function Attachment({ attachment }: { attachment: FeedbackAttachment }) {
+  const url = attachment.url;
+  const name =
+    attachment.filename ?? `attachment-${attachment.hash.slice(0, 8)}`;
+  const metadata = [
+    attachment.mimeType,
+    attachment.dimensions,
+    attachment.size ? formatBytes(attachment.size) : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  if (attachment.mimeType.startsWith("image/")) {
+    return (
+      <figure className="image-attachment">
+        <a href={url} target="_blank" rel="noreferrer">
+          <img src={url} alt={name} loading="lazy" />
+        </a>
+        <figcaption>
+          <span>{name}</span>
+          <small>{metadata}</small>
+        </figcaption>
+      </figure>
+    );
+  }
+
+  return (
+    <a
+      className="file-attachment"
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+      download={name}
+    >
+      <FileIcon />
+      <span>
+        <strong>{name}</strong>
+        <small>{metadata}</small>
+      </span>
+      <ArrowIcon />
+    </a>
+  );
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function Page({
@@ -346,6 +681,72 @@ function FeedbackIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M5 5.5h14v10H9l-4 3v-13Z" />
       <path d="M8.5 9h7M8.5 12h4.5" />
+    </svg>
+  );
+}
+
+function CategoryTag({ category }: { category?: string }) {
+  const labels: Record<string, string> = {
+    bug: "Bug",
+    praise: "Praise",
+    "needs-work": "Needs work",
+  };
+  return (
+    <span className="tag">
+      <CategoryIcon category={category} />
+      {category ? (labels[category] ?? category) : "Uncategorized"}
+    </span>
+  );
+}
+
+function CategoryIcon({ category }: { category?: string }) {
+  if (category === "bug") return <BugIcon />;
+  if (category === "praise") return <ThumbsUpIcon />;
+  if (category === "needs-work") return <WrenchIcon />;
+  return <FeedbackIcon />;
+}
+
+function BugIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 20v-9" />
+      <path d="M14 7a4 4 0 0 1 4 4v3a6 6 0 0 1-12 0v-3a4 4 0 0 1 4-4z" />
+      <path d="M14.12 3.88 16 2M21 21a4 4 0 0 0-3.81-4M21 5a4 4 0 0 1-3.55 3.97M22 13h-4M3 21a4 4 0 0 1 3.81-4M3 5a4 4 0 0 0 3.55 3.97M6 13H2M8 2l1.88 1.88M9 7.13V6a3 3 0 1 1 6 0v1.13" />
+    </svg>
+  );
+}
+
+function ThumbsUpIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z" />
+      <path d="M7 10v12" />
+    </svg>
+  );
+}
+
+function WrenchIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z" />
+    </svg>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="m16 16 4 4" />
+    </svg>
+  );
+}
+
+function FileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M6 3h8l4 4v14H6V3Z" />
+      <path d="M14 3v5h4M9 13h6M9 17h4" />
     </svg>
   );
 }

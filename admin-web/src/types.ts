@@ -30,6 +30,7 @@ export interface FeedbackDetail {
   submitterPubkey: string;
   category?: string;
   body: string;
+  tags: string[][];
   eventCreatedAt: string;
   receivedAt: string;
 }

@@ -154,14 +154,17 @@ async fn feedback(
         .admin_list_feedback(100)
         .await?
         .into_iter()
-        .map(|item| FeedbackSummary {
-            id: item.id,
-            community_id: item.community_id,
-            community_host: item.community_host,
-            submitter_pubkey: item.submitter_pubkey,
-            category: item.category,
-            body_summary: summarize_body(&item.body),
-            received_at: item.received_at,
+        .map(|item| {
+            let body_summary = summarize_body(&item.body, &item.tags);
+            FeedbackSummary {
+                id: item.id,
+                community_id: item.community_id,
+                community_host: item.community_host,
+                submitter_pubkey: item.submitter_pubkey,
+                category: item.category,
+                body_summary,
+                received_at: item.received_at,
+            }
         })
         .collect();
     Ok(Json(items))
@@ -181,9 +184,32 @@ async fn feedback_detail(
         .ok_or_else(ApiError::not_found)
 }
 
-fn summarize_body(body: &str) -> String {
+fn summarize_body(body: &str, tags: &serde_json::Value) -> String {
     const MAX_CHARS: usize = 240;
-    let mut chars = body.chars();
+    let attachment_urls = tags
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tag| tag.as_array())
+        .filter(|tag| tag.first().and_then(|value| value.as_str()) == Some("imeta"))
+        .flat_map(|tag| tag.iter().skip(1))
+        .filter_map(|value| value.as_str()?.strip_prefix("url "))
+        .collect::<std::collections::HashSet<_>>();
+    let body = body
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            let url = line
+                .strip_suffix(')')
+                .and_then(|line| line.rsplit_once("]("))
+                .and_then(|(label, url)| {
+                    (label.starts_with('[') || label.starts_with("![")).then_some(url)
+                });
+            url.is_none_or(|url| !attachment_urls.contains(url))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut chars = body.trim().chars();
     let mut summary = chars.by_ref().take(MAX_CHARS).collect::<String>();
     if chars.next().is_some() {
         summary.push('…');
@@ -204,8 +230,18 @@ mod tests {
     #[test]
     fn feedback_summary_is_unicode_safe_and_marks_truncation() {
         let body = "🐝".repeat(241);
-        let summary = summarize_body(&body);
+        let summary = summarize_body(&body, &serde_json::Value::Null);
         assert_eq!(summary.chars().count(), 241);
         assert!(summary.ends_with('…'));
+    }
+
+    #[test]
+    fn feedback_summary_omits_imeta_attachment_lines() {
+        let url = "http://localhost:3000/media/abc.png";
+        let tags = serde_json::json!([["imeta", format!("url {url}"), "m image/png"]]);
+        assert_eq!(
+            summarize_body(&format!("Useful context.\n![image]({url})"), &tags),
+            "Useful context."
+        );
     }
 }
