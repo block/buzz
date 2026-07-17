@@ -235,7 +235,7 @@ export function GlobalAgentConfigFields({
       {/* Provider field */}
       <div className="space-y-1.5 p-3">
         <label className="text-sm font-medium" htmlFor="global-agent-provider">
-          Default LLM provider
+          LLM provider
         </label>
         <select
           className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
@@ -261,9 +261,6 @@ export function GlobalAgentConfigFields({
             value={providerValue}
           />
         ) : null}
-        <p className="text-xs text-muted-foreground">
-          Applies to all agents that don't have a per-agent provider set.
-        </p>
       </div>
 
       {apiKeyEnvVar ? (
@@ -309,9 +306,6 @@ export function GlobalAgentConfigFields({
           onModelChange={handleModelChange}
           provider={providerForDiscovery}
         />
-        <p className="text-xs text-muted-foreground">
-          Applies to all agents that don't have a per-agent model set.
-        </p>
       </div>
 
       {/* Thinking / Effort */}
@@ -325,7 +319,7 @@ export function GlobalAgentConfigFields({
             effortDefault !== null ? `Default (${effortDefault})` : undefined
           }
           inheritedEffort={bakedEffort ?? undefined}
-          label="Default thinking / effort"
+          label="Thinking/effort"
           onChange={(value) => {
             const nextEnvVars = { ...config.env_vars };
             if (value === "") {
@@ -337,20 +331,15 @@ export function GlobalAgentConfigFields({
           }}
           testId="global-agent-thinking-effort-select"
         />
-        <p className="mt-1.5 text-xs text-muted-foreground">
-          Default thinking/reasoning effort applied to all agents. Per-agent
-          settings override this.
-        </p>
       </div>
 
       {/* Env vars */}
       <div className="p-3">
         <EnvVarsEditor
-          helperText="Passed to every agent unless a per-agent value overrides it."
           hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
           inheritedRows={bakedGenericRows}
           inheritedRowsLabel="build"
-          label="Global environment variables"
+          label="Environment variables"
           onChange={handleEnvVarsChange}
           requiredKeys={advancedRequiredEnvKeys}
           value={Object.fromEntries(

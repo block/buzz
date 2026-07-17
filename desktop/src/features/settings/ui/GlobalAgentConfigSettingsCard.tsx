@@ -8,7 +8,7 @@ export function GlobalAgentConfigSettingsCard() {
       data-testid="settings-global-agent-config"
     >
       <SectionHeader
-        title="AI defaults"
+        title="Agent defaults"
         description="Provider, model, effort, and environment settings inherited by local agents. Agent-specific settings always take priority."
       />
       <GlobalAgentConfigEditor />
