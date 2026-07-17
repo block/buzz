@@ -265,32 +265,37 @@ export function NostrKeyImportForm({
         </>
       )}
 
-      {previewNpub ? (
-        <div
-          className="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs"
-          data-testid="nostr-import-npub-preview"
-        >
-          <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          <div className="min-w-0 space-y-0.5">
-            <p className="font-medium text-foreground">
-              This will use this Nostr identity:
-            </p>
-            <p className="break-all font-mono text-2xs text-muted-foreground">
-              {previewNpub}
-            </p>
+      <div
+        className={cn("min-h-8", variant === "spotlight" && "mt-6 text-center")}
+        data-testid="nostr-import-feedback"
+      >
+        {previewNpub ? (
+          <div
+            className="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs"
+            data-testid="nostr-import-npub-preview"
+          >
+            <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+            <div className="min-w-0 space-y-0.5">
+              <p className="font-medium text-foreground">
+                This will use this Nostr identity:
+              </p>
+              <p className="break-all font-mono text-2xs text-muted-foreground">
+                {previewNpub}
+              </p>
+            </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
 
-      {showInvalidHint && !errorMessage ? (
-        <p className="text-xs text-muted-foreground">
-          Waiting for a valid nsec1 key.
-        </p>
-      ) : null}
+        {showInvalidHint && !errorMessage ? (
+          <p className="text-xs text-muted-foreground">
+            Waiting for a valid nsec1 key.
+          </p>
+        ) : null}
 
-      {errorMessage ? (
-        <p className="text-center text-sm text-destructive">{errorMessage}</p>
-      ) : null}
+        {errorMessage ? (
+          <p className="text-center text-sm text-destructive">{errorMessage}</p>
+        ) : null}
+      </div>
 
       <OnboardingFooter>
         <Button
