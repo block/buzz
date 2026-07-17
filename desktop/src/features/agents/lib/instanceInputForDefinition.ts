@@ -119,7 +119,6 @@ export async function buildInstanceInputForDefinition(
   const avatarUrl = await resolveManagedAgentAvatarUrl(
     persona.avatarUrl,
     upload,
-    runtime.avatarUrl,
   );
 
   const base = {
