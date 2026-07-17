@@ -393,18 +393,27 @@ pub fn build_forum_comment(
 /// event so the rendered message reflects exactly the edited state. NIP-30
 /// custom-emoji tags ride along the same way so an edited body's `:shortcode:`s
 /// stay resolvable (the send path attaches these too).
+///
+/// `mentions` carries the pubkeys of mentions that are *newly added* by this
+/// edit (the caller diffs the edited body against the original). Only those get
+/// a `p` tag so the newly-mentioned party is notified/woken, while a typo-fix
+/// edit that leaves the mention set unchanged emits no `p` tags and never
+/// re-wakes anyone. This mirrors the send path's `mention_tags` (dedup +
+/// lowercase); the receiver overlays these onto the original event's audience.
 pub fn build_message_edit(
     channel_id: Uuid,
     target_event_id: EventId,
     content: &str,
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
+    mentions: &[&str],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![
         tag(vec!["h", &channel_id.to_string()])?,
         tag(vec!["e", &target_event_id.to_hex()])?,
     ];
+    tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(40003), content).tags(tags))
@@ -907,5 +916,71 @@ mod tests {
         assert_eq!(tags[2], vec!["reason", "returned"]);
         assert_eq!(tags.len(), 3, "self unarchive must not carry auth tag");
         assert_eq!(event.pubkey.to_hex(), TARGET_HEX);
+    }
+
+    // ── build_message_edit `p`-tag emission (lane 8ace8eed) ──────────────
+    //
+    // The composer diffs the edited body's mentions against the original and
+    // hands `build_message_edit` only the *newly added* pubkeys. These tests
+    // pin the builder's contract given that contract: emit a `p` per added
+    // mention (deduped, lowercased), and none when the added set is empty
+    // (typo-fix edit) — so an unchanged mention set re-wakes nobody.
+
+    const CH_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const ALICE_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const BOB_HEX: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+
+    fn edit_tags(mentions: &[&str]) -> Vec<Vec<String>> {
+        let channel = Uuid::parse_str(CH_ID).unwrap();
+        let target =
+            EventId::from_hex("d24da132115ca0a46233cf4c2ad8338fbf914250cbcaa9181a6dd59533cb5ac1")
+                .unwrap();
+        let builder = build_message_edit(channel, target, "hi @alice", &[], &[], mentions).unwrap();
+        let secret = nostr::SecretKey::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000003",
+        )
+        .unwrap();
+        let event = builder.sign_with_keys(&Keys::new(secret)).unwrap();
+        event.tags.iter().map(|t| t.as_slice().to_vec()).collect()
+    }
+
+    #[test]
+    fn edit_with_added_mention_emits_p_tag() {
+        let tags = edit_tags(&[ALICE_HEX]);
+        assert_eq!(tags[0][0], "h");
+        assert_eq!(tags[1][0], "e");
+        // The `p` tag rides right after the `e` tag (insertion order).
+        assert_eq!(tags[2], vec!["p".to_string(), ALICE_HEX.to_string()]);
+    }
+
+    #[test]
+    fn edit_with_no_added_mentions_emits_no_p_tag() {
+        // Typo-fix edit: mention set unchanged, so the composer passes `&[]`.
+        // The edit event must carry no `p` tag and re-wake nobody.
+        let tags = edit_tags(&[]);
+        assert!(
+            !tags
+                .iter()
+                .any(|t| t.first().map(String::as_str) == Some("p")),
+            "unchanged-mention edit must not emit any `p` tag, got {tags:?}"
+        );
+    }
+
+    #[test]
+    fn edit_mentions_are_deduped_and_lowercased() {
+        let alice_upper = ALICE_HEX.to_ascii_uppercase();
+        let tags = edit_tags(&[ALICE_HEX, &alice_upper, BOB_HEX]);
+        let p_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().map(String::as_str) == Some("p"))
+            .collect();
+        // ALICE appears twice (mixed case) but collapses to one lowercase tag.
+        assert_eq!(
+            p_tags.len(),
+            2,
+            "duplicate mention must collapse, got {p_tags:?}"
+        );
+        assert_eq!(p_tags[0], &vec!["p".to_string(), ALICE_HEX.to_string()]);
+        assert_eq!(p_tags[1], &vec!["p".to_string(), BOB_HEX.to_string()]);
     }
 }

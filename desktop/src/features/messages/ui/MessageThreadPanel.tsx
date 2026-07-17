@@ -65,7 +65,11 @@ type MessageThreadPanelProps = {
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onEditLastOwnMessage?: () => boolean;
-  onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
+  onEditSave?: (
+    content: string,
+    mediaTags?: string[][],
+    mentionPubkeys?: string[],
+  ) => Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandReplies: (message: TimelineMessage) => void;
