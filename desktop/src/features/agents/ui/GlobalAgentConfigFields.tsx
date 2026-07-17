@@ -346,7 +346,7 @@ export function GlobalAgentConfigFields({
       {/* Env vars */}
       <div className="p-3">
         <EnvVarsEditor
-          helperText="Injected into all agents as the lowest-priority layer. Per-agent values override these."
+          helperText="Passed to every agent unless a per-agent value overrides it."
           hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
           inheritedRows={bakedGenericRows}
           inheritedRowsLabel="build"

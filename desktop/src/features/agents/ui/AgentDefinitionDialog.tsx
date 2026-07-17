@@ -522,9 +522,9 @@ export function AgentDefinitionDialog({
     [runtimes],
   );
   const blankRuntimeOptionLabel = runtimesLoading
-    ? "Loading providers..."
+    ? "Loading engines..."
     : isCreateMode
-      ? "Choose a provider"
+      ? "Choose an engine"
       : "No preference (use app default)";
   const runtimeDropdownOptions: PersonaDropdownOption[] = [
     ...(!isCreateMode
@@ -775,7 +775,7 @@ export function AgentDefinitionDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="persona-system-prompt"
               >
-                Agent instruction
+                Agent instructions
               </label>
               <div className={PERSONA_FIELD_SHELL_CLASS}>
                 <Textarea
@@ -797,7 +797,7 @@ export function AgentDefinitionDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="persona-runtime"
               >
-                Agent runtime
+                Agent engine
               </label>
               <PersonaDropdownField
                 disabled={isPending || runtimesLoading}
@@ -873,8 +873,8 @@ export function AgentDefinitionDialog({
                 isRequired={apiKeyIsRequired}
                 label={
                   effectiveProvider === "anthropic"
-                    ? "Anthropic API Key"
-                    : "OpenAI API Key"
+                    ? "Anthropic API key"
+                    : "OpenAI API key"
                 }
                 onValueChange={(next) => {
                   setEnvVars((prev) => ({

@@ -205,7 +205,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               collapsed={collapsed}
               defaultModel={defaultModel}
               groupKey="__additional_persona_agents__"
-              label="Additional agent instances"
+              label="Additional running agents"
               startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
@@ -218,7 +218,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               collapsed={collapsed}
               defaultModel={defaultModel}
               groupKey="__unknown__"
-              label="Unknown Agent"
+              label="Unknown agents"
               startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
@@ -473,7 +473,7 @@ function NewAgentCard({
           disabled={isPersonasPending}
           onClick={onCreatePersona}
         >
-          New agent
+          Create from scratch
         </DropdownMenuItem>
         {canChooseCatalog ? (
           <DropdownMenuItem

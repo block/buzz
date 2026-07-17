@@ -58,8 +58,8 @@ export function TeamsSection({
     <section className="relative space-y-4" data-testid="agents-library-teams">
       <div className={TEAM_CARD_COLUMN_CLASS}>
         <SectionHeader
-          title="Teams"
-          description="Groups of your agents you can add to a channel together."
+          title="Agent teams"
+          description="Group agents that you can add to a channel together."
         />
       </div>
 
@@ -164,8 +164,7 @@ export function TeamsSection({
                     {missingPersonaCount} agent
                     {missingPersonaCount === 1 ? "" : "s"} in this team{" "}
                     {missingPersonaCount === 1 ? "is" : "are"} no longer in your
-                    My Agents. Edit the team to repair it before deploying or
-                    sharing.
+                    agents. Edit the team to fix it before deploying or sharing.
                   </p>
                 ) : null}
               </TeamIdentityCard>
