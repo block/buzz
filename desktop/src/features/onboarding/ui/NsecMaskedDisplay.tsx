@@ -52,7 +52,10 @@ export function NsecMaskedDisplay({
   // explicit break opportunity the masked key overflows its container. The mask
   // is decorative and non-selectable, and copy uses the raw nsec, so the
   // injected ZWSP is never surfaced.
-  const maskedNsec = Array.from(nsec, () => "•").join("​");
+  const maskedNsec = React.useMemo(
+    () => Array.from(nsec, () => "•").join("\u200b"),
+    [nsec],
+  );
   const iconSize = isBare ? "h-6 w-6" : "h-4 w-4";
 
   return (

@@ -38,10 +38,10 @@ test("backup step shows masked nsec from mock bridge", async ({ page }) => {
   await expect(revealBtn).toBeVisible();
   await expect(nsecDisplay).toHaveCSS("filter", /blur/);
 
-  // Take a screenshot of the masked state.
+  // Take a screenshot of the masked state. Capture the whole viewport: the CTAs
+  // are portaled into the docked footer outside the step subtree.
   await waitForAnimations(page);
-  const backupSection = page.locator('[data-testid="onboarding-page-backup"]');
-  await backupSection.screenshot({
+  await page.screenshot({
     path: `${SHOTS}/02-backup-step-masked.png`,
   });
 
@@ -52,7 +52,7 @@ test("backup step shows masked nsec from mock bridge", async ({ page }) => {
 
   // Take a screenshot of the revealed state.
   await waitForAnimations(page);
-  await backupSection.screenshot({
+  await page.screenshot({
     path: `${SHOTS}/03-backup-step-revealed.png`,
   });
 });

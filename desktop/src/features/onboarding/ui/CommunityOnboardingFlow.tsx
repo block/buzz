@@ -109,8 +109,16 @@ export function CommunityOnboardingFlow({
   };
 
   // Community join is the tail of the 6-page journey: profile is page 5, the
-  // starter-team intro is page 6. Transient join states sit on page 5.
-  const communityStep = transaction.stage === "team-intro" ? 6 : 5;
+  // starter-team page is page 6. That page renders for both "team-intro" and
+  // the "finalizing" transient, so mirror the render condition here — only the
+  // claiming/connecting/profile states sit on page 5. (Keying off "team-intro"
+  // alone made the dots regress 6→5 while "Preparing Welcome…" was shown.)
+  const communityStep =
+    transaction.stage === "claiming" ||
+    transaction.stage === "connecting" ||
+    transaction.stage === "profile"
+      ? 5
+      : 6;
 
   return (
     <div
