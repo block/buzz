@@ -188,9 +188,10 @@ test("successful Codex sign-in hides API key auth and selects it as preferred", 
     0,
   );
   await expect(card.getByLabel("Codex available")).toHaveCount(0);
-  await card
-    .getByRole("button", { name: "Sign in with ChatGPT" })
-    .click({ force: true });
+  await expect(
+    card.getByRole("button", { name: "Sign in with ChatGPT" }),
+  ).toHaveCount(0);
+  await card.getByRole("button", { name: "Log in" }).click({ force: true });
   await expect(card.getByText("Preferred")).toBeVisible();
   await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
 
@@ -225,6 +226,35 @@ test("runtime checkmarks only show for configured harnesses", async ({
 
   await expect(page.getByLabel("Claude available")).toHaveCount(0);
   await expect(page.getByLabel("codex available")).toBeVisible();
+});
+
+test("runtime cards use the preferred onboarding order", async ({ page }) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("buzz-agent", { status: "not_applicable" }),
+        availableRuntime("goose", { status: "not_applicable" }),
+        availableRuntime("codex", { status: "logged_in" }),
+        availableRuntime("claude", { status: "logged_in" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const runtimeOrder = await page
+    .getByRole("radio")
+    .evaluateAll((cards) =>
+      cards.map((card) => card.getAttribute("data-testid")),
+    );
+  expect(runtimeOrder).toEqual([
+    "onboarding-runtime-claude",
+    "onboarding-runtime-codex",
+    "onboarding-runtime-goose",
+    "onboarding-runtime-buzz-agent",
+  ]);
 });
 
 for (const authStatus of [

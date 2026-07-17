@@ -297,6 +297,14 @@ function isSupportedOnboardingAuthMethod(
   return !/api[-_ ]?key/i.test(`${method.id} ${method.name}`);
 }
 
+function onboardingAuthMethodLabel(
+  runtime: AcpRuntimeCatalogEntry,
+  method: { name: string },
+) {
+  if (runtime.id === "codex") return "Log in";
+  return method.name || "Sign in";
+}
+
 function RuntimeAuthActions({
   onAuthenticated,
   runtime,
@@ -374,7 +382,9 @@ function RuntimeAuthActions({
             type="button"
             variant="outline"
           >
-            {connectMutation.isPending ? "Opening…" : method.name || "Sign in"}
+            {connectMutation.isPending
+              ? "Opening…"
+              : onboardingAuthMethodLabel(runtime, method)}
           </Button>
         ))
       ) : (
@@ -579,6 +589,15 @@ function RuntimeProvidersSection({
   selectedRuntimeId: string | null;
 }) {
   const { errorMessage, isChecking, items } = runtimeProviders;
+  const runtimeOrder = ["claude", "codex", "goose", "buzz-agent"];
+  const orderedItems = [...items].sort((left, right) => {
+    const leftIndex = runtimeOrder.indexOf(left.id);
+    const rightIndex = runtimeOrder.indexOf(right.id);
+    return (
+      (leftIndex === -1 ? runtimeOrder.length : leftIndex) -
+      (rightIndex === -1 ? runtimeOrder.length : rightIndex)
+    );
+  });
   const installMutation = useInstallAcpRuntimeMutation();
   const [installResults, setInstallResults] = React.useState<
     Record<string, InstallResultState>
@@ -631,7 +650,7 @@ function RuntimeProvidersSection({
           className="flex flex-wrap items-stretch justify-center gap-4"
           role="radiogroup"
         >
-          {items.map((runtime) => (
+          {orderedItems.map((runtime) => (
             <RuntimeCard
               installError={installResults[runtime.id]?.error ?? null}
               installSuccess={installResults[runtime.id]?.success ?? false}
