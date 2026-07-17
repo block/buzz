@@ -27,6 +27,12 @@ import {
 } from "./OnboardingChrome";
 import { OnboardingFooter, OnboardingFooterProvider } from "./OnboardingFooter";
 
+const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
+  Fizz: "/onboarding/starter-team/fizz.png",
+  Honey: "/onboarding/starter-team/honey.png",
+  Bumble: "/onboarding/starter-team/bumble.png",
+};
+
 const NEUTRAL_EMOJI_PICKER_THEME_VARS = {
   "--buzz-emoji-picker-rgb-background":
     "var(--buzz-onboarding-emoji-picker-background)",
@@ -292,21 +298,34 @@ export function CommunityOnboardingFlow({
               </p>
               {starterPersonas.length > 0 ? (
                 <div className="mt-10 flex flex-wrap justify-center gap-8">
-                  {starterPersonas.map((persona) => (
-                    <div
-                      className="flex w-36 flex-col items-center gap-3"
-                      key={persona.id}
-                    >
-                      <ProfileAvatar
-                        avatarUrl={persona.avatarUrl}
-                        className="h-28 w-28 text-3xl"
-                        label={persona.displayName}
-                      />
-                      <span className="font-mono text-xs font-medium uppercase tracking-[0.15em]">
-                        {persona.displayName}
-                      </span>
-                    </div>
-                  ))}
+                  {starterPersonas.map((persona) => {
+                    const animationUrl =
+                      STARTER_PERSONA_ANIMATIONS[persona.displayName];
+                    return (
+                      <div
+                        className="flex w-40 flex-col items-center gap-3"
+                        key={persona.id}
+                      >
+                        {animationUrl ? (
+                          <img
+                            alt={`${persona.displayName} animated character`}
+                            className="h-40 w-40 object-contain"
+                            data-testid={`starter-persona-${persona.displayName.toLowerCase()}`}
+                            src={animationUrl}
+                          />
+                        ) : (
+                          <ProfileAvatar
+                            avatarUrl={persona.avatarUrl}
+                            className="h-28 w-28 text-3xl"
+                            label={persona.displayName}
+                          />
+                        )}
+                        <span className="font-mono text-xs font-medium uppercase tracking-[0.15em]">
+                          {persona.displayName}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               ) : null}
               {transaction.error ? (
