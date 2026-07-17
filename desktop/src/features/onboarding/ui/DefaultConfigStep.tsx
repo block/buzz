@@ -88,7 +88,11 @@ function AgentDefaultsSection() {
     [config.preferred_runtime, runtimesQuery.data],
   );
 
-  const readiness = resolveAgentReadiness(runtimesQuery.data ?? [], config);
+  const readiness = resolveAgentReadiness(
+    runtimesQuery.data ?? [],
+    config,
+    "preferred",
+  );
 
   return (
     <section className="w-full space-y-4 text-left">

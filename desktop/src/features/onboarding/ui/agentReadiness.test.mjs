@@ -57,7 +57,7 @@ test("resolveAgentReadiness_uses_only_the_preferred_runtime", () => {
     makeRuntime({ id: "claude", label: "Claude" }),
     makeRuntime({ id: "goose", label: "Goose" }),
   ];
-  const result = resolveAgentReadiness(runtimes, makeConfig());
+  const result = resolveAgentReadiness(runtimes, makeConfig(), "preferred");
   assert.equal(result.ready, false);
 });
 
@@ -69,7 +69,7 @@ test("resolveAgentReadiness_cli_skips_logged_out_runtimes", () => {
       authStatus: { status: "logged_out" },
     }),
   ];
-  const result = resolveAgentReadiness(runtimes, makeConfig());
+  const result = resolveAgentReadiness(runtimes, makeConfig(), "preferred");
   assert.equal(result.ready, false);
 });
 
@@ -82,7 +82,7 @@ test("resolveAgentReadiness_goose_requires_provider_and_model", () => {
       authStatus: { status: "not_applicable" },
     }),
   ];
-  const result = resolveAgentReadiness(runtimes, makeConfig());
+  const result = resolveAgentReadiness(runtimes, makeConfig(), "preferred");
   assert.equal(result.ready, false);
 });
 
@@ -96,7 +96,7 @@ test("resolveAgentReadiness_cli_not_ready_for_unknown_auth_status", () => {
       authStatus: { status: "unknown" },
     }),
   ];
-  const result = resolveAgentReadiness(runtimes, makeConfig());
+  const result = resolveAgentReadiness(runtimes, makeConfig(), "preferred");
   assert.equal(result.ready, false);
 });
 
@@ -109,7 +109,7 @@ test("resolveAgentReadiness_cli_not_ready_for_config_invalid_auth_status", () =>
       authStatus: { status: "config_invalid" },
     }),
   ];
-  const result = resolveAgentReadiness(runtimes, makeConfig());
+  const result = resolveAgentReadiness(runtimes, makeConfig(), "preferred");
   assert.equal(result.ready, false);
 });
 
@@ -122,7 +122,7 @@ test("resolveAgentReadiness_cli_skips_unavailable_runtimes", () => {
       authStatus: { status: "logged_in" },
     }),
   ];
-  const result = resolveAgentReadiness(runtimes, makeConfig());
+  const result = resolveAgentReadiness(runtimes, makeConfig(), "preferred");
   assert.equal(result.ready, false);
 });
 
@@ -135,7 +135,7 @@ test("resolveAgentReadiness_cli_ignores_buzz_agent_runtime", () => {
       authStatus: { status: "not_applicable" },
     }),
   ];
-  const result = resolveAgentReadiness(runtimes, makeConfig());
+  const result = resolveAgentReadiness(runtimes, makeConfig(), "preferred");
   assert.equal(result.ready, false);
 });
 
@@ -196,6 +196,42 @@ test("resolveAgentReadiness_neither_returns_not_ready", () => {
   assert.deepEqual(result, { ready: false });
 });
 
+test("resolveAgentReadiness_welcome_readiness_uses_ready_cli_without_preference", () => {
+  const runtimes = [makeRuntime({ id: "claude", label: "Claude" })];
+  const result = resolveAgentReadiness(
+    runtimes,
+    makeConfig({ preferred_runtime: null }),
+  );
+  assert.deepEqual(result, {
+    ready: true,
+    reason: "cli",
+    runtimeLabel: "Claude",
+  });
+});
+
+test("resolveAgentReadiness_legacy_config_without_preference_uses_buzz_agent_fields", () => {
+  const runtimes = [makeRuntime({ id: "buzz-agent", label: "Buzz Agent" })];
+  const result = resolveAgentReadiness(
+    runtimes,
+    makeConfig({
+      preferred_runtime: null,
+      provider: "anthropic",
+      model: "claude-3-5-sonnet-latest",
+      env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
+    }),
+  );
+  assert.deepEqual(result, { ready: true, reason: "buzz-agent" });
+});
+
+test("resolveAgentReadiness_legacy_config_does_not_treat_goose_binary_as_ready", () => {
+  const result = resolveAgentReadiness(
+    [makeRuntime({ id: "goose", label: "Goose" })],
+    makeConfig({ preferred_runtime: null }),
+    "preferred",
+  );
+  assert.deepEqual(result, { ready: false });
+});
+
 // ---------------------------------------------------------------------------
 // Preferred runtime isolation
 // ---------------------------------------------------------------------------
@@ -212,6 +248,7 @@ test("resolveAgentReadiness_preferred_goose_does_not_borrow_ready_buzz_agent_con
       model: null,
       env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
     }),
+    "preferred",
   );
   assert.equal(result.ready, false);
 });

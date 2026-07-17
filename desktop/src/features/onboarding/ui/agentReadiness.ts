@@ -21,10 +21,27 @@ export type AgentReadinessResult =
 export function resolveAgentReadiness(
   runtimes: readonly AcpRuntimeCatalogEntry[],
   globalConfig: GlobalAgentConfig,
+  scope: "any" | "preferred" = "any",
 ): AgentReadinessResult {
-  const preferredRuntime = runtimes.find(
-    (runtime) => runtime.id === globalConfig.preferred_runtime,
-  );
+  if (scope === "any") {
+    for (const runtime of runtimes) {
+      if (runtime.id === "buzz-agent") continue;
+      if (
+        runtime.availability === "available" &&
+        (runtime.authStatus.status === "logged_in" ||
+          runtime.authStatus.status === "not_applicable")
+      ) {
+        return { ready: true, reason: "cli", runtimeLabel: runtime.label };
+      }
+    }
+  }
+
+  const preferredRuntime =
+    scope === "preferred"
+      ? runtimes.find(
+          (runtime) => runtime.id === globalConfig.preferred_runtime,
+        )
+      : runtimes.find((runtime) => runtime.id === "buzz-agent");
   if (preferredRuntime?.availability !== "available") {
     return { ready: false };
   }
