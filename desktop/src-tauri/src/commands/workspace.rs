@@ -103,6 +103,7 @@ pub async fn apply_workspace(
     relay_url: String,
     nsec: Option<String>,
     repos_dir: Option<String>,
+    agent_managed_profiles: Option<bool>,
     app: AppHandle,
 ) -> Result<(), String> {
     let restore_app = app.clone();
@@ -147,6 +148,13 @@ pub async fn apply_workspace(
             let mut keys_guard = state.keys.lock().map_err(|e| e.to_string())?;
             *keys_guard = keys;
         }
+
+        // Keep the backend-side reconcile guard aligned with the frontend
+        // experiment before launch-time restore can spawn any agents. Missing
+        // means the stable behavior: desktop remains authoritative.
+        state
+            .managed_agent_profile_reconcile_enabled
+            .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
 
         // ── Filesystem side-effect (non-fatal) ────────────────────────────────
         // Persist the *effective* repos_dir (None when the candidate failed
