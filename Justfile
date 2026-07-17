@@ -378,6 +378,10 @@ admin: bootstrap _ensure-migrations
     echo "Inject ${BUZZ_ADMIN_REVIEWER_HEADER}: ${BUZZ_ADMIN_REVIEWERS%%,*} in the browser."
     cargo run -p buzz-relay
 
+# Seed deterministic reports and product feedback for local admin dashboard review
+admin-seed: _ensure-migrations
+    ./scripts/seed-admin-dashboard.sh
+
 # Run focused relay and browser checks for the read-only admin dashboard
 admin-check: fmt-check
     cargo check -p buzz-relay --all-targets
