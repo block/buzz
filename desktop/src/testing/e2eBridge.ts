@@ -7272,6 +7272,7 @@ async function handleStartManagedAgent(
   agent.updated_at = now;
   agent.last_started_at = now;
   agent.last_error = null;
+  setMockPresenceStatus(agent.pubkey, "online");
   agent.log_lines.push(
     agent.backend.type === "provider"
       ? `deployed mock provider harness at ${now}`
@@ -7290,6 +7291,7 @@ async function handleStopManagedAgent(args: {
   agent.pid = null;
   agent.updated_at = now;
   agent.last_stopped_at = now;
+  setMockPresenceStatus(agent.pubkey, "offline");
   agent.log_lines.push(`stopped mock harness at ${now}`);
   syncMockRelayAgentsFromManagedAgents();
   return cloneManagedAgent(agent);
@@ -7696,6 +7698,10 @@ async function handleSendManagedAgentChannelMessage(
     channelId: string;
     content: string;
     marker?: string | null;
+    markerScope?: "agent" | "channel" | null;
+    mentionPubkeys?: string[] | null;
+    parentEventId?: string | null;
+    additionalMarkers?: string[] | null;
   },
   _config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -7704,25 +7710,41 @@ async function handleSendManagedAgentChannelMessage(
   if (marker) {
     const existing = getMockMessageStore(args.channelId).find(
       (event) =>
-        event.pubkey === agent.pubkey &&
+        (args.markerScope === "channel" || event.pubkey === agent.pubkey) &&
         event.tags.some((tag) => tag[0] === "client" && tag[1] === marker),
     );
     if (existing) {
       return {
         event_id: existing.id,
-        parent_event_id: null,
-        root_event_id: null,
-        depth: 0,
+        parent_event_id: args.parentEventId ?? null,
+        root_event_id: args.parentEventId ?? null,
+        depth: args.parentEventId ? 1 : 0,
         created_at: existing.created_at,
       };
     }
   }
 
   const createdAt = Math.floor(Date.now() / 1000);
+  const tags = args.parentEventId
+    ? buildReplyMessageTags(
+        args.channelId,
+        agent.pubkey,
+        args.parentEventId,
+        args.parentEventId,
+        args.mentionPubkeys ?? undefined,
+      )
+    : buildTopLevelMessageTags(
+        args.channelId,
+        args.mentionPubkeys ?? undefined,
+        agent.pubkey,
+      );
+  for (const clientMarker of [marker, ...(args.additionalMarkers ?? [])]) {
+    if (clientMarker?.trim()) tags.push(["client", clientMarker.trim()]);
+  }
   const event = createMockEvent(
     9,
     args.content.trim(),
-    [["h", args.channelId], ...(marker ? [["client", marker]] : [])],
+    tags,
     agent.pubkey,
     createdAt,
   );
@@ -7731,9 +7753,9 @@ async function handleSendManagedAgentChannelMessage(
 
   return {
     event_id: event.id,
-    parent_event_id: null,
-    root_event_id: null,
-    depth: 0,
+    parent_event_id: args.parentEventId ?? null,
+    root_event_id: args.parentEventId ?? null,
+    depth: args.parentEventId ? 1 : 0,
     created_at: createdAt,
   };
 }
@@ -9521,6 +9543,22 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleSendChannelMessage>[0],
           activeConfig,
         );
+      case "has_managed_agent_channel_message_marker": {
+        const args = payload as {
+          channelId: string;
+          marker: string;
+          agentPubkey?: string | null;
+          markerScope?: "agent" | "channel" | null;
+        };
+        return getMockMessageStore(args.channelId).some(
+          (event) =>
+            (args.markerScope === "channel" ||
+              event.pubkey === args.agentPubkey) &&
+            event.tags.some(
+              (tag) => tag[0] === "client" && tag[1] === args.marker,
+            ),
+        );
+      }
       case "send_managed_agent_channel_message":
         return handleSendManagedAgentChannelMessage(
           payload as Parameters<typeof handleSendManagedAgentChannelMessage>[0],
@@ -9778,6 +9816,8 @@ export function maybeInstallE2eTauriMocks() {
         // The spec only verifies UI state, not the submitted request shape;
         // returning null mirrors the Rust submit_event success path.
         return null;
+      case "set_canvas":
+        return { ok: true, event_id: mockEventId() };
       case "get_canvas": {
         const canvasReadError = activeConfig?.mock?.canvasReadError;
         if (canvasReadError) {

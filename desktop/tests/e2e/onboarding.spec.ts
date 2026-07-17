@@ -945,15 +945,62 @@ function retryToast(page: Page, title: string) {
     .filter({ hasText: title });
 }
 
-async function expectRetrySuccessDismissesToast(
+async function retryToastAction(
   page: Page,
-  { title }: { command: string; title: string },
+  { command, title }: { command: string; title: string },
 ) {
   const activeToast = retryToast(page, title);
-  await expect(activeToast).toHaveCount(0);
+  await expect(
+    activeToast.getByRole("button", { name: "Retry" }),
+  ).toBeVisible();
+  const before = await commandCount(page, command);
+  await activeToast
+    .getByRole("button", { name: "Retry" })
+    .dispatchEvent("click");
+  await expect.poll(() => commandCount(page, command)).toBeGreaterThan(before);
 }
 
-test("starter channel retry failure does not block private Welcome landing", async ({
+async function commandCount(page: Page, command: string) {
+  return page.evaluate(
+    (target) =>
+      window.__BUZZ_E2E_COMMANDS__?.filter((entry) => entry === target)
+        .length ?? 0,
+    command,
+  );
+}
+
+test("failed starter channel retries recreate actionable toasts", async ({
+  page,
+}) => {
+  const starterError = "Mock starter channel setup failed.";
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      ensureStarterChannelsErrors: [starterError, starterError, starterError],
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await completeProfileOnboarding(page);
+
+  await expectPrivateWelcomeLanding(page);
+  const title = "Couldn't set up starter channels";
+  const activeToast = retryToast(page, title);
+  await expect(activeToast).toContainText(starterError);
+  await retryToastAction(page, {
+    command: "ensure_starter_channels",
+    title,
+  });
+  await expect(activeToast).toContainText(starterError);
+  await expect(
+    activeToast.getByRole("button", { name: "Retry" }),
+  ).toBeVisible();
+});
+
+test("successful starter channel retry clears its actionable toast", async ({
   page,
 }) => {
   const starterError = "Mock starter channel setup failed.";
@@ -970,23 +1017,27 @@ test("starter channel retry failure does not block private Welcome landing", asy
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
 
-  await expectPrivateWelcomeLanding(page);
-  const activeToast = retryToast(page, "Couldn't set up starter channels");
-  await expect(activeToast).toContainText(starterError);
-  await expect(
-    activeToast.getByRole("button", { name: "Retry" }),
-  ).toBeVisible();
+  const title = "Couldn't set up starter channels";
+  await expect(retryToast(page, title)).toContainText(starterError);
+  await retryToastAction(page, {
+    command: "ensure_starter_channels",
+    title,
+  });
+  await expect(retryToast(page, title)).toHaveCount(0);
+  await expectWelcomeView(page);
+  await expectStarterChannels(page);
 });
 
-test("successful starter channel retry clears its actionable toast", async ({
-  page,
-}) => {
-  const starterError = "Mock starter channel setup failed.";
+test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
     {
-      ensureStarterChannelsErrors: [starterError],
+      globalAgentConfig: {
+        env_vars: { OPENAI_API_KEY: "e2e-placeholder" },
+        provider: "openai",
+        model: "gpt-5.5",
+      },
     },
     { skipOnboardingSeed: true },
   );
@@ -995,13 +1046,16 @@ test("successful starter channel retry clears its actionable toast", async ({
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
 
-  await expectRetrySuccessDismissesToast(page, {
-    command: "ensure_starter_channels",
-    title: "Couldn't set up starter channels",
-  });
+  await expectPrivateWelcomeLanding(page);
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "Hi, I'm Fizz. Welcome to Buzz.",
+  );
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "Honey and Bumble, introduce yourselves",
+  );
 });
 
-test("first-run onboarding shows setup loading until starter channel bootstrap completes", async ({
+test("first-run onboarding lands before Welcome team bootstrap completes", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -1015,69 +1069,13 @@ test("first-run onboarding shows setup loading until starter channel bootstrap c
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await completeProfileOnboarding(page);
 
-  const loadingGate = page.getByTestId("app-loading-gate");
-  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expect(loadingGate).toBeVisible();
-  await expect(loadingGate).toContainText("Setting up your community...");
-
-  // The boot gate is the theme-adaptive grainient with the flapping Buzz bee
-  // as its hero. The mark must paint complete on the FIRST frame — a blank
-  // gate reads as "nothing is loading" — so nothing about it may depend on
-  // SMIL/scripted animation (<animate> count stays 0); the wing flap is pure
-  // CSS on HTML-level wing layers so it keeps running on the compositor even
-  // while boot work hogs the main thread.
-  await expect(
-    loadingGate.getByTestId("setup-grainient-background"),
-  ).toBeVisible();
-  const mark = loadingGate.locator(".buzz-mark");
-  await expect(mark).toBeVisible();
-  const gateTreatment = await loadingGate.evaluate((element) => {
-    const markElement = element.querySelector(".buzz-mark");
-    const markSvgs = markElement
-      ? Array.from(markElement.querySelectorAll("svg"))
-      : [];
-    const wing = element.querySelector(".bee-wing");
-    const wingStyles =
-      wing instanceof SVGElement ? window.getComputedStyle(wing) : null;
-    const wash = element.querySelector(".buzz-setup-grainient__wash");
-    const washStyles =
-      wash instanceof HTMLElement ? window.getComputedStyle(wash) : null;
-    return {
-      animateElementCount: element.querySelectorAll("animate").length,
-      // The document must match the OS scheme before the gate mounts (inline
-      // <style> + script in index.html; with no cached theme the first-launch
-      // default is Buzz following the OS scheme — white here because
-      // Playwright's default color scheme is light).
-      documentBackgroundColor: window.getComputedStyle(document.documentElement)
-        .backgroundColor,
-      grainientAnimation: washStyles?.animationName,
-      grainientUsesRadialGradients:
-        washStyles?.backgroundImage.includes("radial-gradient"),
-      markSvgsUseCurrentColor:
-        markSvgs.length > 0 &&
-        markSvgs.every((svg) => svg.getAttribute("fill") === "currentColor"),
-      wingFlapAnimation: wingStyles?.animationName,
-      wingFlapRunning: wingStyles?.animationPlayState,
-    };
-  });
-  expect(gateTreatment).toEqual({
-    animateElementCount: 0,
-    documentBackgroundColor: "rgb(255, 255, 255)",
-    grainientAnimation: "buzz-grainient-orbit",
-    grainientUsesRadialGradients: true,
-    markSvgsUseCurrentColor: true,
-    wingFlapAnimation: "bee-wing-left-flap",
-    wingFlapRunning: "running",
-  });
-  await expect(loadingGate).not.toHaveClass(/buzz-onboarding-neutral-theme/);
-  await expectShellHidden(page);
-  await page.waitForTimeout(250);
-  await expect(loadingGate).toBeVisible();
-  await expect(mark).toBeVisible();
-
-  await expectWelcomeView(page);
-  await expectStarterChannels(page);
-  await expectWelcomeGuideIntro(page);
+  await expectPrivateWelcomeLanding(page);
+  await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "Hi, I'm Fizz. Welcome to Buzz.",
+  );
+  await page.waitForTimeout(1_500);
+  expect(await commandCount(page, "create_managed_agent")).toBe(3);
 });
 
 test("existing relay profile with display name auto-skips onboarding without localStorage", async ({

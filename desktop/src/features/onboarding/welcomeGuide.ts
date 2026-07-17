@@ -36,6 +36,8 @@ export const WELCOME_TEAM_STARTERS = [
 
 export type WelcomeTeamAgents = [ManagedAgent, ManagedAgent, ManagedAgent];
 
+const welcomeTeamPromises = new Map<string, Promise<WelcomeTeamAgents>>();
+
 function normalizeRelayUrl(relayUrl: string | null | undefined) {
   return relayUrl?.trim().replace(/\/+$/, "") ?? null;
 }
@@ -198,7 +200,7 @@ async function ensureWelcomeTeamMembership(
  * The team itself is Rust-seeded; this only activates personas, creates any
  * missing relay-scoped instances, and adds all three to Welcome as bots.
  */
-export async function ensureWelcomeTeam(
+async function provisionWelcomeTeam(
   channelId: string,
   relayUrl?: string | null,
 ): Promise<WelcomeTeamAgents> {
@@ -252,4 +254,19 @@ export async function ensureWelcomeTeam(
   }
   await ensureWelcomeTeamMembership(channelId, welcomeAgents);
   return welcomeAgents;
+}
+
+export function ensureWelcomeTeam(
+  channelId: string,
+  relayUrl?: string | null,
+): Promise<WelcomeTeamAgents> {
+  const key = `${normalizeRelayUrl(relayUrl) ?? ""}:${channelId}`;
+  const current = welcomeTeamPromises.get(key);
+  if (current) return current;
+
+  const promise = provisionWelcomeTeam(channelId, relayUrl).finally(() =>
+    welcomeTeamPromises.delete(key),
+  );
+  welcomeTeamPromises.set(key, promise);
+  return promise;
 }

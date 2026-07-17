@@ -34,8 +34,37 @@ import {
 const STARTER_CHANNEL_SETUP_TOAST_ID = "starter-channel-setup-error";
 
 export type ChannelInitResult =
-  | { ok: true; focusChannelId?: string; warningReason?: string }
-  | { ok: false; reason: string };
+  | { ok: true; focusChannelId?: string }
+  | { ok: false; reason: string; focusChannelId?: string };
+
+const welcomeSeedPromises = new Map<string, Promise<void>>();
+
+function seedWelcomeExperience(
+  queryClient: ReturnType<typeof useQueryClient>,
+  channelId: string,
+  pubkey: string | null,
+  communityScope: string | null,
+) {
+  const key = `${communityScope ?? ""}:${channelId}`;
+  const current = welcomeSeedPromises.get(key);
+  if (current) return current;
+
+  const promise = (async () => {
+    try {
+      await ensureWelcomeTeam(channelId, communityScope);
+      await ensureWelcomeCanvas(channelId);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
+      ]);
+      markWelcomeChannelEnsured(pubkey, communityScope);
+    } catch (error) {
+      console.warn("Failed to seed the private Welcome experience.", error);
+    }
+  })().finally(() => welcomeSeedPromises.delete(key));
+  welcomeSeedPromises.set(key, promise);
+  return promise;
+}
 
 export async function initializeStarterChannels(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -93,20 +122,12 @@ export async function initializeStarterChannels(
         ...channels.filter((channel) => !ensuredIds.has(channel.id)),
       ];
     });
-    try {
-      await ensureWelcomeTeam(welcomeChannel.id, communityScope);
-      await ensureWelcomeCanvas(welcomeChannel.id);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
-        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
-      ]);
-      markWelcomeChannelEnsured(pubkey, communityScope);
-    } catch (error) {
-      // The private Welcome channel itself is the first-run landing contract.
-      // Team/canvas seeding can retry from the focused Welcome surface instead
-      // of trapping the user on Home after onboarding.
-      console.warn("Failed to seed the private Welcome experience.", error);
-    }
+    void seedWelcomeExperience(
+      queryClient,
+      welcomeChannel.id,
+      pubkey,
+      communityScope,
+    );
     await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     if (focus) {
       // Refreshing can briefly replace the optimistic cache with an older relay
@@ -123,16 +144,18 @@ export async function initializeStarterChannels(
       rememberPendingWelcomeChannel(welcomeChannel.id);
       notifyWelcomeChannelReady(welcomeChannel.id);
     }
-    return {
-      ok: true,
-      focusChannelId: focus ? welcomeChannel.id : undefined,
-      warningReason:
-        starterChannelsError instanceof Error
-          ? starterChannelsError.message
-          : starterChannelsError
-            ? "Failed to set up starter channels"
-            : undefined,
-    };
+    const focusChannelId = focus ? welcomeChannel.id : undefined;
+    if (starterChannelsError) {
+      return {
+        ok: false,
+        focusChannelId,
+        reason:
+          starterChannelsError instanceof Error
+            ? starterChannelsError.message
+            : "Failed to set up starter channels",
+      };
+    }
+    return { ok: true, focusChannelId };
   } catch (error) {
     console.warn("Failed to initialize starter channels.", error);
     return {
@@ -539,15 +562,14 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
         focus,
         pubkey: currentPubkey,
         communityScope: starterChannelsCommunityScope,
+      }).finally(() => {
+        starterChannelsInitPromisesRef.current.delete(starterChannelsInitKey);
+        starterChannelsFocusIntentRef.current.delete(starterChannelsInitKey);
       });
       starterChannelsInitPromisesRef.current.set(
         starterChannelsInitKey,
         promise,
       );
-      void promise.finally(() => {
-        starterChannelsInitPromisesRef.current.delete(starterChannelsInitKey);
-        starterChannelsFocusIntentRef.current.delete(starterChannelsInitKey);
-      });
       return promise;
     },
     [currentPubkey, queryClient, starterChannelsCommunityScope],
@@ -578,15 +600,19 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
         id: STARTER_CHANNEL_SETUP_TOAST_ID,
         action: {
           label: "Retry",
-          onClick: () => {
+          onClick: (event) => {
+            event.preventDefault();
             void requestStarterChannels(true).then((result) => {
               if (!result.ok) {
-                showStarterRetryToast(result.reason);
+                window.setTimeout(
+                  // Sonner dismisses an action toast as its click resolves, so
+                  // recreate a failed retry after that dismissal completes.
+                  () => showStarterRetryToast(result.reason),
+                  0,
+                );
                 return;
               }
-              if (result.warningReason) {
-                showStarterRetryToast(result.warningReason);
-              }
+              toast.dismiss(STARTER_CHANNEL_SETUP_TOAST_ID);
             });
           },
         },
@@ -602,17 +628,13 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
       await refreshChannelsCache(queryClient);
       gateComplete();
       setIsCompletingStarterSetup(false);
-      if (!starterResult.ok) {
-        showStarterRetryToast(starterResult.reason);
-        return;
-      }
       if (starterResult.focusChannelId) {
         window.location.hash = `/channels/${encodeURIComponent(
           starterResult.focusChannelId,
         )}`;
       }
-      if (starterResult.warningReason) {
-        showStarterRetryToast(starterResult.warningReason);
+      if (!starterResult.ok) {
+        showStarterRetryToast(starterResult.reason);
       }
     });
   }, [
