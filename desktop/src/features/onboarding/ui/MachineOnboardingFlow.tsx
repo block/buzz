@@ -33,11 +33,13 @@ export type MachineOnboardingPage =
 
 export function MachineOnboardingFlow({
   complete,
+  continueWithIdentity,
   identityLost,
   initialPage,
   queryClient,
 }: {
   complete: (pubkey?: string) => void;
+  continueWithIdentity: (pubkey: string) => void;
   identityLost: boolean;
   initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
@@ -141,12 +143,13 @@ export function MachineOnboardingFlow({
   const importExistingIdentity = React.useCallback(
     async (nsec: string) => {
       const identity = await importIdentity(nsec);
+      continueWithIdentity(identity.pubkey);
       queryClient.setQueryData(["identity"], identity);
       setIdentityWasImported(true);
       setSelectedPubkey(identity.pubkey);
       setPage("setup");
     },
-    [queryClient],
+    [continueWithIdentity, queryClient],
   );
 
   return (

@@ -565,6 +565,23 @@ test("completed users skip the loading gate while profile is still settling", as
   await expectHomeView(page);
 });
 
+test("first-launch key import continues to machine setup", async ({ page }) => {
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Enter a key" }).click();
+  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
+  await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
+  await page.getByTestId("nostr-import-submit").click();
+
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
+  await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
+});
+
 test("first-community choices expose npub and invite input", async ({
   page,
 }) => {
