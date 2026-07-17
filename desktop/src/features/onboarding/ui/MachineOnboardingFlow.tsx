@@ -9,6 +9,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
+import { DefaultConfigStep } from "./DefaultConfigStep";
 import { LandingBees } from "./LandingBees";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import {
@@ -19,7 +20,7 @@ import { OnboardingFooterProvider } from "./OnboardingFooter";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
 
-type MachinePage = "identity" | "key-import" | "backup" | "setup";
+type MachinePage = "identity" | "key-import" | "backup" | "setup" | "config";
 
 export function MachineOnboardingFlow({
   complete,
@@ -102,7 +103,9 @@ export function MachineOnboardingFlow({
       <StartupWindowDragRegion />
       {page === "identity" ? <LandingBees /> : null}
       {page !== "identity" ? (
-        <OnboardingChrome current={page === "setup" ? 3 : 2} />
+        <OnboardingChrome
+          current={page === "config" ? 4 : page === "setup" ? 3 : 2}
+        />
       ) : null}
       <OnboardingFooterProvider>
         <div
@@ -180,11 +183,19 @@ export function MachineOnboardingFlow({
               onBack={() => setPage("identity")}
               onNext={() => setPage("setup")}
             />
-          ) : (
+          ) : page === "setup" ? (
             <SetupStep
               actions={{
                 back: () =>
                   setPage(identityWasImported ? "key-import" : "backup"),
+                next: () => setPage("config"),
+              }}
+              direction="forward"
+            />
+          ) : (
+            <DefaultConfigStep
+              actions={{
+                back: () => setPage("setup"),
                 complete: () => complete(selectedPubkey ?? undefined),
               }}
               direction="forward"

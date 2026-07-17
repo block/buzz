@@ -47,16 +47,52 @@ const RELAY_MESH_RUNTIME_NO_TARGET: &str =
 
 pub type CmdResult<T> = Result<T, String>;
 
+fn advance_mesh_status_cursor(
+    filter: &mut serde_json::Value,
+    page: &[nostr::Event],
+) -> Result<(u64, String), String> {
+    let last = page
+        .last()
+        .ok_or_else(|| "cannot advance an empty mesh status page".to_string())?;
+    let cursor = (last.created_at.as_secs(), last.id.to_hex());
+    filter["until"] = serde_json::json!(cursor.0);
+    filter["before_id"] = serde_json::json!(cursor.1);
+    Ok(cursor)
+}
+
+async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Event>, String> {
+    let mut events = relay::query_relay(state, &[mesh_llm::relay_membership_filter()]).await?;
+    let member_pubkeys = mesh_llm::current_member_pubkeys(&events);
+    if member_pubkeys.is_empty() {
+        return Ok(events);
+    }
+    let mut status_filter = mesh_llm::mesh_status_filter();
+    status_filter["authors"] = serde_json::json!(member_pubkeys);
+    let mut previous_cursor: Option<(u64, String)> = None;
+
+    loop {
+        let page = relay::query_relay(state, &[status_filter.clone()]).await?;
+        let done = page.len() < mesh_llm::MESH_STATUS_PAGE_SIZE;
+        if !done {
+            let cursor = advance_mesh_status_cursor(&mut status_filter, &page)?;
+            if previous_cursor.as_ref() == Some(&cursor) {
+                return Err("mesh status pagination did not advance".to_string());
+            }
+            previous_cursor = Some(cursor);
+        }
+        events.extend(page);
+        if done {
+            return Ok(events);
+        }
+    }
+}
+
 /// Resolve the admission roster by intersecting member-signed mesh status
 /// reporters with the current NIP-43 direct-member list. Missing membership or
 /// a failed query returns an empty roster, which the runtime normalizes to
 /// self-only admission.
 pub(crate) async fn resolve_trusted_owner_ids(state: &AppState) -> Vec<String> {
-    let filters = [
-        mesh_llm::mesh_status_filter(),
-        mesh_llm::relay_membership_filter(),
-    ];
-    match relay::query_relay(state, &filters).await {
+    match query_mesh_discovery_events(state).await {
         Ok(events) => mesh_llm::owner_ids_from_events(&events),
         Err(error) => {
             eprintln!("buzz-mesh: roster query failed; allowing only this node: {error}");
@@ -272,14 +308,7 @@ pub(crate) async fn resolve_mesh_bootstrap_target(
     if model_id.is_empty() {
         return Ok(None);
     }
-    let events = relay::query_relay(
-        state,
-        &[
-            mesh_llm::mesh_status_filter(),
-            mesh_llm::relay_membership_filter(),
-        ],
-    )
-    .await?;
+    let events = query_mesh_discovery_events(state).await?;
     Ok(pick_serve_target_for_model(
         mesh_llm::availability_from_events(events).serve_targets,
         model_id,
@@ -424,6 +453,26 @@ mod tests {
             device_id: None,
             device_name: None,
         }
+    }
+
+    #[test]
+    fn mesh_status_cursor_uses_relay_composite_tiebreak() {
+        let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "status")
+            .custom_created_at(nostr::Timestamp::from(1_234))
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign test status");
+        let mut filter = mesh_llm::mesh_status_filter();
+
+        let cursor = advance_mesh_status_cursor(&mut filter, std::slice::from_ref(&event))
+            .expect("advance status cursor");
+
+        assert_eq!(cursor, (1_234, event.id.to_hex()));
+        assert_eq!(filter["until"], serde_json::json!(1_234));
+        assert_eq!(filter["before_id"], serde_json::json!(event.id.to_hex()));
+        assert_eq!(
+            filter["limit"],
+            serde_json::json!(mesh_llm::MESH_STATUS_PAGE_SIZE)
+        );
     }
 
     #[test]

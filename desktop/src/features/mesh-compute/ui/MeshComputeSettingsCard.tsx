@@ -415,16 +415,19 @@ function CatalogPicker({
   selected: string;
 }) {
   const [expanded, setExpanded] = React.useState(false);
-  // Collapsed: recommended + the next few viable entries. Expanded: all.
-  const visible = expanded ? catalog.entries : catalog.entries.slice(0, 4);
+  // Above the fold: the Buzz-curated picks (models known to work well with
+  // agents on shared compute). Below: everything else, as advanced options.
+  const curated = catalog.entries.filter((e) => e.curated);
+  const advanced = catalog.entries.filter((e) => !e.curated);
+  const visible = expanded ? catalog.entries : curated;
   return (
     <div className="mt-1" data-testid="mesh-share-compute-catalog">
       <p className="text-sm font-normal text-muted-foreground">
-        Suggested for this machine
+        Recommended for this machine
         {catalog.gpuName ? ` (${catalog.gpuName}, ` : " ("}
         {catalog.vramDisplay} AI memory):
       </p>
-      <ul className="mt-1.5 flex flex-col gap-1">
+      <ul className="mt-1.5 flex max-h-56 flex-col gap-1 overflow-y-auto">
         {visible.map((entry) => {
           const isSelected = entry.name === selected;
           const tooLarge = entry.fit === "too_large";
@@ -468,15 +471,16 @@ function CatalogPicker({
           );
         })}
       </ul>
-      {catalog.entries.length > visible.length || expanded ? (
+      {advanced.length > 0 ? (
         <button
           className="mt-1 text-sm text-muted-foreground underline hover:text-foreground"
+          data-testid="mesh-catalog-advanced-toggle"
           onClick={() => setExpanded((v) => !v)}
           type="button"
         >
           {expanded
-            ? "Show fewer"
-            : `Show all ${catalog.entries.length} models`}
+            ? "Hide advanced models"
+            : `Advanced: ${advanced.length} more models`}
         </button>
       ) : null}
     </div>

@@ -128,7 +128,7 @@ type AppSidebarProps = {
     lastMessageAt: string | null | undefined,
   ) => void;
   onMarkAllChannelsRead: () => void;
-  onBrowseChannels?: () => void;
+  onBrowseChannels?: (onCreated?: (channelId: string) => void) => void;
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
   onUpdateCommunity: (
     id: string,
@@ -530,6 +530,13 @@ export function AppSidebar({
     openCreateDialog("stream");
   }, [onCreateChannelOpenChange, openCreateDialog]);
 
+  const handleCreateChannelInSection = React.useCallback(
+    (sectionId: string) => {
+      onBrowseChannels?.((channelId) => assignChannel(channelId, sectionId));
+    },
+    [assignChannel, onBrowseChannels],
+  );
+
   return (
     <Sidebar
       className="!border-r-0"
@@ -667,6 +674,9 @@ export function AppSidebar({
                       onAssignChannel={assignChannel}
                       onUnassignChannel={unassignChannel}
                       onCreateSectionForChannel={handleCreateSectionForChannel}
+                      onCreateChannel={() =>
+                        handleCreateChannelInSection(section.id)
+                      }
                       onRenameSection={() => setRenameSectionTarget(section)}
                       onDeleteSection={() => setDeleteSectionTarget(section)}
                       onMoveSectionUp={() => moveSectionUp(section.id)}

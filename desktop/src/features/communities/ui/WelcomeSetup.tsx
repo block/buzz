@@ -13,6 +13,7 @@ import { pubkeyToNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
+import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
 
 type WelcomeSetupPage = "welcome" | "join" | "invite";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
@@ -94,7 +95,8 @@ export function WelcomeSetup({
       data-system-color-scheme={systemColorScheme}
     >
       <StartupWindowDragRegion />
-      <div className="relative flex w-full max-w-[500px] flex-col items-center text-center">
+      <OnboardingChrome current={5} />
+      <div className="relative flex w-full max-w-[760px] flex-col items-center text-center">
         {page === "welcome" ? (
           <OnboardingSlideTransition
             className="flex w-full flex-col items-center text-center"
@@ -102,51 +104,45 @@ export function WelcomeSetup({
             effect={welcomeEffect}
             transitionKey={`welcome-${welcomeEffect}-${transitionDirection}`}
           >
-            <img
-              alt="Buzz"
-              className="h-14 w-14 rounded-xl shadow-xs"
-              src="/app-icon@2x.png"
-              srcSet="/app-icon@2x.png 1x, /app-icon@3x.png 2x"
-            />
-            <h1 className="mt-6 text-3xl font-semibold tracking-tight">
-              Welcome to Buzz
-            </h1>
-            <p className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground">
-              Choose how you want to get started.
-            </p>
-            <div className="mt-8 flex w-full flex-col gap-3">
+            <div className="w-full max-w-[440px]">
+              <h1 className="text-title font-normal">
+                Join or create a community
+              </h1>
+              <p className="mt-3 text-sm leading-6 text-foreground/80">
+                Request access to an existing community or create a new one.
+              </p>
+            </div>
+            <div className="mt-14 flex w-full flex-wrap items-stretch justify-center gap-4">
               {isLocalDevRelayUrl(defaultRelayUrl) ? null : (
-                <Button
-                  className="h-10 w-full"
+                <button
+                  className="flex min-h-32 w-44 items-center justify-center rounded-2xl bg-white/85 p-4 text-sm font-medium text-foreground shadow-[0_0_45px_18px_rgba(255,255,255,0.65)] transition-shadow hover:shadow-[0_0_55px_25px_rgba(255,255,255,0.85)]"
                   onClick={handleDefaultCommunity}
                   type="button"
                 >
                   Join default community
-                </Button>
+                </button>
               )}
-              <Button
-                className="h-10 w-full"
+              <button
+                className="flex min-h-32 w-44 items-center justify-center rounded-2xl bg-white/85 p-4 text-sm font-medium text-foreground shadow-[0_0_45px_18px_rgba(255,255,255,0.65)] transition-shadow hover:shadow-[0_0_55px_25px_rgba(255,255,255,0.85)]"
                 onClick={() => showPage("join")}
                 type="button"
               >
                 Join a community
-              </Button>
-              <Button
-                className="h-10 w-full"
+              </button>
+              <button
+                className="flex min-h-32 w-44 items-center justify-center rounded-2xl bg-white/85 p-4 text-sm font-medium text-foreground shadow-[0_0_45px_18px_rgba(255,255,255,0.65)] transition-shadow hover:shadow-[0_0_55px_25px_rgba(255,255,255,0.85)]"
                 onClick={() => showPage("invite")}
                 type="button"
-                variant="secondary"
               >
                 I have an invite link
-              </Button>
-              <Button
-                className="h-10 w-full"
+              </button>
+              <button
+                className="flex min-h-32 w-44 items-center justify-center rounded-2xl bg-white/85 p-4 text-sm font-medium text-foreground shadow-[0_0_45px_18px_rgba(255,255,255,0.65)] transition-shadow hover:shadow-[0_0_55px_25px_rgba(255,255,255,0.85)]"
                 onClick={() => void openUrl(CREATE_COMMUNITY_URL)}
                 type="button"
-                variant="ghost"
               >
                 Create a community
-              </Button>
+              </button>
             </div>
           </OnboardingSlideTransition>
         ) : page === "join" ? (
@@ -156,9 +152,7 @@ export function WelcomeSetup({
             transitionKey={`join-${transitionDirection}`}
           >
             <div className="w-full max-w-[440px]">
-              <h1 className="text-3xl font-semibold tracking-tight">
-                Join a community
-              </h1>
+              <h1 className="text-title font-normal">Join a community</h1>
               <p className="mt-3 text-sm leading-6 text-muted-foreground">
                 Send your public key to a community owner. Keep Buzz open; once
                 they add you, their invite link will continue setup here.
@@ -215,9 +209,7 @@ export function WelcomeSetup({
             transitionKey={`invite-${transitionDirection}`}
           >
             <div className="w-full max-w-[440px]">
-              <h1 className="text-3xl font-semibold tracking-tight">
-                I have an invite link
-              </h1>
+              <h1 className="text-title font-normal">I have an invite link</h1>
               <p className="mt-3 text-sm leading-6 text-muted-foreground">
                 Keep this page open, then click the invite link you received.
                 Buzz will continue automatically. You can also paste it below.
