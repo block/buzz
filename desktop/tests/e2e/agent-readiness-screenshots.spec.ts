@@ -18,7 +18,7 @@ async function openCreateDialog(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
   await page.locator("#persona-display-name").fill("Test Agent");
 }
 
@@ -129,7 +129,7 @@ test.describe("agent readiness gate screenshots", () => {
     });
   });
 
-  // Shot 01: inherited AI defaults are an explicit, valid choice. Provider and
+  // Shot 01: inherited agent defaults are an explicit, valid choice. Provider and
   // model controls stay hidden until the user chooses to customize this agent.
   test("01-create-buzzagent-uses-ai-defaults", async ({ page }) => {
     await installMockBridge(page, {
@@ -142,7 +142,7 @@ test.describe("agent readiness gate screenshots", () => {
     await openCreateDialog(page);
 
     await expect(
-      page.getByRole("tab", { name: "Use AI defaults" }),
+      page.getByRole("tab", { name: "Use agent defaults" }),
     ).toHaveAttribute("data-state", "active");
     await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
     await expect(page.locator("#persona-model")).not.toBeVisible();

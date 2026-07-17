@@ -269,7 +269,7 @@ test("agent avatar emoji picker scrolls inside its popover", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "New agent" }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
   await page.getByLabel("Add avatar").click();

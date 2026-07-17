@@ -270,7 +270,7 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   // Open the Agents view, click New > New agent to open the persona dialog.
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
   // Scope all env-vars queries to the dialog: GlobalAgentConfigSettingsCard
   // also renders an EnvVarsEditor in the background settings pane (introduced
@@ -315,7 +315,7 @@ test("persona model options follow the selected LLM provider", async ({
 
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
   const provider = page.locator("#persona-runtime");
   await page.getByRole("tab", { name: "Customize for this agent" }).click();
@@ -348,7 +348,7 @@ test("persona model options follow the selected LLM provider", async ({
 
   // Switch back to inherited defaults — per-agent provider, credential, and
   // model controls disappear together.
-  await page.getByRole("tab", { name: "Use AI defaults" }).click();
+  await page.getByRole("tab", { name: "Use agent defaults" }).click();
   await expect(llmProvider).not.toBeVisible();
   await expect(dialog.getByLabel("Anthropic API Key")).not.toBeVisible();
   await expect(model).not.toBeVisible();

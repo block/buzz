@@ -313,7 +313,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
     });
   });
 
-  // Shot 07: global config save — partial failure "M failed to restart".
+  // Shot 07: global config save — partial failure "M couldn't restart".
   test("07-save-failed-restart", async ({ page }) => {
     await installMockBridge(page, {
       globalAgentConfig: {
@@ -335,10 +335,10 @@ test.describe("agent lifecycle feedback screenshots", () => {
 
     await page.getByRole("button", { name: "Save defaults" }).click();
 
-    // Partial failure copy (zero restarted): singular agent + Agents tab prompt.
+    // Partial failure copy (zero restarted): singular agent + Agents page prompt.
     await expect(
       card.getByText(
-        "Saved. 1 agent failed to restart — check the Agents tab.",
+        "Saved. 1 agent couldn't restart — check the Agents page.",
       ),
     ).toBeVisible({ timeout: 5_000 });
 
