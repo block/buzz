@@ -15,6 +15,9 @@ const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
+const COLLAPSED_CUSTOM_SECTION_TEST =
+  "collapsed custom section surfaces hidden unread state and mark-all clears it";
+const UNREAD_SECTION_ID = "unread-section";
 // Relay-only agent owned by the mock viewer (see e2eBridge.ts
 // OWNED_RELAY_AGENT_PUBKEY). Classified as a bot via mockRelayAgents and
 // owned-by-viewer via its mockProfiles owner_pubkey, so the sidebar
@@ -468,7 +471,29 @@ async function expectIntroActionsShareRow(
   }
 }
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page }, testInfo) => {
+  if (testInfo.title === COLLAPSED_CUSTOM_SECTION_TEST) {
+    await page.addInitScript(
+      ({ channelId, pubkey, sectionId }) => {
+        window.localStorage.setItem(
+          `buzz-channel-sections.v1:${pubkey}`,
+          JSON.stringify({
+            version: 1,
+            sections: [
+              { id: sectionId, name: "Important", icon: "🔔", order: 0 },
+            ],
+            assignments: { [channelId]: sectionId },
+          }),
+        );
+      },
+      {
+        channelId: RANDOM_CHANNEL_ID,
+        pubkey: MOCK_IDENTITY_PUBKEY,
+        sectionId: UNREAD_SECTION_ID,
+      },
+    );
+  }
+
   await installMockBridge(page);
 });
 
@@ -2085,29 +2110,8 @@ test("typing indicator shows avatars and maintains stable name order", async ({
   ).toContainText("alice and bob are typing");
 });
 
-test("collapsed custom section surfaces hidden unread state and mark-all clears it", async ({
-  page,
-}, testInfo) => {
-  const sectionId = "unread-section";
-  await page.addInitScript(
-    ({ channelId, pubkey, sectionId }) => {
-      window.localStorage.setItem(
-        `buzz-channel-sections.v1:${pubkey}`,
-        JSON.stringify({
-          version: 1,
-          sections: [
-            { id: sectionId, name: "Important", icon: "🔔", order: 0 },
-          ],
-          assignments: { [channelId]: sectionId },
-        }),
-      );
-    },
-    {
-      channelId: RANDOM_CHANNEL_ID,
-      pubkey: MOCK_IDENTITY_PUBKEY,
-      sectionId,
-    },
-  );
+test(COLLAPSED_CUSTOM_SECTION_TEST, async ({ page }, testInfo) => {
+  const sectionId = UNREAD_SECTION_ID;
 
   await page.goto("/");
   await waitForMockLiveSubscription(page, "random");
