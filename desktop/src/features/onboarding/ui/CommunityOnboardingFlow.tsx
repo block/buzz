@@ -134,6 +134,7 @@ export function CommunityOnboardingFlow({
         communityScope: relayUrl,
       });
       if (!result.ok) throw new Error(result.reason);
+      if (result.warningReason) throw new Error(result.warningReason);
       await finish();
     } catch (error) {
       update({
