@@ -4,6 +4,8 @@ import * as React from "react";
 import { getNsec } from "@/shared/api/tauriIdentity";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { OnboardingFooter } from "./OnboardingFooter";
 import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
@@ -79,16 +81,16 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
       transitionKey={`backup-${direction}`}
     >
       <div className="w-full max-w-[500px] text-center">
-        <h1 className="text-3xl font-semibold tracking-tight text-foreground">
+        <h1 className="text-title font-normal text-foreground">
           Your unique identity has been created
         </h1>
-        <p className="mt-3 text-sm leading-6 text-foreground/80">
+        <p className="mt-5 text-sm leading-6 text-foreground/80">
           This key is stored in your system keychain, but save it some place
           safe in case you ever need to restore your account.
         </p>
       </div>
 
-      <div className="mt-10 w-full max-w-[640px]">
+      <div className="mt-10 w-full max-w-4xl">
         {isLoading ? (
           <div className="flex items-center justify-center gap-2 py-6 text-sm text-foreground/70">
             <Spinner className="h-4 w-4 border-2" />
@@ -120,7 +122,8 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
             </Button>
           </div>
         ) : nsec ? (
-          <div className="rounded-3xl bg-white/85 px-6 py-5 shadow-[0_0_70px_45px_rgba(255,255,255,0.85)]">
+          // Translucent white card frames the key with equal padding.
+          <div className="w-full min-w-0 rounded-xl bg-white/50 px-8 py-6">
             <NsecMaskedDisplay nsec={nsec} variant="bare" />
           </div>
         ) : (
@@ -130,7 +133,7 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
         )}
 
         {nsec ? (
-          <p className="mx-auto mt-6 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-foreground/70">
+          <p className="mx-auto mt-6 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
             <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
               Never share your private key. Anyone can impersonate you and
@@ -140,9 +143,9 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
         ) : null}
       </div>
 
-      <div className="mt-12 flex flex-col items-center gap-3">
+      <OnboardingFooter>
         <Button
-          className="h-10 rounded-full px-8"
+          className={ONBOARDING_PRIMARY_CTA_CLASS}
           data-testid="onboarding-next"
           disabled={backupNextDisabled({ isLoading, loadError })}
           onClick={onNext}
@@ -172,7 +175,7 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
         >
           Back
         </Button>
-      </div>
+      </OnboardingFooter>
     </OnboardingSlideTransition>
   );
 }

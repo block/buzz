@@ -10,6 +10,10 @@ export default {
       fontSize: {
         "2xs": "0.6875rem", // 11px — meta-text workhorse (timestamps, badges)
         "3xs": "0.5rem", // 8px — tiny glyphs / micro labels
+        // 40px — onboarding page titles (tightened tracking for large display type)
+        title: ["2.5rem", { lineHeight: "1.15", letterSpacing: "-0.02em" }],
+        // 36px — the backup-step private key, shown large in monospace
+        "nsec-key": ["2.25rem", { lineHeight: "1.3" }],
       },
       borderRadius: {
         lg: "var(--radius)",
