@@ -27,7 +27,7 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/01-landing.png` });
 
-  await page.getByRole("button", { name: "Enter a key" }).click();
+  await page.getByRole("button", { name: "Use an existing key" }).click();
   await expect(
     page.getByRole("heading", { name: "Enter your private key" }),
   ).toBeVisible();
@@ -45,8 +45,10 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await page.screenshot({ path: `${SHOT_DIR}/01b-enter-key.png` });
 
   await page.getByRole("button", { name: "Back" }).click();
-  await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
-  await page.getByRole("button", { name: "Get started" }).click();
+  await expect(
+    page.getByRole("button", { name: "Create new identity key" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Create new identity key" }).click();
   await expect(
     page.getByRole("heading", {
       name: "Your unique identity has been created",
