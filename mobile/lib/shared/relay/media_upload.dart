@@ -14,6 +14,7 @@ import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
 
 const _mediaUploadPath = '/upload';
+const _legacyMediaUploadPath = '/media/upload';
 const _mediaUploadPlatformChannelName = 'buzz/media_upload';
 const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';
@@ -234,14 +235,26 @@ class MediaUploadService {
     }
 
     final sha256 = _sha256Hex(bytes);
-    final request = _buildUploadRequest(
+    var request = _buildUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
       sha256: sha256,
+      path: _mediaUploadPath,
     );
 
-    final streamed = await _http.send(request);
-    final response = await http.Response.fromStream(streamed);
+    var streamed = await _http.send(request);
+    var response = await http.Response.fromStream(streamed);
+    if (response.statusCode == HttpStatus.notFound ||
+        response.statusCode == HttpStatus.methodNotAllowed) {
+      request = _buildUploadRequest(
+        bytes: bytes,
+        mimeType: mimeType,
+        sha256: sha256,
+        path: _legacyMediaUploadPath,
+      );
+      streamed = await _http.send(request);
+      response = await http.Response.fromStream(streamed);
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception(
         'upload failed (${response.statusCode}): ${response.body}',
@@ -257,11 +270,9 @@ class MediaUploadService {
     required Uint8List bytes,
     required String mimeType,
     required String sha256,
+    required String path,
   }) {
-    final request = http.Request(
-      'PUT',
-      Uri.parse(_baseUrl).resolve(_mediaUploadPath),
-    );
+    final request = http.Request('PUT', Uri.parse(_baseUrl).resolve(path));
     request.bodyBytes = bytes;
     request.headers.addAll(
       _buildUploadHeaders(mimeType: mimeType, sha256: sha256),

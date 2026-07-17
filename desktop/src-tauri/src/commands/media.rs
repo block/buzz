@@ -349,6 +349,58 @@ fn sign_blossom_upload_auth(
 // Current approach works for videos up to ~100MB but will OOM on 500MB files.
 // Fix: use reqwest's Body::wrap_stream() to stream from the temp file directly.
 // The server already supports streaming upload via process_video_upload.
+fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+    )
+}
+
+async fn send_upload_attempt(
+    state: &State<'_, AppState>,
+    url: String,
+    auth_header: &str,
+    mime: &str,
+    sha256: &str,
+    body: bytes::Bytes,
+    progress: Option<&(tauri::AppHandle, String)>,
+) -> Result<reqwest::Response, String> {
+    let req = state
+        .http_client
+        .put(url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", mime)
+        .header("X-SHA-256", sha256);
+
+    let response = if let Some((app, progress_id)) = progress {
+        use tauri::Emitter;
+        let app = app.clone();
+        let progress_id = progress_id.clone();
+        let total = body.len() as u64;
+        let chunk_size = 64 * 1024;
+        let chunk_count = body.len().div_ceil(chunk_size);
+        let mut sent: u64 = 0;
+        let stream = futures_util::stream::iter((0..chunk_count).map(move |i| {
+            let start = i * chunk_size;
+            let end = usize::min(start + chunk_size, body.len());
+            let chunk = body.slice(start..end);
+            sent += chunk.len() as u64;
+            let _ = app.emit(
+                "media-upload-progress",
+                serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
+            );
+            Ok::<bytes::Bytes, std::io::Error>(chunk)
+        }));
+        req.header(reqwest::header::CONTENT_LENGTH, total)
+            .body(reqwest::Body::wrap_stream(stream))
+            .send()
+            .await
+    } else {
+        req.body(body).send().await
+    };
+    response.map_err(|error| classify_request_error(&error))
+}
+
 async fn do_upload(
     body: Vec<u8>,
     mime: &str,
@@ -375,43 +427,29 @@ async fn do_upload(
         "Nostr {}",
         URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
     );
-    let req = state
-        .http_client
-        .put(format!("{base_url}/upload"))
-        .header("Authorization", &auth_header)
-        .header("Content-Type", mime)
-        .header("X-SHA-256", &sha256);
-
-    // With a progress channel, stream the body in chunks and emit a
-    // `media-upload-progress` event as each chunk is handed to the socket,
-    // so the renderer can draw a determinate progress bar.
-    let resp = if let Some((app, progress_id)) = progress {
-        use tauri::Emitter;
-        let total = body.len() as u64;
-        // Ref-counted slices of one buffer — no second copy of the payload.
-        let body = bytes::Bytes::from(body);
-        let chunk_size = 64 * 1024;
-        let chunk_count = body.len().div_ceil(chunk_size);
-        let mut sent: u64 = 0;
-        let stream = futures_util::stream::iter((0..chunk_count).map(move |i| {
-            let start = i * chunk_size;
-            let end = usize::min(start + chunk_size, body.len());
-            let chunk = body.slice(start..end);
-            sent += chunk.len() as u64;
-            let _ = app.emit(
-                "media-upload-progress",
-                serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
-            );
-            Ok::<bytes::Bytes, std::io::Error>(chunk)
-        }));
-        req.header(reqwest::header::CONTENT_LENGTH, total)
-            .body(reqwest::Body::wrap_stream(stream))
-            .send()
-            .await
-    } else {
-        req.body(body).send().await
+    let body = bytes::Bytes::from(body);
+    let mut resp = send_upload_attempt(
+        state,
+        format!("{base_url}/upload"),
+        &auth_header,
+        mime,
+        &sha256,
+        body.clone(),
+        progress.as_ref(),
+    )
+    .await?;
+    if should_retry_legacy_upload(resp.status()) {
+        resp = send_upload_attempt(
+            state,
+            format!("{base_url}/media/upload"),
+            &auth_header,
+            mime,
+            &sha256,
+            body,
+            progress.as_ref(),
+        )
+        .await?;
     }
-    .map_err(|e| classify_request_error(&e))?;
 
     if !resp.status().is_success() {
         return Err(relay_error_message(resp).await);
@@ -867,6 +905,20 @@ mod tests {
             sanitize_image_for_upload(webp.clone(), "image/webp").unwrap(),
             webp
         );
+    }
+
+    #[test]
+    fn test_legacy_upload_retry_statuses_are_narrow() {
+        assert!(should_retry_legacy_upload(reqwest::StatusCode::NOT_FOUND));
+        assert!(should_retry_legacy_upload(
+            reqwest::StatusCode::METHOD_NOT_ALLOWED
+        ));
+        assert!(!should_retry_legacy_upload(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ));
+        assert!(!should_retry_legacy_upload(
+            reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        ));
     }
 
     #[test]

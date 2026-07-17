@@ -395,6 +395,50 @@ void main() {
     });
 
     test(
+      'retries the legacy upload route when the standard route is absent',
+      () async {
+        final requests = <http.Request>[];
+        final client = http_testing.MockClient((request) async {
+          requests.add(request);
+          if (request.url.path == '/upload') {
+            return http.Response('not found', HttpStatus.notFound);
+          }
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/test.png',
+              'sha256': request.headers['X-SHA-256'],
+              'size': _pngBytes.length,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            200,
+          );
+        });
+        final service = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          httpClient: client,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+        );
+
+        await service.uploadBytes(_pngBytes, mimeType: 'image/png');
+
+        expect(requests.map((request) => request.url.path), [
+          '/upload',
+          '/media/upload',
+        ]);
+        expect(requests[1].bodyBytes, requests[0].bodyBytes);
+        expect(requests[0].headers['Authorization'], startsWith('Nostr '));
+        expect(requests[1].headers['Authorization'], startsWith('Nostr '));
+        expect(
+          requests[1].headers['X-SHA-256'],
+          requests[0].headers['X-SHA-256'],
+        );
+      },
+    );
+
+    test(
       'checks clipboard image availability through the platform channel',
       () async {
         final invokedMethods = <String>[];
