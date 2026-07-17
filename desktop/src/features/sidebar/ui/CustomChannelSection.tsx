@@ -292,7 +292,7 @@ function SectionUnreadIndicator({ testId }: { testId: string }) {
   return (
     <span
       aria-hidden="true"
-      className="h-2 w-2 shrink-0 rounded-full bg-primary"
+      className="ml-0.5 size-1.5 shrink-0 rounded-full bg-primary"
       data-testid={testId}
       title="Contains unread channels"
     />
