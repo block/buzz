@@ -8,6 +8,14 @@ import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
+import {
+  ANNOUNCEMENT_DEMO_AGENTS,
+  ANNOUNCEMENT_DEMO_COMMUNITY_NAME,
+  ANNOUNCEMENT_DEMO_INITIAL_READ_CHANNEL_IDS,
+  ANNOUNCEMENT_DEMO_PEOPLE,
+  ANNOUNCEMENT_DEMO_SECTION_STORE,
+} from "@/testing/announcementDemoFixtures";
+import { localReadStateKey } from "@/features/channels/readState/readStateFormat";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
@@ -22,6 +30,9 @@ const E2E_DEFAULT_PUBKEY = "deadbeef".repeat(8);
 const E2E_COMMUNITY_ID = "e2e-default-community";
 const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX = "buzz-onboarding-complete.v1:";
 const DEV_STATE_RESET_PARAM = "resetDevState";
+const ANNOUNCEMENT_DEMO_QUERY_VALUE = "announcement";
+const CHANNEL_SECTIONS_STORAGE_KEY_PREFIX = "buzz-channel-sections.v1";
+const SELF_PROFILE_STORAGE_KEY_PREFIX = "buzz-self-profile.v1";
 
 function resetDevWebviewStateFromUrl() {
   if (!import.meta.env.DEV) {
@@ -42,24 +53,51 @@ function resetDevWebviewStateFromUrl() {
   window.history.replaceState(window.history.state, "", url);
 }
 
-function configureDevE2eBridgeFromUrl() {
-  if (!import.meta.env.DEV) {
-    return;
-  }
-
+function configureMockBridgeFromUrl() {
   const url = new URL(window.location.href);
-  if (url.searchParams.get("e2e") !== "mock") {
+  const isDevE2eMock =
+    import.meta.env.DEV && url.searchParams.get("e2e") === "mock";
+  const isAnnouncementDemo =
+    url.searchParams.get("demo") === ANNOUNCEMENT_DEMO_QUERY_VALUE ||
+    import.meta.env.VITE_ANNOUNCEMENT_DEMO === "1";
+  const mockRelayWsUrl = isAnnouncementDemo
+    ? `${url.protocol === "https:" ? "wss:" : "ws:"}//${url.host}`
+    : "ws://localhost:3000";
+
+  if (!isDevE2eMock && !isAnnouncementDemo) {
     return;
   }
 
+  // The native recording build intentionally reuses the browser mock bridge;
+  // only live model calls leave the webview through the local provider proxy.
   const e2eWindow = window as E2eWindow;
-  e2eWindow.__BUZZ_E2E__ ??= { mode: "mock" };
+  if (isAnnouncementDemo) {
+    e2eWindow.__BUZZ_E2E__ = {
+      mode: "mock",
+      relayHttpUrl: url.origin,
+      relayWsUrl: mockRelayWsUrl,
+      mock: {
+        announcementDemo: true,
+        managedAgents: ANNOUNCEMENT_DEMO_AGENTS.map((agent) => ({
+          pubkey: agent.pubkey,
+          name: agent.name,
+          avatarUrl: agent.avatarUrl,
+          systemPrompt: agent.systemPrompt,
+          status: "running" as const,
+          channelNames: [...agent.channelNames],
+          respondTo: "owner-only" as const,
+        })),
+      },
+    };
+  } else {
+    e2eWindow.__BUZZ_E2E__ ??= { mode: "mock" };
+  }
 
   const community = {
     addedAt: new Date().toISOString(),
     id: E2E_COMMUNITY_ID,
-    name: "E2E Test",
-    relayUrl: "ws://localhost:3000",
+    name: isAnnouncementDemo ? ANNOUNCEMENT_DEMO_COMMUNITY_NAME : "E2E Test",
+    relayUrl: mockRelayWsUrl,
   };
   window.localStorage.setItem("buzz-communities", JSON.stringify([community]));
   window.localStorage.setItem("buzz-active-community-id", E2E_COMMUNITY_ID);
@@ -67,6 +105,37 @@ function configureDevE2eBridgeFromUrl() {
     `${ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX}${E2E_DEFAULT_PUBKEY}`,
     "true",
   );
+
+  if (isAnnouncementDemo) {
+    const relayStorageScope = encodeURIComponent(mockRelayWsUrl);
+    const initialReadAt = new Date().toISOString();
+    window.localStorage.setItem(
+      `${CHANNEL_SECTIONS_STORAGE_KEY_PREFIX}:${E2E_DEFAULT_PUBKEY}:${relayStorageScope}`,
+      JSON.stringify(ANNOUNCEMENT_DEMO_SECTION_STORE),
+    );
+    window.localStorage.setItem(
+      localReadStateKey(E2E_DEFAULT_PUBKEY),
+      JSON.stringify(
+        Object.fromEntries(
+          ANNOUNCEMENT_DEMO_INITIAL_READ_CHANNEL_IDS.map((channelId) => [
+            channelId,
+            initialReadAt,
+          ]),
+        ),
+      ),
+    );
+    window.localStorage.setItem(
+      `${SELF_PROFILE_STORAGE_KEY_PREFIX}:${mockRelayWsUrl}:${E2E_DEFAULT_PUBKEY}`,
+      JSON.stringify({
+        version: 1,
+        displayName: ANNOUNCEMENT_DEMO_PEOPLE.viewer.displayName,
+        avatarUrl: ANNOUNCEMENT_DEMO_PEOPLE.viewer.avatarUrl,
+        avatarDataUrl: null,
+        updatedAt: Date.now(),
+        hasProfileEvent: true,
+      }),
+    );
+  }
 }
 
 function renderApp() {
@@ -106,7 +175,7 @@ async function installE2eBridgeIfConfigured() {
 
 async function bootstrap() {
   resetDevWebviewStateFromUrl();
-  configureDevE2eBridgeFromUrl();
+  configureMockBridgeFromUrl();
   await installE2eBridgeIfConfigured();
   await migrateLegacyCommunityStorageBeforeRender();
   renderApp();

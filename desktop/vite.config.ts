@@ -2,6 +2,7 @@ import path from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
+import { announcementDemoAgentPlugin } from "./announcementDemoAgentPlugin";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -21,11 +22,20 @@ export default defineConfig(async () => ({
       ],
     }),
     react(),
+    announcementDemoAgentPlugin(),
   ],
   resolve: {
     alias: {
       "@": "/src",
       "@features-manifest": path.resolve(__dirname, "../preview-features.json"),
+      ...(process.env.VITE_ANNOUNCEMENT_DEMO === "1"
+        ? {
+            "@tauri-apps/api/core": path.resolve(
+              __dirname,
+              "src/testing/announcementDemoTauriCore.ts",
+            ),
+          }
+        : {}),
     },
   },
 

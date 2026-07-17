@@ -182,6 +182,20 @@ export const ChannelPane = React.memo(function ChannelPane({
       channelPaneMountedRef.current = false;
     };
   }, []);
+  React.useEffect(() => {
+    const followChannelTail = (event: Event) => {
+      const channelId = (event as CustomEvent<{ channelId?: string }>).detail
+        ?.channelId;
+      if (!channelId || channelId !== activeChannelIdRef.current) {
+        return;
+      }
+      messageTimelineRef.current?.scrollToBottomOnNextUpdate();
+    };
+
+    window.addEventListener("buzz:follow-channel-tail", followChannelTail);
+    return () =>
+      window.removeEventListener("buzz:follow-channel-tail", followChannelTail);
+  }, []);
   // Clear the ?autoSend search param once the auto-submit fires so
   // back-navigation cannot re-trigger the send.
   // When `onAutoSendComplete` is provided it does a surgical single-key clear

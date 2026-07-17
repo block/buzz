@@ -488,6 +488,31 @@ desktop-dev:
     echo "Starting frontend dev server on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     pnpm exec vite --port "${BUZZ_VITE_PORT}" --strictPort
 
+# Open the deterministic, relay-free announcement workspace in a browser
+announcement-demo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{desktop_dir}}
+    [[ -d node_modules ]] || pnpm install
+    source ../scripts/instance-env.sh
+    demo_url="http://127.0.0.1:${BUZZ_VITE_PORT}/?demo=announcement"
+    pnpm exec vite --host 127.0.0.1 --port "${BUZZ_VITE_PORT}" --strictPort &
+    vite_pid=$!
+    trap 'kill "$vite_pid" 2>/dev/null || true' EXIT
+    for _ in $(seq 1 40); do
+        if curl -sf "http://127.0.0.1:${BUZZ_VITE_PORT}/" >/dev/null; then
+            break
+        fi
+        sleep 0.25
+    done
+    echo "Opening the Buzz announcement demo at ${demo_url}"
+    open "${demo_url}"
+    wait "$vite_pid"
+
+# Open the deterministic announcement workspace in the native staging shell
+announcement-staging *ARGS:
+    VITE_ANNOUNCEMENT_DEMO=1 just staging {{ARGS}}
+
 # ─── Web ─────────────────────────────────────────────────────────────────────
 
 # Run the web frontend dev server (port derived from worktree to avoid collisions)

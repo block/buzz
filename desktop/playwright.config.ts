@@ -1,5 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const previewPort = process.env.BUZZ_E2E_PREVIEW_PORT ?? "4173";
+const previewUrl = `http://127.0.0.1:${previewPort}`;
+
 export default defineConfig({
   testDir: "./tests/e2e",
   timeout: 30_000,
@@ -10,7 +13,7 @@ export default defineConfig({
     ["html", { open: "never", outputFolder: "playwright-report" }],
   ],
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL: previewUrl,
     screenshot: "only-on-failure",
     trace: "on-first-retry",
     video: "retain-on-failure",
@@ -21,6 +24,7 @@ export default defineConfig({
       testMatch: [
         "**/smoke.spec.ts",
         "**/onboarding-docked-cta-screenshots.spec.ts",
+        "**/announcement-demo.spec.ts",
         "**/navigation.spec.ts",
         "**/channels.spec.ts",
         "**/channel-shared-header-backdrop.spec.ts",
@@ -140,9 +144,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "python3 -m http.server 4173 -d dist",
+    command: `python3 -m http.server ${previewPort} -d dist`,
     cwd: ".",
     reuseExistingServer: !process.env.CI,
-    url: "http://127.0.0.1:4173",
+    url: previewUrl,
   },
 });
