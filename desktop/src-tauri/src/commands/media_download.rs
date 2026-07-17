@@ -1,6 +1,8 @@
+use std::sync::Mutex;
+
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::app_state::AppState;
 use crate::commands::export_util::save_bytes_with_dialog;
@@ -20,6 +22,39 @@ const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Download request timeout.
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// App-lifetime clipboard ownership keeps copied data available on Linux and
+/// serializes access on Windows. All operations still run on Tauri's main
+/// thread for macOS/AppKit safety.
+pub struct ClipboardState(Mutex<Option<arboard::Clipboard>>);
+
+impl ClipboardState {
+    pub fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    pub fn release(&self) {
+        if let Ok(mut clipboard) = self.0.lock() {
+            clipboard.take();
+        }
+    }
+}
+
+fn with_clipboard<T>(
+    app: &tauri::AppHandle,
+    operation: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
+) -> Result<T, String> {
+    let state = app.state::<ClipboardState>();
+    let mut stored = state
+        .0
+        .lock()
+        .map_err(|_| "clipboard state lock poisoned".to_string())?;
+    if stored.is_none() {
+        *stored = Some(arboard::Clipboard::new().map_err(|e| format!("clipboard error: {e}"))?);
+    }
+    operation(stored.as_mut().expect("clipboard initialized"))
+        .map_err(|e| format!("clipboard error: {e}"))
+}
 
 /// Validate that a URL is a legitimate relay media URL.
 ///
@@ -201,18 +236,15 @@ pub async fn copy_image_to_clipboard(
     // arboard requires main-thread access on macOS. Use a sync channel so the
     // async command can await the result.
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    let clipboard_app = app.clone();
     app.run_on_main_thread(move || {
-        let result = arboard::Clipboard::new()
-            .map_err(|e| format!("clipboard error: {e}"))
-            .and_then(|mut clipboard| {
-                clipboard
-                    .set_image(arboard::ImageData {
-                        width,
-                        height,
-                        bytes: std::borrow::Cow::Owned(raw),
-                    })
-                    .map_err(|e| format!("clipboard error: {e}"))
-            });
+        let result = with_clipboard(&clipboard_app, |clipboard| {
+            clipboard.set_image(arboard::ImageData {
+                width,
+                height,
+                bytes: std::borrow::Cow::Owned(raw),
+            })
+        });
         // Ignore send errors — the receiver dropped only if the command was
         // cancelled, in which case nobody is waiting for the result.
         let _ = tx.send(result);
@@ -235,20 +267,15 @@ pub async fn copy_text_to_clipboard(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    let clipboard_app = app.clone();
     app.run_on_main_thread(move || {
-        let result = arboard::Clipboard::new()
-            .map_err(|e| format!("clipboard error: {e}"))
-            .and_then(|mut clipboard| {
-                if let Some(html) = html {
-                    clipboard
-                        .set_html(html, Some(text))
-                        .map_err(|e| format!("clipboard error: {e}"))
-                } else {
-                    clipboard
-                        .set_text(text)
-                        .map_err(|e| format!("clipboard error: {e}"))
-                }
-            });
+        let result = with_clipboard(&clipboard_app, |clipboard| {
+            if let Some(html) = html {
+                clipboard.set_html(html, Some(text))
+            } else {
+                clipboard.set_text(text)
+            }
+        });
         let _ = tx.send(result);
     })
     .map_err(|e| format!("main thread dispatch failed: {e}"))?;
