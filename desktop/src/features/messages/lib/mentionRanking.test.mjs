@@ -21,11 +21,48 @@ function rankedPubkeys(
   candidates,
   query = "brain",
   activePersonaIds = new Set(),
+  currentPubkey,
 ) {
-  return rankMentionCandidates(candidates, query, activePersonaIds).map(
+  return rankMentionCandidates(
+    candidates,
+    query,
+    activePersonaIds,
+    currentPubkey,
+  ).map(
     (item) => item.candidate.pubkey ?? `persona:${item.candidate.personaId}`,
   );
 }
+
+test("rankMentionCandidates: current user's agents rank before all other candidates", () => {
+  const currentPubkey = "a".repeat(64);
+  const ownedAgent = candidate({
+    displayName: "Brain",
+    isAgent: true,
+    ownerPubkey: currentPubkey.toUpperCase(),
+    pubkey: "7".repeat(64),
+  });
+  const channelMember = candidate({
+    displayName: "Brain",
+    isMember: true,
+    pubkey: CHANNEL_BRAIN_PUBKEY,
+  });
+  const remoteAgent = candidate({
+    displayName: "Brain",
+    isAgent: true,
+    ownerPubkey: "b".repeat(64),
+    pubkey: OTHER_BRAIN_PUBKEY,
+  });
+
+  assert.deepEqual(
+    rankedPubkeys(
+      [channelMember, remoteAgent, ownedAgent],
+      "brain",
+      new Set(),
+      currentPubkey,
+    ),
+    ["7".repeat(64), CHANNEL_BRAIN_PUBKEY, OTHER_BRAIN_PUBKEY],
+  );
+});
 
 test("rankMentionCandidates: channel members outrank runnable personas, people, and other agents", () => {
   const persona = candidate({

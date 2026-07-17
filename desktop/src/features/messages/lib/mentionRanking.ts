@@ -9,11 +9,13 @@ export type MentionCandidateForRanking = {
   personaName?: string | null;
   pubkey?: string;
   secondaryLabel?: string | null;
+  ownerPubkey?: string | null;
 };
 
 export type RankedMentionCandidate<T extends MentionCandidateForRanking> = {
   candidate: T;
   groupRank: number;
+  isOwnedByCurrentUser: boolean;
   label: string;
   order: number;
   score: number;
@@ -55,8 +57,12 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
   candidates: readonly T[],
   query: string,
   activePersonaIds: ReadonlySet<string> = new Set(),
+  currentPubkey?: string | null,
 ): RankedMentionCandidate<T>[] {
   const lowerQuery = query.toLowerCase();
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
 
   return candidates
     .map((candidate, order) => {
@@ -91,12 +97,27 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
             : null
         : null;
       const score = labelScore !== null ? labelScore : pubkeyScore;
+      const isOwnedByCurrentUser =
+        candidate.isAgent &&
+        normalizedCurrentPubkey !== null &&
+        candidate.ownerPubkey != null &&
+        normalizePubkey(candidate.ownerPubkey) === normalizedCurrentPubkey;
 
-      return { candidate, groupRank, label, order, score };
+      return {
+        candidate,
+        groupRank,
+        isOwnedByCurrentUser,
+        label,
+        order,
+        score,
+      };
     })
     .filter((item): item is RankedMentionCandidate<T> => item.score !== null)
     .sort(
       (a, b) =>
-        a.groupRank - b.groupRank || a.score - b.score || a.order - b.order,
+        Number(b.isOwnedByCurrentUser) - Number(a.isOwnedByCurrentUser) ||
+        a.groupRank - b.groupRank ||
+        a.score - b.score ||
+        a.order - b.order,
     );
 }

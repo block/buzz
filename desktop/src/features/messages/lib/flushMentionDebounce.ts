@@ -62,6 +62,7 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
     opts.candidates,
     mention.query,
     opts.activePersonaIds,
+    opts.currentPubkey,
   );
 
   if (ranked.length === 0) {

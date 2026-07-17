@@ -60,11 +60,13 @@ int? _scoreLabel(String label, String lowerQuery) {
 /// stable original order.
 List<MentionCandidate> rankMentionCandidates(
   List<MentionCandidate> candidates,
-  String query,
-) {
+  String query, {
+  String? currentPubkey,
+}) {
   final lowerQuery = query.toLowerCase();
+  final currentLower = currentPubkey?.toLowerCase();
 
-  final ranked = <(MentionCandidate, int, int, int)>[];
+  final ranked = <(MentionCandidate, bool, int, int, int)>[];
   for (var order = 0; order < candidates.length; order++) {
     final candidate = candidates[order];
 
@@ -89,15 +91,27 @@ List<MentionCandidate> rankMentionCandidates(
     }
 
     if (score == null) continue;
-    ranked.add((candidate, _groupRank(candidate), score, order));
+    final isOwnedByCurrentUser =
+        candidate.isAgent &&
+        currentLower != null &&
+        candidate.ownerPubkey?.toLowerCase() == currentLower;
+    ranked.add((
+      candidate,
+      isOwnedByCurrentUser,
+      _groupRank(candidate),
+      score,
+      order,
+    ));
   }
 
   ranked.sort((a, b) {
-    final group = a.$2.compareTo(b.$2);
+    final owned = (b.$2 ? 1 : 0).compareTo(a.$2 ? 1 : 0);
+    if (owned != 0) return owned;
+    final group = a.$3.compareTo(b.$3);
     if (group != 0) return group;
-    final score = a.$3.compareTo(b.$3);
+    final score = a.$4.compareTo(b.$4);
     if (score != 0) return score;
-    return a.$4.compareTo(b.$4);
+    return a.$5.compareTo(b.$5);
   });
 
   return [for (final item in ranked) item.$1];

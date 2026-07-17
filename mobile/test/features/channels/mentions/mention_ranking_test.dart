@@ -12,6 +12,7 @@ MentionCandidate candidate({
   String? secondaryLabel,
   bool isAgent = false,
   bool isMember = false,
+  String? ownerPubkey,
   String? pubkey,
 }) {
   return MentionCandidate(
@@ -20,20 +21,50 @@ MentionCandidate candidate({
     secondaryLabel: secondaryLabel,
     isAgent: isAgent,
     isMember: isMember,
+    ownerPubkey: ownerPubkey,
   );
 }
 
 List<String> rankedPubkeys(
   List<MentionCandidate> candidates, [
   String query = 'brain',
+  String? currentPubkey,
 ]) {
   return [
-    for (final ranked in rankMentionCandidates(candidates, query))
+    for (final ranked in rankMentionCandidates(
+      candidates,
+      query,
+      currentPubkey: currentPubkey,
+    ))
       ranked.pubkey,
   ];
 }
 
 void main() {
+  test("current user's agents rank before all other candidates", () {
+    final currentPubkey = 'a' * 64;
+    final ownedAgent = candidate(
+      isAgent: true,
+      ownerPubkey: currentPubkey.toUpperCase(),
+      pubkey: '7' * 64,
+    );
+    final channelMember = candidate(isMember: true, pubkey: channelBrainPubkey);
+    final remoteAgent = candidate(
+      isAgent: true,
+      ownerPubkey: 'b' * 64,
+      pubkey: otherBrainPubkey,
+    );
+
+    expect(
+      rankedPubkeys(
+        [channelMember, remoteAgent, ownedAgent],
+        'brain',
+        currentPubkey,
+      ),
+      ['7' * 64, channelBrainPubkey, otherBrainPubkey],
+    );
+  });
+
   test('channel members outrank people and other agents', () {
     final remoteAgent = candidate(isAgent: true, pubkey: otherBrainPubkey);
     final person = candidate(pubkey: '6' * 64);

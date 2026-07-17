@@ -519,7 +519,6 @@ export function useMentions(
     () => searchableNames.map((n) => n.toLowerCase()),
     [searchableNames],
   );
-
   // --- Debounce infrastructure for updateMentionQuery ---
   const debounceTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -552,6 +551,7 @@ export function useMentions(
       mentionCandidatesWithTeams,
       mentionQuery,
       activePersonaIds,
+      currentPubkey,
     )
       .slice(
         0,

@@ -133,5 +133,9 @@ final mentionCandidatesProvider = Provider.family
         currentPubkey: currentPubkey,
       );
 
-      return rankMentionCandidates(candidates, args.query);
+      return rankMentionCandidates(
+        candidates,
+        args.query,
+        currentPubkey: currentPubkey,
+      );
     });
