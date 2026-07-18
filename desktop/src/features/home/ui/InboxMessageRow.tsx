@@ -7,6 +7,7 @@ import { formatTimeWithoutDayPeriod } from "@/features/messages/lib/dateFormatte
 import type { TimelineMessage } from "@/features/messages/types";
 import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { MessageActionBar } from "@/features/messages/ui/MessageActionBar";
+import { MessageAgentOwner } from "@/features/messages/ui/MessageAgentOwner";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
@@ -172,6 +173,12 @@ export function InboxMessageRow({
                   {message.authorLabel}
                 </span>
               </UserProfilePopover>
+              {message.isAgent ? (
+                <MessageAgentOwner
+                  ownerLabel={message.ownerLabel}
+                  ownerPubkey={message.ownerPubkey}
+                />
+              ) : null}
               <p className="shrink-0 text-xs font-normal tabular-nums text-muted-foreground/55">
                 {message.fullTimestampLabel}
               </p>

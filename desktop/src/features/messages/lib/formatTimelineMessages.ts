@@ -14,6 +14,7 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 import {
+  formatOwnerLabel,
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
@@ -193,6 +194,8 @@ export function formatTimelineMessages(
   respondToLookup?: Map<string, RespondToMode>,
   /** Active relay identity from NIP-11 `self`; absent or malformed fails closed to the signer. */
   relaySelfPubkey?: string | null,
+  /** Profiles for verified agent owners, fetched in one batch by the surface. */
+  ownerProfiles?: UserProfileLookup,
 ): TimelineMessage[] {
   const currentPubkeyLower = currentPubkey?.toLowerCase();
   const roleByPubkey = new Map<string, string>();
@@ -423,6 +426,9 @@ export function formatTimelineMessages(
     const thread = getThreadReference(event.tags);
     const edit = editsByTargetId.get(event.id);
     const role = roleByPubkey.get(authorPubkey.toLowerCase());
+    const authorProfile = profiles?.[authorPubkey.toLowerCase()];
+    const isAgent = role === "bot" || authorProfile?.isAgent === true;
+    const ownerPubkey = isAgent ? (authorProfile?.ownerPubkey ?? null) : null;
     return {
       id: event.id,
       renderKey: event.localKey ?? event.id,
@@ -430,6 +436,11 @@ export function formatTimelineMessages(
       pubkey: authorPubkey,
       signerPubkey: normalizePubkey(event.pubkey),
       author,
+      isAgent,
+      ownerPubkey,
+      ownerLabel: isAgent
+        ? formatOwnerLabel(ownerPubkey, currentPubkey, ownerProfiles)
+        : null,
       avatarUrl: getAuthorAvatarUrl({
         authorPubkey,
         currentPubkey,

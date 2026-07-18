@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { profileLookupsEqual } from "./identity.ts";
+import { formatOwnerLabel, profileLookupsEqual } from "./identity.ts";
+
+const OWNER_PUBKEY =
+  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 const summary = (over = {}) => ({
   displayName: "Ada",
@@ -10,6 +13,23 @@ const summary = (over = {}) => ({
   ownerPubkey: null,
   isAgent: false,
   ...over,
+});
+
+test("formatOwnerLabel resolves a known owner's display name", () => {
+  assert.equal(
+    formatOwnerLabel(OWNER_PUBKEY, null, {
+      [OWNER_PUBKEY]: summary({ displayName: "baxen" }),
+    }),
+    "baxen",
+  );
+});
+
+test("formatOwnerLabel calls the viewer-owned agent's owner you", () => {
+  assert.equal(formatOwnerLabel(OWNER_PUBKEY, OWNER_PUBKEY, {}), "you");
+});
+
+test("formatOwnerLabel returns null when verified ownership is absent", () => {
+  assert.equal(formatOwnerLabel(null, OWNER_PUBKEY, {}), null);
 });
 
 test("profileLookupsEqual: same reference is equal", () => {

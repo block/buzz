@@ -92,8 +92,51 @@ async function measureThreadSummaryGeometry(summaryRow: Locator) {
   });
 }
 
-test.beforeEach(async ({ page }) => {
-  await installMockBridge(page);
+test.beforeEach(async ({ page }, testInfo) => {
+  const mock = testInfo.title.includes("agent owner label")
+    ? {
+        searchProfiles: [
+          {
+            pubkey: TEST_IDENTITIES.alice.pubkey,
+            displayName: "alice",
+            ownerPubkey: TEST_IDENTITIES.bob.pubkey,
+            isAgent: true,
+          },
+          {
+            pubkey: TEST_IDENTITIES.bob.pubkey,
+            displayName: "bob",
+          },
+        ],
+      }
+    : undefined;
+  await installMockBridge(page, mock);
+});
+
+test("agent owner label identifies the agent and owner", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const aliceMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Hey team — checking in." });
+  const ownerTreatment = aliceMessage.getByTestId("message-agent-owner");
+
+  await expect(ownerTreatment.locator("svg")).toBeVisible();
+  await expect(
+    ownerTreatment.getByText("owned by", { exact: true }),
+  ).toBeVisible();
+  await expect(ownerTreatment.locator(".font-semibold")).toHaveText("bob");
+  await expect(ownerTreatment.locator(".sr-only")).toHaveText(
+    "Agent owned by bob",
+  );
+
+  const joinedRow = page
+    .getByTestId("system-message-row")
+    .filter({ hasText: "alice" })
+    .filter({ hasText: "joined the channel" });
+  await expect(joinedRow.getByTestId("message-agent-owner")).toContainText(
+    "owned bybob",
+  );
 });
 
 test("send a message and see it in timeline", async ({ page }) => {
