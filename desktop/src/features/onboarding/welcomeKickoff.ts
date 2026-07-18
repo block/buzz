@@ -25,6 +25,7 @@ import {
 import { hasManagedAgentChannelMessageMarker } from "@/shared/api/tauriManagedAgentMessageMarkers";
 import { sendManagedAgentChannelMessage } from "@/shared/api/tauriManagedAgentMessages";
 import { getPresence, listManagedAgents } from "@/shared/api/tauri";
+import { getProfile } from "@/shared/api/tauriProfiles";
 import type { Channel, ManagedAgent, RelayEvent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
@@ -142,15 +143,23 @@ export function buildWelcomeKickoffOpener(
   lead: ManagedAgent,
   introTeammates: readonly ManagedAgent[],
   allTeammates: readonly ManagedAgent[] = introTeammates,
+  ownerName?: string | null,
 ) {
+  // Greet the new user by name when we know it. Paired with their pubkey in
+  // the p tags, the @mention renders as a pill and files the opener into
+  // their Inbox mentions feed.
+  const trimmedOwnerName = ownerName?.trim();
+  const greeting = trimmedOwnerName
+    ? `Hi @${trimmedOwnerName}, I'm ${lead.name}.`
+    : `Hi, I'm ${lead.name}.`;
   const introNames = formatMentionNames(introTeammates);
   if (introTeammates.length === 0) {
     const teammateNames = formatAgentNames(allTeammates);
     const teammatePhrase = teammateNames ? ` with ${teammateNames}` : "";
-    return `Hi, I'm ${lead.name}. Welcome to Buzz. This is your private home base, and I'm here${teammatePhrase} to help you get oriented or work through something you're building.\n\n${WELCOME_KICKOFF_CTA}`;
+    return `${greeting} Welcome to Buzz. This is your private home base, and I'm here${teammatePhrase} to help you get oriented or work through something you're building.\n\n${WELCOME_KICKOFF_CTA}`;
   }
 
-  return `Hi, I'm ${lead.name}. Welcome to Buzz. This is your private home base, and we're here to help you get oriented or work through something you're building.\n\n${introNames}, introduce ${introTeammates.length === 1 ? "yourself" : "yourselves"} in a sentence or two — share what you're good at and when to bring you in. Don't start any work yet.`;
+  return `${greeting} Welcome to Buzz. This is your private home base, and we're here to help you get oriented or work through something you're building.\n\n${introNames}, introduce ${introTeammates.length === 1 ? "yourself" : "yourselves"} in a sentence or two — share what you're good at and when to bring you in. Don't start any work yet.`;
 }
 
 export function onlineWelcomeTeammates(
@@ -350,11 +359,24 @@ export function selectWelcomeKickoffIntroTeammates(
   );
 }
 
+export type WelcomeKickoffOwner = {
+  pubkey: string;
+  displayName?: string | null;
+};
+
 export function buildWelcomeKickoffOpenerSendInput(
   agentSet: WelcomeAgentSet,
   introTeammates: readonly ManagedAgent[],
   channelId: string,
+  owner?: WelcomeKickoffOwner | null,
 ) {
+  // Greet the new user by name and tag their pubkey. The p tag renders the
+  // "@Name" in the copy as a mention pill and files the opener into their
+  // Inbox mentions feed, so the Inbox isn't an empty state on first visit.
+  const mentionPubkeys = introTeammates.map((agent) => agent.pubkey);
+  if (owner?.pubkey && !mentionPubkeys.includes(owner.pubkey)) {
+    mentionPubkeys.push(owner.pubkey);
+  }
   return {
     agentPubkey: agentSet.lead.pubkey,
     channelId,
@@ -362,10 +384,11 @@ export function buildWelcomeKickoffOpenerSendInput(
       agentSet.lead,
       introTeammates,
       agentSet.teammates,
+      owner?.displayName,
     ),
     marker: openerMarker,
     markerScope: "channel" as const,
-    mentionPubkeys: introTeammates.map((agent) => agent.pubkey),
+    mentionPubkeys,
     additionalMarkers: introTeammates.length === 0 ? [closerMarker] : [],
   };
 }
@@ -567,11 +590,20 @@ export function useWelcomeKickoff(
         }
         if (isCancelled()) return;
 
+        // Best-effort: a missing profile should degrade to an ungreeted,
+        // untagged opener, never block the kickoff.
+        const owner = await getProfile()
+          .then((profile) => ({
+            pubkey: profile.pubkey,
+            displayName: profile.displayName,
+          }))
+          .catch(() => null);
         const openerResult = await sendManagedAgentChannelMessage(
           buildWelcomeKickoffOpenerSendInput(
             resolvedAgentSet,
             introTeammates,
             channelId,
+            owner,
           ),
         );
         if (!isCancelled()) onKickoffOpenerPosted?.(openerResult.eventId);

@@ -220,6 +220,66 @@ test("opener keeps partial-readiness warm and mentions only online teammates", (
   );
 });
 
+test("opener greets the owner by name and tags their pubkey", () => {
+  const agentSet = { lead: fizz, teammates: [honey, bumble] };
+  const owner = { pubkey: "owner-pubkey-hex", displayName: "Morgan" };
+  const input = buildWelcomeKickoffOpenerSendInput(
+    agentSet,
+    agentSet.teammates,
+    "welcome-1",
+    owner,
+  );
+
+  assert.deepEqual(input.mentionPubkeys, [
+    honey.pubkey,
+    bumble.pubkey,
+    owner.pubkey,
+  ]);
+  assert.match(input.content, /^Hi @Morgan, I'm Fizz\./);
+  // The raw pubkey must never leak into the visible copy.
+  assert.doesNotMatch(input.content, /owner-pubkey-hex/);
+});
+
+test("opener falls back to an unnamed greeting when the display name is missing", () => {
+  const agentSet = { lead: fizz, teammates: [honey, bumble] };
+  const owner = { pubkey: "owner-pubkey-hex", displayName: "  " };
+  const input = buildWelcomeKickoffOpenerSendInput(
+    agentSet,
+    agentSet.teammates,
+    "welcome-1",
+    owner,
+  );
+
+  // Still tagged for the Inbox mentions feed, just no visible greeting name.
+  assert.ok(input.mentionPubkeys.includes(owner.pubkey));
+  assert.match(input.content, /^Hi, I'm Fizz\./);
+  assert.doesNotMatch(input.content, /@\s/);
+});
+
+test("opener greets and tags the owner even when no teammates come online", () => {
+  const agentSet = { lead: fizz, teammates: [honey, bumble] };
+  const input = buildWelcomeKickoffOpenerSendInput(agentSet, [], "welcome-1", {
+    pubkey: "owner-pubkey-hex",
+    displayName: "Morgan",
+  });
+
+  assert.deepEqual(input.mentionPubkeys, ["owner-pubkey-hex"]);
+  assert.equal(input.additionalMarkers.length, 1);
+  assert.match(input.content, /^Hi @Morgan, I'm Fizz\./);
+});
+
+test("opener does not duplicate the owner pubkey if already mentioned", () => {
+  const agentSet = { lead: fizz, teammates: [honey, bumble] };
+  const input = buildWelcomeKickoffOpenerSendInput(
+    agentSet,
+    [honey],
+    "welcome-1",
+    { pubkey: honey.pubkey, displayName: honey.name },
+  );
+
+  assert.deepEqual(input.mentionPubkeys, [honey.pubkey]);
+});
+
 test("opener degrades to one seeded Fizz message when no teammate comes online", () => {
   const agentSet = { lead: fizz, teammates: [honey, bumble] };
   const input = buildWelcomeKickoffOpenerSendInput(agentSet, [], "welcome-1");
