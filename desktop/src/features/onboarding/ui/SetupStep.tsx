@@ -816,12 +816,9 @@ function SetupStepContent({
       selectedRuntimeIds.filter((runtimeId) => {
         const runtime = runtimeById.get(runtimeId);
         if (!runtime) return false;
-        return !runtimeCanAdvanceOnboarding(
-          runtime,
-          installResults[runtimeId]?.success ?? false,
-        );
+        return !runtimeCanAdvanceOnboarding(runtime);
       }),
-    [installResults, runtimeById, selectedRuntimeIds],
+    [runtimeById, selectedRuntimeIds],
   );
   const hasSetupRequiredSelection = setupRequiredRuntimeIds.length > 0;
   const setupRequiredRuntimeIdsKey = setupRequiredRuntimeIds.join("\0");

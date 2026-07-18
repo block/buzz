@@ -50,11 +50,7 @@ export function runtimeCanBeSelected(runtime: AcpRuntimeCatalogEntry) {
   return runtime.id === "buzz-agent" || runtime.id === "goose";
 }
 
-export function runtimeCanAdvanceOnboarding(
-  runtime: AcpRuntimeCatalogEntry,
-  installSuccess = false,
-) {
-  if (installSuccess) return true;
+export function runtimeCanAdvanceOnboarding(runtime: AcpRuntimeCatalogEntry) {
   return (
     runtime.availability === "available" &&
     (runtime.authStatus.status === "logged_in" ||

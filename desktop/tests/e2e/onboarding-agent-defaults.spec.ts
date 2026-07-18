@@ -112,6 +112,33 @@ test("requires a runtime selection and routes Buzz Agent to config", async ({
   expect(await readSavedRuntime(page)).toBe("buzz-agent");
 });
 
+test("rapid harness toggles serialize the persisted preferred runtime", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("goose", { status: "not_applicable" }),
+        availableRuntime("buzz-agent", { status: "not_applicable" }),
+      ],
+      setGlobalAgentConfigDelayMs: 200,
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await page.getByTestId("onboarding-runtime-goose").click();
+  await page.getByTestId("onboarding-runtime-buzz-agent").click();
+  const next = page.getByTestId("onboarding-setup-next");
+  await expect(next).toBeDisabled();
+  await page.waitForTimeout(300);
+  await expect(next).toBeDisabled();
+  await expect(next).toBeEnabled({ timeout: 700 });
+  expect(await readSavedRuntime(page)).toBe("buzz-agent");
+});
+
 test("authenticated Claude saves the selected runtime and routes to defaults", async ({
   page,
 }) => {
@@ -651,7 +678,9 @@ test("setup cards only show checks after user selection", async ({ page }) => {
   ).toHaveText("INSTALLED");
 });
 
-test("unready setup pill runs setup from keyboard", async ({ page }) => {
+test("successful install still waits for refreshed runtime readiness", async ({
+  page,
+}) => {
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
@@ -670,11 +699,14 @@ test("unready setup pill runs setup from keyboard", async ({ page }) => {
   await expect(
     page.getByTestId("onboarding-runtime-installed-claude"),
   ).toHaveText("INSTALLED");
-  await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
-  await page.getByTestId("onboarding-setup-next").click();
-  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
-  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
-    "Claude Code",
+  const next = page.getByTestId("onboarding-setup-next");
+  await expect(next).toBeEnabled();
+  await expect(next).toHaveAttribute("data-soft-disabled", "true");
+  await next.click();
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await expect(page.getByTestId("onboarding-page-config")).toHaveCount(0);
+  await expect(page.getByTestId("onboarding-setup-next-hint")).toHaveText(
+    "Please finish set up",
   );
 });
 

@@ -66,9 +66,10 @@ export function MachineOnboardingFlow({
     string | null
   >(null);
   const runtimeSaveSequence = React.useRef(0);
+  const runtimeSaveChain = React.useRef<Promise<void>>(Promise.resolve());
 
   const persistHarnessSelection = React.useCallback(
-    async (runtimeIds: readonly string[]) => {
+    (runtimeIds: readonly string[]) => {
       const nextRuntimeIds = Array.from(new Set(runtimeIds));
       const preferredRuntimeId =
         getPreferredRuntimeIdForSelection(nextRuntimeIds);
@@ -77,28 +78,33 @@ export function MachineOnboardingFlow({
       setSelectedRuntimeIds(nextRuntimeIds);
       setRuntimeSelectionError(null);
       setIsRuntimeSelectionSaving(true);
-      try {
+
+      const save = runtimeSaveChain.current.then(async () => {
         const current = await getGlobalAgentConfig();
         await setGlobalAgentConfig({
           ...current,
           preferred_runtime: preferredRuntimeId,
         });
-        if (runtimeSaveSequence.current === sequence) {
-          setSelectedRuntimeIds(nextRuntimeIds);
-        }
-      } catch (cause) {
-        if (runtimeSaveSequence.current === sequence) {
-          setRuntimeSelectionError(
-            cause instanceof Error
-              ? cause.message
-              : "Couldn’t save your harness selection.",
-          );
-        }
-      } finally {
-        if (runtimeSaveSequence.current === sequence) {
-          setIsRuntimeSelectionSaving(false);
-        }
-      }
+      });
+      runtimeSaveChain.current = save.then(
+        () => undefined,
+        () => undefined,
+      );
+      void save
+        .catch((cause) => {
+          if (runtimeSaveSequence.current === sequence) {
+            setRuntimeSelectionError(
+              cause instanceof Error
+                ? cause.message
+                : "Couldn’t save your harness selection.",
+            );
+          }
+        })
+        .finally(() => {
+          if (runtimeSaveSequence.current === sequence) {
+            setIsRuntimeSelectionSaving(false);
+          }
+        });
     },
     [],
   );

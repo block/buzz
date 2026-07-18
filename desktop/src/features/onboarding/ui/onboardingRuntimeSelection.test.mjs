@@ -83,9 +83,8 @@ test("selected runtimes can advance only after setup is complete", () => {
   assert.equal(
     runtimeCanAdvanceOnboarding(
       runtime("claude", "adapter_missing", "unknown"),
-      true,
     ),
-    true,
+    false,
   );
 });
 
