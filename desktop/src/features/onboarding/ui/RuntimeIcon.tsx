@@ -7,23 +7,16 @@ import { useTheme } from "@/shared/theme/ThemeProvider";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import chatgptLogoUrl from "../assets/harness-logos/chatgpt.png?inline";
 import claudeLogoUrl from "../assets/harness-logos/claude.png?inline";
-import geminiLogoUrl from "../assets/harness-logos/gemini.png?inline";
 import gooseLogoUrl from "../assets/harness-logos/goose.png?inline";
 
 const RUNTIME_LOGOS: Record<string, string> = {
-  chatgpt: chatgptLogoUrl,
   claude: claudeLogoUrl,
-  "claude-code": claudeLogoUrl,
   codex: chatgptLogoUrl,
-  gemini: geminiLogoUrl,
   goose: gooseLogoUrl,
-  openai: chatgptLogoUrl,
 };
 
 function isBuzzRuntime(runtime: AcpRuntimeCatalogEntry): boolean {
-  const runtimeId = runtime.id.trim().toLowerCase();
-  const runtimeLabel = runtime.label.trim().toLowerCase();
-  return runtimeId === "buzz-agent" || runtimeLabel === "buzz";
+  return runtime.id.trim().toLowerCase() === "buzz-agent";
 }
 
 export function getRuntimeDisplayLabel(
@@ -33,20 +26,7 @@ export function getRuntimeDisplayLabel(
 }
 
 function getRuntimeLogoUrl(runtime: AcpRuntimeCatalogEntry): string | null {
-  const runtimeId = runtime.id.trim().toLowerCase();
-  const runtimeLabel = runtime.label.trim().toLowerCase();
-  return (
-    RUNTIME_LOGOS[runtimeId] ??
-    (runtimeLabel.includes("claude")
-      ? claudeLogoUrl
-      : runtimeLabel.includes("goose")
-        ? gooseLogoUrl
-        : runtimeLabel.includes("gemini")
-          ? geminiLogoUrl
-          : runtimeLabel.includes("codex") || runtimeLabel.includes("chatgpt")
-            ? chatgptLogoUrl
-            : null)
-  );
+  return RUNTIME_LOGOS[runtime.id.trim().toLowerCase()] ?? null;
 }
 
 export function RuntimeIcon({

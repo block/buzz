@@ -112,7 +112,7 @@ const DEFAULT_MODEL_OPTION: PersonaModelOption = {
   label: "Default model",
 };
 
-export const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
+const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },

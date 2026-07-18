@@ -21,10 +21,6 @@ import {
   OnboardingChrome,
 } from "./OnboardingChrome";
 import { OnboardingFooterProvider } from "./OnboardingFooter";
-import {
-  getPreferredRuntimeIdForSelection,
-  runtimeSelectionNeedsDefaultsStep,
-} from "./onboardingRuntimeSelection";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
 
@@ -57,8 +53,11 @@ export function MachineOnboardingFlow({
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
-  const [selectedRuntimeIds, setSelectedRuntimeIds] = React.useState<string[]>(
-    [],
+  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState<
+    string | null
+  >(null);
+  const [pendingRuntimeId, setPendingRuntimeId] = React.useState<string | null>(
+    null,
   );
   const [isRuntimeSelectionSaving, setIsRuntimeSelectionSaving] =
     React.useState(false);
@@ -66,45 +65,38 @@ export function MachineOnboardingFlow({
     string | null
   >(null);
   const runtimeSaveSequence = React.useRef(0);
-  const runtimeSaveChain = React.useRef<Promise<void>>(Promise.resolve());
 
-  const persistHarnessSelection = React.useCallback(
-    (runtimeIds: readonly string[]) => {
-      const nextRuntimeIds = Array.from(new Set(runtimeIds));
-      const preferredRuntimeId =
-        getPreferredRuntimeIdForSelection(nextRuntimeIds);
+  const persistPreferredRuntime = React.useCallback(
+    async (runtimeId: string) => {
       const sequence = runtimeSaveSequence.current + 1;
       runtimeSaveSequence.current = sequence;
-      setSelectedRuntimeIds(nextRuntimeIds);
+      setPendingRuntimeId(runtimeId);
       setRuntimeSelectionError(null);
       setIsRuntimeSelectionSaving(true);
-
-      const save = runtimeSaveChain.current.then(async () => {
+      try {
         const current = await getGlobalAgentConfig();
-        await setGlobalAgentConfig({
+        const result = await setGlobalAgentConfig({
           ...current,
-          preferred_runtime: preferredRuntimeId,
+          preferred_runtime: runtimeId,
         });
-      });
-      runtimeSaveChain.current = save.then(
-        () => undefined,
-        () => undefined,
-      );
-      void save
-        .catch((cause) => {
-          if (runtimeSaveSequence.current === sequence) {
-            setRuntimeSelectionError(
-              cause instanceof Error
-                ? cause.message
-                : "Couldn’t save your harness selection.",
-            );
-          }
-        })
-        .finally(() => {
-          if (runtimeSaveSequence.current === sequence) {
-            setIsRuntimeSelectionSaving(false);
-          }
-        });
+        if (runtimeSaveSequence.current === sequence) {
+          setSelectedRuntimeId(result.config.preferred_runtime);
+          setPendingRuntimeId(null);
+        }
+      } catch (cause) {
+        if (runtimeSaveSequence.current === sequence) {
+          setPendingRuntimeId(null);
+          setRuntimeSelectionError(
+            cause instanceof Error
+              ? cause.message
+              : "Couldn’t save your preferred runtime.",
+          );
+        }
+      } finally {
+        if (runtimeSaveSequence.current === sequence) {
+          setIsRuntimeSelectionSaving(false);
+        }
+      }
     },
     [],
   );
@@ -179,7 +171,7 @@ export function MachineOnboardingFlow({
       <OnboardingFooterProvider>
         <div
           className={`relative flex w-full max-w-[920px] flex-col items-center text-center ${
-            page === "identity" ? "my-auto" : "buzz-onboarding-step-frame"
+            page === "identity" ? "my-auto" : ""
           }`}
         >
           {page === "identity" ? (
@@ -265,8 +257,11 @@ export function MachineOnboardingFlow({
                 back: () =>
                   setPage(identityWasImported ? "key-import" : "backup"),
                 next: () => {
-                  if (selectedRuntimeIds.length === 0) return;
-                  if (!runtimeSelectionNeedsDefaultsStep(selectedRuntimeIds)) {
+                  if (!selectedRuntimeId) return;
+                  if (
+                    selectedRuntimeId === "claude" ||
+                    selectedRuntimeId === "codex"
+                  ) {
                     complete(selectedPubkey ?? undefined);
                     return;
                   }
@@ -275,11 +270,11 @@ export function MachineOnboardingFlow({
               }}
               direction="forward"
               isSelectionSaving={isRuntimeSelectionSaving}
-              onSelectedRuntimeIdsChange={(runtimeIds) => {
-                void persistHarnessSelection(runtimeIds);
+              onSelectedRuntimeChange={(runtimeId) => {
+                void persistPreferredRuntime(runtimeId);
               }}
               selectionError={runtimeSelectionError}
-              selectedRuntimeIds={selectedRuntimeIds}
+              selectedRuntimeId={pendingRuntimeId ?? selectedRuntimeId}
             />
           ) : (
             <DefaultConfigStep
@@ -288,7 +283,6 @@ export function MachineOnboardingFlow({
                 complete: () => complete(selectedPubkey ?? undefined),
               }}
               direction="forward"
-              selectedRuntimeIds={selectedRuntimeIds}
             />
           )}
         </div>

@@ -28,7 +28,7 @@ export function OnboardingSlideTransition({
 }: OnboardingSlideTransitionProps) {
   return (
     <div
-      className={cn("buzz-onboarding-slide w-full", containerClassName)}
+      className={cn("w-full", containerClassName)}
       key={transitionKey}
       {...props}
     >
