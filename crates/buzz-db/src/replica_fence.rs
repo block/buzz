@@ -134,6 +134,196 @@ impl Default for ReplicaFence {
     }
 }
 
+/// Catalog-level verification that the commit-time floor guard (migration
+/// 0021) is present and correctly shaped on the `events` parent AND every
+/// partition: right function, `DEFERRABLE INITIALLY DEFERRED`, row-level,
+/// AFTER, firing on both INSERT and UPDATE (an UPDATE can move an exempt
+/// channel-NULL row into the guarded set, or rewrite `created_at` downward).
+///
+/// This is a name-and-shape check only; it cannot detect a sabotaged
+/// function body. [`verify_floor_guard_behavior`] proves the semantics.
+pub async fn verify_floor_guard_catalog(pool: &PgPool) -> crate::Result<()> {
+    // tgtype bits: 1 = ROW, 2 = BEFORE, 4 = INSERT, 16 = UPDATE, 64 = INSTEAD.
+    // Required: ROW + INSERT + UPDATE set, BEFORE + INSTEAD clear.
+    let missing: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT c.relname::text
+        FROM (
+            SELECT 'events'::regclass AS oid
+            UNION ALL
+            SELECT inhrelid FROM pg_inherits WHERE inhparent = 'events'::regclass
+        ) rels
+        JOIN pg_class c ON c.oid = rels.oid
+        WHERE NOT EXISTS (
+            SELECT 1 FROM pg_trigger t
+            WHERE t.tgrelid = rels.oid
+              AND t.tgname = 'events_created_at_floor'
+              AND t.tgfoid = 'events_created_at_floor_guard'::regproc
+              AND t.tgdeferrable
+              AND t.tginitdeferred
+              AND t.tgtype & 1 = 1      -- row-level
+              AND t.tgtype & 2 = 0      -- AFTER, not BEFORE
+              AND t.tgtype & 64 = 0     -- not INSTEAD OF
+              AND t.tgtype & 4 = 4      -- fires on INSERT
+              AND t.tgtype & 16 = 16    -- fires on UPDATE
+        )
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    if !missing.is_empty() {
+        return Err(crate::error::DbError::InvalidData(format!(
+            "created_at floor guard trigger missing or mis-shaped on: {} \
+             (replica fence must stay closed)",
+            missing.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+/// Behavioral verification of the floor guard, end-to-end through the armed
+/// pool. A catalog check cannot detect a no-op function body or an unarmed
+/// pool; this proves the semantics the fence proof cites, inside one
+/// rolled-back transaction:
+///
+/// 1. the pool's session GUC equals [`CREATED_AT_FLOOR_SECS`] (arming);
+/// 2. an old channel-bearing INSERT raises `check_violation` (23514);
+/// 3. a fresh channel-bearing INSERT commits;
+/// 4. rewriting a fresh row's `created_at` below the floor raises;
+/// 5. an old channel-NULL INSERT is exempt, but flipping its `channel_id`
+///    on raises (the `UPDATE OF` arm).
+///
+/// `SET CONSTRAINTS ALL IMMEDIATE` makes the deferred trigger fire per
+/// statement so each adversary is observable under a savepoint; deferral to
+/// COMMIT is separately pinned by the held-transaction fixture.
+pub async fn verify_floor_guard_behavior(pool: &PgPool) -> crate::Result<()> {
+    use crate::error::DbError;
+
+    let expect_violation = |res: Result<sqlx::postgres::PgQueryResult, sqlx::Error>,
+                            what: &str|
+     -> crate::Result<()> {
+        match res {
+            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("23514") => Ok(()),
+            Ok(_) => Err(DbError::InvalidData(format!(
+                "floor guard is inert: {what} was accepted (replica fence must stay closed)"
+            ))),
+            Err(e) => Err(DbError::InvalidData(format!(
+                "floor guard verification failed unexpectedly on {what}: {e}"
+            ))),
+        }
+    };
+
+    let mut tx = pool.begin().await?;
+
+    // 1. Pool arming (Perci: assert the effective value, not the intent).
+    let armed: String = sqlx::query_scalar("SHOW buzz.created_at_floor")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            DbError::InvalidData(format!(
+                "buzz.created_at_floor GUC not set on this pool: {e}"
+            ))
+        })?;
+    if armed != CREATED_AT_FLOOR_SECS.to_string() {
+        return Err(DbError::InvalidData(format!(
+            "buzz.created_at_floor is '{armed}', expected '{CREATED_AT_FLOOR_SECS}': \
+             pool is not armed"
+        )));
+    }
+
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *tx)
+        .await?;
+
+    // Scratch community satisfying the FK; the whole transaction rolls back.
+    let community = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+        .bind(community)
+        .bind(format!("fence-verify-{}.invalid", community.simple()))
+        .execute(&mut *tx)
+        .await?;
+    let channel = uuid::Uuid::new_v4();
+
+    let insert = |tx_id: [u8; 32], age_secs: i64, ch: Option<uuid::Uuid>| {
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, \
+             content, sig, received_at, channel_id) \
+             VALUES ($1, $2, $3, clock_timestamp() - make_interval(secs => $4::double precision), \
+             9, '[]', 'fence-verify', $5, NOW(), $6)",
+        )
+        .bind(community)
+        .bind(tx_id.to_vec())
+        .bind(vec![0u8; 32])
+        .bind(age_secs as f64)
+        .bind(vec![0u8; 64])
+        .bind(ch)
+    };
+    let old_age = CREATED_AT_FLOOR_SECS + 60;
+
+    // 2. Old channel-bearing insert must raise.
+    sqlx::query("SAVEPOINT floor_probe")
+        .execute(&mut *tx)
+        .await?;
+    let res = insert(rand_id(), old_age, Some(channel))
+        .execute(&mut *tx)
+        .await;
+    expect_violation(res, "an old channel-bearing INSERT")?;
+    sqlx::query("ROLLBACK TO SAVEPOINT floor_probe")
+        .execute(&mut *tx)
+        .await?;
+
+    // 3. Fresh channel-bearing insert must pass.
+    let fresh_id = rand_id();
+    insert(fresh_id, 0, Some(channel)).execute(&mut *tx).await?;
+
+    // 4. Rewriting created_at below the floor must raise (in- or
+    //    cross-partition, either arm of the guard catches the NEW row).
+    sqlx::query("SAVEPOINT floor_probe")
+        .execute(&mut *tx)
+        .await?;
+    let res = sqlx::query(
+        "UPDATE events SET created_at = clock_timestamp() - make_interval(secs => $1::double precision) \
+         WHERE community_id = $2 AND id = $3",
+    )
+    .bind(old_age as f64)
+    .bind(community)
+    .bind(fresh_id.to_vec())
+    .execute(&mut *tx)
+    .await;
+    expect_violation(res, "rewriting created_at below the floor")?;
+    sqlx::query("ROLLBACK TO SAVEPOINT floor_probe")
+        .execute(&mut *tx)
+        .await?;
+
+    // 5. Old channel-NULL insert is exempt; flipping channel_id on must raise.
+    let null_id = rand_id();
+    insert(null_id, old_age, None).execute(&mut *tx).await?;
+    sqlx::query("SAVEPOINT floor_probe")
+        .execute(&mut *tx)
+        .await?;
+    let res = sqlx::query("UPDATE events SET channel_id = $1 WHERE community_id = $2 AND id = $3")
+        .bind(channel)
+        .bind(community)
+        .bind(null_id.to_vec())
+        .execute(&mut *tx)
+        .await;
+    expect_violation(res, "moving an old channel-NULL row into a channel")?;
+    sqlx::query("ROLLBACK TO SAVEPOINT floor_probe")
+        .execute(&mut *tx)
+        .await?;
+
+    tx.rollback().await?;
+    Ok(())
+}
+
+fn rand_id() -> [u8; 32] {
+    let mut id = [0u8; 32];
+    for chunk in id.chunks_mut(16) {
+        chunk.copy_from_slice(&uuid::Uuid::new_v4().into_bytes()[..chunk.len()]);
+    }
+    id
+}
+
 /// One writer-side sample of the ordered handshake.
 #[derive(Debug)]
 struct WriterSample {

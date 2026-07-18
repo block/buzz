@@ -151,12 +151,6 @@ async fn main() -> anyhow::Result<()> {
     })?;
     if db.has_read_pool() {
         info!("Postgres connected (writer + read replica)");
-        // Freshness fence probe: cursor pages route to the replica only for
-        // history the probe has verified as fully replayed. Until the first
-        // successful handshake the fence is closed and all reads stay on the
-        // writer.
-        db.spawn_fence_probe();
-        info!("Replica fence probe started");
     } else {
         info!("Postgres connected");
     }
@@ -175,6 +169,26 @@ async fn main() -> anyhow::Result<()> {
 
     if let Err(e) = db.ensure_future_partitions(3).await {
         error!("Failed to ensure partitions: {e}");
+    }
+
+    // Freshness fence probe: cursor pages route to the replica only for
+    // history the probe has verified as fully replayed. Deliberately AFTER
+    // the migration decision: spawn_fence_probe first verifies the
+    // commit-time floor guard (catalog shape + observed behavior through the
+    // armed pool) against the live schema, so a relay running with
+    // BUZZ_AUTO_MIGRATE off and migration 0021 unapplied can never open the
+    // fence over an unenforced floor. Verification failure is loud but
+    // non-fatal: the fence stays closed and every cursor page routes to the
+    // writer.
+    match db.spawn_fence_probe().await {
+        Ok(true) => info!("Replica fence probe started (floor guard verified)"),
+        Ok(false) => {}
+        Err(e) => {
+            error!(
+                "Replica fence disabled — floor guard verification failed: {e}. \
+                 All cursor reads stay on the writer."
+            );
+        }
     }
 
     // NIP-43: if membership enforcement is on, a valid owner pubkey is required.

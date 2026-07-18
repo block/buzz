@@ -14,39 +14,14 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(pool).await?;
     MIGRATOR.run(pool).await?;
-    verify_created_at_floor_guard_coverage(pool).await?;
-    Ok(())
-}
-
-/// The replica-fence proof (see `replica_fence`) requires the commit-time
-/// `created_at` floor trigger from migration 0021 on **every** writable
-/// `events` partition. `CREATE TABLE .. PARTITION OF` clones parent triggers,
-/// but a partition attached with `ATTACH PARTITION` or created by an older
-/// code path would silently escape the guard — so startup fails closed if any
-/// partition lacks it.
-async fn verify_created_at_floor_guard_coverage(pool: &PgPool) -> Result<()> {
-    let uncovered: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT c.relname::text
-        FROM pg_inherits i
-        JOIN pg_class c ON c.oid = i.inhrelid
-        WHERE i.inhparent = 'events'::regclass
-          AND NOT EXISTS (
-              SELECT 1 FROM pg_trigger t
-              WHERE t.tgrelid = c.oid
-                AND t.tgname = 'events_created_at_floor'
-          )
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
-    if !uncovered.is_empty() {
-        return Err(crate::DbError::InvalidData(format!(
-            "events partition(s) missing the created_at floor guard trigger \
-             (replica-fence safety): {}",
-            uncovered.join(", ")
-        )));
-    }
+    // The replica-fence proof (see `replica_fence`) requires the commit-time
+    // `created_at` floor trigger from migration 0021 — correctly shaped — on
+    // the `events` parent and every partition. `CREATE TABLE .. PARTITION OF`
+    // clones parent triggers, but a partition attached with `ATTACH
+    // PARTITION` or created by an older code path would silently escape the
+    // guard, so migration fails closed if any is missing. (The fence probe
+    // re-runs this same check at startup on non-migrating relays.)
+    crate::replica_fence::verify_floor_guard_catalog(pool).await?;
     Ok(())
 }
 

@@ -430,22 +430,34 @@ impl Db {
         &self.fence
     }
 
-    /// Spawn the background fence probe when a replica is configured.
+    /// Verify the floor guard end-to-end, then spawn the background fence
+    /// probe. Returns `Ok(false)` when no replica is configured.
     ///
-    /// Without a running probe the fence stays closed and all cursor pages
-    /// route to the writer — safe, but no replica offload.
-    pub fn spawn_fence_probe(&self) -> bool {
-        match &self.read_pool {
-            Some(read_pool) => {
-                tokio::spawn(replica_fence::run_probe(
-                    self.pool.clone(),
-                    read_pool.clone(),
-                    std::sync::Arc::clone(&self.fence),
-                ));
-                true
-            }
-            None => false,
-        }
+    /// Ordering matters (Perci, PR #2084 review): this must run **after**
+    /// the migration decision. On a relay with `BUZZ_AUTO_MIGRATE` off, the
+    /// writer pool arms the GUC regardless, but if migration 0021 has not
+    /// been applied there is no trigger enforcing it — and an LSN probe
+    /// would open the fence over an unenforced floor. So the probe is gated
+    /// on an unconditional two-part verification against the live schema:
+    /// catalog shape ([`replica_fence::verify_floor_guard_catalog`]) and
+    /// observed semantics through this exact pool
+    /// ([`replica_fence::verify_floor_guard_behavior`]).
+    ///
+    /// On any verification failure the probe is never spawned and the fence
+    /// stays closed: every cursor page routes to the writer. The relay keeps
+    /// serving — degraded capacity, never holes.
+    pub async fn spawn_fence_probe(&self) -> Result<bool> {
+        let Some(read_pool) = &self.read_pool else {
+            return Ok(false);
+        };
+        replica_fence::verify_floor_guard_catalog(&self.pool).await?;
+        replica_fence::verify_floor_guard_behavior(&self.pool).await?;
+        tokio::spawn(replica_fence::run_probe(
+            self.pool.clone(),
+            read_pool.clone(),
+            std::sync::Arc::clone(&self.fence),
+        ));
+        Ok(true)
     }
 
     /// The pool for lag-tolerant reads: the read replica when configured,
@@ -5890,5 +5902,178 @@ mod tests {
         drop_scratch_db(&admin, seed_pool, &name).await;
         // db pool still holds connections to the dropped DB; close it.
         db.pool.close().await;
+    }
+
+    /// `spawn_fence_probe` must verify the floor guard before letting the
+    /// probe run — catalog shape AND observed behavior — and refuse on
+    /// sabotage. This is the production gate for a relay running with
+    /// `BUZZ_AUTO_MIGRATE` off: an armed GUC with no enforcing trigger must
+    /// never yield an open fence.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn fence_probe_refuses_to_start_without_verified_floor_guard() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed_pool, wname) = create_scratch_db(&admin, "fence_gate_w").await;
+        let (replica_pool, rname) = create_scratch_db(&admin, "fence_gate_r").await;
+        seed_pool.close().await;
+        replica_pool.close().await;
+
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        let db = Db::new(&DbConfig {
+            database_url: format!("{}/{}", &base[..idx], wname),
+            read_database_url: Some(format!("{}/{}", &base[..idx], rname)),
+            max_connections: 2,
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect armed Db with replica");
+
+        // Healthy schema: verification passes, probe starts.
+        assert!(
+            db.spawn_fence_probe().await.expect("verification passes"),
+            "probe must start on a verified schema"
+        );
+
+        // Sabotage A: catalog-shaped no-op — same trigger, gutted function
+        // body. Catalog check alone would pass; behavior check must refuse.
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION events_created_at_floor_guard() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
+        )
+        .execute(&db.pool)
+        .await
+        .expect("gut the guard function");
+        let err = db
+            .spawn_fence_probe()
+            .await
+            .expect_err("inert guard body must refuse the probe");
+        assert!(
+            err.to_string().contains("floor guard is inert"),
+            "unexpected error: {err}"
+        );
+
+        // Sabotage B: trigger dropped entirely (the BUZZ_AUTO_MIGRATE=off /
+        // 0021-unapplied shape). Catalog check must refuse.
+        sqlx::query("DROP TRIGGER events_created_at_floor ON events")
+            .execute(&db.pool)
+            .await
+            .expect("drop the guard trigger");
+        let err = db
+            .spawn_fence_probe()
+            .await
+            .expect_err("missing trigger must refuse the probe");
+        assert!(
+            err.to_string().contains("missing or mis-shaped"),
+            "unexpected error: {err}"
+        );
+
+        // In both refusal states the fence never opened.
+        assert!(
+            db.fence().verified_through().is_none(),
+            "fence must remain closed when verification refuses the probe"
+        );
+
+        db.pool.close().await;
+        if let Some(rp) = &db.read_pool {
+            rp.close().await;
+        }
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {wname} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {rname} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await;
+    }
+
+    /// The `UPDATE OF` arm of the floor guard (Perci's second structural
+    /// hole): an old row legitimately admitted with `channel_id` NULL must
+    /// not be movable into keyset windows, and a channel row's `created_at`
+    /// must not be movable below the fence — through raw SQL, at COMMIT.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn floor_guard_blocks_updates_that_move_rows_below_the_fence() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, name) = create_scratch_db(&admin, "floor_upd").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&pool, community, channel, &author).await;
+
+        let now_secs = chrono::Utc::now().timestamp() as u64;
+        let floor = crate::replica_fence::CREATED_AT_FLOOR_SECS as u64;
+
+        // Seed via unarmed session: one old channel-NULL row, one fresh
+        // channel row.
+        let old_null = signed_event_at(&author, "old-null", now_secs - floor - 120);
+        insert_top_level(&pool, community, channel, &old_null).await;
+        sqlx::query("UPDATE events SET channel_id = NULL WHERE community_id = $1 AND id = $2")
+            .bind(community)
+            .bind(old_null.id.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .expect("detach channel (unarmed seed)");
+        let fresh = signed_event_at(&author, "fresh-row", now_secs);
+        insert_top_level(&pool, community, channel, &fresh).await;
+
+        // Armed transaction, deferred to COMMIT (the production shape).
+        let run_armed_update = |sql: &'static str, id: Vec<u8>, age: Option<u64>| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = pool.begin().await.expect("begin");
+                sqlx::query("SELECT set_config('buzz.created_at_floor', $1, true)")
+                    .bind(crate::replica_fence::CREATED_AT_FLOOR_SECS.to_string())
+                    .execute(&mut *tx)
+                    .await
+                    .expect("arm guard");
+                let q = sqlx::query(sql).bind(community).bind(id);
+                let q = match age {
+                    Some(a) => q.bind(a as f64),
+                    None => q,
+                };
+                q.execute(&mut *tx)
+                    .await
+                    .expect("update inside tx (deferred)");
+                tx.commit().await
+            }
+        };
+
+        // channel-NULL → channel-bearing on an old row: COMMIT must abort.
+        let err = run_armed_update(
+            "UPDATE events SET channel_id = community_id WHERE community_id = $1 AND id = $2",
+            old_null.id.as_bytes().to_vec(),
+            None,
+        )
+        .await
+        .expect_err("moving an old channel-NULL row into a channel must abort at COMMIT");
+        assert!(
+            matches!(&err, sqlx::Error::Database(e) if e.code().as_deref() == Some("23514")),
+            "unexpected error: {err}"
+        );
+
+        // created_at rewrite below the floor on a channel row: COMMIT must abort.
+        let err = run_armed_update(
+            "UPDATE events SET created_at = clock_timestamp() - make_interval(secs => $3::double precision) \
+             WHERE community_id = $1 AND id = $2",
+            fresh.id.as_bytes().to_vec(),
+            Some(floor + 120),
+        )
+        .await
+        .expect_err("rewriting created_at below the floor must abort at COMMIT");
+        assert!(
+            matches!(&err, sqlx::Error::Database(e) if e.code().as_deref() == Some("23514")),
+            "unexpected error: {err}"
+        );
+
+        drop_scratch_db(&admin, pool, &name).await;
     }
 }
