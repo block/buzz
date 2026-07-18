@@ -104,6 +104,7 @@ impl WebSocketManager {
                 .is_err()
             {
                 task.abort();
+                let _ = task.await;
             }
         }
     }
@@ -115,17 +116,15 @@ impl WebSocketManager {
     }
 }
 
-#[tauri::command]
-async fn connect(
-    manager: tauri::State<'_, WebSocketManager>,
-    url: String,
+async fn open_connection(
+    manager: &WebSocketManager,
+    url: &str,
     on_message: Channel<serde_json::Value>,
-    _config: Option<serde_json::Value>,
 ) -> Result<Id, String> {
     let connect_cancel = manager.connect_cancel.lock().await.clone();
     let (socket, _) = tokio::select! {
         _ = connect_cancel.cancelled() => return Err("WebSocket connection cancelled".to_string()),
-        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(&url)) => result
+        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url)) => result
             .map_err(|_| "WebSocket connection timed out".to_string())?
             .map_err(|error| error.to_string())?,
     };
@@ -153,7 +152,7 @@ async fn connect(
     let mut task_slot = handle.task.lock().await;
     manager.connections.lock().await.insert(id, handle.clone());
 
-    let task_manager = manager.inner().clone();
+    let task_manager = manager.clone();
     let task = tauri::async_runtime::spawn(run_connection(
         id,
         socket,
@@ -169,8 +168,17 @@ async fn connect(
 }
 
 #[tauri::command]
-async fn send(
+async fn connect(
     manager: tauri::State<'_, WebSocketManager>,
+    url: String,
+    on_message: Channel<serde_json::Value>,
+    _config: Option<serde_json::Value>,
+) -> Result<Id, String> {
+    open_connection(manager.inner(), &url, on_message).await
+}
+
+async fn send_message(
+    manager: &WebSocketManager,
     id: Id,
     message: WebSocketMessage,
 ) -> Result<(), String> {
@@ -197,6 +205,15 @@ async fn send(
         .await
         .map_err(|_| "WebSocket send timed out".to_string())?
         .map_err(|_| "WebSocket connection closed".to_string())?
+}
+
+#[tauri::command]
+async fn send(
+    manager: tauri::State<'_, WebSocketManager>,
+    id: Id,
+    message: WebSocketMessage,
+) -> Result<(), String> {
+    send_message(manager.inner(), id, message).await
 }
 
 #[tauri::command]
@@ -303,12 +320,54 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use tauri::ipc::InvokeResponseBody;
     use tokio::io::duplex;
     use tokio_tungstenite::{tungstenite::protocol::Role, WebSocketStream};
 
     fn silent_channel() -> Channel<serde_json::Value> {
         Channel::new(|_: InvokeResponseBody| Ok(()))
+    }
+
+    #[tokio::test]
+    async fn live_tcp_server_connect_send_and_disconnect() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (received_tx, received_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let message = socket.next().await.unwrap().unwrap();
+            received_tx.send(message).unwrap();
+            while let Some(message) = socket.next().await {
+                if matches!(message, Ok(Message::Close(_))) {
+                    break;
+                }
+            }
+        });
+
+        let manager = WebSocketManager::default();
+        let id = open_connection(&manager, &format!("ws://{address}"), silent_channel())
+            .await
+            .unwrap();
+        send_message(&manager, id, WebSocketMessage::Text("live-probe".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), received_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            Message::Text("live-probe".into())
+        );
+
+        manager.disconnect(id).await;
+        assert!(!manager.connections.lock().await.contains_key(&id));
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("live server should observe native socket shutdown")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -347,22 +406,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnect_removes_before_bounded_task_shutdown() {
+    async fn disconnect_removes_and_drops_task_before_returning() {
+        struct DropGuard(Arc<AtomicBool>);
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
         let manager = WebSocketManager::default();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = dropped.clone();
+        let (ready_tx, ready_rx) = oneshot::channel();
         let (sender, _receiver) = mpsc::channel(SEND_QUEUE_CAPACITY);
         let handle = Arc::new(ConnectionHandle {
             sender,
             cancel: CancellationToken::new(),
-            task: Mutex::new(Some(tauri::async_runtime::spawn(async {
+            task: Mutex::new(Some(tauri::async_runtime::spawn(async move {
+                let _guard = DropGuard(task_dropped);
+                ready_tx.send(()).unwrap();
                 std::future::pending::<()>().await;
             }))),
         });
         manager.connections.lock().await.insert(7, handle);
+        ready_rx.await.unwrap();
 
         tokio::time::timeout(Duration::from_secs(1), manager.disconnect(7))
             .await
             .expect("disconnect should abort an unresponsive task");
         assert!(!manager.connections.lock().await.contains_key(&7));
+        assert!(dropped.load(Ordering::SeqCst));
 
         // Repeated teardown is intentionally a no-op.
         manager.disconnect(7).await;
