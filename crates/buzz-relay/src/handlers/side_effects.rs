@@ -2753,29 +2753,44 @@ async fn emit_initial_ref_state(
 /// Reconcile every community's event-backed NIP-43 membership view.
 ///
 /// `relay_members` is canonical. A snapshot is rebuilt only when it is absent
-/// or older than the newest canonical membership mutation. This makes the
-/// sweep safe to run at startup and periodically without producing an event
-/// stream when nothing changed.
+/// or its member/role set differs from the canonical rows. This makes the sweep
+/// safe to run at startup and periodically without producing an event stream
+/// when nothing changed. A failure in one community is logged and counted but
+/// does not prevent the remaining communities from being repaired.
 pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyhow::Result<usize> {
     let communities = state.db.usage_community_hosts().await?;
     let mut reconciled = 0usize;
 
     for community in communities {
         let community_id = buzz_core::CommunityId::from_uuid(community.id);
-        if !state
-            .db
-            .nip43_membership_snapshot_needs_reconciliation(
-                community_id,
-                &state.relay_keypair.public_key(),
-            )
-            .await?
-        {
-            continue;
-        }
+        let host = community.host;
+        let result = async {
+            if !state
+                .db
+                .nip43_membership_snapshot_needs_reconciliation(
+                    community_id,
+                    &state.relay_keypair.public_key(),
+                )
+                .await?
+            {
+                return Ok::<bool, anyhow::Error>(false);
+            }
 
-        let tenant = TenantContext::resolved(community_id, community.host);
-        publish_nip43_membership_list(&tenant, state).await?;
-        reconciled += 1;
+            let tenant = TenantContext::resolved(community_id, host.clone());
+            publish_nip43_membership_list(&tenant, state).await?;
+            Ok::<bool, anyhow::Error>(true)
+        }
+        .await;
+
+        match result {
+            Ok(true) => reconciled += 1,
+            Ok(false) => {}
+            Err(error) => {
+                metrics::counter!("buzz_nip43_membership_reconciliation_failures_total")
+                    .increment(1);
+                warn!(%community_id, %host, %error, "NIP-43 membership reconciliation failed");
+            }
+        }
     }
 
     metrics::counter!("buzz_nip43_membership_reconciliations_total").increment(reconciled as u64);
