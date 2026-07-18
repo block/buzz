@@ -334,16 +334,6 @@ export function CommunityOnboardingFlow({
                   >
                     Next
                   </Button>
-                  <Button
-                    className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
-                    data-testid="community-profile-back"
-                    disabled={isPending || isUploadingAvatar}
-                    onClick={clear}
-                    type="button"
-                    variant="ghost"
-                  >
-                    Back
-                  </Button>
                 </OnboardingFooter>
               </>
             )

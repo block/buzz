@@ -338,7 +338,31 @@
     --buzz-onboarding-emoji-picker-input: 10, 10, 10;
   }
 
+  /* The key-import card is viewport-centered on ordinary windows, independent
+     of the top heading and bottom-docked actions. Short windows return it to
+     document flow so the shell can grow and scroll instead of overlapping. */
+  .buzz-onboarding-key-import-position {
+    position: absolute;
+    left: 50%;
+    top: calc(50dvh - 6.625rem);
+    transform: translate(-50%, -50%);
+  }
+
+  @media (max-height: 44rem) {
+    .buzz-onboarding-key-import-position {
+      position: static;
+      margin-top: 3rem;
+      transform: none;
+    }
+  }
+
   .buzz-onboarding-transition-content {
+    animation-delay: var(--buzz-onboarding-transition-delay, 0ms);
+  }
+
+  .buzz-onboarding-transition-line[data-onboarding-effect="fade"]
+    > .buzz-onboarding-transition-content {
+    animation: buzz-onboarding-fade-in 300ms ease-out backwards;
     animation-delay: var(--buzz-onboarding-transition-delay, 0ms);
   }
 
@@ -389,6 +413,16 @@
     56%,
     100% {
       opacity: 0;
+    }
+  }
+
+  @keyframes buzz-onboarding-fade-in {
+    from {
+      opacity: 0;
+    }
+
+    to {
+      opacity: 1;
     }
   }
 

@@ -184,6 +184,8 @@ type MockBridgeOptions = {
   applyCommunityDelayMs?: number;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Close the first channel-window live REQ; its retry is accepted. */
+  closeChannelLiveSubscriptionOnce?: boolean;
   /** Reject successive kind-9 sends with these messages, then resume. */
   sendMessageErrors?: string[];
   /** Reject successive managed-agent starts, then resume. */

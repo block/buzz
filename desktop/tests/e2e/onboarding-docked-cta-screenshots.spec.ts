@@ -27,6 +27,25 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/01-landing.png` });
 
+  await page.getByRole("button", { name: "Enter a key" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Enter your private key" }),
+  ).toBeVisible();
+  const importCard = page.getByTestId("nostr-import-card");
+  await expect(importCard).toBeVisible();
+  await expect(page.getByLabel("Private key")).toBeVisible();
+  // The production card uses a baked nine-slice texture: no runtime SVG
+  // filter, measurement, or texture regeneration during resize.
+  await expect(importCard).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(importCard).toHaveCSS("border-top-width", "0px");
+  await expect(importCard).toHaveCSS("border-image-repeat", "repeat");
+  await expect(importCard).toHaveCSS("border-image-outset", "96px");
+  await expect(importCard.locator("svg")).toHaveCount(0);
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOT_DIR}/01b-enter-key.png` });
+
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
   await page.getByRole("button", { name: "Get started" }).click();
   await expect(
     page.getByRole("heading", {
@@ -48,6 +67,48 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   ).toBeVisible();
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/03-setup.png` });
+});
+
+test("machine key import remains usable in a short viewport", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 900, height: 620 });
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Enter a key" }).click();
+
+  const heading = page.getByRole("heading", { name: "Enter your private key" });
+  const input = page.getByLabel("Private key");
+  const footer = page.getByTestId("onboarding-footer-slot");
+  await expect(heading).toBeVisible();
+  await expect(input).toBeVisible();
+  await expect(footer).toBeVisible();
+
+  const layout = await page.evaluate(() => {
+    const heading = document.querySelector("h1")?.getBoundingClientRect();
+    const input = document
+      .querySelector<HTMLInputElement>("#nostr-private-key")
+      ?.getBoundingClientRect();
+    const footer = document
+      .querySelector('[data-testid="onboarding-footer-slot"]')
+      ?.getBoundingClientRect();
+    return {
+      footerTop: footer?.top ?? 0,
+      headingBottom: heading?.bottom ?? 0,
+      inputBottom: input?.bottom ?? 0,
+      inputTop: input?.top ?? 0,
+      clientWidth: document.documentElement.clientWidth,
+      scrollHeight: document.documentElement.scrollHeight,
+      scrollWidth: document.documentElement.scrollWidth,
+    };
+  });
+  expect(layout.inputTop).toBeGreaterThan(layout.headingBottom);
+  expect(layout.footerTop).toBeGreaterThan(layout.inputBottom);
+  expect(layout.scrollHeight).toBeGreaterThanOrEqual(620);
+  expect(layout.scrollWidth).toBe(layout.clientWidth);
 });
 
 test("relay onboarding: profile and avatar docked CTAs", async ({ page }) => {

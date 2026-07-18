@@ -767,7 +767,7 @@ test("first-community shows the scenario cards for localhost", async ({
   ).toBeVisible();
 });
 
-test("first-community profile step uses onboarding Next and Back controls", async ({
+test("connected first-community profile step cannot discard resumable onboarding", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -786,6 +786,7 @@ test("first-community profile step uses onboarding Next and Back controls", asyn
           stage: "profile",
           relayUrl: "wss://default.example.com",
           communityName: "Default",
+          communityId: "e2e-default-community",
           createdAt: timestamp,
           updatedAt: timestamp,
         }),
@@ -799,7 +800,6 @@ test("first-community profile step uses onboarding Next and Back controls", asyn
   await installMockBridge(page, undefined, {
     relayWsUrl: "wss://default.example.com",
     skipOnboardingSeed: true,
-    skipCommunitySeed: true,
   });
   await page.goto("/");
 
@@ -858,12 +858,7 @@ test("first-community profile step uses onboarding Next and Back controls", asyn
   ).toBe(true);
   await expect(page.getByTestId("community-profile-next")).toHaveText("Next");
   await expect(page.getByTestId("community-profile-next")).toBeDisabled();
-  await expect(page.getByTestId("community-profile-back")).toHaveText("Back");
-
-  await page.getByTestId("community-profile-back").click();
-  await expect(
-    page.getByRole("button", { name: "Add me to a community" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("community-profile-back")).toHaveCount(0);
   await expect
     .poll(() =>
       page.evaluate(
@@ -871,7 +866,7 @@ test("first-community profile step uses onboarding Next and Back controls", asyn
         COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
       ),
     )
-    .toBeNull();
+    .not.toBeNull();
 });
 
 test("identity fallback text does not count as a real onboarding name", async ({

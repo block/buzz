@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.16
+
+- Polish private key onboarding texture ([#2051](https://github.com/block/buzz/pull/2051)) ([`7873135a0`](https://github.com/block/buzz/commit/7873135a0bf843116102796a1671bb4141c4ed23))
+- Fix community profile onboarding back navigation ([#2058](https://github.com/block/buzz/pull/2058)) ([`385dde113`](https://github.com/block/buzz/commit/385dde11387cd74b7e28c80a25c8d3570dbf5823))
+- fix(desktop): route text copies through native clipboard ([#2054](https://github.com/block/buzz/pull/2054)) ([`9f8285095`](https://github.com/block/buzz/commit/9f8285095992ff93b00d93458e43217543e310af))
+- BOT-1359: Continue onboarding after key import ([#2056](https://github.com/block/buzz/pull/2056)) ([`738d45636`](https://github.com/block/buzz/commit/738d45636737ee7835ed5ec84ba74889d570a4fe))
+- fix(desktop): route first community deep links into onboarding ([#2055](https://github.com/block/buzz/pull/2055)) ([`34ef70263`](https://github.com/block/buzz/commit/34ef702638612620ae1b3c506e2be51a5b4bf3ef))
+
+
 ## v0.4.15
 
 - fix(desktop): honor selected onboarding runtime config ([#2047](https://github.com/block/buzz/pull/2047)) ([`0bbcafe9e`](https://github.com/block/buzz/commit/0bbcafe9e6893dcc77f2f813e749ab655cbfc51d))
