@@ -180,7 +180,7 @@ test.describe("agent readiness gate screenshots", () => {
     await selectProvider(page, "Anthropic");
     await setCustomModel(page, "claude-opus-4-5");
 
-    await expect(page.getByLabel("API Key")).toBeVisible();
+    await expect(page.getByLabel("API Key", { exact: true })).toBeVisible();
     await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,
     });
@@ -218,7 +218,9 @@ test.describe("agent readiness gate screenshots", () => {
     await openCreateDialog(page);
     await selectProvider(page, "Anthropic");
     await setCustomModel(page, "claude-opus-4-5");
-    await page.getByLabel("API Key").fill("sk-test-api-key-for-e2e");
+    await page
+      .getByLabel("API Key", { exact: true })
+      .fill("sk-test-api-key-for-e2e");
 
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 5_000,

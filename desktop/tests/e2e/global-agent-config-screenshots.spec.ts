@@ -212,7 +212,7 @@ test.describe("global agent config screenshots", () => {
     await openCreateDialog(page);
     await customizeAgentAi(page);
 
-    await expect(page.getByLabel("API Key")).toBeVisible({
+    await expect(page.getByLabel("API Key", { exact: true })).toBeVisible({
       timeout: 10_000,
     });
     await expect(
@@ -233,7 +233,7 @@ test.describe("global agent config screenshots", () => {
     await openCreateDialog(page);
     await customizeAgentAi(page);
 
-    await expect(page.getByLabel("API Key")).toHaveAttribute(
+    await expect(page.getByLabel("API Key", { exact: true })).toHaveAttribute(
       "placeholder",
       "Inherited from global config",
     );
