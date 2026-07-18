@@ -107,6 +107,17 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Package chart
+        run: helm package deploy/charts/buzz --destination dist
+
+      - name: Upload packaged chart
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.6.2
+        with:
+          name: buzz-chart-${{ github.sha }}
+          path: dist/buzz-*.tgz
+          if-no-files-found: error
+          retention-days: 14
+
   install-on-kind:
     # Full end-to-end install requires the public ghcr.io/block/buzz image to
     # exist and to embed Max's startup migrations. Runs only after Sami's
