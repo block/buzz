@@ -88,6 +88,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   isTimelineLoading,
   entranceMessageId = null,
   onEntranceMessageComplete,
+  welcomeKickoffStage = null,
+  welcomeKickoffSettingUp = false,
   messages,
   threadSummaries,
   firstUnreadMessageId = null,
@@ -684,7 +686,13 @@ export const ChannelPane = React.memo(function ChannelPane({
                     expiresAtMs={timeoutState.expiresAtMs}
                   />
                 ) : isActiveWelcomeChannel ? (
-                  <WelcomeComposerBanner state={welcomeComposerBannerState} />
+                  <div className="relative">
+                    {welcomeKickoffStage}
+                    <WelcomeComposerBanner
+                      settingUp={welcomeKickoffSettingUp}
+                      state={welcomeComposerBannerState}
+                    />
+                  </div>
                 ) : null}
                 <MessageComposer
                   channelId={activeChannel?.id ?? null}
