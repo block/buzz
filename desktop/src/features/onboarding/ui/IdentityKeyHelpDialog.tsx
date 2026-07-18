@@ -8,6 +8,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/shared/ui/dialog";
+import { ONBOARDING_INK_ICON_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
 
 const IDENTITY_KEY_HELP_SEEN_STORAGE_KEY =
@@ -65,7 +66,7 @@ export function IdentityKeyHelpDialog() {
       </OnboardingFooter>
       <DialogContent
         className="buzz-onboarding-neutral-theme max-w-[47.5rem] -translate-y-5"
-        closeButtonClassName="text-[var(--buzz-onboarding-backup-ink)] hover:bg-transparent hover:text-foreground"
+        closeButtonClassName={ONBOARDING_INK_ICON_CLASS}
         data-testid="identity-key-help-dialog"
         overlayVariant="transparent"
         surface="textured"

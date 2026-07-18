@@ -7,7 +7,10 @@ import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
-import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import {
+  ONBOARDING_INK_ICON_CLASS,
+  ONBOARDING_PRIMARY_CTA_CLASS,
+} from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
 
 const NOSTR_KEY_FILE_MAX_BYTES = 1024;
@@ -47,6 +50,15 @@ export function NostrKeyImportForm({
   const previewNpub = React.useMemo(() => nsecToNpub(nsecInput), [nsecInput]);
   const trimmedInput = nsecInput.trim();
   const hasInput = trimmedInput.length > 0;
+
+  // Masked-by-default must re-assert whenever the field empties: a sticky
+  // reveal from a previous key must never apply to newly pasted content the
+  // user hasn't chosen to expose.
+  React.useEffect(() => {
+    if (!hasInput) {
+      setIsRevealed(false);
+    }
+  }, [hasInput]);
   const isValid = previewNpub !== null;
   const isInteractionDisabled = disabled || isImporting;
   const showInvalidHint = hasInput && !isValid && trimmedInput.length >= 5;
@@ -144,7 +156,7 @@ export function NostrKeyImportForm({
             data-testid="nostr-import-card"
             variant="textured"
           >
-            <div className="flex w-full items-center gap-2">
+            <div className="relative w-full">
               <Input
                 autoComplete="off"
                 autoCorrect="off"
@@ -161,25 +173,31 @@ export function NostrKeyImportForm({
                 type={isRevealed ? "text" : "password"}
                 value={nsecInput}
               />
-              {hasInput ? (
-                <Button
-                  aria-label={
-                    isRevealed ? "Hide private key" : "Reveal private key"
-                  }
-                  className="h-10 w-10 shrink-0 text-[color:var(--buzz-onboarding-backup-ink)] hover:bg-transparent hover:text-foreground"
-                  data-testid="nostr-import-reveal-toggle"
-                  onClick={() => setIsRevealed((current) => !current)}
-                  size="icon"
-                  type="button"
-                  variant="ghost"
-                >
-                  {isRevealed ? (
-                    <EyeOff aria-hidden="true" className="h-6 w-6" />
-                  ) : (
-                    <Eye aria-hidden="true" className="h-6 w-6" />
-                  )}
-                </Button>
-              ) : null}
+              {/* Absolutely positioned so appearing/disappearing never resizes
+                  the input or shifts its centered text; fades with hasInput. */}
+              <Button
+                aria-hidden={!hasInput}
+                aria-label={
+                  isRevealed ? "Hide private key" : "Reveal private key"
+                }
+                className={cn(
+                  ONBOARDING_INK_ICON_CLASS,
+                  "absolute -right-2 top-1/2 h-10 w-10 -translate-y-1/2 transition-opacity duration-300 motion-reduce:transition-none",
+                  hasInput ? "opacity-100" : "pointer-events-none opacity-0",
+                )}
+                data-testid="nostr-import-reveal-toggle"
+                onClick={() => setIsRevealed((current) => !current)}
+                size="icon"
+                tabIndex={hasInput ? 0 : -1}
+                type="button"
+                variant="ghost"
+              >
+                {isRevealed ? (
+                  <EyeOff aria-hidden="true" className="h-6 w-6" />
+                ) : (
+                  <Eye aria-hidden="true" className="h-6 w-6" />
+                )}
+              </Button>
             </div>
           </Card>
         ) : (
