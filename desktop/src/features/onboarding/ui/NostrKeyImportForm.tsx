@@ -160,7 +160,10 @@ export function NostrKeyImportForm({
               <Input
                 autoComplete="off"
                 autoCorrect="off"
-                className="h-[3.6875rem] rounded-none border-0 bg-transparent px-0 text-center font-mono !text-4xl text-[color:var(--buzz-onboarding-backup-ink)] shadow-none placeholder:text-foreground/30 focus-visible:ring-0"
+                // Symmetric px reserves the absolutely positioned toggle's
+                // footprint on BOTH sides, so the centered key text never
+                // runs under the eye control and stays optically centered.
+                className="h-[3.6875rem] rounded-none border-0 bg-transparent px-10 text-center font-mono !text-4xl text-[color:var(--buzz-onboarding-backup-ink)] shadow-none placeholder:text-foreground/30 focus-visible:ring-0"
                 data-testid="nostr-import-nsec-input"
                 id="nostr-private-key"
                 onChange={(event) => {
@@ -310,25 +313,42 @@ export function NostrKeyImportForm({
         data-testid="nostr-import-feedback"
       >
         {previewNpub ? (
-          <div
-            className="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs"
-            data-testid="nostr-import-npub-preview"
-          >
-            <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-            <div className="min-w-0 space-y-0.5">
-              <p className="font-medium text-foreground">
-                This will use this Nostr identity:
+          variant === "spotlight" ? (
+            // Spotlight uses the backup step's quiet caption language:
+            // centered, unboxed, with the npub in the shared olive key ink.
+            <div
+              className="space-y-1 text-sm"
+              data-testid="nostr-import-npub-preview"
+            >
+              <p className="flex items-center justify-center gap-1.5 text-foreground">
+                <Check aria-hidden="true" className="h-4 w-4 shrink-0" />
+                Nostr identity found
               </p>
-              <p className="break-all font-mono text-2xs text-muted-foreground">
+              <p className="break-all font-mono text-[color:var(--buzz-onboarding-backup-ink)]">
                 {previewNpub}
               </p>
             </div>
-          </div>
+          ) : (
+            <div
+              className="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs"
+              data-testid="nostr-import-npub-preview"
+            >
+              <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+              <div className="min-w-0 space-y-0.5">
+                <p className="font-medium text-foreground">
+                  This will use this Nostr identity:
+                </p>
+                <p className="break-all font-mono text-2xs text-muted-foreground">
+                  {previewNpub}
+                </p>
+              </div>
+            </div>
+          )
         ) : null}
 
         {showInvalidHint && !errorMessage ? (
-          <p className="text-xs text-muted-foreground">
-            Waiting for a valid nsec1 key.
+          <p className="text-sm text-muted-foreground">
+            Waiting for a valid nsec1 key
           </p>
         ) : null}
 
