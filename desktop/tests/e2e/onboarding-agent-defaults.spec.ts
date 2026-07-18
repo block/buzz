@@ -1077,7 +1077,7 @@ test("compact default config still persists rapid provider edits", async ({
   await chooseConfigDropdownOption(page, "global-agent-provider", "anthropic");
   await expect(providerSelect).toHaveAttribute("data-value", "anthropic");
 
-  await expect(page.getByLabel("Anthropic API Key")).toHaveCount(0);
+  await expect(page.getByLabel("Anthropic API Key")).toBeVisible();
   await expect(page.getByLabel("OpenAI API Key")).toHaveCount(0);
   await expect(page.getByLabel("Value for DATABRICKS_HOST")).toHaveCount(0);
 });
