@@ -21,9 +21,9 @@ test("normal first launch uses the already-persisted identity", async ({
   await expect(gate).toHaveCSS("background-image", /radial-gradient/);
   await expect(gate).toHaveCSS("color", "rgb(23, 23, 23)");
   await expect(
-    page.getByRole("button", { name: "Create new identity key" }),
+    page.getByRole("button", { name: "Create a new identity key" }),
   ).toHaveCSS("background-color", "rgb(23, 23, 23)");
-  await page.getByRole("button", { name: "Create new identity key" }).click();
+  await page.getByRole("button", { name: "Create a new identity key" }).click();
 
   await expect(
     page.getByRole("heading", {

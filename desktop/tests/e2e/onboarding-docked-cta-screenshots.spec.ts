@@ -46,9 +46,9 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
 
   await page.getByRole("button", { name: "Back" }).click();
   await expect(
-    page.getByRole("button", { name: "Create new identity key" }),
+    page.getByRole("button", { name: "Create a new identity key" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Create new identity key" }).click();
+  await page.getByRole("button", { name: "Create a new identity key" }).click();
   await expect(
     page.getByRole("heading", {
       name: "Your unique identity has been created",
@@ -80,7 +80,7 @@ test("machine key import remains usable in a short viewport", async ({
     skipOnboardingSeed: true,
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Enter a key" }).click();
+  await page.getByRole("button", { name: "Use an existing key" }).click();
 
   const heading = page.getByRole("heading", { name: "Enter your private key" });
   const input = page.getByLabel("Private key");
