@@ -13,7 +13,7 @@ mod usage;
 
 pub use usage::TurnUsage;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -287,6 +287,53 @@ async fn check_sibling_via_profile(
     false
 }
 
+const OBSERVER_PUBLISH_INTERVAL: Duration = Duration::from_millis(167);
+const OBSERVER_PUBLISH_LIMIT_PER_MINUTE: usize = 90;
+
+struct ObserverPublishPacer {
+    next_publish: tokio::time::Instant,
+    published: VecDeque<tokio::time::Instant>,
+}
+
+impl ObserverPublishPacer {
+    fn new() -> Self {
+        Self {
+            // No initial burst: even the first snapshot frame waits for its slot.
+            next_publish: tokio::time::Instant::now() + OBSERVER_PUBLISH_INTERVAL,
+            published: VecDeque::with_capacity(OBSERVER_PUBLISH_LIMIT_PER_MINUTE),
+        }
+    }
+
+    async fn wait(&mut self) {
+        loop {
+            let now = tokio::time::Instant::now();
+            while self
+                .published
+                .front()
+                .is_some_and(|sent| now.duration_since(*sent) >= Duration::from_secs(60))
+            {
+                self.published.pop_front();
+            }
+
+            let minute_slot = self.published.front().and_then(|sent| {
+                (self.published.len() >= OBSERVER_PUBLISH_LIMIT_PER_MINUTE)
+                    .then_some(*sent + Duration::from_secs(60))
+            });
+            let publish_at =
+                minute_slot.map_or(self.next_publish, |slot| slot.max(self.next_publish));
+            if publish_at > now {
+                tokio::time::sleep_until(publish_at).await;
+                continue;
+            }
+
+            let published_at = tokio::time::Instant::now();
+            self.published.push_back(published_at);
+            self.next_publish = published_at + OBSERVER_PUBLISH_INTERVAL;
+            return;
+        }
+    }
+}
+
 fn spawn_relay_observer_publisher(
     observer: observer::ObserverHandle,
     publisher: RelayEventPublisher,
@@ -297,7 +344,11 @@ fn spawn_relay_observer_publisher(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut coalescer = ObserverChunkCoalescer::default();
-        for event in observer.snapshot() {
+        let mut pacer = ObserverPublishPacer::new();
+        // Subscribe before pacing so live events remain buffered while the snapshot drains.
+        let snapshot = observer.snapshot();
+        let mut rx = observer.subscribe();
+        for event in snapshot {
             for event in coalescer.ingest(event) {
                 publish_relay_observer_event(
                     &publisher,
@@ -305,13 +356,13 @@ fn spawn_relay_observer_publisher(
                     &agent_pubkey_hex,
                     &owner_pubkey_hex,
                     &owner_pubkey,
+                    &mut pacer,
                     event,
                 )
                 .await;
             }
         }
 
-        let mut rx = observer.subscribe();
         let mut flush_interval = tokio::time::interval(std::time::Duration::from_millis(500));
         flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -322,7 +373,7 @@ fn spawn_relay_observer_publisher(
                             for event in coalescer.ingest(event) {
                                 publish_relay_observer_event(
                                     &publisher, &keys, &agent_pubkey_hex,
-                                    &owner_pubkey_hex, &owner_pubkey, event,
+                                    &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
                                 ).await;
                             }
                         }
@@ -330,7 +381,7 @@ fn spawn_relay_observer_publisher(
                             for event in coalescer.flush() {
                                 publish_relay_observer_event(
                                     &publisher, &keys, &agent_pubkey_hex,
-                                    &owner_pubkey_hex, &owner_pubkey, event,
+                                    &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
                                 ).await;
                             }
                             tracing::warn!(dropped = count, "relay observer publisher lagged");
@@ -339,7 +390,7 @@ fn spawn_relay_observer_publisher(
                             for event in coalescer.flush() {
                                 publish_relay_observer_event(
                                     &publisher, &keys, &agent_pubkey_hex,
-                                    &owner_pubkey_hex, &owner_pubkey, event,
+                                    &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
                                 ).await;
                             }
                             break;
@@ -351,7 +402,7 @@ fn spawn_relay_observer_publisher(
                     for event in coalescer.flush() {
                         publish_relay_observer_event(
                             &publisher, &keys, &agent_pubkey_hex,
-                            &owner_pubkey_hex, &owner_pubkey, event,
+                            &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
                         ).await;
                     }
                 }
@@ -638,8 +689,10 @@ async fn publish_relay_observer_event(
     agent_pubkey_hex: &str,
     owner_pubkey_hex: &str,
     owner_pubkey: &PublicKey,
+    pacer: &mut ObserverPublishPacer,
     mut event: observer::ObserverEvent,
 ) {
+    pacer.wait().await;
     // Trim oversized frames to fit the plaintext cap rather than letting
     // encrypt_observer_payload reject and drop them whole (silent telemetry loss).
     fit_observer_event_to_budget(&mut event);
@@ -4067,6 +4120,40 @@ mod author_gate_tests {
                 "under default OwnerOnly, the {label} must be admitted so steering can fire"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod observer_publish_pacer_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn starts_without_a_burst_and_spaces_frames() {
+        let started = tokio::time::Instant::now();
+        let mut pacer = ObserverPublishPacer::new();
+
+        pacer.wait().await;
+        let first = tokio::time::Instant::now();
+        pacer.wait().await;
+        let second = tokio::time::Instant::now();
+
+        assert_eq!(first.duration_since(started), OBSERVER_PUBLISH_INTERVAL);
+        assert_eq!(second.duration_since(first), OBSERVER_PUBLISH_INTERVAL);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn limits_frames_in_each_rolling_minute() {
+        let mut pacer = ObserverPublishPacer::new();
+        pacer.wait().await;
+        let first = tokio::time::Instant::now();
+        for _ in 1..OBSERVER_PUBLISH_LIMIT_PER_MINUTE {
+            pacer.wait().await;
+        }
+
+        pacer.wait().await;
+        let ninety_first = tokio::time::Instant::now();
+
+        assert_eq!(ninety_first.duration_since(first), Duration::from_secs(60));
     }
 }
 
