@@ -134,6 +134,87 @@ test("leaving a channel from the context menu never freezes the app", async ({
   await expectAppClickable(page);
 });
 
+test("channel context menu only shows owner actions to the owner", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Archive channel" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Delete channel" }),
+  ).toBeVisible();
+  const lifecycleOrder = (
+    await page.getByRole("menuitem").allTextContents()
+  ).filter((label) =>
+    ["Leave channel", "Archive channel", "Delete channel"].includes(label),
+  );
+  expect(lifecycleOrder).toEqual([
+    "Leave channel",
+    "Archive channel",
+    "Delete channel",
+  ]);
+  await page.keyboard.press("Escape");
+
+  await page.getByTestId("channel-random").click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Leave channel" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Loading channel actions..." }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("menuitem", { name: "Archive channel" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("menuitem", { name: "Delete channel" }),
+  ).toHaveCount(0);
+});
+
+test("channel context menu explains when owner actions are loading", async ({
+  page,
+}) => {
+  await installMockBridge(page, { channelMembersReadDelayMs: 500 });
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Loading channel actions..." }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Archive channel" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Loading channel actions..." }),
+  ).toHaveCount(0);
+});
+
+test("channel owner can archive from the context menu", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Archive channel" }).click();
+
+  await expect(page.getByTestId("stream-list")).not.toContainText("general");
+});
+
+test("channel owner can delete from the context menu", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  await page.getByTestId("channel-general").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Delete channel" }).click();
+  await expect(
+    page.getByTestId("channel-delete-confirmation-dialog"),
+  ).toBeVisible();
+  await page.getByTestId("channel-delete-confirm").click();
+
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await expect(page.getByTestId("stream-list")).not.toContainText("general");
+});
+
 test("fades the pinned sidebar chrome edges outside the Buzz theme", async ({
   page,
 }) => {

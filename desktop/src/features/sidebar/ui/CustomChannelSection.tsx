@@ -371,6 +371,7 @@ export function ChannelGroupSection({
   starredChannelIds,
   onStarChannel,
   onUnstarChannel,
+  onDeleteChannel,
   onLeaveChannel,
 }: {
   browseLabel?: string;
@@ -420,6 +421,7 @@ export function ChannelGroupSection({
   starredChannelIds?: ReadonlySet<string>;
   onStarChannel?: (channelId: string) => void;
   onUnstarChannel?: (channelId: string) => void;
+  onDeleteChannel?: (channel: Channel) => void;
   onLeaveChannel?: (channel: Channel) => void;
 }) {
   const contentId = `sidebar-${listTestId}`;
@@ -478,6 +480,7 @@ export function ChannelGroupSection({
                 onAssignChannel={onAssignChannel}
                 onUnassignChannel={onUnassignChannel}
                 onCreateSectionForChannel={onCreateSectionForChannel}
+                onDeleteChannel={onDeleteChannel}
                 onLeaveChannel={onLeaveChannel}
               />
             </ContextMenuContent>
@@ -572,6 +575,7 @@ export function CustomChannelSection({
   starredChannelIds,
   onStarChannel,
   onUnstarChannel,
+  onDeleteChannel,
   onLeaveChannel,
 }: {
   section: ChannelSection;
@@ -611,6 +615,7 @@ export function CustomChannelSection({
   starredChannelIds?: ReadonlySet<string>;
   onStarChannel?: (channelId: string) => void;
   onUnstarChannel?: (channelId: string) => void;
+  onDeleteChannel?: (channel: Channel) => void;
   onLeaveChannel?: (channel: Channel) => void;
 }) {
   const contentId = `sidebar-section-${section.id}`;
@@ -770,6 +775,7 @@ export function CustomChannelSection({
                             onCreateSectionForChannel={
                               onCreateSectionForChannel
                             }
+                            onDeleteChannel={onDeleteChannel}
                             onLeaveChannel={onLeaveChannel}
                           />
                         </ContextMenuContent>

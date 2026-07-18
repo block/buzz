@@ -26,6 +26,7 @@ import {
   CreateSectionDialog,
   DeleteSectionAlertDialog,
   RenameSectionDialog,
+  useDeleteChannelDialog,
   useLeaveChannelDialog,
   type SectionDialogValue,
 } from "@/features/sidebar/ui/ChannelSectionDialogs";
@@ -373,6 +374,10 @@ export function AppSidebar({
     React.useState<ChannelSection | null>(null);
   const { requestLeaveChannel, dialog: leaveChannelDialog } =
     useLeaveChannelDialog();
+  const { requestDeleteChannel, dialog: deleteChannelDialog } =
+    useDeleteChannelDialog((channel) => {
+      if (channel.id === selectedChannelId) onSelectHome();
+    });
 
   const streamChannels = React.useMemo(
     () => channels.filter((channel) => channel.channelType === "stream"),
@@ -635,6 +640,7 @@ export function AppSidebar({
                       starredChannelIds={starredChannelIds}
                       onStarChannel={onStarChannel}
                       onUnstarChannel={onUnstarChannel}
+                      onDeleteChannel={requestDeleteChannel}
                       onLeaveChannel={requestLeaveChannel}
                     />
                   ) : null}
@@ -704,6 +710,7 @@ export function AppSidebar({
                         starredChannelIds={starredChannelIds}
                         onStarChannel={onStarChannel}
                         onUnstarChannel={onUnstarChannel}
+                        onDeleteChannel={requestDeleteChannel}
                         onLeaveChannel={requestLeaveChannel}
                       />
                     ))}
@@ -743,6 +750,7 @@ export function AppSidebar({
                       starredChannelIds={starredChannelIds}
                       onStarChannel={onStarChannel}
                       onUnstarChannel={onUnstarChannel}
+                      onDeleteChannel={requestDeleteChannel}
                       onLeaveChannel={requestLeaveChannel}
                     />
                   </SidebarDndContext>
@@ -773,6 +781,7 @@ export function AppSidebar({
                       mutedChannelIds={mutedChannelIds}
                       onMuteChannel={onMuteChannel}
                       onUnmuteChannel={onUnmuteChannel}
+                      onDeleteChannel={requestDeleteChannel}
                     />
                   </FeatureGate>
                   <SidebarSection
@@ -960,6 +969,7 @@ export function AppSidebar({
           setDeleteSectionTarget(null);
         }}
       />
+      {deleteChannelDialog}
       {leaveChannelDialog}
       <SidebarRail />
     </Sidebar>
