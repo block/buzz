@@ -5,6 +5,7 @@ import {
   BellRing,
   Bot,
   Check,
+  ChevronDown,
   Cpu,
   Download,
   FlaskConical,
@@ -30,7 +31,20 @@ import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
 import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
+import {
+  setThreadViewMode,
+  useThreadViewMode,
+  type ThreadViewMode,
+} from "@/features/channels/lib/threadViewModePreference";
 import { cn } from "@/shared/lib/cn";
+import { Button } from "@/shared/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import {
   ACCENT_COLORS,
   isBuzzTheme,
@@ -64,6 +78,7 @@ import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
 import { GlobalAgentConfigSettingsCard } from "./GlobalAgentConfigSettingsCard";
+import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -630,7 +645,89 @@ function ThemeSettingsCard() {
           )}
         </AnimatePresence>
       )}
+
+      <ThreadLayoutSetting />
     </section>
+  );
+}
+
+const THREAD_VIEW_MODE_OPTIONS: {
+  value: ThreadViewMode;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "focus",
+    label: "Focus",
+    description: "Threads open over the channel, full width",
+  },
+  {
+    value: "split",
+    label: "Split",
+    description: "Threads open in a side panel next to the channel",
+  },
+];
+
+/**
+ * Thread layout picker. Uses the same dropdown radio group vocabulary as the
+ * other enumerated Settings rows (e.g. {@link SoundPicker}) so each option can
+ * carry its own description.
+ */
+function ThreadLayoutSetting() {
+  const threadViewMode = useThreadViewMode();
+  const activeOption =
+    THREAD_VIEW_MODE_OPTIONS.find(
+      (option) => option.value === threadViewMode,
+    ) ?? THREAD_VIEW_MODE_OPTIONS[0];
+
+  return (
+    <SettingsOptionGroup className="mt-8">
+      <SettingsOptionRow>
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Thread layout</p>
+          <p className="text-sm font-normal text-muted-foreground">
+            {activeOption.description}
+          </p>
+        </div>
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              className="h-7 min-w-28 justify-between gap-1.5 rounded-full border border-border/50 bg-muted/45 px-2.5 text-xs font-medium text-foreground shadow-none hover:bg-muted/70"
+              data-testid="thread-layout-trigger"
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              <span className="truncate">{activeOption.label}</span>
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-72">
+            <DropdownMenuRadioGroup
+              onValueChange={(next) =>
+                setThreadViewMode(next as ThreadViewMode)
+              }
+              value={threadViewMode}
+            >
+              {THREAD_VIEW_MODE_OPTIONS.map((option) => (
+                <DropdownMenuRadioItem
+                  data-testid={`thread-layout-${option.value}`}
+                  key={option.value}
+                  value={option.value}
+                >
+                  <span className="flex min-w-0 flex-col">
+                    <span className="font-medium">{option.label}</span>
+                    <span className="text-2xs text-muted-foreground">
+                      {option.description}
+                    </span>
+                  </span>
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </SettingsOptionRow>
+    </SettingsOptionGroup>
   );
 }
 

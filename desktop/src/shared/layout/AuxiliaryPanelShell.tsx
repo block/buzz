@@ -10,6 +10,7 @@ import { getAuxiliaryPanelMode } from "@/shared/layout/AuxiliaryPanelHeader";
 import { cn } from "@/shared/lib/cn";
 import {
   OverlayPanelBackdrop,
+  PANEL_BASE_CLASS,
   PANEL_ENTER_BASE_CLASS,
   PANEL_OVERLAY_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
@@ -24,6 +25,13 @@ type AuxiliaryPanelProps = {
   canResetWidth?: boolean;
   children: React.ReactNode;
   className?: string;
+  /**
+   * When false, the panel skips its own slide-in animation.
+   *
+   * For panels rendered inside a container that already animates itself (the
+   * focus-mode thread drawer), so the two don't compound into a double slide.
+   */
+  enterMotion?: boolean;
   footer?: React.ReactNode;
   header?: React.ReactNode;
   isSinglePanelView?: boolean;
@@ -46,6 +54,7 @@ export function AuxiliaryPanel({
   canResetWidth,
   children,
   className,
+  enterMotion = true,
   footer,
   header,
   isSinglePanelView = false,
@@ -137,7 +146,7 @@ export function AuxiliaryPanel({
       {isFloatingOverlay ? <OverlayPanelBackdrop onClose={onClose} /> : null}
       <aside
         className={cn(
-          PANEL_ENTER_BASE_CLASS,
+          enterMotion ? PANEL_ENTER_BASE_CLASS : PANEL_BASE_CLASS,
           isSinglePanelView && "border-l-0",
           isFloatingOverlay && PANEL_OVERLAY_CLASS,
           className,

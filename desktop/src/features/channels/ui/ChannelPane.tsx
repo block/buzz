@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Hash, LogIn } from "lucide-react";
+import { AnimatePresence } from "motion/react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
@@ -8,10 +9,8 @@ import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
 import { isModerationDm } from "@/features/moderation/lib/moderationDm";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
-import {
-  MessageThreadPanel,
-  MessageThreadPanelSkeleton,
-} from "@/features/messages/ui/MessageThreadPanel";
+import { MessageThreadPanel } from "@/features/messages/ui/MessageThreadPanel";
+import { MessageThreadPanelSkeleton } from "@/features/messages/ui/MessageThreadPanelSkeleton";
 import {
   MessageTimeline,
   type MessageTimelineHandle,
@@ -32,6 +31,9 @@ import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
+import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
+import { THREAD_FOCUS_COLUMN_MAX_WIDTH_PX } from "@/features/channels/lib/threadFocusLayout";
+import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import {
@@ -506,6 +508,15 @@ export const ChannelPane = React.memo(function ChannelPane({
 
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
+  const threadViewMode = useThreadViewMode();
+  // Focus mode is a wide-viewport-only alternative to the split thread pane:
+  // narrow viewports keep their existing single-panel / floating-overlay
+  // behavior untouched. It applies to the thread panel only — channel
+  // management, agent session and profile panels always use the split pane.
+  const useFocusThreadDrawer =
+    threadViewMode === "focus" &&
+    useSplitAuxiliaryPane &&
+    (Boolean(threadHeadMessage) || shouldShowThreadSkeleton);
   const selectedAgent = React.useMemo(
     () =>
       agentSessionSelection.resolveSelectedAgentSession({
@@ -523,10 +534,15 @@ export const ChannelPane = React.memo(function ChannelPane({
       shouldShowThreadSkeleton ||
       Boolean(activeChannel && selectedAgent) ||
       Boolean(profilePanelPubkey));
+  // Every auxiliary panel is keyed because they share one `AnimatePresence`
+  // below: it needs a stable identity per panel to tell "this panel closed"
+  // apart from "a different panel replaced it". Only the focus drawer declares
+  // an `exit`, so every other panel still unmounts on the same frame as before.
   const wrapAux = (panel: React.ReactNode, testId: string) =>
     useSplitAuxiliaryPane ? (
       <RightAuxiliaryPane
         canResetWidth={canResetThreadPanelWidth}
+        key={testId}
         onResetWidth={onResetThreadPanelWidth}
         onResizeStart={onThreadPanelResizeStart}
         testId={testId}
@@ -535,8 +551,43 @@ export const ChannelPane = React.memo(function ChannelPane({
         {panel}
       </RightAuxiliaryPane>
     ) : (
-      panel
+      // Narrow viewports render the panel bare. The fragment exists only to
+      // carry the key; it adds no DOM.
+      <React.Fragment key={testId}>{panel}</React.Fragment>
     );
+  // The thread panel is the one panel that can open as a focus drawer instead
+  // of a split pane. Everything else goes through `wrapAux` unchanged.
+  const wrapThreadPanel = (panel: React.ReactNode) =>
+    useFocusThreadDrawer ? (
+      <FocusThreadDrawer
+        channelName={activeChannel?.name ?? "channel"}
+        key="focus-thread-drawer"
+        onClose={onCloseThread}
+      >
+        {panel}
+      </FocusThreadDrawer>
+    ) : (
+      wrapAux(panel, "message-thread-panel")
+    );
+  // Inside a focus drawer the thread fills the drawer: 100% width, no border of
+  // its own (the drawer draws it) and no resize handle. `isSinglePanelView`
+  // is the only lever on `AuxiliaryPanel` that yields all three, and since the
+  // drawer is not an overlay the header mode resolves to `single-panel` either
+  // way — so the header renders identically apart from gaining a back button,
+  // which is a welcome second affordance back to the channel here.
+  const threadLayoutProps = useFocusThreadDrawer
+    ? ({
+        columnMaxWidthPx: THREAD_FOCUS_COLUMN_MAX_WIDTH_PX,
+        isSinglePanelView: true,
+        layout: "standalone",
+        transparentChrome: false,
+      } as const)
+    : ({
+        columnMaxWidthPx: undefined,
+        isSinglePanelView: useSplitAuxiliaryPane ? false : isSinglePanelView,
+        layout: useSplitAuxiliaryPane ? "split" : "standalone",
+        transparentChrome: useSplitAuxiliaryPane,
+      } as const);
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
       {!isSinglePanelView ? (
@@ -644,7 +695,9 @@ export const ChannelPane = React.memo(function ChannelPane({
             searchQuery={channelFind.query}
             targetMessageId={targetMessageId}
             splitThreadPanelOpen={
-              useSplitAuxiliaryPane && Boolean(openThreadHeadId)
+              useSplitAuxiliaryPane &&
+              !useFocusThreadDrawer &&
+              Boolean(openThreadHeadId)
             }
             threadUnreadCounts={threadUnreadCounts}
           />
@@ -771,169 +824,174 @@ export const ChannelPane = React.memo(function ChannelPane({
         </section>
       ) : null}
 
-      {channelManagementOpen && activeChannel ? (
-        <ChannelManagementAuxiliaryPanel
-          activeChannel={activeChannel}
-          canResetThreadPanelWidth={canResetThreadPanelWidth}
-          currentPubkey={currentPubkey}
-          isSinglePanelView={isSinglePanelView}
-          onChannelManagementDeleted={onChannelManagementDeleted}
-          onCloseChannelManagement={onCloseChannelManagement}
-          onResetThreadPanelWidth={onResetThreadPanelWidth}
-          onThreadPanelResizeStart={onThreadPanelResizeStart}
-          threadPanelWidthPx={threadPanelWidthPx}
-          useSplitAuxiliaryPane={useSplitAuxiliaryPane}
-          transparentChrome={hasSplitAuxiliaryPane}
-        />
-      ) : threadHeadMessage ? (
-        (() => {
-          const panel = (
-            <MessageThreadPanel
-              channel={activeChannel}
-              channelId={activeChannel?.id ?? null}
-              channelName={activeChannel?.name ?? "channel"}
-              currentPubkey={currentPubkey}
-              disabled={isComposerDisabled}
-              editTarget={threadEditTarget}
-              firstUnreadReplyId={threadFirstUnreadReplyId}
-              huddleMemberPubkeys={huddleMemberPubkeys}
-              huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-              isFollowingThread={isFollowingThread}
-              isMessageUnreadById={isMessageUnreadById}
-              isSending={isSending}
-              isSinglePanelView={
-                useSplitAuxiliaryPane ? false : isSinglePanelView
-              }
-              layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-              transparentChrome={useSplitAuxiliaryPane}
-              autoSendDraftKey={autoSendDraftKey}
-              onAutoSubmitComplete={handleAutoSubmitComplete}
-              onCancelEdit={onCancelEdit}
-              onCancelReply={onCancelThreadReply}
-              onClose={onCloseThread}
-              onDelete={onDelete}
-              onEdit={onEdit}
-              onEditLastOwnMessage={handleEditLastOwnThreadMessage}
-              onEditSave={onEditSave}
-              onFollowThread={onFollowThread}
-              onMarkUnread={onMarkUnread}
-              onMarkRead={onMarkRead}
-              onExpandReplies={onExpandThreadReplies}
-              onSelectReplyTarget={onSelectThreadReplyTarget}
-              onSend={onSendThreadReply}
-              onScrollTargetResolved={onThreadScrollTargetResolved}
-              onToggleReaction={onToggleReaction}
-              onUnfollowThread={onUnfollowThread}
-              profiles={profiles}
-              replyTargetMessage={threadReplyTargetMessage}
-              scrollTargetId={threadScrollTargetId}
-              threadHead={threadHeadMessage}
-              threadHeadVideoReviewContext={threadHeadVideoReviewContext}
-              widthPx={threadPanelWidthPx}
-              threadReplies={threadMessages}
-              threadRepliesPending={threadMessagesPending}
-              threadUnreadCount={threadUnreadCounts?.get(threadHeadMessage.id)}
-              threadReplyUnreadCounts={threadReplyUnreadCounts}
-              threadTypingPubkeys={threadTypingPubkeys}
-              toolbarExtraActions={
-                hasThreadComposerBotActivity ? (
-                  <BotActivityComposerAction
-                    agents={activityAgents}
-                    channelId={activeChannel?.id ?? null}
-                    onOpenAgentSession={onOpenAgentSession}
-                    openAgentSessionPubkey={openAgentSessionPubkey}
-                    profiles={profiles}
-                    workingBotPubkeys={threadComposerBotTypingPubkeys}
-                    variant="inline"
-                  />
-                ) : null
-              }
-            />
-          );
-          return wrapAux(panel, "message-thread-panel");
-        })()
-      ) : shouldShowThreadSkeleton ? (
-        (() => {
-          const panel = (
-            <MessageThreadPanelSkeleton
-              isSinglePanelView={
-                useSplitAuxiliaryPane ? false : isSinglePanelView
-              }
-              layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-              transparentChrome={useSplitAuxiliaryPane}
-              onClose={onCloseThread}
-              widthPx={threadPanelWidthPx}
-            />
-          );
-          return wrapAux(panel, "message-thread-panel");
-        })()
-      ) : activeChannel && selectedAgent ? (
-        (() => {
-          // When the panel was opened from a different channel than the
-          // currently active one, re-scope it to the active channel so
-          // that both the content/header AND channel-backed actions (e.g.
-          // Stop current turn) operate on the same channel object.
-          const effectiveAgentSessionChannelId =
-            openAgentSessionChannelId &&
-            activeChannel.id !== openAgentSessionChannelId
-              ? activeChannelId
-              : openAgentSessionChannelId;
-          const panel = (
-            <AgentSessionThreadPanel
-              agent={selectedAgent}
-              canInterruptTurn={selectedAgent.canInterruptTurn}
-              channel={
-                effectiveAgentSessionChannelId
-                  ? effectiveAgentSessionChannelId === activeChannel.id
-                    ? activeChannel
-                    : null
-                  : agentSessionSelection.isAgentInActivityList({
-                        activityAgents,
-                        selectedAgent,
-                      })
-                    ? activeChannel
-                    : null
-              }
-              channelId={effectiveAgentSessionChannelId}
-              isSinglePanelView={
-                useSplitAuxiliaryPane ? false : isSinglePanelView
-              }
-              layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-              transparentChrome={useSplitAuxiliaryPane}
-              profiles={profiles}
-              onBack={onBackFromAgentSession}
-              onClose={onCloseAgentSession}
-              widthPx={threadPanelWidthPx}
-            />
-          );
-          return wrapAux(panel, "agent-session-thread-panel");
-        })()
-      ) : profilePanelPubkey ? (
-        (() => {
-          const panel = (
-            <UserProfilePanel
-              currentPubkey={currentPubkey}
-              callerChannelId={activeChannelId}
-              isSinglePanelView={
-                useSplitAuxiliaryPane ? false : isSinglePanelView
-              }
-              layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-              transparentChrome={useSplitAuxiliaryPane}
-              onClose={onCloseProfilePanel}
-              onOpenDm={onOpenDm}
-              onOpenProfile={onOpenProfilePanel}
-              onTabChange={onProfilePanelTabChange}
-              onViewChange={onProfilePanelViewChange}
-              pubkey={profilePanelPubkey}
-              splitPaneClamp
-              tab={profilePanelTab}
-              view={profilePanelView}
-              widthPx={threadPanelWidthPx}
-            />
-          );
-          return wrapAux(panel, "user-profile-panel");
-        })()
-      ) : null}
+      {/*
+       * `AnimatePresence` keeps the focus thread drawer mounted through its exit
+       * animation — without it the drawer's own existence condition
+       * (`useFocusThreadDrawer`, which is derived from `threadHeadMessage`) goes
+       * false on the same frame as the close, and there is nothing left to
+       * animate. It can hold the real thread through the exit rather than a
+       * frozen snapshot because the panel is fully prop-driven.
+       */}
+      <AnimatePresence>
+        {channelManagementOpen && activeChannel ? (
+          <ChannelManagementAuxiliaryPanel
+            activeChannel={activeChannel}
+            canResetThreadPanelWidth={canResetThreadPanelWidth}
+            currentPubkey={currentPubkey}
+            isSinglePanelView={isSinglePanelView}
+            key="channel-management-panel"
+            onChannelManagementDeleted={onChannelManagementDeleted}
+            onCloseChannelManagement={onCloseChannelManagement}
+            onResetThreadPanelWidth={onResetThreadPanelWidth}
+            onThreadPanelResizeStart={onThreadPanelResizeStart}
+            threadPanelWidthPx={threadPanelWidthPx}
+            useSplitAuxiliaryPane={useSplitAuxiliaryPane}
+            transparentChrome={hasSplitAuxiliaryPane}
+          />
+        ) : threadHeadMessage ? (
+          (() => {
+            const panel = (
+              <MessageThreadPanel
+                channel={activeChannel}
+                channelId={activeChannel?.id ?? null}
+                channelName={activeChannel?.name ?? "channel"}
+                currentPubkey={currentPubkey}
+                disabled={isComposerDisabled}
+                editTarget={threadEditTarget}
+                firstUnreadReplyId={threadFirstUnreadReplyId}
+                huddleMemberPubkeys={huddleMemberPubkeys}
+                huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                isFollowingThread={isFollowingThread}
+                isMessageUnreadById={isMessageUnreadById}
+                isSending={isSending}
+                {...threadLayoutProps}
+                autoSendDraftKey={autoSendDraftKey}
+                onAutoSubmitComplete={handleAutoSubmitComplete}
+                onCancelEdit={onCancelEdit}
+                onCancelReply={onCancelThreadReply}
+                onClose={onCloseThread}
+                onDelete={onDelete}
+                onEdit={onEdit}
+                onEditLastOwnMessage={handleEditLastOwnThreadMessage}
+                onEditSave={onEditSave}
+                onFollowThread={onFollowThread}
+                onMarkUnread={onMarkUnread}
+                onMarkRead={onMarkRead}
+                onExpandReplies={onExpandThreadReplies}
+                onSelectReplyTarget={onSelectThreadReplyTarget}
+                onSend={onSendThreadReply}
+                onScrollTargetResolved={onThreadScrollTargetResolved}
+                onToggleReaction={onToggleReaction}
+                onUnfollowThread={onUnfollowThread}
+                profiles={profiles}
+                replyTargetMessage={threadReplyTargetMessage}
+                scrollTargetId={threadScrollTargetId}
+                threadHead={threadHeadMessage}
+                threadHeadVideoReviewContext={threadHeadVideoReviewContext}
+                widthPx={threadPanelWidthPx}
+                threadReplies={threadMessages}
+                threadRepliesPending={threadMessagesPending}
+                threadUnreadCount={threadUnreadCounts?.get(
+                  threadHeadMessage.id,
+                )}
+                threadReplyUnreadCounts={threadReplyUnreadCounts}
+                threadTypingPubkeys={threadTypingPubkeys}
+                toolbarExtraActions={
+                  hasThreadComposerBotActivity ? (
+                    <BotActivityComposerAction
+                      agents={activityAgents}
+                      channelId={activeChannel?.id ?? null}
+                      onOpenAgentSession={onOpenAgentSession}
+                      openAgentSessionPubkey={openAgentSessionPubkey}
+                      profiles={profiles}
+                      workingBotPubkeys={threadComposerBotTypingPubkeys}
+                      variant="inline"
+                    />
+                  ) : null
+                }
+              />
+            );
+            return wrapThreadPanel(panel);
+          })()
+        ) : shouldShowThreadSkeleton ? (
+          (() => {
+            const panel = (
+              <MessageThreadPanelSkeleton
+                {...threadLayoutProps}
+                onClose={onCloseThread}
+                widthPx={threadPanelWidthPx}
+              />
+            );
+            return wrapThreadPanel(panel);
+          })()
+        ) : activeChannel && selectedAgent ? (
+          (() => {
+            // When the panel was opened from a different channel than the
+            // currently active one, re-scope it to the active channel so
+            // that both the content/header AND channel-backed actions (e.g.
+            // Stop current turn) operate on the same channel object.
+            const effectiveAgentSessionChannelId =
+              openAgentSessionChannelId &&
+              activeChannel.id !== openAgentSessionChannelId
+                ? activeChannelId
+                : openAgentSessionChannelId;
+            const panel = (
+              <AgentSessionThreadPanel
+                agent={selectedAgent}
+                canInterruptTurn={selectedAgent.canInterruptTurn}
+                channel={
+                  effectiveAgentSessionChannelId
+                    ? effectiveAgentSessionChannelId === activeChannel.id
+                      ? activeChannel
+                      : null
+                    : agentSessionSelection.isAgentInActivityList({
+                          activityAgents,
+                          selectedAgent,
+                        })
+                      ? activeChannel
+                      : null
+                }
+                channelId={effectiveAgentSessionChannelId}
+                isSinglePanelView={
+                  useSplitAuxiliaryPane ? false : isSinglePanelView
+                }
+                layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+                transparentChrome={useSplitAuxiliaryPane}
+                profiles={profiles}
+                onBack={onBackFromAgentSession}
+                onClose={onCloseAgentSession}
+                widthPx={threadPanelWidthPx}
+              />
+            );
+            return wrapAux(panel, "agent-session-thread-panel");
+          })()
+        ) : profilePanelPubkey ? (
+          (() => {
+            const panel = (
+              <UserProfilePanel
+                currentPubkey={currentPubkey}
+                callerChannelId={activeChannelId}
+                isSinglePanelView={
+                  useSplitAuxiliaryPane ? false : isSinglePanelView
+                }
+                layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+                transparentChrome={useSplitAuxiliaryPane}
+                onClose={onCloseProfilePanel}
+                onOpenDm={onOpenDm}
+                onOpenProfile={onOpenProfilePanel}
+                onTabChange={onProfilePanelTabChange}
+                onViewChange={onProfilePanelViewChange}
+                pubkey={profilePanelPubkey}
+                splitPaneClamp
+                tab={profilePanelTab}
+                view={profilePanelView}
+                widthPx={threadPanelWidthPx}
+              />
+            );
+            return wrapAux(panel, "user-profile-panel");
+          })()
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 });
