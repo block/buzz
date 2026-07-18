@@ -15,9 +15,7 @@ export function MessageAgentOwner({
       data-testid="message-agent-owner"
     >
       <span className="sr-only">
-        {ownerLabel
-          ? `Agent owned by ${ownerLabel}`
-          : "Agent; owner unavailable"}
+        {ownerLabel ? "Agent owned by" : "Agent; owner unavailable"}
       </span>
       {ownerPubkey && ownerLabel ? (
         <>
@@ -28,11 +26,12 @@ export function MessageAgentOwner({
             <Bot className="relative -top-px h-3.5 w-3.5 self-center" />
             <span>owned by</span>
           </span>
-          <UserProfilePopover pubkey={ownerPubkey} triggerElement="span">
-            <span
-              aria-hidden="true"
-              className="min-w-0 truncate rounded font-semibold text-foreground/85 hover:text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            >
+          <UserProfilePopover
+            pubkey={ownerPubkey}
+            triggerAriaLabel={ownerLabel}
+            triggerElement="span"
+          >
+            <span className="min-w-0 truncate rounded font-semibold text-foreground/85 hover:text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
               {ownerLabel}
             </span>
           </UserProfilePopover>

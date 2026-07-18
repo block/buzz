@@ -126,9 +126,8 @@ test("agent owner label identifies the agent and owner", async ({ page }) => {
     ownerTreatment.getByText("owned by", { exact: true }),
   ).toBeVisible();
   await expect(ownerTreatment.locator(".font-semibold")).toHaveText("bob");
-  await expect(ownerTreatment.locator(".sr-only")).toHaveText(
-    "Agent owned by bob",
-  );
+  await expect(ownerTreatment.getByRole("button")).toHaveAccessibleName("bob");
+  await expect(ownerTreatment.locator(".sr-only")).toHaveText("Agent owned by");
 
   const joinedRow = page
     .getByTestId("system-message-row")
