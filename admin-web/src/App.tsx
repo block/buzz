@@ -401,6 +401,7 @@ function FeedbackDetailView({ id }: { id: string }) {
       <StateView resource={resource}>
         {(feedback) => {
           const attachments = feedbackAttachments(
+            feedback.id,
             feedback.tags,
             feedback.communityHost,
           );
@@ -457,6 +458,7 @@ type FeedbackStatuses = Record<string, boolean>;
 
 interface FeedbackAttachment {
   url: string;
+  sourceUrl: string;
   mimeType: string;
   hash: string;
   size?: number;
@@ -494,6 +496,7 @@ function timeRangeStart(range: string) {
 }
 
 function feedbackAttachments(
+  feedbackId: string,
   tags: string[][],
   communityHost: string,
 ): FeedbackAttachment[] {
@@ -514,7 +517,8 @@ function feedbackAttachments(
     const parsedSize = Number(values.get("size"));
     return [
       {
-        url: safeUrl,
+        url: `/api/admin/v1/feedback/${encodeURIComponent(feedbackId)}/attachments/${hash}`,
+        sourceUrl: safeUrl,
         mimeType,
         hash,
         size:
@@ -546,7 +550,7 @@ function stripAttachmentMarkdown(
   attachments?: FeedbackAttachment[],
 ) {
   const knownUrls = attachments
-    ? new Set(attachments.map((attachment) => attachment.url))
+    ? new Set(attachments.map((attachment) => attachment.sourceUrl))
     : undefined;
   return body
     .replace(/!?\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (match, url) => {
