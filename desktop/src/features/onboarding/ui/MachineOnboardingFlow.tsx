@@ -14,6 +14,7 @@ import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
 import { DefaultConfigStep } from "./DefaultConfigStep";
+import { IdentityKeyHelpDialog } from "./IdentityKeyHelpDialog";
 import { LandingBees } from "./LandingBees";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import {
@@ -212,6 +213,7 @@ export function MachineOnboardingFlow({
                   Use an existing key
                 </Button>
               </div>
+              <IdentityKeyHelpDialog />
             </OnboardingSlideTransition>
           ) : page === "key-import" ? (
             <OnboardingSlideTransition

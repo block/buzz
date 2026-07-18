@@ -7,6 +7,19 @@
  * fixed and repeats edge texture while the white center fills any card size.
  */
 .buzz-card-textured {
+  /*
+   * The asset has three zones, from outside in:
+   *   1. transparent powder bleed (outside the layout box, via outset)
+   *   2. feathered fade (inside the layout edge, white is NOT fully opaque)
+   *   3. solid white center (safe for content)
+   *
+   * `--buzz-card-textured-safe-inset` is the distance from the layout edge
+   * to zone 3. `Card variant="textured"` applies it as default padding so
+   * content always lands on solid fill. Features may add more padding,
+   * never less — and must never layer an opaque surface on top of the
+   * texture; the baked white center IS the surface.
+   */
+  --buzz-card-textured-safe-inset: 5rem;
   border: 0 solid transparent;
   border-image-source: url("./assets/card-texture.png");
   border-image-slice: 416 fill;
