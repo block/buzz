@@ -23,7 +23,6 @@ import {
   EmptyState,
   ProjectGridCard,
   ProjectListRow,
-  ProjectRailRow,
 } from "@/features/projects/ui/ProjectCards";
 import { CreateProjectDialog } from "@/features/projects/ui/CreateProjectDialog";
 import { ProjectsIssuesList } from "@/features/projects/ui/ProjectsIssuesList";
@@ -55,12 +54,12 @@ import {
 } from "@/features/projects/lib/projectsViewHelpers";
 import { useOpenProjectTerminal } from "@/features/projects/ui/useOpenProjectTerminal";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { CommunityEmojiIcon } from "@/features/communities/ui/CommunitySwitcher";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { PageHeader } from "@/shared/ui/PageHeader";
 
 const MANY_PROJECTS_THRESHOLD = 12;
 
@@ -418,43 +417,6 @@ export function ProjectsView() {
       </div>
     );
 
-  const mostActiveProjects = [...projects]
-    .sort((left, right) => {
-      const leftSummary = activitySummariesQuery.data?.[left.repoAddress];
-      const rightSummary = activitySummariesQuery.data?.[right.repoAddress];
-      const activityDifference =
-        (rightSummary?.activityCount ?? 0) - (leftSummary?.activityCount ?? 0);
-      if (activityDifference !== 0) return activityDifference;
-      // `updatedAt: 0` means a summary exists but recorded no activity —
-      // treat it like a missing summary and use the announcement time.
-      return (
-        (rightSummary?.updatedAt || right.createdAt) -
-        (leftSummary?.updatedAt || left.createdAt)
-      );
-    })
-    .slice(0, 3);
-
-  const mostActiveRepositoryItems =
-    mostActiveProjects.length === 0 ? (
-      <p className="px-2 py-8 text-center text-sm text-muted-foreground">
-        No repository activity yet
-      </p>
-    ) : (
-      <div className="space-y-1">
-        {mostActiveProjects.map((project) => {
-          const summary = activitySummariesQuery.data?.[project.repoAddress];
-          return (
-            <ProjectRailRow
-              key={project.id}
-              onOpen={handleOpenProject}
-              project={project}
-              summary={summary}
-            />
-          );
-        })}
-      </div>
-    );
-
   const listControls = (
     <div className="flex flex-wrap items-center gap-2 sm:justify-end">
       <label className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -497,23 +459,40 @@ export function ProjectsView() {
     />
   );
 
-  const projectsHeader = (
-    <div className="pointer-events-auto flex min-w-0 items-center gap-3 px-4 pb-1 pt-4">
-      <CommunityEmojiIcon className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/40 text-3xl" />
-      <div className="min-w-0 flex-1 space-y-0.5">
-        <h2 className="text-xl font-semibold leading-6 tracking-tight text-foreground">
-          {activeCommunity?.name || "Relay"} Projects
-        </h2>
-        <p className="line-clamp-2 max-w-2xl text-base font-normal text-muted-foreground sm:line-clamp-none">
-          Browse shared repositories, pull requests, and local project checkouts
-          in this workspace.
-        </p>
-      </div>
+  const createProjectButton = (
+    <div className="shrink-0 pl-4">
+      <Button
+        aria-label="Create project"
+        className="group h-8 gap-0 rounded-full px-2 transition-all duration-200 ease-out hover:gap-1.5 hover:px-3"
+        data-testid="create-project-button"
+        onClick={() => setCreateProjectOpen(true)}
+        size="sm"
+        type="button"
+        variant="default"
+      >
+        <Plus className="h-4 w-4 shrink-0" />
+        <span className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 ease-out group-hover:max-w-[4.5rem] group-hover:opacity-100">
+          Project
+        </span>
+      </Button>
     </div>
   );
 
-  const renderProjectsToolbar = () => (
-    <ProjectsToolbar filter={filter} onFilterChange={handleFilterChange} />
+  const projectsHeader = (
+    <PageHeader
+      className="pointer-events-auto mb-8"
+      description="Set up and manage your projects."
+      title={activeCommunity?.name || "Relay"}
+    />
+  );
+
+  const projectsNavigation = (
+    <div className="flex h-[3.25rem] min-w-0 items-center">
+      <div className="h-full min-w-0 flex-1">
+        <ProjectsToolbar filter={filter} onFilterChange={handleFilterChange} />
+      </div>
+      {createProjectButton}
+    </div>
   );
 
   return (
@@ -530,23 +509,6 @@ export function ProjectsView() {
         className="pointer-events-none absolute right-[3px] top-0 z-50 w-1 rounded-full bg-border/80 opacity-0 transition-opacity duration-200"
         ref={scrollIndicatorRef}
       />
-      {/* Pinned above the scroll container so it stays put while scrolling. */}
-      <div className="absolute right-4 top-4 z-40">
-        <Button
-          aria-label="Create project"
-          className="group h-8 gap-0 rounded-full px-2 transition-all duration-200 ease-out hover:gap-1.5 hover:px-3"
-          data-testid="create-project-button"
-          onClick={() => setCreateProjectOpen(true)}
-          size="sm"
-          type="button"
-          variant="default"
-        >
-          <Plus className="h-4 w-4 shrink-0" />
-          <span className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 ease-out group-hover:max-w-[4.5rem] group-hover:opacity-100">
-            Project
-          </span>
-        </Button>
-      </div>
       <CreateProjectDialog
         isCreating={createProjectMutation.isPending}
         onCreate={async (input) => {
@@ -560,72 +522,71 @@ export function ProjectsView() {
         open={createProjectOpen}
       />
       <div
-        className="buzz-content-scrollbar flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto"
+        className="buzz-content-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-scroll"
         onScroll={handleContentScroll}
       >
-        {projectsHeader}
-        {filter === "all" ? null : (
-          <div className="sticky top-0 z-30 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55">
-            {renderProjectsToolbar()}
+        <div className="px-4 pb-7 pt-7 sm:px-6 sm:pb-8 sm:pt-8">
+          <div className="mx-auto w-full max-w-6xl">{projectsHeader}</div>
+          <div className="sticky top-0 z-30 -mx-4 border-b border-border/60 bg-background/80 backdrop-blur-xl supports-backdrop-filter:bg-background/65 dark:bg-background/75 dark:supports-backdrop-filter:bg-background/60 sm:-mx-6">
+            <div className="px-4 sm:px-6">
+              <div className="mx-auto w-full max-w-6xl">
+                {projectsNavigation}
+              </div>
+            </div>
           </div>
-        )}
-        <div className="w-full min-w-0 px-4 pb-4 pt-4">
-          {filter === "all" ? (
-            <ProjectsOverviewPanel
-              localRepositoryCount={localProjectCount}
-              metadata={
-                <ProjectsOverviewRail
-                  profiles={profiles}
+          <div className="mx-auto w-full max-w-6xl">
+            <div className="w-full min-w-0 pb-4 pt-4">
+              {filter === "all" ? (
+                <ProjectsOverviewPanel
+                  localRepositoryCount={localProjectCount}
+                  metadata={
+                    <ProjectsOverviewRail
+                      profiles={profiles}
+                      projects={projects}
+                      summaries={activitySummariesQuery.data}
+                    />
+                  }
+                  onSelectSection={handleFilterChange}
                   projects={projects}
-                  snapshots={repoSnapshotsQuery.data}
-                  snapshotsLoading={repoSnapshotsQuery.isLoading}
                   summaries={activitySummariesQuery.data}
                 >
-                  {mostActiveRepositoryItems}
-                </ProjectsOverviewRail>
-              }
-              onSelectSection={handleFilterChange}
-              projects={projects}
-              summaries={activitySummariesQuery.data}
-            >
-              <div className="sticky top-0 z-30 -mx-4 mb-4 mt-2 bg-card/80 backdrop-blur-md supports-backdrop-filter:bg-card/70">
-                {renderProjectsToolbar()}
-              </div>
-              <section className="space-y-3">{activityFeed}</section>
-            </ProjectsOverviewPanel>
-          ) : (
-            <section className="space-y-3">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <h3 className="text-base font-semibold text-foreground">
-                  {filter === "prs"
-                    ? "Pull requests"
-                    : filter === "issues"
-                      ? "Issues"
-                      : "Repositories"}
-                </h3>
-                {listControls}
-              </div>
-              {filter === "prs" ? (
-                <ProjectsPullRequestsList
-                  isLoading={projectPullRequestsQuery.isLoading}
-                  onOpen={handleOpenPullRequest}
-                  profiles={profiles}
-                  pullRequests={visiblePullRequests}
-                  viewMode={viewMode}
-                />
-              ) : filter === "issues" ? (
-                <ProjectsIssuesList
-                  isLoading={projectIssuesQuery.isLoading}
-                  issues={visibleIssues}
-                  onOpen={handleOpenIssue}
-                  profiles={profiles}
-                  viewMode={viewMode}
-                />
+                  <section className="space-y-3">{activityFeed}</section>
+                </ProjectsOverviewPanel>
               ) : (
-                repositoryItems
+                <section className="space-y-3">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <h3 className="text-base font-semibold text-foreground">
+                      {filter === "prs"
+                        ? "Pull requests"
+                        : filter === "issues"
+                          ? "Issues"
+                          : "Repositories"}
+                    </h3>
+                    {listControls}
+                  </div>
+                  {filter === "prs" ? (
+                    <ProjectsPullRequestsList
+                      isLoading={projectPullRequestsQuery.isLoading}
+                      onOpen={handleOpenPullRequest}
+                      profiles={profiles}
+                      pullRequests={visiblePullRequests}
+                      viewMode={viewMode}
+                    />
+                  ) : filter === "issues" ? (
+                    <ProjectsIssuesList
+                      isLoading={projectIssuesQuery.isLoading}
+                      issues={visibleIssues}
+                      onOpen={handleOpenIssue}
+                      profiles={profiles}
+                      viewMode={viewMode}
+                    />
+                  ) : (
+                    repositoryItems
+                  )}
+                </section>
               )}
-            </section>
-          )}
+            </div>
+          </div>
         </div>
       </div>
     </div>

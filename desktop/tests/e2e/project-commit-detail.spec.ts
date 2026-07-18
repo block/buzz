@@ -16,6 +16,82 @@ async function enableProjectsFeature(page: import("@playwright/test").Page) {
   });
 }
 
+test("top-level project lists align dates and overflow actions", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz.projects.viewMode", "list");
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+
+  async function trailingPositions(row: import("@playwright/test").Locator) {
+    const date = row.getByTestId("projects-row-date");
+    const menu = row.getByRole("button", { name: /More options for/ });
+    await expect(date).toBeVisible();
+    await expect(menu).toBeVisible();
+    const dateBox = await date.boundingBox();
+    const menuBox = await menu.boundingBox();
+    expect(dateBox).not.toBeNull();
+    expect(menuBox).not.toBeNull();
+    return { dateX: dateBox?.x ?? 0, menuX: menuBox?.x ?? 0 };
+  }
+
+  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+  const repositoryPositions = await trailingPositions(
+    page.locator('[data-testid^="project-row-"]').first(),
+  );
+
+  await page
+    .getByRole("button", { name: "Pull Requests", exact: true })
+    .click();
+  const pullRequestRow = page
+    .locator('[data-testid^="projects-pr-row-"]')
+    .first();
+  const pullRequestPositions = await trailingPositions(pullRequestRow);
+  await pullRequestRow
+    .getByRole("button", { name: /More options for/ })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: /Review PR|View (draft|merge|closed)/ }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "Issues", exact: true }).click();
+  const issueRow = page.locator('[data-testid^="projects-issue-row-"]').first();
+  const issuePositions = await trailingPositions(issueRow);
+
+  expect(pullRequestPositions.dateX).toBeCloseTo(repositoryPositions.dateX, 0);
+  expect(pullRequestPositions.menuX).toBeCloseTo(repositoryPositions.menuX, 0);
+  expect(issuePositions.dateX).toBeCloseTo(repositoryPositions.dateX, 0);
+  expect(issuePositions.menuX).toBeCloseTo(repositoryPositions.menuX, 0);
+
+  await page.setViewportSize({ height: 720, width: 900 });
+  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+  const responsiveRepositoryRow = page
+    .locator('[data-testid^="project-row-"]')
+    .first();
+  await expect(
+    responsiveRepositoryRow.getByTestId("projects-row-summary"),
+  ).toBeHidden();
+  await expect(
+    responsiveRepositoryRow.getByTestId("projects-row-people"),
+  ).toBeHidden();
+  await expect(
+    responsiveRepositoryRow.getByTestId("projects-row-date"),
+  ).toBeVisible();
+  await expect(
+    responsiveRepositoryRow.getByRole("button", { name: /More options for/ }),
+  ).toBeVisible();
+  expect(
+    await responsiveRepositoryRow.evaluate(
+      (row) => row.scrollWidth <= row.clientWidth,
+    ),
+  ).toBe(true);
+});
+
 test("commit detail opens from the commits feed with a diff", async ({
   page,
 }) => {

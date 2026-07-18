@@ -3,7 +3,6 @@ import {
   FolderGit2,
   GitCommit,
   GitPullRequest,
-  MoreHorizontal,
   TerminalSquare,
   Trash2,
 } from "lucide-react";
@@ -24,6 +23,14 @@ import {
   relativeTime,
 } from "@/features/projects/lib/projectsViewHelpers";
 import { projectTerminalLabel } from "@/features/projects/ui/useOpenProjectTerminal";
+import {
+  PROJECT_LIST_ROW_CLASS,
+  PROJECT_LIST_ROW_DATE_CLASS,
+  PROJECT_LIST_ROW_META_TEXT_CLASS,
+  PROJECT_LIST_ROW_PREVIEW_CLASS,
+  PROJECT_LIST_ROW_TITLE_CLASS,
+  PROJECT_LIST_ROW_TRAILING_CLASS,
+} from "@/features/projects/ui/projectListRowStyles";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
@@ -38,14 +45,10 @@ import {
 } from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/shared/ui/dropdown-menu";
+import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { ProjectListRowMenu } from "./ProjectListRowMenu";
 
 function ProjectUpdatedLabel({
   profiles,
@@ -65,7 +68,7 @@ function ProjectUpdatedLabel({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="whitespace-nowrap text-xs text-muted-foreground">
+        <span className="whitespace-nowrap text-xs leading-4 text-muted-foreground/70">
           {relativeTime(updatedAt)}
         </span>
       </TooltipTrigger>
@@ -175,7 +178,8 @@ function ProjectStatsRow({
   return (
     <div
       className={cn(
-        "flex items-center gap-x-3 gap-y-1 text-xs text-muted-foreground",
+        "flex items-center gap-x-3 gap-y-1 text-muted-foreground",
+        fixedColumns ? PROJECT_LIST_ROW_META_TEXT_CLASS : "text-xs leading-4",
         !fixedColumns && "flex-wrap",
       )}
     >
@@ -326,46 +330,32 @@ function ProjectActionsMenu({
 
   return (
     <AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <Button
-            aria-label={`More options for ${project.name}`}
-            className="relative z-20 h-7 w-7 text-muted-foreground hover:text-foreground"
-            onClick={(event) => event.stopPropagation()}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <MoreHorizontal className="h-4 w-4" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="min-w-48">
-          <DropdownMenuItem
-            onSelect={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              void onOpenTerminal(project);
-            }}
-          >
-            <TerminalSquare className="h-4 w-4" />
-            {projectTerminalLabel(hasLocal)}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            className="text-destructive focus:text-destructive"
-            disabled={!canDelete || disabled}
-            onSelect={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              if (canDelete && !disabled) {
-                setConfirmOpen(true);
-              }
-            }}
-          >
-            <Trash2 className="h-4 w-4" />
-            Delete project
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <ProjectListRowMenu label={`More options for ${project.name}`}>
+        <DropdownMenuItem
+          onSelect={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void onOpenTerminal(project);
+          }}
+        >
+          <TerminalSquare className="h-4 w-4" />
+          {projectTerminalLabel(hasLocal)}
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          className="text-destructive focus:text-destructive"
+          disabled={!canDelete || disabled}
+          onSelect={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (canDelete && !disabled) {
+              setConfirmOpen(true);
+            }
+          }}
+        >
+          <Trash2 className="h-4 w-4" />
+          Delete project
+        </DropdownMenuItem>
+      </ProjectListRowMenu>
       <AlertDialogContent
         data-testid={`project-delete-confirm-${project.dtag}`}
       >
@@ -502,43 +492,52 @@ export function ProjectListRow({
 }: ProjectItemProps) {
   return (
     <div
-      className="group relative px-4 py-2.5 transition-colors duration-150 hover:bg-muted/20"
+      className={cn(PROJECT_LIST_ROW_CLASS, "py-3")}
       data-testid={`project-row-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="flex min-w-0 items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-w-0 items-start gap-2.5">
+        <div className="flex min-w-0 flex-1 items-start gap-2.5">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40">
             <FolderGit2 className="h-4.5 w-4.5 text-muted-foreground" />
           </span>
-          <div className="min-w-0">
+          <div className="-mt-0.5 min-w-0">
             <div className="flex min-w-0 items-center gap-2">
-              <span className="truncate text-sm font-semibold text-foreground">
+              <span className={PROJECT_LIST_ROW_TITLE_CLASS}>
                 {project.name}
               </span>
               <StatusPill status={project.status} />
             </div>
-            <p className="line-clamp-1 text-sm text-muted-foreground">
+            <p className={PROJECT_LIST_ROW_PREVIEW_CLASS}>
               {project.description || "A shared space for internal git work."}
             </p>
           </div>
         </div>
 
-        <div className="relative z-10 flex shrink-0 items-center gap-3">
-          <div className="hidden items-center gap-3 md:flex">
+        <div className={PROJECT_LIST_ROW_TRAILING_CLASS}>
+          <div
+            className="hidden items-center gap-3 xl:flex"
+            data-testid="projects-row-summary"
+          >
             <ProjectStatsRow fixedColumns summary={summary} />
             <div className="w-20 shrink-0">
               <ProjectActivityBar summary={summary} />
             </div>
           </div>
-          <div className="flex w-24 shrink-0 justify-end">
+          <div
+            className="hidden w-24 shrink-0 justify-end lg:flex"
+            data-testid="projects-row-people"
+          >
             <ProjectPeopleStack
               profiles={profiles}
               pubkeys={people}
               workOwnerPubkey={project.owner}
             />
           </div>
-          <div className="hidden w-24 shrink-0 text-right sm:block">
+          <div
+            className={PROJECT_LIST_ROW_DATE_CLASS}
+            data-testid="projects-row-date"
+          >
             <ProjectUpdatedLabel
               profiles={profiles}
               project={project}

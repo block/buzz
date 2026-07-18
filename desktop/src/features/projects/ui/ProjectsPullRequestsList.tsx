@@ -1,4 +1,4 @@
-import { Check, MessageSquare, X } from "lucide-react";
+import { GitPullRequest, MessageSquare } from "lucide-react";
 
 import type {
   Project,
@@ -10,10 +10,20 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
+import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
+import { ProjectListRowMenu } from "./ProjectListRowMenu";
+import {
+  PROJECT_LIST_ROW_CLASS,
+  PROJECT_LIST_ROW_CONTENT_CLASS,
+  PROJECT_LIST_ROW_DATE_CLASS,
+  PROJECT_LIST_ROW_STATUS_CLASS,
+  PROJECT_LIST_ROW_SUBTEXT_CLASS,
+  PROJECT_LIST_ROW_TITLE_CLASS,
+  PROJECT_LIST_ROW_TRAILING_CLASS,
+} from "./projectListRowStyles";
 
 /** Author name that opens the user profile popover. */
 function AuthorNameButton({
@@ -62,13 +72,6 @@ function formatRelativeTime(createdAt: number) {
   return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
 }
 
-function pullRequestStatusClassName(status: ProjectPullRequest["status"]) {
-  if (status === "Closed") return "text-destructive";
-  if (status === "Draft") return "text-muted-foreground";
-  if (status === "Merged") return "text-purple-400";
-  return "text-green-500";
-}
-
 function nextStepLabel(status: ProjectPullRequest["status"]) {
   if (status === "Draft") return "View draft";
   if (status === "Merged") return "View merge";
@@ -91,11 +94,6 @@ function PullRequestGridCard({
     profiles,
     pubkey: pullRequest.author,
   });
-  const authorProfile = profiles?.[normalizePubkey(pullRequest.author)];
-  const StatusIcon =
-    pullRequest.status === "Closed" || pullRequest.status === "Draft"
-      ? X
-      : Check;
 
   return (
     <Card className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-card p-4 shadow-none transition-colors duration-150 hover:bg-muted/20">
@@ -108,30 +106,12 @@ function PullRequestGridCard({
       </button>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex min-w-0 items-start gap-3">
-          <UserProfilePopover pubkey={pullRequest.author} triggerElement="span">
-            <button
-              aria-label={`View ${authorLabel}'s profile`}
-              className="relative z-10 inline-flex shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              type="button"
-            >
-              <UserAvatar
-                accent={authorProfile?.isAgent === true}
-                avatarUrl={authorProfile?.avatarUrl ?? null}
-                displayName={authorLabel}
-                size="md"
-              />
-            </button>
-          </UserProfilePopover>
+          <ProjectEventTypeIcon kind="pull-request" />
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex min-w-0 items-center gap-1.5">
               <p className="truncate text-sm font-semibold text-foreground">
                 {pullRequest.title}
               </p>
-              <StatusIcon
-                className={`h-3.5 w-3.5 shrink-0 ${pullRequestStatusClassName(
-                  pullRequest.status,
-                )}`}
-              />
             </div>
             <p className="truncate text-xs text-muted-foreground">
               {project.name}
@@ -201,14 +181,12 @@ function PullRequestListRow({
     profiles,
     pubkey: pullRequest.author,
   });
-  const authorProfile = profiles?.[normalizePubkey(pullRequest.author)];
-  const StatusIcon =
-    pullRequest.status === "Closed" || pullRequest.status === "Draft"
-      ? X
-      : Check;
 
   return (
-    <div className="group relative px-4 py-2.5 transition-colors duration-150 hover:bg-muted/20">
+    <div
+      className={PROJECT_LIST_ROW_CLASS}
+      data-testid={`projects-pr-row-${pullRequest.id}`}
+    >
       <button
         className="absolute inset-0"
         onClick={() => onOpen(project, pullRequest)}
@@ -216,39 +194,20 @@ function PullRequestListRow({
       >
         <span className="sr-only">View {pullRequest.title}</span>
       </button>
-      <div className="flex min-w-0 items-start gap-3">
-        <UserProfilePopover pubkey={pullRequest.author} triggerElement="span">
-          <button
-            aria-label={`View ${authorLabel}'s profile`}
-            className="relative z-10 inline-flex shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            type="button"
-          >
-            <UserAvatar
-              accent={authorProfile?.isAgent === true}
-              avatarUrl={authorProfile?.avatarUrl ?? null}
-              displayName={authorLabel}
-              size="md"
-            />
-          </button>
-        </UserProfilePopover>
-        <div className="min-w-0 flex-1 space-y-1">
+      <div className={PROJECT_LIST_ROW_CONTENT_CLASS}>
+        <ProjectEventTypeIcon kind="pull-request" />
+        <div className="-mt-0.5 min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1.5">
-            <p className="truncate text-sm font-semibold text-foreground">
-              {pullRequest.title}
-            </p>
-            <StatusIcon
-              className={`h-3.5 w-3.5 shrink-0 ${pullRequestStatusClassName(
-                pullRequest.status,
-              )}`}
-            />
+            <p className={PROJECT_LIST_ROW_TITLE_CLASS}>{pullRequest.title}</p>
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-foreground/80">
+          <div
+            className={`flex min-w-0 items-center gap-x-1.5 overflow-hidden whitespace-nowrap ${PROJECT_LIST_ROW_SUBTEXT_CLASS}`}
+          >
             <span>{project.name}</span>
             <span>·</span>
             <span className="font-mono text-foreground">
               #{pullRequest.id.slice(0, 8)}
             </span>
-            <span>created {formatRelativeTime(pullRequest.createdAt)}</span>
             <span>
               by{" "}
               <AuthorNameButton
@@ -256,29 +215,35 @@ function PullRequestListRow({
                 pubkey={pullRequest.author}
               />
             </span>
-            <span>·</span>
-            <span>{pullRequest.status}</span>
+            <span className="md:hidden">·</span>
+            <span className="md:hidden">{pullRequest.status}</span>
           </div>
         </div>
-        <div className="relative z-10 flex shrink-0 items-center gap-2">
-          {pullRequest.comments.length > 0 ? (
-            <span className="flex items-center gap-1 text-xs text-muted-foreground">
-              <MessageSquare className="h-3.5 w-3.5" />
-              {pullRequest.comments.length}
-            </span>
-          ) : null}
-          <Button
-            className="h-7 px-2.5"
-            onClick={(event) => {
-              event.stopPropagation();
-              onOpen(project, pullRequest);
-            }}
-            size="xs"
-            type="button"
-            variant="outline"
+        <div className={PROJECT_LIST_ROW_TRAILING_CLASS}>
+          <span className={PROJECT_LIST_ROW_STATUS_CLASS}>
+            {pullRequest.status}
+          </span>
+          <div className="hidden w-14 shrink-0 justify-end md:flex">
+            {pullRequest.comments.length > 0 ? (
+              <span className="flex items-center gap-1 text-2xs leading-3 text-muted-foreground">
+                <MessageSquare className="h-3.5 w-3.5" />
+                {pullRequest.comments.length}
+              </span>
+            ) : null}
+          </div>
+          <span
+            className={PROJECT_LIST_ROW_DATE_CLASS}
+            data-testid="projects-row-date"
+            title={new Date(pullRequest.createdAt * 1_000).toLocaleString()}
           >
-            {nextStepLabel(pullRequest.status)}
-          </Button>
+            {formatRelativeTime(pullRequest.createdAt)}
+          </span>
+          <ProjectListRowMenu label={`More options for ${pullRequest.title}`}>
+            <DropdownMenuItem onSelect={() => onOpen(project, pullRequest)}>
+              <GitPullRequest className="h-4 w-4" />
+              {nextStepLabel(pullRequest.status)}
+            </DropdownMenuItem>
+          </ProjectListRowMenu>
         </div>
       </div>
     </div>

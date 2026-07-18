@@ -45,6 +45,10 @@
  * set, engines ignore the `::-webkit-scrollbar` pseudo styles and fall back
  * to overlay scrollbars, which reintroduces the bug.
  */
+.buzz-content-scrollbar {
+  scrollbar-gutter: stable;
+}
+
 .buzz-content-scrollbar::-webkit-scrollbar {
   height: 10px;
   width: 10px;
