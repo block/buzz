@@ -172,7 +172,11 @@ export function CommunityOnboardingFlow({
     };
   }, [clear, isEnteringStage]);
 
-  const retryClaim = () => update({ stage: "claiming", error: undefined });
+  const retry = () =>
+    update({
+      stage: transaction?.inviteCode ? "claiming" : "connecting",
+      error: undefined,
+    });
   const relayUrl = transaction?.relayUrl;
   const finish = React.useCallback(async () => {
     if (!relayUrl) return;
@@ -295,7 +299,7 @@ export function CommunityOnboardingFlow({
               </p>
               <div className="mt-6 flex justify-center gap-3">
                 {transaction.error ? (
-                  <Button className="rounded-full px-6" onClick={retryClaim}>
+                  <Button className="rounded-full px-6" onClick={retry}>
                     Retry
                   </Button>
                 ) : null}

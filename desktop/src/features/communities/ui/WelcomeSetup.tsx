@@ -3,6 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, Copy, Info } from "lucide-react";
 
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
+import { normalizeRelayUrl } from "@/features/communities/relayProbe";
 import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
 import {
   ONBOARDING_KEY_FRAME_CLASS,
@@ -20,6 +21,7 @@ import {
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { pubkeyToNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
@@ -56,6 +58,8 @@ export function WelcomeSetup({
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
   const [npub, setNpub] = React.useState("");
   const [identityError, setIdentityError] = React.useState<string | null>(null);
+  const [relayUrl, setRelayUrl] = React.useState("");
+  const [relayUrlError, setRelayUrlError] = React.useState<string | null>(null);
   const [copied, setCopied] = React.useState(false);
   const communityOnboarding = useCommunityOnboarding();
   const systemColorScheme = useSystemColorScheme();
@@ -78,6 +82,24 @@ export function WelcomeSetup({
     setTransitionMode(nextPage === "welcome" ? "backward" : "forward");
     setPage(nextPage);
   }, []);
+
+  const handleJoin = React.useCallback(
+    (event: React.FormEvent) => {
+      event.preventDefault();
+      const normalizedRelayUrl = normalizeRelayUrl(relayUrl);
+      if (!normalizedRelayUrl) {
+        setRelayUrlError("Enter a valid community URL.");
+        return;
+      }
+
+      setRelayUrlError(null);
+      communityOnboarding.start({
+        source: "first-community",
+        relayUrl: normalizedRelayUrl,
+      });
+    },
+    [communityOnboarding, relayUrl],
+  );
 
   const handleInviteRedeem = React.useCallback(
     (relayWsUrl: string, code: string, policyReceipt?: string) => {
@@ -172,58 +194,103 @@ export function WelcomeSetup({
                 </p>
               </div>
               <div className="flex w-full flex-1 items-center justify-center pb-4 pt-12">
-                <div className="w-full max-w-4xl">
-                  <div
-                    className={ONBOARDING_KEY_FRAME_CLASS}
-                    data-testid="welcome-join-npub-frame"
-                  >
-                    <div className={ONBOARDING_KEY_ROW_CLASS}>
-                      <div className="min-w-0 flex-1">
-                        <code
-                          className={`${ONBOARDING_KEY_TEXT_CLASS} block`}
-                          data-testid="welcome-join-npub"
+                <div className="w-full max-w-[560px] space-y-8">
+                  <div>
+                    <div
+                      className={ONBOARDING_KEY_FRAME_CLASS}
+                      data-testid="welcome-join-npub-frame"
+                    >
+                      <div className={ONBOARDING_KEY_ROW_CLASS}>
+                        <div className="min-w-0 flex-1">
+                          <code
+                            className={`${ONBOARDING_KEY_TEXT_CLASS} block`}
+                            data-testid="welcome-join-npub"
+                          >
+                            {npub || "Loading…"}
+                          </code>
+                        </div>
+                        <Button
+                          aria-label="Copy npub"
+                          className="h-10 w-10 shrink-0 text-muted-foreground hover:text-foreground"
+                          disabled={!npub}
+                          onClick={() => {
+                            void writeTextToClipboard(npub).then(() => {
+                              setCopied(true);
+                              window.setTimeout(() => setCopied(false), 1500);
+                            });
+                          }}
+                          size="icon"
+                          type="button"
+                          variant="ghost"
                         >
-                          {npub || "Loading…"}
-                        </code>
+                          {copied ? (
+                            <Check
+                              className="h-6 w-6 text-primary"
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <Copy className="h-6 w-6" aria-hidden="true" />
+                          )}
+                        </Button>
                       </div>
-                      <Button
-                        aria-label="Copy npub"
-                        className="h-10 w-10 shrink-0 text-muted-foreground hover:text-foreground"
-                        disabled={!npub}
-                        onClick={() => {
-                          void writeTextToClipboard(npub).then(() => {
-                            setCopied(true);
-                            window.setTimeout(() => setCopied(false), 1500);
-                          });
-                        }}
-                        size="icon"
-                        type="button"
-                        variant="ghost"
-                      >
-                        {copied ? (
-                          <Check
-                            className="h-6 w-6 text-primary"
-                            aria-hidden="true"
-                          />
-                        ) : (
-                          <Copy className="h-6 w-6" aria-hidden="true" />
-                        )}
-                      </Button>
                     </div>
+                    {identityError ? (
+                      <p className="mt-4 text-sm text-destructive">
+                        {identityError}
+                      </p>
+                    ) : (
+                      <p className="mx-auto mt-4 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
+                        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          This is safe to share. It does not reveal your private
+                          key.
+                        </span>
+                      </p>
+                    )}
                   </div>
-                  {identityError ? (
-                    <p className="mt-4 text-sm text-destructive">
-                      {identityError}
-                    </p>
-                  ) : (
-                    <p className="mx-auto mt-6 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
-                      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      <span>
-                        This is safe to share. It does not reveal your private
-                        key.
-                      </span>
-                    </p>
-                  )}
+                  <form
+                    className="mx-auto w-full max-w-[440px] space-y-3 text-left"
+                    onSubmit={handleJoin}
+                  >
+                    <label
+                      className="text-sm font-medium"
+                      htmlFor="welcome-join-community-url"
+                    >
+                      Community URL
+                    </label>
+                    <Input
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      data-testid="welcome-join-community-url"
+                      id="welcome-join-community-url"
+                      onChange={(event) => {
+                        setRelayUrl(event.target.value);
+                        setRelayUrlError(null);
+                      }}
+                      placeholder="https://community.example.com"
+                      spellCheck={false}
+                      type="url"
+                      value={relayUrl}
+                    />
+                    {relayUrlError ? (
+                      <p className="text-sm text-destructive">
+                        {relayUrlError}
+                      </p>
+                    ) : (
+                      <p className="text-xs leading-5 text-foreground/70">
+                        After the host adds your public key, enter the community
+                        URL to join. If access is not ready yet, you can try
+                        again.
+                      </p>
+                    )}
+                    <Button
+                      className="w-full rounded-full"
+                      disabled={!relayUrl.trim()}
+                      type="submit"
+                    >
+                      Join community
+                    </Button>
+                  </form>
                 </div>
               </div>
               <OnboardingFooter>
