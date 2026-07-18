@@ -57,6 +57,7 @@ import {
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
+import { AcpSessionScopeSettingsCard } from "./AcpSessionScopeSettingsCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
 import { MobilePairingCard } from "./MobilePairingCard";
@@ -717,6 +718,7 @@ export function renderSettingsSection(
         <div className="space-y-12">
           <PreventSleepSettingsCard />
           <GlobalAgentConfigSettingsCard />
+          <AcpSessionScopeSettingsCard />
         </div>
       );
     case "channel-templates":

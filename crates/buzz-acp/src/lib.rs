@@ -2031,7 +2031,7 @@ async fn tokio_main() -> Result<()> {
                                 event: buzz_event.event,
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
-                                conversation_root: if config.top_level_sessions {
+                                conversation_root: if matches!(config.session_scope, config::SessionScope::Thread) {
                                     let tags = queue::parse_thread_tags(&event_for_steer);
                                     Some(tags.root_event_id.unwrap_or_else(|| event_id_hex.clone()))
                                 } else {
@@ -4181,7 +4181,7 @@ mod build_mcp_servers_tests {
             has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
-            top_level_sessions: false,
+            session_scope: config::SessionScope::Channel,
             no_base_prompt: false,
             base_prompt_content: None,
         }
@@ -4347,7 +4347,7 @@ mod error_outcome_emission_tests {
             has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
-            top_level_sessions: false,
+            session_scope: config::SessionScope::Channel,
             no_base_prompt: false,
             base_prompt_content: None,
         }

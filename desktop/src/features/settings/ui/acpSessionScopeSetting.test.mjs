@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { applyAcpTopLevelSessionsExperiment } from "./acpTopLevelSessionsExperiment.ts";
+import { applyAcpSessionScopeSetting } from "./acpSessionScopeSetting.ts";
 
 const localRunning = {
   pubkey: "local",
@@ -23,7 +23,7 @@ function harness(overrides = {}) {
   return {
     calls,
     deps: {
-      setBackend: async (enabled) => calls.push(["backend", enabled]),
+      setBackend: async (scope) => calls.push(["backend", scope]),
       listAgents: async () => [localRunning, remoteRunning, localStopped],
       stopAgent: async (pubkey) => calls.push(["stop", pubkey]),
       startAgent: async (pubkey) => calls.push(["start", pubkey]),
@@ -33,12 +33,12 @@ function harness(overrides = {}) {
   };
 }
 
-describe("ACP top-level sessions experiment", () => {
+describe("ACP session scope setting", () => {
   it("commits UI only after applying backend state and restarting running local agents", async () => {
     const { calls, deps } = harness();
-    await applyAcpTopLevelSessionsExperiment(false, true, deps);
+    await applyAcpSessionScopeSetting(false, true, deps);
     assert.deepEqual(calls, [
-      ["backend", true],
+      ["backend", "thread"],
       ["stop", "local"],
       ["start", "local"],
       ["ui", true],
@@ -55,14 +55,14 @@ describe("ACP top-level sessions experiment", () => {
       },
     });
     await assert.rejects(
-      applyAcpTopLevelSessionsExperiment(false, true, deps),
+      applyAcpSessionScopeSetting(false, true, deps),
       /restart failed/,
     );
     assert.deepEqual(calls, [
-      ["backend", true],
+      ["backend", "thread"],
       ["stop", "local"],
       ["start", "local"],
-      ["backend", false],
+      ["backend", "channel"],
       ["stop", "local"],
       ["start", "local"],
       ["ui", false],
@@ -71,13 +71,13 @@ describe("ACP top-level sessions experiment", () => {
 
   it("rolls UI back when persistence fails before any restart", async () => {
     const { calls, deps } = harness({
-      setBackend: async (enabled) => {
-        calls.push(["backend", enabled]);
-        if (enabled) throw new Error("persist failed");
+      setBackend: async (scope) => {
+        calls.push(["backend", scope]);
+        if (scope === "thread") throw new Error("persist failed");
       },
     });
     await assert.rejects(
-      applyAcpTopLevelSessionsExperiment(false, true, deps),
+      applyAcpSessionScopeSetting(false, true, deps),
       /persist failed/,
     );
     assert.equal(calls.at(-1)[0], "ui");
@@ -112,16 +112,16 @@ describe("ACP top-level sessions experiment", () => {
     });
 
     await assert.rejects(
-      applyAcpTopLevelSessionsExperiment(false, true, deps),
+      applyAcpSessionScopeSetting(false, true, deps),
       /apply failed/,
     );
     assert.deepEqual(calls, [
-      ["backend", true],
+      ["backend", "thread"],
       ["stop", "first"],
       ["start", "first"],
       ["stop", "second"],
       ["start", "second"],
-      ["backend", false],
+      ["backend", "channel"],
       ["stop", "first"],
       ["start", "first"],
       ["stop", "second"],

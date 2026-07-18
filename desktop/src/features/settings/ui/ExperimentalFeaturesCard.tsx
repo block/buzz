@@ -1,80 +1,20 @@
 import { setAgentManagedProfiles } from "@/shared/api/tauri";
 import { desktopFeatures, useFeatureToggle } from "@/shared/features";
-import { useEffect, useState } from "react";
+
 import type { FeatureDefinition } from "@/shared/features";
-import { listManagedAgents } from "@/shared/api/tauri";
-import {
-  startManagedAgent,
-  stopManagedAgent,
-} from "@/shared/api/tauriManagedAgents";
-import { invokeTauri } from "@/shared/api/tauri";
 import { Switch } from "@/shared/ui/switch";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
-import { applyAcpTopLevelSessionsExperiment } from "./acpTopLevelSessionsExperiment";
 
 function FeatureRow({ feature }: { feature: FeatureDefinition }) {
   const [enabled, toggle] = useFeatureToggle(feature.id);
-  const [pending, setPending] = useState(false);
   const switchId = `feature-toggle-${feature.id}`;
 
-  // Rust persistence is authoritative for this runtime experiment. Hydrate the
-  // local feature store when the row mounts rather than pushing localStorage
-  // into Tauri after launch-time agent restore has already run. Keep the switch
-  // disabled until this one-shot hydration finishes so a stale local value
-  // cannot race an in-flight toggle.
-  const isAcpTopLevelSessions = feature.id === "acpTopLevelSessions";
-  const [hydrated, setHydrated] = useState(!isAcpTopLevelSessions);
-  useEffect(() => {
-    if (!isAcpTopLevelSessions) return;
-    let cancelled = false;
-    void invokeTauri<boolean>("get_acp_top_level_sessions_experiment")
-      .then((persisted) => {
-        if (cancelled) return;
-        toggle(persisted);
-        setHydrated(true);
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          console.error(
-            "Failed to hydrate ACP top-level sessions experiment",
-            error,
-          );
-        }
+  const handleToggle = (value: boolean) => {
+    toggle(value);
+    if (feature.id === "agentManagedProfiles") {
+      void setAgentManagedProfiles(value).catch((error) => {
+        console.error("Failed to apply agent-managed profiles setting:", error);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [isAcpTopLevelSessions, toggle]);
-
-  const handleToggle = async (value: boolean) => {
-    if (feature.id !== "acpTopLevelSessions") {
-      toggle(value);
-      if (feature.id === "agentManagedProfiles") {
-        void setAgentManagedProfiles(value).catch((error) => {
-          console.error(
-            "Failed to apply agent-managed profiles setting:",
-            error,
-          );
-        });
-      }
-      return;
-    }
-    setPending(true);
-    try {
-      await applyAcpTopLevelSessionsExperiment(enabled, value, {
-        setBackend: (next) =>
-          invokeTauri("set_acp_top_level_sessions_experiment", {
-            enabled: next,
-          }),
-        listAgents: listManagedAgents,
-        stopAgent: stopManagedAgent,
-        startAgent: startManagedAgent,
-        setUi: toggle,
-      });
-    } catch (error) {
-      console.error("Failed to apply ACP top-level sessions experiment", error);
-    } finally {
-      setPending(false);
     }
   };
 
@@ -90,8 +30,7 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
         aria-labelledby={`${switchId}-label`}
         checked={enabled}
         data-testid={switchId}
-        disabled={pending || !hydrated}
-        onCheckedChange={(value) => void handleToggle(value)}
+        onCheckedChange={handleToggle}
       />
     </div>
   );

@@ -40,14 +40,6 @@
       "platforms": [
         "desktop"
       ]
-    },
-    {
-      "id": "acpTopLevelSessions",
-      "name": "Fresh agent sessions by conversation",
-      "description": "Start each human top-level agent mention in an isolated ACP session",
-      "platforms": [
-        "desktop"
-      ]
     }
   ]
 }

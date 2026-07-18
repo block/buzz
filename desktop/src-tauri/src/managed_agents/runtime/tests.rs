@@ -771,35 +771,42 @@ fn command_env(
 }
 
 #[test]
-fn top_level_sessions_enabled_finalization_overrides_conflicting_later_env() {
+fn thread_scope_finalization_overrides_legacy_env_without_forcing_queue() {
     let mut command = std::process::Command::new("buzz-acp");
-    // Simulate conflicting runtime defaults/user env written after Buzz's legacy defaults.
     command.env("BUZZ_ACP_TOP_LEVEL_SESSIONS", "false");
     command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
-    super::finalize_acp_top_level_sessions_env(&mut command, true);
+    super::finalize_acp_session_scope_env(
+        &mut command,
+        crate::commands::experiments::AcpSessionScope::Thread,
+    );
     let env = command_env(&command);
     assert_eq!(
-        env.get(std::ffi::OsStr::new("BUZZ_ACP_TOP_LEVEL_SESSIONS"))
+        env.get(std::ffi::OsStr::new("BUZZ_ACP_SESSION_SCOPE"))
             .unwrap(),
-        "true"
+        "thread"
     );
+    assert!(!env.contains_key(std::ffi::OsStr::new("BUZZ_ACP_TOP_LEVEL_SESSIONS")));
     assert_eq!(
         env.get(std::ffi::OsStr::new("BUZZ_ACP_MULTIPLE_EVENT_HANDLING"))
             .unwrap(),
-        "queue"
+        "steer"
     );
 }
 
 #[test]
-fn top_level_sessions_disabled_removes_flag_but_preserves_handling_override() {
+fn channel_scope_finalization_preserves_handling_override() {
     let mut command = std::process::Command::new("buzz-acp");
-    // Simulate conflicting later user env: the new flag is suppressed while the
-    // pre-existing handling override remains compatible when experiment is off.
-    command.env("BUZZ_ACP_TOP_LEVEL_SESSIONS", "true");
     command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "interrupt");
-    super::finalize_acp_top_level_sessions_env(&mut command, false);
+    super::finalize_acp_session_scope_env(
+        &mut command,
+        crate::commands::experiments::AcpSessionScope::Channel,
+    );
     let env = command_env(&command);
-    assert!(!env.contains_key(std::ffi::OsStr::new("BUZZ_ACP_TOP_LEVEL_SESSIONS")));
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("BUZZ_ACP_SESSION_SCOPE"))
+            .unwrap(),
+        "channel"
+    );
     assert_eq!(
         env.get(std::ffi::OsStr::new("BUZZ_ACP_MULTIPLE_EVENT_HANDLING"))
             .unwrap(),

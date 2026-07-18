@@ -1714,7 +1714,7 @@ pub fn spawn_agent_child(
     // Legacy default. User env may override this while the experiment is off;
     // enabled experiment state is authoritatively finalized at the spawn boundary.
     command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
-    let top_level_sessions = crate::commands::experiments::acp_top_level_sessions_enabled(app);
+    let session_scope = crate::commands::experiments::acp_session_scope(app);
     command.env("BUZZ_ACP_DEDUP", "queue");
     if let Some(meta) = runtime_meta {
         for (key, value) in meta.default_env {
@@ -1871,7 +1871,7 @@ pub fn spawn_agent_child(
     // Finalize after every default and user env write. Enabled experiment state
     // must be authoritative; disabled state only removes the new variable and
     // preserves the legacy handling override chosen above or supplied by users.
-    finalize_acp_top_level_sessions_env(&mut command, top_level_sessions);
+    finalize_acp_session_scope_env(&mut command, session_scope);
 
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
@@ -2128,17 +2128,16 @@ pub(crate) fn resolve_effective_prompt_model_provider(
     }
 }
 
-fn finalize_acp_top_level_sessions_env(command: &mut std::process::Command, enabled: bool) {
-    if enabled {
-        command.env("BUZZ_ACP_TOP_LEVEL_SESSIONS", "true");
-        // Conversation roots remain channel-serialized but must never steer
-        // into another root's in-flight ACP session.
-        command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "queue");
-    } else {
-        // The experiment's variable is never user-controlled while disabled.
-        // Do not touch MULTIPLE_EVENT_HANDLING: legacy user overrides remain valid.
-        command.env_remove("BUZZ_ACP_TOP_LEVEL_SESSIONS");
-    }
+fn finalize_acp_session_scope_env(
+    command: &mut std::process::Command,
+    scope: crate::commands::experiments::AcpSessionScope,
+) {
+    let value = match scope {
+        crate::commands::experiments::AcpSessionScope::Thread => "thread",
+        crate::commands::experiments::AcpSessionScope::Channel => "channel",
+    };
+    command.env("BUZZ_ACP_SESSION_SCOPE", value);
+    command.env_remove("BUZZ_ACP_TOP_LEVEL_SESSIONS");
 }
 
 #[cfg(test)]

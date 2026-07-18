@@ -60,6 +60,15 @@ pub enum DedupMode {
     Queue,
 }
 
+/// Scope used for scheduling and retained ACP session identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SessionScope {
+    /// One independent execution lane and session per outermost conversation root.
+    Thread,
+    /// Legacy behavior: one serialized execution lane and session per channel.
+    Channel,
+}
+
 /// How to handle new @mentions while a turn is already in-flight for that channel.
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum MultipleEventHandling {
@@ -468,10 +477,15 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
-    /// Isolate managed-agent ACP sessions by human conversation root.
-    /// Disabled by default; Desktop enables it through its in-app experiment.
-    #[arg(long, env = "BUZZ_ACP_TOP_LEVEL_SESSIONS", default_value_t = false)]
-    pub top_level_sessions: bool,
+    /// Scheduling and retained-session scope. Thread scope is the durable default;
+    /// channel scope preserves the legacy one-session-per-channel behavior.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_SESSION_SCOPE",
+        default_value = "thread",
+        value_enum
+    )]
+    pub session_scope: SessionScope,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -542,8 +556,8 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
-    /// Whether channel turns use conversation-root-scoped ACP sessions.
-    pub top_level_sessions: bool,
+    /// Scheduling and retained-session scope.
+    pub session_scope: SessionScope,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1003,7 +1017,7 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
-            top_level_sessions: args.top_level_sessions,
+            session_scope: args.session_scope,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1377,7 +1391,7 @@ mod tests {
             has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
-            top_level_sessions: false,
+            session_scope: SessionScope::Channel,
             no_base_prompt: false,
             base_prompt_content: None,
         }
@@ -2388,6 +2402,21 @@ channels = "ALL"
     }
 
     // ── Multiple-event-handling validation + default ──────────────────────────
+
+    #[test]
+    fn test_session_scope_defaults_to_thread_and_accepts_legacy_channel_mode() {
+        let default_args = CliArgs::parse_from(["buzz-acp", "--private-key", &"0".repeat(64)]);
+        assert_eq!(default_args.session_scope, SessionScope::Thread);
+
+        let channel_args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &"0".repeat(64),
+            "--session-scope",
+            "channel",
+        ]);
+        assert_eq!(channel_args.session_scope, SessionScope::Channel);
+    }
 
     #[test]
     fn test_multiple_event_handling_default_is_steer() {
