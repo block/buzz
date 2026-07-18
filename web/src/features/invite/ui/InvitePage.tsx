@@ -36,6 +36,8 @@ export function InvitePage({ code }: { code: string }) {
   const [downloadUrl, setDownloadUrl] = React.useState(BUZZ_RELEASES_URL);
   const [needsMacChoice, setNeedsMacChoice] = React.useState(false);
   const [showMacChoice, setShowMacChoice] = React.useState(false);
+  const [choosingMacDownload, setChoosingMacDownload] = React.useState(false);
+  const choosingMacDownloadRef = React.useRef(false);
   const downloadTriggerRef = React.useRef<HTMLAnchorElement>(null);
 
   React.useEffect(() => {
@@ -118,7 +120,19 @@ export function InvitePage({ code }: { code: string }) {
     platform: BuzzDownloadPlatform,
   ) => {
     event.preventDefault();
-    window.location.assign(await resolveBuzzDownloadUrlForPlatform(platform));
+    if (choosingMacDownloadRef.current) return;
+    choosingMacDownloadRef.current = true;
+    setChoosingMacDownload(true);
+    const downloadWindow = window.open("about:blank", "_blank");
+    if (downloadWindow) downloadWindow.opener = null;
+    setShowMacChoice(false);
+    try {
+      const url = await resolveBuzzDownloadUrlForPlatform(platform);
+      downloadWindow?.location.replace(url);
+    } finally {
+      choosingMacDownloadRef.current = false;
+      setChoosingMacDownload(false);
+    }
   };
 
   React.useEffect(() => {
@@ -246,7 +260,8 @@ export function InvitePage({ code }: { code: string }) {
             </div>
             <div className="mt-6 grid gap-3">
               <a
-                className="rounded-2xl border border-black p-5 text-black no-underline hover:bg-black hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
+                aria-disabled={choosingMacDownload}
+                className="rounded-2xl border border-black p-5 text-black no-underline hover:bg-black hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black aria-disabled:pointer-events-none aria-disabled:opacity-50"
                 href={BUZZ_RELEASES_URL}
                 onClick={(event) =>
                   void chooseMacDownload(event, {
@@ -261,7 +276,8 @@ export function InvitePage({ code }: { code: string }) {
                 </span>
               </a>
               <a
-                className="rounded-2xl border border-black p-5 text-black no-underline hover:bg-black hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
+                aria-disabled={choosingMacDownload}
+                className="rounded-2xl border border-black p-5 text-black no-underline hover:bg-black hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black aria-disabled:pointer-events-none aria-disabled:opacity-50"
                 href={BUZZ_RELEASES_URL}
                 onClick={(event) =>
                   void chooseMacDownload(event, {

@@ -139,6 +139,9 @@ test("invite asks Safari users to choose their Mac download", async ({
       body: JSON.stringify({ policy: null }),
     });
   });
+  await page.route("https://api.github.com/**", async (route) => {
+    await route.fulfill({ status: 500 });
+  });
 
   await page.goto("/invite/demo-code");
   const download = page.getByRole("link", { name: "Download it now" });
@@ -157,6 +160,16 @@ test("invite asks Safari users to choose their Mac download", async ({
   );
   await expect(chooser.getByText("About This Mac")).toBeVisible();
 
+  const openedPagePromise = context.waitForEvent("page");
+  await chooser.getByRole("link", { name: /Newer Mac/ }).click();
+  const openedPage = await openedPagePromise;
+  await expect(chooser).toBeHidden();
+  await expect(openedPage).toHaveURL("https://github.com/block/buzz/releases");
+  await expect(page).toHaveURL(/\/invite\/demo-code$/);
+  await openedPage.close();
+
+  await download.click();
+  await expect(chooser).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(chooser).toBeHidden();
   await expect(download).toBeFocused();
