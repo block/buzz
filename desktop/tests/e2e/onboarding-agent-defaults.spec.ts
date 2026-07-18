@@ -112,7 +112,7 @@ test("requires a runtime selection and routes Buzz Agent to config", async ({
   expect(await readSavedRuntime(page)).toBe("buzz-agent");
 });
 
-test("authenticated Claude saves the selected runtime and skips detailed config", async ({
+test("authenticated Claude saves the selected runtime and routes to defaults", async ({
   page,
 }) => {
   await installMockBridge(
@@ -128,7 +128,10 @@ test("authenticated Claude saves the selected runtime and skips detailed config"
   await page.getByTestId("onboarding-runtime-claude").click();
   await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
   await page.getByTestId("onboarding-setup-next").click();
-  await expect(page.getByTestId("machine-onboarding-gate")).toHaveCount(0);
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Claude",
+  );
   expect(await readSavedRuntime(page)).toBe("claude");
 });
 
@@ -669,7 +672,10 @@ test("unready setup pill runs setup from keyboard", async ({ page }) => {
   ).toHaveText("INSTALLED");
   await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
   await page.getByTestId("onboarding-setup-next").click();
-  await expect(page.getByTestId("machine-onboarding-gate")).toHaveCount(0);
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Claude Code",
+  );
 });
 
 test("config page shows Agent defaults form", async ({ page }) => {

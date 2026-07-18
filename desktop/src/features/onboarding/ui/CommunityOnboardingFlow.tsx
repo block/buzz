@@ -201,7 +201,7 @@ export function CommunityOnboardingFlow({
           className={cn(
             "relative w-full text-center",
             isProfileStage || isTeamStage
-              ? "buzz-onboarding-step-frame"
+              ? "buzz-onboarding-step-frame flex flex-col justify-center"
               : "flex min-h-dvh flex-col justify-center py-8",
             isProfileStage
               ? "max-w-4xl"

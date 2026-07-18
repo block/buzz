@@ -167,7 +167,7 @@ function RuntimeStatus({
       <div className="flex flex-col items-center gap-1.5">
         <Button
           aria-label={`Set up ${runtime.label}`}
-          className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+          className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
           data-setup-flash={isSetupFlashing ? "true" : undefined}
           data-testid={`onboarding-runtime-instructions-${runtime.id}`}
           onClick={(event) => {
@@ -262,7 +262,7 @@ function RuntimeStatus({
     return (
       <Button
         aria-label={`Install ${runtime.label}`}
-        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
         data-setup-flash={isSetupFlashing ? "true" : undefined}
         data-testid={`onboarding-runtime-install-${runtime.id}`}
         onClick={(event) => {
@@ -281,7 +281,7 @@ function RuntimeStatus({
   return (
     <Button
       aria-label={`View ${runtime.label} setup instructions`}
-      className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+      className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
       data-setup-flash={isSetupFlashing ? "true" : undefined}
       data-testid={`onboarding-runtime-instructions-${runtime.id}`}
       onClick={(event) => {
