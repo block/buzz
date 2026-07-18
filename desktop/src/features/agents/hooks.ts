@@ -581,6 +581,7 @@ export function useAttachManagedAgentToChannelMutation(
   channelId: string | null,
 ) {
   const queryClient = useQueryClient();
+  const activeRelayUrl = useActiveRelayUrl();
 
   return useMutation({
     mutationFn: async (
@@ -592,7 +593,11 @@ export function useAttachManagedAgentToChannelMutation(
         throw new Error("No channel selected.");
       }
 
-      return attachManagedAgentToChannel(effectiveChannelId, rest);
+      return attachManagedAgentToChannel(
+        effectiveChannelId,
+        rest,
+        activeRelayUrl,
+      );
     },
     onSuccess: (result, variables) => {
       const effectiveChannelId = variables.channelId ?? channelId;
@@ -627,6 +632,7 @@ export function useAttachManagedAgentToChannelMutation(
 
 export function useEnsureChannelAgentPresetMutation(channelId: string | null) {
   const queryClient = useQueryClient();
+  const activeRelayUrl = useActiveRelayUrl();
 
   return useMutation({
     mutationFn: async (
@@ -636,7 +642,11 @@ export function useEnsureChannelAgentPresetMutation(channelId: string | null) {
         throw new Error("No channel selected.");
       }
 
-      return ensureChannelAgentPresetInChannel(channelId, input);
+      return ensureChannelAgentPresetInChannel(
+        channelId,
+        input,
+        activeRelayUrl,
+      );
     },
     onSettled: () => {
       invalidateAgentQueriesInBackground(queryClient, channelId);
@@ -646,6 +656,7 @@ export function useEnsureChannelAgentPresetMutation(channelId: string | null) {
 
 export function useCreateChannelManagedAgentMutation(channelId: string | null) {
   const queryClient = useQueryClient();
+  const activeRelayUrl = useActiveRelayUrl();
 
   return useMutation({
     mutationFn: async (
@@ -657,9 +668,11 @@ export function useCreateChannelManagedAgentMutation(channelId: string | null) {
         throw new Error("No channel selected.");
       }
 
-      const result = await createChannelManagedAgents(effectiveChannelId, [
-        rest,
-      ]);
+      const result = await createChannelManagedAgents(
+        effectiveChannelId,
+        [rest],
+        activeRelayUrl,
+      );
       const success = result.successes[0];
       if (success) {
         return success;
@@ -745,6 +758,7 @@ export function useCreateChannelManagedAgentsMutation(
   channelId: string | null,
 ) {
   const queryClient = useQueryClient();
+  const activeRelayUrl = useActiveRelayUrl();
 
   return useMutation({
     mutationFn: async (
@@ -754,7 +768,7 @@ export function useCreateChannelManagedAgentsMutation(
         throw new Error("No channel selected.");
       }
 
-      return createChannelManagedAgents(channelId, inputs);
+      return createChannelManagedAgents(channelId, inputs, activeRelayUrl);
     },
     onSettled: () => {
       invalidateAgentQueriesInBackground(queryClient, channelId);

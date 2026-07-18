@@ -5,6 +5,7 @@ import {
   pickPreferredManagedAgent,
 } from "@/features/agents/agentReuse";
 export { findReusableAgent } from "@/features/agents/agentReuse";
+import { agentBelongsToRelay } from "@/features/agents/agentRelayScope";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveManagedAgentAvatarUrl } from "@/features/agents/ui/managedAgentAvatar";
 import {
@@ -104,13 +105,41 @@ export type CreateChannelManagedAgentsResult = {
   failures: CreateChannelManagedAgentBatchFailure[];
 };
 
+/**
+ * Relay invariant guard for channel attachment. An agent serves its home
+ * relay; attaching a foreign-relay agent to a channel on the active relay
+ * would add membership against a process that cannot hear this community —
+ * the silent-success trap where `membershipAdded: true` reports over a deaf
+ * agent. Throws an actionable error naming the agent, its home relay, and
+ * the active relay so the caller's onError surfaces a real message.
+ *
+ * Exported so the attach path and its regression tests exercise the same
+ * guard rather than a re-derivation of `agentBelongsToRelay`.
+ */
+export function assertAgentBelongsToActiveRelay(
+  agent: Pick<ManagedAgent, "name" | "relayUrl">,
+  activeRelayUrl: string | null,
+): void {
+  if (!agentBelongsToRelay(agent.relayUrl, activeRelayUrl)) {
+    throw new Error(
+      `Agent "${agent.name}" belongs to ${agent.relayUrl || "another community"} ` +
+        `and cannot be added to a channel on ${activeRelayUrl || "this community"}. ` +
+        `Add it from its home community, or create a new agent here.`,
+    );
+  }
+}
+
 export async function attachManagedAgentToChannel(
   channelId: string,
   input: AttachManagedAgentToChannelInput,
+  activeRelayUrl: string | null,
 ) {
   const role = input.role ?? "bot";
   const ensureRunning = input.ensureRunning ?? true;
   const agentPubkey = normalizePubkey(input.agent.pubkey);
+
+  assertAgentBelongsToActiveRelay(input.agent, activeRelayUrl);
+
   const membershipResult = await addChannelMembers({
     channelId,
     pubkeys: [input.agent.pubkey],
@@ -164,14 +193,23 @@ function buildChannelAgentName(runtimeId: string, runtimeLabel: string) {
   return runtimeLabel.trim().toLowerCase() || "agent";
 }
 
-function pickPreferredChannelPresetAgent(
+export function pickPreferredChannelPresetAgent(
   agents: ManagedAgent[],
   memberPubkeys: ReadonlySet<string>,
   runtimeCommand: string,
   expectedName: string,
+  activeRelayUrl: string | null,
 ) {
+  // Only agents pinned to the active community's relay are reusable here.
+  // Selecting a foreign-relay agent would attach a process that cannot hear
+  // this community; excluding it lets the caller fall through to creating a
+  // new agent on the active relay (correct per-community behavior).
+  const relayScoped = agents.filter((agent) =>
+    agentBelongsToRelay(agent.relayUrl, activeRelayUrl),
+  );
+
   const inChannelAgent = pickPreferredManagedAgent(
-    agents.filter(
+    relayScoped.filter(
       (agent) =>
         commandsMatch(agent.agentCommand, runtimeCommand) &&
         memberPubkeys.has(normalizePubkey(agent.pubkey)),
@@ -182,7 +220,7 @@ function pickPreferredChannelPresetAgent(
   }
 
   return pickPreferredManagedAgent(
-    agents.filter(
+    relayScoped.filter(
       (agent) =>
         commandsMatch(agent.agentCommand, runtimeCommand) &&
         agent.name.trim().toLowerCase() === expectedName.trim().toLowerCase(),
@@ -193,6 +231,7 @@ function pickPreferredChannelPresetAgent(
 export async function ensureChannelAgentPresetInChannel(
   channelId: string,
   input: EnsureChannelAgentPresetInput,
+  activeRelayUrl: string | null,
 ): Promise<EnsureChannelAgentPresetResult> {
   const role = input.role ?? "bot";
   const ensureRunning = input.ensureRunning ?? true;
@@ -210,14 +249,19 @@ export async function ensureChannelAgentPresetInChannel(
     memberPubkeys,
     input.runtime.command,
     expectedName,
+    activeRelayUrl,
   );
 
   if (existingAgent) {
-    const attached = await attachManagedAgentToChannel(channelId, {
-      agent: existingAgent,
-      role,
-      ensureRunning,
-    });
+    const attached = await attachManagedAgentToChannel(
+      channelId,
+      {
+        agent: existingAgent,
+        role,
+        ensureRunning,
+      },
+      activeRelayUrl,
+    );
     return {
       ...attached,
       created: false,
@@ -233,11 +277,15 @@ export async function ensureChannelAgentPresetInChannel(
     mcpCommand: input.runtime.mcpCommand ?? "",
     spawnAfterCreate: false,
   });
-  const attached = await attachManagedAgentToChannel(channelId, {
-    agent: created.agent,
-    role,
-    ensureRunning,
-  });
+  const attached = await attachManagedAgentToChannel(
+    channelId,
+    {
+      agent: created.agent,
+      role,
+      ensureRunning,
+    },
+    activeRelayUrl,
+  );
 
   return {
     ...attached,
@@ -379,17 +427,22 @@ export async function provisionChannelManagedAgent(
 export async function createChannelManagedAgent(
   channelId: string,
   input: CreateChannelManagedAgentInput,
+  activeRelayUrl: string | null,
   context?: {
     managedAgents?: ManagedAgent[];
     channelMemberPubkeys?: ReadonlySet<string>;
   },
 ): Promise<CreateChannelManagedAgentResult> {
   const provisioned = await provisionChannelManagedAgent(input, context);
-  const attached = await attachManagedAgentToChannel(channelId, {
-    agent: provisioned.agent,
-    role: input.role ?? "bot",
-    ensureRunning: input.ensureRunning ?? true,
-  });
+  const attached = await attachManagedAgentToChannel(
+    channelId,
+    {
+      agent: provisioned.agent,
+      role: input.role ?? "bot",
+      ensureRunning: input.ensureRunning ?? true,
+    },
+    activeRelayUrl,
+  );
 
   return {
     ...attached,
@@ -401,6 +454,7 @@ export async function createChannelManagedAgent(
 export async function createChannelManagedAgents(
   channelId: string,
   inputs: readonly CreateChannelManagedAgentInput[],
+  activeRelayUrl: string | null,
 ): Promise<CreateChannelManagedAgentsResult> {
   // Fetch managed agents and channel members once for smart reuse checks.
   const [managedAgents, members] = await Promise.all([
@@ -421,7 +475,12 @@ export async function createChannelManagedAgents(
   for (let i = 0; i < inputs.length; i++) {
     const input = inputs[i];
     try {
-      const result = await createChannelManagedAgent(channelId, input, context);
+      const result = await createChannelManagedAgent(
+        channelId,
+        input,
+        activeRelayUrl,
+        context,
+      );
       successes.push(result);
     } catch (error) {
       failures.push({

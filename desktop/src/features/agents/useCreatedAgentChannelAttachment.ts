@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { attachManagedAgentToChannel } from "./channelAgents";
 import type { AgentChannelAttachmentFailure } from "./channelAttachmentFailure";
+import { useActiveRelayUrl } from "@/features/communities/useCommunities";
 import type { Channel, CreateManagedAgentResponse } from "@/shared/api/types";
 
 type TargetChannel = Pick<Channel, "id" | "name">;
@@ -17,6 +18,7 @@ export function useCreatedAgentChannelAttachment() {
     React.useState<AgentChannelAttachmentFailure | null>(null);
   const targetChannelRef = React.useRef<TargetChannel | null>(null);
   const [isRetryingAttachment, setIsRetryingAttachment] = React.useState(false);
+  const activeRelayUrl = useActiveRelayUrl();
 
   async function attach(
     created: CreateManagedAgentResponse,
@@ -24,11 +26,15 @@ export function useCreatedAgentChannelAttachment() {
   ) {
     targetChannelRef.current = targetChannel;
     try {
-      const attached = await attachManagedAgentToChannel(targetChannel.id, {
-        agent: created.agent,
-        role: "bot",
-        ensureRunning: true,
-      });
+      const attached = await attachManagedAgentToChannel(
+        targetChannel.id,
+        {
+          agent: created.agent,
+          role: "bot",
+          ensureRunning: true,
+        },
+        activeRelayUrl,
+      );
       created.agent = attached.agent;
       targetChannelRef.current = null;
       setAttachmentFailure(null);
