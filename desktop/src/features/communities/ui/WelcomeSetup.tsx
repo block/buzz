@@ -194,7 +194,7 @@ export function WelcomeSetup({
                 </p>
               </div>
               <div className="flex w-full flex-1 items-center justify-center pb-4 pt-12">
-                <div className="w-full max-w-[560px] space-y-8">
+                <div className="w-full max-w-4xl space-y-7">
                   <div>
                     <div
                       className={ONBOARDING_KEY_FRAME_CLASS}
@@ -249,7 +249,7 @@ export function WelcomeSetup({
                     )}
                   </div>
                   <form
-                    className="mx-auto w-full max-w-[440px] space-y-3 text-left"
+                    className="mx-auto w-full max-w-[680px] text-left"
                     onSubmit={handleJoin}
                   >
                     <label
@@ -258,38 +258,41 @@ export function WelcomeSetup({
                     >
                       Community URL
                     </label>
-                    <Input
-                      autoCapitalize="none"
-                      autoCorrect="off"
-                      data-testid="welcome-join-community-url"
-                      id="welcome-join-community-url"
-                      onChange={(event) => {
-                        setRelayUrl(event.target.value);
-                        setRelayUrlError(null);
-                      }}
-                      placeholder="https://community.example.com"
-                      spellCheck={false}
-                      type="url"
-                      value={relayUrl}
-                    />
-                    {relayUrlError ? (
-                      <p className="text-sm text-destructive">
-                        {relayUrlError}
-                      </p>
-                    ) : (
-                      <p className="text-xs leading-5 text-foreground/70">
-                        After the host adds your public key, enter the community
-                        URL to join. If access is not ready yet, you can try
-                        again.
-                      </p>
-                    )}
-                    <Button
-                      className="w-full rounded-full"
-                      disabled={!relayUrl.trim()}
-                      type="submit"
-                    >
-                      Join community
-                    </Button>
+                    <div className="mt-2 flex items-start gap-3">
+                      <div className="min-w-0 flex-1">
+                        <Input
+                          autoCapitalize="none"
+                          autoCorrect="off"
+                          data-testid="welcome-join-community-url"
+                          id="welcome-join-community-url"
+                          onChange={(event) => {
+                            setRelayUrl(event.target.value);
+                            setRelayUrlError(null);
+                          }}
+                          placeholder="https://community.example.com"
+                          spellCheck={false}
+                          type="url"
+                          value={relayUrl}
+                        />
+                        {relayUrlError ? (
+                          <p className="mt-2 text-sm text-destructive">
+                            {relayUrlError}
+                          </p>
+                        ) : (
+                          <p className="mt-2 text-xs leading-5 text-foreground/70">
+                            Once the host adds your public key, enter the URL to
+                            join. You can retry if access is not ready yet.
+                          </p>
+                        )}
+                      </div>
+                      <Button
+                        className="h-10 shrink-0 rounded-full px-6"
+                        disabled={!relayUrl.trim()}
+                        type="submit"
+                      >
+                        Join community
+                      </Button>
+                    </div>
                   </form>
                 </div>
               </div>
