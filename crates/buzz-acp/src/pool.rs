@@ -6134,4 +6134,193 @@ mod tests {
             "timestamp must not use +00:00 offset"
         );
     }
+
+    // ── Quinn review probes (PR #1981 @ eca05aa25) ─────────────────────────
+    // Reviewer-authored, NOT for merge as-is: empirical proofs for the
+    // pool-affinity / LRU-eviction / respawn edges Eva flagged unwritten.
+    // Run in a DETACHED scratch worktree at the reviewed SHA.
+
+    async fn quinn_probe_agent(index: usize) -> OwnedAgent {
+        let acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "sleep 30".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn bash probe agent");
+        OwnedAgent {
+            index,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "probe".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        }
+    }
+
+    // Q1: after a root's session is LRU-evicted from its owning slot, the stale
+    // session_owners[key]->owner reservation must NOT win over a DIFFERENT slot
+    // that legitimately holds the session. Without prune, Pass 1 binds blindly to
+    // the stale owner and FORKS a new session; with prune, the reservation is
+    // dropped and the session-holding slot is reused. Two slots make the two
+    // outcomes observably distinct (non-vacuous: fails if prune is neutered).
+    #[tokio::test]
+    async fn quinn_lru_evict_stale_reservation_does_not_beat_real_session_holder() {
+        let channel_id = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots(vec![
+            Some(quinn_probe_agent(0).await),
+            Some(quinn_probe_agent(1).await),
+        ]);
+        let key = ConversationSessionKey {
+            channel_id,
+            root_event_id: Some("root-k".into()),
+        };
+
+        // Reservation says slot 0 owns `key`, but slot 0 does NOT hold the session
+        // (evicted); slot 1 is the real session holder.
+        pool.session_owners.insert(key.clone(), 0);
+        pool.agents[1]
+            .as_mut()
+            .unwrap()
+            .state
+            .insert_session(key.clone(), "real-sess".into());
+        assert!(!pool.agents[0]
+            .as_ref()
+            .unwrap()
+            .state
+            .contains_session(&key));
+        assert!(pool.agents[1]
+            .as_ref()
+            .unwrap()
+            .state
+            .contains_session(&key));
+
+        // Correct: prune drops the stale reservation, Pass 1 finds slot 1 by
+        // contains_session, and we reuse the retained session — NOT a fresh fork.
+        match pool.try_claim(Some(&key)) {
+            ClaimOutcome::Claimed(a) => {
+                assert_eq!(
+                    a.index, 1,
+                    "must claim the slot that actually holds the session"
+                );
+                assert!(
+                    a.state.contains_session(&key),
+                    "must reuse the retained session, not fork"
+                );
+            }
+            _ => panic!("expected Claimed on the session-holding slot"),
+        }
+    }
+
+    // Q1b: sanity — a bare stale reservation (no other holder) is dropped by prune
+    // and falls through to a clean Pass 2 claim without phantom session content.
+    #[tokio::test]
+    async fn quinn_bare_stale_reservation_is_pruned() {
+        let channel_id = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots(vec![Some(quinn_probe_agent(0).await)]);
+        let key = ConversationSessionKey {
+            channel_id,
+            root_event_id: Some("root-b".into()),
+        };
+        pool.session_owners.insert(key.clone(), 0); // stale: slot 0 holds no such session
+        match pool.try_claim(Some(&key)) {
+            ClaimOutcome::Claimed(a) => assert!(!a.state.contains_session(&key)),
+            _ => panic!("expected clean Claimed after pruning bare stale reservation"),
+        }
+    }
+
+    // Q2: strict affinity — a root whose owning slot is checked out (busy)
+    // returns BusyOwner (never migrates to another idle slot, never Exhausted),
+    // and an UNRELATED root can still claim a different idle slot concurrently.
+    #[tokio::test]
+    async fn quinn_busy_owner_does_not_block_unrelated_root() {
+        let channel_id = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots(vec![
+            Some(quinn_probe_agent(0).await),
+            Some(quinn_probe_agent(1).await),
+        ]);
+        let root_a = ConversationSessionKey {
+            channel_id,
+            root_event_id: Some("root-a".into()),
+        };
+        let root_b = ConversationSessionKey {
+            channel_id,
+            root_event_id: Some("root-b".into()),
+        };
+
+        // Claim A (checks out its slot) and record a task_map entry so prune keeps
+        // the reservation alive (busy owner), mirroring an in-flight turn.
+        let a_agent = pool.try_claim(Some(&root_a)).claimed().expect("A claimed");
+        let a_idx = a_agent.index;
+        // prune_session_owners keeps a reservation alive iff a task_map entry has
+        // agent_index == owner (busy) — only agent_index matters here. task_map is
+        // keyed by tokio::task::Id, so mint a real one from a spawned task.
+        let real_task_id = tokio::spawn(async {}).id();
+        pool.task_map.insert(
+            real_task_id,
+            TaskMeta {
+                agent_index: a_idx,
+                scope: Some(root_a.clone()),
+                turn_id: "turn-a".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+
+        // Second A turn must report BusyOwner — not migrate, not Exhausted.
+        assert!(
+            matches!(pool.try_claim(Some(&root_a)), ClaimOutcome::BusyOwner),
+            "same busy root must yield BusyOwner"
+        );
+
+        // Unrelated root B claims the OTHER idle slot concurrently.
+        let b_agent = pool
+            .try_claim(Some(&root_b))
+            .claimed()
+            .expect("B claims other slot");
+        assert_ne!(b_agent.index, a_idx, "B must not steal A's slot");
+        let _ = a_agent;
+    }
+
+    // Q3: worker death/respawn — a respawned agent enters the SAME index with a
+    // fresh default SessionState. A stale session_owners reservation for the dead
+    // slot must NOT survive: prune drops it (fresh state has no session, no live
+    // task), so the root re-claims cleanly instead of binding a phantom session.
+    #[tokio::test]
+    async fn quinn_respawn_clears_stale_reservation() {
+        let channel_id = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots(vec![Some(quinn_probe_agent(0).await)]);
+        let root = ConversationSessionKey {
+            channel_id,
+            root_event_id: Some("root-x".into()),
+        };
+
+        let mut agent = pool.try_claim(Some(&root)).claimed().expect("claimed");
+        agent.state.insert_session(root.clone(), "sess-x".into());
+        // Simulate death: drop the agent WITHOUT returning it; slot 0 now empty,
+        // but session_owners still holds root -> 0.
+        drop(agent);
+        assert_eq!(
+            pool.session_owners.get(&root),
+            Some(&0),
+            "reservation outlives the dead slot"
+        );
+        assert!(pool.agents[0].is_none(), "slot empty after death");
+
+        // Respawn: fresh default-state agent at the same index (mirrors lib.rs:1731).
+        pool.return_agent(quinn_probe_agent(0).await);
+
+        match pool.try_claim(Some(&root)) {
+            ClaimOutcome::Claimed(a) => assert!(
+                !a.state.contains_session(&root),
+                "respawned slot must not inherit the dead session via stale reservation"
+            ),
+            _ => panic!("expected clean Claimed after respawn"),
+        }
+    }
 }
