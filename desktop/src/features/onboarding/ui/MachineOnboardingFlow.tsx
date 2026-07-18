@@ -155,7 +155,7 @@ export function MachineOnboardingFlow({
 
   return (
     <div
-      className={`buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-y-auto px-4 text-foreground ${
+      className={`buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-x-hidden overflow-y-auto px-4 text-foreground ${
         page === "identity"
           ? "buzz-onboarding-welcome py-8"
           : "pb-28 pt-[106px]"

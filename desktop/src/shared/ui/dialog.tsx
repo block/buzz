@@ -84,7 +84,7 @@ const DialogContent = React.forwardRef<
       />
       <div
         className={cn(
-          "pointer-events-none fixed inset-0 z-50 grid place-items-center overflow-y-auto",
+          "pointer-events-none fixed inset-0 z-50 grid place-items-center overflow-x-hidden overflow-y-auto",
           // The textured surface bleeds a 96px powder band beyond its layout
           // box (see card-texture.css). Give the wrapper enough padding that
           // the bleed isn't clipped by this scroll container; every other
@@ -100,7 +100,7 @@ const DialogContent = React.forwardRef<
             surface === "default" && "rounded-2xl bg-background p-6 shadow-2xl",
             surface === "none" && "bg-transparent p-0 shadow-none",
             surface === "textured" &&
-              "buzz-card-textured isolate rounded-none border-0 bg-transparent p-[var(--buzz-card-textured-safe-inset)] shadow-none",
+              "buzz-card-textured isolate box-border w-full rounded-none border-0 bg-transparent p-[var(--buzz-card-textured-safe-inset)] shadow-none",
             MODAL_CONTENT_MOTION_CLASS,
             className,
           )}

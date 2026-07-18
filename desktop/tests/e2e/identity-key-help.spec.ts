@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 const HELP_SEEN_KEY = "buzz.machine-onboarding.identity-key-help-seen.v1";
@@ -22,10 +23,12 @@ test("identity key help explains the first-run choice", async ({ page }) => {
     )
     .toBe("true");
 
+  await page.setViewportSize({ width: 720, height: 620 });
   await trigger.click();
 
   const dialog = page.getByTestId("identity-key-help-dialog");
   await expect(dialog).toBeVisible();
+  await waitForAnimations(page);
   await expect(
     dialog.getByRole("heading", { name: "What’s an identity key?" }),
   ).toBeVisible();
@@ -34,6 +37,14 @@ test("identity key help explains the first-run choice", async ({ page }) => {
     "background-color",
     "rgba(0, 0, 0, 0)",
   );
+  const dialogWrapper = dialog.locator("..");
+  await expect(dialogWrapper).toHaveCSS("overflow-x", "hidden");
+  const dialogBounds = await dialog.boundingBox();
+  expect(dialogBounds).not.toBeNull();
+  expect(dialogBounds?.x).toBeGreaterThanOrEqual(0);
+  expect(
+    (dialogBounds?.x ?? 0) + (dialogBounds?.width ?? 0),
+  ).toBeLessThanOrEqual(720);
 
   await page.keyboard.press("Escape");
   await expect(dialog).not.toBeVisible();
