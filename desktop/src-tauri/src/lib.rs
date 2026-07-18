@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 mod app_state;
 mod archive;
+mod builderlab;
 mod commands;
 mod deep_link;
 mod event_sync;
@@ -33,6 +34,10 @@ mod mesh_llm_stubs;
 use mesh_llm_stubs::*;
 
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
+use builderlab::{
+    bind_builderlab_nostr_identity, check_builderlab_community_name, create_builderlab_community,
+    get_builderlab_auth, get_builderlab_nostr_identity, start_builderlab_login, BuilderlabSession,
+};
 use commands::*;
 use deep_link::{
     acknowledge_pending_community_deep_link, handle_deep_link_url,
@@ -450,6 +455,7 @@ pub fn run() {
         .manage(build_app_state())
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
+        .manage(BuilderlabSession::default())
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -742,6 +748,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
+            start_builderlab_login,
+            get_builderlab_auth,
+            get_builderlab_nostr_identity,
+            bind_builderlab_nostr_identity,
+            check_builderlab_community_name,
+            create_builderlab_community,
             title_bar_double_click,
             get_identity,
             get_nsec,

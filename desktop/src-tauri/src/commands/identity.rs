@@ -343,7 +343,7 @@ fn nostr_bind_tag(name: &str, value: &str) -> Result<Tag, String> {
     Tag::parse(vec![name, value]).map_err(|error| format!("{name} tag failed: {error}"))
 }
 
-fn build_nostr_identity_binding_event(
+pub(crate) fn build_nostr_identity_binding_event(
     keys: &Keys,
     challenge_id: &str,
     nonce: &str,
