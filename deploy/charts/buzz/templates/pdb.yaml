@@ -1,5 +1,5 @@
 {{- include "buzz.validate" . -}}
-{{- if and .Values.podDisruptionBudget.enabled (gt (.Values.replicaCount | int) 1) -}}
+{{- if and .Values.podDisruptionBudget.enabled (gt (include "buzz.minimumReplicas" . | int) 1) -}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

@@ -10,14 +10,15 @@ surface at template time regardless of which manifest helm renders first.
   {{- fail "relayUrl is required: set --set relayUrl=wss://your.domain" -}}
 {{- end -}}
 
-{{/* replicaCount > 1 requires Redis */}}
-{{- if gt (.Values.replicaCount | int) 1 -}}
+{{/* Multiple replicas require Redis, whether fixed or autoscaled. */}}
+{{- $minimumReplicas := include "buzz.minimumReplicas" . | int -}}
+{{- if gt $minimumReplicas 1 -}}
   {{- if and (not .Values.redis.enabled) (not .Values.externalRedis.url) (not .Values.secrets.existingSecret) -}}
-    {{- fail (printf "replicaCount=%d requires Redis for buzz-pubsub. Enable redis.enabled=true, set externalRedis.url, or provide secrets.existingSecret with key REDIS_URL." (.Values.replicaCount | int)) -}}
+    {{- fail (printf "minimum replica count %d requires Redis for buzz-pubsub. Enable redis.enabled=true, set externalRedis.url, or provide secrets.existingSecret with key REDIS_URL." $minimumReplicas) -}}
   {{- end -}}
 {{- end -}}
 
-{{/* replicaCount > 1 does NOT require ReadWriteMany git storage.
+{{/* Multiple replicas do NOT require ReadWriteMany git storage.
 
      Git ref/object state is object-store-backed: every read and write hydrates
      an ephemeral bare repo from S3-compatible storage per request, and writer
@@ -31,6 +32,19 @@ surface at template time regardless of which manifest helm renders first.
      removed here: its stated reason ("git on-disk state must be shared across
      replicas") is no longer true. Redis (validated above) remains the real
      multi-pod requirement for buzz-pubsub. */}}
+
+{{/* Autoscaling bounds must be coherent. */}}
+{{- if .Values.autoscaling.enabled -}}
+  {{- if lt (.Values.autoscaling.minReplicas | int) 1 -}}
+    {{- fail "autoscaling.minReplicas must be at least 1" -}}
+  {{- end -}}
+  {{- if lt (.Values.autoscaling.maxReplicas | int) (.Values.autoscaling.minReplicas | int) -}}
+    {{- fail "autoscaling.maxReplicas must be greater than or equal to autoscaling.minReplicas" -}}
+  {{- end -}}
+  {{- if not .Values.autoscaling.websocketMetricName -}}
+    {{- fail "autoscaling.websocketMetricName is required when autoscaling.enabled=true" -}}
+  {{- end -}}
+{{- end -}}
 
 {{/* Owner pubkey required when requireRelayMembership */}}
 {{- if .Values.relay.requireRelayMembership -}}

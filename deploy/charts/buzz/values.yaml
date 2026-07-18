@@ -36,6 +36,36 @@ image:
 # in Postgres. Each replica can use its own ReadWriteOnce volume (or none).
 replicaCount: 1
 
+# ── Autoscaling ──────────────────────────────────────────────────────────────
+# Requires Metrics Server for CPU and a custom-metrics adapter exposing the
+# pod-level Prometheus gauge named by websocketMetricName. Kubernetes HPA uses
+# the larger replica recommendation, so either CPU or WebSocket load scales out.
+autoscaling:
+  enabled: false
+  minReplicas: 5
+  maxReplicas: 15
+  targetCPUUtilizationPercentage: 65
+  websocketMetricName: buzz_ws_connections_active
+  targetWebsocketConnections: 5000
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+      selectPolicy: Min
+
 # ── Public URL ───────────────────────────────────────────────────────────────
 # Required. The wss:// URL clients use to connect. Drives:
 #   - RELAY_URL env (relay-side)

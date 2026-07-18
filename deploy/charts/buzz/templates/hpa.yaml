@@ -1,0 +1,32 @@
+{{- include "buzz.validate" . -}}
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "buzz.fullname" . }}
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "buzz.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  behavior:
+    {{- toYaml .Values.autoscaling.behavior | nindent 4 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Pods
+      pods:
+        metric:
+          name: {{ .Values.autoscaling.websocketMetricName }}
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.autoscaling.targetWebsocketConnections | quote }}
+{{- end }}

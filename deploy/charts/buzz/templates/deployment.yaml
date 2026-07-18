@@ -6,7 +6,9 @@ metadata:
   labels:
     {{- include "buzz.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -176,7 +178,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "buzz.envSecretName" . }}
                   key: REDIS_URL
-                  optional: {{ and (eq (.Values.replicaCount | int) 1) (not .Values.redis.enabled) (not .Values.externalRedis.url) }}
+                  optional: {{ and (eq (include "buzz.minimumReplicas" . | int) 1) (not .Values.redis.enabled) (not .Values.externalRedis.url) }}
             - name: BUZZ_S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
