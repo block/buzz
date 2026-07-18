@@ -5,6 +5,12 @@ metadata:
   name: {{ include "buzz.fullname" . }}
   labels:
     {{- include "buzz.labels" . | nindent 4 }}
+  {{- with .Values.relay.deploymentAnnotations }}
+  # Deployment-level annotations, e.g. Stakater Reloader to auto-roll pods
+  # when an external Secret (DB/Redis creds) rotates.
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:

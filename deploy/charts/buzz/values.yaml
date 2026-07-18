@@ -133,6 +133,10 @@ relay:
 
   podAnnotations: {}
   podLabels: {}
+  # Annotations on the relay Deployment resource itself (not the pod template).
+  # Set e.g. secret.reloader.stakater.com/reload: <secret-name> to have
+  # Stakater Reloader roll the pods when that Secret rotates.
+  deploymentAnnotations: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}
