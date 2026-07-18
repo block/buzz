@@ -16,6 +16,7 @@ import { cn } from "@/shared/lib/cn";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 const COPY_SUCCESS_MESSAGE =
   "Signed response copied. Paste it into the Buzz admin console.";
@@ -103,7 +104,7 @@ function formatError(error: unknown): string {
 
 async function copyToClipboard(text: string): Promise<boolean> {
   try {
-    await navigator.clipboard.writeText(text);
+    await writeTextToClipboard(text);
     return true;
   } catch (error) {
     console.warn("copy signed nostr binding response failed:", error);

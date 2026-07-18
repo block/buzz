@@ -1,7 +1,5 @@
-// Deep async call chains (mesh ensure→download→start under Tauri command
-// futures) exceed the default query depth when computing layouts.
+// Deep async call chains under Tauri command futures exceed the default query depth when computing layouts.
 #![recursion_limit = "256"]
-
 mod app_state;
 mod archive;
 mod commands;
@@ -450,6 +448,7 @@ pub fn run() {
             });
         })
         .manage(build_app_state())
+        .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
@@ -980,6 +979,7 @@ pub fn run() {
         }
         RunEvent::Exit => {
             shut_down_app(app_handle, &run_shutdown_done);
+            app_handle.state::<ClipboardState>().release();
 
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
             if restart_requested.load(Ordering::SeqCst) {

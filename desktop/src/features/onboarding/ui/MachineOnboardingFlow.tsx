@@ -24,19 +24,28 @@ import { OnboardingFooterProvider } from "./OnboardingFooter";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
 
-type MachinePage = "identity" | "key-import" | "backup" | "setup" | "config";
+export type MachineOnboardingPage =
+  | "identity"
+  | "key-import"
+  | "backup"
+  | "setup"
+  | "config";
 
 export function MachineOnboardingFlow({
   complete,
+  continueWithIdentity,
   identityLost,
+  initialPage,
   queryClient,
 }: {
   complete: (pubkey?: string) => void;
+  continueWithIdentity: (pubkey: string) => void;
   identityLost: boolean;
+  initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
 }) {
-  const [page, setPage] = React.useState<MachinePage>(
-    identityLost ? "key-import" : "identity",
+  const [page, setPage] = React.useState<MachineOnboardingPage>(
+    identityLost ? "key-import" : (initialPage ?? "identity"),
   );
   const [error, setError] = React.useState<string | null>(null);
   const [isPending, setIsPending] = React.useState(false);
@@ -134,12 +143,13 @@ export function MachineOnboardingFlow({
   const importExistingIdentity = React.useCallback(
     async (nsec: string) => {
       const identity = await importIdentity(nsec);
+      continueWithIdentity(identity.pubkey);
       queryClient.setQueryData(["identity"], identity);
       setIdentityWasImported(true);
       setSelectedPubkey(identity.pubkey);
       setPage("setup");
     },
-    [queryClient],
+    [continueWithIdentity, queryClient],
   );
 
   return (
@@ -205,28 +215,35 @@ export function MachineOnboardingFlow({
             </OnboardingSlideTransition>
           ) : page === "key-import" ? (
             <OnboardingSlideTransition
-              className="flex w-full max-w-[640px] flex-col items-center text-center"
+              className="flex min-h-[calc(100dvh-13.25rem)] w-full max-w-[837px] flex-col items-center text-center"
               direction="forward"
+              effect="fade"
               transitionKey="machine-key-import"
             >
-              <h1 className="text-title font-normal text-foreground">
-                {identityLost ? "Re-import your key" : "Enter your private key"}
-              </h1>
-              <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
-                {identityLost
-                  ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
-                  : "If you already have a Nostr account, enter your private key below to get started."}
-              </p>
-              <NostrKeyImportForm
-                backLabel={identityLost ? "Start new identity" : "Back"}
-                onBack={
-                  identityLost
-                    ? () => void replaceLostIdentity()
-                    : () => setPage("identity")
-                }
-                onImport={importExistingIdentity}
-                variant="spotlight"
-              />
+              <div className="shrink-0">
+                <h1 className="text-title font-normal text-foreground">
+                  {identityLost
+                    ? "Re-import your key"
+                    : "Enter your private key"}
+                </h1>
+                <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                  {identityLost
+                    ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
+                    : "If you already have a Nostr account, enter your private key below to get started."}
+                </p>
+              </div>
+              <div className="buzz-onboarding-key-import-position w-full">
+                <NostrKeyImportForm
+                  backLabel={identityLost ? "Start new identity" : "Back"}
+                  onBack={
+                    identityLost
+                      ? () => void replaceLostIdentity()
+                      : () => setPage("identity")
+                  }
+                  onImport={importExistingIdentity}
+                  variant="spotlight"
+                />
+              </div>
             </OnboardingSlideTransition>
           ) : page === "backup" ? (
             <BackupStep

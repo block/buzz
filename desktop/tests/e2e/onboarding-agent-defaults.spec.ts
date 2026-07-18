@@ -375,6 +375,32 @@ test("Finish button is always enabled on config page regardless of readiness", a
 // B1 regression: rapid consecutive edits must not lose the later change
 // ---------------------------------------------------------------------------
 
+test("Goose config page discovers models through the selected Goose runtime", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("goose", { status: "not_applicable" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-runtime-goose").click();
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+
+  await page.locator("#global-agent-provider").selectOption("openai");
+  await expect(
+    page
+      .locator("#global-agent-model")
+      .getByRole("option", { name: "GPT-5.5" }),
+  ).toBeAttached();
+});
+
 test("provider credentials are first-class and drive model discovery", async ({
   page,
 }) => {

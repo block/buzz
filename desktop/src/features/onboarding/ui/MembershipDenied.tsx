@@ -9,6 +9,7 @@ import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { InviteRedeemForm } from "./InviteRedeemForm";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type MembershipDeniedProps = {
   /** The relay that denied membership — used as the target for bare-code invites. */
@@ -53,7 +54,7 @@ export function MembershipDenied({
 
   const handleCopy = React.useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(npub);
+      await writeTextToClipboard(npub);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {

@@ -28,6 +28,13 @@ export function readMachineOnboardingCompletion(pubkey: string | null) {
   );
 }
 
+function clearMachineOnboardingCompletion(pubkey: string | null) {
+  if (typeof window === "undefined" || !pubkey) return;
+  window.localStorage.removeItem(
+    completionKey(MACHINE_ONBOARDING_COMPLETION_STORAGE_KEY, pubkey),
+  );
+}
+
 function forceMachineOnboarding() {
   if (!import.meta.env.DEV || typeof window === "undefined") return false;
   return (
@@ -91,6 +98,7 @@ export function useMachineOnboardingState({
   const [evaluatedPubkey, setEvaluatedPubkey] = React.useState<string | null>(
     null,
   );
+  const continuingPubkeyRef = React.useRef<string | null>(null);
   const startupPubkeyRef = React.useRef<string | null>(null);
   const [bootedLost, setBootedLost] = React.useState(false);
   const [bootedLocked, setBootedLocked] = React.useState(false);
@@ -150,6 +158,16 @@ export function useMachineOnboardingState({
     [currentPubkey],
   );
 
+  const continueWithIdentity = React.useCallback((pubkey: string) => {
+    continuingPubkeyRef.current = pubkey;
+  }, []);
+
+  const reopen = React.useCallback(() => {
+    clearMachineOnboardingCompletion(currentPubkey);
+    setCompletedPubkey((pubkey) => (pubkey === currentPubkey ? null : pubkey));
+    setEvaluatedPubkey(currentPubkey);
+  }, [currentPubkey]);
+
   const relaunchRequired =
     ((bootedLost && !identityLost) || (bootedLocked && !identityLocked)) &&
     identityQuery.status === "success";
@@ -175,7 +193,12 @@ export function useMachineOnboardingState({
       identityQuery.fetchStatus === "fetching",
     ) ||
     !currentPubkey ||
-    (!hasCompletedCurrentPubkey && evaluatedPubkey !== currentPubkey)
+    // Imported identities are published before the flow can advance to setup.
+    // Keep that explicitly requested identity switch in onboarding; only the
+    // startup identity needs the one-render evaluation gate above.
+    (!hasCompletedCurrentPubkey &&
+      evaluatedPubkey !== currentPubkey &&
+      continuingPubkeyRef.current !== currentPubkey)
   ) {
     stage = "blocking";
   } else if (identityLost || !hasCompletedCurrentPubkey) {
@@ -186,9 +209,11 @@ export function useMachineOnboardingState({
 
   return {
     complete,
+    continueWithIdentity,
     currentPubkey,
     identityLost,
     queryClient,
+    reopen,
     stage,
   };
 }

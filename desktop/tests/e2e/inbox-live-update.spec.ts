@@ -1388,7 +1388,7 @@ test.describe("inbox stable-conversation regressions", () => {
         // be truly centered rather than clamped at the scroll container floor.
 
         for (let i = 1; i <= 5; i++) {
-          const reply = emit({
+          emit({
             channelName: "general",
             content: `Reaction-drift later reply ${i} — provides content below the selected message for a non-clamped center.`,
             parentEventId: fetchRoot.id,

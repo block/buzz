@@ -84,6 +84,7 @@ import {
   ToggleRow,
 } from "./ChannelManagementSheetRows";
 import { ChannelManagementModerationActions } from "./ChannelManagementModerationActions";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type ChannelManagementSheetProps = {
   channel: Channel | null;
@@ -788,9 +789,9 @@ function ChannelManagementPanelContent({
                 icon={Copy}
                 label="Copy ID"
                 onClick={() => {
-                  void navigator.clipboard
-                    .writeText(resolvedChannel.id)
-                    .then(() => toast.success("Copied channel ID"));
+                  void writeTextToClipboard(resolvedChannel.id).then(() =>
+                    toast.success("Copied channel ID"),
+                  );
                 }}
                 testId="channel-management-copy-id-action"
               />
