@@ -88,8 +88,8 @@ fn connect_acp_runtime_blocking(
         .ok_or_else(|| "auth method is no longer advertised by this adapter".to_string())?;
 
     if uses_terminal_auth(method)? {
-        if method.id == "claude-login" && terminal_auth_meta_command(method)?.is_some() {
-            run_claude_login(&request.runtime_id, method)?;
+        if is_claude_subscription_login(&request.runtime_id, method) {
+            run_claude_subscription_login(&request.runtime_id, method)?;
         } else {
             launch_terminal_auth(&request.runtime_id, method)?;
         }
@@ -215,7 +215,11 @@ fn command_error(label: &str, output: &std::process::Output) -> String {
     }
 }
 
-fn run_claude_login(runtime_id: &str, method: &AcpAuthMethod) -> Result<(), String> {
+fn is_claude_subscription_login(runtime_id: &str, method: &AcpAuthMethod) -> bool {
+    runtime_id == "claude" && matches!(method.id.as_str(), "claude-login" | "claude-ai-login")
+}
+
+fn run_claude_subscription_login(runtime_id: &str, method: &AcpAuthMethod) -> Result<(), String> {
     let runtime = known_acp_runtime_exact(runtime_id)
         .ok_or_else(|| format!("unknown ACP runtime: {runtime_id}"))?;
     let argv = adapter_terminal_argv(runtime.label, method, "")?;
@@ -453,8 +457,9 @@ fn shell_escape(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_terminal_argv, append_inherited_path, run_buzz_acp_auth_command_with_paths,
-        shell_escape, shell_join, uses_terminal_auth, windows_terminal_args, AcpAuthMethod,
+        adapter_terminal_argv, append_inherited_path, is_claude_subscription_login,
+        run_buzz_acp_auth_command_with_paths, shell_escape, shell_join, uses_terminal_auth,
+        windows_terminal_args, AcpAuthMethod,
     };
 
     /// Windows regression: the augmented PATH there holds only Buzz-managed
@@ -586,6 +591,37 @@ mod tests {
         let method: AcpAuthMethod = serde_json::from_str(raw).unwrap();
         assert_eq!(method.method_type.as_deref(), Some("terminal"));
         assert_eq!(method.command[0], "claude");
+    }
+
+    #[test]
+    fn claude_subscription_methods_run_without_a_visible_terminal() {
+        for id in ["claude-login", "claude-ai-login"] {
+            let method = AcpAuthMethod {
+                id: id.into(),
+                name: "Claude Subscription".into(),
+                description: None,
+                method_type: Some("terminal".into()),
+                args: vec![],
+                command: vec![],
+                meta: None,
+            };
+            assert!(is_claude_subscription_login("claude", &method));
+            assert!(!is_claude_subscription_login("codex", &method));
+        }
+    }
+
+    #[test]
+    fn other_claude_terminal_methods_remain_visible() {
+        let method = AcpAuthMethod {
+            id: "console-login".into(),
+            name: "Anthropic Console".into(),
+            description: None,
+            method_type: Some("terminal".into()),
+            args: vec![],
+            command: vec![],
+            meta: None,
+        };
+        assert!(!is_claude_subscription_login("claude", &method));
     }
 
     #[test]
