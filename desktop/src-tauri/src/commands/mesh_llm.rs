@@ -6,9 +6,9 @@ use crate::{app_state::AppState, mesh_llm, relay};
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MeshSharingConfig {
-    enabled: bool,
-    model_id: String,
+pub(crate) struct MeshSharingConfig {
+    pub(crate) enabled: bool,
+    pub(crate) model_id: String,
     max_vram_gb: Option<u64>,
 }
 
@@ -31,7 +31,9 @@ fn save_mesh_sharing_config(app: &AppHandle, config: &MeshSharingConfig) -> Resu
     crate::managed_agents::atomic_write_json(&path, &payload)
 }
 
-fn load_mesh_sharing_config(app: &AppHandle) -> Result<Option<MeshSharingConfig>, String> {
+pub(crate) fn load_mesh_sharing_config(
+    app: &AppHandle,
+) -> Result<Option<MeshSharingConfig>, String> {
     let path = mesh_sharing_config_path(app)?;
     match std::fs::read(&path) {
         Ok(payload) => serde_json::from_slice(&payload)

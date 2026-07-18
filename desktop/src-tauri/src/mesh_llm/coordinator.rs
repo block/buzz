@@ -39,14 +39,24 @@ pub async fn start_coordinator(app: AppHandle) {
 
     let publisher_app = app.clone();
     let status_publisher = tokio::spawn(async move {
-        // Clear a stale serving status promptly after an app restart. Keep
-        // publishing while stopped too: serving nodes build their admission
-        // allowlist from fresh member statuses, so consumer-only identities
-        // must remain fresh even though they advertise no serving targets.
-        publish_current_status_once(&publisher_app, "startup").await;
+        // Only advertise presence when this node actually participates in
+        // shared compute. A desktop that never shares, has no relay-mesh agent,
+        // and runs no mesh runtime has nothing to serve and nobody to be fresh
+        // for — publishing its status is pure relay noise. Serving/consuming
+        // nodes still need consumer-only freshness for MeshLLM's admission
+        // allowlist, so we keep publishing (including the "stopped" heartbeat)
+        // whenever participation intent is present.
+        //
+        // Re-checked every iteration so enabling Share Compute or adding a
+        // relay-mesh agent starts publishing without an app restart.
+        if wants_status_publishing(&publisher_app).await {
+            publish_current_status_once(&publisher_app, "startup").await;
+        }
         loop {
             tokio::time::sleep(STATUS_PUBLISH_INTERVAL).await;
-            publish_current_status_once(&publisher_app, "heartbeat").await;
+            if wants_status_publishing(&publisher_app).await {
+                publish_current_status_once(&publisher_app, "heartbeat").await;
+            }
         }
     });
     let roster_app = app.clone();
@@ -194,6 +204,45 @@ async fn reconcile_roster(
         .map_err(|error| format!("mesh node restart after roster change failed: {error}"))?;
     *guard = Some(replacement);
     Ok(())
+}
+
+/// Whether this node should advertise its mesh status to the relay.
+///
+/// True when the node actually participates in shared compute:
+/// - a mesh runtime is live (serving or consuming), or
+/// - Share Compute is enabled in saved config, or
+/// - at least one managed agent uses the relay-mesh provider (intends to consume).
+///
+/// When none hold, the desktop has nothing to serve and nobody to stay fresh
+/// for, so publishing a status event is pure relay noise and is skipped.
+/// Re-evaluated on every heartbeat, so toggling Share Compute or adding a
+/// relay-mesh agent begins publishing without an app restart.
+async fn wants_status_publishing(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+
+    // A live runtime always participates (serve or client).
+    if state.mesh_llm_runtime.lock().await.is_some() {
+        return true;
+    }
+
+    // Share Compute opted in via saved config.
+    if let Ok(Some(config)) = crate::commands::mesh_llm::load_mesh_sharing_config(app) {
+        if config.enabled && !config.model_id.trim().is_empty() {
+            return true;
+        }
+    }
+
+    // Any managed agent configured to consume via the relay-mesh provider.
+    if let Ok(records) = crate::managed_agents::load_managed_agents(app) {
+        if records
+            .iter()
+            .any(|record| crate::managed_agents::relay_mesh_model_id(record).is_some())
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 pub(crate) async fn publish_current_status_once(app: &AppHandle, reason: &str) {
