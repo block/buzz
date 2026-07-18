@@ -129,6 +129,8 @@ test("Customize on Codex/Claude asks only for a model, never a provider", () => 
   );
   assert.match(reason, /Select a model/);
   assert.doesNotMatch(reason, /provider/);
+  assert.match(reason, /Use harness defaults/);
+  assert.doesNotMatch(reason, /Use AI defaults/);
 });
 
 test("precedence: a missing name outranks incomplete AI defaults", () => {

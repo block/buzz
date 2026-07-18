@@ -126,6 +126,20 @@ test("Defaults clears provider and model together", () => {
   );
 });
 
+test("entering Customize pins only the harness model without a provider picker", () => {
+  for (const model of ["claude-opus", "gpt-5.2-codex"]) {
+    assert.deepEqual(
+      agentAiConfigurationPairForMode({
+        current: { provider: "", model: "" },
+        inherited: { provider: "databricks_v2", model },
+        mode: "custom",
+        needsProviderSelection: false,
+      }),
+      { provider: "", model },
+    );
+  }
+});
+
 test("entering Customize pins unresolved fields from the inherited pair", () => {
   assert.deepEqual(
     agentAiConfigurationPairForMode({

@@ -128,7 +128,10 @@ export function personaSubmitBlock(
     if (input.customModelEmpty) pieces.push("a model");
     const what =
       pieces.length > 0 ? joinWithAnd(pieces) : "the AI configuration";
-    return `Select ${what} for this agent, or switch to Use AI defaults.`;
+    const defaultsLabel = input.runtimeNeedsProviderSelection
+      ? "Use AI defaults"
+      : "Use harness defaults";
+    return `Select ${what} for this agent, or switch to ${defaultsLabel}.`;
   }
 
   return null;

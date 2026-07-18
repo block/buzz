@@ -73,6 +73,7 @@ import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentAiDefaultsDialog } from "./AgentAiDefaultsDialog";
 import {
   AgentAiConfigurationModeField,
+  HarnessModelDefaultNotice,
   type AgentAiConfigurationMode,
 } from "./AgentAiConfigurationMode";
 import {
@@ -346,11 +347,14 @@ export function AgentDefinitionDialog({
     setIsCustomModelEditing(false);
     const nextPair = agentAiConfigurationPairForMode({
       current: { provider, model },
-      inherited: {
-        provider: inheritedProviderDefault.value,
-        model: inheritedModelDefault.value,
-      },
+      inherited: runtimeCanChooseLlmProvider
+        ? {
+            provider: inheritedProviderDefault.value,
+            model: inheritedModelDefault.value,
+          }
+        : { provider: "", model: runtimeFileConfig?.model?.trim() ?? "" },
       mode: nextMode,
+      needsProviderSelection: runtimeCanChooseLlmProvider,
     });
     setProvider(nextPair.provider);
     setModel(nextPair.model);
@@ -428,8 +432,6 @@ export function AgentDefinitionDialog({
     aiConfigurationMode === "custom" && runtimeCanChooseLlmProvider;
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
-  // Customize pins a complete provider/model pair. Shared compute's concrete
-  // automatic-routing value is the only valid non-model-id choice.
   const isExplicitModelRequired = aiConfigurationMode === "custom";
   // Gate the provider requirement on the field's actual visibility, not the raw
   // runtime capability. Codex/Claude hide the provider picker (they drive their
@@ -852,9 +854,10 @@ export function AgentDefinitionDialog({
               {runtimeWarning}
             </div>
 
-            {llmProviderFieldVisible ? (
+            {modelFieldVisible ? (
               <AgentAiConfigurationModeField
                 mode={aiConfigurationMode}
+                needsProviderSelection={runtimeCanChooseLlmProvider}
                 onModeChange={handleAiConfigurationModeChange}
               />
             ) : null}
@@ -950,19 +953,23 @@ export function AgentDefinitionDialog({
             </AnimatePresence>
 
             {aiConfigurationMode === "defaults" ? (
-              <AgentAiDefaultsNotice
-                onEditDefaults={() => setAiDefaultsOpen(true)}
-                triggerRef={aiDefaultsTriggerRef}
-                explicitModel=""
-                explicitProvider=""
-                inheritedModel={inheritedModelDefault}
-                inheritedProvider={inheritedProviderDefault}
-              />
+              runtimeCanChooseLlmProvider ? (
+                <AgentAiDefaultsNotice
+                  onEditDefaults={() => setAiDefaultsOpen(true)}
+                  triggerRef={aiDefaultsTriggerRef}
+                  explicitModel=""
+                  explicitProvider=""
+                  inheritedModel={inheritedModelDefault}
+                  inheritedProvider={inheritedProviderDefault}
+                />
+              ) : (
+                <HarnessModelDefaultNotice model={runtimeFileConfig?.model} />
+              )
             ) : null}
 
             <AgentAiDefaultsDialog
               onOpenChange={setAiDefaultsOpen}
-              open={aiDefaultsOpen}
+              open={runtimeCanChooseLlmProvider && aiDefaultsOpen}
               returnFocusRef={aiDefaultsTriggerRef}
             />
 

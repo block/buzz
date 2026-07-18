@@ -15,17 +15,21 @@ export function agentAiConfigurationPairForMode({
   current,
   inherited,
   mode,
+  needsProviderSelection = true,
 }: {
   current: AgentAiConfigurationPair;
   inherited: AgentAiConfigurationPair;
   mode: AgentAiConfigurationMode;
+  needsProviderSelection?: boolean;
 }): AgentAiConfigurationPair {
   if (mode === "defaults") {
     return { provider: "", model: "" };
   }
 
   return {
-    provider: current.provider.trim() || inherited.provider,
+    provider: needsProviderSelection
+      ? current.provider.trim() || inherited.provider
+      : "",
     model: current.model.trim() || inherited.model,
   };
 }
