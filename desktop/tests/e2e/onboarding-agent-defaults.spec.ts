@@ -804,6 +804,49 @@ test("config page gates stale saved model and effort until provider selection", 
   await expect(effortSelect).toHaveText("Select effort level");
 });
 
+test("config page model dropdown filters options via search", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      globalAgentConfig: {
+        env_vars: { OPENAI_COMPAT_API_KEY: "sk-test" },
+        provider: "openai",
+        model: null,
+      },
+    },
+    {
+      skipCommunitySeed: true,
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await navigateToConfigPage(page);
+
+  const modelSelect = page.getByTestId("global-agent-model");
+  await expect(modelSelect).toBeEnabled();
+  await modelSelect.click();
+  const search = page.getByTestId("global-agent-model-search");
+  await expect(search).toBeVisible();
+  await expect(
+    page.getByTestId("global-agent-model-option-gpt-5.5"),
+  ).toBeVisible();
+  await search.fill("mini");
+  await expect(
+    page.getByTestId("global-agent-model-option-gpt-5.4-mini"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("global-agent-model-option-gpt-5.5"),
+  ).toHaveCount(0);
+  await search.fill("zzz-no-such-model");
+  await expect(page.getByText("No matches")).toBeVisible();
+  await search.fill("");
+  await page.getByTestId("global-agent-model-option-gpt-5.4-nano").click();
+  await expect(modelSelect).toHaveAttribute("data-value", "gpt-5.4-nano");
+});
+
 test("config page defaults model after provider selection", async ({
   page,
 }) => {
