@@ -5,10 +5,12 @@ import { CommunityEditForm } from "./CommunityEditForm";
 
 type CommunityChangeOverlayProps = {
   onClose: () => void;
+  onUpdated?: (name: string, relayUrl: string) => void;
 };
 
 export function CommunityChangeOverlay({
   onClose,
+  onUpdated,
 }: CommunityChangeOverlayProps) {
   const { activeCommunity, updateCommunity } = useCommunities();
   const [error, setError] = React.useState<string | null>(null);
@@ -40,6 +42,7 @@ export function CommunityChangeOverlay({
           onClose();
           break;
         case "updated":
+          onUpdated?.(name, relayUrl);
           // If reinit is needed, the communityKey change will trigger a remount.
           // If not (name-only), just close.
           if (!result.requiresReinit) {
@@ -55,7 +58,7 @@ export function CommunityChangeOverlay({
           break;
       }
     },
-    [activeCommunity, onClose, updateCommunity],
+    [activeCommunity, onClose, onUpdated, updateCommunity],
   );
 
   if (!activeCommunity) return null;

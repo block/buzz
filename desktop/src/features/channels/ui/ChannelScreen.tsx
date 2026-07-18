@@ -29,6 +29,7 @@ import { mergeChannelKnownAgentPubkeys } from "@/features/agents/knownAgentPubke
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { pickWelcomeGuideAgent } from "@/features/onboarding/welcomeGuide";
 import { useWelcomeKickoffEntrance } from "@/features/onboarding/useWelcomeKickoffEntrance";
+import { useWelcomeKickoffStagePresence } from "@/features/onboarding/useWelcomeKickoffStagePresence";
 import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
 import {
   mergeMessages,
@@ -257,6 +258,7 @@ export function ChannelScreen({
     resolvedMessages,
     threadReplyEvents,
   );
+
   const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
     resolvedMessages,
     threadReplyEvents,
@@ -622,6 +624,12 @@ export function ChannelScreen({
       timelineLoadingNow,
     );
   settledChannelIdRef.current = settledChannelId;
+  const { welcomeKickoffStage, welcomeKickoffSettingUp } =
+    useWelcomeKickoffStagePresence(
+      activeChannel,
+      timelineMessages,
+      isTimelineLoading,
+    );
   const resetComposerTargets = React.useCallback(
     (_channelId: string | null) => {
       setExpandedThreadReplyIds(new Set());
@@ -842,6 +850,8 @@ export function ChannelScreen({
                   isFetchingOlder={isFetchingOlder}
                   entranceMessageId={welcomeEntranceMessageId}
                   onEntranceMessageComplete={handleWelcomeEntranceComplete}
+                  welcomeKickoffStage={welcomeKickoffStage}
+                  welcomeKickoffSettingUp={welcomeKickoffSettingUp}
                   editTarget={
                     editTargetMessage
                       ? {

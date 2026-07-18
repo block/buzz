@@ -14,6 +14,7 @@ import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
 import { DefaultConfigStep } from "./DefaultConfigStep";
+import { IdentityKeyHelpDialog } from "./IdentityKeyHelpDialog";
 import { LandingBees } from "./LandingBees";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import {
@@ -21,6 +22,10 @@ import {
   OnboardingChrome,
 } from "./OnboardingChrome";
 import { OnboardingFooterProvider } from "./OnboardingFooter";
+import {
+  getPreferredRuntimeIdForSelection,
+  runtimeSelectionNeedsDefaultsStep,
+} from "./onboardingRuntimeSelection";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
 
@@ -53,11 +58,8 @@ export function MachineOnboardingFlow({
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
-  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState<
-    string | null
-  >(null);
-  const [pendingRuntimeId, setPendingRuntimeId] = React.useState<string | null>(
-    null,
+  const [selectedRuntimeIds, setSelectedRuntimeIds] = React.useState<string[]>(
+    [],
   );
   const [isRuntimeSelectionSaving, setIsRuntimeSelectionSaving] =
     React.useState(false);
@@ -65,38 +67,45 @@ export function MachineOnboardingFlow({
     string | null
   >(null);
   const runtimeSaveSequence = React.useRef(0);
+  const runtimeSaveChain = React.useRef<Promise<void>>(Promise.resolve());
 
-  const persistPreferredRuntime = React.useCallback(
-    async (runtimeId: string) => {
+  const persistHarnessSelection = React.useCallback(
+    (runtimeIds: readonly string[]) => {
+      const nextRuntimeIds = Array.from(new Set(runtimeIds));
+      const preferredRuntimeId =
+        getPreferredRuntimeIdForSelection(nextRuntimeIds);
       const sequence = runtimeSaveSequence.current + 1;
       runtimeSaveSequence.current = sequence;
-      setPendingRuntimeId(runtimeId);
+      setSelectedRuntimeIds(nextRuntimeIds);
       setRuntimeSelectionError(null);
       setIsRuntimeSelectionSaving(true);
-      try {
+
+      const save = runtimeSaveChain.current.then(async () => {
         const current = await getGlobalAgentConfig();
-        const result = await setGlobalAgentConfig({
+        await setGlobalAgentConfig({
           ...current,
-          preferred_runtime: runtimeId,
+          preferred_runtime: preferredRuntimeId,
         });
-        if (runtimeSaveSequence.current === sequence) {
-          setSelectedRuntimeId(result.config.preferred_runtime);
-          setPendingRuntimeId(null);
-        }
-      } catch (cause) {
-        if (runtimeSaveSequence.current === sequence) {
-          setPendingRuntimeId(null);
-          setRuntimeSelectionError(
-            cause instanceof Error
-              ? cause.message
-              : "Couldn’t save your preferred runtime.",
-          );
-        }
-      } finally {
-        if (runtimeSaveSequence.current === sequence) {
-          setIsRuntimeSelectionSaving(false);
-        }
-      }
+      });
+      runtimeSaveChain.current = save.then(
+        () => undefined,
+        () => undefined,
+      );
+      void save
+        .catch((cause) => {
+          if (runtimeSaveSequence.current === sequence) {
+            setRuntimeSelectionError(
+              cause instanceof Error
+                ? cause.message
+                : "Couldn’t save your harness selection.",
+            );
+          }
+        })
+        .finally(() => {
+          if (runtimeSaveSequence.current === sequence) {
+            setIsRuntimeSelectionSaving(false);
+          }
+        });
     },
     [],
   );
@@ -154,7 +163,7 @@ export function MachineOnboardingFlow({
 
   return (
     <div
-      className={`buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-y-auto px-4 text-foreground ${
+      className={`buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-x-hidden overflow-y-auto px-4 text-foreground ${
         page === "identity"
           ? "buzz-onboarding-welcome py-8"
           : "pb-28 pt-[106px]"
@@ -171,7 +180,7 @@ export function MachineOnboardingFlow({
       <OnboardingFooterProvider>
         <div
           className={`relative flex w-full max-w-[920px] flex-col items-center text-center ${
-            page === "identity" ? "my-auto" : ""
+            page === "identity" ? "my-auto" : "buzz-onboarding-step-frame"
           }`}
         >
           {page === "identity" ? (
@@ -200,7 +209,7 @@ export function MachineOnboardingFlow({
                   onClick={() => void loadFreshIdentity()}
                   type="button"
                 >
-                  {isPending ? "Saving identity…" : "Get started"}
+                  {isPending ? "Saving identity…" : "Create a new identity key"}
                 </Button>
                 <Button
                   className="h-9 rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
@@ -209,34 +218,42 @@ export function MachineOnboardingFlow({
                   type="button"
                   variant="ghost"
                 >
-                  Enter a key
+                  Use an existing key
                 </Button>
               </div>
+              <IdentityKeyHelpDialog />
             </OnboardingSlideTransition>
           ) : page === "key-import" ? (
             <OnboardingSlideTransition
-              className="flex w-full max-w-[640px] flex-col items-center text-center"
+              className="flex min-h-[calc(100dvh-13.25rem)] w-full max-w-[837px] flex-col items-center text-center"
               direction="forward"
+              effect="fade"
               transitionKey="machine-key-import"
             >
-              <h1 className="text-title font-normal text-foreground">
-                {identityLost ? "Re-import your key" : "Enter your private key"}
-              </h1>
-              <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
-                {identityLost
-                  ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
-                  : "If you already have a Nostr account, enter your private key below to get started."}
-              </p>
-              <NostrKeyImportForm
-                backLabel={identityLost ? "Start new identity" : "Back"}
-                onBack={
-                  identityLost
-                    ? () => void replaceLostIdentity()
-                    : () => setPage("identity")
-                }
-                onImport={importExistingIdentity}
-                variant="spotlight"
-              />
+              <div className="shrink-0">
+                <h1 className="text-title font-normal text-foreground">
+                  {identityLost
+                    ? "Re-import your key"
+                    : "Enter your private key"}
+                </h1>
+                <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                  {identityLost
+                    ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
+                    : "If you already have a Nostr account, enter your private key below to get started."}
+                </p>
+              </div>
+              <div className="buzz-onboarding-key-import-position w-full">
+                <NostrKeyImportForm
+                  backLabel={identityLost ? "Start new identity" : "Back"}
+                  onBack={
+                    identityLost
+                      ? () => void replaceLostIdentity()
+                      : () => setPage("identity")
+                  }
+                  onImport={importExistingIdentity}
+                  variant="spotlight"
+                />
+              </div>
             </OnboardingSlideTransition>
           ) : page === "backup" ? (
             <BackupStep
@@ -250,11 +267,8 @@ export function MachineOnboardingFlow({
                 back: () =>
                   setPage(identityWasImported ? "key-import" : "backup"),
                 next: () => {
-                  if (!selectedRuntimeId) return;
-                  if (
-                    selectedRuntimeId === "claude" ||
-                    selectedRuntimeId === "codex"
-                  ) {
+                  if (selectedRuntimeIds.length === 0) return;
+                  if (!runtimeSelectionNeedsDefaultsStep(selectedRuntimeIds)) {
                     complete(selectedPubkey ?? undefined);
                     return;
                   }
@@ -263,11 +277,11 @@ export function MachineOnboardingFlow({
               }}
               direction="forward"
               isSelectionSaving={isRuntimeSelectionSaving}
-              onSelectedRuntimeChange={(runtimeId) => {
-                void persistPreferredRuntime(runtimeId);
+              onSelectedRuntimeIdsChange={(runtimeIds) => {
+                void persistHarnessSelection(runtimeIds);
               }}
               selectionError={runtimeSelectionError}
-              selectedRuntimeId={pendingRuntimeId ?? selectedRuntimeId}
+              selectedRuntimeIds={selectedRuntimeIds}
             />
           ) : (
             <DefaultConfigStep
@@ -276,6 +290,7 @@ export function MachineOnboardingFlow({
                 complete: () => complete(selectedPubkey ?? undefined),
               }}
               direction="forward"
+              selectedRuntimeIds={selectedRuntimeIds}
             />
           )}
         </div>

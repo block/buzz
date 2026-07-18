@@ -90,6 +90,18 @@ type MockPersonaSeed = {
   isActive?: boolean;
   sourceTeam?: string | null;
   envVars?: Record<string, string>;
+  /**
+   * Runtime the persona is pinned to (e.g. "goose", "codex", "claude"). Lets a
+   * spec seed a CLI-login runtime whose provider picker is hidden, so the Edit
+   * dialog's provider-aware submit gate can be driven end-to-end. Omitted →
+   * null (definition inherits the app default at open).
+   */
+  runtime?: string | null;
+  /** Model pinned on the persona (a custom model id for Customize mode). */
+  model?: string | null;
+  /** Provider pinned on the persona. Leave empty for Codex/Claude runtimes. */
+  provider?: string | null;
+  namePool?: string[];
 };
 
 type MockTeamSeed = {
@@ -116,6 +128,7 @@ export type MockAgentMemoryListing = {
 
 type MockBridgeOptions = {
   acpRuntimesCatalog?: Record<string, unknown>[];
+  acpRuntimesDelayMs?: number;
   acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
   connectAcpRuntimeResult?: { launched: boolean };
   connectAcpRuntimeDelayMs?: number;
@@ -184,6 +197,8 @@ type MockBridgeOptions = {
   applyCommunityDelayMs?: number;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Close the first channel-window live REQ; its retry is accepted. */
+  closeChannelLiveSubscriptionOnce?: boolean;
   /** Reject successive kind-9 sends with these messages, then resume. */
   sendMessageErrors?: string[];
   /** Reject successive managed-agent starts, then resume. */
@@ -344,6 +359,8 @@ type MockBridgeOptions = {
     masked: boolean;
     value: string;
   }>;
+  /** Delay (ms) for `get_baked_build_env` so specs can verify load gating. */
+  bakedBuildEnvDelayMs?: number;
   /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
    *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
   setGlobalAgentConfigDelayMs?: number;

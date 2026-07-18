@@ -8,17 +8,25 @@ import {
 } from "@/features/onboarding/communityOnboarding";
 import { initializeStarterChannels } from "@/features/onboarding/hooks";
 import { useClaimInvite } from "@/features/onboarding/useClaimInvite";
+import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
+import {
+  takePendingWelcomeChannelForDirectEntry,
+  WELCOME_SURFACE_READY_EVENT,
+} from "@/features/onboarding/welcome";
+import { profileQueryKey } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
   parseEmojiAvatarDataUrl,
   ProfileAvatarEditor,
 } from "@/features/profile/ui/ProfileAvatarEditor";
 import { updateProfile } from "@/shared/api/tauriProfiles";
-import { getIdentity } from "@/shared/api/tauriIdentity";
+import { getIdentity, importIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas } from "@/shared/api/tauriPersonas";
+import { relayClient } from "@/shared/api/relayClient";
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { MembershipDenied } from "./MembershipDenied";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import {
   ONBOARDING_PRIMARY_CTA_CLASS,
@@ -31,11 +39,29 @@ import {
   ONBOARDING_KEY_TEXT_CLASS,
 } from "./NsecMaskedDisplay";
 
+function isRelayMembershipDeniedError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.message.includes("You must be a relay member") ||
+    error.message.includes("relay_membership_required") ||
+    error.message.includes("restricted: not a relay member") ||
+    error.message.includes("invalid: you are not a relay member")
+  );
+}
+
 const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
   Fizz: "/onboarding/starter-team/fizz.png",
   Honey: "/onboarding/starter-team/honey.png",
   Bumble: "/onboarding/starter-team/bumble.png",
 };
+
+/** Fade duration for the "entering" curtain over the mounting app. */
+const ENTERING_CURTAIN_FADE_MS = 500;
+/**
+ * Safety valve: if Welcome never reports ready (slow relay, failed query),
+ * fade anyway rather than stranding the user on the onboarding screen.
+ */
+const ENTERING_CURTAIN_MAX_WAIT_MS = 8_000;
 
 const NEUTRAL_EMOJI_PICKER_THEME_VARS = {
   "--buzz-emoji-picker-rgb-background":
@@ -101,10 +127,21 @@ export function CommunityOnboardingFlow({
     [],
   );
   const [isPending, setIsPending] = React.useState(false);
+  const [deniedPubkey, setDeniedPubkey] = React.useState("");
+  const [isMembershipDenied, setIsMembershipDenied] = React.useState(false);
+  const [isCommunityChangeOpen, setIsCommunityChangeOpen] =
+    React.useState(false);
+  const [isCurtainFading, setIsCurtainFading] = React.useState(false);
   const nameInputRef = React.useRef<HTMLInputElement | null>(null);
 
+  // Also fetch on "entering": the curtain is a fresh mount of this component,
+  // so the team-intro fetch from the pre-curtain instance isn't in this state.
+  const isTeamIntroVisible =
+    transaction?.stage === "team-intro" ||
+    transaction?.stage === "finalizing" ||
+    transaction?.stage === "entering";
   React.useEffect(() => {
-    if (transaction?.stage !== "team-intro") return;
+    if (!isTeamIntroVisible) return;
     void listPersonas()
       .then((personas) =>
         setStarterPersonas(
@@ -117,13 +154,41 @@ export function CommunityOnboardingFlow({
         ),
       )
       .catch(() => setStarterPersonas([]));
-  }, [transaction?.stage]);
+  }, [isTeamIntroVisible]);
 
   useClaimInvite();
 
   React.useEffect(() => {
     if (transaction?.stage === "connecting") onConnect();
   }, [onConnect, transaction?.stage]);
+
+  // "Entering" curtain: the app is mounting on the Welcome route underneath.
+  // Fade out when Welcome reports its first settled render — or after a
+  // safety timeout so a slow load can never strand the user on this screen.
+  const isEnteringStage = transaction?.stage === "entering";
+  React.useEffect(() => {
+    if (!isEnteringStage) return;
+
+    let fadeTimer: number | null = null;
+    const beginFade = () => {
+      if (fadeTimer !== null) return;
+      setIsCurtainFading(true);
+      fadeTimer = window.setTimeout(() => {
+        clear();
+      }, ENTERING_CURTAIN_FADE_MS);
+    };
+
+    window.addEventListener(WELCOME_SURFACE_READY_EVENT, beginFade);
+    const safetyTimer = window.setTimeout(
+      beginFade,
+      ENTERING_CURTAIN_MAX_WAIT_MS,
+    );
+    return () => {
+      window.removeEventListener(WELCOME_SURFACE_READY_EVENT, beginFade);
+      window.clearTimeout(safetyTimer);
+      if (fadeTimer !== null) window.clearTimeout(fadeTimer);
+    };
+  }, [clear, isEnteringStage]);
 
   const retryClaim = () => update({ stage: "claiming", error: undefined });
   const relayUrl = transaction?.relayUrl;
@@ -145,6 +210,19 @@ export function CommunityOnboardingFlow({
         communityScope: relayUrl,
       });
       if (!result.ok) throw new Error(result.reason);
+      if (result.focusChannelId) {
+        // Direct entry: point the router at the Welcome channel *before* the
+        // app mounts, so it never lands on Home first. Consume the pending
+        // entry — it exists for the Home-route fallback, and leaving it would
+        // yank a later Home visit back to Welcome.
+        takePendingWelcomeChannelForDirectEntry();
+        window.location.hash = `/channels/${result.focusChannelId}`;
+        markCommunityOnboardingComplete(identity.pubkey, relayUrl);
+        // Keep this screen mounted as a curtain over the loading app; the
+        // "entering" stage fades it out once Welcome reports ready.
+        update({ stage: "entering", error: undefined });
+        return;
+      }
       await finish();
     } catch (error) {
       update({
@@ -156,7 +234,9 @@ export function CommunityOnboardingFlow({
 
   const isProfileStage = transaction?.stage === "profile";
   const isTeamStage =
-    transaction?.stage === "team-intro" || transaction?.stage === "finalizing";
+    transaction?.stage === "team-intro" ||
+    transaction?.stage === "finalizing" ||
+    transaction?.stage === "entering";
 
   React.useLayoutEffect(() => {
     if (isProfileStage && !isAvatarEditorOpen) {
@@ -165,6 +245,45 @@ export function CommunityOnboardingFlow({
   }, [isAvatarEditorOpen, isProfileStage]);
 
   if (!transaction) return null;
+
+  if (isMembershipDenied) {
+    return (
+      <>
+        <MembershipDenied
+          activeRelayUrl={transaction.relayUrl}
+          onBack={() => setIsMembershipDenied(false)}
+          onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+          onImportKey={async (nsec) => {
+            const identity = await importIdentity(nsec);
+            relayClient.disconnect();
+            queryClient.setQueryData(["identity"], identity);
+            queryClient.removeQueries({ queryKey: profileQueryKey });
+            setIsMembershipDenied(false);
+            update({ stage: "connecting", error: undefined });
+          }}
+          onRetry={() => {
+            setIsMembershipDenied(false);
+            update({ stage: "connecting", error: undefined });
+          }}
+          pubkey={deniedPubkey}
+        />
+        {isCommunityChangeOpen ? (
+          <CommunityChangeOverlay
+            onClose={() => setIsCommunityChangeOpen(false)}
+            onUpdated={(communityName, updatedRelayUrl) => {
+              update({
+                communityName,
+                relayUrl: updatedRelayUrl,
+                stage: "connecting",
+                error: undefined,
+              });
+              setIsMembershipDenied(false);
+            }}
+          />
+        ) : null}
+      </>
+    );
+  }
 
   const saveProfile = async () => {
     if (!displayName.trim()) return;
@@ -176,6 +295,16 @@ export function CommunityOnboardingFlow({
       });
       update({ stage: "team-intro", error: undefined });
     } catch (error) {
+      if (isRelayMembershipDeniedError(error)) {
+        try {
+          const identity = await getIdentity();
+          setDeniedPubkey(identity.pubkey);
+        } catch {
+          setDeniedPubkey("");
+        }
+        setIsMembershipDenied(true);
+        return;
+      }
       update({ error: error instanceof Error ? error.message : String(error) });
     } finally {
       setIsPending(false);
@@ -189,8 +318,15 @@ export function CommunityOnboardingFlow({
         isProfileStage || isTeamStage
           ? "items-start pb-36 pt-[106px]"
           : "items-stretch",
+        isCurtainFading &&
+          "pointer-events-none opacity-0 transition-opacity ease-out motion-reduce:transition-none",
       )}
       data-testid="community-onboarding-flow"
+      style={
+        isCurtainFading
+          ? { transitionDuration: `${ENTERING_CURTAIN_FADE_MS}ms` }
+          : undefined
+      }
     >
       <StartupWindowDragRegion />
       {isProfileStage || isTeamStage ? (
@@ -199,10 +335,10 @@ export function CommunityOnboardingFlow({
       <OnboardingFooterProvider>
         <div
           className={cn(
-            "relative flex w-full flex-col justify-center text-center",
+            "relative w-full text-center",
             isProfileStage || isTeamStage
-              ? "min-h-[calc(100dvh-15.625rem)]"
-              : "min-h-dvh py-8",
+              ? "buzz-onboarding-step-frame flex flex-col justify-center"
+              : "flex min-h-dvh flex-col justify-center py-8",
             isProfileStage
               ? "max-w-4xl"
               : isTeamStage
@@ -334,16 +470,6 @@ export function CommunityOnboardingFlow({
                   >
                     Next
                   </Button>
-                  <Button
-                    className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
-                    data-testid="community-profile-back"
-                    disabled={isPending || isUploadingAvatar}
-                    onClick={clear}
-                    type="button"
-                    variant="ghost"
-                  >
-                    Back
-                  </Button>
                 </OnboardingFooter>
               </>
             )
@@ -394,10 +520,11 @@ export function CommunityOnboardingFlow({
               <OnboardingFooter>
                 <Button
                   className={ONBOARDING_PRIMARY_CTA_CLASS}
-                  disabled={isPending}
+                  disabled={isPending || transaction.stage === "entering"}
                   onClick={() => void finalize()}
                 >
-                  {transaction.stage === "finalizing"
+                  {transaction.stage === "finalizing" ||
+                  transaction.stage === "entering"
                     ? "Preparing Welcome…"
                     : `Enter ${transaction.communityName}`}
                 </Button>

@@ -10,6 +10,10 @@ import {
 
 import type { Channel } from "@/shared/api/types";
 import { scoreChannelMatch } from "@/features/channels/lib/channelSearchScore";
+import {
+  type ChannelSortMode,
+  sortChannelsForSidebar,
+} from "@/features/sidebar/lib/channelSortPreference";
 import { ListSortDescending } from "@/shared/ui/icons";
 import {
   Dialog,
@@ -45,10 +49,11 @@ import {
 } from "@/features/sidebar/ui/CreateChannelFormFields";
 
 type BrowserTab = "all" | "joined" | "archived";
-type ChannelSort = "alphabetical" | "members";
+type ChannelSort = ChannelSortMode | "members";
 
 const CHANNEL_SORT_OPTIONS: { label: string; value: ChannelSort }[] = [
-  { label: "Alphabetical", value: "alphabetical" },
+  { label: "Alphabetical", value: "alpha" },
+  { label: "Recent", value: "recent" },
   { label: "Most members", value: "members" },
 ];
 
@@ -102,7 +107,7 @@ export function ChannelBrowserDialog({
 }: ChannelBrowserDialogProps) {
   const [query, setQuery] = React.useState("");
   const [activeTab, setActiveTab] = React.useState<BrowserTab>("all");
-  const [sort, setSort] = React.useState<ChannelSort>("alphabetical");
+  const [sort, setSort] = React.useState<ChannelSort>("alpha");
   const [selectedIndex, setSelectedIndex] = React.useState<number | null>(null);
   const [joiningChannelId, setJoiningChannelId] = React.useState<string | null>(
     null,
@@ -132,7 +137,7 @@ export function ChannelBrowserDialog({
   const isForumMode = channelTypeFilter === "forum";
   const canCreate = Boolean(onCreateChannel);
   const createKind = isForumMode ? "forum" : "stream";
-  const browseTitle = isForumMode ? "Add a forum" : "Add a channel";
+  const browseTitle = isForumMode ? "Add a forum" : "Browse channels";
   const searchPlaceholder = canCreate
     ? isForumMode
       ? "Search or create a forum"
@@ -206,22 +211,29 @@ export function ChannelBrowserDialog({
   const isSearching = deferredQuery.length > 0;
 
   const orderedVisibleChannels = React.useMemo(() => {
-    return [...visibleChannels].sort((a, b) => {
-      // While searching, best match wins so the channel you meant floats to
-      // the top; ties fall back to the user's chosen sort below.
-      if (isSearching) {
-        const scoreA = matchScoreById.get(a.id) ?? Number.POSITIVE_INFINITY;
-        const scoreB = matchScoreById.get(b.id) ?? Number.POSITIVE_INFINITY;
-        if (scoreA !== scoreB) return scoreA - scoreB;
-      }
+    const sorted =
+      sort === "members"
+        ? [...visibleChannels].sort(
+            (a, b) =>
+              b.memberCount - a.memberCount ||
+              a.name.localeCompare(b.name, undefined, {
+                sensitivity: "base",
+              }),
+          )
+        : sortChannelsForSidebar(visibleChannels, sort);
 
-      if (sort === "members" && b.memberCount !== a.memberCount) {
-        return b.memberCount - a.memberCount;
-      }
+    if (!isSearching) return sorted;
 
-      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-    });
+    return sorted.sort(
+      (a, b) =>
+        (matchScoreById.get(a.id) ?? Number.POSITIVE_INFINITY) -
+        (matchScoreById.get(b.id) ?? Number.POSITIVE_INFINITY),
+    );
   }, [isSearching, matchScoreById, sort, visibleChannels]);
+
+  const selectedSortLabel =
+    CHANNEL_SORT_OPTIONS.find((option) => option.value === sort)?.label ??
+    "Alphabetical";
 
   const allTabLabel = isForumMode ? "All forums" : "All channels";
 
@@ -320,7 +332,7 @@ export function ChannelBrowserDialog({
     if (!open) {
       setQuery("");
       setActiveTab("all");
-      setSort("alphabetical");
+      setSort("alpha");
       setSelectedIndex(null);
       setJoiningChannelId(null);
       setMode("browse");
@@ -500,11 +512,7 @@ export function ChannelBrowserDialog({
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button
-                      aria-label={`Sort ${entityLabel}s: ${
-                        sort === "alphabetical"
-                          ? "Alphabetical"
-                          : "Most members"
-                      }`}
+                      aria-label={`Sort ${entityLabel}s: ${selectedSortLabel}`}
                       data-testid="channel-browser-sort"
                       size="icon-xs"
                       type="button"

@@ -16,6 +16,8 @@ export const STARTER_WELCOME_CHANNEL_DESCRIPTION =
   "Say hi, ask a question, or share what brought you here.";
 export const WELCOME_CHANNEL_READY_EVENT =
   "buzz:onboarding-welcome-channel-ready";
+export const WELCOME_SURFACE_READY_EVENT =
+  "buzz:onboarding-welcome-surface-ready";
 
 const PENDING_WELCOME_CHANNEL_STORAGE_KEY =
   "buzz:onboarding-welcome-channel.v1";
@@ -423,6 +425,36 @@ export function consumePendingWelcomeInitialUnreadSuppression(
     WELCOME_INITIAL_UNREAD_SUPPRESSION_STORAGE_KEY,
   );
   return true;
+}
+
+/**
+ * Direct-entry path (end of onboarding): the app mounts straight onto the
+ * Welcome channel route, so the pending entry must be consumed here — if it
+ * stayed behind, a visit to Home within its max age would yank the user back
+ * to Welcome. Unlike `consumePendingWelcomeChannel` this skips the
+ * channels-list availability check: the caller just created the channel.
+ * The Home-route listener remains as a fallback for every other path.
+ */
+export function takePendingWelcomeChannelForDirectEntry() {
+  const pending = readPendingWelcomeChannel();
+  clearPendingWelcomeChannel();
+  return pending?.channelId ?? null;
+}
+
+/**
+ * Announce that the Welcome channel screen has rendered with settled timeline
+ * data. The onboarding "entering" curtain listens for this to fade out.
+ */
+export function notifyWelcomeSurfaceReady(channelId: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.dispatchEvent(
+    new CustomEvent(WELCOME_SURFACE_READY_EVENT, {
+      detail: { channelId },
+    }),
+  );
 }
 
 export function notifyWelcomeChannelReady(channelId: string) {

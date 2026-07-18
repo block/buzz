@@ -329,47 +329,15 @@ function CommunityApp({
       communityOnboarding.update({ stage: "profile", error: undefined });
     }
   }, [communityOnboarding.update, targetIsReady, transaction?.stage]);
-  if (transaction) {
-    return (
-      <CommunityOnboardingFlow onConnect={handleCommunityOnboardingConnect} />
-    );
-  }
-
-  // Show welcome setup for first-run users with no communities
-  if (community.needsSetup) {
-    return (
-      <WelcomeSetup
-        defaultRelayUrl={community.defaultRelayUrl}
-        onBack={onBackToMachineConfig}
-      />
-    );
-  }
-
-  // Surface apply failures so the user can retry or change community.
-  if ("error" in community && community.error) {
-    return (
-      <>
-        <CommunityApplyErrorScreen
-          error={community.error}
-          onChangeCommunity={() => setIsCommunityChangeOpen(true)}
-          onRetry={reconnectCommunity}
-        />
-        {isCommunityChangeOpen ? (
-          <CommunityChangeOverlay
-            onClose={() => setIsCommunityChangeOpen(false)}
-          />
-        ) : null}
-      </>
-    );
-  }
-
-  // Wait for this exact community config to be applied to the backend before
-  // rendering anything that connects to the relay. The appliedKey check avoids
-  // a one-render race where React sees the new active community while the Tauri
-  // backend is still configured for the previous one.
-  if (!community.isReady || community.appliedKey !== communityKey) {
-    return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
-  }
+  // During "entering" the transaction stays alive as a curtain: the app mounts
+  // underneath (already pointed at the Welcome channel route) while the
+  // onboarding screen covers it, then fades once Welcome reports ready.
+  //
+  // The flow must keep ONE stable position in the element tree across every
+  // stage. Rendering it from a different slot when the stage flips to
+  // "entering" would remount it — React state resets and the "Meet your
+  // starter team" screen visibly restarts mid-handoff.
+  const isEnteringCurtain = transaction?.stage === "entering";
 
   // The app mounts (and starts loading data) beneath the splash overlay; the
   // overlay just keeps the bee on screen long enough to be seen, then fades.
@@ -377,27 +345,85 @@ function CommunityApp({
   const showBootSplashOverlay =
     bootSplashPhase !== "done" && !isCommunitySwitch;
 
+  let appContent: ReactNode = null;
+  if (!transaction) {
+    if (community.needsSetup) {
+      // Show welcome setup for first-run users with no communities
+      appContent = (
+        <WelcomeSetup
+          defaultRelayUrl={community.defaultRelayUrl}
+          onBack={onBackToMachineConfig}
+        />
+      );
+    } else if ("error" in community && community.error) {
+      // Surface apply failures so the user can retry or change community.
+      appContent = (
+        <>
+          <CommunityApplyErrorScreen
+            error={community.error}
+            onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+            onRetry={reconnectCommunity}
+          />
+          {isCommunityChangeOpen ? (
+            <CommunityChangeOverlay
+              onClose={() => setIsCommunityChangeOpen(false)}
+            />
+          ) : null}
+        </>
+      );
+    }
+  }
+  // Wait for this exact community config to be applied to the backend before
+  // rendering anything that connects to the relay. The appliedKey check avoids
+  // a one-render race where React sees the new active community while the
+  // Tauri backend is still configured for the previous one.
+  const communityApplied =
+    community.isReady && community.appliedKey === communityKey;
+  if (appContent === null && (!transaction || isEnteringCurtain)) {
+    appContent = communityApplied ? (
+      <CommunityQueryProvider key={communityKey}>
+        <AppReady
+          isCommunitySwitch={isCommunitySwitch}
+          key={communityKey}
+          isSharedIdentity={sharedIdentity}
+        />
+        {showBootSplashOverlay ? (
+          <div
+            aria-hidden="true"
+            className={cn(
+              "fixed inset-0 z-50 transition-opacity",
+              bootSplashPhase === "fading" ? "opacity-0" : "opacity-100",
+            )}
+            data-testid="boot-splash-overlay"
+            style={{ transitionDuration: `${BOOT_SPLASH_FADE_MS}ms` }}
+          >
+            <AppLoadingGate />
+          </div>
+        ) : null}
+      </CommunityQueryProvider>
+    ) : isCommunitySwitch ? (
+      <CommunitySwitchGate />
+    ) : (
+      <AppLoadingGate />
+    );
+  }
+
   return (
-    <CommunityQueryProvider key={communityKey}>
-      <AppReady
-        isCommunitySwitch={isCommunitySwitch}
-        key={communityKey}
-        isSharedIdentity={sharedIdentity}
-      />
-      {showBootSplashOverlay ? (
+    <>
+      {appContent}
+      {transaction ? (
         <div
-          aria-hidden="true"
-          className={cn(
-            "fixed inset-0 z-50 transition-opacity",
-            bootSplashPhase === "fading" ? "opacity-0" : "opacity-100",
-          )}
-          data-testid="boot-splash-overlay"
-          style={{ transitionDuration: `${BOOT_SPLASH_FADE_MS}ms` }}
+          className={isEnteringCurtain ? "fixed inset-0 z-50" : undefined}
+          data-testid={
+            isEnteringCurtain ? "onboarding-entering-curtain" : undefined
+          }
         >
-          <AppLoadingGate />
+          <CommunityOnboardingFlow
+            onConnect={handleCommunityOnboardingConnect}
+          />
         </div>
       ) : null}
-    </CommunityQueryProvider>
+    </>
   );
 }
 

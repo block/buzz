@@ -31,6 +31,7 @@ import {
   emptyPersonaBehaviorDraft,
   personaBehaviorDraftValid,
 } from "./personaBehaviorDraft";
+import { personaSubmitBlock } from "./personaSubmitBlock";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -72,6 +73,7 @@ import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentAiDefaultsDialog } from "./AgentAiDefaultsDialog";
 import {
   AgentAiConfigurationModeField,
+  HarnessModelDefaultNotice,
   type AgentAiConfigurationMode,
 } from "./AgentAiConfigurationMode";
 import {
@@ -345,11 +347,14 @@ export function AgentDefinitionDialog({
     setIsCustomModelEditing(false);
     const nextPair = agentAiConfigurationPairForMode({
       current: { provider, model },
-      inherited: {
-        provider: inheritedProviderDefault.value,
-        model: inheritedModelDefault.value,
-      },
+      inherited: runtimeCanChooseLlmProvider
+        ? {
+            provider: inheritedProviderDefault.value,
+            model: inheritedModelDefault.value,
+          }
+        : { provider: "", model: runtimeFileConfig?.model?.trim() ?? "" },
       mode: nextMode,
+      needsProviderSelection: runtimeCanChooseLlmProvider,
     });
     setProvider(nextPair.provider);
     setModel(nextPair.model);
@@ -415,22 +420,29 @@ export function AgentDefinitionDialog({
     secretEnvVar: topLevelSecretEnvVar,
     value: apiKeyValue,
   } = apiKeyFieldState;
-  // Provider required-ness is a static property of the runtime — it does not
-  // change based on whether the field is currently filled. Using the dynamic
-  // missingNormalizedFields check would flip the asterisk off once a value is
-  // selected, which is incoherent (required means required, not "required until
-  // satisfied"). runtimeSupportsLlmProviderSelection is the authoritative gate.
+  // Provider required-ness is a static property of the field's visibility — it
+  // does not change based on whether the field is currently filled. Using the
+  // dynamic missingNormalizedFields check would flip the asterisk off once a
+  // value is selected, which is incoherent (required means required, not
+  // "required until satisfied"). runtimeCanChooseLlmProvider is the authoritative
+  // gate: it tracks exactly when the provider picker is shown (Buzz Agent/Goose,
+  // plus runtime-less legacy/builtin definitions), so the required marker never
+  // drifts from whether Save actually needs a provider.
   const providerIsRequired =
-    aiConfigurationMode === "custom" &&
-    runtimeSupportsLlmProviderSelection(runtime);
+    aiConfigurationMode === "custom" && runtimeCanChooseLlmProvider;
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
-  // Customize pins a complete provider/model pair. Shared compute's concrete
-  // automatic-routing value is the only valid non-model-id choice.
   const isExplicitModelRequired = aiConfigurationMode === "custom";
+  // Gate the provider requirement on the field's actual visibility, not the raw
+  // runtime capability. Codex/Claude hide the provider picker (they drive their
+  // own provider), so Customize must not require a provider there. But a
+  // runtime-less legacy/builtin definition still exposes the picker via
+  // blankRuntimeModelProviderEditable, so it must keep requiring a provider —
+  // otherwise Save could persist `provider: undefined` despite the visible field.
   const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
     aiConfigurationMode,
     { provider, model },
+    runtimeCanChooseLlmProvider,
   );
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
@@ -451,6 +463,29 @@ export function AgentDefinitionDialog({
     localModeSatisfied &&
     customAiPairSatisfied &&
     !isAvatarUploadPending;
+
+  // Derive the single, deterministic reason the action is disabled from the
+  // same gate outputs that feed canSubmit — no policy is recomputed here.
+  // Precedence mirrors canSubmit's term order, so the reason is `null` exactly
+  // when the form can be submitted (transient Saving/Uploading states aside).
+  const submitBlockReason = personaSubmitBlock({
+    isPending,
+    isAvatarUploadPending,
+    displayNameEmpty: displayName.trim().length === 0,
+    isCreateMode,
+    runtimeChosen: runtime.trim().length > 0,
+    runtimeAvailable: selectedRuntimeIsAvailable,
+    createBackendBlocked: createSubmitBlocked,
+    allowlistEmpty: !personaBehaviorDraftValid(behaviorDraft),
+    aiConfigurationMode,
+    localModeSatisfied,
+    localModeMissingFields: localModeGate.missingNormalizedFields,
+    localModeMissingEnvKeys: localModeGate.missingEnvKeys,
+    customAiPairSatisfied,
+    runtimeNeedsProviderSelection: runtimeCanChooseLlmProvider,
+    customProviderEmpty: provider.trim().length === 0,
+    customModelEmpty: model.trim().length === 0,
+  });
 
   // Merge global env as the base layer so credential keys satisfied via global
   // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
@@ -700,7 +735,16 @@ export function AgentDefinitionDialog({
         title={title}
         footer={
           <div className="flex w-full items-center justify-between gap-3">
-            <div className="flex min-h-9 items-center" />
+            <div className="flex min-h-9 items-center">
+              {submitBlockReason ? (
+                <p
+                  className="text-2xs text-muted-foreground"
+                  data-testid="persona-dialog-submit-reason"
+                >
+                  {submitBlockReason}
+                </p>
+              ) : null}
+            </div>
 
             <div className="flex items-center gap-2">
               <Button
@@ -810,9 +854,10 @@ export function AgentDefinitionDialog({
               {runtimeWarning}
             </div>
 
-            {llmProviderFieldVisible ? (
+            {modelFieldVisible ? (
               <AgentAiConfigurationModeField
                 mode={aiConfigurationMode}
+                needsProviderSelection={runtimeCanChooseLlmProvider}
                 onModeChange={handleAiConfigurationModeChange}
               />
             ) : null}
@@ -908,19 +953,23 @@ export function AgentDefinitionDialog({
             </AnimatePresence>
 
             {aiConfigurationMode === "defaults" ? (
-              <AgentAiDefaultsNotice
-                onEditDefaults={() => setAiDefaultsOpen(true)}
-                triggerRef={aiDefaultsTriggerRef}
-                explicitModel=""
-                explicitProvider=""
-                inheritedModel={inheritedModelDefault}
-                inheritedProvider={inheritedProviderDefault}
-              />
+              runtimeCanChooseLlmProvider ? (
+                <AgentAiDefaultsNotice
+                  onEditDefaults={() => setAiDefaultsOpen(true)}
+                  triggerRef={aiDefaultsTriggerRef}
+                  explicitModel=""
+                  explicitProvider=""
+                  inheritedModel={inheritedModelDefault}
+                  inheritedProvider={inheritedProviderDefault}
+                />
+              ) : (
+                <HarnessModelDefaultNotice model={runtimeFileConfig?.model} />
+              )
             ) : null}
 
             <AgentAiDefaultsDialog
               onOpenChange={setAiDefaultsOpen}
-              open={aiDefaultsOpen}
+              open={runtimeCanChooseLlmProvider && aiDefaultsOpen}
               returnFocusRef={aiDefaultsTriggerRef}
             />
 

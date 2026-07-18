@@ -12,6 +12,7 @@ type OnboardingSlideTransitionProps = React.HTMLAttributes<HTMLDivElement> & {
 
 export type OnboardingTransitionDirection = "forward" | "backward";
 export type OnboardingTransitionEffect =
+  | "fade"
   | "line-slide"
   | "mask-reveal-up"
   | "none";
@@ -27,7 +28,7 @@ export function OnboardingSlideTransition({
 }: OnboardingSlideTransitionProps) {
   return (
     <div
-      className={cn("w-full", containerClassName)}
+      className={cn("buzz-onboarding-slide w-full", containerClassName)}
       key={transitionKey}
       {...props}
     >

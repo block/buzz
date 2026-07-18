@@ -572,7 +572,7 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Enter a key" }).click();
+  await page.getByRole("button", { name: "Use an existing key" }).click();
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
   await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
   await page.getByTestId("nostr-import-submit").click();
@@ -767,7 +767,7 @@ test("first-community shows the scenario cards for localhost", async ({
   ).toBeVisible();
 });
 
-test("first-community profile step uses onboarding Next and Back controls", async ({
+test("connected first-community profile step cannot discard resumable onboarding", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -786,6 +786,7 @@ test("first-community profile step uses onboarding Next and Back controls", asyn
           stage: "profile",
           relayUrl: "wss://default.example.com",
           communityName: "Default",
+          communityId: "e2e-default-community",
           createdAt: timestamp,
           updatedAt: timestamp,
         }),
@@ -799,7 +800,6 @@ test("first-community profile step uses onboarding Next and Back controls", asyn
   await installMockBridge(page, undefined, {
     relayWsUrl: "wss://default.example.com",
     skipOnboardingSeed: true,
-    skipCommunitySeed: true,
   });
   await page.goto("/");
 
@@ -858,11 +858,74 @@ test("first-community profile step uses onboarding Next and Back controls", asyn
   ).toBe(true);
   await expect(page.getByTestId("community-profile-next")).toHaveText("Next");
   await expect(page.getByTestId("community-profile-next")).toBeDisabled();
-  await expect(page.getByTestId("community-profile-back")).toHaveText("Back");
+  await expect(page.getByTestId("community-profile-back")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
+      ),
+    )
+    .not.toBeNull();
+});
 
-  await page.getByTestId("community-profile-back").click();
+test("membership denial on community profile save offers recovery", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript(
+    ({ pubkey, transactionStorageKey }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        transactionStorageKey,
+        JSON.stringify({
+          id: "txn-membership-denied",
+          source: "first-community",
+          stage: "profile",
+          relayUrl: "wss://denied.example.com",
+          communityName: "Denied",
+          communityId: "e2e-default-community",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    {
+      pubkey: BLANK_TYLER_IDENTITY.pubkey,
+      transactionStorageKey: COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
+    },
+  );
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError:
+        "relay returned 403 Forbidden: You must be a relay member to access this relay",
+    },
+    {
+      relayWsUrl: "wss://denied.example.com",
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-profile-name-key").fill("Kalvin");
+  await page.getByTestId("community-profile-next").click();
+
+  await expect(page.getByTestId("membership-denied")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Add me to a community" }),
+    page.getByRole("heading", { name: "Not a member yet" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Change community" }).click();
+  await expect(page.getByTestId("community-change-overlay")).toBeVisible();
+  await page.getByLabel("Community URL").fill("wss://invited.example.com");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await page.getByRole("button", { name: "Use anyway" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
   ).toBeVisible();
   await expect
     .poll(() =>
@@ -871,7 +934,7 @@ test("first-community profile step uses onboarding Next and Back controls", asyn
         COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
       ),
     )
-    .toBeNull();
+    .toContain("wss://invited.example.com");
 });
 
 test("identity fallback text does not count as a real onboarding name", async ({
@@ -1278,8 +1341,10 @@ test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
   await completeProfileOnboarding(page);
 
   await expectPrivateWelcomeLanding(page);
+  // Greeted by the name typed above — the @mention pill also files the opener
+  // into the new user's Inbox mentions feed.
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Hi, I'm Fizz. Welcome to Buzz.",
+    "Hi @Morty QA, I'm Fizz. Welcome to Buzz.",
   );
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Honey and Bumble, introduce yourselves",
@@ -1303,7 +1368,7 @@ test("first-run onboarding lands before Welcome team bootstrap completes", async
   await expectPrivateWelcomeLanding(page);
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Hi, I'm Fizz. Welcome to Buzz.",
+    "Hi @Morty QA, I'm Fizz. Welcome to Buzz.",
   );
   await page.waitForTimeout(1_500);
   expect(await commandCount(page, "create_managed_agent")).toBe(3);
