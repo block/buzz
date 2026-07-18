@@ -536,9 +536,9 @@ function RuntimeCard({
     >
       <RuntimeSelectionIndicator runtime={runtime} selected={selected} />
 
-      <div className="flex min-w-0 flex-col items-center gap-2">
+      <div className="flex min-w-0 flex-col items-center gap-2.5">
         <div className="flex min-w-0 items-center justify-center gap-3">
-          <RuntimeIcon className="h-8 w-8" runtime={runtime} />
+          <RuntimeIcon className="h-7 w-7" runtime={runtime} />
           <h2 className="truncate text-sm font-normal leading-5 text-foreground">
             {getRuntimeDisplayLabel(runtime)}
           </h2>

@@ -63,7 +63,7 @@ export function RuntimeIcon({
   const shouldForceForegroundColor = !runtimeLogoUrl && runtime.id === "goose";
 
   if (isBuzzRuntime(runtime)) {
-    return <BuzzMark className="h-8 w-12 text-foreground" />;
+    return <BuzzMark className="h-7 w-10 text-foreground" />;
   }
 
   if (imageUrl && !imageFailed) {
