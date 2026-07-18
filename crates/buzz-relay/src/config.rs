@@ -53,6 +53,9 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     /// Postgres database connection URL.
     pub database_url: String,
+    /// Optional read-replica connection URL (e.g. an Aurora `cluster-ro-`
+    /// endpoint). Unset means all reads stay on the writer.
+    pub read_database_url: Option<String>,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
@@ -376,6 +379,11 @@ impl Config {
 
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+
+        let read_database_url = std::env::var("READ_DATABASE_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
 
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
@@ -811,6 +819,7 @@ impl Config {
         Ok(Self {
             bind_addr,
             database_url,
+            read_database_url,
             redis_url,
             relay_url,
             pairing_relay_url,
@@ -913,6 +922,34 @@ mod tests {
         assert!(
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
+        );
+    }
+
+    #[test]
+    fn read_database_url_unset_or_blank_is_none() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("READ_DATABASE_URL");
+
+        std::env::remove_var("READ_DATABASE_URL");
+        let unset = Config::from_env().expect("config").read_database_url;
+
+        std::env::set_var("READ_DATABASE_URL", "   ");
+        let blank = Config::from_env().expect("config").read_database_url;
+
+        std::env::set_var("READ_DATABASE_URL", "postgres://buzz:pw@replica:5432/buzz"); // sadscan:disable np.postgres.1
+        let set = Config::from_env().expect("config").read_database_url;
+
+        if let Some(value) = previous {
+            std::env::set_var("READ_DATABASE_URL", value);
+        } else {
+            std::env::remove_var("READ_DATABASE_URL");
+        }
+
+        assert_eq!(unset, None, "unset READ_DATABASE_URL must disable routing");
+        assert_eq!(blank, None, "blank READ_DATABASE_URL must disable routing");
+        assert_eq!(
+            set.as_deref(),
+            Some("postgres://buzz:pw@replica:5432/buzz") // sadscan:disable np.postgres.1
         );
     }
 

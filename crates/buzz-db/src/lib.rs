@@ -170,6 +170,13 @@ pub struct Db {
     pub(crate) pool: PgPool,
     /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
     pub(crate) max_connections: u32,
+    /// Optional read-replica pool (from [`DbConfig::read_database_url`]).
+    ///
+    /// `None` means no replica is configured and every read routes to the
+    /// writer pool — the pre-replica behavior. Only lag-tolerant reads may
+    /// route here (see [`Db::read`]); locks, transactions, and anything
+    /// consistency-critical stays on `pool`.
+    pub(crate) read_pool: Option<PgPool>,
 }
 
 /// Snapshot of Postgres connection pool utilisation.
@@ -209,6 +216,10 @@ impl UsageMetricsLeader {
 pub struct DbConfig {
     /// Postgres connection URL (usually sourced from `DATABASE_URL`).
     pub database_url: String,
+    /// Optional read-replica connection URL (usually sourced from
+    /// `READ_DATABASE_URL`, e.g. an Aurora `cluster-ro-` endpoint). `None`
+    /// disables replica routing: [`Db::read`] falls back to the writer pool.
+    pub read_database_url: Option<String>,
     /// Maximum number of connections in the pool.
     pub max_connections: u32,
     /// Minimum number of idle connections to maintain.
@@ -228,6 +239,7 @@ impl Default for DbConfig {
     fn default() -> Self {
         Self {
             database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string(), // sadscan:disable np.postgres.1
+            read_database_url: None,
             max_connections: 20,
             min_connections: 2,
             acquire_timeout_secs: 3,
@@ -329,19 +341,32 @@ pub struct TokenSummary {
 
 impl Db {
     /// Creates a new `Db` by connecting a Postgres pool with the given config.
+    ///
+    /// When `config.read_database_url` is set, a second pool with the same
+    /// sizing is connected to it for lag-tolerant reads (see [`Db::read`]).
     pub async fn new(config: &DbConfig) -> Result<Self> {
-        let pool = PgPoolOptions::new()
+        let pool = Self::connect_pool(config, &config.database_url).await?;
+        let read_pool = match &config.read_database_url {
+            Some(url) => Some(Self::connect_pool(config, url).await?),
+            None => None,
+        };
+        Ok(Self {
+            pool,
+            max_connections: config.max_connections,
+            read_pool,
+        })
+    }
+
+    /// Connect one pool with the sizing knobs from `config`.
+    async fn connect_pool(config: &DbConfig, url: &str) -> Result<PgPool> {
+        Ok(PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-            .connect(&config.database_url)
-            .await?;
-        Ok(Self {
-            pool,
-            max_connections: config.max_connections,
-        })
+            .connect(url)
+            .await?)
     }
 
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
@@ -349,7 +374,34 @@ impl Db {
         Self {
             max_connections: pool.options().get_max_connections(),
             pool,
+            read_pool: None,
         }
+    }
+
+    /// Creates a `Db` from distinct writer and read pools (useful in tests,
+    /// where a second database stands in for a lagged replica).
+    pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
+        Self {
+            max_connections: pool.options().get_max_connections(),
+            pool,
+            read_pool: Some(read_pool),
+        }
+    }
+
+    /// The pool for lag-tolerant reads: the read replica when configured,
+    /// otherwise the writer pool.
+    ///
+    /// Routing contract — a query may use this pool only when a stale (bounded
+    /// replication lag) result is acceptable to its caller. Keyset-cursor
+    /// pagination over immutable history qualifies; head-of-channel fetches,
+    /// auth/membership checks, locks, and anything inside a transaction do not.
+    pub fn read(&self) -> &PgPool {
+        self.read_pool.as_ref().unwrap_or(&self.pool)
+    }
+
+    /// Whether a distinct read-replica pool is configured.
+    pub fn has_read_pool(&self) -> bool {
+        self.read_pool.is_some()
     }
 
     /// Run pending database migrations.
@@ -373,6 +425,15 @@ impl Db {
             idle: self.pool.num_idle() as u32,
             max: self.max_connections,
         }
+    }
+
+    /// Pool utilisation stats for the read-replica pool, when configured.
+    pub fn read_pool_stats(&self) -> Option<DbPoolStats> {
+        self.read_pool.as_ref().map(|p| DbPoolStats {
+            size: p.size(),
+            idle: p.num_idle() as u32,
+            max: self.max_connections,
+        })
     }
 
     /// Try to acquire the detached session advisory lock for relay usage metrics.
@@ -1830,6 +1891,14 @@ impl Db {
     }
 
     /// Fetch replies under a root event.
+    ///
+    /// Routing: the head fetch (`cursor: None`) always reads the writer.
+    /// Cursor-bearing pages read the replica pool when one is configured —
+    /// thread pagination walks forward from oldest to newest, so every page
+    /// except possibly the last covers history a lagged replica already has.
+    /// An under-`limit` replica page is a candidate terminal page: the client
+    /// treats it as EOF, and a lagged replica could truncate the tail. That
+    /// one page is re-run on the writer so the EOF decision is authoritative.
     pub async fn get_thread_replies(
         &self,
         community_id: CommunityId,
@@ -1838,6 +1907,21 @@ impl Db {
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> Result<Vec<thread::ThreadReply>> {
+        if cursor.is_some() && self.has_read_pool() {
+            let replies = thread::get_thread_replies(
+                self.read(),
+                community_id,
+                root_event_id,
+                depth_limit,
+                limit,
+                cursor,
+            )
+            .await?;
+            if replies.len() >= limit as usize {
+                return Ok(replies);
+            }
+            // Candidate terminal page — verify against the writer.
+        }
         thread::get_thread_replies(
             &self.pool,
             community_id,
@@ -1859,6 +1943,13 @@ impl Db {
     }
 
     /// One channel window: top-level rows + summaries + server `has_more`.
+    ///
+    /// Routing: the head fetch (`cursor: None`) always reads the writer — it
+    /// must include just-committed events. Cursor-bearing pages read the
+    /// replica pool when one is configured: channel scroll-back pages
+    /// *backward* into history strictly older than the cursor
+    /// (`created_at < ts`), which a replica within any sane lag bound already
+    /// has, and the live tail patches the head regardless of pool.
     pub async fn get_channel_window(
         &self,
         community_id: CommunityId,
@@ -1867,15 +1958,12 @@ impl Db {
         cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
     ) -> Result<thread::ChannelWindow> {
-        thread::get_channel_window(
-            &self.pool,
-            community_id,
-            channel_id,
-            limit,
-            cursor,
-            kind_filter,
-        )
-        .await
+        let pool = if cursor.is_some() {
+            self.read()
+        } else {
+            &self.pool
+        };
+        thread::get_channel_window(pool, community_id, channel_id, limit, cursor, kind_filter).await
     }
 
     /// Look up a single thread_metadata row by event_id.
@@ -5015,5 +5103,345 @@ mod tests {
             groups_a_after.is_empty(),
             "A's reaction must be gone after A removes it"
         );
+    }
+
+    // ---- Read-replica routing ------------------------------------------------
+    //
+    // These tests pin the routing contract of `Db::read()` and the two routed
+    // methods. A second scratch database stands in for the replica; the
+    // fixtures are deliberately DIVERGENT (rows that exist in only one of the
+    // two databases) so every assertion observes which pool actually served
+    // the query instead of trusting the routing code's word for it.
+
+    async fn admin_url() -> String {
+        std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into())
+    }
+
+    /// Create a fresh scratch database on the same server and run migrations.
+    /// Returns (pool, db_name); callers should `drop_scratch_db` when done.
+    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
+        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(admin)
+            .await
+            .expect("create scratch db");
+        let base = admin_url().await;
+        // Swap the database path segment of the admin URL for the scratch name.
+        let scratch_url = {
+            let idx = base.rfind('/').expect("db url has a path segment");
+            format!("{}/{}", &base[..idx], name)
+        };
+        let pool = PgPool::connect(&scratch_url)
+            .await
+            .expect("connect scratch db");
+        migration::run_migrations(&pool)
+            .await
+            .expect("migrate scratch db");
+        (pool, name)
+    }
+
+    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
+        pool.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+        )))
+        .execute(admin)
+        .await;
+    }
+
+    /// Insert identical community + channel rows into a database so the same
+    /// (community, channel) ids resolve in both writer and replica.
+    async fn seed_community_channel(
+        pool: &PgPool,
+        community: Uuid,
+        channel: Uuid,
+        author: &nostr::Keys,
+    ) {
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(format!("replica-routing-{}.example", community.simple()))
+            .execute(pool)
+            .await
+            .expect("insert community");
+        crate::channel::create_channel_with_id(
+            pool,
+            CommunityId::from_uuid(community),
+            channel,
+            &format!("replica-routing-{channel}"),
+            crate::channel::ChannelType::Stream,
+            crate::channel::ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+    }
+
+    fn signed_event_at(keys: &nostr::Keys, content: &str, secs: u64) -> nostr::Event {
+        nostr::EventBuilder::new(nostr::Kind::Custom(9), content)
+            .custom_created_at(nostr::Timestamp::from(secs))
+            .sign_with_keys(keys)
+            .expect("sign event")
+    }
+
+    async fn insert_top_level(pool: &PgPool, community: Uuid, channel: Uuid, ev: &nostr::Event) {
+        let ts =
+            chrono::DateTime::from_timestamp(ev.created_at.as_secs() as i64, 0).expect("valid ts");
+        event::insert_event_with_thread_metadata(
+            pool,
+            CommunityId::from_uuid(community),
+            ev,
+            Some(channel),
+            Some(event::ThreadMetadataParams {
+                event_id: ev.id.as_bytes(),
+                event_created_at: ts,
+                channel_id: channel,
+                parent_event_id: None,
+                parent_event_created_at: None,
+                root_event_id: None,
+                root_event_created_at: None,
+                depth: 0,
+                broadcast: true,
+            }),
+        )
+        .await
+        .expect("insert top-level event");
+    }
+
+    async fn insert_thread_reply(
+        pool: &PgPool,
+        community: Uuid,
+        channel: Uuid,
+        root: &nostr::Event,
+        reply: &nostr::Event,
+    ) {
+        let reply_ts = chrono::DateTime::from_timestamp(reply.created_at.as_secs() as i64, 0)
+            .expect("valid ts");
+        let root_ts = chrono::DateTime::from_timestamp(root.created_at.as_secs() as i64, 0)
+            .expect("valid ts");
+        event::insert_event_with_thread_metadata(
+            pool,
+            CommunityId::from_uuid(community),
+            reply,
+            Some(channel),
+            Some(event::ThreadMetadataParams {
+                event_id: reply.id.as_bytes(),
+                event_created_at: reply_ts,
+                channel_id: channel,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_ts),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_ts),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert reply");
+    }
+
+    /// Composite thread cursor: 8-byte BE seconds + raw event id.
+    fn thread_cursor(reply: &crate::thread::ThreadReply) -> Vec<u8> {
+        let mut cur = reply.created_at.timestamp().to_be_bytes().to_vec();
+        cur.extend_from_slice(&reply.event_id);
+        cur
+    }
+
+    #[tokio::test]
+    async fn read_falls_back_to_writer_when_no_replica_configured() {
+        // Pure wiring test — connect_lazy never touches the network.
+        let pool = sqlx::PgPool::connect_lazy(TEST_DB_URL).expect("lazy pool");
+        let db = Db::from_pool(pool);
+        assert!(!db.has_read_pool());
+        assert!(
+            std::ptr::eq(db.read(), &db.pool),
+            "read() must be the writer pool when no replica is configured"
+        );
+        assert!(db.read_pool_stats().is_none());
+    }
+
+    /// Channel window: head fetch (no cursor) reads the WRITER; cursor pages
+    /// read the REPLICA. Divergent fixtures prove which pool served each.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "routing_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "routing_r").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        // Shared history (both databases): m1 < m2 < m3.
+        let base = 1_700_000_000u64;
+        let m1 = signed_event_at(&author, "m1", base);
+        let m2 = signed_event_at(&author, "m2", base + 10);
+        let m3 = signed_event_at(&author, "m3", base + 20);
+        for pool in [&writer, &replica] {
+            for ev in [&m1, &m2, &m3] {
+                insert_top_level(pool, community, channel, ev).await;
+            }
+        }
+        // Lag: the newest event exists only on the writer.
+        let fresh = signed_event_at(&author, "fresh-writer-only", base + 30);
+        insert_top_level(&writer, community, channel, &fresh).await;
+        // Marker: exists only on the "replica" (unphysical for a real replica,
+        // but it makes replica-served pages unambiguous).
+        let marker = signed_event_at(&author, "replica-only-marker", base + 5);
+        insert_top_level(&replica, community, channel, &marker).await;
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        let cid = CommunityId::from_uuid(community);
+
+        // Head fetch (cursor: None) → writer: sees `fresh`, never `marker`.
+        let head = db
+            .get_channel_window(cid, channel, 2, None, None)
+            .await
+            .expect("head window");
+        let head_contents: Vec<String> = head
+            .rows
+            .iter()
+            .map(|r| r.stored_event.event.content.clone())
+            .collect();
+        assert_eq!(
+            head_contents,
+            vec!["fresh-writer-only".to_string(), "m3".to_string()],
+            "head fetch must be served by the writer"
+        );
+
+        // Cursor page → replica: sees `marker`, never `fresh`.
+        let cursor = head.next_cursor.expect("has_more implies next_cursor");
+        let page2 = db
+            .get_channel_window(cid, channel, 10, Some(cursor), None)
+            .await
+            .expect("cursor window");
+        let page2_contents: Vec<String> = page2
+            .rows
+            .iter()
+            .map(|r| r.stored_event.event.content.clone())
+            .collect();
+        assert_eq!(
+            page2_contents,
+            vec![
+                "m2".to_string(),
+                "replica-only-marker".to_string(),
+                "m1".to_string()
+            ],
+            "cursor page must be served by the replica"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Thread replies: head fetch reads the writer; a FULL cursor page is
+    /// served by the replica; an UNDER-limit cursor page (candidate terminal
+    /// page) is re-run on the writer so a lagged replica can never truncate
+    /// the tail into a false EOF.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn thread_replies_cursor_pages_route_to_replica_with_writer_terminal_verification() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "routing_tw").await;
+        let (replica, rname) = create_scratch_db(&admin, "routing_tr").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let root = signed_event_at(&author, "root", base);
+        for pool in [&writer, &replica] {
+            insert_top_level(pool, community, channel, &root).await;
+        }
+
+        // Writer holds replies r1..r5; the lagged replica only has r1..r3.
+        let replies: Vec<nostr::Event> = (1..=5)
+            .map(|i| signed_event_at(&author, &format!("r{i}"), base + 10 * i as u64))
+            .collect();
+        for reply in &replies {
+            insert_thread_reply(&writer, community, channel, &root, reply).await;
+        }
+        for reply in &replies[..3] {
+            insert_thread_reply(&replica, community, channel, &root, reply).await;
+        }
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        let cid = CommunityId::from_uuid(community);
+
+        // Page 1 (no cursor) → writer.
+        let page1 = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 2, None)
+            .await
+            .expect("page 1");
+        let contents: Vec<&str> = page1
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(contents, vec!["r1", "r2"], "head page from writer");
+
+        // Page 2: replica serves a FULL page (r3 exists there) — but wait:
+        // replica has r1..r3, page after r2 with limit 2 returns only [r3]
+        // (under limit) → terminal-verification re-runs on the writer, which
+        // returns [r3, r4]. A lag-truncated EOF must never surface.
+        let cur2 = thread_cursor(page1.last().expect("page 1 non-empty"));
+        let page2 = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 2, Some(&cur2))
+            .await
+            .expect("page 2");
+        let contents: Vec<&str> = page2
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["r3", "r4"],
+            "under-limit replica page must be re-verified on the writer"
+        );
+
+        // Full-page replica serve: with limit 1, the page after r2 is [r3] —
+        // exactly `limit` rows, so the replica result stands. Prove it came
+        // from the replica with a replica-only divergent reply.
+        let ghost = signed_event_at(&author, "replica-only-ghost", base + 25);
+        insert_thread_reply(&replica, community, channel, &root, &ghost).await;
+        let page_replica = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 1, Some(&cur2))
+            .await
+            .expect("full replica page");
+        let contents: Vec<&str> = page_replica
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["replica-only-ghost"],
+            "a full cursor page must be served by the replica"
+        );
+
+        // Same query with no replica configured reads the writer and cannot
+        // see the ghost.
+        let db_writer_only = Db::from_pool(writer.clone());
+        let page_writer = db_writer_only
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 1, Some(&cur2))
+            .await
+            .expect("writer-only page");
+        let contents: Vec<&str> = page_writer
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(contents, vec!["r3"], "unset replica falls back to writer");
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
     }
 }
