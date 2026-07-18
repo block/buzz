@@ -15,7 +15,7 @@ import {
 } from "@/shared/constants/kinds";
 import {
   getTextPayload,
-  sortEvents,
+  handleSubMessage,
   type ConnectionState,
   type PendingEvent,
   type RelaySubscription,
@@ -767,8 +767,15 @@ export class RelayClient {
       return;
     }
 
-    if (type === "EOSE" && typeof rest[0] === "string") {
-      this.handleEose(rest[0]);
+    if (
+      handleSubMessage(
+        this.subscriptions,
+        type,
+        rest,
+        (subId) => void this.closeSubscription(subId),
+      )
+    ) {
+      return;
     }
   }
 
@@ -825,24 +832,6 @@ export class RelayClient {
         subscription.onEvent(event);
       }
     }
-  }
-
-  private handleEose(subId: string) {
-    const subscription = this.subscriptions.get(subId);
-    if (!subscription) {
-      return;
-    }
-
-    if (subscription.mode === "live") {
-      subscription.resolveReady?.();
-      subscription.resolveReady = undefined;
-      return;
-    }
-
-    window.clearTimeout(subscription.timeout);
-    this.subscriptions.delete(subId);
-    void this.closeSubscription(subId);
-    subscription.resolve(sortEvents(subscription.events));
   }
 
   private handleOk(eventId: string, success: boolean, message: string) {

@@ -1,8 +1,8 @@
 import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { ArrowLeft } from "lucide-react";
+import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 
-import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
+import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import { getFeature } from "@/shared/features/manifest";
 import {
   resolveEnabled,
@@ -129,10 +129,10 @@ export function SettingsView({
   section,
 }: SettingsViewProps) {
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
-  const myMembershipQuery = useMyRelayMembershipQuery();
+  const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const featureState = useFeatureSnapshot();
   const visibleSections = React.useMemo(() => {
-    const membership = myMembershipQuery.data;
+    const membership = myMembershipQuery.data?.membership;
 
     return settingsSections.filter((s) => {
       // Feature gate check. Manifest is preview-only — if the gate id is in
@@ -243,6 +243,44 @@ export function SettingsView({
         </SidebarHeader>
 
         <SidebarContent>
+          {myMembershipQuery.isPending ? (
+            <div
+              className="mx-3 flex items-center gap-2 rounded-md border border-sidebar-border px-3 py-2 text-xs text-sidebar-foreground/70"
+              data-testid="community-access-loading"
+            >
+              <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+              Checking community access…
+            </div>
+          ) : null}
+          {myMembershipQuery.isError ? (
+            <div
+              className="mx-3 space-y-2 rounded-md border border-destructive/40 px-3 py-2 text-xs text-sidebar-foreground"
+              data-testid="community-access-error"
+            >
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-3.5 w-3.5 text-destructive" />
+                Community access could not be checked.
+              </div>
+              <button
+                className="flex items-center gap-1.5 font-medium text-sidebar-foreground underline-offset-2 hover:underline"
+                onClick={() => void myMembershipQuery.refetch()}
+                type="button"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Try again
+              </button>
+            </div>
+          ) : null}
+          {myMembershipQuery.data?.snapshotFound === false ? (
+            <div
+              className="mx-3 flex items-start gap-2 rounded-md border border-amber-500/40 px-3 py-2 text-xs text-sidebar-foreground"
+              data-testid="community-access-snapshot-missing"
+            >
+              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+              Community access data is unavailable. Relay recovery may still be
+              in progress.
+            </div>
+          ) : null}
           {visibleNavGroups.map((group) => (
             <SidebarGroup key={group.label}>
               <SidebarGroupLabel>{group.label}</SidebarGroupLabel>

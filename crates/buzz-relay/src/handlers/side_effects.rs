@@ -2750,6 +2750,38 @@ async fn emit_initial_ref_state(
     Ok(())
 }
 
+/// Reconcile every community's event-backed NIP-43 membership view.
+///
+/// `relay_members` is canonical. A snapshot is rebuilt only when it is absent
+/// or older than the newest canonical membership mutation. This makes the
+/// sweep safe to run at startup and periodically without producing an event
+/// stream when nothing changed.
+pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyhow::Result<usize> {
+    let communities = state.db.usage_community_hosts().await?;
+    let mut reconciled = 0usize;
+
+    for community in communities {
+        let community_id = buzz_core::CommunityId::from_uuid(community.id);
+        if !state
+            .db
+            .nip43_membership_snapshot_needs_reconciliation(
+                community_id,
+                &state.relay_keypair.public_key(),
+            )
+            .await?
+        {
+            continue;
+        }
+
+        let tenant = TenantContext::resolved(community_id, community.host);
+        publish_nip43_membership_list(&tenant, state).await?;
+        reconciled += 1;
+    }
+
+    metrics::counter!("buzz_nip43_membership_reconciliations_total").increment(reconciled as u64);
+    Ok(reconciled)
+}
+
 /// Publish a kind:13534 relay membership list event (NIP-43).
 ///
 /// Queries all current relay members and emits a relay-signed, NIP-70-protected
@@ -2761,6 +2793,24 @@ async fn emit_initial_ref_state(
 /// overwriting a newer one when two publications race: the lock serializes
 /// the entire read-build-write cycle, not just the write.
 pub async fn publish_nip43_membership_list(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+) -> anyhow::Result<()> {
+    let started_at = std::time::Instant::now();
+    metrics::counter!("buzz_nip43_membership_publications_total", "result" => "attempted")
+        .increment(1);
+    let result = publish_nip43_membership_list_inner(tenant, state).await;
+    metrics::histogram!("buzz_nip43_membership_publication_seconds")
+        .record(started_at.elapsed().as_secs_f64());
+    metrics::counter!(
+        "buzz_nip43_membership_publications_total",
+        "result" => if result.is_ok() { "succeeded" } else { "failed" }
+    )
+    .increment(1);
+    result
+}
+
+async fn publish_nip43_membership_list_inner(
     tenant: &TenantContext,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
