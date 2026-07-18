@@ -217,6 +217,7 @@ export function MachineOnboardingFlow({
             <OnboardingSlideTransition
               className="flex min-h-[calc(100dvh-13.25rem)] w-full max-w-[837px] flex-col items-center text-center"
               direction="forward"
+              effect="fade"
               transitionKey="machine-key-import"
             >
               <div className="shrink-0">

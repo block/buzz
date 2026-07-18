@@ -360,6 +360,12 @@
     animation-delay: var(--buzz-onboarding-transition-delay, 0ms);
   }
 
+  .buzz-onboarding-transition-line[data-onboarding-effect="fade"]
+    > .buzz-onboarding-transition-content {
+    animation: buzz-onboarding-fade-in 300ms ease-out backwards;
+    animation-delay: var(--buzz-onboarding-transition-delay, 0ms);
+  }
+
   .buzz-onboarding-transition-line[data-onboarding-effect="line-slide"]
     > .buzz-onboarding-transition-content {
     animation-duration: 650ms;
@@ -407,6 +413,16 @@
     56%,
     100% {
       opacity: 0;
+    }
+  }
+
+  @keyframes buzz-onboarding-fade-in {
+    from {
+      opacity: 0;
+    }
+
+    to {
+      opacity: 1;
     }
   }
 
