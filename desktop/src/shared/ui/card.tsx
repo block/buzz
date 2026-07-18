@@ -32,7 +32,11 @@ const cardVariants = cva("text-card-foreground", {
     variant: {
       default: "rounded-xl border border-border/70 bg-card/80 shadow-xs",
       textured:
-        "buzz-card-textured relative isolate rounded-none border-0 p-[var(--buzz-card-textured-safe-inset)] shadow-none",
+        // flex + justify-center: the variant enforces a min size (see
+        // card-texture.css); when that floor stretches the card beyond its
+        // content, the content stays vertically centered instead of pinning
+        // to the top padding edge.
+        "buzz-card-textured relative isolate flex flex-col justify-center rounded-none border-0 p-[var(--buzz-card-textured-safe-inset)] shadow-none",
     },
   },
   defaultVariants: {

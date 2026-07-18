@@ -21,6 +21,16 @@
    */
   --buzz-card-textured-safe-inset: 5rem;
   border: 0 solid transparent;
+  /*
+   * Each border-image band is 208px wide but extends 96px outside the layout
+   * box (outset), leaving 112px per edge inside it. Below 224px (2 × 112px)
+   * on either axis the opposing bands collapse into each other: the solid
+   * white center region disappears and the bands meet on a semi-transparent
+   * row of the fade, which shows the page background through as a thin seam
+   * line. Enforce the floor so the texture can never degenerate.
+   */
+  min-height: 224px;
+  min-width: 224px;
   border-image-source: url("./assets/card-texture.png");
   border-image-slice: 416 fill;
   border-image-width: 208px;
