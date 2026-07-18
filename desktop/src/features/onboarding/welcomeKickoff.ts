@@ -17,6 +17,7 @@ import {
 } from "@/features/onboarding/welcomeGuide";
 import { isWelcomeChannel } from "@/features/onboarding/welcome";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import {
   startManagedAgent,
   stopManagedAgent,
@@ -86,8 +87,7 @@ const closerInFlight = new Set<string>();
 const TEAMMATE_READY_POLL_MS = 250;
 const TEAMMATE_READY_WAIT_MS = 60_000;
 const TEAMMATE_INTRO_WAIT_MS = 15_000;
-const KICKOFF_BEAT_MS = 3_000;
-const CLOSER_BEAT_MS = 10_000;
+const CLOSER_BEAT_MS = 3_000;
 const closerAbortControllers = new Map<string, AbortController>();
 const closerTimeouts = new Map<
   string,
@@ -203,10 +203,11 @@ export async function waitForWelcomeTeammatesOnline(
   return options.isCancelled() ? [] : latestOnline;
 }
 
-export async function waitForWelcomeKickoffBeat(
-  options: { signal?: AbortSignal; waitMs?: number } = {},
-) {
-  const waitMs = options.waitMs ?? KICKOFF_BEAT_MS;
+export async function waitForWelcomeKickoffBeat(options: {
+  signal?: AbortSignal;
+  waitMs: number;
+}) {
+  const waitMs = options.waitMs;
   if (options.signal?.aborted) return false;
 
   return new Promise<boolean>((resolve) => {
@@ -422,8 +423,29 @@ export function useWelcomeKickoff(
   const isActiveWelcome = isWelcomeChannel(activeChannel);
   const focusedWelcomeChannelRef = React.useRef<string | null>(null);
   focusedWelcomeChannelRef.current = isActiveWelcome ? channelId : null;
-  const channelEventsRef = React.useRef(channelEvents);
-  channelEventsRef.current = channelEvents;
+  // Watch the opener's thread subtree directly so teammate intro replies are
+  // visible to the closer classification even when the user never opens the
+  // thread. Without this, replies only surfaced through the UI's open-thread
+  // query and the closer stalled until the user clicked into the thread.
+  const openerEvent = React.useMemo(
+    () => markerEvent(channelEvents, openerMarker) ?? null,
+    [channelEvents],
+  );
+  const openerThreadQuery = useThreadReplies(
+    isActiveWelcome ? activeChannel : null,
+    openerEvent?.id ?? null,
+  );
+  const kickoffEvents = React.useMemo(() => {
+    const openerReplies = openerThreadQuery.data ?? [];
+    if (openerReplies.length === 0) return channelEvents;
+    const seen = new Set(channelEvents.map((event) => event.id));
+    return [
+      ...channelEvents,
+      ...openerReplies.filter((event) => !seen.has(event.id)),
+    ];
+  }, [channelEvents, openerThreadQuery.data]);
+  const channelEventsRef = React.useRef(kickoffEvents);
+  channelEventsRef.current = kickoffEvents;
   const agentSet = React.useMemo(
     () =>
       resolveWelcomeAgentSetForRelay(
@@ -451,9 +473,6 @@ export function useWelcomeKickoff(
     const isCancelled = () =>
       kickoffController.signal.aborted ||
       focusedWelcomeChannelRef.current !== channelId;
-    const landingBeat = waitForWelcomeKickoffBeat({
-      signal: kickoffController.signal,
-    });
     void (async () => {
       try {
         const welcomeTeam = await ensureWelcomeTeam(
@@ -546,7 +565,7 @@ export function useWelcomeKickoff(
             "Some Welcome teammates did not become ready; continuing with a degraded kickoff.",
           );
         }
-        if (!(await landingBeat) || isCancelled()) return;
+        if (isCancelled()) return;
 
         const openerResult = await sendManagedAgentChannelMessage(
           buildWelcomeKickoffOpenerSendInput(
@@ -595,13 +614,13 @@ export function useWelcomeKickoff(
       closerInFlight.has(channelId)
     )
       return;
-    const opener = markerEvent(channelEvents, openerMarker);
-    if (!opener || markerEvent(channelEvents, closerMarker)) {
+    const opener = markerEvent(kickoffEvents, openerMarker);
+    if (!opener || markerEvent(kickoffEvents, closerMarker)) {
       return;
     }
 
     const { unresolved } = classifyWelcomeKickoffResolution(
-      channelEvents,
+      kickoffEvents,
       opener,
       agentSet,
     );
@@ -717,7 +736,7 @@ export function useWelcomeKickoff(
   }, [
     activeCommunity?.relayUrl,
     agentSet,
-    channelEvents,
+    kickoffEvents,
     channelId,
     isActiveWelcome,
     queryClient,
