@@ -104,6 +104,7 @@ struct Sub {
 pub struct Relay {
     subs: Mutex<Vec<Sub>>,
     conn_count: AtomicU32,
+    max_conns: u32,
     next_conn_id: AtomicU64,
     /// Global dedup vec — entries expire after ENTRY_TTL; rejects at DEDUP_CAP after eviction.
     seen_ids: Mutex<Vec<([u8; 32], tokio::time::Instant)>>,
@@ -119,9 +120,19 @@ impl Default for Relay {
 
 impl Relay {
     pub fn new() -> Self {
+        Self::with_max_conns(MAX_CONNS)
+    }
+
+    /// Create a relay with a custom connection cap.
+    ///
+    /// This is primarily used by integration tests so cap behavior can be
+    /// exercised without requiring more file descriptors than some local
+    /// environments allow. Production callers should use [`Relay::new`].
+    pub fn with_max_conns(max_conns: u32) -> Self {
         Self {
             subs: Mutex::new(Vec::new()),
             conn_count: AtomicU32::new(0),
+            max_conns,
             next_conn_id: AtomicU64::new(0),
             seen_ids: Mutex::new(Vec::new()),
             delivered: Mutex::new(HashMap::new()),
@@ -947,7 +958,7 @@ async fn http_service(
     }
 
     // Reserve slot before upgrading.
-    if relay.conn_count.fetch_add(1, Ordering::Relaxed) >= MAX_CONNS {
+    if relay.conn_count.fetch_add(1, Ordering::Relaxed) >= relay.max_conns {
         relay.conn_count.fetch_sub(1, Ordering::Relaxed);
         let mut r = Response::new(Full::default());
         *r.status_mut() = StatusCode::SERVICE_UNAVAILABLE;

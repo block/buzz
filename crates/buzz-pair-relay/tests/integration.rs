@@ -32,10 +32,13 @@ type WS = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Start a relay on a random port, return the WebSocket URL.
 async fn start_relay() -> String {
+    start_relay_with(Relay::new()).await
+}
+
+async fn start_relay_with(relay: Relay) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let relay = Arc::new(Relay::new());
-    tokio::spawn(run_server(listener, relay));
+    tokio::spawn(run_server(listener, Arc::new(relay)));
     format!("ws://127.0.0.1:{}", addr.port())
 }
 
@@ -580,20 +583,21 @@ async fn test_invalid_hex_in_event_id() {
     assert_eq!(resp[2], false);
 }
 
-/// 17. Global connection cap: 128 connections succeed; 129th is rejected.
-///     After closing one, a new connection succeeds.
+/// 17. Global connection cap: configured max connections succeed; the next is
+///     rejected. After closing one, a new connection succeeds.
 #[tokio::test]
 async fn test_global_conn_cap() {
-    let url = start_relay().await;
+    let max_conns = 16;
+    let url = start_relay_with(Relay::with_max_conns(max_conns)).await;
 
-    let mut conns: Vec<WS> = Vec::with_capacity(128);
-    for _ in 0..128 {
+    let mut conns: Vec<WS> = Vec::with_capacity(max_conns as usize);
+    for _ in 0..max_conns {
         conns.push(connect(&url).await);
     }
 
-    // 129th should fail (server returns 503).
+    // One over the configured limit should fail (server returns 503).
     let result = connect_async(&url).await;
-    assert!(result.is_err(), "expected 129th connection to fail");
+    assert!(result.is_err(), "expected capped connection to fail");
 
     // Close one connection.
     let mut dropped = conns.pop().unwrap();
@@ -984,11 +988,12 @@ async fn test_close_handshake() {
     assert_closed(&mut ws).await;
 }
 
-/// 35. Connection counter does not leak: open/close 5 connections, then open
-///     128 more — all should succeed.
+/// 35. Connection counter does not leak: open/close some connections, then
+///     fill the configured cap — all should succeed.
 #[tokio::test]
 async fn test_conn_counter_no_leak() {
-    let url = start_relay().await;
+    let max_conns = 16;
+    let url = start_relay_with(Relay::with_max_conns(max_conns)).await;
 
     // Open and close 5 connections.
     for _ in 0..5 {
@@ -998,12 +1003,12 @@ async fn test_conn_counter_no_leak() {
     // Give the relay time to decrement counters.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Now open 128 connections — all should succeed.
-    let mut conns: Vec<WS> = Vec::with_capacity(128);
-    for _ in 0..128 {
+    // Now open connections up to the cap — all should succeed.
+    let mut conns: Vec<WS> = Vec::with_capacity(max_conns as usize);
+    for _ in 0..max_conns {
         conns.push(connect(&url).await);
     }
-    assert_eq!(conns.len(), 128);
+    assert_eq!(conns.len(), max_conns as usize);
 }
 
 /// 36. Fan-out drops do not close the subscriber connection.
