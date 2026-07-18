@@ -416,25 +416,31 @@ export function AgentDefinitionDialog({
     secretEnvVar: topLevelSecretEnvVar,
     value: apiKeyValue,
   } = apiKeyFieldState;
-  // Provider required-ness is a static property of the runtime — it does not
-  // change based on whether the field is currently filled. Using the dynamic
-  // missingNormalizedFields check would flip the asterisk off once a value is
-  // selected, which is incoherent (required means required, not "required until
-  // satisfied"). runtimeSupportsLlmProviderSelection is the authoritative gate.
+  // Provider required-ness is a static property of the field's visibility — it
+  // does not change based on whether the field is currently filled. Using the
+  // dynamic missingNormalizedFields check would flip the asterisk off once a
+  // value is selected, which is incoherent (required means required, not
+  // "required until satisfied"). runtimeCanChooseLlmProvider is the authoritative
+  // gate: it tracks exactly when the provider picker is shown (Buzz Agent/Goose,
+  // plus runtime-less legacy/builtin definitions), so the required marker never
+  // drifts from whether Save actually needs a provider.
   const providerIsRequired =
-    aiConfigurationMode === "custom" &&
-    runtimeSupportsLlmProviderSelection(runtime);
+    aiConfigurationMode === "custom" && runtimeCanChooseLlmProvider;
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   // Customize pins a complete provider/model pair. Shared compute's concrete
   // automatic-routing value is the only valid non-model-id choice.
   const isExplicitModelRequired = aiConfigurationMode === "custom";
-  // Codex/Claude hide the provider picker (they drive their own provider), so
-  // Customize must not require a provider there — only Buzz Agent/Goose do.
+  // Gate the provider requirement on the field's actual visibility, not the raw
+  // runtime capability. Codex/Claude hide the provider picker (they drive their
+  // own provider), so Customize must not require a provider there. But a
+  // runtime-less legacy/builtin definition still exposes the picker via
+  // blankRuntimeModelProviderEditable, so it must keep requiring a provider —
+  // otherwise Save could persist `provider: undefined` despite the visible field.
   const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
     aiConfigurationMode,
     { provider, model },
-    runtimeSupportsLlmProviderSelection(runtime),
+    runtimeCanChooseLlmProvider,
   );
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
@@ -474,7 +480,7 @@ export function AgentDefinitionDialog({
     localModeMissingFields: localModeGate.missingNormalizedFields,
     localModeMissingEnvKeys: localModeGate.missingEnvKeys,
     customAiPairSatisfied,
-    runtimeNeedsProviderSelection: runtimeSupportsLlmProviderSelection(runtime),
+    runtimeNeedsProviderSelection: runtimeCanChooseLlmProvider,
     customProviderEmpty: provider.trim().length === 0,
     customModelEmpty: model.trim().length === 0,
   });

@@ -91,6 +91,30 @@ test("Buzz Agent/Goose Customize still requires both provider and model", () => 
   );
 });
 
+test("runtime-less editable definition still requires the visible provider", () => {
+  // A legacy/builtin definition with no runtime but a saved model exposes the
+  // provider picker (runtimeCanChooseLlmProvider === true), so the dialog passes
+  // needsProviderSelection=true here. An empty provider must NOT satisfy the
+  // pair — otherwise Save persists `provider: undefined` despite the visible
+  // picker (wesbillman's blocking review point).
+  assert.equal(
+    agentAiConfigurationModeSatisfied(
+      "custom",
+      { provider: "", model: "claude-opus-4-5" },
+      true,
+    ),
+    false,
+  );
+  assert.equal(
+    agentAiConfigurationModeSatisfied(
+      "custom",
+      { provider: "anthropic", model: "claude-opus-4-5" },
+      true,
+    ),
+    true,
+  );
+});
+
 test("Defaults clears provider and model together", () => {
   assert.deepEqual(
     agentAiConfigurationPairForMode({

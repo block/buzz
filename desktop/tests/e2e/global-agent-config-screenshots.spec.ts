@@ -127,6 +127,41 @@ const CATALOG_WITH_CODEX = [
   },
 ];
 
+// A catalog where every runtime is unavailable (not installed). With nothing
+// available, getDefaultPersonaRuntime returns null, so the definition dialog's
+// runtime auto-seed effect is a no-op and a runtime-less definition keeps its
+// empty runtime — the precondition for blankRuntimeModelProviderEditable.
+const CATALOG_NONE_AVAILABLE = [
+  {
+    id: "buzz-agent",
+    label: "Buzz Agent",
+    avatar_url: "",
+    availability: "not_installed",
+    command: "buzz-agent",
+    binary_path: null,
+    default_args: [],
+    mcp_command: "buzz-dev-mcp",
+    install_hint: "Ships with the Buzz desktop app.",
+    install_instructions_url: "https://github.com/block/buzz",
+    can_auto_install: false,
+    underlying_cli_path: null,
+  },
+  {
+    id: "goose",
+    label: "Goose",
+    avatar_url: "",
+    availability: "not_installed",
+    command: "goose",
+    binary_path: null,
+    default_args: [],
+    mcp_command: null,
+    install_hint: "Install Goose to use this runtime.",
+    install_instructions_url: "https://github.com/block/goose",
+    can_auto_install: false,
+    underlying_cli_path: null,
+  },
+];
+
 test.describe("global agent config screenshots", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
@@ -463,6 +498,101 @@ test.describe("global agent config screenshots", () => {
     const dialog = page.getByRole("dialog");
     await dialog.screenshot({
       path: `${SHOTS}/10-edit-codex-custom-model-save-enabled-no-reason.png`,
+    });
+  });
+
+  // Shot 11: the inverse of Ian's fix, and wesbillman's blocking review point.
+  // A runtime-LESS legacy/builtin definition (no runtime, but a saved model)
+  // still EXPOSES the provider picker via blankRuntimeModelProviderEditable, so
+  // an empty provider must keep Save DISABLED. The gate must key off the field's
+  // visibility (runtimeCanChooseLlmProvider), not the raw runtime capability —
+  // otherwise Save persists `provider: undefined` despite the visible picker.
+  // A global provider/model default keeps localMode satisfied, so the ONLY thing
+  // that can block Save here is the Customize-pair provider gate (step 7), which
+  // is exactly what this regression pins.
+  test("11-edit-runtime-less-provider-required-save-blocked", async ({
+    page,
+  }) => {
+    const PERSONA_ID = "persona-runtime-less-edit-e2e";
+    await installMockBridge(page, {
+      // No runtime is available, so getDefaultPersonaRuntime returns null and
+      // the dialog does NOT auto-seed a runtime on open — the runtime-less
+      // definition stays runtime-less, which is the only state where
+      // blankRuntimeModelProviderEditable exposes the provider picker.
+      acpRuntimesCatalog: CATALOG_NONE_AVAILABLE,
+      // Global defaults satisfy localMode, so any block is the pair gate alone.
+      globalAgentConfig: {
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-global-value" },
+      },
+      managedAgents: [
+        {
+          pubkey: TEST_IDENTITIES.tyler.pubkey,
+          name: "Legacy Editor",
+          personaId: PERSONA_ID,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+      personas: [
+        {
+          id: PERSONA_ID,
+          displayName: "Legacy Editor",
+          systemPrompt: "You are the runtime-less edit-mode e2e persona.",
+          // Runtime-less definition with a saved model and NO provider — the
+          // picker is editable-without-runtime, so the provider stays required.
+          runtime: null,
+          model: "claude-opus-4-5",
+          provider: null,
+        },
+      ],
+    });
+
+    // Agents view → persona-grouped agent card → Edit quick action.
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    const agentButton = page.getByRole("button", {
+      name: "Legacy Editor agent profile",
+    });
+    await expect(agentButton).toBeVisible({ timeout: 10_000 });
+    await agentButton.click();
+    await expect(page.getByTestId("user-profile-panel")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId("user-profile-edit-agent").click();
+
+    // Confirm the real EDIT dialog, seeded from the persona.
+    await expect(page.getByTestId("persona-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.locator("#persona-display-name")).toHaveValue(
+      "Legacy Editor",
+    );
+    await expect(page.getByTestId("persona-dialog-submit")).toHaveText(
+      /Save changes/,
+    );
+
+    // The provider picker IS visible (runtime-less editable definition) …
+    await expect(page.locator("#persona-llm-provider")).toBeVisible({
+      timeout: 10_000,
+    });
+    // … so the empty provider must block Save …
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
+      timeout: 10_000,
+    });
+    // … and the reason must be the Customize-pair provider gate, not the
+    // global-defaults gate (which would say "Settings → AI defaults").
+    const reason = page.getByTestId("persona-dialog-submit-reason");
+    await expect(reason).toBeVisible({ timeout: 10_000 });
+    await expect(reason).toContainText("Select a provider");
+    await expect(reason).not.toContainText("Settings → AI defaults");
+
+    await waitForAnimations(page);
+
+    const dialog = page.getByRole("dialog");
+    await dialog.screenshot({
+      path: `${SHOTS}/11-edit-runtime-less-provider-required-save-blocked.png`,
     });
   });
 });
