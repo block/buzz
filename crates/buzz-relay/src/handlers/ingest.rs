@@ -510,6 +510,111 @@ fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(),
     Ok(())
 }
 
+async fn validate_channel_mention_audience(
+    community_id: CommunityId,
+    channel_id: Uuid,
+    event: &Event,
+    state: &AppState,
+) -> Result<(), String> {
+    let mut reference_modes = std::collections::HashSet::new();
+    let mut recipients = Vec::new();
+
+    for tag in event.tags.iter() {
+        if let (Some(mode), Some(recipient)) = (
+            buzz_core::channel_mentions::channel_mention_recipient_mode(tag),
+            buzz_core::channel_mentions::channel_mention_recipient(tag),
+        ) {
+            recipients.push((mode.to_string(), recipient.to_string()));
+            continue;
+        }
+
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) == Some("p")
+            && parts.get(3).is_some_and(|marker| {
+                marker.starts_with(
+                    buzz_core::channel_mentions::CHANNEL_MENTION_RECIPIENT_MARKER_PREFIX,
+                )
+            })
+        {
+            return Err("malformed channel mention recipient tag".into());
+        }
+        match parts.first().map(String::as_str) {
+            Some(buzz_core::channel_mentions::CHANNEL_MENTION_REFERENCE_TAG) => {
+                let mode = buzz_core::channel_mentions::channel_mention_reference_mode(tag)
+                    .ok_or_else(|| "malformed audience-ref tag".to_string())?;
+                reference_modes.insert(mode.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    if reference_modes.is_empty() && recipients.is_empty() {
+        return Ok(());
+    }
+
+    let kind = event_kind_u32(event);
+    if !matches!(
+        kind,
+        KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_EDIT | KIND_FORUM_POST | KIND_FORUM_COMMENT
+    ) {
+        return Err("channel mention tags are only valid on messages and edits".into());
+    }
+
+    if recipients
+        .iter()
+        .any(|(mode, _)| !reference_modes.contains(mode))
+    {
+        return Err("audience recipient tag is missing its audience-ref marker".into());
+    }
+    if recipients.len() > buzz_core::channel_mentions::MAX_CHANNEL_MENTION_RECIPIENTS {
+        return Err(format!(
+            "channel mention audience exceeds {} recipients",
+            buzz_core::channel_mentions::MAX_CHANNEL_MENTION_RECIPIENTS
+        ));
+    }
+
+    let author = event.pubkey.to_bytes().to_vec();
+    let author_hex = event.pubkey.to_hex();
+    let author_is_member = state
+        .db
+        .is_member(community_id, channel_id, &author)
+        .await
+        .map_err(|error| format!("database error checking channel membership: {error}"))?;
+    if !author_is_member {
+        return Err("only channel members may use @everyone or @here".into());
+    }
+
+    let mut unique_recipients = std::collections::HashSet::new();
+    let mut recipient_pubkeys = Vec::with_capacity(recipients.len());
+    for (_, recipient) in recipients {
+        let normalized = recipient.to_ascii_lowercase();
+        if normalized.len() != 64 || !normalized.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Err("audience recipient must be a 64-character hex pubkey".into());
+        }
+        if normalized == author_hex {
+            return Err("channel mention audience must not include the sender".into());
+        }
+        if !unique_recipients.insert(normalized.clone()) {
+            return Err("channel mention audience contains a duplicate recipient".into());
+        }
+        recipient_pubkeys.push(
+            hex::decode(normalized)
+                .map_err(|_| "audience recipient must be a 64-character hex pubkey")?,
+        );
+    }
+
+    let recipients_are_members = state
+        .db
+        .are_members(community_id, channel_id, &recipient_pubkeys)
+        .await
+        .map_err(|error| format!("database error checking channel membership: {error}"))?;
+    if !recipients_are_members {
+        return Err("channel mention audience contains a non-member".into());
+    }
+
+    Ok(())
+}
+
 /// Owned thread metadata for the DB insert.
 pub(crate) struct ThreadMetadataOwned {
     pub event_id: Vec<u8>,
@@ -1727,6 +1832,10 @@ async fn ingest_event_inner(
             );
             auth_result.map_err(IngestError::Rejected)?;
         }
+
+        validate_channel_mention_audience(tenant.community(), ch_id, &event, state)
+            .await
+            .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
     }
 
     // Handled directly — these mutate relay_members and do NOT get stored.

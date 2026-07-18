@@ -65,7 +65,7 @@ export function resolveMentionProps(
   tags: string[][] | undefined,
   profiles: Record<string, UserProfileSummary> | undefined,
 ): ResolvedMentionProps {
-  if (!profiles || !tags) {
+  if (!tags) {
     return { mentionNames: undefined, mentionPubkeysByName: undefined };
   }
 
@@ -73,8 +73,16 @@ export function resolveMentionProps(
   const pubkeysByName: Record<string, string> = {};
 
   for (const tag of tags) {
+    if (
+      tag[0] === "buzz-audience-ref" &&
+      (tag[1] === "everyone" || tag[1] === "here")
+    ) {
+      names.add(tag[1]);
+      continue;
+    }
+
     const pubkey = getMentionTagPubkey(tag);
-    if (!pubkey) {
+    if (!pubkey || !profiles) {
       continue;
     }
 

@@ -34,6 +34,7 @@ export default defineConfig({
         "**/profile-custom-emoji-status.spec.ts",
         "**/custom-emoji-ui.spec.ts",
         "**/channel-mute.spec.ts",
+        "**/channel-mentions.spec.ts",
         "**/channel-star.spec.ts",
         "**/channel-controls.spec.ts",
         "**/active-turn-resilience.spec.ts",

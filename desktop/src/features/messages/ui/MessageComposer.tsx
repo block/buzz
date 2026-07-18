@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
+import { toast } from "sonner";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
@@ -21,15 +22,11 @@ import {
 } from "@/features/messages/lib/imetaMediaMarkdown";
 
 import { useAttachmentEditing } from "@/features/messages/lib/useAttachmentEditing";
-import {
-  type MediaUploadController,
-  useMediaUpload,
-} from "@/features/messages/lib/useMediaUpload";
+import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import { diffAddedMentionPubkeys } from "@/features/messages/lib/threading";
 import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
   hasMentionClipboardHtml,
   normalizeMentionClipboardHtml,
@@ -45,7 +42,6 @@ import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposer
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
-import type { ChannelType } from "@/shared/api/types";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
@@ -60,95 +56,7 @@ import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
-
-type MessageComposerAudienceContext = {
-  type: "thread";
-  threadRootId: string;
-  initialAgentPubkeys?: readonly string[];
-};
-type MessageComposerProps = {
-  audienceContext?: MessageComposerAudienceContext | null;
-  channelId?: string | null;
-  channelName: string;
-  channelType?: ChannelType | null;
-  containerClassName?: string;
-  disabled?: boolean;
-  draftKey?: string;
-  /**
-   * When provided, the composer fires `submitMessage` once on mount after
-   * the draft matching this key has been loaded into the editor. This powers
-   * the "Send message" confirm-dialog flow in the Drafts panel. The callback
-   * `onAutoSubmitComplete` must clear the trigger (e.g. remove `?autoSend`
-   * from the URL) — it is called synchronously before `submitMessage` fires
-   * so the param is gone before any navigation the send might cause.
-   *
-   * Fires at most once per mount: a stable key value that persists across
-   * re-renders does NOT re-fire.
-   */
-  autoSubmitDraftKey?: string | null;
-  /** Called when the auto-submit fires so the parent can clear the trigger. */
-  onAutoSubmitComplete?: () => void;
-  editTarget?: {
-    author: string;
-    body: string;
-    id: string;
-    /**
-     * NIP-92 imeta attachments on the original event, in tag order. Loaded
-     * into the composer's pending-imeta state on edit-open so the user sees
-     * them as removable thumbnails (just like the send path) and can add
-     * more. The submit path emits a fresh full imeta tag set on the edit
-     * event; the receiver overlays it.
-     */
-    imetaMedia?: ImetaMedia[];
-  } | null;
-  isSending?: boolean;
-  mediaController?: MediaUploadController;
-  onCancelEdit?: () => void;
-  onCancelReply?: () => void;
-  /**
-   * Invoked when the user presses ↑ in an empty composer that is not already
-   * in edit mode. The owner should locate the most recent message authored by
-   * the current user within this composer's scope (main timeline, DM, or
-   * thread) and enter edit mode for it. Return `true` if a target was found
-   * and edit mode was entered, so the composer can swallow the keystroke;
-   * return `false` to let the arrow key fall through normally.
-   */
-  onEditLastOwnMessage?: () => boolean;
-  onEditSave?: (
-    content: string,
-    mediaTags?: string[][],
-    mentionPubkeys?: string[],
-  ) => Promise<void>;
-  /** Captures send context synchronously before awaits can change navigation. */
-  onCaptureSendContext?: () => {
-    parentEventId: string | null;
-    threadHeadId: string | null;
-  } | null;
-  /** Resolves the channel required to prepare mentions before sending. */
-  onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
-  onPreparingMentionSendChange?: (isPreparing: boolean) => void;
-  onSend: (
-    content: string,
-    mentionPubkeys: string[],
-    mediaTags?: string[][],
-    channelId?: string | null,
-    threadContext?: {
-      parentEventId: string | null;
-      threadHeadId: string | null;
-    } | null,
-  ) => Promise<void>;
-  placeholder?: string;
-  profiles?: UserProfileLookup;
-  replyTarget?: {
-    author: string;
-    body: string;
-    id: string;
-  } | null;
-  showTopBorder?: boolean;
-  toolbarExtraActions?: React.ReactNode;
-  typingParentEventId?: string | null;
-  typingRootEventId?: string | null;
-};
+import type { MessageComposerProps } from "./messageComposerTypes";
 
 function MessageComposerImpl({
   audienceContext = null,
@@ -622,18 +530,30 @@ function MessageComposerImpl({
       // NIP-30: attach `["emoji", shortcode, url]` tags for custom emoji in the
       // edited body, exactly like the send path. Without this an edited message
       // ships with no emoji tags, so the receiver can't resolve a `:shortcode:`
-      // and renders the literal text. `?? []` preserves edit semantics (a
-      // defined-but-empty media set means "wipe attachments").
-      const outgoingTags =
+      // and renders the literal text. Keep channel-mention metadata in sync too.
+      const baseOutgoingTags =
         mergeOutgoingTags(
           mediaTags,
           buildCustomEmojiTags(finalContent, customEmoji),
         ) ?? [];
+      const channelMentionError = mentions.getChannelMentionError(
+        finalContent,
+        editTargetRef.current.body,
+      );
+      if (channelMentionError) {
+        toast.error(channelMentionError);
+        return;
+      }
+      const channelMentionTags = mentions.extractChannelMentionTags(
+        finalContent,
+        editTargetRef.current.body,
+      );
+      const outgoingTags = [...baseOutgoingTags, ...channelMentionTags];
 
       // Notify only mentions this edit *newly adds* (see
       // diffAddedMentionPubkeys): a typo-fix edit that leaves the mention set
-      // unchanged emits no `p` tags and re-wakes nobody. Computed before the
-      // composer state is cleared below.
+      // unchanged emits no direct `p` tags and re-wakes nobody. Computed before
+      // the composer state is cleared below.
       const addedMentionPubkeys = diffAddedMentionPubkeys(
         extractMentionPubkeysRef.current(editTargetRef.current.body),
         extractMentionPubkeysRef.current(finalContent),
@@ -719,6 +639,8 @@ function MessageComposerImpl({
     mentionSendFlow.isPreparingMentionSend,
     mentionSendFlow.sendMessageWithMentionFlow,
     mentions.clearMentions,
+    mentions.extractChannelMentionTags,
+    mentions.getChannelMentionError,
     richText.clearContent,
     richText.setContent,
     setComposerContent,

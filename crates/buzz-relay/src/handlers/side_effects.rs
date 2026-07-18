@@ -935,6 +935,17 @@ async fn emit_addressable_discovery_event(
     Ok(())
 }
 
+fn group_member_tags(group_id: &str, members: &[MemberRecord]) -> anyhow::Result<Vec<Tag>> {
+    let mut tags: Vec<Tag> = vec![Tag::parse(["d", group_id])?];
+    for member in members {
+        let pubkey_hex = hex::encode(&member.pubkey);
+        // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
+        // because the canonical relay is implicit (this event is signed by it).
+        tags.push(Tag::parse(["p", &pubkey_hex, "", &member.role])?);
+    }
+    Ok(tags)
+}
+
 /// Emit NIP-29 group discovery events (39000, 39001, 39002) signed by the relay keypair.
 /// Called after group creation, metadata changes, or membership changes.
 /// Events are stored channel-scoped (`channel_id = Some(...)`) so that existing
@@ -1038,13 +1049,7 @@ pub async fn emit_group_discovery_events(
     }
 
     {
-        let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-        for m in &members {
-            let pubkey_hex = hex::encode(&m.pubkey);
-            // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
-            // because the canonical relay is implicit (this event is signed by it).
-            tags.push(Tag::parse(["p", &pubkey_hex, "", &m.role])?);
-        }
+        let tags = group_member_tags(&group_id, &members)?;
         emit_addressable_discovery_event(
             tenant,
             state,
@@ -3327,5 +3332,34 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
+    }
+
+    #[test]
+    fn group_member_roster_preserves_the_channel_mention_overflow_boundary() {
+        let channel_id = Uuid::new_v4();
+        let member_count = buzz_core::channel_mentions::MAX_CHANNEL_MENTION_RECIPIENTS + 2;
+        let members: Vec<MemberRecord> = (0..member_count)
+            .map(|index| MemberRecord {
+                channel_id,
+                pubkey: hex::decode(format!("{index:064x}")).expect("hex pubkey"),
+                role: "member".to_string(),
+                joined_at: chrono::Utc::now(),
+                invited_by: None,
+                removed_at: None,
+            })
+            .collect();
+
+        let tags = group_member_tags(&channel_id.to_string(), &members).expect("member tags");
+
+        assert_eq!(tags.len(), member_count + 1, "d tag plus every member");
+        assert_eq!(
+            tags.last().expect("last member tag").as_slice(),
+            [
+                "p",
+                format!("{:064x}", member_count - 1).as_str(),
+                "",
+                "member",
+            ]
+        );
     }
 }

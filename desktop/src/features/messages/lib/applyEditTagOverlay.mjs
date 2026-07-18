@@ -22,6 +22,9 @@
  *     `:shortcode:` that the original rendered fine. Preserving on empty is
  *     strictly safe: an orphaned emoji tag whose shortcode is no longer in the
  *     body resolves nothing, so it can't cause a stale render.
+ *   - `buzz-audience-ref` tags come exclusively from the edit, because they describe
+ *     which reserved channel mentions remain in the edited body. Notification
+ *     recipient tags (`audience`) remain immutable like ordinary `p` tags.
  *   - all other tag kinds (`h`, `e`, `p` mentions, etc.) come exclusively
  *     from the original — the edit can't rewrite channel membership,
  *     thread refs, or mention targets.
@@ -35,9 +38,16 @@ export function applyEditTagOverlay(originalTags, editTags) {
   // the edit actually supplies emoji tags; otherwise the original's are kept.
   const droppedFromOriginal =
     editEmoji.length > 0
-      ? (t) => t[0] !== "imeta" && t[0] !== "emoji"
-      : (t) => t[0] !== "imeta";
+      ? (t) =>
+          t[0] !== "imeta" && t[0] !== "emoji" && t[0] !== "buzz-audience-ref"
+      : (t) => t[0] !== "imeta" && t[0] !== "buzz-audience-ref";
   const baseFromOriginal = originalTags.filter(droppedFromOriginal);
   const overlaidFromEdit = editTags.filter((t) => t[0] === "imeta");
-  return [...baseFromOriginal, ...overlaidFromEdit, ...editEmoji];
+  const editAudienceRefs = editTags.filter((t) => t[0] === "buzz-audience-ref");
+  return [
+    ...baseFromOriginal,
+    ...overlaidFromEdit,
+    ...editEmoji,
+    ...editAudienceRefs,
+  ];
 }

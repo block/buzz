@@ -13,6 +13,8 @@ use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
+mod channel_mentions;
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
@@ -74,23 +76,6 @@ fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
         }
     }
     Ok(tags)
-}
-
-fn mention_reference_tags(mentions: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for mention in mentions {
-        if mention.first().map(String::as_str) != Some("mention") {
-            return Err(format!(
-                "mention reference tags must use 'mention' prefix (got {:?})",
-                mention.first()
-            ));
-        }
-        let Some(pubkey) = mention.get(1) else {
-            return Err("mention reference tag missing pubkey".into());
-        };
-        check_pubkey(pubkey)?;
-        tags.push(tag(vec!["mention", &pubkey.to_ascii_lowercase()])?);
-    }
-    Ok(())
 }
 
 /// Validate and append imeta tags. Rejects any tag whose first element is not "imeta"
@@ -332,7 +317,7 @@ pub fn build_message_with_client_tags(
     tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
-    mention_reference_tags(mention_ref_tags, &mut tags)?;
+    channel_mentions::append(mention_ref_tags, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
@@ -366,7 +351,7 @@ pub fn build_forum_post(
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
-    mention_reference_tags(mention_ref_tags, &mut tags)?;
+    channel_mentions::append(mention_ref_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(45001), content).tags(tags))
 }
 
@@ -384,7 +369,7 @@ pub fn build_forum_comment(
     tags.extend(thread_tags(thread_ref)?);
     tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
-    mention_reference_tags(mention_ref_tags, &mut tags)?;
+    channel_mentions::append(mention_ref_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
 }
 
@@ -407,6 +392,7 @@ pub fn build_message_edit(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mentions: &[&str],
+    mention_ref_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![
@@ -416,6 +402,7 @@ pub fn build_message_edit(
     tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
+    channel_mentions::append(mention_ref_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(40003), content).tags(tags))
 }
 
@@ -935,7 +922,8 @@ mod tests {
         let target =
             EventId::from_hex("d24da132115ca0a46233cf4c2ad8338fbf914250cbcaa9181a6dd59533cb5ac1")
                 .unwrap();
-        let builder = build_message_edit(channel, target, "hi @alice", &[], &[], mentions).unwrap();
+        let builder =
+            build_message_edit(channel, target, "hi @alice", &[], &[], mentions, &[]).unwrap();
         let secret = nostr::SecretKey::from_hex(
             "0000000000000000000000000000000000000000000000000000000000000003",
         )

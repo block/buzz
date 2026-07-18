@@ -201,3 +201,24 @@ test("imeta and emoji are overlaid together from the edit", () => {
     ["rickroll"],
   );
 });
+
+test("edit replaces channel-wide render refs without rewriting recipient p-tags", () => {
+  const recipient = ["p", "a".repeat(64), "", "buzz:audience:everyone"];
+  const original = [
+    ["h", "uuid"],
+    ["buzz-audience-ref", "everyone"],
+    recipient,
+  ];
+  const edit = [
+    ["h", "uuid"],
+    ["e", "x"],
+    ["buzz-audience-ref", "here"],
+  ];
+
+  const out = applyEditTagOverlay(original, edit);
+  assert.deepEqual(
+    out.filter((tag) => tag[0] === "buzz-audience-ref"),
+    [["buzz-audience-ref", "here"]],
+  );
+  assert.ok(out.includes(recipient));
+});

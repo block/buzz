@@ -110,6 +110,16 @@ test("includes aliases from mention reference tags", () => {
   });
 });
 
+test("channel-wide reference tags render without recipient profiles", () => {
+  assert.deepEqual(
+    resolveMentionProps([["buzz-audience-ref", "everyone"]], undefined),
+    {
+      mentionNames: ["everyone"],
+      mentionPubkeysByName: undefined,
+    },
+  );
+});
+
 test("every rendered name resolves to a pubkey (outputs stay in sync)", () => {
   const tags = [
     ["p", PUBKEY],

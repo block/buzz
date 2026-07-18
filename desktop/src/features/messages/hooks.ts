@@ -457,7 +457,12 @@ export function useSendMessageMutation(
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
       // tags, so emoji-only messages would otherwise lose their emoji tag.
-      if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
+      if (
+        parentEventId ||
+        imetaTags.length > 0 ||
+        emojiTags.length > 0 ||
+        mentionTags.length > 0
+      ) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(effectiveChannel.id),
@@ -699,7 +704,11 @@ export function useEditMessageMutation(channel: Channel | null) {
       // Split so each rides its own validated Tauri arg — emoji tags must NOT
       // go through the imeta-only `mediaTags` channel (the Rust `imeta_tags`
       // guard rejects any non-imeta prefix), mirroring the send path.
-      const { mediaTags: imetaTags, emojiTags } = splitOutgoingTags(mediaTags);
+      const {
+        mediaTags: imetaTags,
+        emojiTags,
+        mentionTags,
+      } = splitOutgoingTags(mediaTags);
 
       await editMessage(
         channel.id,
@@ -708,6 +717,7 @@ export function useEditMessageMutation(channel: Channel | null) {
         imetaTags,
         emojiTags,
         mentionPubkeys,
+        mentionTags,
       );
     },
     onSuccess: (_data, { eventId, content, mediaTags }) => {

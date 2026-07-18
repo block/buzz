@@ -665,6 +665,13 @@ export function useMentionSendFlow({
           return;
         }
 
+        const channelMentionError = mentions.getChannelMentionError(trimmed);
+        if (channelMentionError) {
+          setNonMemberPromptError(channelMentionError);
+          toast.error(channelMentionError);
+          return;
+        }
+
         let effectiveChannelId = capturedChannelId;
         if (!effectiveChannelId && onPrepareSendChannel) {
           effectiveChannelId = await onPrepareSendChannel();
@@ -708,10 +715,15 @@ export function useMentionSendFlow({
           pendingImeta,
           spoileredAttachmentUrls,
         );
-        const outgoingTags = mergeOutgoingTags(
+        const baseOutgoingTags = mergeOutgoingTags(
           mediaTags,
           buildCustomEmojiTags(finalContent, customEmoji),
         );
+        const channelMentionTags = mentions.extractChannelMentionTags(trimmed);
+        const outgoingTags =
+          baseOutgoingTags || channelMentionTags.length > 0
+            ? [...(baseOutgoingTags ?? []), ...channelMentionTags]
+            : undefined;
         const nonMemberPubkeys = getNonMemberMentionPubkeys(pubkeys);
         let promptNonMemberPubkeys = nonMemberPubkeys.filter(
           (pubkey) =>
@@ -773,6 +785,8 @@ export function useMentionSendFlow({
       getNonMemberMentionPubkeys,
       getDmThreadAgentMentionError,
       mentions.extractMentionPubkeys,
+      mentions.extractChannelMentionTags,
+      mentions.getChannelMentionError,
       mentions.isAgentPubkey,
       mentions.isManagedAgentPubkey,
       onPrepareSendChannel,

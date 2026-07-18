@@ -1534,6 +1534,16 @@ impl Db {
         channel::is_member(&self.pool, community_id, channel_id, pubkey).await
     }
 
+    /// Returns `true` if every supplied pubkey is an active member.
+    pub async fn are_members(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkeys: &[Vec<u8>],
+    ) -> Result<bool> {
+        channel::are_members(&self.pool, community_id, channel_id, pubkeys).await
+    }
+
     /// Returns all active members of a channel.
     pub async fn get_members(
         &self,

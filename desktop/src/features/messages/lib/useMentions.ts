@@ -25,7 +25,6 @@ import {
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { AutocompleteEdit } from "./useRichTextEditor";
 import type {
-  AgentPersona,
   ChannelMember,
   ChannelType,
   UserSearchResult,
@@ -41,17 +40,16 @@ import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
   buildTeamMentionCandidates,
+  buildSearchableMentionNames,
   formatTeamMention,
   globalSearchIdentityKey,
   type MentionCandidate,
   mentionCandidateLabel,
+  type PersonaMentionTarget,
 } from "./mentionCandidates";
+import { useChannelMentions } from "./useChannelMentions";
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
-export type PersonaMentionTarget = {
-  displayName: string;
-  persona: AgentPersona;
-};
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
@@ -92,7 +90,6 @@ export function useMentions(
   const mentionMapRef = React.useRef<Map<string, string>>(new Map());
   const personaMentionMapRef = React.useRef<Map<string, string>>(new Map());
   const previousSuggestionsRef = React.useRef<MentionSuggestion[]>([]);
-  void options?.channelType;
   const mentionSearchQuery = mentionQuery?.trim() ?? "";
   const canSearchGlobalPeople = mentionSearchQuery.length > 0;
   const identityQuery = useIdentityQuery();
@@ -236,6 +233,11 @@ export function useMentions(
     () =>
       new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
     [members],
+  );
+  const channelMentions = useChannelMentions(
+    memberPubkeys,
+    members !== undefined,
+    currentPubkey,
   );
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
     const candidatesByPubkey = new Map<string, MentionCandidate>();
@@ -455,25 +457,11 @@ export function useMentions(
   });
 
   const searchableNames = React.useMemo<string[]>(() => {
-    const names: string[] = [];
-    const seen = new Set<string>();
-
-    for (const candidate of mentionCandidatesWithTeams) {
-      for (const name of [
-        candidate.displayName,
-        candidate.personaName,
-        candidate.secondaryLabel,
-      ]) {
-        const trimmed = name?.trim();
-        if (trimmed && !seen.has(trimmed.toLowerCase())) {
-          names.push(trimmed);
-          seen.add(trimmed.toLowerCase());
-        }
-      }
-    }
-
-    return names;
-  }, [mentionCandidatesWithTeams]);
+    return buildSearchableMentionNames(
+      channelMentions.names,
+      mentionCandidatesWithTeams,
+    );
+  }, [channelMentions.names, mentionCandidatesWithTeams]);
 
   const highlightNames = React.useMemo<string[]>(() => {
     const names: string[] = [];
@@ -535,7 +523,10 @@ export function useMentions(
       return [];
     }
 
-    return rankMentionCandidates(
+    const channelSuggestions =
+      channelMentions.suggestionsForQuery(mentionQuery);
+
+    const peopleSuggestions = rankMentionCandidates(
       mentionCandidatesWithTeams,
       mentionQuery,
       activePersonaIds,
@@ -554,8 +545,10 @@ export function useMentions(
           profiles,
         }),
       );
+    return [...channelSuggestions, ...peopleSuggestions];
   }, [
     activePersonaIds,
+    channelMentions.suggestionsForQuery,
     currentPubkey,
     mentionCandidatesWithTeams,
     mentionQuery,
@@ -625,6 +618,9 @@ export function useMentions(
       const personaMentions = personaMentionMapRef.current;
       const selectedMentions = teamMembers ?? [suggestion];
       for (const selected of selectedMentions) {
+        if (selected.kind === "audience") {
+          continue;
+        }
         if (selected.kind === "persona" && selected.personaId) {
           personaMentions.set(selected.displayName, selected.personaId);
           mentions.delete(selected.displayName);
@@ -971,10 +967,12 @@ export function useMentions(
   return {
     cancelMentionAutocomplete,
     clearMentions,
+    extractChannelMentionTags: channelMentions.extractChannelMentionTags,
     extractMentionPersonas,
     extractMentionPubkeys,
     getDraftMentionRefs,
     getMentionDisplayName,
+    getChannelMentionError: channelMentions.getChannelMentionError,
     handleMentionKeyDown,
     hasResolvedMembers: members !== undefined,
     insertMention,
@@ -983,7 +981,7 @@ export function useMentions(
     isAgentPubkey,
     isManagedAgentPubkey,
     isMentionOpen,
-    knownNames: highlightNames,
+    knownNames: ([] as string[]).concat(channelMentions.names, highlightNames),
     memberPubkeys,
     mentionSelectedIndex,
     registerMentionPubkey,

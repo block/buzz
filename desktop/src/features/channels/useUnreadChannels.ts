@@ -26,7 +26,7 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 import {
-  hasMentionForEvent,
+  hasAnyMentionForEvent,
   isHighPriorityEventForUser,
   shouldNotifyForEvent,
 } from "@/features/notifications/lib/shouldNotify";
@@ -368,7 +368,7 @@ export function useUnreadChannels(
     (event: RelayEvent): boolean => {
       if (normalizedPubkey === null) return false;
       if (event.pubkey.toLowerCase() === normalizedPubkey) return false;
-      if (!hasMentionForEvent(event, normalizedPubkey)) return false;
+      if (!hasAnyMentionForEvent(event, normalizedPubkey)) return false;
       const { rootId } = getThreadReference(event.tags);
       if (rootId === null) return false;
       const target = mentionedRootIdsRef.current;

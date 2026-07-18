@@ -666,6 +666,13 @@ const MENTION_REF = [
   "mention",
   "1111111111111111111111111111111111111111111111111111111111111111",
 ];
+const CHANNEL_MENTION_REF = ["buzz-audience-ref", "everyone"];
+const CHANNEL_MENTION_RECIPIENT = [
+  "p",
+  "2222222222222222222222222222222222222222222222222222222222222222",
+  "",
+  "buzz:audience:everyone",
+];
 
 test("splitOutgoingTags: undefined input yields three empty arrays", () => {
   assert.deepEqual(splitOutgoingTags(undefined), {
@@ -702,6 +709,20 @@ test("splitOutgoingTags: separates reference-only mention tags", () => {
   assert.deepEqual(mediaTags, [IMETA]);
   assert.deepEqual(emojiTags, [EMOJI_A]);
   assert.deepEqual(mentionTags, [MENTION_REF]);
+});
+
+test("splitOutgoingTags: routes validated channel mention metadata together", () => {
+  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([
+    IMETA,
+    CHANNEL_MENTION_REF,
+    CHANNEL_MENTION_RECIPIENT,
+  ]);
+  assert.deepEqual(mediaTags, [IMETA]);
+  assert.deepEqual(emojiTags, []);
+  assert.deepEqual(mentionTags, [
+    CHANNEL_MENTION_REF,
+    CHANNEL_MENTION_RECIPIENT,
+  ]);
 });
 
 test("splitOutgoingTags: unknown prefixes stay with mediaTags (injection defense)", () => {

@@ -5,7 +5,7 @@ import {
   toSearchHit,
 } from "@/app/AppShell.helpers";
 import { getThreadReference } from "@/features/messages/lib/threading";
-import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
+import { hasAnyMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
   listenForDesktopNotificationActions,
@@ -94,7 +94,7 @@ export function useAppShellDesktopNotifications({
       // Replies that @-mention the user are owned by the home-feed mention
       // path — skip them here so they don't notify (and sound) twice.
       const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
-      if (hasMentionForEvent(event, normalizedPubkey)) {
+      if (hasAnyMentionForEvent(event, normalizedPubkey)) {
         return;
       }
 

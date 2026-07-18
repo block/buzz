@@ -28,6 +28,12 @@ function makeEvent(tags = [], overrides = {}) {
 const rootTag = (id) => ["e", id, "", "root"];
 const replyTag = (id) => ["e", id, "", "reply"];
 const pTag = (pubkey) => ["p", pubkey];
+const channelMentionTag = (pubkey, mode = "everyone") => [
+  "p",
+  pubkey,
+  "",
+  `buzz:audience:${mode}`,
+];
 const broadcastTag = () => ["broadcast", "1"];
 const hTag = (channelId) => ["h", channelId];
 
@@ -78,6 +84,37 @@ test("mention in muted channel still notifies (mention fires before mute check)"
       followedRootIds: EMPTY,
       authoredRootIds: EMPTY,
       mutedChannelIds: new Set([CHANNEL_ID]),
+      channelId: CHANNEL_ID,
+    }),
+    true,
+  );
+});
+
+test("channel-wide mention in muted channel is suppressed", () => {
+  const event = makeEvent([hTag(CHANNEL_ID), channelMentionTag(PUBKEY)]);
+  assert.equal(hasMentionForEvent(event, PUBKEY), false);
+  assert.equal(
+    shouldNotifyForEvent(event, PUBKEY, {
+      participatedRootIds: EMPTY,
+      followedRootIds: EMPTY,
+      authoredRootIds: EMPTY,
+      mutedChannelIds: new Set([CHANNEL_ID]),
+      channelId: CHANNEL_ID,
+    }),
+    false,
+  );
+});
+
+test("channel-wide mention in an unmuted channel notifies", () => {
+  const event = makeEvent([
+    hTag(CHANNEL_ID),
+    channelMentionTag(PUBKEY, "here"),
+  ]);
+  assert.equal(
+    shouldNotifyForEvent(event, PUBKEY, {
+      participatedRootIds: EMPTY,
+      followedRootIds: EMPTY,
+      authoredRootIds: EMPTY,
       channelId: CHANNEL_ID,
     }),
     true,

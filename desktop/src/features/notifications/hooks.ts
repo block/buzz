@@ -4,6 +4,7 @@ import { useHomeFeedQuery } from "@/features/home/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import { isChannelWideMentionEvent } from "@/features/messages/lib/channelMentions";
 import {
   getDesktopNotificationPermissionState,
   requestDesktopNotificationAccess,
@@ -442,7 +443,7 @@ export function useHomeFeedNotificationState(
       if (
         item.channelId &&
         mutedChannelIds?.has(item.channelId) &&
-        item.category !== "mention"
+        (item.category !== "mention" || isChannelWideMentionEvent(item.tags))
       ) {
         continue;
       }

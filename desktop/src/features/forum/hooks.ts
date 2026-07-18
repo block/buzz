@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 
 import { getForumPosts, getForumThread } from "@/shared/api/forum";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
@@ -75,13 +76,18 @@ export function useCreateForumPostMutation(channel: Channel | null) {
         throw new Error("No channel selected.");
       }
 
+      const { mediaTags: imetaTags, mentionTags } =
+        splitOutgoingTags(mediaTags);
+
       return sendChannelMessage(
         channel.id,
         content,
         null,
-        mediaTags,
+        imetaTags,
         mentionPubkeys,
         KIND_FORUM_POST,
+        undefined,
+        mentionTags,
       );
     },
     onSuccess: () => {
@@ -161,13 +167,18 @@ export function useCreateForumReplyMutation(channel: Channel | null) {
         throw new Error("No channel selected.");
       }
 
+      const { mediaTags: imetaTags, mentionTags } =
+        splitOutgoingTags(mediaTags);
+
       return sendChannelMessage(
         channel.id,
         content,
         parentEventId,
-        mediaTags,
+        imetaTags,
         mentionPubkeys,
         KIND_FORUM_COMMENT,
+        undefined,
+        mentionTags,
       );
     },
     onSuccess: (_data, variables) => {

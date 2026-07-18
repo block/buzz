@@ -366,7 +366,11 @@ export function splitOutgoingTags(tags: string[][] | undefined): {
   for (const tag of tags ?? []) {
     if (tag[0] === "emoji") {
       emojiTags.push(tag);
-    } else if (tag[0] === "mention") {
+    } else if (
+      tag[0] === "mention" ||
+      tag[0] === "buzz-audience-ref" ||
+      (tag[0] === "p" && tag[3]?.startsWith("buzz:audience:"))
+    ) {
       mentionTags.push(tag);
     } else {
       mediaTags.push(tag);

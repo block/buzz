@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
+import { toast } from "sonner";
 import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
@@ -208,6 +209,11 @@ export function ForumComposer({
     }
 
     const pubkeys = mentions.extractMentionPubkeys(trimmed);
+    const channelMentionError = mentions.getChannelMentionError(trimmed);
+    if (channelMentionError) {
+      toast.error(channelMentionError);
+      return;
+    }
 
     // Reuse the shared send-path builder so forum/notes posts emit the same
     // body + imeta as chat: generic files become `[filename](url)` links with a
@@ -217,6 +223,11 @@ export function ForumComposer({
       trimmed,
       currentPendingImeta,
     );
+    const channelMentionTags = mentions.extractChannelMentionTags(trimmed);
+    const outgoingTags =
+      mediaTags || channelMentionTags.length > 0
+        ? [...(mediaTags ?? []), ...channelMentionTags]
+        : undefined;
 
     // Save draft state so we can restore on failure.
     const savedContent = contentRef.current;
@@ -230,7 +241,7 @@ export function ForumComposer({
     channelLinks.clearChannels();
     setIsEmojiPickerOpen(false);
 
-    const result = onSubmitRef.current(finalContent, pubkeys, mediaTags);
+    const result = onSubmitRef.current(finalContent, pubkeys, outgoingTags);
     const collapseCompactComposer = () => {
       if (compact) setIsCompactExpanded(false);
     };
@@ -252,6 +263,8 @@ export function ForumComposer({
     media.pendingImetaRef,
     media.setPendingImeta,
     mentions.extractMentionPubkeys,
+    mentions.extractChannelMentionTags,
+    mentions.getChannelMentionError,
     mentions.clearMentions,
     channelLinks.clearChannels,
     richText.clearContent,

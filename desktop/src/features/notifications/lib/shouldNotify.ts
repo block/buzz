@@ -3,6 +3,10 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import {
+  hasChannelMentionForPubkey,
+  isChannelMentionRecipientTag,
+} from "@/features/messages/lib/channelMentions";
 
 export function hasMentionForEvent(
   event: RelayEvent,
@@ -11,8 +15,28 @@ export function hasMentionForEvent(
   return (
     currentPubkey.length > 0 &&
     event.tags.some(
-      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === currentPubkey,
+      (tag) =>
+        tag[0] === "p" &&
+        !isChannelMentionRecipientTag(tag) &&
+        tag[1]?.toLowerCase() === currentPubkey,
     )
+  );
+}
+
+export function hasChannelMentionForEvent(
+  event: RelayEvent,
+  currentPubkey: string,
+): boolean {
+  return hasChannelMentionForPubkey(event.tags, currentPubkey);
+}
+
+export function hasAnyMentionForEvent(
+  event: RelayEvent,
+  currentPubkey: string,
+): boolean {
+  return (
+    hasMentionForEvent(event, currentPubkey) ||
+    hasChannelMentionForEvent(event, currentPubkey)
   );
 }
 
@@ -52,6 +76,10 @@ export function shouldNotifyForEvent(
     return false;
   }
 
+  if (hasChannelMentionForEvent(event, currentPubkey)) {
+    return true;
+  }
+
   if (parentId === null) {
     return true;
   }
@@ -79,12 +107,7 @@ export function isHighPriorityEventForUser(
   event: RelayEvent,
   currentPubkey: string,
 ): boolean {
-  if (
-    currentPubkey.length > 0 &&
-    event.tags.some(
-      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === currentPubkey,
-    )
-  ) {
+  if (hasAnyMentionForEvent(event, currentPubkey)) {
     return true;
   }
   if (isBroadcastReply(event.tags)) {

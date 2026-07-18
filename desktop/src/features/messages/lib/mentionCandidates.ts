@@ -9,6 +9,11 @@ export type TeamMentionMember = {
   pubkey?: string;
 };
 
+export type PersonaMentionTarget = {
+  displayName: string;
+  persona: AgentPersona;
+};
+
 export type MentionCandidate = {
   kind: "identity" | "persona" | "team";
   pubkey?: string;
@@ -129,4 +134,29 @@ export function formatTeamMention(
   members: readonly TeamMentionMember[],
 ) {
   return `${teamName}(${members.map((member) => `@${member.displayName}`).join(" ")}) `;
+}
+
+export function buildSearchableMentionNames(
+  reservedNames: readonly string[],
+  candidates: readonly Pick<
+    MentionCandidate,
+    "displayName" | "personaName" | "secondaryLabel"
+  >[],
+) {
+  const names = [...reservedNames];
+  const seen = new Set(names.map((name) => name.toLowerCase()));
+  for (const candidate of candidates) {
+    for (const name of [
+      candidate.displayName,
+      candidate.personaName,
+      candidate.secondaryLabel,
+    ]) {
+      const trimmed = name?.trim();
+      if (trimmed && !seen.has(trimmed.toLowerCase())) {
+        names.push(trimmed);
+        seen.add(trimmed.toLowerCase());
+      }
+    }
+  }
+  return names;
 }

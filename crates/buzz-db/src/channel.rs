@@ -538,6 +538,41 @@ pub async fn is_member(
     Ok(cnt > 0)
 }
 
+/// Returns `true` if every supplied pubkey is an active member of the channel.
+///
+/// The query is bounded by the caller-provided pubkeys rather than the size of
+/// the channel roster. An empty input is vacuously valid.
+pub async fn are_members(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkeys: &[Vec<u8>],
+) -> Result<bool> {
+    if pubkeys.is_empty() {
+        return Ok(true);
+    }
+    let unique_pubkeys: std::collections::HashSet<&Vec<u8>> = pubkeys.iter().collect();
+
+    let mut qb: sqlx::QueryBuilder<Postgres> = sqlx::QueryBuilder::new(
+        "SELECT COUNT(DISTINCT cm.pubkey) AS cnt FROM channel_members cm \
+         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
+         WHERE cm.community_id = ",
+    );
+    qb.push_bind(community_id.as_uuid());
+    qb.push(" AND cm.channel_id = ");
+    qb.push_bind(channel_id);
+    qb.push(" AND cm.removed_at IS NULL AND cm.pubkey IN (");
+    let mut separated = qb.separated(", ");
+    for pubkey in &unique_pubkeys {
+        separated.push_bind(pubkey.as_slice());
+    }
+    qb.push(")");
+
+    let row = qb.build().fetch_one(pool).await?;
+    let count: i64 = row.try_get("cnt")?;
+    Ok(count == unique_pubkeys.len() as i64)
+}
+
 /// Returns all active members of the given channel.
 ///
 /// Returns an empty list if the channel has been soft-deleted.
@@ -553,7 +588,6 @@ pub async fn get_members(
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
         ORDER BY cm.joined_at ASC
-        LIMIT 1000
         "#,
     )
     .bind(community_id.as_uuid())
@@ -1751,6 +1785,55 @@ mod tests {
             .await
             .expect("load accessible channel ids");
         assert_eq!(channel_ids.len(), channel_count as usize);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_member_roster_and_targeted_lookup_cross_the_four_thousand_boundary() {
+        let database_url =
+            std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB");
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "channel-mention-boundary",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        sqlx::query(
+            r#"
+            INSERT INTO channel_members (community_id, channel_id, pubkey, role)
+            SELECT $1, $2, decode(lpad(to_hex(n), 64, '0'), 'hex'), 'member'::member_role
+            FROM generate_series(1, 4001) n
+            "#,
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .execute(&pool)
+        .await
+        .expect("insert members across the channel mention boundary");
+
+        let members = get_members(&pool, community, channel.id)
+            .await
+            .expect("load complete member roster");
+        assert_eq!(members.len(), 4_002, "owner plus 4,001 recipients");
+
+        let last_member = hex::decode(format!("{:064x}", 4_001)).expect("hex pubkey");
+        assert!(members.iter().any(|member| member.pubkey == last_member));
+        assert!(are_members(&pool, community, channel.id, &[last_member])
+            .await
+            .expect("validate later-joined member"));
     }
 
     /// A random non-admin, non-owner user cannot remove someone else's bot.

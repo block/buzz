@@ -15,6 +15,7 @@ import {
   mapMentionCandidateToSuggestion,
   type MentionSuggestionCandidate,
 } from "./mentionSuggestionMapping";
+import { CHANNEL_MENTION_SUGGESTIONS } from "./channelMentions";
 
 type MentionCandidateWithUI = MentionCandidateForRanking &
   MentionSuggestionCandidate;
@@ -56,6 +57,21 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
 
   if (!mention || mention.query.length === 0) {
     return null;
+  }
+
+  const channelSuggestion = CHANNEL_MENTION_SUGGESTIONS.find(
+    ({ displayName }) => displayName.startsWith(mention.query.toLowerCase()),
+  );
+  if (channelSuggestion) {
+    return {
+      type: "match",
+      suggestion: {
+        ...channelSuggestion,
+        audience: channelSuggestion.displayName,
+        kind: "audience",
+      },
+      startIndex: mention.startIndex,
+    };
   }
 
   const ranked = rankMentionCandidates(

@@ -25,6 +25,7 @@ import {
   slotForFeedKind,
 } from "./lib/sound";
 import type { NotificationSettings } from "./hooks";
+import { isChannelWideMentionEvent } from "@/features/messages/lib/channelMentions";
 
 const HOME_FEED_SEEN_STORAGE_KEY = "buzz-home-feed-seen.v1";
 const HOME_FEED_SEEN_MAX_ITEMS = 500;
@@ -172,7 +173,8 @@ export function useFeedDesktopNotifications(
             (item) =>
               !item.channelId ||
               !mutedChannelIds?.has(item.channelId) ||
-              item.category === "mention",
+              (item.category === "mention" &&
+                !isChannelWideMentionEvent(item.tags)),
           )
       : [];
 

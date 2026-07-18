@@ -18,7 +18,9 @@ export type MentionSuggestion = {
   personaId?: string;
   teamId?: string;
   teamMembers?: TeamMentionMember[];
-  kind?: "identity" | "persona" | "team";
+  kind?: "audience" | "identity" | "persona" | "team";
+  audience?: "everyone" | "here";
+  annotation?: string;
   displayName: string;
   avatarUrl?: string | null;
   isAgent?: boolean;
@@ -97,6 +99,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
         {suggestions.map((suggestion, index) => {
           const suggestionKey =
             suggestion.pubkey ??
+            (suggestion.audience ? `audience-${suggestion.audience}` : null) ??
             (suggestion.personaId ? `persona-${suggestion.personaId}` : null) ??
             (suggestion.teamId ? `team-${suggestion.teamId}` : null) ??
             suggestion.displayName;
@@ -125,7 +128,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               tabIndex={-1}
               type="button"
             >
-              {suggestion.kind === "team" ? (
+              {suggestion.kind === "team" || suggestion.kind === "audience" ? (
                 <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
                   <Users aria-hidden="true" className="h-4 w-4" />
                 </span>
@@ -144,7 +147,8 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 >
                   {suggestion.displayName}
                 </span>
-                {suggestion.kind === "team" ||
+                {suggestion.kind === "audience" ||
+                suggestion.kind === "team" ||
                 suggestion.isAgent ||
                 suggestion.role ||
                 suggestion.ownerLabel ||
@@ -157,7 +161,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                         : "text-muted-foreground",
                     )}
                   >
-                    {suggestion.kind === "team" ? (
+                    {suggestion.kind === "audience" ? (
+                      <span>{suggestion.annotation}</span>
+                    ) : suggestion.kind === "team" ? (
                       <span className="inline-flex shrink-0 items-center gap-1">
                         <Users aria-hidden="true" className="h-3.5 w-3.5" />
                         team · {suggestion.teamMembers?.length ?? 0} agents
