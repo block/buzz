@@ -126,11 +126,12 @@ async function relayRequiresMembership(): Promise<boolean> {
 }
 
 export async function getMyRelayMembershipLookup(): Promise<RelayMembershipLookup> {
-  const [{ pubkey }, event, membershipRequired] = await Promise.all([
+  const [{ pubkey }, event] = await Promise.all([
     getIdentity(),
     fetchMembershipListEvent(),
-    relayRequiresMembership(),
   ]);
+  const membershipRequired =
+    event !== null || (await relayRequiresMembership());
   return relayMembershipLookupFromEvent(event, pubkey, membershipRequired);
 }
 
