@@ -636,11 +636,24 @@ fn push_model(out: &mut Vec<MeshModelOption>, id: &str, name: Option<String>) {
     });
 }
 
+/// Canonical model id for equality/dedup. A serving node advertises the same
+/// model under two strings — `org/model@main:Q4` (serveTargets[].modelId) and
+/// `org/model:Q4` (available_models) — so keying on the raw string leaves BOTH
+/// in the picker. Strip the `@main` ref-qualifier (matching the selection-time
+/// rule in `pick_serve_target_for_model`) so the two collapse to one entry.
+pub(super) fn canonical_model_id(value: &str) -> String {
+    value.trim().replace("@main", "")
+}
+
 pub(super) fn dedupe_models(models: Vec<MeshModelOption>) -> Vec<MeshModelOption> {
+    // Key by canonical id so `@main` / non-`@main` forms of the same model
+    // dedup together. Display the canonical (stripped) id so the UI shows one
+    // stable label; selection still matches because the picker canonicalizes
+    // both sides too.
     let mut by_id = BTreeMap::<String, Option<String>>::new();
     for model in models {
         by_id
-            .entry(model.id)
+            .entry(canonical_model_id(&model.id))
             .and_modify(|name| {
                 if name.is_none() {
                     *name = model.name.clone();

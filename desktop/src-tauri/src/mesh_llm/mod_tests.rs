@@ -54,6 +54,34 @@ fn sdk_ready_models_are_parsed_from_real_status_shape() {
 }
 
 #[test]
+fn dedupe_models_collapses_at_main_and_plain_forms() {
+    // Regression: a serving node advertises the SAME model under two strings —
+    // `org/model@main:Q4` (serveTargets[].modelId) and `org/model:Q4`
+    // (available_models). Keying on the raw id left BOTH in the picker (the
+    // "two model listing" bug). They must dedup to a single canonical entry.
+    let models = vec![
+        super::MeshModelOption {
+            id: "unsloth/gemma-4-E4B-it-GGUF@main:Q4_K_M".to_string(),
+            name: None,
+        },
+        super::MeshModelOption {
+            id: "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M".to_string(),
+            name: Some("Gemma 4".to_string()),
+        },
+    ];
+
+    let deduped = super::dedupe_models(models);
+    assert_eq!(
+        deduped,
+        vec![super::MeshModelOption {
+            id: "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M".to_string(),
+            name: Some("Gemma 4".to_string()),
+        }],
+        "@main and plain forms of the same model must collapse to one entry"
+    );
+}
+
+#[test]
 fn requested_model_is_not_ready_while_sdk_is_in_standby() {
     let payload = json!({
         "node_state": "standby",
