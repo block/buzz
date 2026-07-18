@@ -43,6 +43,8 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 type DialogContentProps = React.ComponentPropsWithoutRef<
   typeof DialogPrimitive.Content
 > & {
+  /** Extra classes for the built-in close button (e.g. a themed icon color). */
+  closeButtonClassName?: string;
   overlayVariant?: "default" | "transparent";
   showCloseButton?: boolean;
   /**
@@ -63,6 +65,7 @@ const DialogContent = React.forwardRef<
     {
       className,
       children,
+      closeButtonClassName,
       overlayVariant = "default",
       showCloseButton = true,
       surface = "default",
@@ -115,6 +118,7 @@ const DialogContent = React.forwardRef<
                 surface === "textured"
                   ? "right-[var(--buzz-card-textured-safe-inset)] top-[var(--buzz-card-textured-safe-inset)] -mr-2 -mt-2"
                   : "right-4 top-4",
+                closeButtonClassName,
               )}
             >
               <X className="h-4 w-4" />

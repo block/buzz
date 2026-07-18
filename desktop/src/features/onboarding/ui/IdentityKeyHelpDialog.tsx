@@ -65,6 +65,7 @@ export function IdentityKeyHelpDialog() {
       </OnboardingFooter>
       <DialogContent
         className="buzz-onboarding-neutral-theme max-w-[47.5rem] -translate-y-5"
+        closeButtonClassName="text-[var(--buzz-onboarding-backup-ink)] hover:bg-transparent hover:text-foreground"
         data-testid="identity-key-help-dialog"
         overlayVariant="transparent"
         surface="textured"
@@ -73,8 +74,11 @@ export function IdentityKeyHelpDialog() {
           <DialogTitle className="text-balance pr-8 text-3xl font-normal text-foreground">
             What’s an identity key?
           </DialogTitle>
-          <DialogDescription asChild>
-            <div className="mt-6 space-y-4 text-pretty text-base leading-7 text-foreground/80">
+          <DialogDescription
+            asChild
+            className="mt-6 space-y-4 text-pretty text-base leading-7 text-[color:var(--buzz-onboarding-backup-ink)]"
+          >
+            <div>
               <p>
                 Buzz uses an identity key instead of a traditional account. It’s
                 created on your device and represents you whenever you use Buzz.
