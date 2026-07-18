@@ -235,10 +235,16 @@ test("feedback attachments render from imeta without raw markdown", async ({
   await expect(page.getByText("![image]", { exact: false })).toHaveCount(0);
   await expect(
     page.getByRole("img", { name: "screenshot.png" }),
-  ).toHaveAttribute("src", imageUrl);
+  ).toHaveAttribute(
+    "src",
+    `/api/admin/v1/feedback/${id}/attachments/${"a".repeat(64)}`,
+  );
   await expect(
     page.getByRole("link", { name: /diagnostics.txt/ }),
-  ).toHaveAttribute("href", fileUrl);
+  ).toHaveAttribute(
+    "href",
+    `/api/admin/v1/feedback/${id}/attachments/${"b".repeat(64)}`,
+  );
   const fileHeight = await page
     .locator(".file-attachment")
     .evaluate((element) => element.getBoundingClientRect().height);

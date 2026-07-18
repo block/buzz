@@ -606,17 +606,30 @@ pub async fn get_blob(
     req_headers: HeaderMap,
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
-    let require_media_get_auth = state.config.require_media_get_auth;
     let media_auth = authenticate_media_read(&state, &req_headers, &sha256_ext).await?;
-    let tenant = media_auth.tenant;
-    let cache_control = blob_cache_control(require_media_get_auth);
+    serve_blob_for_tenant(&state, &media_auth.tenant, &sha256_ext, &req_headers).await
+}
+
+/// Serve a validated blob from an already-authorized tenant context.
+///
+/// This is the common byte-serving mechanism for Blossom reads and narrowly
+/// scoped internal readers. Callers must establish their own authorization
+/// before entering this function; the tenant is never derived from client input.
+pub(crate) async fn serve_blob_for_tenant(
+    state: &AppState,
+    tenant: &TenantContext,
+    sha256_ext: &str,
+    req_headers: &HeaderMap,
+) -> Result<Response, MediaError> {
+    validate_media_path(sha256_ext)?;
+    let cache_control = blob_cache_control(state.config.require_media_get_auth);
 
     // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
-        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(&sha256_ext);
+        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(sha256_ext);
         let _ = state
             .media_storage
-            .read_sidecar_mime(&tenant, parent_hash)
+            .read_sidecar_mime(tenant, parent_hash)
             .await
             .ok_or(MediaError::NotFound)?;
         "image/jpeg".to_string()
@@ -625,14 +638,14 @@ pub async fn get_blob(
         // the sidecar's canonical extension — sidecar is authoritative.
         let sidecar_mime = state
             .media_storage
-            .read_sidecar_mime(&tenant, &sha256_ext)
+            .read_sidecar_mime(tenant, sha256_ext)
             .await
             .ok_or(MediaError::NotFound)?;
         if sha256_ext.contains('.') {
             let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
             let sidecar = state
                 .media_storage
-                .get_sidecar(&tenant, sha256_ext.split('.').next().unwrap_or(&sha256_ext))
+                .get_sidecar(tenant, sha256_ext.split('.').next().unwrap_or(sha256_ext))
                 .await
                 .map_err(|_| MediaError::NotFound)?;
             if requested_ext != sidecar.ext {
@@ -652,7 +665,7 @@ pub async fn get_blob(
         "attachment"
     };
 
-    let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
+    let key = resolve_s3_key(&state.media_storage, tenant, sha256_ext).await?;
 
     // Parse optional Range header.
     let range_header = req_headers
@@ -661,8 +674,7 @@ pub async fn get_blob(
         .map(|s| s.to_owned());
 
     // Extract single-range value, if present. Multi-range (comma-separated) is
-    // unsupported — we ignore it and serve the full body per RFC 9110 §14.2:
-    // "A server MAY ignore the Range header field."
+    // unsupported — we ignore it and serve the full body per RFC 9110 §14.2.
     let single_range = range_header.filter(|r| !r.contains(','));
 
     match single_range {
@@ -689,7 +701,7 @@ pub async fn get_blob(
             Ok(resp)
         }
         Some(range_str) => {
-            // Single-range request — HEAD first to get total size without loading the blob.
+            // S3-native single-range response, capped to bound request memory.
             let total = state
                 .media_storage
                 .head_with_metadata(&key)
@@ -697,7 +709,6 @@ pub async fn get_blob(
                 .ok_or(MediaError::NotFound)?
                 .size;
 
-            // Parse range: "bytes=START-END", "bytes=START-", or "bytes=-N" (suffix).
             let parsed = parse_byte_range(&range_str, total);
             match parsed {
                 Some((start, end)) => {
@@ -709,13 +720,10 @@ pub async fn get_blob(
                             .map_err(|_| MediaError::Internal);
                     }
 
-                    // Clamp end to total-1, then cap chunk size.
                     let end = end.min(total.saturating_sub(1));
                     let end = end
                         .min(start.saturating_add(MAX_RANGE_CHUNK - 1))
                         .min(total.saturating_sub(1));
-
-                    // S3-native range GET — never loads the full blob into RAM.
                     let chunk = state.media_storage.get_range(&key, start, end).await?;
                     let content_range = format!("bytes {start}-{end}/{total}");
 
