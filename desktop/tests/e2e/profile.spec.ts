@@ -164,6 +164,52 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test("keeps the saved profile description after a community round trip", async ({
+  page,
+}) => {
+  const communities = [
+    {
+      id: "profile-community-a",
+      name: "Alpha",
+      relayUrl: "ws://localhost:3000",
+      addedAt: "2026-01-01T00:00:00.000Z",
+    },
+    {
+      id: "profile-community-b",
+      name: "Bravo",
+      relayUrl: "ws://localhost:3001",
+      addedAt: "2026-01-02T00:00:00.000Z",
+    },
+  ];
+  await page.addInitScript((seed) => {
+    window.localStorage.setItem("buzz-communities", JSON.stringify(seed));
+    window.localStorage.setItem("buzz-active-community-id", seed[0].id);
+  }, communities);
+  await page.goto("/");
+
+  const description = "Description that should survive switching";
+  await openSettings(page, "profile");
+  await page.getByTestId("profile-metadata-edit").click();
+  await page.getByTestId("profile-about").fill(description);
+  await page.getByTestId("profile-metadata-edit").click();
+  await expect(page.getByTestId("profile-about-value")).toHaveText(description);
+  await page.getByTestId("settings-back-to-app").click();
+
+  const communityA = page.getByTestId(
+    "community-rail-button-profile-community-a",
+  );
+  const communityB = page.getByTestId(
+    "community-rail-button-profile-community-b",
+  );
+  await communityB.click();
+  await expect(communityB).toHaveAttribute("aria-current", "true");
+  await communityA.click();
+  await expect(communityA).toHaveAttribute("aria-current", "true");
+
+  await openSettings(page, "profile");
+  await expect(page.getByTestId("profile-about-value")).toHaveText(description);
+});
+
 test("updates the relay-backed profile from settings", async ({ page }) => {
   const stamp = Date.now();
   const displayName = `Tyler QA ${stamp}`;

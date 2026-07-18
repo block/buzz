@@ -572,7 +572,7 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Enter a key" }).click();
+  await page.getByRole("button", { name: "Use an existing key" }).click();
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
   await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
   await page.getByTestId("nostr-import-submit").click();
@@ -867,6 +867,74 @@ test("connected first-community profile step cannot discard resumable onboarding
       ),
     )
     .not.toBeNull();
+});
+
+test("membership denial on community profile save offers recovery", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript(
+    ({ pubkey, transactionStorageKey }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        transactionStorageKey,
+        JSON.stringify({
+          id: "txn-membership-denied",
+          source: "first-community",
+          stage: "profile",
+          relayUrl: "wss://denied.example.com",
+          communityName: "Denied",
+          communityId: "e2e-default-community",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    {
+      pubkey: BLANK_TYLER_IDENTITY.pubkey,
+      transactionStorageKey: COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
+    },
+  );
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError:
+        "relay returned 403 Forbidden: You must be a relay member to access this relay",
+    },
+    {
+      relayWsUrl: "wss://denied.example.com",
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-profile-name-key").fill("Kalvin");
+  await page.getByTestId("community-profile-next").click();
+
+  await expect(page.getByTestId("membership-denied")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Not a member yet" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Change community" }).click();
+  await expect(page.getByTestId("community-change-overlay")).toBeVisible();
+  await page.getByLabel("Community URL").fill("wss://invited.example.com");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await page.getByRole("button", { name: "Use anyway" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
+      ),
+    )
+    .toContain("wss://invited.example.com");
 });
 
 test("identity fallback text does not count as a real onboarding name", async ({
@@ -1273,8 +1341,10 @@ test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
   await completeProfileOnboarding(page);
 
   await expectPrivateWelcomeLanding(page);
+  // Greeted by the name typed above — the @mention pill also files the opener
+  // into the new user's Inbox mentions feed.
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Hi, I'm Fizz. Welcome to Buzz.",
+    "Hi @Morty QA, I'm Fizz. Welcome to Buzz.",
   );
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Honey and Bumble, introduce yourselves",
@@ -1298,7 +1368,7 @@ test("first-run onboarding lands before Welcome team bootstrap completes", async
   await expectPrivateWelcomeLanding(page);
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Hi, I'm Fizz. Welcome to Buzz.",
+    "Hi @Morty QA, I'm Fizz. Welcome to Buzz.",
   );
   await page.waitForTimeout(1_500);
   expect(await commandCount(page, "create_managed_agent")).toBe(3);
@@ -1593,26 +1663,18 @@ test("membership denial can import a different invited key", async ({
 
   // Alice already has a relay profile with a display name, so after the
   // identity swap the onboarding gate auto-completes.
-  // The identity swap must tear down the old relay socket. There is no
-  // `plugin:websocket|disconnect` command in tauri-plugin-websocket — closing
-  // is a Close frame sent through `plugin:websocket|send`.
+  // The identity swap must tear down the old relay socket through the native
+  // disconnect command before the replacement identity connects.
   await expect
     .poll(() =>
       page.evaluate(
         () =>
           (
             window as Window & {
-              __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
-                command: string;
-                payload: unknown;
-              }>;
+              __BUZZ_E2E_COMMANDS__?: string[];
             }
-          ).__BUZZ_E2E_COMMAND_PAYLOADS__?.some(
-            (entry) =>
-              entry.command === "plugin:websocket|send" &&
-              (entry.payload as { message?: { type?: string } })?.message
-                ?.type === "Close",
-          ) ?? false,
+          ).__BUZZ_E2E_COMMANDS__?.includes("plugin:websocket|disconnect") ??
+          false,
       ),
     )
     .toBe(true);

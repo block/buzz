@@ -78,6 +78,7 @@ export function useCreateChannelForm({
   >(null);
   const [typePopoverOpen, setTypePopoverOpen] = React.useState(false);
   const nameInputRef = React.useRef<HTMLInputElement>(null);
+  const visibilityTouchedRef = React.useRef(false);
 
   const templatesQuery = useChannelTemplatesQuery();
   const templates = templatesQuery.data ?? [];
@@ -96,6 +97,7 @@ export function useCreateChannelForm({
     setErrorMessage(null);
     setSelectedTemplateId(null);
     setTypePopoverOpen(false);
+    visibilityTouchedRef.current = false;
 
     if (!autoFocusName) return;
 
@@ -123,7 +125,7 @@ export function useCreateChannelForm({
       if (!templateId) {
         setSelectedTemplateId(null);
         setDescription("");
-        setVisibility("open");
+        if (!visibilityTouchedRef.current) setVisibility("open");
         setErrorMessage(null);
         return;
       }
@@ -135,7 +137,7 @@ export function useCreateChannelForm({
 
       setSelectedTemplateId(templateId);
       setDescription(template.description ?? "");
-      setVisibility(template.visibility);
+      if (!visibilityTouchedRef.current) setVisibility(template.visibility);
       setErrorMessage(null);
     },
     [templates],
@@ -195,7 +197,10 @@ export function useCreateChannelForm({
       setErrorMessage(null);
     },
     visibility,
-    setVisibility,
+    setVisibility: (value: ChannelVisibility) => {
+      visibilityTouchedRef.current = true;
+      setVisibility(value);
+    },
     ephemeral,
     setEphemeral,
     durationLabel,

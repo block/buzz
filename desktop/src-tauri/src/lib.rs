@@ -15,6 +15,7 @@ mod migration;
 #[cfg(test)]
 mod model_tests;
 mod models;
+mod native_websocket;
 mod nostr_bind;
 pub mod nostr_convert;
 mod prevent_sleep;
@@ -230,7 +231,7 @@ pub fn run() {
                 })
                 .build(),
         )
-        .plugin(tauri_plugin_websocket::init())
+        .plugin(native_websocket::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init());
 

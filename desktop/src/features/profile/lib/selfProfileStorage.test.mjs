@@ -53,6 +53,7 @@ test("parseSelfProfileCache: valid v1 payload round-trips", () => {
     version: 1,
     displayName: "Alice",
     avatarUrl: "https://relay.example.com/media/abc.jpg",
+    about: "Building better communities",
     avatarDataUrl: "data:image/jpeg;base64,/9j/4A==",
     updatedAt: 1700000000000,
   };
@@ -65,6 +66,7 @@ test("parseSelfProfileCache: null fields are preserved", () => {
     version: 1,
     displayName: null,
     avatarUrl: null,
+    about: null,
     avatarDataUrl: null,
     updatedAt: 0,
   };

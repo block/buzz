@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.4.16"
+version = "0.4.17"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -63,14 +63,13 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-window-state = "2"
-tauri-plugin-websocket = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 infer = "0.19"
 hex = "0.4"
 ed25519-dalek = "=3.0.0-rc.0"
-tokio = { version = "1", features = ["fs", "sync", "rt", "macros", "time"] }
+tokio = { version = "1", features = ["fs", "sync", "rt", "macros", "time", "net", "io-util"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 bytes = "1"
@@ -84,6 +83,7 @@ toml = "0.8"
 nostr = { version = "0.44", features = ["nip44"] }
 zeroize = "1"
 reqwest = { version = "0.13", features = ["json", "query", "stream", "blocking"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 url = "2"
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }

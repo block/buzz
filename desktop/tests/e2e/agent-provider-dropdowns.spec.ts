@@ -197,4 +197,46 @@ test.describe("agent provider dropdown screenshots", () => {
       path: `${SHOTS}/03-builtin-edit-runtime-seeded.png`,
     });
   });
+
+  test("04-codex-definition-exposes-model-without-global-provider-defaults", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        provider: "databricks_v2",
+        model: "global-databricks-model",
+        env_vars: {},
+      },
+      personas: [
+        {
+          displayName: "Codex Definition",
+          systemPrompt: "A Codex-backed definition.",
+          runtime: "codex",
+        },
+      ],
+    });
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    await page
+      .getByRole("button", { name: "Open actions for Codex Definition" })
+      .click();
+    await page.getByRole("menuitem", { name: "Edit" }).click();
+
+    const dialog = page.getByTestId("persona-dialog");
+    await expect(dialog).toBeVisible({ timeout: 10_000 });
+    await expect(
+      dialog.getByRole("tab", { name: "Customize for this agent" }),
+    ).toBeVisible();
+    await expect(
+      dialog.getByText("Harness default", { exact: true }),
+    ).toBeVisible();
+    await expect(dialog.getByText(/Databricks/i)).toHaveCount(0);
+
+    await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
+    await expect(
+      dialog.getByRole("combobox", { name: /model/i }),
+    ).toBeVisible();
+    await expect(dialog.getByText("Model changes apply only")).toBeVisible();
+  });
 });

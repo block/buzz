@@ -88,6 +88,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   isTimelineLoading,
   entranceMessageId = null,
   onEntranceMessageComplete,
+  welcomeKickoffStage = null,
+  welcomeKickoffSettingUp = false,
   messages,
   threadSummaries,
   firstUnreadMessageId = null,
@@ -130,6 +132,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   unfollowThreadById,
   personaLookup,
   profiles,
+  ownerProfiles,
   openThreadHeadId,
   shouldShowThreadSkeleton,
   openAgentSessionChannelId,
@@ -603,6 +606,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             isMessageUnreadById={isMessageUnreadById}
             personaLookup={personaLookup}
             profiles={profiles}
+            ownerProfiles={ownerProfiles}
             unfollowThreadById={unfollowThreadById}
             emptyDescription={
               activeChannel?.channelType === "forum"
@@ -684,7 +688,13 @@ export const ChannelPane = React.memo(function ChannelPane({
                     expiresAtMs={timeoutState.expiresAtMs}
                   />
                 ) : isActiveWelcomeChannel ? (
-                  <WelcomeComposerBanner state={welcomeComposerBannerState} />
+                  <div className="relative">
+                    {welcomeKickoffStage}
+                    <WelcomeComposerBanner
+                      settingUp={welcomeKickoffSettingUp}
+                      state={welcomeComposerBannerState}
+                    />
+                  </div>
                 ) : null}
                 <MessageComposer
                   channelId={activeChannel?.id ?? null}

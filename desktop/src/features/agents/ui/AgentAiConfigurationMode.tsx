@@ -3,11 +3,28 @@ import type { AgentAiConfigurationMode } from "./agentAiConfigurationPolicy";
 
 export type { AgentAiConfigurationMode } from "./agentAiConfigurationPolicy";
 
+export function HarnessModelDefaultNotice({
+  model,
+}: {
+  model?: string | null;
+}) {
+  return (
+    <div className="text-sm" data-testid="agent-harness-defaults-notice">
+      <span className="text-muted-foreground">Model</span>{" "}
+      <span className="text-foreground">
+        {model?.trim() || "Harness default"}
+      </span>
+    </div>
+  );
+}
+
 export function AgentAiConfigurationModeField({
   mode,
+  needsProviderSelection = true,
   onModeChange,
 }: {
   mode: AgentAiConfigurationMode;
+  needsProviderSelection?: boolean;
   onModeChange: (mode: AgentAiConfigurationMode) => void;
 }) {
   return (
@@ -20,13 +37,19 @@ export function AgentAiConfigurationModeField({
         value={mode}
       >
         <TabsList>
-          <TabsTrigger value="defaults">Use agent defaults</TabsTrigger>
+          <TabsTrigger value="defaults">
+            {needsProviderSelection
+              ? "Use agent defaults"
+              : "Use harness defaults"}
+          </TabsTrigger>
           <TabsTrigger value="custom">Customize for this agent</TabsTrigger>
         </TabsList>
       </Tabs>
       {mode === "custom" ? (
         <p className="text-xs text-muted-foreground">
-          Provider and model changes apply only to this agent.
+          {needsProviderSelection
+            ? "Provider and model changes apply only to this agent."
+            : "Model changes apply only to this agent."}
         </p>
       ) : null}
     </div>

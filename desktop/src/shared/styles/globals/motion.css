@@ -55,3 +55,58 @@
     }
   }
 }
+
+/*
+ * Welcome kickoff stage: the starter-team characters arrive from below with
+ * a staggered entrance while the team is being set up, then the stage fades
+ * out when the first agent message lands. Per-character stagger is driven by
+ * the --stagger-index custom property set inline on each character.
+ */
+.motion-kickoff-character-enter {
+  animation: motion-kickoff-character-enter var(--motion-duration-arrival)
+    var(--motion-ease-arrival) both;
+  animation-delay: calc(var(--stagger-index, 0) * 120ms);
+}
+
+@keyframes motion-kickoff-character-enter {
+  from {
+    opacity: 0;
+    transform: translateY(2.5rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.motion-kickoff-stage-exit {
+  animation: motion-kickoff-stage-exit var(--motion-duration-standard)
+    var(--motion-ease-standard) both;
+}
+
+@keyframes motion-kickoff-stage-exit {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-kickoff-character-enter,
+  .motion-kickoff-stage-exit {
+    animation-delay: 0ms;
+    animation-duration: 1ms;
+  }
+
+  @keyframes motion-kickoff-character-enter {
+    from,
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}

@@ -461,34 +461,46 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // NIP-43: publish the initial membership list on startup so clients can
-    // REQ kind:13534 immediately without waiting for the next membership change.
+    // NIP-43: reconcile the event-backed roster for every provisioned
+    // community before opening the listener. `relay_members` is canonical;
+    // this repairs pre-snapshot communities and any publication that failed
+    // after a membership transaction committed.
     if config.require_relay_membership {
-        // Resolve the deployment's community from the configured relay URL
-        // host (single-community per deployment), failing closed if the host
-        // isn't mapped. Await publication before opening the listener so the
-        // first client query observes the roster.
-        match buzz_relay::tenant::bind_deployment_community(&state.db, &state.config.relay_url)
-            .await
+        match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots(&state).await
         {
-            Ok(tenant) => {
-                if let Err(e) = buzz_relay::handlers::side_effects::publish_nip43_membership_list(
-                    &tenant, &state,
+            Ok(count) => info!(count, "NIP-43 membership snapshots reconciled on startup"),
+            Err(error) => {
+                tracing::warn!(%error, "NIP-43 membership snapshot startup reconciliation failed")
+            }
+        }
+
+        let reconcile_state = Arc::clone(&state);
+        let interval_secs = std::env::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60)
+            .max(1);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots(
+                    &reconcile_state,
                 )
                 .await
                 {
-                    tracing::warn!(error = %e, "failed to publish initial NIP-43 membership list on startup");
-                } else {
-                    tracing::info!("NIP-43 membership list published on startup");
+                    Ok(count) if count > 0 => {
+                        info!(count, "NIP-43 membership snapshots repaired")
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "periodic NIP-43 membership snapshot reconciliation failed"
+                    ),
                 }
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = ?e,
-                    "initial NIP-43 membership list skipped: relay host is not mapped to a community"
-                );
-            }
-        }
+        });
     }
 
     // Emit kind:39000/39002 discovery events for channels that exist in the DB

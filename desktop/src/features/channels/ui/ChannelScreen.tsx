@@ -5,6 +5,7 @@ import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
 import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandlers";
 import { useMessageEventProfilePubkeys } from "@/features/channels/useMessageEventProfilePubkeys";
+import { useMessageOwnerProfiles } from "@/features/channels/useMessageOwnerProfiles";
 import { useThreadTargetSync } from "@/features/channels/useThreadTargetSync";
 import {
   useChannelMembersQuery,
@@ -29,6 +30,7 @@ import { mergeChannelKnownAgentPubkeys } from "@/features/agents/knownAgentPubke
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { pickWelcomeGuideAgent } from "@/features/onboarding/welcomeGuide";
 import { useWelcomeKickoffEntrance } from "@/features/onboarding/useWelcomeKickoffEntrance";
+import { useWelcomeKickoffStagePresence } from "@/features/onboarding/useWelcomeKickoffStagePresence";
 import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
 import {
   mergeMessages,
@@ -257,6 +259,7 @@ export function ChannelScreen({
     resolvedMessages,
     threadReplyEvents,
   );
+
   const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
     resolvedMessages,
     threadReplyEvents,
@@ -348,6 +351,7 @@ export function ChannelScreen({
     profiles: messageProfilesQuery.data?.profiles,
     relayAgents,
   });
+  const messageOwnerProfiles = useMessageOwnerProfiles(messageProfiles);
   // Agent set for ChannelPane's own consumers (DM huddle member resolution,
   // the agents list): the community-scoped baseline shared by every surface,
   // widened with channel-member roles and this screen's profile lookup.
@@ -391,6 +395,7 @@ export function ChannelScreen({
         personaLookup,
         respondToLookup,
         relaySelfPubkey,
+        messageOwnerProfiles,
       ),
     [
       activeChannel,
@@ -398,6 +403,7 @@ export function ChannelScreen({
       currentProfile?.avatarUrl,
       currentPubkey,
       messageProfiles,
+      messageOwnerProfiles,
       personaLookup,
       relaySelfPubkey,
       respondToLookup,
@@ -435,6 +441,7 @@ export function ChannelScreen({
     currentPubkey,
     currentAvatarUrl: currentProfile?.avatarUrl ?? null,
     profiles: messageProfiles,
+    ownerProfiles: messageOwnerProfiles,
     members: channelMembers,
     personaLookup,
     respondToLookup,
@@ -622,6 +629,12 @@ export function ChannelScreen({
       timelineLoadingNow,
     );
   settledChannelIdRef.current = settledChannelId;
+  const { welcomeKickoffStage, welcomeKickoffSettingUp } =
+    useWelcomeKickoffStagePresence(
+      activeChannel,
+      timelineMessages,
+      isTimelineLoading,
+    );
   const resetComposerTargets = React.useCallback(
     (_channelId: string | null) => {
       setExpandedThreadReplyIds(new Set());
@@ -842,6 +855,8 @@ export function ChannelScreen({
                   isFetchingOlder={isFetchingOlder}
                   entranceMessageId={welcomeEntranceMessageId}
                   onEntranceMessageComplete={handleWelcomeEntranceComplete}
+                  welcomeKickoffStage={welcomeKickoffStage}
+                  welcomeKickoffSettingUp={welcomeKickoffSettingUp}
                   editTarget={
                     editTargetMessage
                       ? {
@@ -924,6 +939,7 @@ export function ChannelScreen({
                   profilePanelView={profilePanelView}
                   personaLookup={personaLookup}
                   profiles={messageProfiles}
+                  ownerProfiles={messageOwnerProfiles}
                   firstUnreadMessageId={firstUnreadMessageId}
                   unreadCount={unreadCount}
                   targetMessageId={mainTimelineTargetMessageId}

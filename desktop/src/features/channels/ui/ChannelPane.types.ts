@@ -56,6 +56,10 @@ export type ChannelPaneProps = {
   /** Newly-created message that should receive the one-shot conversation arrival motion. */
   entranceMessageId?: string | null;
   onEntranceMessageComplete?: (messageId: string) => void;
+  /** Welcome kickoff characters, rendered standing on the Welcome composer banner. */
+  welcomeKickoffStage?: React.ReactNode;
+  /** The kickoff is still setting up the team — the banner copy reads as setup status. */
+  welcomeKickoffSettingUp?: boolean;
   messages: TimelineMessage[];
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   firstUnreadMessageId?: string | null;
@@ -130,6 +134,7 @@ export type ChannelPaneProps = {
   ) => void;
   personaLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
+  ownerProfiles?: UserProfileLookup;
   openThreadHeadId: string | null;
   shouldShowThreadSkeleton: boolean;
   openAgentSessionChannelId: string | null;

@@ -288,9 +288,19 @@ function WelcomeComposerPersonaMention() {
 
 type WelcomeComposerBannerProps = {
   state: WelcomeComposerBannerState;
+  /**
+   * While the Welcome kickoff is still setting up the team, the banner's
+   * prompt copy reads as a setup status ("Setting up your welcome team…")
+   * instead of the mention hint — the kickoff characters stand on top of the
+   * banner during this window.
+   */
+  settingUp?: boolean;
 };
 
-export function WelcomeComposerBanner({ state }: WelcomeComposerBannerProps) {
+export function WelcomeComposerBanner({
+  settingUp = false,
+  state,
+}: WelcomeComposerBannerProps) {
   if (state === "hidden") {
     return null;
   }
@@ -381,6 +391,18 @@ export function WelcomeComposerBanner({ state }: WelcomeComposerBannerProps) {
                 variants={welcomeComposerBannerSuccessCopyVariants}
               >
                 Nice work.
+              </motion.span>
+            ) : settingUp ? (
+              <motion.span
+                animate="animate"
+                className="min-w-0"
+                data-testid="welcome-composer-setting-up-copy"
+                exit="exit"
+                initial="initial"
+                key="setting-up-copy"
+                variants={welcomeComposerBannerContentVariants}
+              >
+                Setting up your welcome team…
               </motion.span>
             ) : (
               <motion.span
