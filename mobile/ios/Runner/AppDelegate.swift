@@ -64,6 +64,8 @@ import UserNotifications
         sanitizedData = image.pngData()
       case "image/jpeg":
         sanitizedData = image.jpegData(compressionQuality: 1.0)
+      case "image/webp":
+        sanitizedData = image.pngData()
       default:
         sanitizedData = nil
       }
@@ -177,6 +179,7 @@ import UserNotifications
     exportSession.outputURL = outputURL
     exportSession.outputFileType = .mp4
     exportSession.shouldOptimizeForNetworkUse = true
+    exportSession.metadataItemFilter = AVMetadataItemFilter.forSharing()
 
     exportSession.exportAsynchronously {
       switch exportSession.status {

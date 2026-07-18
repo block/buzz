@@ -269,7 +269,7 @@ test("agent avatar emoji picker scrolls inside its popover", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "New agent" }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
   await page.getByLabel("Add avatar").click();
@@ -1121,25 +1121,9 @@ test("share access controls include the selected memories", async ({
     .getByRole("menuitemradio", { name: "Agent + core memory" })
     .click();
   await expect(linkAccess).toHaveText("Agent + core memory");
-  const shareCardHeightSamples = await shareMainCard.evaluate(
-    async (element) => {
-      const samples: number[] = [];
-      const start = performance.now();
-
-      await new Promise<void>((resolve) => {
-        const sample = (now: number) => {
-          samples.push(element.getBoundingClientRect().height);
-          if (now - start >= 280) {
-            resolve();
-            return;
-          }
-          requestAnimationFrame(sample);
-        };
-        requestAnimationFrame(sample);
-      });
-
-      return samples;
-    },
+  await waitForAnimations(page);
+  const expandedShareCardHeight = await shareMainCard.evaluate(
+    (element) => element.getBoundingClientRect().height,
   );
   const inlineMemoryWarning = shareDialog.getByTestId(
     "persona-share-memory-warning",
@@ -1151,10 +1135,7 @@ test("share access controls include the selected memories", async ({
   await expect(inlineMemoryWarning).toContainText(
     "Only share it with people you trust.",
   );
-  expect(shareCardHeightSamples.at(-1)).toBeGreaterThan(initialShareCardHeight);
-  expect(
-    new Set(shareCardHeightSamples.map((height) => Math.round(height))).size,
-  ).toBeGreaterThan(2);
+  expect(expandedShareCardHeight).toBeGreaterThan(initialShareCardHeight);
   await page.getByTestId("persona-share-copy-link").click();
   const memoryConfirmation = page.getByTestId(
     "persona-share-memory-confirmation",

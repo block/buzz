@@ -24,6 +24,15 @@ pub enum ConfigError {
     InvalidValue(String),
 }
 
+/// Deny-by-default read-only deployment-admin configuration.
+#[derive(Debug, Clone)]
+pub struct AdminConfig {
+    /// Exact admin HTTP authority.
+    pub host: String,
+    /// Optional admin SPA bundle directory.
+    pub web_dir: Option<std::path::PathBuf>,
+}
+
 /// Relay-hosted policy content presented on join surfaces.
 #[derive(Debug, Clone)]
 pub struct JoinPolicyConfig {
@@ -219,6 +228,9 @@ pub struct Config {
     /// documents or age attestation are configured.
     pub join_policy: Option<JoinPolicyConfig>,
 
+    /// Deployment-admin API and SPA configuration. Absent means the surface is disabled.
+    pub admin: Option<AdminConfig>,
+
     /// Optional path to the web UI `dist/` directory.
     /// When set, the relay serves the invite landing page and its static assets.
     /// When unset, no static file serving happens (relay behaves as before).
@@ -231,6 +243,54 @@ pub struct Config {
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
     raw.parse::<SocketAddr>()
         .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
+}
+
+fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| ConfigError::InvalidValue(format!("{name} must be a positive integer"))),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidValue(format!(
+            "{name} must be valid Unicode"
+        ))),
+    }
+}
+
+fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigError> {
+    let defaults = buzz_auth::RateLimitConfig::default();
+    Ok(buzz_auth::RateLimitConfig {
+        human_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN",
+            defaults.human_messages_per_min,
+        )?,
+        human_api_calls_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN",
+            defaults.human_api_calls_per_min,
+        )?,
+        human_ws_events_per_sec: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC",
+            defaults.human_ws_events_per_sec,
+        )?,
+        agent_standard_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN",
+            defaults.agent_standard_messages_per_min,
+        )?,
+        agent_standard_api_calls_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_STANDARD_API_CALLS_PER_MIN",
+            defaults.agent_standard_api_calls_per_min,
+        )?,
+        agent_elevated_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_ELEVATED_MESSAGES_PER_MIN",
+            defaults.agent_elevated_messages_per_min,
+        )?,
+        agent_platform_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_PLATFORM_MESSAGES_PER_MIN",
+            defaults.agent_platform_messages_per_min,
+        )?,
+    })
 }
 
 fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
@@ -477,7 +537,9 @@ impl Config {
             ));
         }
 
-        let auth = buzz_auth::AuthConfig::default();
+        let auth = buzz_auth::AuthConfig {
+            rate_limits: rate_limit_config_from_env()?,
+        };
 
         if !require_auth_token {
             warn!(
@@ -687,6 +749,35 @@ impl Config {
             })
         };
 
+        // Read-only deployment-admin surface. The route is absent when the host is unset.
+        let admin = match std::env::var("BUZZ_ADMIN_HOST")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            None => None,
+            Some(host) => {
+                if host.contains(['/', '\\', '@']) {
+                    return Err(ConfigError::InvalidValue(
+                        "BUZZ_ADMIN_HOST must be an exact authority".to_string(),
+                    ));
+                }
+                let web_dir = std::env::var("BUZZ_ADMIN_WEB_DIR")
+                    .ok()
+                    .map(|value| std::path::PathBuf::from(value.trim()))
+                    .filter(|value| !value.as_os_str().is_empty());
+                if let Some(ref dir) = web_dir {
+                    if !dir.join("index.html").is_file() {
+                        return Err(ConfigError::InvalidValue(format!(
+                            "BUZZ_ADMIN_WEB_DIR={} does not contain index.html",
+                            dir.display()
+                        )));
+                    }
+                }
+                Some(AdminConfig { host, web_dir })
+            }
+        };
+
         // Web UI static file serving
         let web_dir = std::env::var("BUZZ_WEB_DIR")
             .ok()
@@ -760,6 +851,7 @@ impl Config {
             push_gateway_delivery_url,
             push_gateway_timeout,
             join_policy,
+            admin,
             web_dir,
             serve_git_web_gui,
         })
@@ -839,6 +931,37 @@ mod tests {
             result,
             Err(ConfigError::InvalidValue(ref message))
                 if message.contains("BUZZ_AGE_ATTESTATION_REQUIRED")
+        ));
+    }
+
+    #[test]
+    fn rate_limits_can_be_overridden() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN", "1001");
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN", "1002");
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "1003");
+
+        let config = Config::from_env().expect("config");
+
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN");
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN");
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
+        assert_eq!(config.auth.rate_limits.human_messages_per_min, 1001);
+        assert_eq!(config.auth.rate_limits.human_api_calls_per_min, 1002);
+        assert_eq!(config.auth.rate_limits.human_ws_events_per_sec, 1003);
+    }
+
+    #[test]
+    fn rate_limit_overrides_reject_zero() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "0");
+        let result = Config::from_env();
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC")
         ));
     }
 

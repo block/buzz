@@ -133,17 +133,23 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
-          # Both workflows take the bare version (for the build) and the tag ref
-          # (so the dispatch builds the tagged commit, not main).
+          # Run the workflow itself at the immutable tag so github.sha, OIDC,
+          # provenance, and the checked-out source all name the release commit.
+          extra_args=()
           case "$DISPATCH" in
             release) WORKFLOW="release.yml" ;;
             docker)  WORKFLOW="docker.yml" ;;
-            helm-chart) WORKFLOW="helm-chart.yml" ;;
-            push-gateway-helm-chart) WORKFLOW="push-gateway-helm-chart.yml" ;;
+            helm-chart)
+              WORKFLOW="helm-chart.yml"
+              extra_args=(-f "ref=$TAG") ;;
+            push-gateway-helm-chart)
+              WORKFLOW="push-gateway-helm-chart.yml"
+              extra_args=(-f "ref=$TAG") ;;
             *)
               echo "::error::Unhandled dispatch target: '$DISPATCH'"
               exit 1 ;;
           esac
           gh workflow run "$WORKFLOW" \
+            --ref "$TAG" \
             -f version="$VERSION" \
-            -f ref="$TAG"
+            "${extra_args[@]}"

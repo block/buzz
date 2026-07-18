@@ -118,9 +118,9 @@ test("resolveInheritedRuntimeSubmission preserves a user-edited provider + env w
   assert.equal(result.model, null);
 });
 
-test("resolveInheritedRuntimeSubmission clears an already-inheriting agent's persona-backed provider and model to AI defaults", () => {
+test("resolveInheritedRuntimeSubmission clears an already-inheriting agent's persona-backed provider and model to agent defaults", () => {
   // Regression: an already-inheriting agent is linked to a persona with a
-  // provider and model. The user picks "Use AI defaults" for both fields.
+  // provider and model. The user picks "Use agent defaults" for both fields.
   // Because the agent was NOT harness-pinned at open, these empty local values
   // are deliberate clears, not an inherit-transition — persist null for both
   // rather than resurrecting the persona values.

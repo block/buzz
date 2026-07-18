@@ -597,6 +597,24 @@ impl AcpClient {
             .session_id)
     }
 
+    /// Send Goose's custom system-prompt request after `session/new`.
+    pub async fn session_set_goose_system_prompt(
+        &mut self,
+        session_id: &str,
+        text: &str,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.send_request(
+            "_goose/unstable/session/system-prompt/set",
+            serde_json::json!({
+                "sessionId": session_id,
+                "mode": "append",
+                "key": "buzz",
+                "text": text,
+            }),
+        )
+        .await
+    }
+
     /// Send `session/set_config_option` (stable ACP path).
     pub async fn session_set_config_option(
         &mut self,
@@ -2887,6 +2905,61 @@ mod tests {
             Some("Custom system prompt"),
             "systemPrompt should be included in params when Some"
         );
+    }
+
+    #[tokio::test]
+    async fn goose_system_prompt_request_uses_append_contract() {
+        let script = r#"
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":0,"result":{"_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let result = client
+            .session_set_goose_system_prompt("ses_goose", "Be terse")
+            .await
+            .expect("custom request succeeds");
+        let received = &result["_receivedRequest"];
+        assert_eq!(
+            received["method"],
+            "_goose/unstable/session/system-prompt/set"
+        );
+        assert_eq!(received["params"]["sessionId"], "ses_goose");
+        assert_eq!(received["params"]["mode"], "append");
+        assert_eq!(received["params"]["key"], "buzz");
+        assert_eq!(received["params"]["text"], "Be terse");
+    }
+
+    #[tokio::test]
+    async fn goose_system_prompt_preserves_method_not_found_for_fallback() {
+        let script = r#"
+            read -t 2 _REQ
+            echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"Method not found"}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        assert!(matches!(
+            client
+                .session_set_goose_system_prompt("ses_goose", "Be terse")
+                .await,
+            Err(AcpError::AgentError { code: -32601, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn goose_system_prompt_preserves_invalid_params_as_error() {
+        let script = r#"
+            read -t 2 _REQ
+            echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32602,"message":"Invalid params"}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        assert!(matches!(
+            client
+                .session_set_goose_system_prompt("ses_goose", "Be terse")
+                .await,
+            Err(AcpError::AgentError { code: -32602, .. })
+        ));
     }
 
     #[tokio::test]

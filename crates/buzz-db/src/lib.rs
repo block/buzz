@@ -9,6 +9,8 @@
 //! - No FK references to partitioned tables.
 //! - Uses `sqlx::query()` (runtime) not `sqlx::query!()` (compile-time).
 
+/// Explicit deployment-global admin report reads.
+pub mod admin_moderation;
 /// API token storage and lookup.
 pub mod api_token;
 /// Relay-scoped archived identity persistence (NIP-IA).
@@ -395,6 +397,57 @@ impl Db {
         } else {
             Ok(None)
         }
+    }
+
+    /// List reports for the deployment-global read-only admin plane.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn admin_list_reports(
+        &self,
+        community_id: Option<Uuid>,
+        status: Option<&str>,
+        report_type: Option<&str>,
+        target_kind: Option<&str>,
+        after: Option<DateTime<Utc>>,
+        before: Option<DateTime<Utc>>,
+        cursor: Option<(DateTime<Utc>, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<admin_moderation::AdminReport>> {
+        admin_moderation::list_reports(
+            &self.pool,
+            community_id,
+            status,
+            report_type,
+            target_kind,
+            after,
+            before,
+            cursor,
+            limit,
+        )
+        .await
+    }
+
+    /// Fetch one report for the deployment-global read-only admin plane.
+    pub async fn admin_get_report(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<admin_moderation::AdminReport>> {
+        admin_moderation::get_report(&self.pool, id).await
+    }
+
+    /// List feedback for the deployment-global read-only admin plane.
+    pub async fn admin_list_feedback(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<admin_moderation::AdminFeedback>> {
+        admin_moderation::list_feedback(&self.pool, limit).await
+    }
+
+    /// Fetch one feedback submission for the deployment-global admin plane.
+    pub async fn admin_get_feedback(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<admin_moderation::AdminFeedback>> {
+        admin_moderation::get_feedback(&self.pool, id).await
     }
 
     /// Return total number of communities on this relay.

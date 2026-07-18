@@ -759,6 +759,7 @@ fn handle_cancel_turn_control(
                 channel_id: Some(channel_id.to_string()),
                 session_id: None,
                 turn_id: None,
+                started_at: None,
             },
             serde_json::json!({
                 "type": "cancel_turn",
@@ -835,6 +836,7 @@ fn handle_switch_model_control(
                 channel_id: Some(channel_id.to_string()),
                 session_id: None,
                 turn_id: None,
+                started_at: None,
             },
             serde_json::json!({
                 "type": "switch_model",
@@ -984,7 +986,7 @@ struct RespawnResult {
     /// Tuple: (initialized client, protocol version, supports_goose_steer).
     /// The third element is always `true` — the supervisor uses
     /// try-and-tolerate for the steer extension.
-    result: Result<(AcpClient, u32, bool)>,
+    result: Result<(AcpClient, u32, String)>,
 }
 
 /// Outcome of a non-cancelling steer attempt, forwarded from a per-attempt
@@ -1028,7 +1030,7 @@ impl RespawnGuard {
     /// Send the result and disarm the guard. Uses `try_send` (sync) so there
     /// is no await boundary between marking `sent` and actually enqueueing —
     /// cancellation cannot slip between the two.
-    fn send(mut self, result: Result<(AcpClient, u32, bool)>) {
+    fn send(mut self, result: Result<(AcpClient, u32, String)>) {
         // Invariant: try_send succeeds because the channel capacity equals the
         // slot count, and respawn_in_flight guarantees at most one outstanding
         // result per slot. If this ever fails, the channel sizing or the
@@ -1198,6 +1200,7 @@ async fn tokio_main() -> Result<()> {
                                 "initializeResult": init_result,
                             }),
                         );
+                        let agent_name = normalized_agent_name(&init_result);
                         agent_slots.push(Some(OwnedAgent {
                             index: i,
                             acp,
@@ -1205,6 +1208,8 @@ async fn tokio_main() -> Result<()> {
                             model_capabilities: None,
                             desired_model: config.model.clone(),
                             model_overridden: false,
+                            agent_name,
+                            goose_system_prompt_supported: None,
                             protocol_version,
                         }));
                     }
@@ -1286,12 +1291,6 @@ async fn tokio_main() -> Result<()> {
 
     let presence_publisher = relay.event_publisher();
     let presence_keys = config.keys.clone();
-    if config.presence_enabled {
-        match publish_presence(&presence_publisher, &presence_keys, "online").await {
-            Ok(_) => tracing::info!("presence set to online"),
-            Err(e) => tracing::warn!("failed to set initial presence: {e}"),
-        }
-    }
 
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
     let startup_owner: Option<String> = resolve_agent_owner(&config);
@@ -1323,13 +1322,14 @@ async fn tokio_main() -> Result<()> {
 
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
+    let mut relay_observer_publisher = None;
     if config.relay_observer {
         if let (Some(observer), Some(owner_pubkey_hex)) =
             (observer.clone(), owner_cache.pubkey.clone())
         {
             match PublicKey::from_hex(&owner_pubkey_hex) {
                 Ok(owner_pubkey) => {
-                    relay_observer_publisher_task = Some(spawn_relay_observer_publisher(
+                    relay_observer_publisher = Some((
                         observer,
                         relay.event_publisher(),
                         config.keys.clone(),
@@ -1405,11 +1405,36 @@ async fn tokio_main() -> Result<()> {
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
+    let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
         if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
             tracing::warn!("failed to subscribe to channel {channel_id}: {e}");
         } else {
+            subscribed_channel_ids.insert(*channel_id);
             tracing::info!("subscribed to channel {channel_id}");
+        }
+    }
+
+    if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
+        relay_observer_publisher.take()
+    {
+        relay_observer_publisher_task = Some(spawn_relay_observer_publisher(
+            observer,
+            publisher,
+            keys,
+            agent_pubkey,
+            owner_pubkey,
+            owner,
+        ));
+    }
+
+    // Online means the harness can receive work, not merely that its socket is
+    // connected. Publishing after channel subscriptions gives desktop callers
+    // a durable readiness boundary before they send a startup mention.
+    if config.presence_enabled {
+        match publish_presence(&presence_publisher, &presence_keys, "online").await {
+            Ok(_) => tracing::info!("presence set to online"),
+            Err(e) => tracing::warn!("failed to set initial presence: {e}"),
         }
     }
 
@@ -1636,7 +1661,7 @@ async fn tokio_main() -> Result<()> {
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
-                Ok((acp, protocol_version, _)) => {
+                Ok((acp, protocol_version, agent_name)) => {
                     let agent = OwnedAgent {
                         index: rr.index,
                         acp,
@@ -1644,6 +1669,8 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         model_overridden: false,
+                        agent_name,
+                        goose_system_prompt_supported: None,
                         protocol_version,
                     };
                     pool.return_agent(agent);
@@ -1779,15 +1806,20 @@ async fn tokio_main() -> Result<()> {
                                     // stripped for a legitimately re-added channel.
                                     removed_channels.remove(&ch);
 
-                                    if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                    if subscribed_channel_ids.contains(&ch) {
+                                        tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
+                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
+                                        } else {
+                                            subscribed_channel_ids.insert(ch);
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
                                     }
                                 } else {
+                                    subscribed_channel_ids.remove(&ch);
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
@@ -2667,6 +2699,8 @@ fn dispatch_pending(
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
+        let turn_id = Uuid::new_v4().to_string();
+        let task_turn_id = turn_id.clone();
 
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
@@ -2676,6 +2710,7 @@ fn dispatch_pending(
                 ctx_clone,
                 result_tx,
                 Some(control_rx),
+                task_turn_id,
             )
             .await;
         });
@@ -2685,6 +2720,7 @@ fn dispatch_pending(
             pool::TaskMeta {
                 agent_index,
                 channel_id: Some(channel_id),
+                turn_id,
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
@@ -2858,6 +2894,7 @@ fn handle_prompt_result(
         PromptSource::Channel(ch) => Some(*ch),
         PromptSource::Heartbeat => None,
     };
+    let turn_id = result.turn_id.clone();
     let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
@@ -2870,7 +2907,7 @@ fn handle_prompt_result(
             observer.emit(
                 "turn_error",
                 Some(agent_index),
-                &observer::context_for(channel_id, None, None),
+                &observer::context_for(channel_id, None, Some(turn_id.clone())),
                 payload,
             );
         }
@@ -3093,7 +3130,7 @@ fn recover_panicked_agent(
         observer.emit(
             "agent_panic",
             Some(i),
-            &observer::context_for(meta.channel_id, None, None),
+            &observer::context_for(meta.channel_id, None, Some(meta.turn_id)),
             serde_json::json!({
                 "outcome": "panic",
                 "error": format!("Agent task panicked: {join_error}"),
@@ -3195,16 +3232,23 @@ fn dispatch_heartbeat(
         .heartbeat_prompt
         .clone()
         .unwrap_or_else(default_heartbeat_prompt);
-    // For legacy agents (protocol_version < 2), prepend base_prompt to the
-    // heartbeat user message since they don't receive it via session/new.
-    let prompt_text =
-        pool::prepend_base_for_legacy(agent.protocol_version, ctx.base_prompt, &prompt_text);
     let result_tx = pool.result_tx();
     let ctx_clone = Arc::clone(ctx);
     let agent_index = agent.index;
+    let turn_id = Uuid::new_v4().to_string();
+    let task_turn_id = turn_id.clone();
 
     let abort_handle = pool.join_set.spawn(async move {
-        pool::run_prompt_task(agent, None, Some(prompt_text), ctx_clone, result_tx, None).await;
+        pool::run_prompt_task(
+            agent,
+            None,
+            Some(prompt_text),
+            ctx_clone,
+            result_tx,
+            None,
+            task_turn_id,
+        )
+        .await;
     });
 
     pool.task_map_mut().insert(
@@ -3212,6 +3256,7 @@ fn dispatch_heartbeat(
         pool::TaskMeta {
             agent_index,
             channel_id: None,
+            turn_id,
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
@@ -3311,6 +3356,17 @@ fn spawn_respawn_task(
     true
 }
 
+fn normalized_agent_name(init_result: &serde_json::Value) -> String {
+    init_result
+        .get("agentInfo")
+        .or_else(|| init_result.get("serverInfo"))
+        .and_then(|info| info.get("name"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+        .trim()
+        .to_ascii_lowercase()
+}
+
 // ── spawn_and_init ────────────────────────────────────────────────────────────
 /// Spawn an agent subprocess and run the MCP `initialize` handshake.
 ///
@@ -3323,7 +3379,7 @@ async fn spawn_and_init(
     has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
-) -> Result<(AcpClient, u32, bool)> {
+) -> Result<(AcpClient, u32, String)> {
     let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
@@ -3340,7 +3396,8 @@ async fn spawn_and_init(
                     "initializeResult": init_result,
                 }),
             );
-            Ok((acp, protocol_version, true))
+            let agent_name = normalized_agent_name(&init_result);
+            Ok((acp, protocol_version, agent_name))
         }
         Err(e) => {
             // Explicitly shut down the spawned child to prevent zombie/leak.
@@ -3787,6 +3844,7 @@ mod owner_control_command_tests {
             pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
@@ -3989,6 +4047,7 @@ mod observer_chunk_coalescer_tests {
             channel_id: Some("channel-1".to_string()),
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
+            started_at: None,
             payload: serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "session/update",
@@ -4016,6 +4075,7 @@ mod observer_chunk_coalescer_tests {
             channel_id: Some("channel-1".to_string()),
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
+            started_at: None,
             payload: serde_json::json!({ "type": "turn_started" }),
         }
     }
@@ -4283,6 +4343,22 @@ mod error_outcome_emission_tests {
         }
     }
 
+    #[test]
+    fn normalizes_agent_name_from_initialize_result() {
+        assert_eq!(
+            normalized_agent_name(&serde_json::json!({
+                "agentInfo": { "name": " Goose ", "version": "1.43.0" }
+            })),
+            "goose"
+        );
+        assert_eq!(
+            normalized_agent_name(&serde_json::json!({
+                "serverInfo": { "name": "buzz-agent" }
+            })),
+            "buzz-agent"
+        );
+    }
+
     /// Spawn a real but inert agent subprocess (`cat`) so the error paths have
     /// an `OwnedAgent` to move into respawn or return to the pool. The error
     /// branches never talk to the subprocess.
@@ -4296,6 +4372,8 @@ mod error_outcome_emission_tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,
@@ -4318,6 +4396,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -4340,6 +4419,7 @@ mod error_outcome_emission_tests {
         let result = PromptResult {
             agent,
             source: PromptSource::Channel(Uuid::new_v4()),
+            turn_id: "test-turn-id".to_string(),
             outcome,
             batch: None,
         };
@@ -4358,16 +4438,88 @@ mod error_outcome_emission_tests {
             None,
         );
 
-        observer
+        let turn_errors: Vec<_> = observer
             .snapshot()
-            .iter()
+            .into_iter()
             .filter(|e| e.kind == "turn_error")
-            .count()
+            .collect();
+        assert!(
+            turn_errors
+                .iter()
+                .all(|event| event.turn_id.as_deref() == Some("test-turn-id")),
+            "turn_error must retain the completed turn id"
+        );
+        turn_errors.len()
     }
 
     #[tokio::test]
     async fn agent_exited_emits_exactly_one_feed_event() {
         assert_eq!(turn_errors_emitted_for(PromptOutcome::AgentExited).await, 1);
+    }
+
+    #[tokio::test]
+    async fn panic_event_retains_task_turn_id() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let task_id = abort_handle.id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "panic-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        started_rx.await.unwrap();
+        abort_handle.abort();
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut typing_channels = HashMap::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+        );
+
+        let panic = observer
+            .snapshot()
+            .into_iter()
+            .find(|event| event.kind == "agent_panic")
+            .expect("panic recovery emits an observer event");
+        assert_eq!(
+            panic.channel_id.as_deref(),
+            Some(channel_id.to_string().as_str())
+        );
+        assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
     }
 
     #[tokio::test]
@@ -4409,6 +4561,7 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -4429,6 +4582,7 @@ mod error_outcome_emission_tests {
             let result = PromptResult {
                 agent,
                 source: PromptSource::Channel(Uuid::new_v4()),
+                turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: None,
             };
@@ -4492,6 +4646,7 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -4511,6 +4666,7 @@ mod error_outcome_emission_tests {
             let result = PromptResult {
                 agent,
                 source: PromptSource::Channel(channel_id),
+                turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: Some(batch),
             };
@@ -4602,6 +4758,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -4633,6 +4790,7 @@ mod error_outcome_emission_tests {
         let result = PromptResult {
             agent,
             source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::CancelDrainTimeout(grace),
             batch: Some(batch),
         };
@@ -4739,6 +4897,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -4760,6 +4919,7 @@ mod error_outcome_emission_tests {
         let result = PromptResult {
             agent,
             source: PromptSource::Channel(Uuid::new_v4()),
+            turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::CancelDrainTimeout(grace),
             // Explicit Stop already dropped the batch upstream in
             // `classify_control_cancel_failure` — `handle_prompt_result`
@@ -4849,6 +5009,7 @@ mod observer_payload_trim_tests {
             channel_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
             session_id: Some("sess-1".to_string()),
             turn_id: Some("turn-1".to_string()),
+            started_at: None,
             payload,
         }
     }

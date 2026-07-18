@@ -454,6 +454,7 @@ pub struct ManagedAgentSummary {
     pub pubkey: String,
     pub name: String,
     pub persona_id: Option<String>,
+    pub team_id: Option<String>,
     pub relay_url: String,
     pub acp_command: String,
     pub agent_command: String,

@@ -206,10 +206,10 @@ test.describe("edit agent dialog", () => {
     await openEditDialog(page);
 
     await expect(page.locator("#edit-agent-llm-provider")).toHaveText(
-      "Use AI defaults (anthropic)",
+      "Use agent defaults (anthropic)",
     );
     await expect(page.locator("#edit-agent-model")).toHaveText(
-      "Use AI defaults (claude-opus-4-5)",
+      "Use agent defaults (claude-opus-4-5)",
     );
     const defaults = page.getByTestId("agent-ai-defaults-notice");
     await expect(

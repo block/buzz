@@ -23,8 +23,11 @@ import {
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   getPersonaProviderOptions,
+  getProviderApiKeyEnvVar,
+  requiredCredentialEnvKeys,
 } from "@/features/agents/ui/personaDialogPickers";
 import { AgentModelField } from "@/features/agents/ui/personaProviderModelFields";
+import { PersonaProviderApiKeyField } from "@/features/agents/ui/PersonaProviderApiKeyField";
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
 import {
   BUZZ_AGENT_THINKING_EFFORT,
@@ -42,6 +45,7 @@ export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   env_vars: {},
   provider: null,
   model: null,
+  preferred_runtime: null,
 };
 
 /** Baked env keys that route to structured controls, not the generic env editor. */
@@ -53,7 +57,7 @@ const BAKED_STRUCTURED_KEYS = new Set([
 
 export type GlobalAgentConfigFieldsProps = {
   bakedEnv: BakedEnvEntry[];
-  buzzAgentRuntime: AcpRuntimeCatalogEntry | undefined;
+  selectedRuntime: AcpRuntimeCatalogEntry | undefined;
   config: GlobalAgentConfig;
   isCustomModelEditing: boolean;
   isCustomProvider: boolean;
@@ -65,7 +69,7 @@ export type GlobalAgentConfigFieldsProps = {
 
 export function GlobalAgentConfigFields({
   bakedEnv,
-  buzzAgentRuntime,
+  selectedRuntime,
   config,
   isCustomModelEditing,
   isCustomProvider,
@@ -100,6 +104,25 @@ export function GlobalAgentConfigFields({
 
   const providerValue = config.provider ?? "";
   const providerForDiscovery = isCustomProvider ? "" : providerValue;
+  const credentialProvider = isCustomProvider ? "" : effectiveProvider;
+  const requiredEnvKeys = requiredCredentialEnvKeys(
+    "buzz-agent",
+    credentialProvider,
+  );
+  const apiKeyEnvVar = getProviderApiKeyEnvVar(credentialProvider);
+  const advancedRequiredEnvKeys = requiredEnvKeys.filter(
+    (key) =>
+      key !== apiKeyEnvVar && !bakedEnv.some((entry) => entry.key === key),
+  );
+  const apiKeyValue = apiKeyEnvVar ? (config.env_vars[apiKeyEnvVar] ?? "") : "";
+  const bakedEnvKeys = React.useMemo(
+    () => bakedEnv.map((entry) => entry.key),
+    [bakedEnv],
+  );
+  const apiKeyInherited =
+    apiKeyEnvVar !== null &&
+    apiKeyValue.length === 0 &&
+    bakedEnvKeys.includes(apiKeyEnvVar);
 
   const {
     discoveredModelOptions,
@@ -111,7 +134,7 @@ export function GlobalAgentConfigFields({
     modelFieldVisible: true,
     open: true,
     provider: providerForDiscovery,
-    selectedRuntime: buzzAgentRuntime,
+    selectedRuntime,
   });
 
   const currentEffortForAutoClear =
@@ -131,21 +154,32 @@ export function GlobalAgentConfigFields({
   });
 
   function handleProviderChange(value: string) {
+    const previousApiKey = getProviderApiKeyEnvVar(effectiveProvider);
     if (value === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
+      const nextEnvVars = { ...config.env_vars };
+      if (previousApiKey) delete nextEnvVars[previousApiKey];
       onIsCustomProviderChange(true);
+      onConfigChange({ ...config, env_vars: nextEnvVars, provider: null });
       return;
     }
-    if (value === AUTO_PROVIDER_DROPDOWN_VALUE || value === "") {
-      onIsCustomProviderChange(false);
-      onConfigChange({ ...config, provider: null });
-    } else {
-      onIsCustomProviderChange(false);
-      onConfigChange({
-        ...config,
-        provider: value,
-        model: value === "relay-mesh" ? config.model || "auto" : config.model,
-      });
+    const nextProvider =
+      value === AUTO_PROVIDER_DROPDOWN_VALUE || value === "" ? null : value;
+    const nextApiKey = getProviderApiKeyEnvVar(
+      nextProvider ?? bakedProvider ?? "",
+    );
+    const nextEnvVars = { ...config.env_vars };
+    if (previousApiKey && previousApiKey !== nextApiKey) {
+      delete nextEnvVars[previousApiKey];
     }
+
+    onIsCustomProviderChange(false);
+    onConfigChange({
+      ...config,
+      env_vars: nextEnvVars,
+      provider: nextProvider,
+      model:
+        nextProvider === "relay-mesh" ? config.model || "auto" : config.model,
+    });
   }
 
   function handleCustomProviderInput(value: string) {
@@ -168,10 +202,6 @@ export function GlobalAgentConfigFields({
     onConfigChange({ ...config, env_vars: merged });
   }
 
-  const bakedEnvKeys = React.useMemo(
-    () => bakedEnv.map((e) => e.key),
-    [bakedEnv],
-  );
   // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
   // migration rewrites v1→v2. Hide the legacy v1 option so it is not offered
   // for new selections; OSS builds show it.
@@ -206,7 +236,7 @@ export function GlobalAgentConfigFields({
       {/* Provider field */}
       <div className="space-y-1.5 p-3">
         <label className="text-sm font-medium" htmlFor="global-agent-provider">
-          Default LLM provider
+          LLM provider
         </label>
         <select
           className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
@@ -232,10 +262,30 @@ export function GlobalAgentConfigFields({
             value={providerValue}
           />
         ) : null}
-        <p className="text-xs text-muted-foreground">
-          Applies to all agents that don't have a per-agent provider set.
-        </p>
       </div>
+
+      {apiKeyEnvVar ? (
+        <div className="p-3">
+          <PersonaProviderApiKeyField
+            disabled={false}
+            inheritedLabel="Provided by this build"
+            isInherited={apiKeyInherited}
+            isRequired={!apiKeyInherited && apiKeyValue.length === 0}
+            label={
+              effectiveProvider === "anthropic"
+                ? "Anthropic API Key"
+                : "OpenAI API Key"
+            }
+            onValueChange={(value) =>
+              onConfigChange({
+                ...config,
+                env_vars: { ...config.env_vars, [apiKeyEnvVar]: value },
+              })
+            }
+            value={apiKeyValue}
+          />
+        </div>
+      ) : null}
 
       {/* Model field */}
       <div className="space-y-1.5 p-3">
@@ -257,9 +307,6 @@ export function GlobalAgentConfigFields({
           onModelChange={handleModelChange}
           provider={providerForDiscovery}
         />
-        <p className="text-xs text-muted-foreground">
-          Applies to all agents that don't have a per-agent model set.
-        </p>
       </div>
 
       {/* Thinking / Effort */}
@@ -273,7 +320,7 @@ export function GlobalAgentConfigFields({
             effortDefault !== null ? `Default (${effortDefault})` : undefined
           }
           inheritedEffort={bakedEffort ?? undefined}
-          label="Default thinking / effort"
+          label="Thinking/effort"
           onChange={(value) => {
             const nextEnvVars = { ...config.env_vars };
             if (value === "") {
@@ -285,20 +332,17 @@ export function GlobalAgentConfigFields({
           }}
           testId="global-agent-thinking-effort-select"
         />
-        <p className="mt-1.5 text-xs text-muted-foreground">
-          Default thinking/reasoning effort applied to all agents. Per-agent
-          settings override this.
-        </p>
       </div>
 
       {/* Env vars */}
       <div className="p-3">
         <EnvVarsEditor
-          helperText="Injected into all agents as the lowest-priority layer. Per-agent values override these."
+          hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
           inheritedRows={bakedGenericRows}
           inheritedRowsLabel="build"
-          label="Global environment variables"
+          label="Environment variables"
           onChange={handleEnvVarsChange}
+          requiredKeys={advancedRequiredEnvKeys}
           value={Object.fromEntries(
             Object.entries(config.env_vars).filter(
               ([k]) => k !== BUZZ_AGENT_THINKING_EFFORT,

@@ -1,0 +1,57 @@
+/*
+ * Buzz motion system
+ *
+ * Keep shared timing, easing, distance, and semantic motion primitives here.
+ * Features decide when motion runs; this layer defines how Buzz moves.
+ */
+
+:root {
+  /* Durations: feedback → state change → composed arrival. */
+  --motion-duration-instant: 120ms;
+  --motion-duration-fast: 180ms;
+  --motion-duration-standard: 240ms;
+  --motion-duration-arrival: 500ms;
+
+  /* Easing: direct for feedback, confident deceleration for entrances. */
+  --motion-ease-standard: cubic-bezier(0.25, 1, 0.5, 1);
+  --motion-ease-arrival: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Distances stay restrained so motion supports hierarchy without spectacle. */
+  --motion-distance-arrival: 0.75rem;
+  --motion-blur-arrival: 2px;
+}
+
+/* A newly-created conversational object settling into the timeline. */
+.motion-enter-conversation {
+  animation: motion-enter-conversation var(--motion-duration-arrival)
+    var(--motion-ease-arrival) both;
+}
+
+@keyframes motion-enter-conversation {
+  from {
+    filter: blur(var(--motion-blur-arrival));
+    opacity: 0;
+    transform: translateY(var(--motion-distance-arrival));
+  }
+
+  to {
+    filter: blur(0);
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-enter-conversation {
+    animation-duration: 1ms;
+  }
+
+  @keyframes motion-enter-conversation {
+    from,
+    to {
+      filter: none;
+      opacity: 1;
+      transform: none;
+    }
+  }
+}

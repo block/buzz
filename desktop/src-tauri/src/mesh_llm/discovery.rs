@@ -9,6 +9,7 @@ use super::{dedupe_models, MeshAvailability, MeshModelOption, MeshServeTarget, M
 /// than two minutes so crashed/offline devices stop contributing compute or
 /// admission identities without requiring a relay-side cleanup job.
 pub(super) const STATUS_FRESHNESS_SECS: u64 = 120;
+pub(crate) const MESH_STATUS_PAGE_SIZE: usize = 100;
 
 fn status_is_fresh(event: &nostr::Event, now: u64) -> bool {
     event
@@ -34,16 +35,22 @@ fn dedupe_targets(targets: Vec<MeshServeTarget>) -> Vec<MeshServeTarget> {
 /// contribute an owner id. This removes stale notes from former members and
 /// ignores notes from nonmembers. If the relay has no membership snapshot, the
 /// roster is empty and MeshLLM admission therefore remains self-only.
+///
+/// Admission deliberately ignores status freshness: membership is the trust
+/// boundary, and a member whose device is offline (stale status) is still a
+/// member. Gating admission on freshness caused the allowlist — and therefore
+/// the serving node — to churn whenever any member's app went online or
+/// offline. Freshness still gates *routing* (see `availability_from_events`):
+/// stale nodes are never selected as serve targets. Revocation is unaffected:
+/// a member removed from the NIP-43 roster leaves the intersection at the next
+/// roster poll regardless of how fresh their last status is.
 pub fn owner_ids_from_events(events: &[nostr::Event]) -> Vec<String> {
     let Some(members) = latest_membership_list(events) else {
         return Vec::new();
     };
-    let now = nostr::Timestamp::now().as_secs();
     let mut ids: Vec<String> = events
         .iter()
-        .filter(|event| {
-            event.kind.as_u16() as u64 == MESH_STATUS_KIND && status_is_fresh(event, now)
-        })
+        .filter(|event| event.kind.as_u16() as u64 == MESH_STATUS_KIND)
         .filter(|event| {
             reporter_pubkey_from_status_event(event)
                 .is_some_and(|reporter| members.contains(&reporter.to_ascii_lowercase()))
@@ -77,6 +84,27 @@ fn latest_membership_list(events: &[nostr::Event]) -> Option<BTreeSet<String>> {
                 .filter(|pubkey| !pubkey.is_empty())
                 .collect()
         })
+}
+
+pub(crate) fn current_member_pubkeys(events: &[nostr::Event]) -> Vec<String> {
+    latest_membership_list(events)
+        .map(BTreeSet::into_iter)
+        .map(Iterator::collect)
+        .unwrap_or_default()
+}
+
+/// Whether the relay actually returned a NIP-43 membership snapshot (kind
+/// 13534) in `events`.
+///
+/// The relay publishes an explicit membership event even for a zero-member
+/// community, so its presence is what makes an empty roster *authoritative*.
+/// Callers use this to distinguish "the community genuinely has no members"
+/// (snapshot present, zero `member` tags) from "no snapshot came back at all"
+/// (a transient relay gap / replication lag). Only the former may shrink the
+/// admission roster; the latter must be surfaced as an error so the reconcile
+/// loop keeps the current allowlist instead of restarting to self-only.
+pub(crate) fn has_membership_snapshot(events: &[nostr::Event]) -> bool {
+    events.iter().any(|event| event.kind.as_u16() == 13_534)
 }
 
 fn owner_id_from_status_event(event: &nostr::Event) -> Option<String> {
@@ -186,11 +214,12 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
             .unwrap_or_default()
             .into_iter()
             .filter_map(|mut target| {
-                let endpoint_id =
+                let validated =
                     super::transport_policy::validate_advertised_endpoint(&target.endpoint_addr)
                         .ok()?;
+                target.endpoint_addr = validated.join_token;
                 if target.endpoint_id.is_none() {
-                    target.endpoint_id = Some(endpoint_id);
+                    target.endpoint_id = Some(validated.endpoint_id);
                 }
                 if target.device_id.is_none() {
                     target.device_id = target.endpoint_id.clone();
@@ -242,11 +271,19 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
     }
 }
 
+/// Status filter for admission and availability queries.
+///
+/// Deliberately has no `since` bound: status events are parameterized
+/// replaceable (one per member), and admission must see a member's latest
+/// owner binding even when that member has been offline for longer than
+/// [`STATUS_FRESHNESS_SECS`]. Freshness is applied *after* the query, and only
+/// where it belongs — routing (`availability_from_events`), never admission
+/// (`owner_ids_from_events`).
 pub fn mesh_status_filter() -> serde_json::Value {
     serde_json::json!({
         "kinds": [MESH_STATUS_KIND],
         "#k": ["buzz-mesh-status"],
-        "limit": 100
+        "limit": MESH_STATUS_PAGE_SIZE
     })
 }
 
@@ -300,7 +337,9 @@ pub(super) fn device_name_from_status(
 }
 
 fn endpoint_id_from_invite_token(invite_token: &str) -> Option<String> {
-    super::transport_policy::validate_advertised_endpoint(invite_token).ok()
+    super::transport_policy::validate_advertised_endpoint(invite_token)
+        .ok()
+        .map(|validated| validated.endpoint_id)
 }
 
 fn string_value(value: &serde_json::Value, key: &str) -> Option<String> {

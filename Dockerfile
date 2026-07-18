@@ -105,9 +105,11 @@ RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY patches/ patches/
 COPY web/package.json web/
-RUN pnpm install --frozen-lockfile --filter buzz-web
+COPY admin-web/package.json admin-web/
+RUN pnpm install --frozen-lockfile --filter buzz-web --filter buzz-admin-web
 COPY web/ web/
-RUN pnpm -C web build
+COPY admin-web/ admin-web/
+RUN pnpm -C web build && pnpm -C admin-web build
 
 # ─── Stage 5: runtime ───────────────────────────────────────────────────────
 FROM debian:${DEBIAN_VERSION}-slim AS runtime
@@ -137,10 +139,13 @@ COPY --from=builder    /build/target/release/buzz-relay /usr/local/bin/buzz-rela
 COPY --from=builder    /build/target/release/buzz-admin /usr/local/bin/buzz-admin
 COPY --from=builder    /build/target/release/buzz-pair-relay /usr/local/bin/buzz-pair-relay
 COPY --from=web-builder /build/web/dist                 /srv/buzz/web
+COPY --from=web-builder /build/admin-web/dist           /srv/buzz/admin-web
 
 # The invite landing page is always served from the bundled web UI. Repository
-# browser routes require the separate BUZZ_SERVE_GIT_WEB_GUI=true opt-in.
-ENV BUZZ_WEB_DIR=/srv/buzz/web
+# browser routes require the separate BUZZ_SERVE_GIT_WEB_GUI=true opt-in. The
+# admin bundle is inert until BUZZ_ADMIN_HOST is configured.
+ENV BUZZ_WEB_DIR=/srv/buzz/web \
+    BUZZ_ADMIN_WEB_DIR=/srv/buzz/admin-web
 
 # 3000: app (WS + REST)  ·  8080: /_liveness, /_readiness  ·  9102: /metrics
 EXPOSE 3000 8080 9102

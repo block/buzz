@@ -36,6 +36,7 @@ import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { Textarea } from "@/shared/ui/textarea";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type ProfileSettingsCardProps = {
   currentPubkey?: string;
@@ -85,7 +86,7 @@ function IdentityRow({
           className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           data-testid={`copy-${testId}`}
           onClick={async () => {
-            await navigator.clipboard.writeText(copyValue);
+            await writeTextToClipboard(copyValue);
             toast.success("Copied to clipboard");
           }}
           title={`Copy ${label}`}

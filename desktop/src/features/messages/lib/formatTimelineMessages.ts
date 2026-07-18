@@ -580,3 +580,15 @@ export function collectMessageMentionPubkeys(
 
   return [...pubkeys];
 }
+
+/** Every pubkey a channel surface needs profiles for: authors (signer +
+ *  attributed actor), mentions, and reaction actors, deduplicated. */
+export function collectMessageProfilePubkeys(events: RelayEvent[]) {
+  return [
+    ...new Set([
+      ...collectMessageAuthorPubkeys(events),
+      ...collectMessageMentionPubkeys(events),
+      ...collectReactionActorPubkeys(events),
+    ]),
+  ];
+}

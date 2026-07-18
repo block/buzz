@@ -26,6 +26,7 @@ import {
   useMediaUpload,
 } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
+import { diffAddedMentionPubkeys } from "@/features/messages/lib/threading";
 import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -60,10 +61,11 @@ import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionH
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 
-type MessageComposerAudienceContext =
-  | { type: "timeline" }
-  | { type: "thread"; threadRootId: string };
-
+type MessageComposerAudienceContext = {
+  type: "thread";
+  threadRootId: string;
+  initialAgentPubkeys?: readonly string[];
+};
 type MessageComposerProps = {
   audienceContext?: MessageComposerAudienceContext | null;
   channelId?: string | null;
@@ -112,7 +114,11 @@ type MessageComposerProps = {
    * return `false` to let the arrow key fall through normally.
    */
   onEditLastOwnMessage?: () => boolean;
-  onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
+  onEditSave?: (
+    content: string,
+    mediaTags?: string[][],
+    mentionPubkeys?: string[],
+  ) => Promise<void>;
   /** Captures send context synchronously before awaits can change navigation. */
   onCaptureSendContext?: () => {
     parentEventId: string | null;
@@ -198,10 +204,9 @@ function MessageComposerImpl({
   const identityQuery = useIdentityQuery();
   const effectiveDraftKey = draftKey ?? channelId;
   const ownerPubkey = identityQuery.data?.pubkey ?? null;
-  const audienceThreadRootId =
-    audienceContext?.type === "thread" ? audienceContext.threadRootId : null;
+  const audienceThreadRootId = audienceContext?.threadRootId ?? null;
   const audienceScope =
-    audienceContext && channelId && ownerPubkey
+    audienceThreadRootId && channelId && ownerPubkey
       ? getPersistentAgentAudienceScope({
           ownerPubkey,
           channelId,
@@ -242,6 +247,8 @@ function MessageComposerImpl({
     channelId,
     loadDraft: drafts.loadDraft,
     persistDraft: drafts.persistDraft,
+    getMentionRefs: mentions.getDraftMentionRefs,
+    restoreMentionRefs: mentions.restoreDraftMentionRefs,
     livePendingImeta: media.pendingImeta,
     setPendingImeta: media.setPendingImeta,
     setContent: (content) => {
@@ -256,12 +263,10 @@ function MessageComposerImpl({
     spoileredAttachmentUrlsRef,
     syncComposerContentFromEditor,
   });
-
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useEffect(() => {
     media.setUploadState({ status: "idle" });
     setIsEmojiPickerOpen(false);
-    mentions.clearMentions();
     channelLinks.clearChannels();
     emojiAutocomplete.clearEmojis();
   }, [effectiveDraftKey]);
@@ -273,6 +278,8 @@ function MessageComposerImpl({
   const onEditSaveRef = React.useRef(onEditSave);
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
   const editTargetRef = React.useRef(editTarget);
+  const extractMentionPubkeysRef = React.useRef(mentions.extractMentionPubkeys);
+  const ownerPubkeyRef = React.useRef(ownerPubkey);
   disabledRef.current = disabled;
   isSendingRef.current = isSending;
   isUploadingRef.current = media.isUploading;
@@ -280,6 +287,8 @@ function MessageComposerImpl({
   onEditSaveRef.current = onEditSave;
   onEditLastOwnMessageRef.current = onEditLastOwnMessage;
   editTargetRef.current = editTarget;
+  extractMentionPubkeysRef.current = mentions.extractMentionPubkeys;
+  ownerPubkeyRef.current = ownerPubkey;
 
   const isAutocompleteOpenRef = React.useRef(false);
   isAutocompleteOpenRef.current =
@@ -364,6 +373,7 @@ function MessageComposerImpl({
   const persistentMentionHydration = usePersistentAgentMentionHydration({
     audienceScope,
     hydrationKey: effectiveDraftKey,
+    initialAgentPubkeys: audienceContext?.initialAgentPubkeys,
     isEditing: editTarget != null,
     mentions,
     richText,
@@ -401,6 +411,7 @@ function MessageComposerImpl({
             persistentAudience.promotePubkeys({ ...promotion, scope });
           }
         : undefined,
+    resolvePostSendContent: persistentMentionHydration.resolvePostSendContent,
   });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger
@@ -619,6 +630,16 @@ function MessageComposerImpl({
           buildCustomEmojiTags(finalContent, customEmoji),
         ) ?? [];
 
+      // Notify only mentions this edit *newly adds* (see
+      // diffAddedMentionPubkeys): a typo-fix edit that leaves the mention set
+      // unchanged emits no `p` tags and re-wakes nobody. Computed before the
+      // composer state is cleared below.
+      const addedMentionPubkeys = diffAddedMentionPubkeys(
+        extractMentionPubkeysRef.current(editTargetRef.current.body),
+        extractMentionPubkeysRef.current(finalContent),
+        ownerPubkeyRef.current ?? "",
+      );
+
       const savedContent = trimmed;
       const savedImeta = [...currentPendingImeta];
       const savedSpoileredAttachmentUrls = new Set(spoileredAttachmentUrls);
@@ -632,7 +653,11 @@ function MessageComposerImpl({
       setIsEmojiPickerOpen(false);
 
       try {
-        await onEditSaveRef.current(finalContent, outgoingTags);
+        await onEditSaveRef.current(
+          finalContent,
+          outgoingTags,
+          addedMentionPubkeys,
+        );
       } catch {
         setComposerContent(savedContent);
         richText.setContent(savedContent);

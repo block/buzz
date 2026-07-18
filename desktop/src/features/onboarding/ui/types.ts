@@ -58,6 +58,11 @@ export type ProfileStepActions = {
 
 export type SetupStepActions = {
   back: () => void;
+  next: () => void;
+};
+
+export type DefaultConfigStepActions = {
+  back: () => void;
   complete: () => void;
 };
 

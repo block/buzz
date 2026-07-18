@@ -123,7 +123,7 @@ class MainActivity : FlutterActivity() {
     ): Bitmap.CompressFormat? {
         return when (mimeType) {
             "image/jpeg" -> Bitmap.CompressFormat.JPEG
-            "image/png" -> Bitmap.CompressFormat.PNG
+            "image/png", "image/webp" -> Bitmap.CompressFormat.PNG
             else -> null
         }
     }
@@ -175,11 +175,21 @@ class MainActivity : FlutterActivity() {
                 muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
 
                 val trackIndices = mutableMapOf<Int, Int>()
+                var copiedVideo = false
+                var copiedAudio = false
                 for (i in 0 until extractor.trackCount) {
                     val format = extractor.getTrackFormat(i)
+                    val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+                    val isVideo = mime.startsWith("video/")
+                    val isAudio = mime.startsWith("audio/")
+                    if ((!isVideo && !isAudio) || (isVideo && copiedVideo) || (isAudio && copiedAudio)) {
+                        continue
+                    }
                     val newIndex = muxer.addTrack(format)
                     trackIndices[i] = newIndex
                     extractor.selectTrack(i)
+                    copiedVideo = copiedVideo || isVideo
+                    copiedAudio = copiedAudio || isAudio
                 }
 
                 muxer.start()
@@ -189,7 +199,11 @@ class MainActivity : FlutterActivity() {
                 while (true) {
                     val sampleSize = extractor.readSampleData(buffer, 0)
                     if (sampleSize < 0) break
-                    val muxerTrack = trackIndices[extractor.sampleTrackIndex]!!
+                    val muxerTrack = trackIndices[extractor.sampleTrackIndex]
+                    if (muxerTrack == null) {
+                        extractor.advance()
+                        continue
+                    }
                     bufferInfo.offset = 0
                     bufferInfo.size = sampleSize
                     bufferInfo.presentationTimeUs = extractor.sampleTime

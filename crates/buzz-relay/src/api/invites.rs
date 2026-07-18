@@ -400,12 +400,16 @@ mod tests {
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
     };
-    use base64::Engine;
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use hmac::{Hmac, KeyInit, Mac};
+    use nostr::{EventBuilder, EventId, Keys, Kind, Tag};
     use serde_json::Value;
     use sha2::{Digest, Sha256};
+    use std::sync::Mutex;
     use tower::ServiceExt;
     use uuid::Uuid;
+
+    use crate::invite_token::{derive_invite_key, InvitePayload};
 
     use crate::router::build_router;
     use crate::state::AppState;
@@ -971,6 +975,248 @@ mod tests {
         let body = serde_json::json!({ "code": code }).to_string();
         let response = post_json(state, &host_b, "/api/invites/claim", &joiner, body).await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Forge an already-expired invite payload signed with the relay's derived
+    /// invite key. `mint_invite` clamps ttl to 60s minimum, so the only way to
+    /// produce an expired code is to build the payload by hand at the token
+    /// layer.
+    fn forge_expired_invite_code(
+        state: &AppState,
+        community: buzz_core::CommunityId,
+        seconds_ago: u64,
+    ) -> String {
+        let key = derive_invite_key(&state.relay_keypair);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_secs();
+        let payload = InvitePayload {
+            c: community.as_uuid().to_string(),
+            r: "member".to_string(),
+            e: now.saturating_sub(seconds_ago),
+            n: "test-nonce".to_string(),
+        };
+        let payload_bytes = serde_json::to_vec(&payload).expect("payload serializes");
+        let mut mac =
+            <Hmac<Sha256> as KeyInit>::new_from_slice(&key).expect("HMAC accepts any key size");
+        mac.update(&payload_bytes);
+        let mac_bytes = mac.finalize().into_bytes();
+        format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(&payload_bytes),
+            URL_SAFE_NO_PAD.encode(mac_bytes),
+        )
+    }
+
+    /// Endpoint-level proof that expired codes (with a valid MAC) are
+    /// rejected by `/api/invites/claim` with the distinguishable
+    /// `invite_expired` body, and do not admit the caller.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_rejects_expired_code() {
+        let host = format!("invites-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let code = forge_expired_invite_code(&state, community.id, 10);
+
+        let body = serde_json::json!({ "code": code }).to_string();
+        let response = post_json(state.clone(), &host, "/api/invites/claim", &joiner, body).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let json = read_json(response).await;
+        // The expired branch is deliberately distinguishable from the generic
+        // `invite_invalid` so the UX can prompt the user for a fresh link
+        // without becoming a MAC oracle.
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("invite_expired"),
+            "expired branch must be distinguishable from generic invalid",
+        );
+
+        let is_member = state
+            .db
+            .is_relay_member(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("member check");
+        assert!(!is_member, "expired code must not admit anyone");
+    }
+
+    /// NIP-98 replay guard that returns `Ok(true)` the first time a given
+    /// event id is seen and `Ok(false)` on every subsequent call — mirrors
+    /// what the Redis guard does after a `SET NX` succeeds and then fails.
+    struct SeenOnceReplayGuard {
+        seen: Mutex<std::collections::HashSet<[u8; 32]>>,
+    }
+
+    impl SeenOnceReplayGuard {
+        fn new() -> Self {
+            Self {
+                seen: Mutex::new(std::collections::HashSet::new()),
+            }
+        }
+    }
+
+    impl buzz_auth::Nip98ReplayGuard for SeenOnceReplayGuard {
+        fn try_mark_in_scope<'a>(
+            &'a self,
+            _scope: &'a str,
+            event_id: &'a EventId,
+            _ttl_secs: u64,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>> + Send + 'a>,
+        > {
+            let bytes = *event_id.as_bytes();
+            let inserted = self.seen.lock().expect("replay set").insert(bytes);
+            Box::pin(async move { Ok(inserted) })
+        }
+    }
+
+    /// Endpoint-level proof that a replayed NIP-98 auth event on a claim POST
+    /// is rejected — the first claim succeeds, but reusing the exact same
+    /// Authorization header (same signed NIP-98 event id) is rejected as
+    /// replay before the invite verification ever runs.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_rejects_replayed_nip98_auth() {
+        let host = format!("invites-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let state_arc = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        // Swap the always-fresh guard for one that fires the second time the
+        // same event id is presented — the code path we're pinning.
+        let mut state_owned =
+            Arc::try_unwrap(state_arc).unwrap_or_else(|_| panic!("sole owner of AppState"));
+        state_owned.nip98_replay = Arc::new(SeenOnceReplayGuard::new());
+        let state = Arc::new(state_owned);
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        // Mint a valid code so the replay under test is on the claim path.
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites",
+            &owner,
+            "{}".to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = read_json(response).await;
+        let code = json.get("code").and_then(Value::as_str).expect("code");
+
+        // Build one NIP-98 header and reuse it verbatim on two claim POSTs.
+        let claim_body = serde_json::json!({ "code": code }).to_string();
+        let claim_url = format!("https://{host}/api/invites/claim");
+        let claim_auth = nip98_auth_header(&joiner, &claim_url, claim_body.as_bytes());
+
+        let send_claim = |auth: String, body: String| {
+            let state = state.clone();
+            let host = host.clone();
+            async move {
+                build_router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/invites/claim")
+                            .header(header::HOST, host.as_str())
+                            .header(header::AUTHORIZATION, auth)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(body))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response")
+            }
+        };
+
+        let first = send_claim(claim_auth.clone(), claim_body.clone()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // Same signed auth event, sent again → replay guard fires.
+        let second = send_claim(claim_auth, claim_body).await;
+        assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+        let json = read_json(second).await;
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("NIP-98: replay detected"),
+        );
+    }
+
+    /// Endpoint-level proof that `/api/invites/claim` enforces the per-pubkey
+    /// fixed-window rate limit — the same joiner probing the endpoint hits
+    /// 429 on the `CLAIM_RATE_LIMIT + 1`th attempt inside the window.
+    ///
+    /// We use invalid codes throughout so no membership state can change; the
+    /// limiter runs before code verification, so the transition from
+    /// `invite_invalid` (403) to `too many invite claim attempts` (429) proves
+    /// the limiter guard is on the request path and fires on repeat pubkey.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_rate_limit_fires_on_repeat_pubkey() {
+        let host = format!("invites-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let state_arc = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        // Fresh limiter with the production limit so the assertion pins the
+        // in-endpoint threshold, not a test-only budget.
+        let mut state_owned =
+            Arc::try_unwrap(state_arc).unwrap_or_else(|_| panic!("sole owner of AppState"));
+        state_owned.invite_claim_rate_limiter = Arc::new(claim_cache(
+            super::CLAIM_RATE_CACHE_CAPACITY,
+            super::CLAIM_RATE_WINDOW,
+        ));
+        let state = Arc::new(state_owned);
+
+        let body = serde_json::json!({ "code": "garbage.code" }).to_string();
+        for _ in 0..CLAIM_RATE_LIMIT {
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/invites/claim",
+                &joiner,
+                body.clone(),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "attempts up to the limit should reach code verification and be rejected as invalid",
+            );
+            let json = read_json(response).await;
+            assert_eq!(
+                json.get("error").and_then(Value::as_str),
+                Some("invite_invalid"),
+            );
+        }
+
+        let over_limit = post_json(state, &host, "/api/invites/claim", &joiner, body).await;
+        assert_eq!(over_limit.status(), StatusCode::TOO_MANY_REQUESTS);
+        let json = read_json(over_limit).await;
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("too many invite claim attempts, slow down"),
+        );
     }
 
     #[test]

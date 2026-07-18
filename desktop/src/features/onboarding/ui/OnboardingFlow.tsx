@@ -13,10 +13,12 @@ import {
   persistCurrentIdentity,
 } from "@/shared/api/tauriIdentity";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
+import { forceFreshOnboarding } from "@/features/onboarding/devFreshOnboarding";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
-import { StepProgress } from "@/shared/ui/step-progress";
 import { AvatarStep } from "./AvatarStep";
+import { OnboardingChrome } from "./OnboardingChrome";
+import { OnboardingFooterProvider } from "./OnboardingFooter";
 import { MembershipDenied } from "./MembershipDenied";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -376,7 +378,6 @@ export function OnboardingFlow({
   const pageIndex = activeSteps.indexOf(normalizedPage);
   const currentStep = pageIndex >= 0 ? pageIndex + STEP_OFFSET : STEP_OFFSET;
   const totalOnboardingSteps = activeSteps.length;
-  const hideFixedProgressOnCompact = currentPage === "avatar";
 
   // Swapping the identity changes the pubkey, which remounts this flow
   // (keyed on pubkey in App.tsx) and re-runs the onboarding gate: the new
@@ -447,154 +448,137 @@ export function OnboardingFlow({
   return (
     <>
       <div
-        className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-start justify-center overflow-y-auto bg-background px-4 py-8 text-foreground"
+        className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-start justify-center overflow-y-auto bg-background px-4 pb-28 pt-[106px] text-foreground"
         data-testid="onboarding-gate"
         data-system-color-scheme={systemColorScheme}
       >
         <StartupWindowDragRegion />
-        <div
-          className={`relative my-auto flex w-full flex-col items-center text-center ${
-            currentPage === "avatar" ? "max-w-[1080px]" : "max-w-[500px]"
-          }`}
-        >
-          <OnboardingSlideTransition
-            className="w-auto"
-            containerClassName={`fixed bottom-12 left-1/2 z-40 w-auto -translate-x-1/2 ${
-              hideFixedProgressOnCompact ? "max-lg:hidden" : ""
-            }`}
-            direction={transitionDirection}
-            transitionKey={`progress-${currentStep}-${transitionDirection}-${
-              hideFixedProgressOnCompact ? "compact-hidden" : "visible"
+        <OnboardingChrome current={currentStep} total={totalOnboardingSteps} />
+        <OnboardingFooterProvider>
+          <div
+            className={`relative flex w-full flex-col items-center text-center ${
+              currentPage === "avatar" ? "max-w-[1080px]" : "max-w-[500px]"
             }`}
           >
-            <StepProgress
-              activeSegmentClassName="bg-primary"
-              completeSegmentClassName="bg-primary/35"
-              currentStep={currentStep}
-              inactiveSegmentClassName="bg-muted-foreground/25"
-              totalSteps={totalOnboardingSteps}
-            />
-          </OnboardingSlideTransition>
-
-          {membershipError &&
-          (currentPage === "profile" || currentPage === "avatar") ? (
-            <div className="mb-4 w-full max-w-[500px] rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm">
-              {membershipError.kind === "unreachable" ? (
-                <>
-                  <p className="font-medium text-destructive">
-                    Can't reach this relay
-                  </p>
-                  <p className="mt-1 text-muted-foreground">
-                    Check your connection or change your community.
-                  </p>
-                  <Button
-                    className="mt-3"
-                    onClick={() => setIsCommunityChangeOpen(true)}
-                    size="sm"
-                    variant="outline"
-                  >
-                    Change community
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <p className="font-medium text-destructive">
-                    {membershipError.message ?? "Something went wrong"}
-                  </p>
-                  <p className="mt-1 text-muted-foreground">
-                    The relay returned an error. Try again.
-                  </p>
-                </>
-              )}
-            </div>
-          ) : null}
-
-          {currentPage === "profile" ? (
-            <ProfileStep
-              actions={{
-                advanceWithoutSaving: advanceFromProfileWithoutSaving,
-                back: () => {
-                  setMembershipError(null);
-                  setIsCommunityChangeOpen(true);
-                },
-                clearAvatarDraft: resetAvatarDraft,
-                importExistingKey: showKeyImportPage,
-                onUploadingChange: setIsUploadingAvatar,
-                skipForNow,
-                submit: () => {
-                  void saveProfileAndContinue("avatar");
-                },
-                updateAvatarUrl: updateAvatarUrlDraft,
-                updateDisplayName: updateDisplayNameDraft,
-              }}
-              direction={transitionDirection}
-              state={profileStepState}
-            />
-          ) : currentPage === "key-import" ? (
-            <OnboardingSlideTransition
-              className="flex w-full flex-col items-center text-center"
-              direction={transitionDirection}
-              transitionKey={`key-import-${transitionDirection}`}
-            >
-              <div className="w-full max-w-[440px]">
-                {identityLost ? (
+            {membershipError &&
+            (currentPage === "profile" || currentPage === "avatar") ? (
+              <div className="mb-4 w-full max-w-[500px] rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm">
+                {membershipError.kind === "unreachable" ? (
                   <>
-                    <h1 className="text-3xl font-semibold tracking-tight">
-                      Re-import your key
-                    </h1>
-                    <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                      Your identity is no longer in the system keyring.
-                      Re-import your nsec to restore it — Buzz will restart to
-                      finish recovery. Or go back to start a new identity with a
-                      fresh key.
+                    <p className="font-medium text-destructive">
+                      Can't reach this relay
                     </p>
+                    <p className="mt-1 text-muted-foreground">
+                      Check your connection or change your community.
+                    </p>
+                    <Button
+                      className="mt-3"
+                      onClick={() => setIsCommunityChangeOpen(true)}
+                      size="sm"
+                      variant="outline"
+                    >
+                      Change community
+                    </Button>
                   </>
                 ) : (
                   <>
-                    <h1 className="text-3xl font-semibold tracking-tight">
-                      Use your existing key
-                    </h1>
-                    <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                      Import your Nostr private key to use that identity with
-                      Buzz. If this key already has a profile on the relay, your
-                      name and avatar are restored automatically.
+                    <p className="font-medium text-destructive">
+                      {membershipError.message ?? "Something went wrong"}
+                    </p>
+                    <p className="mt-1 text-muted-foreground">
+                      The relay returned an error. Try again.
                     </p>
                   </>
                 )}
               </div>
+            ) : null}
 
-              {persistError ? (
-                <p className="mt-4 w-full max-w-[440px] text-sm text-destructive">
-                  {persistError}
-                </p>
-              ) : null}
-
-              <NostrKeyImportForm
-                backLabel={identityLost ? "Start new identity" : undefined}
-                onBack={identityLost ? handleLostModeBack : showProfilePage}
-                onImport={importExistingKey}
+            {currentPage === "profile" ? (
+              <ProfileStep
+                actions={{
+                  advanceWithoutSaving: advanceFromProfileWithoutSaving,
+                  back: () => {
+                    setMembershipError(null);
+                    setIsCommunityChangeOpen(true);
+                  },
+                  clearAvatarDraft: resetAvatarDraft,
+                  importExistingKey: showKeyImportPage,
+                  onUploadingChange: setIsUploadingAvatar,
+                  skipForNow,
+                  submit: () => {
+                    void saveProfileAndContinue("avatar");
+                  },
+                  updateAvatarUrl: updateAvatarUrlDraft,
+                  updateDisplayName: updateDisplayNameDraft,
+                }}
+                direction={transitionDirection}
+                state={profileStepState}
+                usesExistingIdentity={forceFreshOnboarding}
               />
-            </OnboardingSlideTransition>
-          ) : (
-            <AvatarStep
-              actions={{
-                advanceWithoutSaving: complete,
-                back: showProfilePage,
-                onUploadingChange: setIsUploadingAvatar,
-                skipForNow,
-                submit: () => {
-                  void saveProfileAndContinue("complete");
-                },
-                updateAvatarUrl: updateAvatarUrlDraft,
-              }}
-              currentStep={currentStep}
-              direction={transitionDirection}
-              showAlwaysSkip={true}
-              state={avatarStepState}
-              totalSteps={totalOnboardingSteps}
-            />
-          )}
-        </div>
+            ) : currentPage === "key-import" ? (
+              <OnboardingSlideTransition
+                className="flex w-full flex-col items-center text-center"
+                direction={transitionDirection}
+                transitionKey={`key-import-${transitionDirection}`}
+              >
+                <div className="w-full max-w-[440px]">
+                  {identityLost ? (
+                    <>
+                      <h1 className="text-title font-normal text-foreground">
+                        Re-import your key
+                      </h1>
+                      <p className="mt-5 text-sm leading-6 text-muted-foreground">
+                        Your identity is no longer in the system keyring.
+                        Re-import your nsec to restore it — Buzz will restart to
+                        finish recovery. Or go back to start a new identity with
+                        a fresh key.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <h1 className="text-title font-normal text-foreground">
+                        Use your existing key
+                      </h1>
+                      <p className="mt-5 text-sm leading-6 text-muted-foreground">
+                        Import your Nostr private key to use that identity with
+                        Buzz. If this key already has a profile on the relay,
+                        your name and avatar are restored automatically.
+                      </p>
+                    </>
+                  )}
+                </div>
+
+                {persistError ? (
+                  <p className="mt-4 w-full max-w-[440px] text-sm text-destructive">
+                    {persistError}
+                  </p>
+                ) : null}
+
+                <NostrKeyImportForm
+                  backLabel={identityLost ? "Start new identity" : undefined}
+                  onBack={identityLost ? handleLostModeBack : showProfilePage}
+                  onImport={importExistingKey}
+                />
+              </OnboardingSlideTransition>
+            ) : (
+              <AvatarStep
+                actions={{
+                  advanceWithoutSaving: complete,
+                  back: showProfilePage,
+                  onUploadingChange: setIsUploadingAvatar,
+                  skipForNow,
+                  submit: () => {
+                    void saveProfileAndContinue("complete");
+                  },
+                  updateAvatarUrl: updateAvatarUrlDraft,
+                }}
+                direction={transitionDirection}
+                showAlwaysSkip={true}
+                state={avatarStepState}
+              />
+            )}
+          </div>
+        </OnboardingFooterProvider>
       </div>
       {isCommunityChangeOpen ? (
         <CommunityChangeOverlay

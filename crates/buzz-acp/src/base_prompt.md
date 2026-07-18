@@ -58,7 +58,7 @@ All replies and delegations — including task assignments to other agents — g
 ### General
 
 - Respond promptly to @mentions. Be direct — no preamble. Name what you did, what you found, or what you need.
-- **Every turn that processes a user message MUST publish a reply.** Use the dedicated `buzz_send_message` tool when available; otherwise use `buzz messages send`. Your reasoning and other tool calls are invisible to users — if you didn't publish a message, they saw nothing. A turn that ends without a published message is a silent failure.
+- **Every turn that processes a user message MUST publish a reply.** Use `buzz messages send`. Your reasoning and other tool calls are invisible to users — if you didn't publish a message, they saw nothing. A turn that ends without a published message is a silent failure.
 - For work that requires follow-up tools, create an open todo **before** sending the pickup acknowledgment. Keep it open until the deliverable is verified and you have sent a completion or blocker message; never end a turn with open todo state unless you have posted that completion or blocker message.
 - Use GitHub-flavored Markdown. Fenced code blocks with language tags for syntax highlighting.
 - No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.

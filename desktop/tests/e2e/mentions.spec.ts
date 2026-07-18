@@ -6,6 +6,8 @@ import {
   TEST_IDENTITIES,
 } from "../helpers/bridge";
 
+const MOCK_VIEWER_PUBKEY = "deadbeef".repeat(8);
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -26,6 +28,8 @@ const CASEY_PROFILE_PUBKEY =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const PROFILE_ONLY_AGENT_PUBKEY =
   "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
+const OWNED_AGENT_PROFILE_PUBKEY =
+  "1212121212121212121212121212121212121212121212121212121212121212";
 const SYSTEM_MESSAGE_KIND = 40099;
 const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
   "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
@@ -1697,6 +1701,150 @@ test("clicking a mention chip in a forum post opens the profile panel", async ({
   await expect(page.getByRole("button", { name: "Back to posts" })).toHaveCount(
     0,
   );
+});
+
+test("agent profile popover shows its owner", async ({ page }) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: OWNED_AGENT_PROFILE_PUBKEY,
+        displayName: "Bumble",
+        ownerPubkey: TEST_IDENTITIES.bob.pubkey,
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Bumble checking in.", {
+    pubkey: OWNED_AGENT_PROFILE_PUBKEY,
+  });
+  await waitForTimelineSettled(page);
+
+  const bumbleMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Bumble checking in." })
+    .first();
+  await bumbleMessage.locator("button").first().hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-owner-${OWNED_AGENT_PROFILE_PUBKEY}`,
+    ),
+  ).toHaveText("owned by bob");
+});
+
+test("agent profile popover labels an agent owned by the viewer as you", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: OWNED_AGENT_PROFILE_PUBKEY,
+        displayName: "Bumble",
+        ownerPubkey: MOCK_VIEWER_PUBKEY,
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Bumble checking in.", {
+    pubkey: OWNED_AGENT_PROFILE_PUBKEY,
+  });
+  await waitForTimelineSettled(page);
+
+  const bumbleMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Bumble checking in." })
+    .first();
+  await bumbleMessage.locator("button").first().hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-owner-${OWNED_AGENT_PROFILE_PUBKEY}`,
+    ),
+  ).toHaveText("owned by you");
+});
+
+test("agent profile popover falls back to the owner's pubkey", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: OWNED_AGENT_PROFILE_PUBKEY,
+        displayName: "Bumble",
+        ownerPubkey: CASEY_PROFILE_PUBKEY,
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Bumble checking in.", {
+    pubkey: OWNED_AGENT_PROFILE_PUBKEY,
+  });
+  await waitForTimelineSettled(page);
+
+  const bumbleMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Bumble checking in." })
+    .first();
+  await bumbleMessage.locator("button").first().hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-owner-${OWNED_AGENT_PROFILE_PUBKEY}`,
+    ),
+  ).toHaveText("owned by 11111111…1111");
+});
+
+test("human profile popover does not show an owner", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Bob checking in.", {
+    pubkey: TEST_IDENTITIES.bob.pubkey,
+  });
+  await waitForTimelineSettled(page);
+
+  const bobMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Bob checking in." })
+    .first();
+  await bobMessage.locator("button").first().hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expect(
+    profilePopover.locator('[data-testid^="user-profile-popover-owner-"]'),
+  ).toHaveCount(0);
 });
 
 test("owned bot profile only exposes message action", async ({ page }) => {

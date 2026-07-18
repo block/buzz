@@ -12,6 +12,7 @@ type OnboardingSlideTransitionProps = React.HTMLAttributes<HTMLDivElement> & {
 
 export type OnboardingTransitionDirection = "forward" | "backward";
 export type OnboardingTransitionEffect =
+  | "fade"
   | "line-slide"
   | "mask-reveal-up"
   | "none";

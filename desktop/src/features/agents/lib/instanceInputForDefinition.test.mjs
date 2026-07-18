@@ -120,6 +120,23 @@ test("row 3: plain avatar URLs pass through; base64 data URIs upload via the inj
   assert.equal(uploads.length, 1, "upload must go through the injected fn");
 });
 
+test("row 3: failed persona avatar upload never substitutes the runtime avatar", async () => {
+  const input = await buildInstanceInputForDefinition(
+    persona({
+      id: "builtin:fizz",
+      displayName: "Fizz",
+      avatarUrl: "data:image/png;base64,aGk=",
+    }),
+    claudeRuntime,
+    async () => {
+      throw new Error("upload failed");
+    },
+  );
+
+  assert.equal(input.avatarUrl, undefined);
+  assert.notEqual(input.avatarUrl, claudeRuntime.avatarUrl);
+});
+
 test("mapping carries the runtime and definition fields", async () => {
   const input = await buildInstanceInputForDefinition(persona(), gooseRuntime);
   assert.equal(input.name, "Test Agent");

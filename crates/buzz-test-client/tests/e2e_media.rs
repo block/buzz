@@ -99,10 +99,10 @@ async fn test_upload_and_get() {
     println!("sha256: {sha256}");
     println!("relay: {}", relay_http_url());
 
-    // PUT /media/upload
+    // Standards-compliant BUD-02 upload route.
     let auth = sign_blossom_auth(&keys, &sha256);
     let resp = client
-        .put(format!("{}/media/upload", relay_http_url()))
+        .put(format!("{}/upload", relay_http_url()))
         .header("Authorization", blossom_auth_header(&auth))
         .header("Content-Type", "image/jpeg")
         .header("X-SHA-256", &sha256)
@@ -113,7 +113,7 @@ async fn test_upload_and_get() {
 
     let status = resp.status();
     let body_text = resp.text().await.unwrap_or_default();
-    println!("PUT /media/upload → {status}: {body_text}");
+    println!("PUT /upload → {status}: {body_text}");
     assert_eq!(status, 200, "upload should succeed");
 
     // Parse BlobDescriptor

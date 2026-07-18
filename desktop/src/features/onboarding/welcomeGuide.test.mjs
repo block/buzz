@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activateWelcomeTeamPersonasSequentially,
+  buildWelcomeStarterCreateInput,
   LEGACY_WELCOME_GUIDE_SYSTEM_PROMPT,
   pickWelcomeGuideAgent,
   pickWelcomeGuideAgentForRelay,
+  pickWelcomeTeamStarterAgentForRelay,
   WELCOME_GUIDE_AGENT_NAME,
   WELCOME_GUIDE_PERSONA_ID,
+  WELCOME_TEAM_ID,
+  WELCOME_TEAM_STARTERS,
 } from "./welcomeGuide.ts";
 
 const PUB_A = "a".repeat(64);
@@ -46,6 +51,7 @@ function makeAgent(overrides = {}) {
     backendAgentId: null,
     respondTo: "owner-only",
     respondToAllowlist: [],
+    teamId: WELCOME_TEAM_ID,
     ...overrides,
   };
 }
@@ -126,5 +132,166 @@ test("pickWelcomeGuideAgentForRelay returns null when Fizz only exists in anothe
   assert.equal(
     pickWelcomeGuideAgentForRelay([otherCommunityFizz], RELAY_B),
     null,
+  );
+});
+
+test("starter persona activation is serialized to protect the shared store", async () => {
+  const calls = [];
+  let activeWrites = 0;
+
+  await activateWelcomeTeamPersonasSequentially(
+    ["builtin:fizz", "builtin:honey", "builtin:bumble"],
+    async (personaId) => {
+      assert.equal(activeWrites, 0, "activation writes must never overlap");
+      activeWrites += 1;
+      calls.push(personaId);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      activeWrites -= 1;
+    },
+  );
+
+  assert.deepEqual(calls, ["builtin:fizz", "builtin:honey", "builtin:bumble"]);
+});
+
+test("all Welcome starters use the onboarding runtime preference", async () => {
+  const claude = {
+    id: "claude",
+    label: "Claude",
+    avatarUrl: "https://runtime/claude.png",
+    availability: "available",
+    command: "claude-code-acp",
+    binaryPath: "/bin/claude-code-acp",
+    defaultArgs: [],
+    mcpCommand: null,
+    installHint: "",
+    installInstructionsUrl: "",
+    canAutoInstall: false,
+    underlyingCliPath: "/bin/claude",
+  };
+  const buzzAgent = {
+    ...claude,
+    id: "buzz-agent",
+    label: "Buzz Agent",
+    command: "buzz-agent",
+  };
+
+  for (const starter of WELCOME_TEAM_STARTERS) {
+    const input = await buildWelcomeStarterCreateInput(
+      starter,
+      {
+        id: starter.personaId,
+        displayName: starter.name,
+        systemPrompt: `${starter.name} prompt`,
+        model: null,
+        provider: null,
+        runtime: null,
+        avatarUrl: null,
+        envVars: {},
+        isBuiltIn: true,
+        isActive: true,
+      },
+      [buzzAgent, claude],
+      "claude",
+      RELAY_A,
+    );
+
+    assert.equal(input.agentCommand, "claude-code-acp");
+    assert.equal(input.harnessOverride, true);
+    assert.equal(input.personaId, starter.personaId);
+    assert.equal(input.teamId, WELCOME_TEAM_ID);
+    assert.equal(input.relayUrl, RELAY_A);
+    assert.equal(input.spawnAfterCreate, false);
+    assert.equal(input.startOnAppLaunch, false);
+  }
+});
+
+test("welcome team starter definitions and role identities are stable", () => {
+  assert.equal(WELCOME_TEAM_ID, "builtin-team:welcome");
+  assert.deepEqual(WELCOME_TEAM_STARTERS, [
+    { name: "Fizz", personaId: "builtin:fizz", role: "lead" },
+    { name: "Honey", personaId: "builtin:honey", role: "teammate" },
+    { name: "Bumble", personaId: "builtin:bumble", role: "teammate" },
+  ]);
+});
+
+test("starter matching ignores user agents with a Welcome persona", () => {
+  const honey = WELCOME_TEAM_STARTERS[1];
+  const userHoney = makeAgent({
+    personaId: honey.personaId,
+    teamId: null,
+  });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay([userHoney], honey, RELAY_A),
+    null,
+  );
+});
+
+test("starter matching uses persona identity rather than display name", () => {
+  const honey = WELCOME_TEAM_STARTERS[1];
+  const renamedHoney = makeAgent({
+    name: "Honey the Helper",
+    personaId: honey.personaId,
+  });
+  const nameOnlyHoney = makeAgent({ name: honey.name, pubkey: PUB_B });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay(
+      [nameOnlyHoney, renamedHoney],
+      honey,
+      RELAY_A,
+    ),
+    renamedHoney,
+  );
+});
+
+test("starter matching is relay scoped and normalizes trailing slashes", () => {
+  const bumble = WELCOME_TEAM_STARTERS[2];
+  const otherRelay = makeAgent({
+    personaId: bumble.personaId,
+    relayUrl: RELAY_B,
+    status: "running",
+  });
+  const matchingRelay = makeAgent({
+    personaId: bumble.personaId,
+    relayUrl: `${RELAY_A}/`,
+    pubkey: PUB_B,
+  });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay(
+      [otherRelay, matchingRelay],
+      bumble,
+      RELAY_A,
+    ),
+    matchingRelay,
+  );
+});
+
+test("starter matching prefers running, then deployed instances", () => {
+  const fizz = WELCOME_TEAM_STARTERS[0];
+  const stopped = makeAgent({ personaId: fizz.personaId });
+  const deployed = makeAgent({
+    personaId: fizz.personaId,
+    pubkey: PUB_B,
+    status: "deployed",
+  });
+  const running = makeAgent({
+    personaId: fizz.personaId,
+    pubkey: PUB_C,
+    status: "running",
+  });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay(
+      [stopped, deployed, running],
+      fizz,
+      RELAY_A,
+    ),
+    running,
+  );
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay([stopped, deployed], fizz, RELAY_A),
+    deployed,
   );
 });

@@ -47,17 +47,77 @@ const RELAY_MESH_RUNTIME_NO_TARGET: &str =
 
 pub type CmdResult<T> = Result<T, String>;
 
+fn advance_mesh_status_cursor(
+    filter: &mut serde_json::Value,
+    page: &[nostr::Event],
+) -> Result<(u64, String), String> {
+    let last = page
+        .last()
+        .ok_or_else(|| "cannot advance an empty mesh status page".to_string())?;
+    let cursor = (last.created_at.as_secs(), last.id.to_hex());
+    filter["until"] = serde_json::json!(cursor.0);
+    filter["before_id"] = serde_json::json!(cursor.1);
+    Ok(cursor)
+}
+
+async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Event>, String> {
+    let mut events = relay::query_relay(state, &[mesh_llm::relay_membership_filter()]).await?;
+    let member_pubkeys = mesh_llm::current_member_pubkeys(&events);
+    if member_pubkeys.is_empty() {
+        // Distinguish "relay returned a membership snapshot listing zero
+        // members" (authoritative empty — allowed to shrink the roster to
+        // self-only) from "no membership snapshot came back at all" (a
+        // transient gap / replication lag). The relay publishes an explicit
+        // kind:13534 event even for a zero-member community, so its absence
+        // means the query is incomplete: surface it as an error so the
+        // reconcile loop keeps the current allowlist instead of flapping the
+        // node down to self-only on a successful-but-empty response.
+        if !mesh_llm::has_membership_snapshot(&events) {
+            return Err("relay returned no membership snapshot".to_string());
+        }
+        return Ok(events);
+    }
+    let mut status_filter = mesh_llm::mesh_status_filter();
+    status_filter["authors"] = serde_json::json!(member_pubkeys);
+    let mut previous_cursor: Option<(u64, String)> = None;
+
+    loop {
+        let page = relay::query_relay(state, &[status_filter.clone()]).await?;
+        let done = page.len() < mesh_llm::MESH_STATUS_PAGE_SIZE;
+        if !done {
+            let cursor = advance_mesh_status_cursor(&mut status_filter, &page)?;
+            if previous_cursor.as_ref() == Some(&cursor) {
+                return Err("mesh status pagination did not advance".to_string());
+            }
+            previous_cursor = Some(cursor);
+        }
+        events.extend(page);
+        if done {
+            return Ok(events);
+        }
+    }
+}
+
 /// Resolve the admission roster by intersecting member-signed mesh status
-/// reporters with the current NIP-43 direct-member list. Missing membership or
-/// a failed query returns an empty roster, which the runtime normalizes to
-/// self-only admission.
-pub(crate) async fn resolve_trusted_owner_ids(state: &AppState) -> Vec<String> {
-    let filters = [
-        mesh_llm::mesh_status_filter(),
-        mesh_llm::relay_membership_filter(),
-    ];
-    match relay::query_relay(state, &filters).await {
-        Ok(events) => mesh_llm::owner_ids_from_events(&events),
+/// reporters with the current NIP-43 direct-member list.
+///
+/// Returns `Err` when the relay query fails. Callers MUST distinguish this from
+/// an `Ok(empty)` roster (a genuinely empty community): a failed query must
+/// never be collapsed into "self-only", or a transient relay blip de-admits
+/// every other member. `reconcile_roster` relies on this to keep the current
+/// allowlist on error instead of restarting the node down to self-only.
+pub(crate) async fn resolve_trusted_owner_ids(state: &AppState) -> Result<Vec<String>, String> {
+    let events = query_mesh_discovery_events(state).await?;
+    Ok(mesh_llm::owner_ids_from_events(&events))
+}
+
+/// Resolve the roster for an initial node *start*, failing closed to self-only
+/// (an empty roster) when the relay query fails. This is safe only at start:
+/// there is no established allowlist to preserve yet. The periodic
+/// `reconcile_roster` path must NOT use this — it has a live roster to keep.
+pub(crate) async fn resolve_trusted_owner_ids_or_self_only(state: &AppState) -> Vec<String> {
+    match resolve_trusted_owner_ids(state).await {
+        Ok(owners) => owners,
         Err(error) => {
             eprintln!("buzz-mesh: roster query failed; allowing only this node: {error}");
             Vec::new()
@@ -81,7 +141,7 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
         model_id: Some(config.model_id),
         max_vram_gb: config.max_vram_gb,
         join_token: None,
-        trusted_owner_ids: Some(resolve_trusted_owner_ids(state).await),
+        trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
     };
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
@@ -101,7 +161,7 @@ pub async fn mesh_start_node(
     // Frontend requests never carry a roster; resolve it here so every
     // UI-started node enforces the member allowlist.
     if request.trusted_owner_ids.is_none() {
-        request.trusted_owner_ids = Some(resolve_trusted_owner_ids(&state).await);
+        request.trusted_owner_ids = Some(resolve_trusted_owner_ids_or_self_only(&state).await);
     }
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {
@@ -232,7 +292,7 @@ pub(crate) async fn ensure_client_node_for_model(
         model_id: None,
         max_vram_gb: None,
         join_token: Some(join_token),
-        trusted_owner_ids: Some(resolve_trusted_owner_ids(state).await),
+        trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
     };
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {
@@ -272,14 +332,7 @@ pub(crate) async fn resolve_mesh_bootstrap_target(
     if model_id.is_empty() {
         return Ok(None);
     }
-    let events = relay::query_relay(
-        state,
-        &[
-            mesh_llm::mesh_status_filter(),
-            mesh_llm::relay_membership_filter(),
-        ],
-    )
-    .await?;
+    let events = query_mesh_discovery_events(state).await?;
     Ok(pick_serve_target_for_model(
         mesh_llm::availability_from_events(events).serve_targets,
         model_id,
@@ -424,6 +477,26 @@ mod tests {
             device_id: None,
             device_name: None,
         }
+    }
+
+    #[test]
+    fn mesh_status_cursor_uses_relay_composite_tiebreak() {
+        let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "status")
+            .custom_created_at(nostr::Timestamp::from(1_234))
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign test status");
+        let mut filter = mesh_llm::mesh_status_filter();
+
+        let cursor = advance_mesh_status_cursor(&mut filter, std::slice::from_ref(&event))
+            .expect("advance status cursor");
+
+        assert_eq!(cursor, (1_234, event.id.to_hex()));
+        assert_eq!(filter["until"], serde_json::json!(1_234));
+        assert_eq!(filter["before_id"], serde_json::json!(event.id.to_hex()));
+        assert_eq!(
+            filter["limit"],
+            serde_json::json!(mesh_llm::MESH_STATUS_PAGE_SIZE)
+        );
     }
 
     #[test]

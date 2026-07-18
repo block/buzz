@@ -6,7 +6,7 @@ import 'package:http/http.dart' as http;
 /// WebSocket. This client now exists only to provide a base URL (and a
 /// shared HTTP client) for the media upload endpoint, which is the one
 /// remaining HTTP path because Blossom uses kind:24242 NIP-98 auth on a
-/// regular HTTP POST.
+/// regular HTTP PUT.
 class RelayClient {
   final String baseUrl;
   final http.Client _http;
@@ -20,7 +20,7 @@ class RelayClient {
   /// Fully-qualified URL for the relay's Blossom-style media upload endpoint.
   String get mediaUploadUrl {
     final base = Uri.parse(baseUrl);
-    return base.resolve('/media/upload').toString();
+    return base.resolve('/upload').toString();
   }
 
   void dispose() => _http.close();

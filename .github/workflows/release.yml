@@ -7,18 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Semver version (e.g. 0.4.0) — only for manual runs"
-        required: true
-      ref:
-        description: "Branch, tag, or SHA to build — only for manual runs"
-        default: main
+        description: "Semver version matching the v-prefixed dispatch tag"
         required: true
 
 jobs:
-  # Shared setup: determine the version and create the release objects all four
-  # platform jobs upload into. Runs on ubuntu with no OIDC so a branch
-  # workflow_dispatch can exercise the platform builds without the codesign
-  # AssumeRole wall that gates the arm64 job.
+  # Shared setup: verify the immutable release tag, determine the version, and
+  # create the release objects all four platform jobs upload into.
   setup:
     name: Setup
     if: github.repository == 'block/buzz'
@@ -28,6 +22,7 @@ jobs:
       contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
     steps:
       - name: Determine version
         id: version
@@ -51,12 +46,18 @@ jobs:
             exit 1
           fi
 
-      # Checkout at the same ref the platform jobs use so git rev-parse HEAD
-      # pins the release to the right commit via --target.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify tag-bound release source
+        id: source
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          scripts/verify-release-ref.sh v "$VERSION"
+          echo "source_sha=$(git rev-parse 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
 
       - name: Create versioned GitHub release
         env:
@@ -108,8 +109,12 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify tag-bound release source
+        run: scripts/verify-release-ref.sh v "$VERSION"
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
@@ -291,7 +296,7 @@ jobs:
         run: gh release upload "v${VERSION}" "$DMG_PATH" --clobber
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
+        if: github.ref == format('refs/tags/v{0}', needs.setup.outputs.version)
         run: |
           gh release upload buzz-desktop-latest \
             "$ARCHIVE_PATH" \
@@ -320,8 +325,12 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify tag-bound release source
+        run: scripts/verify-release-ref.sh v "$VERSION"
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
@@ -451,7 +460,7 @@ jobs:
           DMG_PATH: ${{ steps.unsigned.outputs.dmg }}
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
+        if: github.ref == format('refs/tags/v{0}', needs.setup.outputs.version)
         run: |
           gh release upload buzz-desktop-latest \
             "$ARCHIVE_PATH" \
@@ -536,11 +545,17 @@ jobs:
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Mark workspace safe for git (containerized job)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Verify tag-bound release source
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: scripts/verify-release-ref.sh v "$VERSION"
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
@@ -687,7 +702,7 @@ jobs:
             --clobber
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
+        if: github.ref == format('refs/tags/v{0}', needs.setup.outputs.version)
         run: |
           gh release upload buzz-desktop-latest \
             "$ARCHIVE_PATH" \
@@ -714,8 +729,13 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify tag-bound release source
+        shell: bash
+        run: scripts/verify-release-ref.sh v "$VERSION"
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
@@ -815,7 +835,7 @@ jobs:
           EXE_PATH: ${{ steps.artifacts.outputs.exe }}
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
+        if: github.ref == format('refs/tags/v{0}', needs.setup.outputs.version)
         shell: bash
         run: |
           gh release upload buzz-desktop-latest \
@@ -829,12 +849,11 @@ jobs:
 
   assemble-manifest:
     name: Assemble multi-platform latest.json
-    # Only tag-backed releases assemble latest.json. Branch workflow_dispatch
-    # runs skip rolling-release uploads, so their archive URLs never exist.
+    # Only the tag-bound setup path can reach this job.
     if: |
       always() &&
       needs.setup.result == 'success' &&
-      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version)))
+      github.ref == format('refs/tags/v{0}', needs.setup.outputs.version)
     runs-on: ubuntu-latest
     needs: [setup, release, release-macos-x64, release-linux, release-windows]
     timeout-minutes: 10
@@ -846,8 +865,12 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify tag-bound release source
+        run: scripts/verify-release-ref.sh v "$VERSION"
 
       - name: Write signature files
         env:

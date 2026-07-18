@@ -770,6 +770,14 @@ test("right-click image shows Copy image and invokes copy command", async ({
     page.getByRole("button", { name: "Download image" }),
   ).toBeVisible();
 
+  // The image menu carries the shared generic marker plus its own image-
+  // specific attribute, and never the link/video attributes — so e2e locators
+  // can target one surface without aliasing another.
+  await expect(page.locator("[data-media-context-menu]")).toBeVisible();
+  await expect(page.locator("[data-image-context-menu]")).toBeVisible();
+  await expect(page.locator("[data-link-context-menu]")).toHaveCount(0);
+  await expect(page.locator("[data-video-context-menu]")).toHaveCount(0);
+
   await copyButton.click();
 
   await expect

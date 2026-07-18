@@ -152,6 +152,68 @@ test("long autolink wraps without widening the timeline", async ({ page }) => {
     .toBeLessThanOrEqual(0);
 });
 
+test("markdown tables overflow wide content and fill the message when narrow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 900, height: 600 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  const longCell = "WIDE TABLE COLUMN VALUE ".repeat(8);
+  await page.evaluate(
+    ({ wide, narrow }) => {
+      const createdAt = Math.floor(Date.now() / 1000);
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: wide,
+        createdAt,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: narrow,
+        createdAt: createdAt + 1,
+      });
+    },
+    {
+      wide: `| ${longCell} | ${longCell} | ${longCell} |\n| --- | --- | --- |\n| ${longCell} | ${longCell} | ${longCell} |`,
+      narrow: "| NARROW TABLE | VALUE |\n| --- | --- |\n| alpha | beta |",
+    },
+  );
+
+  const wideTable = page
+    .getByTestId("message-row")
+    .filter({ hasText: "WIDE TABLE COLUMN VALUE" })
+    .locator("[data-table-block]");
+  const narrowTable = page
+    .getByTestId("message-row")
+    .filter({ hasText: "NARROW TABLE" })
+    .locator("[data-table-block]");
+  await expect(wideTable).toBeVisible();
+  await expect(narrowTable).toBeVisible();
+
+  await expect
+    .poll(() =>
+      wideTable.evaluate(
+        (element) => element.scrollWidth - element.clientWidth,
+      ),
+    )
+    .toBeGreaterThan(1);
+  await expect
+    .poll(() =>
+      narrowTable.evaluate((element) => {
+        const table = element.querySelector("table");
+        return table
+          ? Math.abs(table.getBoundingClientRect().width - element.clientWidth)
+          : Number.POSITIVE_INFINITY;
+      }),
+    )
+    .toBeLessThanOrEqual(1);
+});
+
 test("supported link previews keep the message link visible", async ({
   page,
 }) => {
@@ -1094,6 +1156,35 @@ test("thread refetch preserves a live reply and reaction received in flight", as
   await page.waitForTimeout(1_200);
   await expect(replyRow).toContainText(reply);
   await expect(replyRow.getByLabel("Toggle 👍 reaction")).toBeVisible();
+});
+
+test("thread reply appears after relay closes and restores its live subscription", async ({
+  page,
+}) => {
+  await installMockBridge(page, { closeChannelLiveSubscriptionOnce: true });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const seed = `Thread CLOSED seed ${Date.now()}`;
+  await page.getByTestId("message-input").fill(seed);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(seed);
+
+  const rootMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const reply = `Thread reply after CLOSED ${Date.now()}`;
+  await threadPanel.getByTestId("message-input").fill(reply);
+  await page.waitForTimeout(1_100);
+  await threadPanel.getByTestId("send-message").click();
+
+  await expect(threadPanel).toContainText(reply);
 });
 
 test("thread composer keeps focus after sending a thread reply", async ({

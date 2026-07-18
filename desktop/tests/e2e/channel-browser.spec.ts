@@ -1,9 +1,29 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge, openChannelBrowser } from "../helpers/bridge";
 
-test.beforeEach(async ({ page }) => {
-  await installMockBridge(page);
+const MOCK_PUBKEY = "deadbeef".repeat(8);
+const CUSTOM_SECTION = { id: "sec-projects", name: "Projects", order: 0 };
+
+async function seedCustomSection(page: Page) {
+  await page.addInitScript(
+    ({ pubkey, section }) => {
+      window.localStorage.setItem(
+        `buzz-channel-sections.v1:${pubkey}`,
+        JSON.stringify({ version: 1, sections: [section], assignments: {} }),
+      );
+    },
+    { pubkey: MOCK_PUBKEY, section: CUSTOM_SECTION },
+  );
+}
+
+test.beforeEach(async ({ page }, testInfo) => {
+  await installMockBridge(
+    page,
+    testInfo.title.includes("failed section create")
+      ? { createChannelErrors: ["Create failed"] }
+      : undefined,
+  );
 });
 
 test("keyboard shortcut opens the channel browser dialog", async ({ page }) => {
@@ -170,6 +190,75 @@ test("sidebar add-channel button opens the browser", async ({ page }) => {
   await page.getByTestId("section-actions-channels-quick-create").click();
 
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
+});
+
+test("custom section add button creates directly into that section", async ({
+  page,
+}) => {
+  await seedCustomSection(page);
+  await page.goto("/");
+
+  const addButton = page.getByTestId(
+    `section-actions-${CUSTOM_SECTION.id}-quick-create`,
+  );
+  await expect(addButton).toHaveAccessibleName("Add channel to Projects");
+  await addButton.click();
+  await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
+
+  const channelName = `section-created-${Date.now()}`;
+  await page.getByTestId("channel-browser-search").fill(channelName);
+  await page.getByTestId("channel-browser-create-row").click();
+  await page.getByTestId("create-channel-submit").click();
+
+  await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  await expect(
+    page.getByTestId(`section-title-${CUSTOM_SECTION.id}`),
+  ).toBeVisible();
+  await expect(page.getByTestId(`channel-${channelName}`)).toBeVisible();
+  await expect(page.getByTestId("stream-list")).not.toContainText(channelName);
+});
+
+test("canceling section create does not affect the next global create", async ({
+  page,
+}) => {
+  await seedCustomSection(page);
+  await page.goto("/");
+
+  await page
+    .getByTestId(`section-actions-${CUSTOM_SECTION.id}-quick-create`)
+    .click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+
+  await page.getByTestId("section-actions-channels-quick-create").click();
+  const channelName = `global-after-cancel-${Date.now()}`;
+  await page.getByTestId("channel-browser-search").fill(channelName);
+  await page.getByTestId("channel-browser-create-row").click();
+  await page.getByTestId("create-channel-submit").click();
+
+  await expect(page.getByTestId("stream-list")).toContainText(channelName);
+});
+
+test("failed section create retry still assigns to the section", async ({
+  page,
+}) => {
+  await seedCustomSection(page);
+  await page.goto("/");
+
+  await page
+    .getByTestId(`section-actions-${CUSTOM_SECTION.id}-quick-create`)
+    .click();
+  const channelName = `section-retry-${Date.now()}`;
+  await page.getByTestId("channel-browser-search").fill(channelName);
+  await page.getByTestId("channel-browser-create-row").click();
+  await page.getByTestId("create-channel-submit").click();
+  await expect(page.getByText("Create failed")).toBeVisible();
+
+  await page.getByTestId("create-channel-submit").click();
+
+  await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  await expect(page.getByTestId(`channel-${channelName}`)).toBeVisible();
+  await expect(page.getByTestId("stream-list")).not.toContainText(channelName);
 });
 
 test("create affordance is visible on open before typing", async ({ page }) => {

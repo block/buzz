@@ -2,6 +2,10 @@ import * as React from "react";
 import type { QueryClient } from "@tanstack/react-query";
 
 import {
+  getGlobalAgentConfig,
+  setGlobalAgentConfig,
+} from "@/shared/api/tauriGlobalAgentConfig";
+import {
   getIdentity,
   importIdentity,
   persistCurrentIdentity,
@@ -9,30 +13,92 @@ import {
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
+import { DefaultConfigStep } from "./DefaultConfigStep";
 import { LandingBees } from "./LandingBees";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
+import {
+  ONBOARDING_LANDING_CTA_CLASS,
+  OnboardingChrome,
+} from "./OnboardingChrome";
+import { OnboardingFooterProvider } from "./OnboardingFooter";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
 
-type MachinePage = "identity" | "key-import" | "backup" | "setup";
+export type MachineOnboardingPage =
+  | "identity"
+  | "key-import"
+  | "backup"
+  | "setup"
+  | "config";
 
 export function MachineOnboardingFlow({
   complete,
+  continueWithIdentity,
   identityLost,
+  initialPage,
   queryClient,
 }: {
   complete: (pubkey?: string) => void;
+  continueWithIdentity: (pubkey: string) => void;
   identityLost: boolean;
+  initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
 }) {
-  const [page, setPage] = React.useState<MachinePage>(
-    identityLost ? "key-import" : "identity",
+  const [page, setPage] = React.useState<MachineOnboardingPage>(
+    identityLost ? "key-import" : (initialPage ?? "identity"),
   );
   const [error, setError] = React.useState<string | null>(null);
   const [isPending, setIsPending] = React.useState(false);
   const [identityWasImported, setIdentityWasImported] = React.useState(false);
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
+  );
+  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState<
+    string | null
+  >(null);
+  const [pendingRuntimeId, setPendingRuntimeId] = React.useState<string | null>(
+    null,
+  );
+  const [isRuntimeSelectionSaving, setIsRuntimeSelectionSaving] =
+    React.useState(false);
+  const [runtimeSelectionError, setRuntimeSelectionError] = React.useState<
+    string | null
+  >(null);
+  const runtimeSaveSequence = React.useRef(0);
+
+  const persistPreferredRuntime = React.useCallback(
+    async (runtimeId: string) => {
+      const sequence = runtimeSaveSequence.current + 1;
+      runtimeSaveSequence.current = sequence;
+      setPendingRuntimeId(runtimeId);
+      setRuntimeSelectionError(null);
+      setIsRuntimeSelectionSaving(true);
+      try {
+        const current = await getGlobalAgentConfig();
+        const result = await setGlobalAgentConfig({
+          ...current,
+          preferred_runtime: runtimeId,
+        });
+        if (runtimeSaveSequence.current === sequence) {
+          setSelectedRuntimeId(result.config.preferred_runtime);
+          setPendingRuntimeId(null);
+        }
+      } catch (cause) {
+        if (runtimeSaveSequence.current === sequence) {
+          setPendingRuntimeId(null);
+          setRuntimeSelectionError(
+            cause instanceof Error
+              ? cause.message
+              : "Couldn’t save your preferred runtime.",
+          );
+        }
+      } finally {
+        if (runtimeSaveSequence.current === sequence) {
+          setIsRuntimeSelectionSaving(false);
+        }
+      }
+    },
+    [],
   );
 
   const loadFreshIdentity = React.useCallback(async () => {
@@ -77,105 +143,150 @@ export function MachineOnboardingFlow({
   const importExistingIdentity = React.useCallback(
     async (nsec: string) => {
       const identity = await importIdentity(nsec);
+      continueWithIdentity(identity.pubkey);
       queryClient.setQueryData(["identity"], identity);
       setIdentityWasImported(true);
       setSelectedPubkey(identity.pubkey);
       setPage("setup");
     },
-    [queryClient],
+    [continueWithIdentity, queryClient],
   );
 
   return (
     <div
-      className={`buzz-onboarding-neutral-theme buzz-startup-shell flex items-center justify-center px-4 py-8 text-foreground ${
-        page === "identity" ? "buzz-onboarding-welcome" : ""
+      className={`buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-y-auto px-4 text-foreground ${
+        page === "identity"
+          ? "buzz-onboarding-welcome py-8"
+          : "pb-28 pt-[106px]"
       }`}
       data-testid="machine-onboarding-gate"
     >
       <StartupWindowDragRegion />
       {page === "identity" ? <LandingBees /> : null}
-      <div className="relative flex w-full max-w-[920px] flex-col items-center text-center">
-        {page === "identity" ? (
-          <OnboardingSlideTransition
-            className="flex w-full max-w-[720px] flex-col items-center text-center"
-            direction="forward"
-            effect="mask-reveal-up"
-            transitionKey="machine-identity"
-          >
-            <img
-              alt="Buzz"
-              className="w-full max-w-[560px]"
-              src="/landing/buzz-wordmark.png"
+      {page !== "identity" ? (
+        <OnboardingChrome
+          current={page === "config" ? 4 : page === "setup" ? 3 : 2}
+        />
+      ) : null}
+      <OnboardingFooterProvider>
+        <div
+          className={`relative flex w-full max-w-[920px] flex-col items-center text-center ${
+            page === "identity" ? "my-auto" : ""
+          }`}
+        >
+          {page === "identity" ? (
+            <OnboardingSlideTransition
+              className="flex w-full max-w-[720px] flex-col items-center text-center"
+              direction="forward"
+              effect="mask-reveal-up"
+              transitionKey="machine-identity"
+            >
+              <img
+                alt="Buzz"
+                className="w-full max-w-[600px]"
+                src="/landing/buzz-wordmark.png"
+              />
+              <p className="mt-2 max-w-[560px] text-center text-2xl font-normal leading-none text-foreground">
+                Your people, your agents, your projects —<br />
+                all in one place.
+              </p>
+              {error ? (
+                <p className="mt-4 text-sm text-destructive">{error}</p>
+              ) : null}
+              <div className="mt-10 flex flex-col items-center gap-3">
+                <Button
+                  className={ONBOARDING_LANDING_CTA_CLASS}
+                  disabled={isPending}
+                  onClick={() => void loadFreshIdentity()}
+                  type="button"
+                >
+                  {isPending ? "Saving identity…" : "Get started"}
+                </Button>
+                <Button
+                  className="h-9 rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
+                  disabled={isPending}
+                  onClick={() => setPage("key-import")}
+                  type="button"
+                  variant="ghost"
+                >
+                  Enter a key
+                </Button>
+              </div>
+            </OnboardingSlideTransition>
+          ) : page === "key-import" ? (
+            <OnboardingSlideTransition
+              className="flex min-h-[calc(100dvh-13.25rem)] w-full max-w-[837px] flex-col items-center text-center"
+              direction="forward"
+              effect="fade"
+              transitionKey="machine-key-import"
+            >
+              <div className="shrink-0">
+                <h1 className="text-title font-normal text-foreground">
+                  {identityLost
+                    ? "Re-import your key"
+                    : "Enter your private key"}
+                </h1>
+                <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                  {identityLost
+                    ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
+                    : "If you already have a Nostr account, enter your private key below to get started."}
+                </p>
+              </div>
+              <div className="buzz-onboarding-key-import-position w-full">
+                <NostrKeyImportForm
+                  backLabel={identityLost ? "Start new identity" : "Back"}
+                  onBack={
+                    identityLost
+                      ? () => void replaceLostIdentity()
+                      : () => setPage("identity")
+                  }
+                  onImport={importExistingIdentity}
+                  variant="spotlight"
+                />
+              </div>
+            </OnboardingSlideTransition>
+          ) : page === "backup" ? (
+            <BackupStep
+              direction="forward"
+              onBack={() => setPage("identity")}
+              onNext={() => setPage("setup")}
             />
-            <p className="mt-2 max-w-[560px] text-center text-2xl font-normal leading-none text-foreground">
-              Your people, your agents, your projects — all in one place.
-            </p>
-            {error ? (
-              <p className="mt-4 text-sm text-destructive">{error}</p>
-            ) : null}
-            <div className="mt-10 flex flex-col items-center gap-3">
-              <Button
-                className="h-10 rounded-full px-6"
-                disabled={isPending}
-                onClick={() => void loadFreshIdentity()}
-                type="button"
-              >
-                {isPending ? "Saving identity…" : "Get started"}
-              </Button>
-              <Button
-                className="h-9 rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
-                disabled={isPending}
-                onClick={() => setPage("key-import")}
-                type="button"
-                variant="ghost"
-              >
-                Enter a key
-              </Button>
-            </div>
-          </OnboardingSlideTransition>
-        ) : page === "key-import" ? (
-          <OnboardingSlideTransition
-            className="flex w-full max-w-[500px] flex-col items-center text-center"
-            direction="forward"
-            transitionKey="machine-key-import"
-          >
-            <h1 className="text-3xl font-semibold tracking-tight">
-              {identityLost ? "Re-import your key" : "Use your existing key"}
-            </h1>
-            <p className="mt-3 text-sm leading-6 text-muted-foreground">
-              {identityLost
-                ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
-                : "Import your Nostr private key to use that identity with Buzz."}
-            </p>
-            <NostrKeyImportForm
-              backLabel={identityLost ? "Start new identity" : "Back"}
-              onBack={
-                identityLost
-                  ? () => void replaceLostIdentity()
-                  : () => setPage("identity")
-              }
-              onImport={importExistingIdentity}
+          ) : page === "setup" ? (
+            <SetupStep
+              actions={{
+                back: () =>
+                  setPage(identityWasImported ? "key-import" : "backup"),
+                next: () => {
+                  if (!selectedRuntimeId) return;
+                  if (
+                    selectedRuntimeId === "claude" ||
+                    selectedRuntimeId === "codex"
+                  ) {
+                    complete(selectedPubkey ?? undefined);
+                    return;
+                  }
+                  setPage("config");
+                },
+              }}
+              direction="forward"
+              isSelectionSaving={isRuntimeSelectionSaving}
+              onSelectedRuntimeChange={(runtimeId) => {
+                void persistPreferredRuntime(runtimeId);
+              }}
+              selectionError={runtimeSelectionError}
+              selectedRuntimeId={pendingRuntimeId ?? selectedRuntimeId}
             />
-          </OnboardingSlideTransition>
-        ) : page === "backup" ? (
-          <BackupStep
-            currentStep={2}
-            direction="forward"
-            onBack={() => setPage("identity")}
-            onNext={() => setPage("setup")}
-            totalSteps={3}
-          />
-        ) : (
-          <SetupStep
-            actions={{
-              back: () =>
-                setPage(identityWasImported ? "key-import" : "backup"),
-              complete: () => complete(selectedPubkey ?? undefined),
-            }}
-            direction="forward"
-          />
-        )}
-      </div>
+          ) : (
+            <DefaultConfigStep
+              actions={{
+                back: () => setPage("setup"),
+                complete: () => complete(selectedPubkey ?? undefined),
+              }}
+              direction="forward"
+            />
+          )}
+        </div>
+      </OnboardingFooterProvider>
     </div>
   );
 }

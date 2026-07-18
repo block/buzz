@@ -31,7 +31,12 @@ struct BuiltInTeam {
     persona_ids: &'static [&'static str],
 }
 
-const BUILT_IN_TEAMS: &[BuiltInTeam] = &[];
+const BUILT_IN_TEAMS: &[BuiltInTeam] = &[BuiltInTeam {
+    id: "builtin-team:welcome",
+    name: "Welcome Team",
+    description: Some("A friendly starter trio ready to help you plan, create, and ship."),
+    persona_ids: &["builtin:fizz", "builtin:honey", "builtin:bumble"],
+}];
 
 // Built-in teams that have been retired. A stored copy that still exactly
 // matches its seed is purged on load (the user never touched it); customized

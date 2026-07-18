@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invokeTauri } from "@/shared/api/tauri";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { createThemeVars, hexToHsl } from "./adaptive-theme";
@@ -244,8 +245,14 @@ function applyBuzzSidebar(themeName: string) {
   const root = document.documentElement;
   if (isBuzzTheme(themeName)) {
     root.setAttribute("data-buzz-sidebar", "");
+    // Keep the concrete Buzz variant on the root as well as the generic
+    // marker. The gradient stylesheet matches this attribute directly, which
+    // makes WKWebView invalidate the painted background when light/dark mode
+    // changes instead of relying only on a custom-property dependency update.
+    root.setAttribute("data-buzz-theme", themeName);
   } else {
     root.removeAttribute("data-buzz-sidebar");
+    root.removeAttribute("data-buzz-theme");
     // Leaving Buzz: drop translucency synchronously here too. Going *opaque*
     // never shows desktop/prior content through, so there's no ordering risk
     // on the way out — only on the way in.
@@ -293,6 +300,9 @@ let buzzVibrancyRequest = 0;
  */
 let buzzVibrancyReady = false;
 
+/** The native layer does not need rebuilding when Buzz only changes mode. */
+let buzzVibrancyEnabled = false;
+
 /**
  * Enable the CSS translucency treatment, but only once BOTH prerequisites for
  * the current request are in place:
@@ -338,6 +348,16 @@ function maybeEnableBuzzTranslucent(themeName: string, requestToken: number) {
 async function applyBuzzVibrancy(themeName: string) {
   const buzz = isBuzzTheme(themeName);
   const requestToken = ++buzzVibrancyRequest;
+
+  // Buzz Light and Buzz Dark use the same native material. Rebuilding the
+  // NSVisualEffectView on every mode change briefly clears the layer behind
+  // the webview and makes the new CSS theme appear late. Keep the installed
+  // layer and let applyTheme swap only the color tokens.
+  if (buzz && buzzVibrancyEnabled && buzzVibrancyReady) {
+    maybeEnableBuzzTranslucent(themeName, requestToken);
+    return;
+  }
+
   // A new request is in flight — the vibrancy layer's readiness for it is not
   // yet known, so any stale "ready" from a prior request must not gate this one.
   buzzVibrancyReady = false;
@@ -357,6 +377,7 @@ async function applyBuzzVibrancy(themeName: string) {
     // A newer theme change superseded this request while the IPC was in flight;
     // that later call owns the current translucency state, so don't clobber it.
     if (requestToken !== buzzVibrancyRequest) return;
+    buzzVibrancyEnabled = buzz;
     // Native layer is installed. Record readiness and try to enable translucency
     // — but only if `applyBuzzSidebar` has already installed the Buzz gradient
     // vars. If that effect hasn't landed yet (the IPC won the race), it will
@@ -369,6 +390,7 @@ async function applyBuzzVibrancy(themeName: string) {
     console.warn("set_window_vibrancy failed", error);
     if (requestToken !== buzzVibrancyRequest) return;
     // Vibrancy failed — don't go transparent or we'd show through to nothing.
+    buzzVibrancyEnabled = false;
     setBuzzTranslucent(false);
   }
 }
@@ -400,9 +422,17 @@ function applyCachedVars(): string | null {
   }
 }
 
+/** The latest theme load is the only one allowed to write document styles. */
+let themeApplyRequest = 0;
+
 /** Apply a theme: load data, derive CSS vars, set them on :root. */
-async function applyTheme(name: SyntaxThemeName): Promise<{ isDark: boolean }> {
+async function applyTheme(
+  name: SyntaxThemeName,
+): Promise<{ isDark: boolean } | null> {
+  const requestToken = ++themeApplyRequest;
   const themeData = await loadThemeData(name);
+  if (requestToken !== themeApplyRequest) return null;
+
   const info = extractThemeInfo(name, themeData);
   const { isDark, vars } = createThemeVars(info.bg, info.fg, info.comment, {
     added: info.added,
@@ -498,12 +528,13 @@ export function ThemeProvider({
     loadingRef.current = thisTheme;
     setIsLoading(true);
 
-    applyTheme(effectiveTheme as SyntaxThemeName).then(({ isDark: dark }) => {
+    applyTheme(effectiveTheme as SyntaxThemeName).then((result) => {
+      if (!result) return;
       // Only update if this is still the theme we want. The accent is applied
       // inside applyTheme (synchronously with the theme vars), so there's no
       // separate re-application here — that avoided the switch-time flicker.
       if (loadingRef.current === thisTheme) {
-        setIsDark(dark);
+        setIsDark(result.isDark);
         setIsLoading(false);
       }
     });
@@ -519,13 +550,41 @@ export function ThemeProvider({
     if (!followSystem) return;
 
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const handler = (event: MediaQueryListEvent) => {
+    const handleMediaChange = (event: MediaQueryListEvent) => {
       setSystemIsDark(event.matches);
     };
+    let disposed = false;
+    let unlistenNativeTheme: (() => void) | undefined;
 
     setSystemIsDark(mq.matches);
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
+    mq.addEventListener("change", handleMediaChange);
+
+    // WKWebView can update the media query value without dispatching its
+    // change event until the page reloads. Tauri's native window event arrives
+    // immediately when macOS appearance changes, so use it as the reliable app
+    // signal while retaining matchMedia for the browser build.
+    if (isTauri()) {
+      void getCurrentWindow()
+        .onThemeChanged(({ payload }) => {
+          if (!disposed) setSystemIsDark(payload === "dark");
+        })
+        .then((unlisten) => {
+          if (disposed) {
+            unlisten();
+          } else {
+            unlistenNativeTheme = unlisten;
+          }
+        })
+        .catch((error) => {
+          console.warn("system theme listener unavailable", error);
+        });
+    }
+
+    return () => {
+      disposed = true;
+      mq.removeEventListener("change", handleMediaChange);
+      unlistenNativeTheme?.();
+    };
   }, [followSystem]);
 
   // Re-apply the accent when the user picks a new swatch or the effective theme

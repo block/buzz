@@ -293,8 +293,9 @@ pub(crate) fn harden_git_env(cmd: &mut Command) {
 /// Acquire the global git-subprocess semaphore permit, or respond 503.
 ///
 /// Bounds total in-flight git subprocesses across all routes. Returned
-/// `OwnedSemaphorePermit` releases automatically on drop, so the caller
-/// just binds it for the function scope.
+/// `OwnedSemaphorePermit` releases automatically on drop. Streaming callers
+/// must move it into the response body so it covers the subprocess lifetime,
+/// not just response construction.
 #[allow(clippy::result_large_err)]
 fn acquire_git_permit(
     state: &Arc<AppState>,
@@ -706,7 +707,7 @@ pub async fn upload_pack(
     body: Body,
 ) -> Result<Response, Response> {
     let _ = validate_repo_id(&params.owner, &params.repo)?;
-    let _permit = acquire_git_permit(&state)?;
+    let permit = acquire_git_permit(&state)?;
 
     let repo = match hydrate_for_read(
         &state.git_store,
@@ -727,12 +728,10 @@ pub async fn upload_pack(
     // Track A: stream the subprocess stdout straight into the response body
     // instead of buffering the whole pack into RAM. `repo` (the hydrated
     // tempdir) is moved into the stream and stays alive until the last byte
-    // is drained — the streaming analogue of the old `drop(repo)`. The
-    // `_permit` (git semaphore) is bound for the function scope; binding it
-    // here keeps it held only until the response head is built, not for the
-    // whole drain. That's intentional — see Track C notes on permit hold time.
+    // is drained — the streaming analogue of the old `drop(repo)`.
     stream_git_read(
         repo,
+        permit,
         "upload-pack",
         &[],
         body,
@@ -1171,6 +1170,28 @@ struct StreamingGit {
     _repo: HydratedRepo,
 }
 
+/// Keeps a git concurrency permit alive for the lifetime of a response-body
+/// stream. The permit is released when the stream reaches EOF or the client
+/// disconnects and Axum drops the body.
+struct GitPermitStream<S> {
+    inner: std::pin::Pin<Box<S>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl<S> futures_util::Stream for GitPermitStream<S>
+where
+    S: futures_util::Stream,
+{
+    type Item = S::Item;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
 impl futures_util::Stream for StreamingGit {
     type Item = Result<bytes::Bytes, std::io::Error>;
 
@@ -1200,6 +1221,7 @@ impl futures_util::Stream for StreamingGit {
 #[allow(clippy::result_large_err)]
 fn stream_git_read(
     repo: HydratedRepo,
+    permit: tokio::sync::OwnedSemaphorePermit,
     service: &'static str,
     extra_args: &[&str],
     body: Body,
@@ -1258,7 +1280,10 @@ fn stream_git_read(
         futures_util::stream::once(
             async move { Ok::<_, std::io::Error>(bytes::Bytes::from(prefix)) },
         );
-    let body_stream = futures_util::StreamExt::chain(prefix_stream, git_stream);
+    let body_stream = GitPermitStream {
+        inner: Box::pin(futures_util::StreamExt::chain(prefix_stream, git_stream)),
+        _permit: permit,
+    };
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -1584,6 +1609,25 @@ mod track_c_tests {
         let mut out = Vec::new();
         super::pkt_line(&mut out, payload);
         out
+    }
+
+    #[test]
+    fn streaming_body_holds_git_permit_until_drop() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&semaphore)
+            .try_acquire_owned()
+            .expect("initial permit");
+        let stream = GitPermitStream {
+            inner: Box::pin(futures_util::stream::pending::<
+                Result<bytes::Bytes, std::io::Error>,
+            >()),
+            _permit: permit,
+        };
+        let body = Body::from_stream(stream);
+
+        assert_eq!(semaphore.available_permits(), 0);
+        drop(body);
+        assert_eq!(semaphore.available_permits(), 1);
     }
 
     /// Wrap inner status pkt-lines in one side-band-64k band-1 (data) outer

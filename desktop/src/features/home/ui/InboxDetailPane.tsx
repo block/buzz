@@ -18,11 +18,14 @@ import {
   hasSameMessageAuthor,
   isWithinGroupingWindow,
 } from "@/features/messages/lib/messageGrouping";
+import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
-import type { Channel } from "@/shared/api/types";
+import type { Channel, UserProfileSummary } from "@/shared/api/types";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -56,6 +59,7 @@ type InboxDetailPaneProps = {
   isThreadContextLoading?: boolean;
   item: InboxItem | null;
   messages?: InboxContextMessage[];
+  profiles?: Record<string, UserProfileSummary>;
   replies?: InboxReply[];
   channel: Channel | null;
   contextChannelName?: string | null;
@@ -108,6 +112,7 @@ export function InboxDetailPane({
   isThreadContextLoading = false,
   item,
   messages = [],
+  profiles,
   replies = [],
   channel,
   contextChannelName = null,
@@ -138,6 +143,40 @@ export function InboxDetailPane({
   // Live arrivals rerun its layout compensation without changing the target.
 
   const selectedMessage = messages.find((message) => message.isSelected);
+  // A latest reply can represent an Inbox conversation. Resolve the actual
+  // root from loaded context or the complete feed group; never treat an
+  // unresolved root/profile lookup as an authoritative empty audience.
+  const contextRoot = messages.find((message) => message.id === conversationId);
+  const feedRoot = item
+    ? [item.item, ...item.groupItems].find(
+        (groupItem) => groupItem.id === conversationId,
+      )
+    : undefined;
+  const rootMessage = contextRoot
+    ? {
+        authorPubkey: contextRoot.authorPubkey,
+        content: contextRoot.content,
+        mentionPubkeysByName: contextRoot.mentionPubkeysByName,
+      }
+    : feedRoot && profiles
+      ? {
+          authorPubkey: feedRoot.pubkey,
+          content: feedRoot.content,
+          mentionPubkeysByName: resolveMentionProps(feedRoot.tags, profiles)
+            .mentionPubkeysByName,
+        }
+      : null;
+  const initialAgentPubkeys = rootMessage
+    ? currentPubkey &&
+      normalizePubkey(rootMessage.authorPubkey) ===
+        normalizePubkey(currentPubkey)
+      ? orderMentionPubkeysByText(
+          rootMessage.content,
+          rootMessage.mentionPubkeysByName,
+          (pubkey) => agentPubkeys?.has(pubkey) === true,
+        )
+      : []
+    : undefined;
   const pendingReplyMessages: InboxDisplayMessage[] = replies.map((reply) => ({
     ...reply,
     depth: reply.depth ?? (selectedMessage?.depth ?? 0) + 1,
@@ -475,6 +514,7 @@ export function InboxDetailPane({
               audienceContext={{
                 type: "thread",
                 threadRootId: item.conversationId,
+                initialAgentPubkeys,
               }}
               channelId={item.item.channelId}
               channelName={item.channelLabel ?? "channel"}

@@ -9,21 +9,62 @@ import {
 import { channelsQueryKey } from "@/features/channels/hooks";
 import {
   ensureStarterChannels,
+  ensureWelcomeChannel,
   hasEnsuredWelcomeChannel,
   markWelcomeChannelEnsured,
   notifyWelcomeChannelReady,
   rememberPendingWelcomeChannel,
 } from "@/features/onboarding/welcome";
-import { ensureWelcomeGuideIntro } from "@/features/onboarding/welcomeGuide";
+import { forceFreshOnboarding } from "@/features/onboarding/devFreshOnboarding";
+import { ensureWelcomeCanvas } from "@/features/onboarding/welcomeCanvas";
+import { ensureWelcomeTeam } from "@/features/onboarding/welcomeGuide";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import type { Channel } from "@/shared/api/types";
 import {
+  createChannel,
+  deleteChannel,
   ensureStarterChannels as ensureStarterChannelsCommand,
+  getChannelMembers,
   getChannels,
+  updateChannel,
 } from "@/shared/api/tauri";
 
-export type ChannelInitResult = { ok: true } | { ok: false; reason: string };
+const STARTER_CHANNEL_SETUP_TOAST_ID = "starter-channel-setup-error";
+
+export type ChannelInitResult =
+  | { ok: true; focusChannelId?: string }
+  | { ok: false; reason: string; focusChannelId?: string };
+
+const welcomeSeedPromises = new Map<string, Promise<void>>();
+
+function seedWelcomeExperience(
+  queryClient: ReturnType<typeof useQueryClient>,
+  channelId: string,
+  pubkey: string | null,
+  communityScope: string | null,
+) {
+  const key = `${communityScope ?? ""}:${channelId}`;
+  const current = welcomeSeedPromises.get(key);
+  if (current) return current;
+
+  const promise = (async () => {
+    try {
+      await ensureWelcomeTeam(channelId, communityScope);
+      await ensureWelcomeCanvas(channelId);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
+      ]);
+      markWelcomeChannelEnsured(pubkey, communityScope);
+    } catch (error) {
+      console.warn("Failed to seed the private Welcome experience.", error);
+    }
+  })().finally(() => welcomeSeedPromises.delete(key));
+  welcomeSeedPromises.set(key, promise);
+  return promise;
+}
 
 export async function initializeStarterChannels(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -38,33 +79,83 @@ export async function initializeStarterChannels(
   },
 ): Promise<ChannelInitResult> {
   try {
-    const starterChannels = await ensureStarterChannels({
-      ensureStarterChannels: ensureStarterChannelsCommand,
-      getChannels,
-    });
-
-    markWelcomeChannelEnsured(pubkey, communityScope);
-    if (focus) {
-      rememberPendingWelcomeChannel(starterChannels.welcomeChannel.id);
-    }
-    queryClient.setQueryData(channelsQueryKey, starterChannels.channels);
+    let starterChannels: Awaited<
+      ReturnType<typeof ensureStarterChannels>
+    > | null = null;
+    let starterChannelsError: unknown = null;
     try {
-      await ensureWelcomeGuideIntro(
-        starterChannels.welcomeChannel.id,
-        communityScope,
-      );
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
-        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
-      ]);
+      starterChannels = await ensureStarterChannels({
+        ensureStarterChannels: ensureStarterChannelsCommand,
+        getChannels,
+      });
     } catch (error) {
-      console.warn("Failed to initialize Welcome guide.", error);
+      starterChannelsError = error;
+      console.warn("Failed to initialize public starter channels.", error);
     }
+
+    const welcomeChannel = await ensureWelcomeChannel(
+      {
+        createChannel,
+        deleteChannel,
+        getChannelMembers,
+        getChannels,
+        updateChannel,
+      },
+      {
+        replaceExisting: forceFreshOnboarding,
+      },
+    );
+
+    const starterChannelList = starterChannels?.channels ?? [];
+    queryClient.setQueryData<Channel[]>(channelsQueryKey, (channels = []) => {
+      const ensuredIds = new Set(
+        starterChannelList.map((channel) => channel.id),
+      );
+      ensuredIds.add(welcomeChannel.id);
+      return [
+        ...starterChannelList,
+        ...(starterChannelList.some(
+          (channel) => channel.id === welcomeChannel.id,
+        )
+          ? []
+          : [welcomeChannel]),
+        ...channels.filter((channel) => !ensuredIds.has(channel.id)),
+      ];
+    });
+    void seedWelcomeExperience(
+      queryClient,
+      welcomeChannel.id,
+      pubkey,
+      communityScope,
+    );
     await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     if (focus) {
-      notifyWelcomeChannelReady(starterChannels.welcomeChannel.id);
+      // Refreshing can briefly replace the optimistic cache with an older relay
+      // snapshot. Reinsert the just-ensured channels before announcing focus so
+      // the route can consume the pending private Welcome channel immediately.
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (channels = []) => {
+        const byId = new Map(
+          [...channels, ...starterChannelList, welcomeChannel].map(
+            (channel) => [channel.id, channel],
+          ),
+        );
+        return [...byId.values()];
+      });
+      rememberPendingWelcomeChannel(welcomeChannel.id);
+      notifyWelcomeChannelReady(welcomeChannel.id);
     }
-    return { ok: true };
+    const focusChannelId = focus ? welcomeChannel.id : undefined;
+    if (starterChannelsError) {
+      return {
+        ok: false,
+        focusChannelId,
+        reason:
+          starterChannelsError instanceof Error
+            ? starterChannelsError.message
+            : "Failed to set up starter channels",
+      };
+    }
+    return { ok: true, focusChannelId };
   } catch (error) {
     console.warn("Failed to initialize starter channels.", error);
     return {
@@ -116,6 +207,9 @@ function onboardingCompletionStorageKey(pubkey: string) {
 }
 
 function readOnboardingCompletion(pubkey: string | null) {
+  if (forceFreshOnboarding) {
+    return false;
+  }
   if (typeof window === "undefined" || !pubkey) {
     return false;
   }
@@ -236,6 +330,7 @@ export function useFirstRunOnboardingGate({
     // main checkout. Skip unconditionally without waiting for the relay
     // profile query. Guarded by !hasCompletedCurrentPubkey so it fires once.
     if (
+      !forceFreshOnboarding &&
       isSharedIdentity &&
       currentPubkey &&
       identityStatus === "success" &&
@@ -292,7 +387,9 @@ export function useFirstRunOnboardingGate({
     // still exists, so onboarding is skipped. A missing event (new user, or no
     // kind:0 on the relay) always shows onboarding regardless of display_name.
     const hasExistingProfile =
-      profileStatus === "success" && profileHasEvent === true;
+      !forceFreshOnboarding &&
+      profileStatus === "success" &&
+      profileHasEvent === true;
 
     setGateState((current) =>
       updateActiveGateState(current, currentPubkey, (activeGateState) => {
@@ -465,15 +562,14 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
         focus,
         pubkey: currentPubkey,
         communityScope: starterChannelsCommunityScope,
+      }).finally(() => {
+        starterChannelsInitPromisesRef.current.delete(starterChannelsInitKey);
+        starterChannelsFocusIntentRef.current.delete(starterChannelsInitKey);
       });
       starterChannelsInitPromisesRef.current.set(
         starterChannelsInitKey,
         promise,
       );
-      void promise.finally(() => {
-        starterChannelsInitPromisesRef.current.delete(starterChannelsInitKey);
-        starterChannelsFocusIntentRef.current.delete(starterChannelsInitKey);
-      });
       return promise;
     },
     [currentPubkey, queryClient, starterChannelsCommunityScope],
@@ -501,13 +597,22 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   const showStarterRetryToast = React.useCallback(
     (reason: string) => {
       toast.error("Couldn't set up starter channels", {
+        id: STARTER_CHANNEL_SETUP_TOAST_ID,
         action: {
           label: "Retry",
-          onClick: () => {
+          onClick: (event) => {
+            event.preventDefault();
             void requestStarterChannels(true).then((result) => {
               if (!result.ok) {
-                showStarterRetryToast(result.reason);
+                window.setTimeout(
+                  // Sonner dismisses an action toast as its click resolves, so
+                  // recreate a failed retry after that dismissal completes.
+                  () => showStarterRetryToast(result.reason),
+                  0,
+                );
+                return;
               }
+              toast.dismiss(STARTER_CHANNEL_SETUP_TOAST_ID);
             });
           },
         },
@@ -519,17 +624,19 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
 
   const completeAndShowWelcome = React.useCallback(() => {
     setIsCompletingStarterSetup(true);
-    gateComplete();
-    void requestStarterChannels(true)
-      .then((starterResult) => {
-        if (!starterResult.ok) {
-          showStarterRetryToast(starterResult.reason);
-        }
-        return refreshChannelsCache(queryClient);
-      })
-      .finally(() => {
-        setIsCompletingStarterSetup(false);
-      });
+    void requestStarterChannels(true).then(async (starterResult) => {
+      await refreshChannelsCache(queryClient);
+      gateComplete();
+      setIsCompletingStarterSetup(false);
+      if (starterResult.focusChannelId) {
+        window.location.hash = `/channels/${encodeURIComponent(
+          starterResult.focusChannelId,
+        )}`;
+      }
+      if (!starterResult.ok) {
+        showStarterRetryToast(starterResult.reason);
+      }
+    });
   }, [
     gateComplete,
     queryClient,

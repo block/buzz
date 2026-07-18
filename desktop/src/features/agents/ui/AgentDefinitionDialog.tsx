@@ -156,9 +156,17 @@ export function AgentDefinitionDialog({
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
+  const {
+    globalConfig,
+    inheritedDefaults: {
+      provider: inheritedProviderDefault,
+      model: inheritedModelDefault,
+    },
+    inheritedEnvVars: inheritedEnvVarsForAdvanced,
+  } = useAgentDialogDefaults({ open });
   const defaultRuntime = React.useMemo(
-    () => getDefaultPersonaRuntime(runtimes),
-    [runtimes],
+    () => getDefaultPersonaRuntime(runtimes, globalConfig.preferred_runtime),
+    [globalConfig.preferred_runtime, runtimes],
   );
   const shouldReduceMotion = useReducedMotion();
   const initialModelProviderEditableWithoutRuntime = Boolean(
@@ -331,14 +339,6 @@ export function AgentDefinitionDialog({
   // Used to silence requirements already satisfied there.
   const { data: runtimeFileConfig, isLoading: fileConfigLoading } =
     useRuntimeFileConfigQuery(runtime, { enabled: open });
-  const {
-    globalConfig,
-    inheritedDefaults: {
-      provider: inheritedProviderDefault,
-      model: inheritedModelDefault,
-    },
-    inheritedEnvVars: inheritedEnvVarsForAdvanced,
-  } = useAgentDialogDefaults({ open });
   function handleAiConfigurationModeChange(nextMode: AgentAiConfigurationMode) {
     setAiConfigurationMode(nextMode);
     setIsCustomProviderEditing(false);
@@ -522,9 +522,9 @@ export function AgentDefinitionDialog({
     [runtimes],
   );
   const blankRuntimeOptionLabel = runtimesLoading
-    ? "Loading providers..."
+    ? "Loading harnesses..."
     : isCreateMode
-      ? "Choose a provider"
+      ? "Choose a harness"
       : "No preference (use app default)";
   const runtimeDropdownOptions: PersonaDropdownOption[] = [
     ...(!isCreateMode
@@ -775,7 +775,7 @@ export function AgentDefinitionDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="persona-system-prompt"
               >
-                Agent instruction
+                Agent instructions
               </label>
               <div className={PERSONA_FIELD_SHELL_CLASS}>
                 <Textarea
@@ -797,7 +797,7 @@ export function AgentDefinitionDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="persona-runtime"
               >
-                Agent runtime
+                Agent harness
               </label>
               <PersonaDropdownField
                 disabled={isPending || runtimesLoading}
@@ -873,8 +873,8 @@ export function AgentDefinitionDialog({
                 isRequired={apiKeyIsRequired}
                 label={
                   effectiveProvider === "anthropic"
-                    ? "Anthropic API Key"
-                    : "OpenAI API Key"
+                    ? "Anthropic API key"
+                    : "OpenAI API key"
                 }
                 onValueChange={(next) => {
                   setEnvVars((prev) => ({

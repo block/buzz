@@ -1,5 +1,10 @@
 # Changelog
 
+## mobile-v0.4.6-rc.1
+
+- Strip media metadata on clients and reject it at the relay ([#2006](https://github.com/block/buzz/pull/2006)) ([`5cfd69cb`](https://github.com/block/buzz/commit/5cfd69cb0cf1dc63d718454defe3b8a8aaf5f15b))
+
+
 ## mobile-v0.4.5
 
 - fix(mobile): support open pairing relays ([#1939](https://github.com/block/buzz/pull/1939)) ([`a0081944`](https://github.com/block/buzz/commit/a0081944edbb3d33a2bcee0b4890ae5ef8ad4966))

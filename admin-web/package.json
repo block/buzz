@@ -1,0 +1,32 @@
+{
+  "name": "buzz-admin-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint .",
+    "check": "biome check . && pnpm typecheck && pnpm test",
+    "format": "biome format --write .",
+    "test": "vitest run src --passWithNoTests",
+    "test:e2e": "pnpm build && playwright test"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^6.0.0",
+    "vite": "^8.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "jsdom": "^27.3.0",
+    "typescript": "~6.0.0",
+    "vitest": "^4.1.1"
+  }
+}

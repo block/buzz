@@ -20,7 +20,7 @@ export function AgentAiConfigurationModeField({
         value={mode}
       >
         <TabsList>
-          <TabsTrigger value="defaults">Use AI defaults</TabsTrigger>
+          <TabsTrigger value="defaults">Use agent defaults</TabsTrigger>
           <TabsTrigger value="custom">Customize for this agent</TabsTrigger>
         </TabsList>
       </Tabs>

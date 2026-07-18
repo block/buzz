@@ -63,6 +63,8 @@ type TimelineMessageListProps = {
   highlightedMessageId?: string | null;
   isFollowingThreadById?: (rootId: string) => boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
+  entranceMessageId?: string | null;
+  onEntranceMessageComplete?: (messageId: string) => void;
   messageFooters?: Record<string, React.ReactNode>;
   /** Hoisted main-timeline entries (computed once in ChannelPane). Falls back
    *  to deriving them here when omitted (e.g. the deferred-render pass). */
@@ -130,6 +132,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   huddleMemberPubkeysPending = false,
   isFollowingThreadById,
   isMessageUnreadById,
+  entranceMessageId = null,
+  onEntranceMessageComplete,
   messageFooters,
   mainEntries,
   threadSummaries,
@@ -262,6 +266,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               isFollowedByContinuation={item.isFollowedByContinuation}
               isFollowingThreadById={isFollowingThreadById}
               isUnread={isMessageUnreadById?.(item.entry.message.id)}
+              playEntrance={item.entry.message.id === entranceMessageId}
+              onEntranceComplete={onEntranceMessageComplete}
               onDelete={onDelete}
               onEdit={onEdit}
               onMarkRead={onMarkRead}
@@ -290,6 +296,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       huddleMemberPubkeysPending,
       isFollowingThreadById,
       isMessageUnreadById,
+      entranceMessageId,
+      onEntranceMessageComplete,
       messageFooters,
       onDelete,
       onEdit,
@@ -831,6 +839,8 @@ type MessageRowItemProps = Pick<
   isContinuation?: boolean;
   isFollowedByContinuation?: boolean;
   isUnread?: boolean;
+  playEntrance?: boolean;
+  onEntranceComplete?: (messageId: string) => void;
   videoReviewContext: ReturnType<typeof buildVideoReviewContextForMessage>;
 };
 
@@ -847,6 +857,8 @@ function MessageRowItem({
   isFollowedByContinuation = false,
   isFollowingThreadById,
   isUnread,
+  playEntrance = false,
+  onEntranceComplete,
   onDelete,
   onEdit,
   onMarkUnread,
@@ -893,6 +905,8 @@ function MessageRowItem({
           }
           isUnread={isUnread}
           isContinuation={isContinuation}
+          playEntrance={playEntrance}
+          onEntranceComplete={onEntranceComplete}
           message={message}
           onDelete={canDelete}
           onEdit={canEdit}
@@ -943,6 +957,8 @@ function MessageRowItem({
         huddleMemberPubkeysPending={huddleMemberPubkeysPending}
         isContinuation={isContinuation}
         isUnread={isUnread}
+        playEntrance={playEntrance}
+        onEntranceComplete={onEntranceComplete}
         message={message}
         onDelete={canDelete}
         onEdit={canEdit}

@@ -53,6 +53,9 @@ export type ChannelPaneProps = {
   isSinglePanelView?: boolean;
   isSending: boolean;
   isTimelineLoading: boolean;
+  /** Newly-created message that should receive the one-shot conversation arrival motion. */
+  entranceMessageId?: string | null;
+  onEntranceMessageComplete?: (messageId: string) => void;
   messages: TimelineMessage[];
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   firstUnreadMessageId?: string | null;
@@ -76,7 +79,11 @@ export type ChannelPaneProps = {
   onCloseThread: () => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
-  onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
+  onEditSave?: (
+    content: string,
+    mediaTags?: string[][],
+    mentionPubkeys?: string[],
+  ) => Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandThreadReplies: (message: TimelineMessage) => void;

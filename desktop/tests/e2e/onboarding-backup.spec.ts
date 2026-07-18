@@ -20,7 +20,9 @@ test("backup step appears on fresh-key path after profile submit", async ({
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Save your private key" }),
+    page.getByRole("heading", {
+      name: "Your unique identity has been created",
+    }),
   ).toBeVisible();
 });
 
@@ -36,10 +38,10 @@ test("backup step shows masked nsec from mock bridge", async ({ page }) => {
   await expect(revealBtn).toBeVisible();
   await expect(nsecDisplay).toHaveCSS("filter", /blur/);
 
-  // Take a screenshot of the masked state.
+  // Take a screenshot of the masked state. Capture the whole viewport: the CTAs
+  // are portaled into the docked footer outside the step subtree.
   await waitForAnimations(page);
-  const backupSection = page.locator('[data-testid="onboarding-page-backup"]');
-  await backupSection.screenshot({
+  await page.screenshot({
     path: `${SHOTS}/02-backup-step-masked.png`,
   });
 
@@ -50,24 +52,16 @@ test("backup step shows masked nsec from mock bridge", async ({ page }) => {
 
   // Take a screenshot of the revealed state.
   await waitForAnimations(page);
-  await backupSection.screenshot({
+  await page.screenshot({
     path: `${SHOTS}/03-backup-step-revealed.png`,
   });
 });
 
-test("backup step Next is disabled until checkbox is checked", async ({
-  page,
-}) => {
+test("backup step Next is enabled once the key is shown", async ({ page }) => {
   await enterMachineBackup(page);
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("nsec-value")).toBeVisible();
-
-  // Next is disabled while checkbox is unchecked.
-  await expect(page.getByTestId("onboarding-next")).toBeDisabled();
-
-  // Check the checkbox → Next enables.
-  await page.getByTestId("backup-acknowledge").check();
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
 });
 
@@ -78,7 +72,6 @@ test("backup step advances to machine setup on Next click", async ({
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("nsec-value")).toBeVisible();
-  await page.getByTestId("backup-acknowledge").check();
   await page.getByTestId("onboarding-next").click();
 
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();

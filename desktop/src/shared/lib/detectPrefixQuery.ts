@@ -21,9 +21,17 @@ export function detectPrefixQuery(
 ): { query: string; startIndex: number } | null {
   const beforeCursor = value.slice(0, cursorPosition);
 
+  // A prefix only triggers a query when it opens a "word" — i.e. it sits at the
+  // start of the text or right after whitespace or an opening bracket. Opening
+  // brackets are included so `(#channel`, `[@name`, `{#chan` all autocomplete
+  // the same as ` #channel` (previously only whitespace/start counted, so a
+  // prefix glued to a `(` never fired). Keep the two detection paths below in
+  // sync with this single definition of "boundary before the prefix".
+  const isBoundaryChar = (ch: string) => /[\s([{]/.test(ch);
+
   // Fast path: single-word query (no spaces after the prefix)
   const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const simplePattern = new RegExp(`(?:^|[\\s])${escapedPrefix}([^\\s]*)$`);
+  const simplePattern = new RegExp(`(?:^|[\\s([{])${escapedPrefix}([^\\s]*)$`);
   const simpleMatch = beforeCursor.match(simplePattern);
   if (simpleMatch) {
     const query = simpleMatch[1];
@@ -37,8 +45,8 @@ export function detectPrefixQuery(
   for (let i = beforeCursor.length - 1; i >= scanStart; i--) {
     const ch = beforeCursor[i];
     if (ch === prefix) {
-      // Ensure prefix is at start or preceded by whitespace
-      if (i > 0 && !/\s/.test(beforeCursor[i - 1])) {
+      // Ensure prefix is at start or preceded by whitespace/opening bracket
+      if (i > 0 && !isBoundaryChar(beforeCursor[i - 1])) {
         continue;
       }
       const candidate = beforeCursor.slice(i + 1);
@@ -46,6 +54,15 @@ export function detectPrefixQuery(
         break;
       }
       const lowerCandidate = candidate.toLowerCase();
+      // A trailing space after an exact known name means the mention is
+      // complete — don't keep the query open just because a longer name
+      // (e.g. a team) shares the prefix.
+      if (
+        lowerCandidate.endsWith(" ") &&
+        knownNamesLower.includes(lowerCandidate.trimEnd())
+      ) {
+        break;
+      }
       const isPrefix = knownNamesLower.some((name) =>
         name.startsWith(lowerCandidate),
       );

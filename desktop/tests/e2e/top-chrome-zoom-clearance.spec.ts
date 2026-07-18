@@ -17,7 +17,7 @@ const tauriConfig = JSON.parse(
     "utf8",
   ),
 ) as TauriConfig;
-const EXPECTED_TRAFFIC_LIGHT_POSITION = { x: 16, y: 24 };
+const EXPECTED_TRAFFIC_LIGHT_POSITION = { x: 16, y: 25 };
 const EXPECTED_NAV_CENTER_Y = 23;
 
 // The macOS traffic lights are native chrome: with `trafficLightPosition`
@@ -118,9 +118,9 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
       .getByRole("button", { name: "Toggle Sidebar", exact: true })
       .boundingBox();
     expect(toggleBox).not.toBeNull();
-    // Tauri interprets y:24 as a native titlebar inset, not the literal
-    // traffic-light center. The established 40px row + 3px webview offset
-    // centers the adjacent controls at y:23.
+    // Tauri interprets y:25 as a native titlebar inset, not the literal
+    // traffic-light center. The native controls use a small optical correction
+    // while the adjacent web controls remain centered at y:23.
     expect((toggleBox?.y ?? 0) + (toggleBox?.height ?? 0) / 2).toBe(
       EXPECTED_NAV_CENTER_Y,
     );

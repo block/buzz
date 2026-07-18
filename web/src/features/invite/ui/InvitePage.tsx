@@ -1,4 +1,8 @@
 import buzzAppIcon from "@/assets/app-icon@3x.png";
+import {
+  BUZZ_RELEASES_URL,
+  resolveBuzzDownloadUrl,
+} from "@/shared/lib/buzz-download";
 import { relayWsUrl } from "@/shared/lib/relay-url";
 import { Button } from "@/shared/ui/button";
 import * as React from "react";
@@ -7,7 +11,6 @@ import remarkGfm from "remark-gfm";
 
 import { InviteJoinPolicyNotice } from "./InviteJoinPolicyNotice";
 
-const DOWNLOAD_URL = "https://github.com/block/buzz/releases/latest";
 type JoinPolicy = {
   terms_markdown?: string;
   privacy_markdown?: string;
@@ -28,6 +31,11 @@ export function InvitePage({ code }: { code: string }) {
   const [ageConfirmed, setAgeConfirmed] = React.useState(false);
   const [agreementConfirmed, setAgreementConfirmed] = React.useState(false);
   const [opening, setOpening] = React.useState(false);
+  const [downloadUrl, setDownloadUrl] = React.useState(BUZZ_RELEASES_URL);
+
+  React.useEffect(() => {
+    resolveBuzzDownloadUrl().then(setDownloadUrl);
+  }, []);
 
   React.useEffect(() => {
     fetch("/api/join-policy")
@@ -150,7 +158,7 @@ export function InvitePage({ code }: { code: string }) {
           Don&apos;t have the app?{" "}
           <a
             className="ml-1 font-medium text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
-            href={DOWNLOAD_URL}
+            href={downloadUrl}
             rel="noreferrer"
             target="_blank"
           >

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { relayClient } from "@/shared/api/relayClient";
 import { applyCommunity, getDefaultRelayUrl } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
+import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
 import { initDraftStore } from "@/features/messages/lib/useDrafts";
@@ -157,6 +158,7 @@ export function useCommunityInit(
           undefined,
           activeCommunity.token,
           activeCommunity.reposDir,
+          getOverrides().agentManagedProfiles === true,
         );
       } catch (error) {
         // A bad `repos_dir` no longer reaches here — `apply_workspace` treats
@@ -184,6 +186,13 @@ export function useCommunityInit(
       }
 
       if (!cancelled) {
+        // Refresh relay-derived media state only after the backend has installed
+        // this community's relay override. On cold launch, mediaUrl.ts may have
+        // eagerly cached the default relay origin before applyCommunity ran;
+        // leaving that stale value makes authenticated relay media look external
+        // and bypass the localhost proxy.
+        resetMediaCaches();
+
         // Initialise the draft store for this identity so localStorage drafts
         // are scoped to the correct pubkey before the app renders.
         if (activeCommunity.pubkey) {
