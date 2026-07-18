@@ -18,7 +18,13 @@ export type CommunityOnboardingStage =
   | "connecting"
   | "profile"
   | "team-intro"
-  | "finalizing";
+  | "finalizing"
+  /**
+   * Backend setup is done and the app is mounting directly on the Welcome
+   * channel underneath the onboarding screen, which stays up as an opaque
+   * curtain until Welcome reports settled (or a safety timeout), then fades.
+   */
+  | "entering";
 
 export type CommunityOnboardingTransaction = {
   id: string;
@@ -84,9 +90,14 @@ function isTransaction(
     typeof transaction.communityName === "string" &&
     typeof transaction.createdAt === "string" &&
     typeof transaction.updatedAt === "string" &&
-    ["claiming", "connecting", "profile", "team-intro", "finalizing"].includes(
-      transaction.stage ?? "",
-    )
+    [
+      "claiming",
+      "connecting",
+      "profile",
+      "team-intro",
+      "finalizing",
+      "entering",
+    ].includes(transaction.stage ?? "")
   );
 }
 

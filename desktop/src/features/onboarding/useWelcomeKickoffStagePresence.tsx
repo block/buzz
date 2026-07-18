@@ -4,6 +4,10 @@ import { isWelcomeSetupSystemMessage } from "@/features/channels/ui/ChannelPane.
 import type { TimelineMessage } from "@/features/messages/types";
 import { WelcomeKickoffStage } from "@/features/onboarding/ui/WelcomeKickoffStage";
 import { useWelcomeKickoffStage } from "@/features/onboarding/useWelcomeKickoffStage";
+import {
+  isWelcomeChannel,
+  notifyWelcomeSurfaceReady,
+} from "@/features/onboarding/welcome";
 import type { Channel } from "@/shared/api/types";
 
 /**
@@ -31,6 +35,18 @@ export function useWelcomeKickoffStagePresence(
     hasVisibleTimelineMessages,
     isTimelineLoading,
   );
+  // Announce the Welcome surface's first settled render (per channel) so the
+  // onboarding "entering" curtain knows it can fade. Harmless outside
+  // onboarding — nothing listens unless the curtain is up.
+  const announcedChannelIdRef = React.useRef<string | null>(null);
+  const channelId = activeChannel?.id ?? null;
+  React.useEffect(() => {
+    if (!channelId || isTimelineLoading) return;
+    if (!isWelcomeChannel(activeChannel)) return;
+    if (announcedChannelIdRef.current === channelId) return;
+    announcedChannelIdRef.current = channelId;
+    notifyWelcomeSurfaceReady(channelId);
+  }, [activeChannel, channelId, isTimelineLoading]);
   const welcomeKickoffStage =
     phase !== "hidden" ? (
       <WelcomeKickoffStage onExitComplete={handleExitComplete} phase={phase} />
