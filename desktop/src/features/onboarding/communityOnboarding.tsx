@@ -53,7 +53,12 @@ export type CommunityOnboardingTransaction = {
 export type CommunityOnboardingTransactionPatch = Partial<
   Pick<
     CommunityOnboardingTransaction,
-    "stage" | "communityId" | "communityName" | "error" | "acknowledged"
+    | "stage"
+    | "relayUrl"
+    | "communityId"
+    | "communityName"
+    | "error"
+    | "acknowledged"
   >
 >;
 

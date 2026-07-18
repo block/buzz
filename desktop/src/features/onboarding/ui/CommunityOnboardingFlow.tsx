@@ -8,21 +8,25 @@ import {
 } from "@/features/onboarding/communityOnboarding";
 import { initializeStarterChannels } from "@/features/onboarding/hooks";
 import { useClaimInvite } from "@/features/onboarding/useClaimInvite";
+import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import {
   takePendingWelcomeChannelForDirectEntry,
   WELCOME_SURFACE_READY_EVENT,
 } from "@/features/onboarding/welcome";
+import { profileQueryKey } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
   parseEmojiAvatarDataUrl,
   ProfileAvatarEditor,
 } from "@/features/profile/ui/ProfileAvatarEditor";
 import { updateProfile } from "@/shared/api/tauriProfiles";
-import { getIdentity } from "@/shared/api/tauriIdentity";
+import { getIdentity, importIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas } from "@/shared/api/tauriPersonas";
+import { relayClient } from "@/shared/api/relayClient";
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { MembershipDenied } from "./MembershipDenied";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import {
   ONBOARDING_PRIMARY_CTA_CLASS,
@@ -34,6 +38,16 @@ import {
   ONBOARDING_KEY_ROW_CLASS,
   ONBOARDING_KEY_TEXT_CLASS,
 } from "./NsecMaskedDisplay";
+
+function isRelayMembershipDeniedError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.message.includes("You must be a relay member") ||
+    error.message.includes("relay_membership_required") ||
+    error.message.includes("restricted: not a relay member") ||
+    error.message.includes("invalid: you are not a relay member")
+  );
+}
 
 const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
   Fizz: "/onboarding/starter-team/fizz.png",
@@ -113,6 +127,9 @@ export function CommunityOnboardingFlow({
     [],
   );
   const [isPending, setIsPending] = React.useState(false);
+  const [deniedPubkey, setDeniedPubkey] = React.useState("");
+  const [isMembershipDenied, setIsMembershipDenied] = React.useState(false);
+  const [isCommunityChangeOpen, setIsCommunityChangeOpen] = React.useState(false);
   const [isCurtainFading, setIsCurtainFading] = React.useState(false);
   const nameInputRef = React.useRef<HTMLInputElement | null>(null);
 
@@ -228,6 +245,45 @@ export function CommunityOnboardingFlow({
 
   if (!transaction) return null;
 
+  if (isMembershipDenied) {
+    return (
+      <>
+        <MembershipDenied
+          activeRelayUrl={transaction.relayUrl}
+          onBack={() => setIsMembershipDenied(false)}
+          onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+          onImportKey={async (nsec) => {
+            const identity = await importIdentity(nsec);
+            relayClient.disconnect();
+            queryClient.setQueryData(["identity"], identity);
+            queryClient.removeQueries({ queryKey: profileQueryKey });
+            setIsMembershipDenied(false);
+            update({ stage: "connecting", error: undefined });
+          }}
+          onRetry={() => {
+            setIsMembershipDenied(false);
+            update({ stage: "connecting", error: undefined });
+          }}
+          pubkey={deniedPubkey}
+        />
+        {isCommunityChangeOpen ? (
+          <CommunityChangeOverlay
+            onClose={() => setIsCommunityChangeOpen(false)}
+            onUpdated={(communityName, updatedRelayUrl) => {
+              update({
+                communityName,
+                relayUrl: updatedRelayUrl,
+                stage: "connecting",
+                error: undefined,
+              });
+              setIsMembershipDenied(false);
+            }}
+          />
+        ) : null}
+      </>
+    );
+  }
+
   const saveProfile = async () => {
     if (!displayName.trim()) return;
     setIsPending(true);
@@ -238,6 +294,16 @@ export function CommunityOnboardingFlow({
       });
       update({ stage: "team-intro", error: undefined });
     } catch (error) {
+      if (isRelayMembershipDeniedError(error)) {
+        try {
+          const identity = await getIdentity();
+          setDeniedPubkey(identity.pubkey);
+        } catch {
+          setDeniedPubkey("");
+        }
+        setIsMembershipDenied(true);
+        return;
+      }
       update({ error: error instanceof Error ? error.message : String(error) });
     } finally {
       setIsPending(false);
