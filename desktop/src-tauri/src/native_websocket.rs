@@ -15,6 +15,11 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const SEND_QUEUE_CAPACITY: usize = 64;
 
+pub(crate) fn install_crypto_provider() {
+    // Dependencies enable both rustls providers; choose one before TLS setup.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 type Id = u32;
 
 #[derive(Debug, Deserialize)]
@@ -303,6 +308,7 @@ fn outbound_message(message: Message) -> OutboundMessage {
 }
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
+    install_crypto_provider();
     tauri::plugin::Builder::new("websocket")
         .invoke_handler(tauri::generate_handler![
             connect,
@@ -320,6 +326,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::FutureExt;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use tauri::ipc::InvokeResponseBody;
@@ -328,6 +335,25 @@ mod tests {
 
     fn silent_channel() -> Channel<serde_json::Value> {
         Channel::new(|_: InvokeResponseBody| Ok(()))
+    }
+
+    #[tokio::test]
+    async fn secure_websocket_reaches_tls_without_panicking() {
+        install_crypto_provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        let result = std::panic::AssertUnwindSafe(tokio_tungstenite::connect_async(format!(
+            "wss://{address}"
+        )))
+        .catch_unwind()
+        .await;
+
+        assert!(result.is_ok(), "TLS setup must not panic");
+        server.await.unwrap();
     }
 
     #[tokio::test]

@@ -83,6 +83,7 @@ toml = "0.8"
 nostr = { version = "0.44", features = ["nip44"] }
 zeroize = "1"
 reqwest = { version = "0.13", features = ["json", "query", "stream", "blocking"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 url = "2"
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
