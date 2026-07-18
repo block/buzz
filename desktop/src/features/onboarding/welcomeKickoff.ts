@@ -374,7 +374,12 @@ export function buildWelcomeKickoffOpenerSendInput(
   // "@Name" in the copy as a mention pill and files the opener into their
   // Inbox mentions feed, so the Inbox isn't an empty state on first visit.
   const mentionPubkeys = introTeammates.map((agent) => agent.pubkey);
-  if (owner?.pubkey && !mentionPubkeys.includes(owner.pubkey)) {
+  if (
+    owner?.pubkey &&
+    !mentionPubkeys.some(
+      (pubkey) => normalizePubkey(pubkey) === normalizePubkey(owner.pubkey),
+    )
+  ) {
     mentionPubkeys.push(owner.pubkey);
   }
   return {
@@ -450,12 +455,18 @@ export function useWelcomeKickoff(
   // visible to the closer classification even when the user never opens the
   // thread. Without this, replies only surfaced through the UI's open-thread
   // query and the closer stalled until the user clicked into the thread.
+  // Retired once the closer exists — the kickoff is resolved, so revisits to
+  // Welcome shouldn't keep refetching the opener's thread subtree forever.
   const openerEvent = React.useMemo(
     () => markerEvent(channelEvents, openerMarker) ?? null,
     [channelEvents],
   );
+  const kickoffResolved = React.useMemo(
+    () => markerEvent(channelEvents, closerMarker) != null,
+    [channelEvents],
+  );
   const openerThreadQuery = useThreadReplies(
-    isActiveWelcome ? activeChannel : null,
+    isActiveWelcome && !kickoffResolved ? activeChannel : null,
     openerEvent?.id ?? null,
   );
   const kickoffEvents = React.useMemo(() => {

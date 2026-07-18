@@ -24,16 +24,6 @@ export type WelcomeKickoffStagePhase =
  */
 export const WELCOME_KICKOFF_STAGE_TIMEOUT_MS = 90_000;
 
-/**
- * Dev-only preview switch: forces the stage to `active` on the Welcome
- * channel regardless of messages, so choreography can be iterated on a
- * running dev app (HMR) without re-running fresh onboarding. Stripped from
- * production builds via the `import.meta.env.DEV` guard below.
- *
- * TODO(morganm): flip back to false before merging.
- */
-const DEV_FORCE_STAGE = false;
-
 export type WelcomeKickoffStageInput = {
   /** The active channel is the private Welcome channel. */
   isWelcome: boolean;
@@ -84,7 +74,6 @@ export function useWelcomeKickoffStage(
 ) {
   const channelId = activeChannel?.id ?? null;
   const isWelcome = isWelcomeChannel(activeChannel);
-  const forceStage = import.meta.env.DEV && DEV_FORCE_STAGE;
   const [phase, setPhase] = React.useState<WelcomeKickoffStagePhase>("hidden");
   const [timedOut, setTimedOut] = React.useState(false);
 
@@ -118,8 +107,5 @@ export function useWelcomeKickoffStage(
     setPhase("hidden");
   }, []);
 
-  if (forceStage && isWelcome) {
-    return { phase: "active" as const, handleExitComplete };
-  }
   return { phase, handleExitComplete };
 }

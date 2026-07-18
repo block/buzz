@@ -238,9 +238,14 @@ export function CommunityOnboardingFlow({
       className={cn(
         "buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-y-auto px-4 pb-28 pt-[106px] text-foreground",
         isCurtainFading &&
-          "pointer-events-none opacity-0 transition-opacity duration-500 ease-out motion-reduce:transition-none",
+          "pointer-events-none opacity-0 transition-opacity ease-out motion-reduce:transition-none",
       )}
       data-testid="community-onboarding-flow"
+      style={
+        isCurtainFading
+          ? { transitionDuration: `${ENTERING_CURTAIN_FADE_MS}ms` }
+          : undefined
+      }
     >
       <StartupWindowDragRegion />
       {isProfileStage || isTeamStage ? (
