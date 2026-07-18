@@ -767,6 +767,184 @@ test("first-community shows the scenario cards for localhost", async ({
   ).toBeVisible();
 });
 
+test("first-community direct join reaches profile", async ({ page }) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "wss://onboarding.communities.buzz.xyz",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Add me to a community" }).click();
+  await page
+    .getByTestId("welcome-join-community-url")
+    .fill("wss://onboarding.communities.buzz.xyz");
+  await page.getByRole("button", { name: "Join community" }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await expect(page.getByText("Connecting securely…")).toHaveCount(0);
+  await expect(page.getByText("Create an identity key")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate((transactionStorageKey) => {
+        const communitiesRaw = window.localStorage.getItem("buzz-communities");
+        const transactionRaw = window.localStorage.getItem(
+          transactionStorageKey,
+        );
+        const communities = communitiesRaw
+          ? (JSON.parse(communitiesRaw) as Array<{ id: string }>)
+          : [];
+        const transaction = transactionRaw
+          ? (JSON.parse(transactionRaw) as { communityId?: string })
+          : null;
+        return {
+          communityCount: communities.length,
+          transactionMatchesOnlyCommunity:
+            communities.length === 1 &&
+            transaction?.communityId === communities[0]?.id,
+        };
+      }, COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY),
+    )
+    .toEqual({ communityCount: 1, transactionMatchesOnlyCommunity: true });
+});
+
+test("first-community direct join cancel returns to request access", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    { applyCommunityDelayMs: 5_000 },
+    {
+      relayWsUrl: "wss://onboarding.communities.buzz.xyz",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Add me to a community" }).click();
+  await page
+    .getByTestId("welcome-join-community-url")
+    .fill("wss://onboarding.communities.buzz.xyz");
+  await page.getByRole("button", { name: "Join community" }).click();
+  await expect(page.getByText("Connecting securely…")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "Request access to community" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("community-change-overlay")).toHaveCount(0);
+  await expect(page.getByText("Create an identity key")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (storageKey) => ({
+          communities: window.localStorage.getItem("buzz-communities"),
+          transaction: window.localStorage.getItem(storageKey),
+        }),
+        COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
+      ),
+    )
+    .toEqual({ communities: null, transaction: null });
+});
+
+test("canceling a join to an existing inactive community preserves it", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript(
+    ({ pubkey, relayUrl }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        "buzz-communities",
+        JSON.stringify([
+          {
+            id: "active-community",
+            name: "Active",
+            relayUrl: "wss://active.example.com",
+            addedAt: timestamp,
+          },
+          {
+            id: "existing-community",
+            name: "Existing",
+            relayUrl,
+            addedAt: timestamp,
+          },
+        ]),
+      );
+      window.localStorage.setItem(
+        "buzz-active-community-id",
+        "active-community",
+      );
+    },
+    {
+      pubkey: BLANK_TYLER_IDENTITY.pubkey,
+      relayUrl: "wss://onboarding.communities.buzz.xyz",
+    },
+  );
+  await installMockBridge(
+    page,
+    { applyCommunityDelayMs: 5_000 },
+    {
+      relayWsUrl: "wss://active.example.com",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.evaluate((transactionStorageKey) => {
+    const timestamp = new Date().toISOString();
+    window.localStorage.setItem(
+      transactionStorageKey,
+      JSON.stringify({
+        id: "existing-community-join",
+        source: "add-community",
+        stage: "connecting",
+        relayUrl: "wss://onboarding.communities.buzz.xyz",
+        communityName: "Existing",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
+    window.location.reload();
+  }, COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY);
+
+  await expect(page.getByText("Connecting securely…")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByText("Connecting securely…")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const raw = window.localStorage.getItem("buzz-communities");
+        return raw
+          ? (JSON.parse(raw) as Array<{ id: string }>).map(({ id }) => id)
+          : [];
+      }),
+    )
+    .toEqual(["active-community", "existing-community"]);
+});
+
 test("connected first-community profile step cannot discard resumable onboarding", async ({
   page,
 }) => {
@@ -1400,31 +1578,19 @@ test("existing relay profile with display name auto-skips onboarding without loc
   await expectHomeView(page);
 });
 
-test("onboarding can import an existing key when the community is already set up", async ({
+test("onboarding uses the existing identity when the community is already set up", async ({
   page,
 }) => {
-  // Community exists (default seed), but this identity has no profile yet,
-  // so the app lands on the onboarding name step — Tyler's moved-laptop /
-  // fresh-dev-instance case.
+  // Community exists (default seed), and machine onboarding has already created
+  // this identity. Profile setup must not offer to create or replace it.
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
   await page.goto("/");
 
   await expect(page.getByTestId("onboarding-display-name")).toHaveValue("");
-  await page.getByTestId("onboarding-import-key").click();
-  await expect(
-    page.getByRole("heading", { name: "Use your existing key" }),
-  ).toBeVisible();
-
-  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
-  await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
-  await expect(page.getByTestId("nostr-import-npub-preview")).toBeVisible();
-  await page.getByTestId("nostr-import-submit").click();
-
-  // Identity swap remounts the flow; alice already has a relay profile with
-  // a display name, so onboarding auto-completes and lands in the app.
-  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expectHomeView(page);
+  await expect(page.getByTestId("onboarding-next")).toHaveText("Continue");
+  await expect(page.getByTestId("onboarding-import-key")).toHaveCount(0);
+  await expect(page.getByText("Create an identity key")).toHaveCount(0);
 });
 
 test("completed onboarding backfills missing starter channels", async ({

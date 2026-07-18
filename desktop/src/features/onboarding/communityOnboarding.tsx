@@ -42,6 +42,8 @@ export type CommunityOnboardingTransaction = {
    */
   policyReceipt?: string;
   communityId?: string;
+  previousCommunityId?: string;
+  addedCommunity?: boolean;
   createdAt: string;
   updatedAt: string;
   error?: string;
@@ -56,6 +58,8 @@ export type CommunityOnboardingTransactionPatch = Partial<
     | "stage"
     | "relayUrl"
     | "communityId"
+    | "previousCommunityId"
+    | "addedCommunity"
     | "communityName"
     | "error"
     | "acknowledged"

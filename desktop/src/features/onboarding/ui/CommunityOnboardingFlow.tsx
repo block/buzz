@@ -113,8 +113,10 @@ function AvatarCircle({
 }
 
 export function CommunityOnboardingFlow({
+  onCancel,
   onConnect,
 }: {
+  onCancel: () => void;
   onConnect: () => void;
 }) {
   const { transaction, update, clear } = useCommunityOnboarding();
@@ -372,7 +374,7 @@ export function CommunityOnboardingFlow({
                 ) : null}
                 <Button
                   className="rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
-                  onClick={clear}
+                  onClick={onCancel}
                   variant="ghost"
                 >
                   Cancel
