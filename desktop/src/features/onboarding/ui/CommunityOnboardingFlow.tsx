@@ -272,10 +272,10 @@ export function CommunityOnboardingFlow({
       <OnboardingFooterProvider>
         <div
           className={cn(
-            "relative flex w-full flex-col justify-center text-center",
+            "relative w-full text-center",
             isProfileStage || isTeamStage
-              ? "min-h-[calc(100dvh-15.625rem)]"
-              : "min-h-dvh py-8",
+              ? "buzz-onboarding-step-frame flex flex-col justify-center"
+              : "flex min-h-dvh flex-col justify-center py-8",
             isProfileStage
               ? "max-w-4xl"
               : isTeamStage
