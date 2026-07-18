@@ -10,6 +10,7 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
+import { OnboardingStepHeader } from "./OnboardingStepHeader";
 import {
   NsecMaskedDisplay,
   ONBOARDING_KEY_FRAME_CLASS,
@@ -83,15 +84,15 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
       direction={direction}
       transitionKey={`backup-${direction}`}
     >
-      <div className="w-full max-w-[500px] text-center">
-        <h1 className="text-title font-normal text-foreground">
-          Your unique identity has been created
-        </h1>
-        <p className="mt-5 text-sm leading-6 text-foreground/80">
-          This key is stored in your system keychain, but save it some place
-          safe in case you ever need to restore your account.
-        </p>
-      </div>
+      <OnboardingStepHeader
+        description={
+          <>
+            This key is stored in your system keychain, but save it some place
+            safe in case you ever need to restore your account.
+          </>
+        }
+        title="Your unique identity has been created"
+      />
 
       <div className="mt-10 w-full max-w-4xl">
         {isLoading ? (

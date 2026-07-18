@@ -22,6 +22,7 @@ import {
   OnboardingChrome,
 } from "./OnboardingChrome";
 import { OnboardingFooterProvider } from "./OnboardingFooter";
+import { OnboardingStepHeader } from "./OnboardingStepHeader";
 import {
   getPreferredRuntimeIdForSelection,
   runtimeSelectionNeedsDefaultsStep,
@@ -230,18 +231,17 @@ export function MachineOnboardingFlow({
               effect="fade"
               transitionKey="machine-key-import"
             >
-              <div className="shrink-0">
-                <h1 className="text-title font-normal text-foreground">
-                  {identityLost
-                    ? "Re-import your key"
-                    : "Enter your private key"}
-                </h1>
-                <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
-                  {identityLost
+              <OnboardingStepHeader
+                className="shrink-0"
+                description={
+                  identityLost
                     ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
-                    : "If you already have a Nostr account, enter your private key below to get started."}
-                </p>
-              </div>
+                    : "If you already have a Nostr account, enter your private key below to get started."
+                }
+                title={
+                  identityLost ? "Re-import your key" : "Enter your private key"
+                }
+              />
               <div className="buzz-onboarding-key-import-position w-full">
                 <NostrKeyImportForm
                   backLabel={identityLost ? "Start new identity" : "Back"}

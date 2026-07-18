@@ -10,6 +10,7 @@ import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
+import { OnboardingStepHeader } from "./OnboardingStepHeader";
 import { AnimatePresence, motion } from "motion/react";
 import * as React from "react";
 import {
@@ -328,14 +329,11 @@ export function AvatarStep({
         transition={AVATAR_POSITION_MOTION_TRANSITION}
       >
         <div className="flex w-full flex-col items-center text-center lg:items-start lg:text-left">
-          <div className="w-full max-w-[500px]">
-            <h1 className="text-title font-normal text-foreground">
-              Next, add a display image
-            </h1>
-            <p className="mt-5 text-sm leading-6 text-muted-foreground">
-              Choose an image or emoji as your avatar
-            </p>
-          </div>
+          <OnboardingStepHeader
+            description="Choose an image or emoji as your avatar"
+            descriptionClassName="text-muted-foreground lg:mx-0"
+            title="Next, add a display image"
+          />
 
           <div className="mt-12 grid justify-items-center gap-3 lg:justify-items-start">
             <div className="relative h-48 w-48">

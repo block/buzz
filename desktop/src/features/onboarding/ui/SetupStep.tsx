@@ -24,6 +24,7 @@ import {
 } from "./onboardingRuntimeSelection";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
+import { OnboardingStepHeader } from "./OnboardingStepHeader";
 import { getRuntimeDisplayLabel, RuntimeIcon } from "./RuntimeIcon";
 import {
   type OnboardingTransitionDirection,
@@ -725,20 +726,22 @@ function RuntimeProvidersSection({
 
   return (
     <section className="flex min-h-full w-full flex-col items-center">
-      <div className="w-full max-w-[820px] text-center">
-        <h1 className="text-title font-normal text-foreground">
-          Use the models that fit the task
-        </h1>
-        <p className="mx-auto mt-3 max-w-[760px] text-sm leading-6 text-foreground/90">
-          <span>
-            Connect your model providers here. Each agent can use the one that’s
-            best for their work.
-          </span>
-          <span className="mt-1 block">
-            Choose at least one to start using Buzz.
-          </span>
-        </p>
-      </div>
+      <OnboardingStepHeader
+        className="max-w-[820px]"
+        description={
+          <>
+            <span>
+              Connect your model providers here. Each agent can use the one
+              that’s best for their work.
+            </span>
+            <span className="mt-1 block">
+              Choose at least one to start using Buzz.
+            </span>
+          </>
+        }
+        descriptionClassName="max-w-[760px] text-foreground/90"
+        title="Use the models that fit the task"
+      />
 
       <div className="flex w-full flex-1 flex-col items-center justify-center gap-8 py-10">
         <GitBashPrerequisiteCard />

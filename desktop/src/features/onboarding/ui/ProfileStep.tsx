@@ -10,6 +10,7 @@ import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
+import { OnboardingStepHeader } from "./OnboardingStepHeader";
 import {
   type OnboardingTransitionDirection,
   type OnboardingTransitionEffect,
@@ -219,15 +220,17 @@ export function ProfileStep({
       effect={transitionEffect}
       transitionKey={`profile-${direction}`}
     >
-      <div className="w-full max-w-2xl">
-        <h1 className="text-title font-normal text-foreground">
-          What should we call you?
-        </h1>
-        <p className="mt-5 text-sm leading-6 text-muted-foreground">
-          Pick the name people and agents will see in Buzz. You can change it
-          anytime.
-        </p>
-      </div>
+      <OnboardingStepHeader
+        className="max-w-2xl"
+        description={
+          <>
+            Pick the name people and agents will see in Buzz. You can change it
+            anytime.
+          </>
+        }
+        descriptionClassName="text-muted-foreground"
+        title="What should we call you?"
+      />
 
       <label
         className="mt-12 flex w-full cursor-text flex-col items-center"

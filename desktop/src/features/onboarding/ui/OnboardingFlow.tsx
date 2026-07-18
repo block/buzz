@@ -18,6 +18,7 @@ import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { AvatarStep } from "./AvatarStep";
 import { OnboardingChrome } from "./OnboardingChrome";
 import { OnboardingFooterProvider } from "./OnboardingFooter";
+import { OnboardingStepHeader } from "./OnboardingStepHeader";
 import { MembershipDenied } from "./MembershipDenied";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -521,30 +522,32 @@ export function OnboardingFlow({
                 transitionKey={`key-import-${transitionDirection}`}
               >
                 <div className="w-full max-w-[440px]">
-                  {identityLost ? (
-                    <>
-                      <h1 className="text-title font-normal text-foreground">
-                        Re-import your key
-                      </h1>
-                      <p className="mt-5 text-sm leading-6 text-muted-foreground">
-                        Your identity is no longer in the system keyring.
-                        Re-import your nsec to restore it — Buzz will restart to
-                        finish recovery. Or go back to start a new identity with
-                        a fresh key.
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <h1 className="text-title font-normal text-foreground">
-                        Use your existing key
-                      </h1>
-                      <p className="mt-5 text-sm leading-6 text-muted-foreground">
-                        Import your Nostr private key to use that identity with
-                        Buzz. If this key already has a profile on the relay,
-                        your name and avatar are restored automatically.
-                      </p>
-                    </>
-                  )}
+                  <OnboardingStepHeader
+                    className="max-w-[440px]"
+                    description={
+                      identityLost ? (
+                        <>
+                          Your identity is no longer in the system keyring.
+                          Re-import your nsec to restore it — Buzz will restart
+                          to finish recovery. Or go back to start a new identity
+                          with a fresh key.
+                        </>
+                      ) : (
+                        <>
+                          Import your Nostr private key to use that identity
+                          with Buzz. If this key already has a profile on the
+                          relay, your name and avatar are restored
+                          automatically.
+                        </>
+                      )
+                    }
+                    descriptionClassName="text-muted-foreground"
+                    title={
+                      identityLost
+                        ? "Re-import your key"
+                        : "Use your existing key"
+                    }
+                  />
                 </div>
 
                 {persistError ? (

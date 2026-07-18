@@ -33,6 +33,7 @@ import {
   OnboardingChrome,
 } from "./OnboardingChrome";
 import { OnboardingFooter, OnboardingFooterProvider } from "./OnboardingFooter";
+import { OnboardingStepHeader } from "./OnboardingStepHeader";
 import {
   ONBOARDING_KEY_FRAME_CLASS,
   ONBOARDING_KEY_ROW_CLASS,
@@ -232,11 +233,16 @@ export function CommunityOnboardingFlow({
       await finish();
     } catch (error) {
       update({
+        stage: "team-intro",
         error: error instanceof Error ? error.message : String(error),
       });
       setIsPending(false);
     }
   }, [finish, isPending, queryClient, relayUrl, update]);
+  const backToProfile = React.useCallback(() => {
+    if (isPending) return;
+    update({ stage: "profile", error: undefined });
+  }, [isPending, update]);
 
   const isProfileStage = transaction?.stage === "profile";
   const isTeamStage =
@@ -343,7 +349,7 @@ export function CommunityOnboardingFlow({
           className={cn(
             "relative w-full text-center",
             isProfileStage || isTeamStage
-              ? "buzz-onboarding-step-frame flex flex-col justify-center"
+              ? "buzz-onboarding-step-frame flex flex-col items-center"
               : "flex min-h-dvh flex-col justify-center py-8",
             isProfileStage
               ? "max-w-4xl"
@@ -412,11 +418,16 @@ export function CommunityOnboardingFlow({
             ) : (
               <>
                 <div data-testid="community-profile-main">
-                  <h1 className="text-title font-normal">Build your profile</h1>
-                  <p className="mx-auto mt-3 max-w-[380px] text-sm leading-6 text-foreground/80">
-                    Add a name and avatar. They’ll show up on your messages,
-                    reactions, and agent handoffs.
-                  </p>
+                  <OnboardingStepHeader
+                    description={
+                      <>
+                        Add a name and avatar. They’ll show up on your messages,
+                        reactions, and agent handoffs.
+                      </>
+                    }
+                    descriptionClassName="max-w-[380px]"
+                    title="Build your profile"
+                  />
                   <div className="mt-10 w-full max-w-4xl">
                     <div
                       className={ONBOARDING_KEY_FRAME_CLASS}
@@ -481,69 +492,73 @@ export function CommunityOnboardingFlow({
             )
           ) : (
             <>
-              <h1 className="text-title font-normal">Meet your starter team</h1>
-              <p className="mx-auto mt-3 max-w-[400px] text-sm leading-6 text-foreground/80">
-                Buzz lets you bring multiple agents into the same workspace.
-                This team will help you get started using Buzz.
-              </p>
-              {starterPersonas.length > 0 ? (
-                <div className="mt-10 flex flex-wrap justify-center gap-8">
-                  {starterPersonas.map((persona) => {
-                    const animationUrl =
-                      STARTER_PERSONA_ANIMATIONS[persona.displayName];
-                    return (
-                      <div
-                        className="flex w-40 flex-col items-center gap-3"
-                        key={persona.id}
-                      >
-                        {animationUrl ? (
-                          <img
-                            alt={`${persona.displayName} animated character`}
-                            className="h-40 w-40 object-contain"
-                            data-testid={`starter-persona-${persona.displayName.toLowerCase()}`}
-                            src={animationUrl}
-                          />
-                        ) : (
-                          <ProfileAvatar
-                            avatarUrl={persona.avatarUrl}
-                            className="h-28 w-28 text-3xl"
-                            label={persona.displayName}
-                          />
-                        )}
-                        <span className="font-mono text-xs font-medium uppercase tracking-[0.15em]">
-                          {persona.displayName}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : null}
+              <OnboardingStepHeader
+                description={
+                  <>
+                    Buzz lets you bring multiple agents into the same workspace.
+                    Your team will help you get started using Buzz.
+                  </>
+                }
+                descriptionClassName="max-w-[400px]"
+                title="Meet your starter team"
+              />
+              <div className="flex w-full flex-1 items-center justify-center py-10">
+                {starterPersonas.length > 0 ? (
+                  <div className="flex flex-wrap justify-center gap-8">
+                    {starterPersonas.map((persona) => {
+                      const animationUrl =
+                        STARTER_PERSONA_ANIMATIONS[persona.displayName];
+                      return (
+                        <div
+                          className="flex w-40 flex-col items-center gap-3"
+                          key={persona.id}
+                        >
+                          {animationUrl ? (
+                            <img
+                              alt={`${persona.displayName} animated character`}
+                              className="h-40 w-40 object-contain"
+                              data-testid={`starter-persona-${persona.displayName.toLowerCase()}`}
+                              src={animationUrl}
+                            />
+                          ) : (
+                            <ProfileAvatar
+                              avatarUrl={persona.avatarUrl}
+                              className="h-28 w-28 text-3xl"
+                              label={persona.displayName}
+                            />
+                          )}
+                          <span className="font-mono text-xs font-medium uppercase tracking-[0.15em]">
+                            {persona.displayName}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
               {transaction.error ? (
-                <p className="mt-4 text-sm text-destructive">
-                  {transaction.error}
-                </p>
+                <p className="text-sm text-destructive">{transaction.error}</p>
               ) : null}
               <OnboardingFooter>
                 <Button
                   className={ONBOARDING_PRIMARY_CTA_CLASS}
+                  data-testid="community-team-intro-enter"
                   disabled={isPending || transaction.stage === "entering"}
                   onClick={() => void finalize()}
                 >
-                  {transaction.stage === "finalizing" ||
-                  transaction.stage === "entering"
+                  {isPending || transaction.stage === "entering"
                     ? "Preparing Welcome…"
-                    : `Enter ${transaction.communityName}`}
+                    : "Take me to Buzz"}
                 </Button>
-                {transaction.error ? (
-                  <Button
-                    className="h-9 rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
-                    disabled={isPending}
-                    onClick={() => void finish()}
-                    variant="ghost"
-                  >
-                    Skip for now
-                  </Button>
-                ) : null}
+                <Button
+                  className="h-9 rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
+                  data-testid="community-team-intro-back"
+                  disabled={isPending || transaction.stage === "entering"}
+                  onClick={backToProfile}
+                  variant="ghost"
+                >
+                  Back
+                </Button>
               </OnboardingFooter>
             </>
           )}

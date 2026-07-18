@@ -26,6 +26,7 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
+import { OnboardingStepHeader } from "./OnboardingStepHeader";
 import type { DefaultConfigStepActions } from "./types";
 
 type DefaultConfigStepProps = {
@@ -249,15 +250,16 @@ export function DefaultConfigStep({
       direction={direction}
       transitionKey={`default-config-${direction}`}
     >
-      <div className="w-full max-w-[500px] text-center">
-        <h1 className="text-title font-normal text-foreground">
-          Configure your default model settings
-        </h1>
-        <p className="mx-auto mt-3 max-w-[440px] text-sm leading-5 text-foreground/80">
-          These settings will be used by your agents in Buzz. You can always
-          change them in your Settings.
-        </p>
-      </div>
+      <OnboardingStepHeader
+        description={
+          <>
+            These settings will be used by your agents in Buzz. You can always
+            change them in your Settings.
+          </>
+        }
+        descriptionClassName="leading-5"
+        title="Configure your default model settings"
+      />
 
       <div className="flex w-full flex-1 items-center justify-center py-10">
         <div className="w-full max-w-[328px]">

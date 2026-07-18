@@ -25,6 +25,7 @@ import { Input } from "@/shared/ui/input";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
+import { OnboardingStepHeader } from "@/features/onboarding/ui/OnboardingStepHeader";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type WelcomeSetupPage = "welcome" | "join" | "invite";
@@ -136,15 +137,16 @@ export function WelcomeSetup({
               effect={welcomeEffect}
               transitionKey={`welcome-${welcomeEffect}-${transitionDirection}`}
             >
-              <div className="w-full max-w-[760px]">
-                <h1 className="text-title font-normal">
-                  Join or create a community
-                </h1>
-                <p className="mt-3 text-sm leading-6 text-foreground/80">
-                  Choose how you’d like to get started. If you have an invite
-                  link, you can open it directly to continue setup.
-                </p>
-              </div>
+              <OnboardingStepHeader
+                className="max-w-[760px]"
+                description={
+                  <>
+                    Choose how you’d like to get started. If you have an invite
+                    link, you can open it directly to continue setup.
+                  </>
+                }
+                title="Join or create a community"
+              />
               <div className="mt-28 flex w-full flex-col items-center gap-6">
                 <button
                   className={COMMUNITY_OPTION_CARD_CLASS}
@@ -186,15 +188,15 @@ export function WelcomeSetup({
               direction={transitionDirection}
               transitionKey={`join-${transitionDirection}`}
             >
-              <div className="w-full max-w-[500px]">
-                <h1 className="text-title font-normal">
-                  Request access to community
-                </h1>
-                <p className="mt-3 text-sm leading-6 text-foreground/80">
-                  Ask the community host to send you an invite link or add you
-                  directly using your public key.
-                </p>
-              </div>
+              <OnboardingStepHeader
+                description={
+                  <>
+                    Ask the community host to send you an invite link or add you
+                    directly using your public key.
+                  </>
+                }
+                title="Request access to community"
+              />
               <div className="flex w-full flex-1 items-center justify-center pb-4 pt-12">
                 <div className="w-full max-w-4xl space-y-7">
                   <div>
@@ -315,15 +317,15 @@ export function WelcomeSetup({
               direction={transitionDirection}
               transitionKey={`invite-${transitionDirection}`}
             >
-              <div className="w-full max-w-[500px]">
-                <h1 className="text-title font-normal">
-                  Enter your invite link
-                </h1>
-                <p className="mt-3 text-sm leading-6 text-foreground/80">
-                  If you have an invite link for a community, paste it below to
-                  continue setup.
-                </p>
-              </div>
+              <OnboardingStepHeader
+                description={
+                  <>
+                    If you have an invite link for a community, paste it below
+                    to continue setup.
+                  </>
+                }
+                title="Enter your invite link"
+              />
               <div className="flex w-full flex-1 items-center justify-center pb-4 pt-12">
                 <InviteRedeemForm
                   defaultRelayUrl={
