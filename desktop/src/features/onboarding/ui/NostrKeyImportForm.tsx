@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Check, KeyRound } from "lucide-react";
+import { Check, Eye, EyeOff, KeyRound } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { nsecToNpub } from "@/shared/lib/nostrUtils";
@@ -41,6 +41,7 @@ export function NostrKeyImportForm({
   const [isImporting, setIsImporting] = React.useState(false);
   const [importError, setImportError] = React.useState<string | null>(null);
   const [isDragging, setIsDragging] = React.useState(false);
+  const [isRevealed, setIsRevealed] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const previewNpub = React.useMemo(() => nsecToNpub(nsecInput), [nsecInput]);
@@ -143,22 +144,43 @@ export function NostrKeyImportForm({
             data-testid="nostr-import-card"
             variant="textured"
           >
-            <Input
-              autoComplete="off"
-              autoCorrect="off"
-              className="h-[3.6875rem] rounded-none border-0 bg-transparent px-0 text-center font-mono !text-4xl shadow-none placeholder:text-foreground/30 focus-visible:ring-0"
-              data-testid="nostr-import-nsec-input"
-              id="nostr-private-key"
-              onChange={(event) => {
-                setNsecInput(event.target.value);
-                setImportError(null);
-              }}
-              placeholder="Enter your key here"
-              ref={inputRef}
-              spellCheck={false}
-              type="password"
-              value={nsecInput}
-            />
+            <div className="flex w-full items-center gap-2">
+              <Input
+                autoComplete="off"
+                autoCorrect="off"
+                className="h-[3.6875rem] rounded-none border-0 bg-transparent px-0 text-center font-mono !text-4xl text-[color:var(--buzz-onboarding-backup-ink)] shadow-none placeholder:text-foreground/30 focus-visible:ring-0"
+                data-testid="nostr-import-nsec-input"
+                id="nostr-private-key"
+                onChange={(event) => {
+                  setNsecInput(event.target.value);
+                  setImportError(null);
+                }}
+                placeholder="Enter your key here"
+                ref={inputRef}
+                spellCheck={false}
+                type={isRevealed ? "text" : "password"}
+                value={nsecInput}
+              />
+              {hasInput ? (
+                <Button
+                  aria-label={
+                    isRevealed ? "Hide private key" : "Reveal private key"
+                  }
+                  className="h-10 w-10 shrink-0 text-[color:var(--buzz-onboarding-backup-ink)] hover:bg-transparent hover:text-foreground"
+                  data-testid="nostr-import-reveal-toggle"
+                  onClick={() => setIsRevealed((current) => !current)}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  {isRevealed ? (
+                    <EyeOff aria-hidden="true" className="h-6 w-6" />
+                  ) : (
+                    <Eye aria-hidden="true" className="h-6 w-6" />
+                  )}
+                </Button>
+              ) : null}
+            </div>
           </Card>
         ) : (
           <Input
