@@ -5,13 +5,19 @@ import {
   GlobalAgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/GlobalAgentConfigFields";
+import { BUZZ_AGENT_THINKING_EFFORT } from "@/features/agents/ui/buzzAgentConfig";
+import { runtimeSupportsLlmProviderSelection } from "@/features/agents/ui/personaDialogPickers";
+import { AgentDropdownSelect } from "@/features/agents/ui/personaProviderModelFields";
 import { createSaveCoalescer } from "./saveCoalescer";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import {
   getGlobalAgentConfig,
   setGlobalAgentConfig,
 } from "@/shared/api/tauriGlobalAgentConfig";
-import type { GlobalAgentConfig } from "@/shared/api/types";
+import type {
+  AcpRuntimeCatalogEntry,
+  GlobalAgentConfig,
+} from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
@@ -25,9 +31,38 @@ import type { DefaultConfigStepActions } from "./types";
 type DefaultConfigStepProps = {
   actions: DefaultConfigStepActions;
   direction: OnboardingTransitionDirection;
+  selectedRuntimeIds: readonly string[];
 };
 
-function AgentDefaultsSection() {
+const RUNTIME_ORDER = ["claude", "codex", "goose", "buzz-agent"];
+
+function formatHarnessLabel(runtime: AcpRuntimeCatalogEntry | undefined) {
+  if (!runtime) return "Select a harness";
+  return runtime.id === "buzz-agent" ? "Buzz" : runtime.label;
+}
+
+function sortSelectedRuntimes(
+  runtimes: readonly AcpRuntimeCatalogEntry[],
+  selectedRuntimeIds: readonly string[],
+) {
+  const selectedRuntimeIdSet = new Set(selectedRuntimeIds);
+  return runtimes
+    .filter((runtime) => selectedRuntimeIdSet.has(runtime.id))
+    .sort((left, right) => {
+      const leftIndex = RUNTIME_ORDER.indexOf(left.id);
+      const rightIndex = RUNTIME_ORDER.indexOf(right.id);
+      return (
+        (leftIndex === -1 ? RUNTIME_ORDER.length : leftIndex) -
+        (rightIndex === -1 ? RUNTIME_ORDER.length : rightIndex)
+      );
+    });
+}
+
+function AgentDefaultsSection({
+  selectedRuntimeIds,
+}: {
+  selectedRuntimeIds: readonly string[];
+}) {
   const runtimesQuery = useAcpRuntimesQuery();
   const [config, setConfig] =
     React.useState<GlobalAgentConfig>(EMPTY_GLOBAL_CONFIG);
@@ -82,56 +117,119 @@ function AgentDefaultsSection() {
     };
   }, []);
 
-  const selectedRuntime = React.useMemo(
+  const selectedRuntimes = React.useMemo(
+    () => sortSelectedRuntimes(runtimesQuery.data ?? [], selectedRuntimeIds),
+    [runtimesQuery.data, selectedRuntimeIds],
+  );
+  const selectedRuntime = React.useMemo(() => {
+    const preferredRuntime = selectedRuntimes.find(
+      (runtime) => runtime.id === config.preferred_runtime,
+    );
+    return preferredRuntime ?? selectedRuntimes[0];
+  }, [config.preferred_runtime, selectedRuntimes]);
+  const selectedRuntimeId =
+    selectedRuntime?.id ?? config.preferred_runtime ?? "";
+  const selectedRuntimeSupportsModelProvider =
+    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  const harnessOptions = React.useMemo(
     () =>
-      (runtimesQuery.data ?? []).find(
-        (runtime) => runtime.id === config.preferred_runtime,
-      ),
-    [config.preferred_runtime, runtimesQuery.data],
+      selectedRuntimes.map((runtime) => ({
+        label: formatHarnessLabel(runtime),
+        value: runtime.id,
+      })),
+    [selectedRuntimes],
   );
 
+  function handleHarnessChange(runtimeId: string) {
+    const nextEnvVars = { ...config.env_vars };
+    delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+    const nextProvider =
+      runtimeSupportsLlmProviderSelection(runtimeId) &&
+      config.provider !== "relay-mesh"
+        ? config.provider
+        : null;
+    const next = {
+      ...config,
+      env_vars: nextEnvVars,
+      model: null,
+      preferred_runtime: runtimeId || null,
+      provider: nextProvider,
+    };
+    setIsCustomModelEditing(false);
+    setIsCustomProvider(false);
+    setConfig(next);
+    coalescerRef.current?.enqueue(next);
+  }
+
   return (
-    <section className="w-full text-left text-sm">
+    <section className="w-full space-y-4 text-left text-sm">
       {isLoading ? (
         <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
           <Spinner className="h-4 w-4 border-2" />
           Loading…
         </div>
       ) : (
-        <GlobalAgentConfigFields
-          bakedEnv={bakedEnv}
-          selectedRuntime={selectedRuntime}
-          config={config}
-          isCustomModelEditing={isCustomModelEditing}
-          isCustomProvider={isCustomProvider}
-          autoSelectModelOnProviderChange
-          disableModelSelectDuringDiscovery={false}
-          effortPlaceholderLabel="Select effort level"
-          keepSelectedModelValueLabel
-          modelPlaceholderLabel="Select a model"
-          onConfigChange={(next) => {
-            // Always apply optimistically so the UI never reverts mid-save,
-            // then enqueue the persist — the coalescer serialises multiple
-            // rapid edits into a single trailing request.
-            setConfig(next);
-            coalescerRef.current?.enqueue(next);
-          }}
-          onCustomModelEditingChange={setIsCustomModelEditing}
-          onIsCustomProviderChange={setIsCustomProvider}
-          effortLabel="Effort"
-          providerLabel="Provider"
-          requireProviderForModelAndEffort
-          selectClassName="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
-          showAdvancedFields={false}
-          showCustomModelOption={false}
-          showCustomProviderOption={false}
-          showDescriptions={false}
-          showRequiredIndicators={false}
-          showProviderPlaceholderOption={false}
-          showUnavailableEffortOptions={false}
-          unstyled
-          useCustomSelect
-        />
+        <div className="space-y-7">
+          <div className="space-y-4">
+            <label
+              className="pl-3 text-sm font-medium"
+              htmlFor="global-agent-default-harness"
+            >
+              Default harness
+            </label>
+            <AgentDropdownSelect
+              className="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
+              id="global-agent-default-harness"
+              onValueChange={handleHarnessChange}
+              options={harnessOptions}
+              placeholder="Select a harness"
+              placeholderClassName="text-foreground/70"
+              testId="global-agent-default-harness"
+              value={selectedRuntimeId}
+            />
+          </div>
+
+          <GlobalAgentConfigFields
+            bakedEnv={bakedEnv}
+            selectedRuntime={selectedRuntime}
+            config={config}
+            isCustomModelEditing={isCustomModelEditing}
+            isCustomProvider={isCustomProvider}
+            autoSelectModelOnProviderChange
+            disableModelSelectDuringDiscovery={false}
+            effortPlaceholderLabel="Select effort level"
+            keepSelectedModelValueLabel
+            hideUnconfiguredCredentialProviders={
+              selectedRuntimeId === "buzz-agent"
+            }
+            modelPlaceholderLabel="Select a model"
+            onConfigChange={(next) => {
+              // Always apply optimistically so the UI never reverts mid-save,
+              // then enqueue the persist — the coalescer serialises multiple
+              // rapid edits into a single trailing request.
+              setConfig(next);
+              coalescerRef.current?.enqueue(next);
+            }}
+            onCustomModelEditingChange={setIsCustomModelEditing}
+            onIsCustomProviderChange={setIsCustomProvider}
+            preserveCredentialEnvVarsOnProviderChange
+            effortLabel="Effort"
+            placeholderClassName="text-foreground/70"
+            providerLabel="Provider"
+            requireProviderForModelAndEffort
+            selectClassName="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
+            showAdvancedFields={false}
+            showCustomModelOption={false}
+            showCustomProviderOption={false}
+            showDescriptions={false}
+            showProviderField={selectedRuntimeSupportsModelProvider}
+            showRequiredIndicators={false}
+            showProviderPlaceholderOption={false}
+            showUnavailableEffortOptions={false}
+            unstyled
+            useCustomSelect
+          />
+        </div>
       )}
     </section>
   );
@@ -145,6 +243,7 @@ function AgentDefaultsSection() {
 export function DefaultConfigStep({
   actions,
   direction,
+  selectedRuntimeIds,
 }: DefaultConfigStepProps) {
   return (
     <OnboardingSlideTransition
@@ -165,7 +264,7 @@ export function DefaultConfigStep({
 
       <div className="flex w-full flex-1 items-center justify-center py-10">
         <div className="w-full max-w-[328px]">
-          <AgentDefaultsSection />
+          <AgentDefaultsSection selectedRuntimeIds={selectedRuntimeIds} />
         </div>
       </div>
 

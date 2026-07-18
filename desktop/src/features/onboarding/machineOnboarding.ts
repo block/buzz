@@ -38,7 +38,6 @@ function clearMachineOnboardingCompletion(pubkey: string | null) {
 function forceMachineOnboarding() {
   if (!import.meta.env.DEV || typeof window === "undefined") return false;
   return (
-    import.meta.env.VITE_FORCE_MACHINE_ONBOARDING === "1" ||
     new URL(window.location.href).searchParams.get("machineOnboarding") === "1"
   );
 }

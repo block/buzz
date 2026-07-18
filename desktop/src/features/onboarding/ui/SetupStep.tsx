@@ -1,11 +1,6 @@
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import {
-  AlertTriangle,
-  Check,
-  ExternalLink,
-  TerminalSquare,
-} from "lucide-react";
+import { AlertTriangle, Check, ExternalLink } from "lucide-react";
 
 import {
   useAcpAuthMethodsQuery,
@@ -14,22 +9,22 @@ import {
   useInstallAcpRuntimeMutation,
   useGitBashPrerequisiteQuery,
 } from "@/features/agents/hooks";
-import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
+import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
-import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
-import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { Spinner } from "@/shared/ui/spinner";
-import { runtimeCanBeSelected } from "./onboardingRuntimeSelection";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import {
+  runtimeCanAdvanceOnboarding,
+  runtimeCanBeSelected,
+} from "./onboardingRuntimeSelection";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
-import chatgptLogoUrl from "../assets/harness-logos/chatgpt.png";
-import claudeLogoUrl from "../assets/harness-logos/claude.png";
-import geminiLogoUrl from "../assets/harness-logos/gemini.png";
-import gooseLogoUrl from "../assets/harness-logos/goose.png";
+import { getRuntimeDisplayLabel, RuntimeIcon } from "./RuntimeIcon";
 import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
@@ -60,38 +55,7 @@ type InstallResultState = {
   success: boolean;
 };
 
-const RUNTIME_LOGOS: Record<string, string> = {
-  chatgpt: chatgptLogoUrl,
-  claude: claudeLogoUrl,
-  "claude-code": claudeLogoUrl,
-  codex: chatgptLogoUrl,
-  gemini: geminiLogoUrl,
-  goose: gooseLogoUrl,
-  openai: chatgptLogoUrl,
-};
-
-function isBuzzRuntime(runtime: AcpRuntimeCatalogEntry): boolean {
-  const runtimeId = runtime.id.trim().toLowerCase();
-  const runtimeLabel = runtime.label.trim().toLowerCase();
-  return runtimeId === "buzz-agent" || runtimeLabel === "buzz";
-}
-
-function getRuntimeLogoUrl(runtime: AcpRuntimeCatalogEntry): string | null {
-  const runtimeId = runtime.id.trim().toLowerCase();
-  const runtimeLabel = runtime.label.trim().toLowerCase();
-  return (
-    RUNTIME_LOGOS[runtimeId] ??
-    (runtimeLabel.includes("claude")
-      ? claudeLogoUrl
-      : runtimeLabel.includes("goose")
-        ? gooseLogoUrl
-        : runtimeLabel.includes("gemini")
-          ? geminiLogoUrl
-          : runtimeLabel.includes("codex") || runtimeLabel.includes("chatgpt")
-            ? chatgptLogoUrl
-            : null)
-  );
-}
+type InstallResultsState = Record<string, InstallResultState>;
 
 function useSetupStepState(): SetupStepState {
   const runtimesQuery = useAcpRuntimesQuery();
@@ -109,47 +73,6 @@ function useSetupStepState(): SetupStepState {
   };
 }
 
-function RuntimeIcon({
-  className = "h-8 w-8",
-  runtime,
-}: {
-  className?: string;
-  runtime: AcpRuntimeCatalogEntry;
-}) {
-  const [imageFailed, setImageFailed] = React.useState(false);
-  const { isDark } = useTheme();
-  const runtimeLogoUrl = getRuntimeLogoUrl(runtime);
-  const imageUrl = runtimeLogoUrl ?? runtime.avatarUrl;
-  const shouldForceForegroundColor = !runtimeLogoUrl && runtime.id === "goose";
-
-  if (isBuzzRuntime(runtime)) {
-    return <BuzzMark className="h-8 w-12 text-foreground" />;
-  }
-
-  if (imageUrl && !imageFailed) {
-    return (
-      <img
-        alt=""
-        className={cn(
-          "rounded-md object-contain",
-          className,
-          shouldForceForegroundColor &&
-            (isDark ? "brightness-0 invert" : "brightness-0"),
-        )}
-        onError={() => setImageFailed(true)}
-        src={imageUrl}
-      />
-    );
-  }
-
-  return (
-    <TerminalSquare
-      className={cn(className, "text-foreground")}
-      strokeWidth={1.25}
-    />
-  );
-}
-
 function RuntimeSelectionIndicator({
   runtime,
   selected,
@@ -161,7 +84,7 @@ function RuntimeSelectionIndicator({
     <span
       aria-hidden="true"
       className={cn(
-        "buzz-onboarding-runtime-check pointer-events-none absolute right-3 top-3 flex h-8 w-8 scale-90 items-center justify-center rounded-full border border-[var(--buzz-welcome-chartreuse)] bg-white/75 opacity-0 transition-[background-color,opacity,transform] duration-200 ease-out group-hover:scale-100 group-hover:opacity-100 group-focus-visible:scale-100 group-focus-visible:opacity-100",
+        "pointer-events-none absolute right-3 top-3 flex h-8 w-8 scale-90 items-center justify-center rounded-full border border-[var(--buzz-welcome-chartreuse)] bg-white/75 opacity-0 transition-[background-color,opacity,transform] duration-200 ease-out group-hover:scale-100 group-hover:opacity-100 group-focus-visible:scale-100 group-focus-visible:opacity-100",
         selected &&
           "scale-100 bg-[var(--buzz-welcome-chartreuse)] opacity-100 group-hover:opacity-100",
       )}
@@ -169,7 +92,7 @@ function RuntimeSelectionIndicator({
     >
       <Check
         className={cn(
-          "buzz-onboarding-runtime-checkmark h-4 w-4 text-foreground transition-[opacity,transform] duration-150 ease-out",
+          "h-4 w-4 text-foreground transition-[opacity,transform] duration-150 ease-out",
           selected ? "scale-100 opacity-100" : "scale-50 opacity-0",
         )}
         data-testid={`onboarding-runtime-checkmark-${runtime.id}`}
@@ -179,46 +102,111 @@ function RuntimeSelectionIndicator({
   );
 }
 
-function runtimeIsReadyForOnboarding(
-  runtime: AcpRuntimeCatalogEntry,
-  installSuccess: boolean,
-) {
-  if (installSuccess) return true;
-  if (runtime.availability !== "available") return false;
-  return (
-    runtime.authStatus.status === "logged_in" ||
-    runtime.authStatus.status === "not_applicable"
-  );
+function runtimeIsInstalled(runtime: AcpRuntimeCatalogEntry) {
+  return runtimeCanBeSelected(runtime) && runtimeCanAdvanceOnboarding(runtime);
 }
 
-function runtimeNeedsInstallSetup(
-  runtime: AcpRuntimeCatalogEntry,
-  installSuccess: boolean,
-) {
-  return runtime.availability !== "available" && !installSuccess;
+function useSetupFlashState(setupFlashToken: number) {
+  const [isFlashing, setIsFlashing] = React.useState(false);
+
+  React.useEffect(() => {
+    if (setupFlashToken === 0) return;
+
+    setIsFlashing(false);
+    const frame = window.requestAnimationFrame(() => {
+      setIsFlashing(true);
+    });
+    const timeout = window.setTimeout(() => {
+      setIsFlashing(false);
+    }, 650);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timeout);
+    };
+  }, [setupFlashToken]);
+
+  return isFlashing;
 }
 
-function RuntimeSetupPill({
+function RuntimeStatus({
   installError,
   installSuccess,
   isInstalling,
+  onInstall,
+  onSelect,
   runtime,
+  setupFlashToken,
 }: {
   installError: string | null;
   installSuccess: boolean;
   isInstalling: boolean;
+  onInstall: () => void;
+  onSelect: () => void;
   runtime: AcpRuntimeCatalogEntry;
+  setupFlashToken: number;
 }) {
-  const isReady = runtimeIsReadyForOnboarding(runtime, installSuccess);
+  const isSetupFlashing = useSetupFlashState(setupFlashToken);
+  const methodsQuery = useAcpAuthMethodsQuery(runtime.id, {
+    enabled:
+      runtime.availability === "available" &&
+      runtime.authStatus.status === "logged_out",
+  });
+  const connectMutation = useConnectAcpRuntimeMutation();
+  const authMethods = getOnboardingAuthMethods(
+    runtime,
+    methodsQuery.data?.methods ?? [],
+  );
+  const authMethod = authMethods[0] ?? null;
+  const shouldRunAuthSetup =
+    runtime.availability === "available" &&
+    runtime.authStatus.status === "logged_out";
 
-  if (isReady) {
+  if (shouldRunAuthSetup) {
     return (
-      <span
-        className="buzz-onboarding-runtime-pill inline-flex h-5 items-center rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono font-normal text-foreground"
-        data-testid={`onboarding-runtime-installed-${runtime.id}`}
-      >
-        INSTALLED
-      </span>
+      <div className="flex flex-col items-center gap-1.5">
+        <Button
+          aria-label={`Set up ${runtime.label}`}
+          className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+          data-setup-flash={isSetupFlashing ? "true" : undefined}
+          data-testid={`onboarding-runtime-instructions-${runtime.id}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onSelect();
+            if (!authMethod) {
+              void methodsQuery.refetch();
+              return;
+            }
+            connectMutation.mutate(
+              {
+                methodId: authMethod.id,
+                runtimeId: runtime.id,
+              },
+              {
+                onSuccess: () => {
+                  if (runtime.id === "claude" || runtime.id === "codex") {
+                    onSelect();
+                  }
+                },
+              },
+            );
+          }}
+          type="button"
+          variant="ghost"
+        >
+          SET UP
+        </Button>
+        {methodsQuery.error instanceof Error ? (
+          <span className="text-2xs text-destructive">
+            Couldn’t load sign-in options.
+          </span>
+        ) : null}
+        {connectMutation.error instanceof Error ? (
+          <span className="text-2xs text-destructive">
+            {connectMutation.error.message}
+          </span>
+        ) : null}
+      </div>
     );
   }
 
@@ -226,7 +214,7 @@ function RuntimeSetupPill({
     return (
       <div
         aria-label={`Installing ${runtime.label}`}
-        className="buzz-onboarding-runtime-pill flex h-5 items-center gap-2 rounded-full bg-white/60 px-2.5 font-mono font-normal text-foreground"
+        className="flex h-5 items-center gap-2 rounded-full bg-white/60 px-2.5 font-mono text-badge font-normal uppercase text-foreground"
         role="status"
       >
         <Spinner className="h-3 w-3 border-2 text-foreground" />
@@ -235,76 +223,259 @@ function RuntimeSetupPill({
     );
   }
 
+  if (installError) {
+    return (
+      <div className="flex h-8 w-8 items-center justify-center">
+        <AlertTriangle className="h-4 w-4 text-destructive" />
+      </div>
+    );
+  }
+
+  if (runtimeIsInstalled(runtime) || installSuccess) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            aria-label={`${runtime.label} installed`}
+            className="inline-flex h-5 cursor-default items-center rounded-full bg-[#EBEFEF] px-2.5 font-mono text-badge font-normal uppercase text-foreground"
+            data-testid={`onboarding-runtime-installed-${runtime.id}`}
+            role="img"
+          >
+            INSTALLED
+          </span>
+        </TooltipTrigger>
+        <TooltipContent
+          className="max-w-80 bg-black text-left text-xs text-white shadow-sm"
+          side="top"
+        >
+          {runtimeIsInstalled(runtime) ? (
+            <RuntimeDetails runtime={runtime} />
+          ) : (
+            <p className="text-xs leading-4 text-white">Setup completed.</p>
+          )}
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  if (runtime.canAutoInstall) {
+    return (
+      <Button
+        aria-label={`Install ${runtime.label}`}
+        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+        data-setup-flash={isSetupFlashing ? "true" : undefined}
+        data-testid={`onboarding-runtime-install-${runtime.id}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onSelect();
+          onInstall();
+        }}
+        type="button"
+        variant="ghost"
+      >
+        SET UP
+      </Button>
+    );
+  }
+
   return (
-    <span
-      className={cn(
-        "buzz-onboarding-runtime-pill inline-flex h-5 items-center rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono font-normal text-foreground",
-        installError && "bg-destructive/10 text-destructive",
-      )}
-      data-runtime-setup
-      data-testid={
-        runtime.canAutoInstall
-          ? `onboarding-runtime-install-${runtime.id}`
-          : `onboarding-runtime-instructions-${runtime.id}`
-      }
+    <Button
+      aria-label={`View ${runtime.label} setup instructions`}
+      className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+      data-setup-flash={isSetupFlashing ? "true" : undefined}
+      data-testid={`onboarding-runtime-instructions-${runtime.id}`}
+      onClick={(event) => {
+        event.stopPropagation();
+        onSelect();
+        void openUrl(runtime.installInstructionsUrl);
+      }}
+      type="button"
+      variant="ghost"
     >
-      {installError ? "RETRY" : "SET UP"}
-    </span>
+      SET UP
+    </Button>
   );
+}
+
+function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+  if (
+    runtime.availability === "available" &&
+    runtime.command &&
+    runtime.binaryPath
+  ) {
+    const description = describeResolvedCommand(
+      runtime.command,
+      runtime.binaryPath,
+    );
+    return (
+      <>
+        <p className="text-xs leading-4 text-white">
+          {description.charAt(0).toUpperCase() + description.slice(1)}
+        </p>
+        {runtime.defaultArgs.length > 0 ? (
+          <p className="mt-1 text-xs leading-4 text-white">
+            Args:{" "}
+            <code className="font-mono">{runtime.defaultArgs.join(", ")}</code>
+          </p>
+        ) : null}
+      </>
+    );
+  }
+
+  if (runtime.availability === "adapter_missing") {
+    return (
+      <>
+        <p className="text-xs leading-4 text-white">
+          CLI detected; ACP adapter missing.
+        </p>
+        <p className="mt-1 text-xs leading-4 text-white">
+          {runtime.installHint}
+        </p>
+      </>
+    );
+  }
+
+  if (runtime.availability === "adapter_outdated") {
+    return (
+      <>
+        <p className="text-xs leading-4 text-white">
+          ACP adapter detected but outdated — reinstall required.
+        </p>
+        <p className="mt-1 text-xs leading-4 text-white">
+          This updates the machine-global{" "}
+          <code className="rounded bg-white/10 px-0.5 font-mono text-xs text-white">
+            codex-acp
+          </code>{" "}
+          adapter. Older Buzz releases using the legacy adapter contract may
+          lose community access until{" "}
+          <code className="rounded bg-white/10 px-0.5 font-mono text-xs text-white">
+            @zed-industries/codex-acp@0.16.0
+          </code>{" "}
+          is restored.
+        </p>
+        <p className="mt-1 text-xs leading-4 text-white">
+          {runtime.installHint}
+        </p>
+      </>
+    );
+  }
+
+  if (runtime.availability === "cli_missing") {
+    return (
+      <>
+        <p className="text-xs leading-4 text-white">
+          ACP adapter detected; CLI missing.
+        </p>
+        <p className="mt-1 text-xs leading-4 text-white">
+          {runtime.installHint}
+        </p>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <p className="text-xs leading-4 text-white">Not installed yet.</p>
+      <p className="mt-1 text-xs leading-4 text-white">{runtime.installHint}</p>
+    </>
+  );
+}
+
+function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
+  if (
+    runtime.availability === "available" &&
+    runtime.command &&
+    runtime.binaryPath
+  ) {
+    const description = describeResolvedCommand(
+      runtime.command,
+      runtime.binaryPath,
+    );
+    return description.charAt(0).toUpperCase() + description.slice(1);
+  }
+  if (runtime.availability === "adapter_missing") {
+    return "CLI detected; ACP adapter missing.";
+  }
+  if (runtime.availability === "adapter_outdated") {
+    return "ACP adapter detected but outdated — reinstall required.";
+  }
+  if (runtime.availability === "cli_missing") {
+    return "ACP adapter detected; CLI missing.";
+  }
+  return "Not installed yet.";
 }
 
 function isSupportedOnboardingAuthMethod(
   runtime: AcpRuntimeCatalogEntry,
-  method: { id: string; name: string },
+  method: AcpAuthMethod,
 ) {
   if (runtime.id !== "codex") return true;
   return !/api[-_ ]?key/i.test(`${method.id} ${method.name}`);
 }
 
-function onboardingAuthMethodLabel(
-  runtime: AcpRuntimeCatalogEntry,
-  method: { name: string },
-) {
-  if (runtime.id === "codex") return "Log in";
-  return method.name || "Sign in";
+function isPreferredClaudeAuthMethod(method: AcpAuthMethod) {
+  const haystack = [
+    method.id,
+    method.name,
+    method.description ?? "",
+    method.command.join(" "),
+    method.args.join(" "),
+  ]
+    .join(" ")
+    .toLowerCase();
+  return (
+    haystack.includes("claudeai") ||
+    haystack.includes("claude ai") ||
+    haystack.includes("claude.ai") ||
+    haystack.includes("subscription")
+  );
 }
 
-function RuntimeAuthActions({
-  onAuthenticated,
-  runtime,
-}: {
-  onAuthenticated: () => void;
-  runtime: AcpRuntimeCatalogEntry;
-}) {
+function getOnboardingAuthMethods(
+  runtime: AcpRuntimeCatalogEntry,
+  methods: AcpAuthMethod[],
+) {
+  const supported = methods.filter((method) =>
+    isSupportedOnboardingAuthMethod(runtime, method),
+  );
+
+  if (runtime.id === "claude") {
+    const preferred =
+      supported.find(isPreferredClaudeAuthMethod) ?? supported[0];
+    return preferred ? [preferred] : [];
+  }
+
+  if (runtime.id === "codex") {
+    return supported.slice(0, 1);
+  }
+
+  return supported;
+}
+
+function RuntimeAuthActions({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   const runtimesQuery = useAcpRuntimesQuery();
-  const methodsQuery = useAcpAuthMethodsQuery(runtime.id, {
-    enabled:
-      runtime.availability === "available" &&
-      runtime.authStatus.status === "logged_out",
-  });
-  const connectMutation = useConnectAcpRuntimeMutation();
 
   if (runtime.authStatus.status === "config_invalid") {
     return (
-      <p className="mt-1 max-w-[15rem] text-center text-2xs leading-4 text-destructive">
+      <p className="mt-2 text-2xs leading-4 text-destructive">
         {runtime.authStatus.diagnostic}
       </p>
     );
   }
-
   if (runtime.authStatus.status === "unknown") {
     return (
-      <div className="mt-1 flex flex-col items-center gap-1.5">
+      <div className="mt-2 flex flex-col items-center gap-1.5">
         <span className="text-2xs text-muted-foreground">
           Couldn’t verify authentication.
         </span>
         <Button
-          className="h-6 rounded-full px-2 text-2xs"
           disabled={runtimesQuery.isFetching}
+          className="h-6 rounded-full px-2 text-2xs"
           onClick={(event) => {
             event.stopPropagation();
             void runtimesQuery.refetch();
           }}
+          size="sm"
           type="button"
           variant="ghost"
         >
@@ -313,73 +484,7 @@ function RuntimeAuthActions({
       </div>
     );
   }
-
-  if (runtime.authStatus.status !== "logged_out") return null;
-
-  const methods = (methodsQuery.data?.methods ?? []).filter((method) =>
-    isSupportedOnboardingAuthMethod(runtime, method),
-  );
-
-  return (
-    <div className="mt-1 flex flex-col items-center gap-1.5">
-      {methodsQuery.isLoading ? (
-        <span className="text-2xs text-muted-foreground">Loading sign-in…</span>
-      ) : methods.length > 0 ? (
-        methods.map((method) => (
-          <Button
-            className="h-6 rounded-full px-2 text-2xs"
-            disabled={connectMutation.isPending}
-            key={method.id}
-            onClick={(event) => {
-              event.stopPropagation();
-              connectMutation.mutate(
-                {
-                  methodId: method.id,
-                  runtimeId: runtime.id,
-                },
-                {
-                  onSuccess: () => {
-                    if (runtime.id === "claude" || runtime.id === "codex") {
-                      onAuthenticated();
-                    }
-                  },
-                },
-              );
-            }}
-            type="button"
-            variant="outline"
-          >
-            {connectMutation.isPending
-              ? "Opening…"
-              : onboardingAuthMethodLabel(runtime, method)}
-          </Button>
-        ))
-      ) : (
-        <span className="text-2xs text-muted-foreground">
-          {methodsQuery.error instanceof Error
-            ? "Couldn’t load sign-in options."
-            : runtime.loginHint || "Sign in from the CLI."}
-        </span>
-      )}
-      {connectMutation.error instanceof Error ? (
-        <span className="text-2xs text-destructive">
-          {connectMutation.error.message}
-        </span>
-      ) : null}
-      <Button
-        className="h-6 rounded-full px-2 text-2xs"
-        disabled={runtimesQuery.isFetching}
-        onClick={(event) => {
-          event.stopPropagation();
-          void Promise.all([runtimesQuery.refetch(), methodsQuery.refetch()]);
-        }}
-        type="button"
-        variant="ghost"
-      >
-        {runtimesQuery.isFetching ? "Checking…" : "Check again"}
-      </Button>
-    </div>
-  );
+  return null;
 }
 
 function RuntimeCard({
@@ -391,6 +496,7 @@ function RuntimeCard({
   onToggle,
   runtime,
   selected,
+  setupFlashToken,
 }: {
   installError: string | null;
   installSuccess: boolean;
@@ -400,90 +506,63 @@ function RuntimeCard({
   onToggle: () => void;
   runtime: AcpRuntimeCatalogEntry;
   selected: boolean;
+  setupFlashToken: number;
 }) {
-  const needsInstallSetup = runtimeNeedsInstallSetup(runtime, installSuccess);
-  const isReady = runtimeIsReadyForOnboarding(runtime, installSuccess);
+  const isAvailable = runtime.availability === "available" || installSuccess;
   const canSelect = runtimeCanBeSelected(runtime);
-  const canSetup = needsInstallSetup && !isInstalling;
-  const showStatusPill =
-    selected ||
-    !isReady ||
-    installSuccess ||
-    Boolean(installError) ||
-    isInstalling;
-
-  function handleSetup() {
-    if (runtime.canAutoInstall) {
-      onInstall();
-      return;
-    }
-    void openUrl(runtime.installInstructionsUrl);
-  }
 
   return (
-    // biome-ignore lint/a11y/useSemanticElements: Cannot use <input> because this card contains nested setup and auth buttons.
+    // biome-ignore lint/a11y/useSemanticElements: Cannot use <input> because this card contains nested setup and details buttons, which require interactive content
     <div
       aria-checked={selected}
       aria-disabled={!canSelect}
       className={cn(
-        "group relative flex aspect-[288/132] min-h-[96px] w-full select-none flex-col items-center justify-center rounded-2xl border-0 bg-white/75 px-3 py-1.5 text-center outline-none transition-colors duration-150 ease-out hover:bg-white/80 active:bg-white/90 focus-visible:ring-2 focus-visible:ring-foreground/40",
-        selected && "bg-white/90 hover:bg-white/90",
+        "group relative flex aspect-[288/132] min-h-[96px] w-full max-w-[288px] select-none flex-col items-center justify-center rounded-2xl border-0 bg-white/75 px-3 py-1.5 text-center outline-none transition-colors duration-150 ease-out hover:bg-white/80 active:bg-white/90 focus-visible:ring-2 focus-visible:ring-foreground/40",
         installError && "ring-1 ring-destructive/40",
+        selected && "bg-white/90 hover:bg-white/90",
         canSelect ? "cursor-pointer" : "cursor-default",
-        canSetup && "cursor-pointer",
       )}
       data-testid={`onboarding-runtime-${runtime.id}`}
-      onClick={(event) => {
-        const target =
-          event.target instanceof HTMLElement ? event.target : null;
-        if (canSetup && target?.closest("[data-runtime-setup]")) {
-          handleSetup();
-          return;
-        }
-        if (canSelect) onToggle();
-      }}
+      onClick={canSelect ? onToggle : undefined}
       onKeyDown={(event) => {
-        if (event.repeat || (event.key !== "Enter" && event.key !== " ")) {
-          return;
-        }
-        if (canSetup) {
-          event.preventDefault();
-          handleSetup();
-          return;
-        }
-        if (canSelect) {
+        if (event.target !== event.currentTarget) return;
+        if (canSelect && (event.key === "Enter" || event.key === " ")) {
           event.preventDefault();
           onToggle();
         }
       }}
       role="checkbox"
-      tabIndex={canSelect || canSetup ? 0 : -1}
+      tabIndex={canSelect ? 0 : -1}
     >
       <RuntimeSelectionIndicator runtime={runtime} selected={selected} />
 
-      <div className="flex flex-col items-center gap-2">
-        <div className="flex items-center justify-center gap-3">
+      <div className="flex min-w-0 flex-col items-center gap-2">
+        <div className="flex min-w-0 items-center justify-center gap-3">
           <RuntimeIcon className="h-8 w-8" runtime={runtime} />
-          {!isBuzzRuntime(runtime) ? (
-            <h2 className="text-sm font-normal leading-5 text-foreground">
-              {runtime.label}
-            </h2>
-          ) : null}
+          <h2 className="truncate text-sm font-normal leading-5 text-foreground">
+            {getRuntimeDisplayLabel(runtime)}
+          </h2>
         </div>
-        {showStatusPill ? (
-          <RuntimeSetupPill
-            installError={installError}
-            installSuccess={installSuccess}
-            isInstalling={isInstalling}
-            runtime={runtime}
-          />
+        <RuntimeStatus
+          installError={installError}
+          installSuccess={installSuccess}
+          isInstalling={isInstalling}
+          onInstall={onInstall}
+          onSelect={onSelect}
+          runtime={runtime}
+          setupFlashToken={setupFlashToken}
+        />
+        {!isAvailable && !installError ? (
+          <p className="max-w-[13rem] text-2xs leading-4 text-muted-foreground">
+            {runtimeDetailText(runtime)}
+          </p>
         ) : null}
-        {selected && installError ? (
-          <p className="max-w-[22rem] text-2xs leading-4 text-destructive">
+        {installError ? (
+          <p className="max-w-[13rem] text-2xs leading-4 text-destructive">
             {installError}
           </p>
         ) : null}
-        <RuntimeAuthActions onAuthenticated={onSelect} runtime={runtime} />
+        <RuntimeAuthActions runtime={runtime} />
       </div>
     </div>
   );
@@ -564,12 +643,22 @@ function RuntimeProvidersLoadingState() {
 }
 
 function RuntimeProvidersSection({
+  installResults,
+  onInstallResultsChange,
   onSelectedRuntimeIdsChange,
   runtimeProviders,
+  setupFlashToken,
+  setupRequiredRuntimeIds,
   selectedRuntimeIds,
 }: {
+  installResults: InstallResultsState;
+  onInstallResultsChange: React.Dispatch<
+    React.SetStateAction<InstallResultsState>
+  >;
   onSelectedRuntimeIdsChange: (runtimeIds: readonly string[]) => void;
   runtimeProviders: SetupStepState["runtimeProviders"];
+  setupFlashToken: number;
+  setupRequiredRuntimeIds: readonly string[];
   selectedRuntimeIds: readonly string[];
 }) {
   const { errorMessage, isChecking, items } = runtimeProviders;
@@ -583,12 +672,13 @@ function RuntimeProvidersSection({
     );
   });
   const installMutation = useInstallAcpRuntimeMutation();
-  const [installResults, setInstallResults] = React.useState<
-    Record<string, InstallResultState>
-  >({});
   const selectedRuntimeIdSet = React.useMemo(
     () => new Set(selectedRuntimeIds),
     [selectedRuntimeIds],
+  );
+  const setupRequiredRuntimeIdSet = React.useMemo(
+    () => new Set(setupRequiredRuntimeIds),
+    [setupRequiredRuntimeIds],
   );
 
   function handleRuntimeToggle(runtimeId: string) {
@@ -607,14 +697,14 @@ function RuntimeProvidersSection({
   }
 
   function handleInstall(runtimeId: string) {
-    setInstallResults((current) => ({
+    onInstallResultsChange((current) => ({
       ...current,
       [runtimeId]: { error: null, success: false },
     }));
 
     installMutation.mutate(runtimeId, {
       onSuccess: (result) => {
-        setInstallResults((current) => ({
+        onInstallResultsChange((current) => ({
           ...current,
           [runtimeId]: result.success
             ? { error: null, success: true }
@@ -622,7 +712,7 @@ function RuntimeProvidersSection({
         }));
       },
       onError: (error) => {
-        setInstallResults((current) => ({
+        onInstallResultsChange((current) => ({
           ...current,
           [runtimeId]: {
             error: error instanceof Error ? error.message : "Install failed.",
@@ -635,16 +725,18 @@ function RuntimeProvidersSection({
 
   return (
     <section className="flex min-h-full w-full flex-col items-center">
-      <div className="w-full max-w-[620px] text-center">
+      <div className="w-full max-w-[820px] text-center">
         <h1 className="text-title font-normal text-foreground">
           Use the models that fit the task
         </h1>
-        <p className="mx-auto mt-3 max-w-[520px] text-sm leading-6 text-foreground/90">
-          Connect different model providers so each agent can use the right
-          model for the work.
-        </p>
-        <p className="mt-4 text-sm leading-5 text-foreground/90">
-          Choose at least one to start using Buzz.
+        <p className="mx-auto mt-3 max-w-[760px] text-sm leading-6 text-foreground/90">
+          <span>
+            Connect your model providers here. Each agent can use the one that’s
+            best for their work.
+          </span>
+          <span className="mt-1 block">
+            Choose at least one to start using Buzz.
+          </span>
         </p>
       </div>
 
@@ -652,7 +744,7 @@ function RuntimeProvidersSection({
         <GitBashPrerequisiteCard />
 
         {items.length > 0 ? (
-          <fieldset className="grid min-w-0 w-full max-w-[640px] grid-cols-1 gap-4 border-0 p-0 md:grid-cols-2">
+          <fieldset className="grid min-w-0 w-full max-w-[592px] grid-cols-1 gap-4 border-0 p-0 md:grid-cols-2">
             <legend className="sr-only">Agent harnesses</legend>
             {orderedItems.map((runtime) => (
               <RuntimeCard
@@ -668,6 +760,11 @@ function RuntimeProvidersSection({
                 onToggle={() => handleRuntimeToggle(runtime.id)}
                 runtime={runtime}
                 selected={selectedRuntimeIdSet.has(runtime.id)}
+                setupFlashToken={
+                  setupRequiredRuntimeIdSet.has(runtime.id)
+                    ? setupFlashToken
+                    : 0
+                }
               />
             ))}
           </fieldset>
@@ -703,6 +800,53 @@ function SetupStepContent({
   state,
 }: SetupStepContentProps) {
   const { runtimeProviders } = state;
+  const [installResults, setInstallResults] =
+    React.useState<InstallResultsState>({});
+  const [setupFlashToken, setSetupFlashToken] = React.useState(0);
+  const [setupRequiredHintKey, setSetupRequiredHintKey] = React.useState<
+    string | null
+  >(null);
+  const runtimeById = React.useMemo(
+    () =>
+      new Map(runtimeProviders.items.map((runtime) => [runtime.id, runtime])),
+    [runtimeProviders.items],
+  );
+  const setupRequiredRuntimeIds = React.useMemo(
+    () =>
+      selectedRuntimeIds.filter((runtimeId) => {
+        const runtime = runtimeById.get(runtimeId);
+        if (!runtime) return false;
+        return !runtimeCanAdvanceOnboarding(
+          runtime,
+          installResults[runtimeId]?.success ?? false,
+        );
+      }),
+    [installResults, runtimeById, selectedRuntimeIds],
+  );
+  const hasSetupRequiredSelection = setupRequiredRuntimeIds.length > 0;
+  const setupRequiredRuntimeIdsKey = setupRequiredRuntimeIds.join("\0");
+  const showSetupRequiredHint =
+    hasSetupRequiredSelection &&
+    setupRequiredHintKey === setupRequiredRuntimeIdsKey;
+
+  React.useEffect(() => {
+    if (
+      setupRequiredHintKey !== null &&
+      setupRequiredHintKey !== setupRequiredRuntimeIdsKey
+    ) {
+      setSetupRequiredHintKey(null);
+    }
+  }, [setupRequiredHintKey, setupRequiredRuntimeIdsKey]);
+
+  function handleNext() {
+    if (selectedRuntimeIds.length === 0 || isSelectionSaving) return;
+    if (hasSetupRequiredSelection) {
+      setSetupRequiredHintKey(setupRequiredRuntimeIdsKey);
+      setSetupFlashToken((current) => current + 1);
+      return;
+    }
+    actions.next();
+  }
 
   return (
     <OnboardingSlideTransition
@@ -712,26 +856,46 @@ function SetupStepContent({
       transitionKey={`setup-${direction}`}
     >
       <RuntimeProvidersSection
+        installResults={installResults}
+        onInstallResultsChange={setInstallResults}
         onSelectedRuntimeIdsChange={onSelectedRuntimeIdsChange}
         runtimeProviders={runtimeProviders}
+        setupFlashToken={setupFlashToken}
+        setupRequiredRuntimeIds={setupRequiredRuntimeIds}
         selectedRuntimeIds={selectedRuntimeIds}
       />
 
       <OnboardingFooter>
         {selectionError ? (
-          <p className="max-w-[24rem] text-center text-sm text-destructive">
+          <p
+            className="max-w-sm text-center text-xs text-destructive"
+            role="alert"
+          >
             {selectionError}
           </p>
         ) : null}
-
+        {hasSetupRequiredSelection && showSetupRequiredHint ? (
+          <p
+            className="-mb-1 text-center text-xs leading-4 text-foreground/60"
+            data-testid="onboarding-setup-next-hint"
+          >
+            Please finish set up
+          </p>
+        ) : null}
         <Button
-          className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
+          className={cn(
+            ONBOARDING_PRIMARY_CTA_CLASS,
+            "text-sm",
+            hasSetupRequiredSelection &&
+              "cursor-default opacity-50 hover:opacity-50",
+          )}
+          data-soft-disabled={hasSetupRequiredSelection ? "true" : undefined}
           data-testid="onboarding-setup-next"
           disabled={selectedRuntimeIds.length === 0 || isSelectionSaving}
-          onClick={actions.next}
+          onClick={handleNext}
           type="button"
         >
-          {isSelectionSaving ? "Saving…" : "Next"}
+          Next
         </Button>
 
         <Button

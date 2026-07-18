@@ -24,9 +24,11 @@ import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  PERSONA_LLM_PROVIDER_OPTIONS,
   getPersonaProviderOptions,
   getProviderApiKeyEnvVar,
   requiredCredentialEnvKeys,
+  runtimeSupportsLlmProviderSelection,
 } from "@/features/agents/ui/personaDialogPickers";
 import {
   AgentDropdownSelect,
@@ -74,11 +76,15 @@ export type GlobalAgentConfigFieldsProps = {
   disableModelSelectDuringDiscovery?: boolean;
   effortPlaceholderLabel?: string;
   effortLabel?: string;
+  hideUnconfiguredCredentialProviders?: boolean;
   keepSelectedModelValueLabel?: boolean;
   modelPlaceholderLabel?: string;
+  placeholderClassName?: string;
   providerLabel?: string;
+  preserveCredentialEnvVarsOnProviderChange?: boolean;
   requireProviderForModelAndEffort?: boolean;
   selectClassName?: string;
+  showProviderField?: boolean;
   showAdvancedFields?: boolean;
   showCustomModelOption?: boolean;
   showCustomProviderOption?: boolean;
@@ -106,11 +112,15 @@ export function GlobalAgentConfigFields({
   disableModelSelectDuringDiscovery = true,
   effortPlaceholderLabel,
   effortLabel = "Thinking/effort",
+  hideUnconfiguredCredentialProviders = false,
   keepSelectedModelValueLabel = false,
   modelPlaceholderLabel = "Select model",
+  placeholderClassName,
   providerLabel = "LLM provider",
+  preserveCredentialEnvVarsOnProviderChange = false,
   requireProviderForModelAndEffort = false,
   selectClassName,
+  showProviderField = true,
   showAdvancedFields = true,
   showCustomModelOption = true,
   showCustomProviderOption = true,
@@ -127,7 +137,11 @@ export function GlobalAgentConfigFields({
     () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
     [bakedEnv],
   );
-  const effectiveProvider = config.provider?.trim() || bakedProvider || "";
+  const selectedRuntimeId = selectedRuntime?.id ?? "";
+  const providerFieldVisible = showProviderField;
+  const effectiveProvider = providerFieldVisible
+    ? config.provider?.trim() || bakedProvider || ""
+    : "";
   const fallbackModel = React.useMemo(
     () => getGlobalModelFallback(bakedEnv, effectiveProvider, config.env_vars),
     [bakedEnv, config.env_vars, effectiveProvider],
@@ -147,16 +161,24 @@ export function GlobalAgentConfigFields({
     [bakedEnv],
   );
 
-  const providerValue = config.provider ?? "";
-  const providerForDiscovery = isCustomProvider
-    ? ""
-    : providerValue || bakedProvider || "";
+  const providerValue = providerFieldVisible ? (config.provider ?? "") : "";
+  const providerForDiscovery =
+    providerFieldVisible && !isCustomProvider
+      ? providerValue || bakedProvider || ""
+      : "";
   const dependentFieldsDisabled =
+    providerFieldVisible &&
     requireProviderForModelAndEffort &&
     providerForDiscovery.trim().length === 0;
-  const credentialProvider = isCustomProvider ? "" : effectiveProvider;
+  const credentialProvider =
+    providerFieldVisible && !isCustomProvider ? effectiveProvider : "";
+  const credentialRuntimeId = runtimeSupportsLlmProviderSelection(
+    selectedRuntimeId,
+  )
+    ? selectedRuntimeId
+    : "buzz-agent";
   const requiredEnvKeys = requiredCredentialEnvKeys(
-    "buzz-agent",
+    credentialRuntimeId,
     credentialProvider,
   );
   const apiKeyEnvVar = getProviderApiKeyEnvVar(credentialProvider);
@@ -169,6 +191,13 @@ export function GlobalAgentConfigFields({
     () => bakedEnv.map((entry) => entry.key),
     [bakedEnv],
   );
+  const configuredCredentialKeys = React.useMemo(() => {
+    const keys = new Set(bakedEnvKeys);
+    for (const [key, value] of Object.entries(config.env_vars)) {
+      if (value.trim().length > 0) keys.add(key);
+    }
+    return keys;
+  }, [bakedEnvKeys, config.env_vars]);
   const apiKeyInherited =
     apiKeyEnvVar !== null &&
     apiKeyValue.length === 0 &&
@@ -187,24 +216,25 @@ export function GlobalAgentConfigFields({
     selectedRuntime,
   });
 
-  const autoSelectedModelProviderRef = React.useRef<string | null>(null);
+  const autoSelectedModelScopeRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!autoSelectModelOnProviderChange) return;
     const trimmedProvider = providerForDiscovery.trim();
     if (trimmedProvider.length === 0 || isCustomProvider) {
-      autoSelectedModelProviderRef.current = null;
+      autoSelectedModelScopeRef.current = null;
       return;
     }
     if ((config.model ?? "").trim().length > 0) return;
     if (modelDiscoveryLoading || discoveredModelOptions === null) return;
-    if (autoSelectedModelProviderRef.current === trimmedProvider) return;
+    const selectionScope = `${selectedRuntimeId}:${trimmedProvider}`;
+    if (autoSelectedModelScopeRef.current === selectionScope) return;
 
     const firstModel = discoveredModelOptions.find(
       (option) => option.id.trim().length > 0,
     );
     if (!firstModel) return;
 
-    autoSelectedModelProviderRef.current = trimmedProvider;
+    autoSelectedModelScopeRef.current = selectionScope;
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, model: firstModel.id });
   }, [
@@ -216,6 +246,7 @@ export function GlobalAgentConfigFields({
     onConfigChange,
     onCustomModelEditingChange,
     providerForDiscovery,
+    selectedRuntimeId,
   ]);
 
   const currentEffortForAutoClear =
@@ -258,7 +289,9 @@ export function GlobalAgentConfigFields({
     const previousApiKey = getProviderApiKeyEnvVar(effectiveProvider);
     if (value === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
       const nextEnvVars = { ...config.env_vars };
-      if (previousApiKey) delete nextEnvVars[previousApiKey];
+      if (!preserveCredentialEnvVarsOnProviderChange && previousApiKey) {
+        delete nextEnvVars[previousApiKey];
+      }
       onIsCustomProviderChange(true);
       onConfigChange({ ...config, env_vars: nextEnvVars, provider: null });
       return;
@@ -269,7 +302,11 @@ export function GlobalAgentConfigFields({
       nextProvider ?? bakedProvider ?? "",
     );
     const nextEnvVars = { ...config.env_vars };
-    if (previousApiKey && previousApiKey !== nextApiKey) {
+    if (
+      !preserveCredentialEnvVarsOnProviderChange &&
+      previousApiKey &&
+      previousApiKey !== nextApiKey
+    ) {
       delete nextEnvVars[previousApiKey];
     }
     const providerChanged = nextProvider !== (config.provider ?? null);
@@ -311,16 +348,38 @@ export function GlobalAgentConfigFields({
   // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
   // migration rewrites v1→v2. Hide the legacy v1 option so it is not offered
   // for new selections; OSS builds show it.
-  const hideProviderIds = React.useMemo(
-    () =>
-      bakedEnvKeys.includes("BUZZ_AGENT_PROVIDER")
-        ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
-        : new Set<string>(),
-    [bakedEnvKeys],
-  );
+  const hideProviderIds = React.useMemo(() => {
+    const hidden = new Set<string>();
+    if (bakedEnvKeys.includes("BUZZ_AGENT_PROVIDER")) {
+      for (const providerId of BLOCK_BUILD_HIDDEN_PROVIDER_IDS) {
+        hidden.add(providerId);
+      }
+    }
+    if (hideUnconfiguredCredentialProviders) {
+      for (const option of PERSONA_LLM_PROVIDER_OPTIONS) {
+        const requiredKeys = requiredCredentialEnvKeys(
+          credentialRuntimeId,
+          option.id,
+        );
+        if (requiredKeys.some((key) => !configuredCredentialKeys.has(key))) {
+          hidden.add(option.id);
+        }
+      }
+    }
+    if (selectedRuntimeId !== "buzz-agent") {
+      hidden.add("relay-mesh");
+    }
+    return hidden;
+  }, [
+    bakedEnvKeys,
+    configuredCredentialKeys,
+    credentialRuntimeId,
+    hideUnconfiguredCredentialProviders,
+    selectedRuntimeId,
+  ]);
   const providerOptions = getPersonaProviderOptions(
     providerValue,
-    "buzz-agent",
+    credentialRuntimeId,
     undefined,
     hideProviderIds,
   );
@@ -342,8 +401,17 @@ export function GlobalAgentConfigFields({
     return "Select a provider";
   }, [bakedProvider, providerOptions]);
 
+  const implicitEffortProvider =
+    selectedRuntimeId === "claude"
+      ? "anthropic"
+      : selectedRuntimeId === "codex"
+        ? "openai"
+        : "";
+  const effortProvider = providerFieldVisible
+    ? (config.provider ?? "")
+    : implicitEffortProvider;
   const { validValues: effortValid, defaultValue: effortDefault } =
-    getProviderEffortConfig(config.provider ?? "", config.model ?? "");
+    getProviderEffortConfig(effortProvider, config.model ?? "");
   const currentEffort = config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
 
   const fieldClassName = unstyled ? "space-y-4" : "space-y-1.5 p-3";
@@ -381,6 +449,7 @@ export function GlobalAgentConfigFields({
           ? "Select provider"
           : compactProviderZeroLabel
       }
+      placeholderClassName={placeholderClassName}
       placeholderValue={
         !showProviderPlaceholderOption && !bakedProvider
           ? AUTO_PROVIDER_DROPDOWN_VALUE
@@ -410,37 +479,38 @@ export function GlobalAgentConfigFields({
 
   const content = (
     <>
-      {/* Provider field */}
-      <div className={fieldClassName}>
-        <label
-          className={cn("text-sm font-medium", fieldLabelClassName)}
-          htmlFor="global-agent-provider"
-        >
-          {providerLabel}
-        </label>
-        {!useCustomSelect && useChevronSelectIcon ? (
-          <div className="relative">
-            {providerSelect}
-            <ChevronDown
-              aria-hidden="true"
-              className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground"
+      {providerFieldVisible ? (
+        <div className={fieldClassName}>
+          <label
+            className={cn("text-sm font-medium", fieldLabelClassName)}
+            htmlFor="global-agent-provider"
+          >
+            {providerLabel}
+          </label>
+          {!useCustomSelect && useChevronSelectIcon ? (
+            <div className="relative">
+              {providerSelect}
+              <ChevronDown
+                aria-hidden="true"
+                className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground"
+              />
+            </div>
+          ) : (
+            providerSelect
+          )}
+          {isCustomProvider ? (
+            <Input
+              aria-label="Custom global provider ID"
+              autoCorrect="off"
+              onChange={(e) => handleCustomProviderInput(e.target.value)}
+              placeholder="Custom provider ID"
+              value={providerValue}
             />
-          </div>
-        ) : (
-          providerSelect
-        )}
-        {isCustomProvider ? (
-          <Input
-            aria-label="Custom global provider ID"
-            autoCorrect="off"
-            onChange={(e) => handleCustomProviderInput(e.target.value)}
-            placeholder="Custom provider ID"
-            value={providerValue}
-          />
-        ) : null}
-      </div>
+          ) : null}
+        </div>
+      ) : null}
 
-      {showAdvancedFields && apiKeyEnvVar ? (
+      {showAdvancedFields && providerFieldVisible && apiKeyEnvVar ? (
         <div className={blockClassName}>
           <PersonaProviderApiKeyField
             disabled={false}
@@ -493,6 +563,7 @@ export function GlobalAgentConfigFields({
           }
           onIsCustomModelEditingChange={onCustomModelEditingChange}
           onModelChange={handleModelChange}
+          placeholderClassName={placeholderClassName}
           placeholder={modelPlaceholderLabel}
           provider={providerForDiscovery}
           fieldClassName={unstyled ? fieldClassName : undefined}
@@ -532,6 +603,7 @@ export function GlobalAgentConfigFields({
               }
               onConfigChange({ ...config, env_vars: nextEnvVars });
             }}
+            placeholderClassName={placeholderClassName}
             selectClassName={selectClassName}
             showUnavailableOptions={showUnavailableEffortOptions}
             testId="global-agent-thinking-effort-select"

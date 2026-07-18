@@ -48,6 +48,7 @@ export function EffortSelectField({
   label,
   labelClassName,
   onChange,
+  placeholderClassName,
   selectClassName,
   showUnavailableOptions = true,
   testId,
@@ -89,6 +90,8 @@ export function EffortSelectField({
   labelClassName?: string;
   /** Called when the user selects a new value. */
   onChange: (value: string) => void;
+  /** Optional class override for placeholder text. */
+  placeholderClassName?: string;
   /** Optional class override for the select/trigger. */
   selectClassName?: string;
   /** When false, hide effort values that are not valid for the provider/model. */
@@ -134,6 +137,7 @@ export function EffortSelectField({
           id={htmlFor}
           onValueChange={onChange}
           options={effortOptions}
+          placeholderClassName={placeholderClassName}
           placeholderValue={emptyOptionLabel ? "" : undefined}
           testId={testId}
           value={currentEffort}

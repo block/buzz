@@ -9429,8 +9429,12 @@ export function maybeInstallE2eTauriMocks() {
           supportsSwitching: false,
         };
       case "discover_agent_models": {
-        const input = (payload as { input?: { provider?: string } } | null)
-          ?.input;
+        const input = (
+          payload as {
+            input?: { agentCommand?: string; provider?: string };
+          } | null
+        )?.input;
+        const agentCommand = input?.agentCommand?.trim() ?? "";
         const provider = input?.provider?.trim() ?? "";
         const openAiModels = [
           { id: "gpt-5.5", name: "GPT-5.5", description: null },
@@ -9449,6 +9453,22 @@ export function maybeInstallE2eTauriMocks() {
             name: "Claude Sonnet 4.6",
             description: null,
           },
+        ];
+        const claudeRuntimeModels = [
+          {
+            id: "claude-sonnet-4-20250514",
+            name: "Claude Sonnet 4",
+            description: null,
+          },
+          {
+            id: "claude-opus-4-20250514",
+            name: "Claude Opus 4",
+            description: null,
+          },
+        ];
+        const codexRuntimeModels = [
+          { id: "codex-mini", name: "Codex mini", description: null },
+          { id: "codex-pro", name: "Codex pro", description: null },
         ];
         if (provider === "relay-mesh") {
           if (!mockMeshState.admitted) {
@@ -9471,7 +9491,11 @@ export function maybeInstallE2eTauriMocks() {
               ? openAiModels
               : provider === "anthropic"
                 ? anthropicModels
-                : [...anthropicModels, ...openAiModels];
+                : agentCommand.includes("claude")
+                  ? claudeRuntimeModels
+                  : agentCommand.includes("codex")
+                    ? codexRuntimeModels
+                    : [...anthropicModels, ...openAiModels];
         return {
           agentName: "mock-agent",
           agentVersion: "0.0.0",

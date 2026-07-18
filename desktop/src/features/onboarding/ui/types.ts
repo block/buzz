@@ -7,7 +7,6 @@ export type OnboardingPage =
   | "membership-denied";
 
 export type OnboardingActions = {
-  backToAgentDefaults?: () => void;
   complete: () => void;
   skipForNow: () => void;
 };

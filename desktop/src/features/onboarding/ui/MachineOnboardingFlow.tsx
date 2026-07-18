@@ -21,6 +21,10 @@ import {
   OnboardingChrome,
 } from "./OnboardingChrome";
 import { OnboardingFooterProvider } from "./OnboardingFooter";
+import {
+  getPreferredRuntimeIdForSelection,
+  runtimeSelectionNeedsDefaultsStep,
+} from "./onboardingRuntimeSelection";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
 
@@ -30,25 +34,6 @@ export type MachineOnboardingPage =
   | "backup"
   | "setup"
   | "config";
-
-function readDevInitialMachinePage(): MachineOnboardingPage | null {
-  if (!import.meta.env.DEV || typeof window === "undefined") return null;
-
-  const requestedPage =
-    new URL(window.location.href).searchParams.get("machineOnboardingPage") ??
-    import.meta.env.VITE_MACHINE_ONBOARDING_PAGE;
-
-  switch (requestedPage) {
-    case "identity":
-    case "key-import":
-    case "backup":
-    case "setup":
-    case "config":
-      return requestedPage;
-    default:
-      return null;
-  }
-}
 
 export function MachineOnboardingFlow({
   complete,
@@ -64,10 +49,7 @@ export function MachineOnboardingFlow({
   queryClient: QueryClient;
 }) {
   const [page, setPage] = React.useState<MachineOnboardingPage>(
-    () =>
-      initialPage ??
-      readDevInitialMachinePage() ??
-      (identityLost ? "key-import" : "identity"),
+    identityLost ? "key-import" : (initialPage ?? "identity"),
   );
   const [error, setError] = React.useState<string | null>(null);
   const [isPending, setIsPending] = React.useState(false);
@@ -88,6 +70,8 @@ export function MachineOnboardingFlow({
   const persistHarnessSelection = React.useCallback(
     async (runtimeIds: readonly string[]) => {
       const nextRuntimeIds = Array.from(new Set(runtimeIds));
+      const preferredRuntimeId =
+        getPreferredRuntimeIdForSelection(nextRuntimeIds);
       const sequence = runtimeSaveSequence.current + 1;
       runtimeSaveSequence.current = sequence;
       setSelectedRuntimeIds(nextRuntimeIds);
@@ -97,7 +81,7 @@ export function MachineOnboardingFlow({
         const current = await getGlobalAgentConfig();
         await setGlobalAgentConfig({
           ...current,
-          preferred_runtime: nextRuntimeIds[0] ?? null,
+          preferred_runtime: preferredRuntimeId,
         });
         if (runtimeSaveSequence.current === sequence) {
           setSelectedRuntimeIds(nextRuntimeIds);
@@ -276,12 +260,7 @@ export function MachineOnboardingFlow({
                   setPage(identityWasImported ? "key-import" : "backup"),
                 next: () => {
                   if (selectedRuntimeIds.length === 0) return;
-                  if (
-                    selectedRuntimeIds.every(
-                      (runtimeId) =>
-                        runtimeId === "claude" || runtimeId === "codex",
-                    )
-                  ) {
+                  if (!runtimeSelectionNeedsDefaultsStep(selectedRuntimeIds)) {
                     complete(selectedPubkey ?? undefined);
                     return;
                   }
@@ -303,6 +282,7 @@ export function MachineOnboardingFlow({
                 complete: () => complete(selectedPubkey ?? undefined),
               }}
               direction="forward"
+              selectedRuntimeIds={selectedRuntimeIds}
             />
           )}
         </div>

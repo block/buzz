@@ -47,6 +47,28 @@ pub(crate) enum ProbeOutcome {
 /// one term.
 const CONFIG_PARSE_SIGNALS: &[&str] = &["error loading configuration", "unknown variant"];
 
+fn successful_probe_json_outcome(stdout_bytes: &[u8]) -> Option<ProbeOutcome> {
+    let parsed = serde_json::from_slice::<serde_json::Value>(stdout_bytes).ok()?;
+    let logged_in = parsed
+        .get("loggedIn")
+        .and_then(serde_json::Value::as_bool)?;
+    if !logged_in {
+        return Some(ProbeOutcome::LoggedOut);
+    }
+
+    let auth_method = parsed
+        .get("authMethod")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .replace(['-', '_'], "");
+    if auth_method == "apikey" {
+        return Some(ProbeOutcome::LoggedOut);
+    }
+
+    Some(ProbeOutcome::LoggedIn)
+}
+
 /// Run the probe at the resolved absolute path so the GUI-PATH gap is
 /// bypassed. Injects the same augmented PATH used for launched agents so
 /// script shims with `/usr/bin/env <interpreter>` shebangs can find runtimes
@@ -63,8 +85,7 @@ pub(crate) fn login_probe(
     }
 
     match command.output() {
-        Ok(o) if o.status.success() => ProbeOutcome::LoggedIn,
-        Ok(o) => classify_probe_output(&o.stderr, false),
+        Ok(o) => classify_probe_output(&o.stdout, &o.stderr, o.status.success()),
         Err(_) => ProbeOutcome::LoggedOut,
     }
 }
@@ -72,10 +93,17 @@ pub(crate) fn login_probe(
 /// Classify collected probe output into a `ProbeOutcome`.
 ///
 /// Shared between `login_probe` (which has the full `Output`) and the
-/// process-level timeout path in `probe_auth_status` (which drains stderr
-/// on a background thread and collects it separately).
-pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> ProbeOutcome {
+/// process-level timeout path in `probe_auth_status` (which drains stdout and
+/// stderr on background threads and collects them separately).
+pub(crate) fn classify_probe_output(
+    stdout_bytes: &[u8],
+    stderr_bytes: &[u8],
+    exit_success: bool,
+) -> ProbeOutcome {
     if exit_success {
+        if let Some(outcome) = successful_probe_json_outcome(stdout_bytes) {
+            return outcome;
+        }
         return ProbeOutcome::LoggedIn;
     }
     let stderr = String::from_utf8_lossy(stderr_bytes);
@@ -228,6 +256,33 @@ mod tests {
             ProbeOutcome::LoggedOut,
             "non-config stderr should produce LoggedOut"
         );
+    }
+
+    #[test]
+    fn successful_json_probe_logged_out_when_logged_in_false() {
+        let outcome =
+            super::classify_probe_output(br#"{"loggedIn":false,"authMethod":"none"}"#, b"", true);
+        assert_eq!(outcome, ProbeOutcome::LoggedOut);
+    }
+
+    #[test]
+    fn successful_json_probe_logged_out_for_api_key_only_auth() {
+        let outcome = super::classify_probe_output(
+            br#"{"loggedIn":true,"authMethod":"api_key","apiKeySource":"ANTHROPIC_API_KEY"}"#,
+            b"",
+            true,
+        );
+        assert_eq!(outcome, ProbeOutcome::LoggedOut);
+    }
+
+    #[test]
+    fn successful_json_probe_logged_in_for_account_auth() {
+        let outcome = super::classify_probe_output(
+            br#"{"loggedIn":true,"authMethod":"claudeai"}"#,
+            b"",
+            true,
+        );
+        assert_eq!(outcome, ProbeOutcome::LoggedIn);
     }
 
     /// Verify that every string in CONFIG_PARSE_SIGNALS is lowercased so the

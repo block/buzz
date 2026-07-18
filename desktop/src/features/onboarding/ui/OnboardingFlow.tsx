@@ -149,7 +149,7 @@ export function OnboardingFlow({
   identityLost = false,
   initialProfile,
 }: OnboardingFlowProps) {
-  const { backToAgentDefaults, complete, skipForNow } = actions;
+  const { complete, skipForNow } = actions;
   const { activeCommunity } = useCommunities();
   const queryClient = useQueryClient();
   const savedProfile = resolveSavedProfile(initialProfile);
@@ -458,7 +458,7 @@ export function OnboardingFlow({
           <div
             className={`relative flex w-full flex-col items-center text-center ${
               currentPage === "avatar" ? "max-w-[1080px]" : "max-w-[500px]"
-            } buzz-onboarding-step-frame`}
+            }`}
           >
             {membershipError &&
             (currentPage === "profile" || currentPage === "avatar") ? (
@@ -498,10 +498,6 @@ export function OnboardingFlow({
                 actions={{
                   advanceWithoutSaving: advanceFromProfileWithoutSaving,
                   back: () => {
-                    if (backToAgentDefaults) {
-                      backToAgentDefaults();
-                      return;
-                    }
                     setMembershipError(null);
                     setIsCommunityChangeOpen(true);
                   },
