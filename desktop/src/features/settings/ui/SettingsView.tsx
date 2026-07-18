@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
+import { shouldWarnMissingMembershipSnapshot } from "@/shared/api/relayMembers";
 import { getFeature } from "@/shared/features/manifest";
 import {
   resolveEnabled,
@@ -271,7 +272,7 @@ export function SettingsView({
               </button>
             </div>
           ) : null}
-          {myMembershipQuery.data?.snapshotFound === false ? (
+          {shouldWarnMissingMembershipSnapshot(myMembershipQuery.data) ? (
             <div
               className="mx-3 flex items-start gap-2 rounded-md border border-amber-500/40 px-3 py-2 text-xs text-sidebar-foreground"
               data-testid="community-access-snapshot-missing"

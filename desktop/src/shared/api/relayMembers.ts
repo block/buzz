@@ -1,5 +1,5 @@
 import { relayClient } from "@/shared/api/relayClient";
-import { signRelayEvent } from "@/shared/api/tauri";
+import { getRelayHttpUrl, signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import type {
   RelayEvent,
@@ -34,8 +34,15 @@ export type RelayMembershipLookup = {
    * be treated as a denial by onboarding.
    */
   snapshotFound: boolean;
+  membershipRequired: boolean;
   membership: RelayMember | null;
 };
+
+export function shouldWarnMissingMembershipSnapshot(
+  lookup: RelayMembershipLookup | undefined,
+): boolean {
+  return lookup?.membershipRequired === true && !lookup.snapshotFound;
+}
 
 export function relayMembersFromEvent(event: RelayEvent): RelayMember[] {
   const seen = new Set<string>();
@@ -68,14 +75,20 @@ export function relayMembersFromEvent(event: RelayEvent): RelayMember[] {
 export function relayMembershipLookupFromEvent(
   event: RelayEvent | null,
   pubkey: string,
+  membershipRequired = event !== null,
 ): RelayMembershipLookup {
   if (!event) {
-    return { snapshotFound: false, membership: null };
+    return {
+      snapshotFound: false,
+      membershipRequired,
+      membership: null,
+    };
   }
 
   const normalizedPubkey = normalizePubkey(pubkey);
   return {
     snapshotFound: true,
+    membershipRequired,
     membership:
       relayMembersFromEvent(event).find(
         (member) => normalizePubkey(member.pubkey) === normalizedPubkey,
@@ -97,12 +110,28 @@ export async function listRelayMembers(): Promise<RelayMember[]> {
   return event ? relayMembersFromEvent(event) : [];
 }
 
+async function relayRequiresMembership(): Promise<boolean> {
+  const base = (await getRelayHttpUrl()).replace(/\/+$/, "");
+  const response = await fetch(`${base}/info`, {
+    headers: { Accept: "application/nostr+json" },
+  });
+  if (!response.ok) {
+    throw new Error(`Relay information request failed (${response.status}).`);
+  }
+  const info = (await response.json()) as { supported_nips?: unknown };
+  return (
+    Array.isArray(info.supported_nips) &&
+    info.supported_nips.some((nip) => nip === 43)
+  );
+}
+
 export async function getMyRelayMembershipLookup(): Promise<RelayMembershipLookup> {
-  const [{ pubkey }, event] = await Promise.all([
+  const [{ pubkey }, event, membershipRequired] = await Promise.all([
     getIdentity(),
     fetchMembershipListEvent(),
+    relayRequiresMembership(),
   ]);
-  return relayMembershipLookupFromEvent(event, pubkey);
+  return relayMembershipLookupFromEvent(event, pubkey, membershipRequired);
 }
 
 export async function getMyRelayMembership(): Promise<RelayMember | null> {
