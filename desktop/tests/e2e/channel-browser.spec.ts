@@ -57,6 +57,9 @@ test("channel browser shows channels not yet joined", async ({ page }) => {
 
   await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Browse channels" }),
+  ).toBeVisible();
 
   // "design" and "sales" are open channels the mock user is NOT a member of
   await expect(page.getByTestId("browse-channel-design")).toBeVisible();
@@ -105,6 +108,33 @@ test("channel browser sorts alphabetically or by member count", async ({
   await expect(page.getByTestId("channel-browser-sort")).toHaveAttribute(
     "aria-label",
     "Sort channels: Most members",
+  );
+});
+
+test("channel browser sorts by recent activity", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  const rows = page.locator('[data-testid^="browse-channel-"]');
+
+  await page.getByTestId("channel-browser-sort").click();
+  await page.getByTestId("channel-browser-sort-recent").click();
+
+  await expect(rows).toHaveText([
+    /#all-replies/,
+    /#deep-history/,
+    /#general/,
+    /#agents/,
+    /#sales/,
+    /#engineering/,
+    /#design/,
+    /#random/,
+    /#secret-projects/,
+    /#welcome-everyone/,
+  ]);
+  await expect(page.getByTestId("channel-browser-sort")).toHaveAttribute(
+    "aria-label",
+    "Sort channels: Recent",
   );
 });
 

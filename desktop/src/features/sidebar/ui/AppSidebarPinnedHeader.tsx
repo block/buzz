@@ -24,6 +24,7 @@ type SidebarSelectedView =
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
   currentPubkey?: string;
+  onBrowseChannels?: () => void;
   onCreateAgent: () => void;
   onCreateChannel: () => void;
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
@@ -47,6 +48,7 @@ type AppSidebarPrimaryMenuProps = {
 export function AppSidebarPinnedHeader({
   channelLabels,
   currentPubkey,
+  onBrowseChannels,
   onCreateAgent,
   onCreateChannel,
   onOpenDm,
@@ -69,6 +71,7 @@ export function AppSidebarPinnedHeader({
         onOpenChannel={onSelectChannel}
         onOpenResult={onOpenSearchResult}
         onOpenUser={(user) => onOpenDm({ pubkeys: [user.pubkey] })}
+        onBrowseChannels={onBrowseChannels}
         onCreateAgent={onCreateAgent}
         onCreateChannel={onCreateChannel}
         suggestionChannels={suggestionChannels}

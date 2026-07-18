@@ -554,6 +554,7 @@ export function AppSidebar({
         <AppSidebarPinnedHeader
           channelLabels={dmChannelLabels}
           currentPubkey={currentPubkey}
+          onBrowseChannels={onBrowseChannels}
           onCreateAgent={onCreateAgent}
           onCreateChannel={handleOpenCreateChannel}
           onOpenDm={onOpenDm}
@@ -720,7 +721,7 @@ export function AppSidebar({
                       }
                       actionsTestId="section-actions-channels"
                       listTestId="stream-list"
-                      quickCreateLabel="Add channel"
+                      quickCreateLabel="Browse channels"
                       onQuickCreateClick={onBrowseChannels}
                       showQuickCreate
                       onMarkAllRead={onMarkAllChannelsRead}
