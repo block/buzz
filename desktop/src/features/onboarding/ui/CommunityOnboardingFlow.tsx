@@ -129,7 +129,8 @@ export function CommunityOnboardingFlow({
   const [isPending, setIsPending] = React.useState(false);
   const [deniedPubkey, setDeniedPubkey] = React.useState("");
   const [isMembershipDenied, setIsMembershipDenied] = React.useState(false);
-  const [isCommunityChangeOpen, setIsCommunityChangeOpen] = React.useState(false);
+  const [isCommunityChangeOpen, setIsCommunityChangeOpen] =
+    React.useState(false);
   const [isCurtainFading, setIsCurtainFading] = React.useState(false);
   const nameInputRef = React.useRef<HTMLInputElement | null>(null);
 
