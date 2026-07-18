@@ -11,9 +11,84 @@ use crate::Result;
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
 /// Run all pending Buzz database migrations.
+///
+/// Wraps the sqlx migrator in a session-scoped advisory lock so that
+/// concurrent replicas (rolling deploy) serialize startup instead of
+/// racing each other's concurrent index builds or repair guards.
+///
+/// All operations (lock, pre-migration guards, migrator, unlock) run on
+/// a single acquired connection — `pg_advisory_lock` is session-scoped,
+/// so the lock-holding session must be the one that runs the critical
+/// section and releases it. The connection is marked `close_on_drop`,
+/// so if unlock fails or the future is cancelled, dropping the
+/// connection closes the PG session (rather than returning a locked
+/// session to the pool) and releases the lock automatically.
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
-    reject_legacy_nip_rs_cardinality_ambiguity(pool).await?;
-    MIGRATOR.run(pool).await?;
+    const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x42757a7a4d696772; // "BuzzMigr"
+
+    let mut conn = pool.acquire().await?;
+    conn.close_on_drop();
+
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(MIGRATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *conn)
+        .await?;
+
+    let result = async {
+        reject_legacy_nip_rs_cardinality_ambiguity(&mut conn).await?;
+        repair_invalid_media_index(&mut conn).await?;
+        MIGRATOR.run(&mut *conn).await?;
+        Ok(())
+    }
+    .await;
+
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(MIGRATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *conn)
+        .await;
+
+    result
+}
+
+/// Drop `idx_audit_log_media_uploads` if it exists but is invalid
+/// (`indisvalid = false`), so migration 21's `CREATE INDEX CONCURRENTLY
+/// IF NOT EXISTS` builds a fresh valid index instead of skipping over
+/// the broken leftover.
+///
+/// This handles the case where a prior concurrent build failed (e.g. OOM,
+/// process kill, unique violation on a UNIQUE variant) and left an invalid
+/// index behind. Without this guard, `IF NOT EXISTS` would skip creation,
+/// SQLx would record version 21, and the relay would run permanently
+/// without the required access path.
+///
+/// The probe joins `pg_index.indrelid = to_regclass('audit_log')` so it
+/// finds the invalid index attached to whichever `audit_log` the
+/// session's `search_path` resolves, regardless of schema. The DROP
+/// statement is built server-side via `quote_ident(schema.index)` so it
+/// targets the correct namespace without hardcoding `public`.
+///
+/// Multi-replica safety: the caller holds a session-scoped advisory lock
+/// on the same connection, so a second replica starting simultaneously
+/// cannot see replica A's in-progress concurrent build as invalid and
+/// drop it mid-build.
+async fn repair_invalid_media_index(conn: &mut sqlx::PgConnection) -> Result<()> {
+    let drop_stmt: Option<String> = sqlx::query_scalar(
+        "SELECT 'DROP INDEX IF EXISTS ' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) \
+         FROM pg_index i \
+         JOIN pg_class c ON c.oid = i.indexrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.relname = 'idx_audit_log_media_uploads' \
+           AND i.indrelid = to_regclass('audit_log') \
+           AND NOT i.indisvalid",
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    if let Some(stmt) = drop_stmt {
+        sqlx::query(sqlx::AssertSqlSafe(stmt))
+            .execute(&mut *conn)
+            .await?;
+    }
     Ok(())
 }
 
@@ -21,17 +96,17 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
 /// enforcement. A populated database still on 0001-0006 must not let 0007
 /// irreversibly purge duplicate-tag history. Fail before sqlx starts its
 /// migration transaction so an operator can inspect and repair those rows.
-async fn reject_legacy_nip_rs_cardinality_ambiguity(pool: &PgPool) -> Result<()> {
+async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut sqlx::PgConnection) -> Result<()> {
     let migrations_table: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await?;
     if migrations_table.is_none() {
         return Ok(());
     }
     let applied: Option<i64> =
         sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await?;
     if applied.is_none_or(|version| version >= 7) {
         return Ok(());
@@ -75,7 +150,7 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(pool: &PgPool) -> Result<()>
                )\
          )",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
 
     if ambiguous {
@@ -549,7 +624,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 20);
+        assert_eq!(migrations.len(), 21);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -824,6 +899,23 @@ mod tests {
             .sql
             .as_str()
             .contains("join_policy_acceptances"));
+
+        // Per-user storage attribution needs a non-transactional CONCURRENTLY
+        // index build on audit_log; it must not lock out concurrent writers
+        // during migration on a populated relay.
+        assert_eq!(migrations[20].version, 21);
+        assert!(
+            migrations[20].no_tx,
+            "migration 21 builds an index CONCURRENTLY and must run outside a transaction"
+        );
+        assert!(migrations[20]
+            .sql
+            .as_str()
+            .contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_log_media_uploads"));
+        assert!(!migrations[0]
+            .sql
+            .as_str()
+            .contains("idx_audit_log_media_uploads"));
     }
 
     #[test]
@@ -1066,7 +1158,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(20));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(21));
     }
 
     #[tokio::test]
@@ -1127,6 +1219,366 @@ mod tests {
         .await
         .expect("read post-push search behavior");
         assert_eq!(after, vec![(1, Some(true)), (30_350, None)]);
+    }
+
+    /// Bookkeeping-race recovery: a process dies after the DDL succeeds but
+    /// before SQLx records version 21 → a valid same-named index is left
+    /// unrecorded. `IF NOT EXISTS` makes the retry idempotent: PG skips
+    /// creation and SQLx records version 21 — the relay starts normally.
+    /// The repair guard must NOT drop a valid index in this scenario.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_21_retries_after_leftover_unrecorded_index() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+
+        MIGRATOR
+            .run_to(20, &pool)
+            .await
+            .expect("apply migrations 1-20");
+
+        sqlx::query(
+            "CREATE INDEX idx_audit_log_media_uploads \
+             ON audit_log (community_id, actor_pubkey, object_id) \
+             WHERE action = 'media_uploaded'",
+        )
+        .execute(&pool)
+        .await
+        .expect("plant a same-named valid index (simulates successful DDL before bookkeeping)");
+
+        let planted: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM pg_class WHERE relname = 'idx_audit_log_media_uploads' \
+             )",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check planted index");
+        assert!(planted, "planted index must exist before retry");
+
+        run_migrations(&pool)
+            .await
+            .expect("migration 21 must not wedge when a same-named index already exists");
+
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(21));
+
+        let index_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM pg_indexes \
+                 WHERE indexname = 'idx_audit_log_media_uploads' \
+             )",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check index still present");
+        assert!(
+            index_exists,
+            "index must still exist after idempotent retry"
+        );
+    }
+
+    /// Failed-build recovery: a prior `CREATE INDEX CONCURRENTLY` failed
+    /// (e.g. OOM, unique violation, process kill) and left an `indisvalid=false`
+    /// index behind. Without the startup repair guard, `IF NOT EXISTS` would
+    /// skip creation, SQLx would record version 21, and the relay would run
+    /// permanently without the required access path. The repair guard drops
+    /// the invalid index before the migrator runs, so a fresh valid build
+    /// proceeds.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_21_recovers_after_failed_concurrent_build() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+
+        MIGRATOR
+            .run_to(20, &pool)
+            .await
+            .expect("apply migrations 1-20");
+
+        // Plant duplicate data so a UNIQUE concurrent build fails, leaving
+        // an indisvalid=false index behind.
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("invalid-idx-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community for duplicate data");
+        let hash_a = vec![0xAA_u8; 32];
+        let hash_b = vec![0xBB_u8; 32];
+        let actor = vec![0xCC_u8; 32];
+        for (seq, hash) in [(1_i64, &hash_a), (2_i64, &hash_b)] {
+            sqlx::query(
+                "INSERT INTO audit_log (community_id, seq, hash, action, actor_pubkey, object_id, detail) \
+                 VALUES ($1, $2, $3, 'media_uploaded', $4, 'same-obj', '{}'::jsonb)",
+            )
+            .bind(community_id)
+            .bind(seq)
+            .bind(hash)
+            .bind(&actor)
+            .execute(&pool)
+            .await
+            .expect("insert duplicate audit row");
+        }
+
+        // Attempt a UNIQUE concurrent build — it will fail on the duplicates,
+        // leaving an indisvalid=false index.
+        let unique_result = sqlx::query(
+            "CREATE UNIQUE INDEX CONCURRENTLY idx_audit_log_media_uploads \
+             ON audit_log (community_id, actor_pubkey, object_id) \
+             WHERE action = 'media_uploaded'",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            unique_result.is_err(),
+            "UNIQUE build must fail on duplicate data"
+        );
+
+        // Verify the invalid index exists.
+        let invalid: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM pg_index i \
+                 JOIN pg_class c ON c.oid = i.indexrelid \
+                 WHERE c.relname = 'idx_audit_log_media_uploads' \
+                   AND NOT i.indisvalid \
+             )",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check invalid index");
+        assert!(
+            invalid,
+            "failed concurrent build must leave indisvalid=false index"
+        );
+
+        // Clean up the duplicate data so the real (non-unique) index build
+        // in migration 21 succeeds.
+        sqlx::query("DELETE FROM audit_log WHERE community_id = $1 AND seq = 2")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("remove duplicate so real migration succeeds");
+
+        // Run migrations — repair guard should drop the invalid index,
+        // then migration 21 creates a fresh valid one.
+        run_migrations(&pool)
+            .await
+            .expect("repair guard + migration 21 must recover from invalid index");
+
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(21));
+
+        // The index must exist AND be valid.
+        let (exists, valid): (bool, bool) = sqlx::query_as(
+            "SELECT \
+                 EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_log_media_uploads'), \
+                 COALESCE(( \
+                     SELECT i.indisvalid FROM pg_index i \
+                     JOIN pg_class c ON c.oid = i.indexrelid \
+                     WHERE c.relname = 'idx_audit_log_media_uploads' \
+                 ), false)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check repaired index");
+        assert!(exists, "index must exist after repair");
+        assert!(valid, "index must be valid (indisvalid=true) after repair");
+
+        // Postcondition: advisory lock must be released after run_migrations
+        // returns. The pool may return the same physical session, so this is
+        // a global pg_locks absence check — valid because pg_locks is
+        // cluster-wide. Scoped to current database to avoid false failures
+        // from an unrelated database using the same key.
+        let lock_key: i64 = 0x42757a7a4d696772;
+        let lock_held: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM pg_locks \
+                 WHERE locktype = 'advisory' \
+                   AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                   AND classid = ($1 >> 32)::oid \
+                   AND objid = ($1 & x'FFFFFFFF'::bigint)::oid \
+             )",
+        )
+        .bind(lock_key)
+        .fetch_one(&pool)
+        .await
+        .expect("check pg_locks for advisory lock");
+        assert!(
+            !lock_held,
+            "advisory lock must not be held after run_migrations returns"
+        );
+    }
+
+    /// Same as `migration_21_recovers_after_failed_concurrent_build` but
+    /// under a non-public `search_path`. This exercises the probe/drop path
+    /// where the invalid index lives in a schema other than `public` — the
+    /// repair guard must resolve the actual schema from the table OID
+    /// (`to_regclass('audit_log')`) rather than hardcoding `public`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_21_recovers_after_failed_concurrent_build_nonpublic_schema() {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+
+        let schema_name = format!(
+            "test_schema_{}",
+            uuid::Uuid::new_v4().simple().to_string().get(..8).unwrap()
+        );
+
+        // Bootstrap pool (public schema) to create the custom schema.
+        let bootstrap_pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect bootstrap pool");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE",
+            &schema_name
+        )))
+        .execute(&bootstrap_pool)
+        .await
+        .expect("drop old test schema");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE SCHEMA {}",
+            &schema_name
+        )))
+        .execute(&bootstrap_pool)
+        .await
+        .expect("create test schema");
+        bootstrap_pool.close().await;
+
+        // Build a pool whose connections default to the custom schema.
+        let opts: sqlx::postgres::PgConnectOptions =
+            database_url.parse().expect("parse database URL");
+        let opts = opts.options([("search_path", schema_name.as_str())]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(opts)
+            .await
+            .expect("connect custom-schema pool");
+
+        // Verify search_path is set correctly.
+        let current: String = sqlx::query_scalar("SELECT current_schema()")
+            .fetch_one(&pool)
+            .await
+            .expect("check current_schema");
+        assert_eq!(
+            current, schema_name,
+            "pool connections must default to the custom schema"
+        );
+
+        MIGRATOR
+            .run_to(20, &pool)
+            .await
+            .expect("apply migrations 1-20 in custom schema");
+
+        // Plant duplicate data so a UNIQUE concurrent build fails.
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("nonpub-idx-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let hash_a = vec![0xAA_u8; 32];
+        let hash_b = vec![0xBB_u8; 32];
+        let actor = vec![0xCC_u8; 32];
+        for (seq, hash) in [(1_i64, &hash_a), (2_i64, &hash_b)] {
+            sqlx::query(
+                "INSERT INTO audit_log (community_id, seq, hash, action, actor_pubkey, object_id, detail) \
+                 VALUES ($1, $2, $3, 'media_uploaded', $4, 'same-obj', '{}'::jsonb)",
+            )
+            .bind(community_id)
+            .bind(seq)
+            .bind(hash)
+            .bind(&actor)
+            .execute(&pool)
+            .await
+            .expect("insert duplicate audit row");
+        }
+
+        let unique_result = sqlx::query(
+            "CREATE UNIQUE INDEX CONCURRENTLY idx_audit_log_media_uploads \
+             ON audit_log (community_id, actor_pubkey, object_id) \
+             WHERE action = 'media_uploaded'",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            unique_result.is_err(),
+            "UNIQUE build must fail on duplicate data"
+        );
+
+        // Verify the invalid index exists in the custom schema.
+        let invalid: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM pg_index i \
+                 JOIN pg_class c ON c.oid = i.indexrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.relname = 'idx_audit_log_media_uploads' \
+                   AND n.nspname = $1 \
+                   AND NOT i.indisvalid \
+             )",
+        )
+        .bind(&schema_name)
+        .fetch_one(&pool)
+        .await
+        .expect("check invalid index in custom schema");
+        assert!(
+            invalid,
+            "failed concurrent build must leave indisvalid=false in custom schema"
+        );
+
+        // Remove duplicate so the real migration build succeeds.
+        sqlx::query("DELETE FROM audit_log WHERE community_id = $1 AND seq = 2")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("remove duplicate");
+
+        run_migrations(&pool)
+            .await
+            .expect("repair guard must handle non-public schema");
+
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(21));
+
+        // The index must exist AND be valid in the custom schema.
+        let (exists, valid): (bool, bool) = sqlx::query_as(
+            "SELECT \
+                 EXISTS ( \
+                     SELECT 1 FROM pg_class c \
+                     JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE c.relname = 'idx_audit_log_media_uploads' AND n.nspname = $1 \
+                 ), \
+                 COALESCE(( \
+                     SELECT i.indisvalid FROM pg_index i \
+                     JOIN pg_class c ON c.oid = i.indexrelid \
+                     JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE c.relname = 'idx_audit_log_media_uploads' AND n.nspname = $1 \
+                 ), false)",
+        )
+        .bind(&schema_name)
+        .fetch_one(&pool)
+        .await
+        .expect("check repaired index in custom schema");
+        assert!(exists, "index must exist in custom schema after repair");
+        assert!(
+            valid,
+            "index must be valid (indisvalid=true) in custom schema after repair"
+        );
+
+        // Cleanup: close the pool and drop the custom schema.
+        pool.close().await;
+        let cleanup_pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect cleanup pool");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE",
+            &schema_name
+        )))
+        .execute(&cleanup_pool)
+        .await
+        .expect("cleanup test schema");
+        cleanup_pool.close().await;
     }
 
     #[tokio::test]

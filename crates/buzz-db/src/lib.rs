@@ -503,6 +503,11 @@ impl Db {
         usage::active_channel_counts(&self.pool, interval_sql).await
     }
 
+    /// Return per-user storage byte totals and object counts (logical attribution).
+    pub async fn usage_storage_byte_counts(&self) -> Result<Vec<usage::UserStorageCounts>> {
+        usage::storage_byte_counts(&self.pool).await
+    }
+
     /// Return all community id → host mappings.
     pub async fn usage_community_hosts(&self) -> Result<Vec<usage::CommunityHost>> {
         usage::community_hosts(&self.pool).await

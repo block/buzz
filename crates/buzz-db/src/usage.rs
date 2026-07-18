@@ -333,6 +333,97 @@ pub async fn active_channel_counts(
         .collect())
 }
 
+/// Per-user storage usage derived from the audit log (logical attribution).
+///
+/// "Logical attribution" means one full-size charge per uploader per distinct
+/// blob (`object_id`).  Re-uploading the same SHA is idempotent and does not
+/// double-count.
+#[derive(Debug)]
+pub struct UserStorageCounts {
+    /// The UUID of the community.
+    pub community_id: Uuid,
+    /// 32-byte pubkey of the uploading actor.
+    pub actor_pubkey: Vec<u8>,
+    /// Sum of bytes across distinct blobs owned by this user in this community.
+    pub total_bytes: i64,
+    /// Number of distinct blobs (unique `object_id` values).
+    pub object_count: i64,
+}
+
+/// Return per-user logical storage, deduped by `(community_id, actor_pubkey,
+/// object_id)`.  Each distinct blob is charged once at its full size (the
+/// largest *valid* recorded size wins when multiple audit rows exist for the
+/// same triple, so a malformed row never shadows a good one).  Rows with
+/// NULL `actor_pubkey` or NULL `object_id` are excluded.
+///
+/// `detail->>'size'` is historical, operator-written JSONB — never trust it
+/// to be a well-formed non-negative integer. A raw `::bigint` cast throws on
+/// anything that isn't, which would abort the whole poller over one bad row.
+/// Instead: validate with a digits-only regex, then bound-check against
+/// `i64::MAX` lexicographically (strip leading zeros with `ltrim`, reject
+/// if the stripped length exceeds 19 digits or if it equals 19 and exceeds
+/// `'9223372036854775807'`). All predicates are non-throwing on arbitrary
+/// text; the `::bigint` cast is inside `THEN`, which CASE only evaluates
+/// after both guards pass. Fall back to 0 — the object is still counted
+/// once, just at zero bytes.
+///
+/// Each individual `blob_bytes` is bounded to `i64::MAX`, but the per-user
+/// `SUM` of many valid blobs can still exceed it — `SUM(bigint)` returns
+/// `numeric` (wider precision) precisely so that doesn't overflow
+/// mid-aggregation. The final cast to `BIGINT` is what would throw, so
+/// the sum is clamped into `[0, i64::MAX]` *before* that cast — an
+/// extreme (or adversarial) total degrades to a saturated gauge reading,
+/// not an aborted poller.
+pub async fn storage_byte_counts(pool: &PgPool) -> Result<Vec<UserStorageCounts>> {
+    let rows = sqlx::query_as::<_, (Uuid, Vec<u8>, i64, i64)>(
+        r#"
+        SELECT
+            community_id,
+            actor_pubkey,
+            CAST(
+                LEAST(
+                    GREATEST(COALESCE(SUM(blob_bytes), 0), 0::numeric),
+                    9223372036854775807::numeric
+                ) AS BIGINT
+            )                    AS total_bytes,
+            COUNT(*)             AS object_count
+        FROM (
+            SELECT DISTINCT ON (community_id, actor_pubkey, object_id)
+                community_id,
+                actor_pubkey,
+                CASE
+                    WHEN detail->>'size' ~ '^[0-9]+$'
+                         AND (length(ltrim(detail->>'size', '0')) < 19
+                              OR (length(ltrim(detail->>'size', '0')) = 19
+                                  AND ltrim(detail->>'size', '0') <= '9223372036854775807'))
+                    THEN (detail->>'size')::bigint
+                    ELSE 0::bigint
+                END AS blob_bytes
+            FROM audit_log
+            WHERE action = 'media_uploaded'
+              AND actor_pubkey IS NOT NULL
+              AND object_id IS NOT NULL
+            ORDER BY community_id, actor_pubkey, object_id, blob_bytes DESC
+        ) deduped
+        GROUP BY community_id, actor_pubkey
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(community_id, actor_pubkey, total_bytes, object_count)| UserStorageCounts {
+                community_id,
+                actor_pubkey,
+                total_bytes,
+                object_count,
+            },
+        )
+        .collect())
+}
+
 /// Mapping from community UUID to host string, used by the poller to resolve
 /// Prometheus label values.
 #[derive(Debug)]
@@ -717,6 +808,508 @@ mod tests {
         assert!(
             after_row.is_none(),
             "no stream row after last channel deleted — poller will zero-fill"
+        );
+    }
+
+    /// Insert a media_uploaded audit entry for `object_id` with a raw JSON
+    /// `size` value (as text, so malformed values can be exercised — e.g.
+    /// `"not-a-number"`, `"-5"`, or omission via `None`).
+    async fn insert_media_audit_raw(
+        pool: &PgPool,
+        community_id: Uuid,
+        actor: Option<&[u8]>,
+        object_id: Option<&str>,
+        seq: i64,
+        size: Option<&str>,
+    ) {
+        let hash = random_pubkey(); // unique 32 bytes
+        let mut detail = serde_json::Map::new();
+        if let Some(s) = size {
+            detail.insert("size".to_string(), serde_json::Value::String(s.to_string()));
+        }
+        sqlx::query(
+            "INSERT INTO audit_log (community_id, seq, hash, action, actor_pubkey, object_id, detail)
+             VALUES ($1, $2, $3, 'media_uploaded', $4, $5, $6)",
+        )
+        .bind(community_id)
+        .bind(seq)
+        .bind(&hash)
+        .bind(actor)
+        .bind(object_id)
+        .bind(serde_json::Value::Object(detail))
+        .execute(pool)
+        .await
+        .expect("insert media audit entry");
+    }
+
+    /// Insert a media_uploaded audit entry with a well-formed numeric size.
+    async fn insert_media_audit(
+        pool: &PgPool,
+        community_id: Uuid,
+        actor: &[u8],
+        object_id: &str,
+        seq: i64,
+        size: u64,
+    ) {
+        insert_media_audit_raw(
+            pool,
+            community_id,
+            Some(actor),
+            Some(object_id),
+            seq,
+            Some(&size.to_string()),
+        )
+        .await;
+    }
+
+    /// Two users in the same community get independent per-user storage rows.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_storage_two_users_same_community_independent() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+
+        let user_a = random_pubkey();
+        let user_b = random_pubkey();
+
+        // User A: 2 distinct blobs totalling 300 bytes.
+        insert_media_audit(&pool, comm_uuid, &user_a, "blob-a1", 1, 100).await;
+        insert_media_audit(&pool, comm_uuid, &user_a, "blob-a2", 2, 200).await;
+        // User B: 1 blob of 500 bytes.
+        insert_media_audit(&pool, comm_uuid, &user_b, "blob-b1", 3, 500).await;
+
+        let rows = storage_byte_counts(&pool)
+            .await
+            .expect("storage_byte_counts");
+
+        let a_row = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user_a);
+        let b_row = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user_b);
+
+        let a = a_row.expect("user A row");
+        assert_eq!(a.total_bytes, 300, "user A: 100 + 200");
+        assert_eq!(a.object_count, 2, "user A: 2 distinct blobs");
+
+        let b = b_row.expect("user B row");
+        assert_eq!(b.total_bytes, 500, "user B: 500");
+        assert_eq!(b.object_count, 1, "user B: 1 blob");
+    }
+
+    /// Storage counts are scoped per-community — same pubkey in two communities
+    /// gets separate rows.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_storage_cross_community_isolation() {
+        let pool = get_pool().await;
+        let (comm_a, _, _) = make_community(&pool).await;
+        let (comm_b, _, _) = make_community(&pool).await;
+
+        let user = random_pubkey();
+
+        insert_media_audit(&pool, comm_a, &user, "blob-1", 1, 100).await;
+        insert_media_audit(&pool, comm_b, &user, "blob-1", 1, 900).await;
+
+        let rows = storage_byte_counts(&pool)
+            .await
+            .expect("storage_byte_counts");
+
+        let in_a = rows
+            .iter()
+            .find(|r| r.community_id == comm_a && r.actor_pubkey == user)
+            .expect("row in community A");
+        let in_b = rows
+            .iter()
+            .find(|r| r.community_id == comm_b && r.actor_pubkey == user)
+            .expect("row in community B");
+
+        assert_eq!(in_a.total_bytes, 100, "community A: 100 bytes");
+        assert_eq!(in_b.total_bytes, 900, "community B: 900 bytes");
+    }
+
+    /// Multiple distinct blobs by the same user accumulate correctly.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_storage_multiple_uploads_same_user_accumulate() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let user = random_pubkey();
+
+        for seq in 1..=5 {
+            insert_media_audit(&pool, comm_uuid, &user, &format!("blob-{seq}"), seq, 10).await;
+        }
+
+        let rows = storage_byte_counts(&pool)
+            .await
+            .expect("storage_byte_counts");
+        let row = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user)
+            .expect("user row");
+
+        assert_eq!(row.total_bytes, 50, "5 × 10 bytes");
+        assert_eq!(row.object_count, 5, "5 distinct blobs");
+    }
+
+    /// Rows with missing `size` key in detail JSONB contribute 0 bytes but
+    /// still count the blob once (fail-safe, not fail-closed).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_storage_missing_size_contributes_zero_bytes() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let user = random_pubkey();
+
+        // One normal blob + one with missing size.
+        insert_media_audit(&pool, comm_uuid, &user, "blob-1", 1, 100).await;
+        insert_media_audit_raw(&pool, comm_uuid, Some(&user), Some("blob-2"), 2, None).await;
+
+        let rows = storage_byte_counts(&pool)
+            .await
+            .expect("storage_byte_counts");
+        let row = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user)
+            .expect("user row");
+
+        assert_eq!(
+            row.total_bytes, 100,
+            "only the well-formed size contributes"
+        );
+        assert_eq!(row.object_count, 2, "both blobs counted");
+    }
+
+    /// Malformed (non-numeric, negative, or otherwise unparseable) `size`
+    /// values must not abort the whole aggregate — they fall back to 0 bytes
+    /// while the blob is still counted once. Proves the poller survives
+    /// historical junk in `detail->>'size'` instead of erroring the query.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_storage_malformed_size_fails_safe_to_zero() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let user = random_pubkey();
+
+        insert_media_audit_raw(
+            &pool,
+            comm_uuid,
+            Some(&user),
+            Some("blob-text"),
+            1,
+            Some("not-a-number"),
+        )
+        .await;
+        insert_media_audit_raw(
+            &pool,
+            comm_uuid,
+            Some(&user),
+            Some("blob-neg"),
+            2,
+            Some("-5"),
+        )
+        .await;
+        insert_media_audit_raw(
+            &pool,
+            comm_uuid,
+            Some(&user),
+            Some("blob-float"),
+            3,
+            Some("3.5"),
+        )
+        .await;
+        insert_media_audit(&pool, comm_uuid, &user, "blob-good", 4, 42).await;
+
+        let rows = storage_byte_counts(&pool)
+            .await
+            .expect("storage_byte_counts");
+        let row = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user)
+            .expect("user row");
+
+        assert_eq!(
+            row.total_bytes, 42,
+            "malformed sizes contribute 0 bytes; only the valid blob's 42 counts"
+        );
+        assert_eq!(row.object_count, 4, "all four blobs are still counted");
+    }
+
+    /// A `detail->>'size'` value exceeding `i64::MAX` or with an extreme
+    /// digit count must not abort the poller. The lexicographic bound check
+    /// (`ltrim` + length/comparison) rejects these without throwing, so the
+    /// blob falls back to 0 bytes and the poller survives.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_storage_oversized_digits_fails_safe_to_zero() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let user = random_pubkey();
+
+        let oversized = "9".repeat(131_073);
+        insert_media_audit_raw(
+            &pool,
+            comm_uuid,
+            Some(&user),
+            Some("blob-oversized"),
+            1,
+            Some(&oversized),
+        )
+        .await;
+        insert_media_audit(&pool, comm_uuid, &user, "blob-good", 2, 42).await;
+
+        let rows = storage_byte_counts(&pool)
+            .await
+            .expect("storage_byte_counts must not abort on oversized digit string");
+        let row = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user)
+            .expect("user row");
+
+        assert_eq!(
+            row.total_bytes, 42,
+            "oversized-digit value contributes 0 bytes; only the valid blob's 42 counts"
+        );
+        assert_eq!(row.object_count, 2, "both blobs are still counted");
+    }
+
+    /// Boundary battery for the lexicographic bigint bound check: i64::MAX
+    /// accepted, i64::MAX+1 → 0, 131,073 digits → 0, leading-zero forms
+    /// ('09223372036854775807' → MAX, '0000' → 0), mixed together with a
+    /// valid 42-byte blob. All must resolve without error.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_storage_bigint_boundary_battery() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let user = random_pubkey();
+
+        // i64::MAX — must be accepted.
+        insert_media_audit_raw(
+            &pool,
+            comm_uuid,
+            Some(&user),
+            Some("blob-i64max"),
+            1,
+            Some("9223372036854775807"),
+        )
+        .await;
+        // i64::MAX + 1 — rejected, falls back to 0.
+        insert_media_audit_raw(
+            &pool,
+            comm_uuid,
+            Some(&user),
+            Some("blob-i64max-plus-1"),
+            2,
+            Some("9223372036854775808"),
+        )
+        .await;
+        // 131,073 digits — rejected, falls back to 0.
+        let oversized = "9".repeat(131_073);
+        insert_media_audit_raw(
+            &pool,
+            comm_uuid,
+            Some(&user),
+            Some("blob-oversized-digits"),
+            3,
+            Some(&oversized),
+        )
+        .await;
+        // Leading-zero i64::MAX — accepted as MAX.
+        insert_media_audit_raw(
+            &pool,
+            comm_uuid,
+            Some(&user),
+            Some("blob-leading-zero-max"),
+            4,
+            Some("09223372036854775807"),
+        )
+        .await;
+        // All zeros — accepted as 0.
+        insert_media_audit_raw(
+            &pool,
+            comm_uuid,
+            Some(&user),
+            Some("blob-all-zeros"),
+            5,
+            Some("0000"),
+        )
+        .await;
+        // Valid reference blob.
+        insert_media_audit(&pool, comm_uuid, &user, "blob-valid", 6, 42).await;
+
+        let rows = storage_byte_counts(&pool)
+            .await
+            .expect("boundary battery must not abort");
+        let row = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user)
+            .expect("user row");
+
+        // i64::MAX + leading-zero-MAX + 42 = 2 * 9223372036854775807 + 42
+        // exceeds i64::MAX → saturates to i64::MAX.
+        assert_eq!(
+            row.total_bytes,
+            i64::MAX,
+            "i64::MAX + leading-zero-MAX + 42 saturates to i64::MAX"
+        );
+        assert_eq!(
+            row.object_count, 6,
+            "all six blobs counted (including rejected-size ones)"
+        );
+    }
+
+    /// Rows with a NULL `actor_pubkey` or NULL `object_id` are excluded from
+    /// per-user attribution entirely — they must not collapse into a fake
+    /// shared "unknown" user and must not be miscounted against a real user.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_storage_null_actor_or_object_id_excluded() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let user = random_pubkey();
+
+        // Real attributable upload.
+        insert_media_audit(&pool, comm_uuid, &user, "blob-real", 1, 100).await;
+        // NULL actor_pubkey (e.g. system-initiated action) — excluded.
+        insert_media_audit_raw(
+            &pool,
+            comm_uuid,
+            None,
+            Some("blob-no-actor"),
+            2,
+            Some("999"),
+        )
+        .await;
+        // NULL object_id — excluded.
+        insert_media_audit_raw(&pool, comm_uuid, Some(&user), None, 3, Some("999")).await;
+
+        let rows = storage_byte_counts(&pool)
+            .await
+            .expect("storage_byte_counts");
+        let row = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user)
+            .expect("user row");
+
+        assert_eq!(
+            row.total_bytes, 100,
+            "only the real, fully-attributed upload counts"
+        );
+        assert_eq!(row.object_count, 1, "only one attributable blob");
+
+        // No row should exist with an empty/placeholder pubkey standing in
+        // for the excluded NULL-actor entry.
+        assert_eq!(
+            rows.iter().filter(|r| r.community_id == comm_uuid).count(),
+            1,
+            "excluded rows must not create a second, fake user row"
+        );
+    }
+
+    /// Re-uploading the same blob (same `object_id`) twice for one user is
+    /// charged once — idempotent re-upload must not double-count logical
+    /// storage even though the audit log records both attempts.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_storage_same_user_same_blob_reuploaded_charged_once() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let user = random_pubkey();
+
+        // Same object_id uploaded twice (idempotent re-upload).
+        insert_media_audit(&pool, comm_uuid, &user, "blob-dup", 1, 250).await;
+        insert_media_audit(&pool, comm_uuid, &user, "blob-dup", 2, 250).await;
+
+        let rows = storage_byte_counts(&pool)
+            .await
+            .expect("storage_byte_counts");
+        let row = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user)
+            .expect("user row");
+
+        assert_eq!(
+            row.total_bytes, 250,
+            "re-upload of the same blob charged once"
+        );
+        assert_eq!(row.object_count, 1, "one distinct blob, not two");
+    }
+
+    /// Two different users uploading the same blob (`object_id`, e.g. same
+    /// file contents hashing to the same SHA) are each charged once — the
+    /// dedup key includes actor_pubkey, so blob sharing across users does not
+    /// collapse their independent attribution.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_storage_two_users_same_blob_each_charged_once() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let user_a = random_pubkey();
+        let user_b = random_pubkey();
+
+        insert_media_audit(&pool, comm_uuid, &user_a, "shared-blob", 1, 400).await;
+        insert_media_audit(&pool, comm_uuid, &user_b, "shared-blob", 2, 400).await;
+
+        let rows = storage_byte_counts(&pool)
+            .await
+            .expect("storage_byte_counts");
+        let a = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user_a)
+            .expect("user A row");
+        let b = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user_b)
+            .expect("user B row");
+
+        assert_eq!(
+            a.total_bytes, 400,
+            "user A charged once for the shared blob"
+        );
+        assert_eq!(a.object_count, 1);
+        assert_eq!(
+            b.total_bytes, 400,
+            "user B charged once for the shared blob"
+        );
+        assert_eq!(b.object_count, 1);
+    }
+
+    /// Two distinct blobs whose sizes are each individually valid (≤
+    /// `i64::MAX`) but sum past it must not abort the query — Postgres
+    /// `SUM(bigint)` returns `numeric` (wider precision than `bigint`), so
+    /// the accumulation itself won't overflow for any feasible row count,
+    /// but a naive final `CAST(... AS BIGINT)` throws `bigint out of range`
+    /// on the result. The aggregate must clamp to `i64::MAX` instead, and
+    /// the object is still counted (both blobs are individually valid, so
+    /// nothing here is malformed input to fail-safe on).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_storage_aggregate_overflow_saturates_to_i64_max() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let user = random_pubkey();
+
+        insert_media_audit(&pool, comm_uuid, &user, "blob-huge-1", 1, i64::MAX as u64).await;
+        insert_media_audit(&pool, comm_uuid, &user, "blob-huge-2", 2, 1).await;
+
+        let rows = storage_byte_counts(&pool)
+            .await
+            .expect("storage_byte_counts must not abort on aggregate overflow");
+        let row = rows
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.actor_pubkey == user)
+            .expect("user row");
+
+        assert_eq!(
+            row.total_bytes,
+            i64::MAX,
+            "aggregate exceeding i64::MAX saturates instead of erroring"
+        );
+        assert_eq!(
+            row.object_count, 2,
+            "both individually-valid blobs are still counted"
         );
     }
 }

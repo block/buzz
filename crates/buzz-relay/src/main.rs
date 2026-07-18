@@ -1372,6 +1372,7 @@ async fn emit_db_usage_metrics(
     let active_users_30d = state.db.usage_active_user_counts("30 days").await?;
     let active_channels_1d = state.db.usage_active_channel_counts("1 day").await?;
     let active_channels_7d = state.db.usage_active_channel_counts("7 days").await?;
+    let storage_rows = state.db.usage_storage_byte_counts().await?;
 
     // --- Determine which community IDs receive per-community series (K1) ---
     //
@@ -1672,7 +1673,72 @@ async fn emit_db_usage_metrics(
         }
     }
 
+    // --- D. Storage — per-user logical bytes and object counts from audit log ---
+    //
+    // Each `UserStorageCounts.total_bytes` is already clamped to `i64::MAX`
+    // in SQL (see `storage_byte_counts`), but summing many such rows into
+    // community/fleet rollups can itself exceed `i64::MAX`. These are
+    // observability gauges, not a billing ledger, so rollups saturate at
+    // `i64::MAX` instead of panicking (overflow checks) or wrapping
+    // (release mode) on that addition.
+    {
+        let mut community_bytes: HashMap<Uuid, i64> = HashMap::new();
+        let mut community_objects: HashMap<Uuid, i64> = HashMap::new();
+        for row in &storage_rows {
+            if !active_set.contains(&row.community_id) {
+                continue;
+            }
+            let bytes_entry = community_bytes.entry(row.community_id).or_default();
+            *bytes_entry = bytes_entry.saturating_add(row.total_bytes);
+            let objects_entry = community_objects.entry(row.community_id).or_default();
+            *objects_entry = objects_entry.saturating_add(row.object_count);
+            let community_label = match host_map.get(&row.community_id) {
+                Some(h) => h.clone(),
+                None => continue,
+            };
+            let pubkey_hex = hex::encode(&row.actor_pubkey);
+            metrics::gauge!(
+                "buzz_user_storage_bytes",
+                "community" => community_label.clone(),
+                "pubkey" => pubkey_hex.clone()
+            )
+            .set(row.total_bytes as f64);
+            metrics::gauge!(
+                "buzz_user_storage_objects",
+                "community" => community_label,
+                "pubkey" => pubkey_hex
+            )
+            .set(row.object_count as f64);
+        }
+        // Fleet totals (always emitted).
+        let total_bytes = saturating_sum(storage_rows.iter().map(|r| r.total_bytes));
+        let total_objects = saturating_sum(storage_rows.iter().map(|r| r.object_count));
+        metrics::gauge!("buzz_total_storage_bytes").set(total_bytes as f64);
+        metrics::gauge!("buzz_total_storage_objects").set(total_objects as f64);
+        // Per-community rollups (gated by active_set).
+        for (&id, community) in host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
+            let bytes = community_bytes.get(&id).copied().unwrap_or(0);
+            let objects = community_objects.get(&id).copied().unwrap_or(0);
+            metrics::gauge!("buzz_community_storage_bytes", "community" => community.clone())
+                .set(bytes as f64);
+            metrics::gauge!("buzz_community_storage_objects", "community" => community.clone())
+                .set(objects as f64);
+        }
+    }
+
     Ok(())
+}
+
+/// Sum `i64` values with saturation instead of panicking (debug overflow
+/// checks) or wrapping (release mode). Used for storage rollups, which are
+/// observability gauges rather than an authoritative ledger — degrading to
+/// a saturated reading on an extreme aggregate is preferable to losing the
+/// whole usage-metrics snapshot for the tick.
+fn saturating_sum(values: impl Iterator<Item = i64>) -> i64 {
+    values.fold(0i64, i64::saturating_add)
 }
 
 #[cfg(test)]
@@ -1686,8 +1752,8 @@ mod tests {
 
     use super::{
         buzz_auto_migrate_enabled, dropped_in_memory_keys, idle_timeout_secs,
-        refresh_legacy_active_gauge_recency, run_periodic_until_cancelled, EmissionScope,
-        InMemoryMetricKey,
+        refresh_legacy_active_gauge_recency, run_periodic_until_cancelled, saturating_sum,
+        EmissionScope, InMemoryMetricKey,
     };
     use metrics::GaugeFn;
     use metrics_util::{
@@ -1806,5 +1872,33 @@ mod tests {
     fn test_idle_timeout_is_at_least_three_usage_intervals() {
         assert_eq!(idle_timeout_secs(None, 300), 900);
         assert_eq!(idle_timeout_secs(Some(10), 1_000), 3_000);
+    }
+
+    /// Storage rollups sum many already-clamped per-user `i64` values;
+    /// individually valid inputs can still overflow `i64` in aggregate.
+    /// `saturating_sum` must clamp at `i64::MAX`/`i64::MIN` instead of
+    /// panicking (debug overflow checks) or wrapping (release mode).
+    #[test]
+    fn test_saturating_sum_clamps_instead_of_panicking_or_wrapping() {
+        assert_eq!(
+            saturating_sum([i64::MAX, 1].into_iter()),
+            i64::MAX,
+            "aggregate exceeding i64::MAX saturates high"
+        );
+        assert_eq!(
+            saturating_sum([i64::MIN, -1].into_iter()),
+            i64::MIN,
+            "aggregate exceeding i64::MIN saturates low"
+        );
+        assert_eq!(
+            saturating_sum([10, 20, 30].into_iter()),
+            60,
+            "normal sums are unaffected"
+        );
+        assert_eq!(
+            saturating_sum(std::iter::empty()),
+            0,
+            "empty input sums to zero"
+        );
     }
 }
