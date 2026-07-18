@@ -41,6 +41,8 @@ pub mod push;
 pub mod reaction;
 /// Relay-level membership persistence (NIP-43).
 pub mod relay_members;
+/// Replica freshness fence for keyset-cursor read routing.
+pub mod replica_fence;
 /// Thread metadata persistence.
 pub mod thread;
 /// Per-community usage rollup queries for Prometheus gauges.
@@ -177,6 +179,12 @@ pub struct Db {
     /// route here (see [`Db::read`]); locks, transactions, and anything
     /// consistency-critical stays on `pool`.
     pub(crate) read_pool: Option<PgPool>,
+    /// Freshness fence gating cursor-page routing to the replica.
+    ///
+    /// Starts closed; a background probe ([`replica_fence::run_probe`])
+    /// advances it after each verified writer→replica LSN handshake. When
+    /// closed or stale, every cursor page routes to the writer.
+    pub(crate) fence: std::sync::Arc<replica_fence::ReplicaFence>,
 }
 
 /// Snapshot of Postgres connection pool utilisation.
@@ -344,29 +352,51 @@ impl Db {
     ///
     /// When `config.read_database_url` is set, a second pool with the same
     /// sizing is connected to it for lag-tolerant reads (see [`Db::read`]).
+    ///
+    /// The writer pool arms the commit-time `created_at` floor guard
+    /// (migration 0021) on every connection by setting the
+    /// `buzz.created_at_floor` GUC — this is what makes the replica fence
+    /// proof hold for every insert path that goes through this pool.
     pub async fn new(config: &DbConfig) -> Result<Self> {
-        let pool = Self::connect_pool(config, &config.database_url).await?;
+        let pool = Self::connect_pool(config, &config.database_url, true).await?;
         let read_pool = match &config.read_database_url {
-            Some(url) => Some(Self::connect_pool(config, url).await?),
+            Some(url) => Some(Self::connect_pool(config, url, false).await?),
             None => None,
         };
         Ok(Self {
             pool,
             max_connections: config.max_connections,
             read_pool,
+            fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
         })
     }
 
     /// Connect one pool with the sizing knobs from `config`.
-    async fn connect_pool(config: &DbConfig, url: &str) -> Result<PgPool> {
-        Ok(PgPoolOptions::new()
+    ///
+    /// `arm_floor_guard` sets the `buzz.created_at_floor` session GUC on
+    /// every connection, arming the deferred commit-time trigger from
+    /// migration 0021. Writer pools must arm it; replica pools are read-only
+    /// so the trigger never fires there.
+    async fn connect_pool(config: &DbConfig, url: &str, arm_floor_guard: bool) -> Result<PgPool> {
+        let mut options = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-            .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-            .connect(url)
-            .await?)
+            .idle_timeout(Duration::from_secs(config.idle_timeout_secs));
+        if arm_floor_guard {
+            options = options.after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    // `SET` cannot take bind parameters; `set_config` can.
+                    sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
+                        .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            });
+        }
+        Ok(options.connect(url).await?)
     }
 
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
@@ -375,16 +405,46 @@ impl Db {
             max_connections: pool.options().get_max_connections(),
             pool,
             read_pool: None,
+            fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
         }
     }
 
     /// Creates a `Db` from distinct writer and read pools (useful in tests,
     /// where a second database stands in for a lagged replica).
+    ///
+    /// The fence starts closed; tests that want cursor pages served by the
+    /// fake replica must open it via
+    /// [`replica_fence::ReplicaFence::force_open_for_tests`] (see
+    /// [`Db::fence`]).
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
         Self {
             max_connections: pool.options().get_max_connections(),
             pool,
             read_pool: Some(read_pool),
+            fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
+        }
+    }
+
+    /// The freshness fence gating replica routing (see [`replica_fence`]).
+    pub fn fence(&self) -> &std::sync::Arc<replica_fence::ReplicaFence> {
+        &self.fence
+    }
+
+    /// Spawn the background fence probe when a replica is configured.
+    ///
+    /// Without a running probe the fence stays closed and all cursor pages
+    /// route to the writer — safe, but no replica offload.
+    pub fn spawn_fence_probe(&self) -> bool {
+        match &self.read_pool {
+            Some(read_pool) => {
+                tokio::spawn(replica_fence::run_probe(
+                    self.pool.clone(),
+                    read_pool.clone(),
+                    std::sync::Arc::clone(&self.fence),
+                ));
+                true
+            }
+            None => false,
         }
     }
 
@@ -1893,12 +1953,18 @@ impl Db {
     /// Fetch replies under a root event.
     ///
     /// Routing: the head fetch (`cursor: None`) always reads the writer.
-    /// Cursor-bearing pages read the replica pool when one is configured —
-    /// thread pagination walks forward from oldest to newest, so every page
-    /// except possibly the last covers history a lagged replica already has.
-    /// An under-`limit` replica page is a candidate terminal page: the client
-    /// treats it as EOF, and a lagged replica could truncate the tail. That
-    /// one page is re-run on the writer so the EOF decision is authoritative.
+    /// Cursor-bearing pages may read the replica pool when one is configured
+    /// AND the freshness fence is open ([`replica_fence`]). Thread pagination
+    /// walks forward from oldest to newest, so a replica page is served only
+    /// when it is provably complete:
+    ///
+    /// - an under-`limit` page is a candidate terminal page — the client
+    ///   treats it as EOF, so it is re-run on the writer to keep the EOF
+    ///   decision authoritative (a lagged replica could truncate the tail);
+    /// - a full page whose newest row exceeds the fence could straddle a row
+    ///   the replica has not replayed (commit order is not `created_at`
+    ///   order), so it is also re-run on the writer. Only a full page that
+    ///   sits entirely at or below the fence is served from the replica.
     pub async fn get_thread_replies(
         &self,
         community_id: CommunityId,
@@ -1907,7 +1973,7 @@ impl Db {
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> Result<Vec<thread::ThreadReply>> {
-        if cursor.is_some() && self.has_read_pool() {
+        if cursor.is_some() && self.has_read_pool() && self.fence.verified_through().is_some() {
             let replies = thread::get_thread_replies(
                 self.read(),
                 community_id,
@@ -1917,10 +1983,15 @@ impl Db {
                 cursor,
             )
             .await?;
-            if replies.len() >= limit as usize {
+            let full = replies.len() >= limit as usize;
+            let below_fence = replies
+                .last()
+                .is_some_and(|tail| self.fence.covers(tail.created_at));
+            if full && below_fence {
                 return Ok(replies);
             }
-            // Candidate terminal page — verify against the writer.
+            // Candidate terminal page, or page reaching above the fence —
+            // verify against the writer.
         }
         thread::get_thread_replies(
             &self.pool,
@@ -1945,11 +2016,14 @@ impl Db {
     /// One channel window: top-level rows + summaries + server `has_more`.
     ///
     /// Routing: the head fetch (`cursor: None`) always reads the writer — it
-    /// must include just-committed events. Cursor-bearing pages read the
-    /// replica pool when one is configured: channel scroll-back pages
-    /// *backward* into history strictly older than the cursor
-    /// (`created_at < ts`), which a replica within any sane lag bound already
-    /// has, and the live tail patches the head regardless of pool.
+    /// must include just-committed events. A cursor-bearing page scrolls
+    /// *backward* into history bounded above by the cursor timestamp
+    /// (`created_at < ts`, or `= ts` with the id tiebreak), so it may read
+    /// the replica when one is configured AND the freshness fence covers the
+    /// cursor timestamp: every row the page could contain is then provably
+    /// replayed on the replica ([`replica_fence`]). Pages whose cursor
+    /// reaches above the fence — the freshest sliver of history — stay on
+    /// the writer.
     pub async fn get_channel_window(
         &self,
         community_id: CommunityId,
@@ -1958,10 +2032,9 @@ impl Db {
         cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
     ) -> Result<thread::ChannelWindow> {
-        let pool = if cursor.is_some() {
-            self.read()
-        } else {
-            &self.pool
+        let pool = match &cursor {
+            Some((ts, _)) if self.has_read_pool() && self.fence.covers(*ts) => self.read(),
+            _ => &self.pool,
         };
         thread::get_channel_window(pool, community_id, channel_id, limit, cursor, kind_filter).await
     }
@@ -5297,6 +5370,10 @@ mod tests {
         insert_top_level(&replica, community, channel, &marker).await;
 
         let db = Db::from_pools(writer.clone(), replica.clone());
+        // Open the fence through "now": the fixture's history is far in the
+        // past, so every cursor falls below the fence and routing is
+        // eligible. Fence-gating itself is pinned by the fence tests below.
+        db.fence().force_open_for_tests(chrono::Utc::now());
         let cid = CommunityId::from_uuid(community);
 
         // Head fetch (cursor: None) → writer: sees `fresh`, never `marker`.
@@ -5377,6 +5454,8 @@ mod tests {
         }
 
         let db = Db::from_pools(writer.clone(), replica.clone());
+        // Open the fence through "now" — fixture history is far in the past.
+        db.fence().force_open_for_tests(chrono::Utc::now());
         let cid = CommunityId::from_uuid(community);
 
         // Page 1 (no cursor) → writer.
@@ -5443,5 +5522,373 @@ mod tests {
 
         drop_scratch_db(&admin, replica, &rname).await;
         drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Channel DESC scrollback, out-of-order commit adversary: the replica is
+    /// missing a MIDDLE row (`m2`) because a transaction with an older
+    /// client-signed `created_at` committed late and has not replayed yet.
+    /// The replica's cursor page would be `[m1]` — silently skipping `m2`
+    /// forever, since the next cursor advances past it. The fence must route
+    /// any cursor above it to the writer.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_cursor_above_fence_stays_on_writer_preventing_middle_hole() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "fence_cw").await;
+        let (replica, rname) = create_scratch_db(&admin, "fence_cr").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let m1 = signed_event_at(&author, "m1", base);
+        let m2 = signed_event_at(&author, "m2-late-commit", base + 10);
+        let m3 = signed_event_at(&author, "m3", base + 20);
+        let m4 = signed_event_at(&author, "m4", base + 30);
+        for ev in [&m1, &m2, &m3, &m4] {
+            insert_top_level(&writer, community, channel, ev).await;
+        }
+        // Replica replayed everything EXCEPT the late-committed m2.
+        for ev in [&m1, &m3, &m4] {
+            insert_top_level(&replica, community, channel, ev).await;
+        }
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        let cid = CommunityId::from_uuid(community);
+
+        // Head page (writer): [m4, m3]; cursor lands on m3 (base+20).
+        let head = db
+            .get_channel_window(cid, channel, 2, None, None)
+            .await
+            .expect("head window");
+        let cursor = head.next_cursor.expect("has_more implies next_cursor");
+
+        // Fence closed → cursor page must come from the writer: m2 present.
+        let contents = |w: &thread::ChannelWindow| -> Vec<String> {
+            w.rows
+                .iter()
+                .map(|r| r.stored_event.event.content.clone())
+                .collect()
+        };
+        let page_closed = db
+            .get_channel_window(cid, channel, 10, Some(cursor.clone()), None)
+            .await
+            .expect("cursor page, fence closed");
+        assert_eq!(
+            contents(&page_closed),
+            vec!["m2-late-commit".to_string(), "m1".to_string()],
+            "fence closed: cursor pages route to the writer"
+        );
+
+        // Fence open but BELOW the cursor timestamp (covers base+5 only):
+        // the cursor (base+20) is not covered → writer again.
+        db.fence().force_open_for_tests(
+            chrono::DateTime::from_timestamp(base as i64 + 5, 0).expect("ts"),
+        );
+        let page_below = db
+            .get_channel_window(cid, channel, 10, Some(cursor.clone()), None)
+            .await
+            .expect("cursor page, fence below cursor");
+        assert_eq!(
+            contents(&page_below),
+            vec!["m2-late-commit".to_string(), "m1".to_string()],
+            "cursor above the fence must stay on the writer"
+        );
+
+        // Counterfactual pinning the hazard: were the fence (wrongly) open
+        // through now, the replica would serve the page WITHOUT m2 — the
+        // permanent-skip hole this fence exists to prevent.
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let page_hazard = db
+            .get_channel_window(cid, channel, 10, Some(cursor), None)
+            .await
+            .expect("cursor page, fence wrongly open");
+        assert_eq!(
+            contents(&page_hazard),
+            vec!["m1".to_string()],
+            "fixture models the inversion: an over-open fence would skip m2"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Thread ASC pagination, out-of-order commit adversary: the replica
+    /// holds a FULL page whose newest row (`r4`) has a later key than a
+    /// not-yet-replayed row (`r3`). The old under-limit check alone would
+    /// serve `[r4]` and the client cursor would advance past `r3` forever.
+    /// The fence rule (full AND tail ≤ fence) must send that page to the
+    /// writer instead.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn thread_full_replica_page_above_fence_is_reverified_on_writer() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "fence_tw").await;
+        let (replica, rname) = create_scratch_db(&admin, "fence_tr").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let root = signed_event_at(&author, "root", base);
+        for pool in [&writer, &replica] {
+            insert_top_level(pool, community, channel, &root).await;
+        }
+        let replies: Vec<nostr::Event> = (1..=4)
+            .map(|i| signed_event_at(&author, &format!("r{i}"), base + 10 * i as u64))
+            .collect();
+        for reply in &replies {
+            insert_thread_reply(&writer, community, channel, &root, reply).await;
+        }
+        // Replica replayed r1, r2, r4 — the late-committed r3 is missing.
+        for reply in [&replies[0], &replies[1], &replies[3]] {
+            insert_thread_reply(&replica, community, channel, &root, reply).await;
+        }
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        let cid = CommunityId::from_uuid(community);
+
+        // Fence covers r2 (base+20) but not r3/r4.
+        db.fence().force_open_for_tests(
+            chrono::DateTime::from_timestamp(base as i64 + 20, 0).expect("ts"),
+        );
+
+        // Page after r2 with limit 1: the replica would return the FULL page
+        // [r4] — but its tail is above the fence, so the writer re-runs it
+        // and returns [r3]. No skip.
+        let page1 = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 2, None)
+            .await
+            .expect("head page");
+        let cur = thread_cursor(page1.last().expect("head page non-empty"));
+        let page = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 1, Some(&cur))
+            .await
+            .expect("cursor page");
+        let contents: Vec<&str> = page
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["r3"],
+            "a full replica page above the fence must be re-run on the writer"
+        );
+
+        // Counterfactual: an over-open fence would serve the replica's [r4],
+        // skipping r3 permanently.
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let hazard = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 1, Some(&cur))
+            .await
+            .expect("hazard page");
+        let contents: Vec<&str> = hazard
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["r4"],
+            "fixture models the inversion: an over-open fence would skip r3"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Commit-time floor guard (migration 0021), exact held-transaction
+    /// adversary: a channel-bearing row whose `created_at` is older than the
+    /// floor at COMMIT time must abort the transaction — the guard runs
+    /// inside commit processing with `clock_timestamp()`, so holding the
+    /// transaction open cannot outrun it. channel_id-NULL rows are
+    /// structurally exempt, and sessions without the GUC are unaffected.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn created_at_floor_guard_aborts_old_channel_rows_at_commit() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, name) = create_scratch_db(&admin, "floor_guard").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&pool, community, channel, &author).await;
+
+        let insert_raw = |ev: nostr::Event, channel_id: Option<Uuid>| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = pool.begin().await.expect("begin");
+                // Arm the guard for this transaction only (the relay's
+                // writer pool arms it per connection; tests are explicit).
+                sqlx::query("SELECT set_config('buzz.created_at_floor', $1, true)")
+                    .bind(crate::replica_fence::CREATED_AT_FLOOR_SECS.to_string())
+                    .execute(&mut *tx)
+                    .await
+                    .expect("arm guard");
+                sqlx::query(
+                    "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, \
+                     content, sig, received_at, channel_id) \
+                     VALUES ($1, $2, $3, to_timestamp($4), 9, '[]', $5, $6, NOW(), $7)",
+                )
+                .bind(community)
+                .bind(ev.id.as_bytes().as_slice())
+                .bind(ev.pubkey.to_bytes().as_slice())
+                .bind(ev.created_at.as_secs() as f64)
+                .bind(&ev.content)
+                .bind(ev.sig.serialize().as_slice())
+                .bind(channel_id)
+                .execute(&mut *tx)
+                .await
+                .expect("insert inside tx (guard is deferred to commit)");
+                // Hold the transaction "open" past the insert, then commit —
+                // the deferred guard must still see the stale created_at.
+                sqlx::query("SELECT pg_sleep(0.05)")
+                    .execute(&mut *tx)
+                    .await
+                    .expect("hold tx");
+                tx.commit().await
+            }
+        };
+
+        let now_secs = chrono::Utc::now().timestamp() as u64;
+        let floor = crate::replica_fence::CREATED_AT_FLOOR_SECS as u64;
+
+        // Old channel-bearing row → COMMIT aborts with check_violation.
+        let old = signed_event_at(&author, "old-held-tx", now_secs - floor - 60);
+        let err = insert_raw(old, Some(channel))
+            .await
+            .expect_err("below-floor channel row must abort at COMMIT");
+        let code = match &err {
+            sqlx::Error::Database(db_err) => db_err.code().map(|c| c.to_string()),
+            other => panic!("expected database error, got {other:?}"),
+        };
+        assert_eq!(
+            code.as_deref(),
+            Some("23514"),
+            "guard raises check_violation"
+        );
+
+        // Fresh channel-bearing row → commits.
+        let fresh = signed_event_at(&author, "fresh", now_secs);
+        insert_raw(fresh, Some(channel))
+            .await
+            .expect("fresh row commits under the armed guard");
+
+        // Old row WITHOUT a channel (push lease / profile shapes) →
+        // structurally exempt, commits.
+        let old_global = signed_event_at(&author, "old-global", now_secs - floor - 60);
+        insert_raw(old_global, None)
+            .await
+            .expect("channel_id-NULL rows are exempt from the floor");
+
+        // Unarmed session (no GUC) → guard inert; backfills stay possible
+        // (and must hold the fence closed, per the migration header).
+        let old_backfill = signed_event_at(&author, "old-backfill", now_secs - floor - 60);
+        insert_top_level(&pool, community, channel, &old_backfill).await;
+
+        drop_scratch_db(&admin, pool, &name).await;
+    }
+
+    /// The armed writer pool (`Db::new`) must enforce the floor end-to-end
+    /// through the public insert APIs, and the session GUC must be verifiably
+    /// set on pooled connections.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed_pool, name) = create_scratch_db(&admin, "floor_pool").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&seed_pool, community, channel, &author).await;
+
+        // Connect a Db the production way: after_connect arms the guard.
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        let scratch_url = format!("{}/{}", &base[..idx], name);
+        let db = Db::new(&DbConfig {
+            database_url: scratch_url,
+            max_connections: 2,
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect armed Db");
+        let cid = CommunityId::from_uuid(community);
+
+        // Perci nit: assert the effective session value, not the intent.
+        let effective: String = sqlx::query_scalar("SHOW buzz.created_at_floor")
+            .fetch_one(&db.pool)
+            .await
+            .expect("SHOW guard GUC");
+        assert_eq!(
+            effective,
+            crate::replica_fence::CREATED_AT_FLOOR_SECS.to_string(),
+            "writer pool must arm the floor guard on every connection"
+        );
+
+        let now_secs = chrono::Utc::now().timestamp() as u64;
+        let floor = crate::replica_fence::CREATED_AT_FLOOR_SECS as u64;
+
+        // insert_event (single INSERT, autocommit): old channel row rejected.
+        let old = signed_event_at(&author, "old-direct", now_secs - floor - 60);
+        let err = event::insert_event(&db.pool, cid, &old, Some(channel))
+            .await
+            .expect_err("armed pool must reject below-floor channel inserts");
+        assert!(
+            err.to_string().contains("below the replica-fence floor"),
+            "unexpected error: {err}"
+        );
+
+        // insert_event_with_thread_metadata (multi-statement tx): same.
+        let old2 = signed_event_at(&author, "old-thread-meta", now_secs - floor - 90);
+        let ts = chrono::DateTime::from_timestamp(old2.created_at.as_secs() as i64, 0)
+            .expect("valid ts");
+        let err = event::insert_event_with_thread_metadata(
+            &db.pool,
+            cid,
+            &old2,
+            Some(channel),
+            Some(event::ThreadMetadataParams {
+                event_id: old2.id.as_bytes(),
+                event_created_at: ts,
+                channel_id: channel,
+                parent_event_id: None,
+                parent_event_created_at: None,
+                root_event_id: None,
+                root_event_created_at: None,
+                depth: 0,
+                broadcast: true,
+            }),
+        )
+        .await
+        .expect_err("armed pool must reject below-floor thread-metadata inserts");
+        assert!(
+            err.to_string().contains("below the replica-fence floor"),
+            "unexpected error: {err}"
+        );
+
+        // Fresh events pass through both APIs.
+        let fresh = signed_event_at(&author, "fresh-direct", now_secs);
+        event::insert_event(&db.pool, cid, &fresh, Some(channel))
+            .await
+            .expect("fresh insert passes the armed guard");
+
+        drop_scratch_db(&admin, seed_pool, &name).await;
+        // db pool still holds connections to the dropped DB; close it.
+        db.pool.close().await;
     }
 }

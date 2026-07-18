@@ -151,6 +151,12 @@ async fn main() -> anyhow::Result<()> {
     })?;
     if db.has_read_pool() {
         info!("Postgres connected (writer + read replica)");
+        // Freshness fence probe: cursor pages route to the replica only for
+        // history the probe has verified as fully replayed. Until the first
+        // successful handshake the fence is closed and all reads stay on the
+        // writer.
+        db.spawn_fence_probe();
+        info!("Replica fence probe started");
     } else {
         info!("Postgres connected");
     }
@@ -938,6 +944,20 @@ async fn main() -> anyhow::Result<()> {
                     metrics::gauge!("buzz_db_read_pool_idle").set(read_stats.idle as f64);
                     metrics::gauge!("buzz_db_read_pool_active").set(read_active as f64);
                     metrics::gauge!("buzz_db_read_pool_max").set(read_stats.max as f64);
+
+                    // Fence observability: 1 when replica routing is
+                    // eligible, and the verified-freshness lag in seconds.
+                    // Closed/stale fence reports open=0 with lag untouched.
+                    match pool_state.db.fence().verified_through() {
+                        Some(fence_ts) => {
+                            let lag = (chrono::Utc::now() - fence_ts).num_seconds();
+                            metrics::gauge!("buzz_db_replica_fence_open").set(1.0);
+                            metrics::gauge!("buzz_db_replica_fence_lag_seconds").set(lag as f64);
+                        }
+                        None => {
+                            metrics::gauge!("buzz_db_replica_fence_open").set(0.0);
+                        }
+                    }
                 }
 
                 let rs = pool_state.redis_pool.status();
