@@ -1158,6 +1158,35 @@ test("thread refetch preserves a live reply and reaction received in flight", as
   await expect(replyRow.getByLabel("Toggle 👍 reaction")).toBeVisible();
 });
 
+test("thread reply appears after relay closes and restores its live subscription", async ({
+  page,
+}) => {
+  await installMockBridge(page, { closeChannelLiveSubscriptionOnce: true });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const seed = `Thread CLOSED seed ${Date.now()}`;
+  await page.getByTestId("message-input").fill(seed);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(seed);
+
+  const rootMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const reply = `Thread reply after CLOSED ${Date.now()}`;
+  await threadPanel.getByTestId("message-input").fill(reply);
+  await page.waitForTimeout(1_100);
+  await threadPanel.getByTestId("send-message").click();
+
+  await expect(threadPanel).toContainText(reply);
+});
+
 test("thread composer keeps focus after sending a thread reply", async ({
   page,
 }) => {

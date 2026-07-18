@@ -164,6 +164,8 @@ type E2eConfig = {
     applyCommunityDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Close the first channel-window live REQ; its retry is accepted. */
+    closeChannelLiveSubscriptionOnce?: boolean;
     /** Reject successive kind-9 sends with these messages, then resume. */
     sendMessageErrors?: string[];
     /** Reject successive managed-agent starts, then resume. */
@@ -2563,6 +2565,7 @@ const mockReminderEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
+let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 
@@ -8234,6 +8237,16 @@ function sendToMockSocket(args: {
         channelIds.size === 1
           ? (channelIds.values().next().value as string)
           : undefined;
+      if (
+        getConfig()?.mock?.closeChannelLiveSubscriptionOnce &&
+        !mockClosedChannelLiveSubscription &&
+        onlyChannelId &&
+        kinds.has(KIND_CHANNEL_THREAD_SUMMARY)
+      ) {
+        mockClosedChannelLiveSubscription = true;
+        sendWsText(socket.handler, ["CLOSED", subId, "rate-limited"]);
+        return;
+      }
       socket.subscriptions.set(subId, {
         channelId: onlyChannelId ?? GLOBAL_MOCK_SUBSCRIPTION,
         kinds: kinds.size > 0 ? [...kinds] : null,
@@ -8451,6 +8464,7 @@ export function maybeInstallE2eTauriMocks() {
     return;
   }
 
+  mockClosedChannelLiveSubscription = false;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
