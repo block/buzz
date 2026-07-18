@@ -742,10 +742,10 @@ test("config page shows Agent defaults form", async ({ page }) => {
   await page.getByTestId("global-agent-provider").click();
   await expect(
     page.getByTestId("global-agent-provider-option-anthropic"),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await expect(
     page.getByTestId("global-agent-provider-option-openai"),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await expect(
     page.getByTestId("global-agent-provider-option-__custom_provider__"),
   ).toHaveCount(0);

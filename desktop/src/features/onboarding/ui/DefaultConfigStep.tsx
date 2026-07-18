@@ -199,9 +199,6 @@ function AgentDefaultsSection({
             disableModelSelectDuringDiscovery={false}
             effortPlaceholderLabel="Select effort level"
             keepSelectedModelValueLabel
-            hideUnconfiguredCredentialProviders={
-              selectedRuntimeId === "buzz-agent"
-            }
             modelPlaceholderLabel="Select a model"
             onConfigChange={(next) => {
               // Always apply optimistically so the UI never reverts mid-save,
