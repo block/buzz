@@ -15,7 +15,7 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
-import { GitCommitHorizontal } from "lucide-react";
+import { GitBranch, GitCommitHorizontal } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
@@ -164,6 +164,7 @@ function groupCommitsByDay(commits: ProjectRepoCommit[]) {
 }
 
 export function ActivityPanel({
+  branch,
   snapshot,
   isLoading,
   error,
@@ -173,6 +174,7 @@ export function ActivityPanel({
   repoContributors,
   viewerGitIdentity,
 }: {
+  branch?: string;
   snapshot: ProjectRepoSnapshot | null | undefined;
   isLoading: boolean;
   error: unknown;
@@ -264,12 +266,18 @@ export function ActivityPanel({
                           pubkey={matchedProfile?.pubkey ?? null}
                           showLabel={false}
                         />
-                        <span className="truncate font-medium text-foreground/80">
-                          {authorLabel}
-                        </span>
-                        <span>
+                        <span className="truncate">
+                          <span className="font-medium text-foreground/80">
+                            {authorLabel}
+                          </span>{" "}
                           authored {relativeCommitTime(commit.timestamp)}
                         </span>
+                        {branch ? (
+                          <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border/60 px-1.5 py-0.5 font-mono text-2xs">
+                            <GitBranch className="h-3 w-3 shrink-0" />
+                            <span className="truncate">{branch}</span>
+                          </span>
+                        ) : null}
                         {matchingContributor?.commitCount ? (
                           <span className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs">
                             {pluralize(

@@ -1,9 +1,10 @@
 import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge } from "../helpers/bridge";
+import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/project-pr-review";
+const REVIEWER_AGENT_PUBKEY = "a".repeat(64);
 
 // The projects surface is a preview feature — opt in before the app mounts.
 // Must run before installMockBridge so React reads the override on mount.
@@ -62,7 +63,10 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
 
   // Request a review from bob via the reviewers dropdown.
   await page.getByRole("button", { name: "Request" }).click();
-  await page.getByRole("menuitem", { name: "bob" }).click();
+  await page.getByTestId("project-reviewer-search").fill("bob");
+  await page
+    .getByTestId(`project-reviewer-result-${TEST_IDENTITIES.bob.pubkey}`)
+    .click();
   await expect(page.getByText("Review requested.")).toBeVisible();
   // The requested reviewer appears in the reviewers row and the timeline.
   await expect(page.getByText("Requested a review from bob")).toBeVisible({
@@ -152,7 +156,7 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
           ).length ?? 0,
       ),
     )
-    .toBe(2);
+    .toBe(1);
   const mergedEvent = await page.evaluate(() =>
     window.__BUZZ_E2E_SIGNED_EVENTS__
       ?.filter((event) => event.kind === 1631)
@@ -170,6 +174,65 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
       ).length ?? 0,
   );
   expect(mergeCommandCount).toBe(1);
+});
+
+test("managed agent repository owner can merge", async ({ page }) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript((owner) => {
+    window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ = owner;
+  }, TEST_IDENTITIES.alice.pubkey);
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        name: "Brain",
+      },
+      {
+        pubkey: REVIEWER_AGENT_PUBKEY,
+        name: "Reviewer Bot",
+      },
+    ],
+  });
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "PRs" }).click();
+  const agentRow = page
+    .getByTestId("project-pull-request-row")
+    .filter({ hasText: "Brain" })
+    .first();
+  await expect(agentRow).toBeVisible({ timeout: 10_000 });
+  await agentRow.getByRole("button", { name: /^#/ }).click();
+  await page.getByRole("button", { name: "Request", exact: true }).click();
+  await page.getByTestId("project-reviewer-search").fill("Reviewer Bot");
+  await page
+    .getByTestId(`project-reviewer-result-${REVIEWER_AGENT_PUBKEY}`)
+    .click();
+  await expect(page.getByText("Review requested.")).toBeVisible();
+  const reviewRequestPayload = await page.evaluate(() =>
+    window.__BUZZ_E2E_COMMAND_PAYLOADS__?.find(
+      (entry) => entry.command === "sign_project_pull_request_review_request",
+    ),
+  );
+  expect(reviewRequestPayload?.payload).toMatchObject({
+    input: {
+      reviewers: [REVIEWER_AGENT_PUBKEY],
+      targetOwner: TEST_IDENTITIES.alice.pubkey,
+    },
+  });
+  await page.getByRole("button", { name: "Merge", exact: true }).click();
+  await page.getByTestId("merge-pull-request-confirm-button").click();
+  await expect(page.getByText("Merged feature into main.")).toBeVisible();
+
+  const mergePayload = await page.evaluate(() =>
+    window.__BUZZ_E2E_COMMAND_PAYLOADS__?.find(
+      (entry) => entry.command === "merge_project_pull_request",
+    ),
+  );
+  expect(mergePayload?.payload).toMatchObject({
+    input: {
+      targetOwner: TEST_IDENTITIES.alice.pubkey,
+    },
+  });
 });
 
 test("project without a checkout can be cloned", async ({ page }) => {

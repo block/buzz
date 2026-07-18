@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
+import { signProjectPullRequestReviewRequest } from "@/shared/api/projectGit";
 import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import {
@@ -79,11 +80,13 @@ async function requestProjectPullRequestReview({
   pullRequest,
   reviewers,
   reviewerLabel,
+  signAsManagedOwner,
 }: {
   project: Project;
   pullRequest: ProjectPullRequest;
   reviewers: string[];
   reviewerLabel: string;
+  signAsManagedOwner: boolean;
 }): Promise<void> {
   if (reviewers.length === 0) {
     throw new Error("Select at least one reviewer.");
@@ -91,6 +94,16 @@ async function requestProjectPullRequestReview({
   const reviewerPubkeys = [
     ...new Set(reviewers.map((pubkey) => pubkey.toLowerCase())),
   ];
+  if (signAsManagedOwner) {
+    await signProjectPullRequestReviewRequest({
+      targetOwner: project.owner,
+      repoAddress: project.repoAddress,
+      pullRequestId: pullRequest.id,
+      reviewers: reviewerPubkeys,
+      reviewerLabel,
+    });
+    return;
+  }
   const event = await signRelayEvent({
     kind: KIND_TEXT_NOTE,
     content: `Requested a review from ${reviewerLabel}`,
@@ -185,10 +198,12 @@ export function useRequestProjectPullRequestReviewMutation(
       pullRequest,
       reviewers,
       reviewerLabel,
+      signAsManagedOwner,
     }: {
       pullRequest: ProjectPullRequest;
       reviewers: string[];
       reviewerLabel: string;
+      signAsManagedOwner: boolean;
     }) => {
       if (!project) throw new Error("No project selected.");
       return requestProjectPullRequestReview({
@@ -196,6 +211,7 @@ export function useRequestProjectPullRequestReviewMutation(
         pullRequest,
         reviewers,
         reviewerLabel,
+        signAsManagedOwner,
       });
     },
     onSuccess: invalidate,

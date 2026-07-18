@@ -10,6 +10,7 @@ import {
 import * as React from "react";
 import { toast } from "sonner";
 
+import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
   type Project,
@@ -18,7 +19,6 @@ import {
 } from "@/features/projects/hooks";
 import {
   useApproveProjectPullRequestMutation,
-  useRequestProjectPullRequestReviewMutation,
   useUpdateProjectPullRequestStatusMutation,
 } from "@/features/projects/pullRequestReviews";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -26,16 +26,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "@/shared/ui/dropdown-menu";
 import { Markdown } from "@/shared/ui/markdown";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   ProjectFeedRow,
   ProjectFeedRowCluster,
@@ -44,6 +35,7 @@ import {
 import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 import { MergePullRequestButton } from "./MergePullRequestButton";
+import { PullRequestReviewersRow } from "./PullRequestReviewersRow";
 
 function compactDate(createdAt: number) {
   return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
@@ -250,144 +242,11 @@ function PullRequestRow({
 
 export type PullRequestPanelMode = "conversation" | "commits" | "checks";
 
-/** Candidate reviewers: project owner, contributors, and PR recipients —
- * minus the PR author and anyone already requested. */
-function reviewerCandidates(project: Project, pullRequest: ProjectPullRequest) {
-  const requested = new Set(pullRequest.reviewers);
-  const author = normalizePubkey(pullRequest.author);
-  return [
-    ...new Set(
-      [project.owner, ...project.contributors, ...pullRequest.recipients].map(
-        normalizePubkey,
-      ),
-    ),
-  ].filter((pubkey) => pubkey !== author && !requested.has(pubkey));
-}
-
-function PullRequestReviewersRow({
-  canRequest,
-  profiles,
-  project,
-  pullRequest,
-}: {
-  canRequest: boolean;
-  profiles?: UserProfileLookup;
-  project: Project;
-  pullRequest: ProjectPullRequest;
-}) {
-  const requestReviewMutation =
-    useRequestProjectPullRequestReviewMutation(project);
-  const candidates = reviewerCandidates(project, pullRequest);
-  const approvedBy = new Set(
-    pullRequest.approvals.map((approval) => normalizePubkey(approval.author)),
-  );
-
-  const handleRequest = React.useCallback(
-    async (pubkey: string) => {
-      try {
-        await requestReviewMutation.mutateAsync({
-          pullRequest,
-          reviewers: [pubkey],
-          reviewerLabel: labelForPubkey(pubkey, profiles),
-        });
-        toast.success("Review requested.");
-      } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to request review.",
-        );
-      }
-    },
-    [profiles, pullRequest, requestReviewMutation],
-  );
-
-  if (pullRequest.reviewers.length === 0 && !canRequest) {
-    return null;
-  }
-
-  return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5 px-1 text-xs text-muted-foreground">
-      <span className="font-medium">Reviewers</span>
-      {pullRequest.reviewers.map((pubkey) => {
-        const profile = profileForPubkey(pubkey, profiles);
-        const label = labelForPubkey(pubkey, profiles);
-        const hasApproved = approvedBy.has(normalizePubkey(pubkey));
-        return (
-          <Tooltip key={pubkey}>
-            <TooltipTrigger asChild>
-              <span className="relative inline-flex">
-                <UserAvatar
-                  accent={profile?.isAgent === true}
-                  avatarUrl={profile?.avatarUrl ?? null}
-                  displayName={label}
-                  size="xs"
-                />
-                {hasApproved ? (
-                  <span className="-right-1 -bottom-1 absolute flex h-3.5 w-3.5 items-center justify-center rounded-full bg-green-600 text-white ring-2 ring-background">
-                    <Check className="h-2.5 w-2.5" />
-                  </span>
-                ) : null}
-              </span>
-            </TooltipTrigger>
-            <TooltipContent>
-              {label}
-              {hasApproved ? " — approved" : " — review requested"}
-            </TooltipContent>
-          </Tooltip>
-        );
-      })}
-      {canRequest && candidates.length > 0 ? (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              className="h-6 gap-1 px-2 text-2xs text-muted-foreground hover:text-foreground"
-              disabled={requestReviewMutation.isPending}
-              size="xs"
-              type="button"
-              variant="outline"
-            >
-              <UserPlus className="h-3 w-3" />
-              Request
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="min-w-52">
-            <DropdownMenuLabel>Request a review</DropdownMenuLabel>
-            {candidates.map((pubkey) => {
-              const profile = profileForPubkey(pubkey, profiles);
-              const label = labelForPubkey(pubkey, profiles);
-              return (
-                <DropdownMenuItem
-                  key={pubkey}
-                  onSelect={() => {
-                    void handleRequest(pubkey);
-                  }}
-                >
-                  <span className="flex min-w-0 items-center gap-2">
-                    <UserAvatar
-                      accent={profile?.isAgent === true}
-                      avatarUrl={profile?.avatarUrl ?? null}
-                      displayName={label}
-                      size="xs"
-                    />
-                    <span className="truncate">{label}</span>
-                  </span>
-                </DropdownMenuItem>
-              );
-            })}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      ) : null}
-    </div>
-  );
-}
-
-/** GitHub-style review box rendered in the conversation flow, above the
- * comment composer: reviewers on top, review state + actions below. */
+/** GitHub-style review state and actions rendered in the conversation flow. */
 function PullRequestReviewCard({
-  profiles,
   project,
   pullRequest,
 }: {
-  profiles?: UserProfileLookup;
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
@@ -399,8 +258,8 @@ function PullRequestReviewCard({
   const viewer = viewerPubkey ? normalizePubkey(viewerPubkey) : null;
   const isAuthor = viewer === normalizePubkey(pullRequest.author);
   const isOwner = viewer === normalizePubkey(project.owner);
+  const isManagedAgentOwner = useIsManagedAgent(project.owner) === true;
   const canChangeStatus = Boolean(viewer) && (isAuthor || isOwner);
-  const canRequestReview = canChangeStatus;
   const hasApproved = Boolean(
     viewer &&
       pullRequest.approvals.some(
@@ -413,7 +272,7 @@ function PullRequestReviewCard({
     !hasApproved &&
     (pullRequest.status === "Open" || pullRequest.status === "Draft");
   const canMerge =
-    isOwner &&
+    (isOwner || isManagedAgentOwner) &&
     pullRequest.status === "Open" &&
     Boolean(pullRequest.branchName && pullRequest.commit);
 
@@ -463,12 +322,6 @@ function PullRequestReviewCard({
 
   return (
     <div className="space-y-2.5 pt-3">
-      <PullRequestReviewersRow
-        canRequest={canRequestReview}
-        profiles={profiles}
-        project={project}
-        pullRequest={pullRequest}
-      />
       <div
         className={`min-w-0 space-y-2.5 rounded-xl px-3 py-2.5 ${
           isDraft
@@ -600,8 +453,7 @@ export function PullRequestDetailHeader({
   );
 }
 
-/** Right-hand meta column for the PR detail view: status, author, branches,
- * and dates. Review actions live inline in the conversation column. */
+/** Right-hand meta column for the PR detail view. */
 export function PullRequestMetaRail({
   profiles,
   project,
@@ -611,11 +463,19 @@ export function PullRequestMetaRail({
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
+  const identityQuery = useIdentityQuery();
   const authorProfile = profileForPubkey(pullRequest.author, profiles);
   const authorLabel = labelForPubkey(pullRequest.author, profiles);
   const targetBranch = project.defaultBranch || "default branch";
   const sourceBranch = pullRequest.branchName || "unknown branch";
   const commitCount = Math.max(1, pullRequest.updateCount + 1);
+  const viewerPubkey = identityQuery.data?.pubkey;
+  const viewer = viewerPubkey ? normalizePubkey(viewerPubkey) : null;
+  const isAuthor = viewer === normalizePubkey(pullRequest.author);
+  const isOwner = viewer === normalizePubkey(project.owner);
+  const isManagedAgentOwner = useIsManagedAgent(project.owner) === true;
+  const canRequestReview =
+    Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
 
   return (
     <aside className="min-w-0 space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
@@ -631,6 +491,17 @@ export function PullRequestMetaRail({
           {pullRequest.status}
         </span>
       </OverviewRailSection>
+      {pullRequest.reviewers.length > 0 || canRequestReview ? (
+        <OverviewRailSection title="Reviewers">
+          <PullRequestReviewersRow
+            canRequest={canRequestReview}
+            profiles={profiles}
+            project={project}
+            pullRequest={pullRequest}
+            signAsManagedOwner={isManagedAgentOwner && !isOwner}
+          />
+        </OverviewRailSection>
+      ) : null}
       <OverviewRailSection title="Author">
         <ProfileIdentityButton
           align="center"
@@ -867,11 +738,7 @@ function PullRequestDetail({
         ) : (
           <p className="text-sm text-muted-foreground">No comments yet.</p>
         )}
-        <PullRequestReviewCard
-          profiles={profiles}
-          project={project}
-          pullRequest={pullRequest}
-        />
+        <PullRequestReviewCard project={project} pullRequest={pullRequest} />
         <ForumComposer
           className="border border-border/60 bg-background/45"
           disabled={commentMutation.isPending}

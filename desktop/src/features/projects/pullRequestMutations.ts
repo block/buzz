@@ -1,12 +1,14 @@
 import { useMutation } from "@tanstack/react-query";
 
-import { mergeProjectPullRequest } from "@/shared/api/projectGit";
+import {
+  mergeProjectPullRequest,
+  publishProjectPullRequestMergedStatus,
+} from "@/shared/api/projectGit";
 import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import {
   KIND_GIT_PR_UPDATE,
   KIND_GIT_PULL_REQUEST,
-  KIND_GIT_STATUS_MERGED,
 } from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { Project, ProjectPullRequest } from "./hooks";
@@ -148,23 +150,12 @@ export async function publishProjectPullRequestUpdate({
 
 export async function publishProjectPullRequestMerged(
   project: Project,
-  pullRequest: ProjectPullRequest,
-  mergeCommit: string,
+  statusEvent: string,
 ) {
-  const event = await signRelayEvent({
-    kind: KIND_GIT_STATUS_MERGED,
-    content: "",
-    createdAt: nextProjectPullRequestStatusCreatedAt(
-      pullRequest,
-      Math.floor(Date.now() / 1_000),
-    ),
-    tags: projectPullRequestMergedTags(project, pullRequest, mergeCommit),
+  await publishProjectPullRequestMergedStatus({
+    targetOwner: project.owner,
+    statusEvent,
   });
-  await relayClient.publishEvent(
-    event,
-    "Repository merged, but publishing its pull request status timed out.",
-    "Repository merged, but its pull request status could not be published.",
-  );
 }
 
 export function useCreateProjectPullRequestMutation(
@@ -225,24 +216,18 @@ export function useMergeProjectPullRequestMutation(
         targetCloneUrl: project.cloneUrls[0],
         sourceCloneUrl: pullRequest.cloneUrls[0] ?? project.cloneUrls[0],
         targetOwner: project.owner,
+        repoAddress: project.repoAddress,
+        pullRequestId: pullRequest.id,
+        pullRequestAuthor: pullRequest.author,
+        statusCreatedAt: nextProjectPullRequestStatusCreatedAt(
+          pullRequest,
+          Math.floor(Date.now() / 1_000),
+        ),
         targetBranch: project.defaultBranch,
         sourceBranch: pullRequest.branchName,
         expectedCommit: pullRequest.commit,
       });
-      let statusPublicationError: string | null = null;
-      try {
-        await publishProjectPullRequestMerged(
-          project,
-          pullRequest,
-          result.mergeCommit,
-        );
-      } catch (error) {
-        statusPublicationError =
-          error instanceof Error
-            ? error.message
-            : "Pull request status could not be published.";
-      }
-      return { ...result, statusPublicationError };
+      return result;
     },
     onSuccess: invalidate,
   });
@@ -253,15 +238,9 @@ export function usePublishProjectPullRequestMergedMutation(
 ) {
   const invalidate = useProjectPullRequestWriteInvalidation(project);
   return useMutation({
-    mutationFn: ({
-      mergeCommit,
-      pullRequest,
-    }: {
-      mergeCommit: string;
-      pullRequest: ProjectPullRequest;
-    }) => {
+    mutationFn: ({ statusEvent }: { statusEvent: string }) => {
       if (!project) throw new Error("No project selected.");
-      return publishProjectPullRequestMerged(project, pullRequest, mergeCommit);
+      return publishProjectPullRequestMerged(project, statusEvent);
     },
     onSuccess: invalidate,
   });

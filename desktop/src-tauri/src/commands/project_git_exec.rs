@@ -5,7 +5,7 @@
 //! variables so nothing key-related ever touches disk or global git config.
 
 use crate::{app_state::AppState, managed_agents::resolve_command};
-use nostr::ToBech32;
+use nostr::{Keys, ToBech32};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -148,14 +148,17 @@ fn apply_git_config(command: &mut Command, entries: &[(&str, String)]) {
 }
 
 pub(crate) fn build_git_auth_config(state: &AppState) -> Result<GitAuthConfig, String> {
+    let keys = state.signing_keys()?;
+    build_git_auth_config_for_keys(&keys)
+}
+
+pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfig, String> {
     let git_path = resolve_command("git").ok_or_else(|| "git was not found on PATH".to_string())?;
     let credential_helper = resolve_command("git-credential-nostr");
-    let nsec = {
-        let keys = state.keys.lock().map_err(|error| error.to_string())?;
-        keys.secret_key()
-            .to_bech32()
-            .map_err(|error| format!("encode identity key: {error}"))?
-    };
+    let nsec = keys
+        .secret_key()
+        .to_bech32()
+        .map_err(|error| format!("encode identity key: {error}"))?;
     Ok(GitAuthConfig {
         git_path,
         credential_helper,

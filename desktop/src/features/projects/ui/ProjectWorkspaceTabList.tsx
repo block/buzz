@@ -25,7 +25,7 @@ export function ProjectTabsList({ prsActive }: { prsActive?: boolean }) {
         <BookOpen className="h-full w-full" strokeWidth={2} />
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="files">
-        Code
+        Files
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="activity">
         Commits

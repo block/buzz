@@ -96,4 +96,6 @@ export type ProjectRepoCloneResult = {
 export type ProjectRepoMergeResult = {
   message: string;
   mergeCommit: string;
+  statusEvent: string;
+  statusPublicationError: string | null;
 };

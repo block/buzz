@@ -401,12 +401,18 @@ export async function cloneProjectRepository(input: {
 type RawProjectRepoMergeResult = {
   message: string;
   merge_commit: string;
+  status_event: string;
+  status_publication_error: string | null;
 };
 
 export async function mergeProjectPullRequest(input: {
   targetCloneUrl: string;
   sourceCloneUrl: string;
   targetOwner: string;
+  repoAddress: string;
+  pullRequestId: string;
+  pullRequestAuthor: string;
+  statusCreatedAt: number;
   targetBranch: string;
   sourceBranch: string;
   expectedCommit: string;
@@ -414,16 +420,34 @@ export async function mergeProjectPullRequest(input: {
   const result = await invokeTauri<RawProjectRepoMergeResult>(
     "merge_project_pull_request",
     {
-      targetCloneUrl: input.targetCloneUrl,
-      sourceCloneUrl: input.sourceCloneUrl,
-      targetOwner: input.targetOwner,
-      targetBranch: input.targetBranch,
-      sourceBranch: input.sourceBranch,
-      expectedCommit: input.expectedCommit,
+      input,
     },
   );
   return {
     message: result.message,
     mergeCommit: result.merge_commit,
+    statusEvent: result.status_event,
+    statusPublicationError: result.status_publication_error,
   };
+}
+
+export async function signProjectPullRequestReviewRequest(input: {
+  targetOwner: string;
+  repoAddress: string;
+  pullRequestId: string;
+  reviewers: string[];
+  reviewerLabel: string;
+}): Promise<void> {
+  await invokeTauri<void>("sign_project_pull_request_review_request", {
+    input,
+  });
+}
+
+export async function publishProjectPullRequestMergedStatus(input: {
+  targetOwner: string;
+  statusEvent: string;
+}): Promise<void> {
+  await invokeTauri<void>("publish_project_pull_request_merged_status", {
+    input,
+  });
 }

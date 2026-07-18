@@ -27,7 +27,7 @@ export function MergePullRequestButton({
   pullRequest: ProjectPullRequest;
 }) {
   const [confirmOpen, setConfirmOpen] = React.useState(false);
-  const [unpublishedMergeCommit, setUnpublishedMergeCommit] = React.useState<
+  const [unpublishedStatusEvent, setUnpublishedStatusEvent] = React.useState<
     string | null
   >(null);
   const mergeMutation = useMergeProjectPullRequestMutation(project);
@@ -38,12 +38,12 @@ export function MergePullRequestButton({
     try {
       const result = await mergeMutation.mutateAsync({ pullRequest });
       if (result.statusPublicationError) {
-        setUnpublishedMergeCommit(result.mergeCommit);
+        setUnpublishedStatusEvent(result.statusEvent);
         toast.warning(result.message, {
           description: result.statusPublicationError,
         });
       } else {
-        setUnpublishedMergeCommit(null);
+        setUnpublishedStatusEvent(null);
         toast.success(result.message);
       }
       setConfirmOpen(false);
@@ -57,13 +57,12 @@ export function MergePullRequestButton({
   }, [mergeMutation, pullRequest]);
 
   const handlePublishMergedStatus = React.useCallback(async () => {
-    if (!unpublishedMergeCommit) return;
+    if (!unpublishedStatusEvent) return;
     try {
       await publishMergedMutation.mutateAsync({
-        mergeCommit: unpublishedMergeCommit,
-        pullRequest,
+        statusEvent: unpublishedStatusEvent,
       });
-      setUnpublishedMergeCommit(null);
+      setUnpublishedStatusEvent(null);
       toast.success("Published merged pull request status.");
     } catch (error) {
       toast.error(
@@ -72,7 +71,7 @@ export function MergePullRequestButton({
           : "Failed to publish merged pull request status.",
       );
     }
-  }, [publishMergedMutation, pullRequest, unpublishedMergeCommit]);
+  }, [publishMergedMutation, unpublishedStatusEvent]);
 
   return (
     <AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
@@ -80,7 +79,7 @@ export function MergePullRequestButton({
         className="h-8 gap-1.5 bg-purple-600 px-3.5 text-white shadow-sm hover:bg-purple-700"
         disabled={mergeMutation.isPending || publishMergedMutation.isPending}
         onClick={() => {
-          if (unpublishedMergeCommit) {
+          if (unpublishedStatusEvent) {
             void handlePublishMergedStatus();
           } else {
             setConfirmOpen(true);
@@ -92,7 +91,7 @@ export function MergePullRequestButton({
         <GitMerge className="h-3.5 w-3.5" />
         {publishMergedMutation.isPending
           ? "Publishing…"
-          : unpublishedMergeCommit
+          : unpublishedStatusEvent
             ? "Publish merged status"
             : "Merge"}
       </Button>

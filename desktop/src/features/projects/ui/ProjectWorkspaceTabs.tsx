@@ -359,6 +359,7 @@ export function WorkspaceTabs({
           />
         ) : (
           <ActivityPanel
+            branch={sourceControls?.branch}
             error={displayedSnapshotError}
             isLoading={displayedSnapshotLoading}
             onSelectCommit={(commit) => onSelectedCommitHashChange(commit.hash)}

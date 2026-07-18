@@ -11,8 +11,6 @@ import { toast } from "sonner";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useOpenDmMutation } from "@/features/channels/hooks";
 import {
-  type Project,
-  type ProjectRepoSnapshot,
   useProjectQuery,
   useProjectIssuesQuery,
   useProjectLocalRepoDiffQuery,
@@ -52,7 +50,6 @@ import {
 } from "@/shared/layout/chromeLayout";
 import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import { isSafeUrl } from "@/shared/lib/url";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
@@ -72,81 +69,12 @@ import {
 } from "./useOpenProjectTerminal";
 import { CopyTextButton } from "./ProjectCommitCopyButton";
 import type { CreatePullRequestDialogInput } from "./CreatePullRequestDialog";
-
-/** Tooltip for the push/pull sync buttons, e.g. "Pull 2 remote commits". */
-function pushPullTitle(
-  verb: "Push" | "Pull",
-  count: number | undefined,
-  side: "local" | "remote",
-) {
-  if (!count) return `${verb} ${side} commits`;
-  return `${verb} ${count} ${side} ${count === 1 ? "commit" : "commits"}`;
-}
-
-function projectPeople(project: Project) {
-  return [
-    ...new Set(
-      [project.owner, ...project.contributors]
-        .filter(Boolean)
-        .map(normalizePubkey),
-    ),
-  ];
-}
-
-function snapshotHasContent(snapshot: ProjectRepoSnapshot | null | undefined) {
-  return Boolean(
-    snapshot &&
-      (snapshot.latestCommit ||
-        snapshot.commits.length > 0 ||
-        snapshot.files.length > 0 ||
-        snapshot.contributors.length > 0),
-  );
-}
-
-function createPullRequestAvailability(input: {
-  activeBranch: string | null;
-  defaultBranch: string;
-  hasLocalCheckout: boolean;
-  hasOpenPullRequest: boolean;
-  localBranch: string | null | undefined;
-  localHead: string | null | undefined;
-  remoteHead: string | null | undefined;
-}) {
-  if (input.hasOpenPullRequest) {
-    return {
-      enabled: false,
-      reason: "A pull request already exists for this branch.",
-    };
-  }
-  if (!input.activeBranch || input.activeBranch === input.defaultBranch) {
-    return {
-      enabled: false,
-      reason: "Select a feature branch to create a pull request.",
-    };
-  }
-  if (!input.hasLocalCheckout) {
-    return {
-      enabled: false,
-      reason: "Clone the repository before creating a pull request.",
-    };
-  }
-  if (input.localBranch !== input.activeBranch) {
-    return {
-      enabled: false,
-      reason: `Check out ${input.activeBranch} locally first.`,
-    };
-  }
-  if (!input.localHead || input.localHead !== input.remoteHead) {
-    return {
-      enabled: false,
-      reason: "Push this branch before creating a pull request.",
-    };
-  }
-  return {
-    enabled: true,
-    reason: "Create a pull request from this branch.",
-  };
-}
+import {
+  createPullRequestAvailability,
+  projectPeople,
+  pushPullTitle,
+  snapshotHasContent,
+} from "./projectDetailHelpers";
 
 type ProjectDetailScreenProps = {
   commitHash?: string;
@@ -344,7 +272,21 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     ],
     [branchOptions, repoSyncStatusQuery.data?.localBranch],
   );
-  // Compact branch + remote/local controls shared by the readme and Code
+  const handleFetchRepo = React.useCallback(async () => {
+    const results = await Promise.all([
+      repoSnapshotQuery.refetch(),
+      repoStateQuery.refetch(),
+      repoSyncStatusQuery.refetch(),
+    ]);
+    const error = results.find((result) => result.error)?.error;
+    if (error) {
+      toast.error("Could not fetch repository.", {
+        description:
+          error instanceof Error ? error.message : "The Git fetch failed.",
+      });
+    }
+  }, [repoSnapshotQuery, repoStateQuery, repoSyncStatusQuery]);
+  // Compact branch + remote/local controls shared by the readme and Files
   // tab headers.
   const filesSourceControls: RepoSourceHeaderControls = {
     branch: activeBranch ?? "",
@@ -385,9 +327,12 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     aheadCount: repoSyncStatusQuery.data?.aheadCount ?? null,
     behindCount: repoSyncStatusQuery.data?.behindCount ?? null,
     onFetch: () => {
-      void repoSyncStatusQuery.refetch();
+      void handleFetchRepo();
     },
-    fetchPending: repoSyncStatusQuery.isFetching,
+    fetchPending:
+      repoSnapshotQuery.isFetching ||
+      repoStateQuery.isFetching ||
+      repoSyncStatusQuery.isFetching,
     fetchTitle:
       repoSyncStatusQuery.data?.pullBlockReason ?? "Check for remote changes",
   };
@@ -736,7 +681,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         : null;
   // Sub-tab crumb when no work item is open. Overview (readme) is home.
   const TAB_CRUMB_LABELS: Record<string, string> = {
-    files: "Code",
+    files: "Files",
     activity: "Commits",
     issues: "Issues",
     prs: "PRs",

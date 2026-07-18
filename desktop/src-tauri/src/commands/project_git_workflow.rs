@@ -3,16 +3,19 @@
 use super::project_git::{first_output_line, normalize_branch_option};
 use super::project_git_diff::clean_commit;
 use super::project_git_exec::{
-    build_git_auth_config, clone_url_owner, run_git, validate_clone_url,
-    validate_workspace_clone_url, GitAuthConfig,
+    build_git_auth_config, build_git_auth_config_for_keys, clone_url_owner, run_git,
+    validate_clone_url, validate_workspace_clone_url, GitAuthConfig,
 };
 use super::project_repo_paths::{
     canonical_repos_roots, canonicalize_repos_root, default_repos_root_candidates,
     find_local_repo_dir, local_repo_candidates,
 };
 use crate::app_state::AppState;
-use serde::Serialize;
-use tauri::State;
+use crate::managed_agents::{load_managed_agents, spawn_key_refusal};
+use crate::relay::submit_signed_event_with_keys;
+use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, State};
 
 #[derive(Serialize)]
 pub struct ProjectRepoCloneResult {
@@ -25,10 +28,208 @@ pub struct ProjectRepoCloneResult {
 pub struct ProjectRepoMergeResult {
     pub message: String,
     pub merge_commit: String,
+    pub status_event: String,
+    pub status_publication_error: Option<String>,
+}
+
+struct ProjectRepoMergeGitResult {
+    message: String,
+    merge_commit: String,
+}
+
+/// Validated repository and pull-request metadata for a native merge.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPullRequestMergeInput {
+    target_clone_url: String,
+    source_clone_url: String,
+    target_owner: String,
+    repo_address: String,
+    pull_request_id: String,
+    pull_request_author: String,
+    status_created_at: u64,
+    target_branch: String,
+    source_branch: String,
+    expected_commit: String,
+}
+
+/// Repository-scoped metadata for an agent-signed review request.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPullRequestReviewRequestInput {
+    target_owner: String,
+    repo_address: String,
+    pull_request_id: String,
+    reviewers: Vec<String>,
+    reviewer_label: String,
+}
+
+/// A previously signed merged-status event that needs publishing again.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPullRequestMergedStatusInput {
+    target_owner: String,
+    status_event: String,
 }
 
 fn normalize_commit(value: &str) -> Option<String> {
     clean_commit(Some(value.trim().to_ascii_lowercase()))
+}
+
+fn normalize_event_id(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    (value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())).then_some(value)
+}
+
+struct ProjectOwnerIdentity {
+    keys: Keys,
+    auth_tag: Option<String>,
+}
+
+fn project_owner_identity(
+    app: &AppHandle,
+    state: &AppState,
+    target_owner: &str,
+) -> Result<ProjectOwnerIdentity, String> {
+    let viewer_keys = state.signing_keys()?;
+    if viewer_keys.public_key().to_hex() == target_owner {
+        return Ok(ProjectOwnerIdentity {
+            keys: viewer_keys,
+            auth_tag: None,
+        });
+    }
+
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let records = load_managed_agents(app)?;
+    let record = records
+        .iter()
+        .find(|record| record.pubkey.eq_ignore_ascii_case(target_owner))
+        .ok_or_else(|| {
+            "Only the repository owner or the owner of its managed agent can merge pull requests."
+                .to_string()
+        })?;
+    if let Some(error) = spawn_key_refusal(record) {
+        return Err(error);
+    }
+    let keys = Keys::parse(&record.private_key_nsec)
+        .map_err(|error| format!("managed agent signing key is invalid: {error}"))?;
+    if keys.public_key().to_hex() != target_owner {
+        return Err("Managed agent key does not match the repository owner.".to_string());
+    }
+    Ok(ProjectOwnerIdentity {
+        keys,
+        auth_tag: record.auth_tag.clone(),
+    })
+}
+
+fn validate_repo_address(repo_address: &str, owner: &str) -> Result<(), String> {
+    let prefix = format!("30617:{owner}:");
+    if repo_address.strip_prefix(&prefix).is_none_or(str::is_empty) {
+        return Err("Repository address does not match the repository owner.".to_string());
+    }
+    Ok(())
+}
+
+fn build_merged_status_event(
+    keys: &Keys,
+    repo_address: &str,
+    pull_request_id: &str,
+    pull_request_author: &str,
+    merge_commit: &str,
+    created_at: u64,
+) -> Result<String, String> {
+    let owner = keys.public_key().to_hex();
+    validate_repo_address(repo_address, &owner)?;
+    let pull_request_id = normalize_event_id(pull_request_id)
+        .ok_or_else(|| "Invalid pull request event ID.".to_string())?;
+    let pull_request_author = normalize_event_id(pull_request_author)
+        .ok_or_else(|| "Invalid pull request author.".to_string())?;
+    let merge_commit =
+        normalize_commit(merge_commit).ok_or_else(|| "Invalid merge commit.".to_string())?;
+
+    let mut raw_tags = vec![
+        vec!["e", pull_request_id.as_str(), "", "root"],
+        vec!["a", repo_address],
+        vec!["p", owner.as_str()],
+    ];
+    if pull_request_author != owner {
+        raw_tags.push(vec!["p", pull_request_author.as_str()]);
+    }
+    raw_tags.extend([
+        vec!["merge-commit", merge_commit.as_str()],
+        vec!["r", merge_commit.as_str()],
+    ]);
+    let tags = raw_tags
+        .into_iter()
+        .map(Tag::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("build merged status tags: {error}"))?;
+    EventBuilder::new(Kind::Custom(1631), "")
+        .tags(tags)
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .map(|event| event.as_json())
+        .map_err(|error| format!("sign merged pull request status: {error}"))
+}
+
+fn build_review_request_event(
+    keys: &Keys,
+    repo_address: &str,
+    pull_request_id: &str,
+    reviewers: &[String],
+    reviewer_label: &str,
+) -> Result<String, String> {
+    let owner = keys.public_key().to_hex();
+    validate_repo_address(repo_address, &owner)?;
+    let pull_request_id = normalize_event_id(pull_request_id)
+        .ok_or_else(|| "Invalid pull request event ID.".to_string())?;
+    if reviewers.is_empty() || reviewers.len() > 50 {
+        return Err("Select between 1 and 50 reviewers.".to_string());
+    }
+    let mut reviewers = reviewers
+        .iter()
+        .map(|reviewer| {
+            normalize_event_id(reviewer).ok_or_else(|| "Invalid reviewer pubkey.".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    reviewers.sort();
+    reviewers.dedup();
+    let reviewer_label = reviewer_label.trim();
+    if reviewer_label.is_empty() || reviewer_label.chars().count() > 128 {
+        return Err("Reviewer label must be between 1 and 128 characters.".to_string());
+    }
+
+    let mut raw_tags = vec![
+        vec![
+            "e".to_string(),
+            pull_request_id,
+            String::new(),
+            "root".to_string(),
+        ],
+        vec!["a".to_string(), repo_address.to_string()],
+    ];
+    raw_tags.extend(
+        reviewers
+            .into_iter()
+            .map(|reviewer| vec!["p".to_string(), reviewer]),
+    );
+    raw_tags.push(vec!["t".to_string(), "review-request".to_string()]);
+    let tags = raw_tags
+        .into_iter()
+        .map(Tag::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("build review request tags: {error}"))?;
+    EventBuilder::new(
+        Kind::TextNote,
+        format!("Requested a review from {reviewer_label}"),
+    )
+    .tags(tags)
+    .sign_with_keys(keys)
+    .map(|event| event.as_json())
+    .map_err(|error| format!("sign pull request review request: {error}"))
 }
 
 fn same_repository(left: &str, right: &str) -> bool {
@@ -138,15 +339,71 @@ pub async fn clone_project_repository(
 }
 
 #[tauri::command]
+pub async fn sign_project_pull_request_review_request(
+    input: ProjectPullRequestReviewRequestInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let target_owner = input.target_owner.trim().to_ascii_lowercase();
+    if normalize_event_id(&target_owner).is_none() {
+        return Err("Invalid target repository owner.".to_string());
+    }
+    let identity = project_owner_identity(&app, &state, &target_owner)?;
+    let event = Event::from_json(build_review_request_event(
+        &identity.keys,
+        &input.repo_address,
+        &input.pull_request_id,
+        &input.reviewers,
+        &input.reviewer_label,
+    )?)
+    .map_err(|error| format!("parse signed review request: {error}"))?;
+    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn publish_project_pull_request_merged_status(
+    input: ProjectPullRequestMergedStatusInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let target_owner = input.target_owner.trim().to_ascii_lowercase();
+    if normalize_event_id(&target_owner).is_none() {
+        return Err("Invalid target repository owner.".to_string());
+    }
+    let event = Event::from_json(input.status_event)
+        .map_err(|error| format!("parse merged status event: {error}"))?;
+    if event.kind != Kind::Custom(1631)
+        || event.pubkey.to_hex() != target_owner
+        || event.verify().is_err()
+    {
+        return Err("Invalid merged pull request status event.".to_string());
+    }
+    let identity = project_owner_identity(&app, &state, &target_owner)?;
+    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn merge_project_pull_request(
-    target_clone_url: String,
-    source_clone_url: String,
-    target_owner: String,
-    target_branch: String,
-    source_branch: String,
-    expected_commit: String,
+    input: ProjectPullRequestMergeInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoMergeResult, String> {
+    let ProjectPullRequestMergeInput {
+        target_clone_url,
+        source_clone_url,
+        target_owner,
+        repo_address,
+        pull_request_id,
+        pull_request_author,
+        status_created_at,
+        target_branch,
+        source_branch,
+        expected_commit,
+    } = input;
     validate_workspace_clone_url(&target_clone_url, &state)?;
     validate_workspace_clone_url(&source_clone_url, &state)?;
     let target_owner = target_owner.trim().to_ascii_lowercase();
@@ -156,15 +413,8 @@ pub async fn merge_project_pull_request(
     if clone_url_owner(&target_clone_url).as_deref() != Some(target_owner.as_str()) {
         return Err("Target clone URL does not match the repository owner.".to_string());
     }
-    let merger_pubkey = state
-        .keys
-        .lock()
-        .map_err(|error| error.to_string())?
-        .public_key()
-        .to_hex();
-    if merger_pubkey != target_owner {
-        return Err("Only the repository owner can merge pull requests.".to_string());
-    }
+    let owner_identity = project_owner_identity(&app, &state, &target_owner)?;
+    let merger_pubkey = owner_identity.keys.public_key().to_hex();
     let target_branch = normalize_branch_option(Some(&target_branch))
         .ok_or_else(|| "Invalid target branch.".to_string())?;
     let source_branch = normalize_branch_option(Some(&source_branch))
@@ -174,9 +424,9 @@ pub async fn merge_project_pull_request(
     }
     let expected_commit = normalize_commit(&expected_commit)
         .ok_or_else(|| "Invalid pull request commit.".to_string())?;
-    let auth = build_git_auth_config(&state)?;
+    let auth = build_git_auth_config_for_keys(&owner_identity.keys)?;
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let git_result = tauri::async_runtime::spawn_blocking(move || {
         let temp_dir = tempfile::tempdir().map_err(|error| format!("create temp dir: {error}"))?;
         let repo_dir = temp_dir.path().join("repo");
         let repo_path = repo_dir
@@ -251,18 +501,45 @@ pub async fn merge_project_pull_request(
             &auth,
         )?;
 
-        Ok(ProjectRepoMergeResult {
+        Ok(ProjectRepoMergeGitResult {
             message: format!("Merged {source_branch} into {target_branch}."),
             merge_commit,
         })
     })
     .await
-    .map_err(|error| format!("pull request merge task failed: {error}"))?
+    .map_err(|error| format!("pull request merge task failed: {error}"))??;
+    let status_event = build_merged_status_event(
+        &owner_identity.keys,
+        &repo_address,
+        &pull_request_id,
+        &pull_request_author,
+        &git_result.merge_commit,
+        status_created_at,
+    )?;
+    let signed_status = Event::from_json(&status_event)
+        .map_err(|error| format!("parse signed merged status: {error}"))?;
+    let status_publication_error = submit_signed_event_with_keys(
+        &signed_status,
+        &state,
+        &owner_identity.keys,
+        owner_identity.auth_tag.as_deref(),
+    )
+    .await
+    .err();
+    Ok(ProjectRepoMergeResult {
+        message: git_result.message,
+        merge_commit: git_result.merge_commit,
+        status_event,
+        status_publication_error,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_commit, same_repository};
+    use super::{
+        build_merged_status_event, build_review_request_event, normalize_commit, same_repository,
+    };
+    use nostr::{Event, JsonUtil, Keys};
 
     #[test]
     fn normalize_commit_accepts_sha1_and_sha256_hex() {
@@ -286,5 +563,68 @@ mod tests {
             "https://relay.example/git/owner/repo",
             "https://relay.example/git/fork/repo"
         ));
+    }
+
+    #[test]
+    fn merged_status_is_signed_by_repository_owner() {
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_hex();
+        let pull_request_id = "d".repeat(64);
+        let pull_request_author = "b".repeat(64);
+        let merge_commit = "e".repeat(40);
+        let repo_address = format!("30617:{owner}:buzz");
+        let event = Event::from_json(
+            build_merged_status_event(
+                &keys,
+                &repo_address,
+                &pull_request_id,
+                &pull_request_author,
+                &merge_commit,
+                123,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(event.pubkey, keys.public_key());
+        assert_eq!(event.kind.as_u16(), 1631);
+        assert_eq!(event.created_at.as_secs(), 123);
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["merge-commit", merge_commit.as_str()]));
+        assert!(event.verify().is_ok());
+    }
+
+    #[test]
+    fn review_request_is_signed_by_repository_owner() {
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_hex();
+        let reviewer = "b".repeat(64);
+        let repo_address = format!("30617:{owner}:buzz");
+        let event = Event::from_json(
+            build_review_request_event(
+                &keys,
+                &repo_address,
+                &"d".repeat(64),
+                std::slice::from_ref(&reviewer),
+                "Bob",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(event.pubkey, keys.public_key());
+        assert_eq!(event.kind, nostr::Kind::TextNote);
+        assert_eq!(event.content, "Requested a review from Bob");
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["p", reviewer.as_str()]));
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["t", "review-request"]));
+        assert!(event.verify().is_ok());
     }
 }
