@@ -8,6 +8,7 @@ import {
   buildWelcomeKickoffOpenerSendInput,
   classifyWelcomeKickoffResolution,
   createWelcomeKickoffCoordinator,
+  mergeKickoffEvents,
   resolveWelcomeAgentSet,
   selectWelcomeKickoffIntroTeammates,
   waitForWelcomeKickoffBeat,
@@ -354,4 +355,75 @@ test("closer classification sees replies that arrive during the final beat", asy
     afterBeat.unresolved.map((agent) => agent.name),
     ["Bumble"],
   );
+});
+
+function introReply(id, pubkey, openerId) {
+  return relayEvent({
+    id,
+    pubkey,
+    createdAt: 2,
+    tags: [
+      ["e", openerId, "", "root"],
+      ["e", openerId, "", "reply"],
+    ],
+  });
+}
+
+const kickoffOpener = relayEvent({
+  id: "opener",
+  pubkey: fizz.pubkey,
+  tags: [["client", "buzz-welcome-kickoff.opener.v1"]],
+});
+
+// The bug this branch fixes: teammate intros are thread replies, which the
+// channel window excludes from the main timeline. So the kickoff saw the
+// opener and never the intros, and the closer stalled until the user happened
+// to click into the thread. Merging the opener's subtree in is the fix.
+test("intro replies reach the closer classification without the user opening the thread", () => {
+  const agentSet = { lead: fizz, teammates: [honey, bumble] };
+  const channelEvents = [kickoffOpener];
+  const openerReplies = [
+    introReply("honey-intro", honey.pubkey, kickoffOpener.id),
+    introReply("bumble-intro", bumble.pubkey, kickoffOpener.id),
+  ];
+
+  // Pin the pre-fix behaviour: on the channel events alone, both teammates
+  // look silent forever. This is what stalled the closer.
+  assert.deepEqual(
+    classifyWelcomeKickoffResolution(
+      channelEvents,
+      kickoffOpener,
+      agentSet,
+    ).unresolved.map((agent) => agent.name),
+    ["Honey", "Bumble"],
+  );
+
+  // With the subtree merged in, the same intros resolve the kickoff.
+  assert.deepEqual(
+    classifyWelcomeKickoffResolution(
+      mergeKickoffEvents(channelEvents, openerReplies),
+      kickoffOpener,
+      agentSet,
+    ).unresolved,
+    [],
+  );
+});
+
+test("merging the opener subtree never double-counts an already-visible reply", () => {
+  const honeyIntro = introReply("honey-intro", honey.pubkey, kickoffOpener.id);
+  // An open thread feeds the same replies in through both sources.
+  const merged = mergeKickoffEvents(
+    [kickoffOpener, honeyIntro],
+    [honeyIntro, introReply("bumble-intro", bumble.pubkey, kickoffOpener.id)],
+  );
+
+  assert.deepEqual(
+    merged.map((event) => event.id),
+    ["opener", "honey-intro", "bumble-intro"],
+  );
+});
+
+test("merging with no subtree replies leaves the channel events untouched", () => {
+  const channelEvents = [kickoffOpener];
+  assert.equal(mergeKickoffEvents(channelEvents, []), channelEvents);
 });

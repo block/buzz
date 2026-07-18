@@ -1,6 +1,9 @@
 import * as React from "react";
 
-import type { WelcomeKickoffStagePhase } from "@/features/onboarding/useWelcomeKickoffStage";
+import {
+  isWelcomeKickoffStageExiting,
+  type WelcomeKickoffStagePhase,
+} from "@/features/onboarding/useWelcomeKickoffStage";
 import { cn } from "@/shared/lib/cn";
 
 type StageCharacter = {
@@ -25,7 +28,9 @@ const STAGE_EXIT_ANIMATION = "motion-kickoff-stage-exit";
  *
  * Placeholder choreography: staggered rise-from-below entrance per character
  * (CSS `motion-kickoff-character-enter`, delay via `--stagger-index`), whole
- * row crossfades out when the first agent message lands.
+ * row crossfades out on either resolution — the first agent message landing,
+ * or the wait timing out. The characters must not linger after a timeout: a
+ * stage that stays up implies a team is still coming when none is.
  */
 export function WelcomeKickoffStage({
   onExitComplete,
@@ -43,14 +48,14 @@ export function WelcomeKickoffStage({
     [onExitComplete],
   );
 
-  if (phase === "hidden") return null;
+  if (phase === "hidden" || phase === "done") return null;
 
   return (
     <div
       aria-hidden
       className={cn(
         "pointer-events-none absolute bottom-full left-10 z-10 flex items-end gap-4",
-        phase === "exiting" && "motion-kickoff-stage-exit",
+        isWelcomeKickoffStageExiting(phase) && "motion-kickoff-stage-exit",
       )}
       data-phase={phase}
       data-testid="welcome-kickoff-stage"

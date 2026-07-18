@@ -364,6 +364,32 @@ export type WelcomeKickoffOwner = {
   displayName?: string | null;
 };
 
+/**
+ * The event view the kickoff classification reasons over: the channel's own
+ * events plus the opener's thread replies.
+ *
+ * Teammate intros (and the closer) are thread replies, which the channel
+ * window deliberately excludes — only broadcast replies reach the main
+ * timeline. So `channelEvents` alone shows the opener and never the intros,
+ * and the closer stalls until the user happens to open the thread. Merging the
+ * opener's subtree in is what lets the choreography resolve on its own.
+ *
+ * De-duplicated because the two sources legitimately overlap: the live
+ * subscription writes replies into the thread cache, and an open thread also
+ * feeds the same replies in through `channelEvents`.
+ */
+export function mergeKickoffEvents(
+  channelEvents: readonly RelayEvent[],
+  openerReplies: readonly RelayEvent[],
+): readonly RelayEvent[] {
+  if (openerReplies.length === 0) return channelEvents;
+  const seen = new Set(channelEvents.map((event) => event.id));
+  return [
+    ...channelEvents,
+    ...openerReplies.filter((event) => !seen.has(event.id)),
+  ];
+}
+
 export function buildWelcomeKickoffOpenerSendInput(
   agentSet: WelcomeAgentSet,
   introTeammates: readonly ManagedAgent[],
@@ -455,29 +481,38 @@ export function useWelcomeKickoff(
   // visible to the closer classification even when the user never opens the
   // thread. Without this, replies only surfaced through the UI's open-thread
   // query and the closer stalled until the user clicked into the thread.
-  // Retired once the closer exists — the kickoff is resolved, so revisits to
-  // Welcome shouldn't keep refetching the opener's thread subtree forever.
   const openerEvent = React.useMemo(
     () => markerEvent(channelEvents, openerMarker) ?? null,
     [channelEvents],
   );
-  const kickoffResolved = React.useMemo(
-    () => markerEvent(channelEvents, closerMarker) != null,
-    [channelEvents],
-  );
+  // Retire the watch once the closer exists: the kickoff is resolved, so
+  // revisits to Welcome shouldn't keep refetching the subtree forever.
+  //
+  // This has to be a latch rather than a plain derivation. The closer is a
+  // *thread reply* to the opener (see sendWelcomeKickoffCloser), so it never
+  // appears in `channelEvents` unless the user happened to open the thread —
+  // deriving from `channelEvents` meant this never retired at all. Deriving
+  // from `kickoffEvents` instead is self-referential: it gates the query that
+  // feeds it, so retiring would drop the evidence that justified retiring and
+  // (on a cache eviction) flip the query back on. Latching per channel keeps
+  // the decision one-way and stable.
+  const [resolvedChannelId, setResolvedChannelId] = React.useState<
+    string | null
+  >(null);
+  const kickoffResolved = channelId !== null && resolvedChannelId === channelId;
   const openerThreadQuery = useThreadReplies(
     isActiveWelcome && !kickoffResolved ? activeChannel : null,
     openerEvent?.id ?? null,
   );
-  const kickoffEvents = React.useMemo(() => {
-    const openerReplies = openerThreadQuery.data ?? [];
-    if (openerReplies.length === 0) return channelEvents;
-    const seen = new Set(channelEvents.map((event) => event.id));
-    return [
-      ...channelEvents,
-      ...openerReplies.filter((event) => !seen.has(event.id)),
-    ];
-  }, [channelEvents, openerThreadQuery.data]);
+  const kickoffEvents = React.useMemo(
+    () => mergeKickoffEvents(channelEvents, openerThreadQuery.data ?? []),
+    [channelEvents, openerThreadQuery.data],
+  );
+  React.useEffect(() => {
+    if (!channelId || kickoffResolved) return;
+    if (markerEvent(kickoffEvents, closerMarker) == null) return;
+    setResolvedChannelId(channelId);
+  }, [channelId, kickoffEvents, kickoffResolved]);
   const channelEventsRef = React.useRef(kickoffEvents);
   channelEventsRef.current = kickoffEvents;
   const agentSet = React.useMemo(
@@ -654,7 +689,13 @@ export function useWelcomeKickoff(
       !channelId ||
       !isActiveWelcome ||
       !agentSet ||
-      closerInFlight.has(channelId)
+      closerInFlight.has(channelId) ||
+      // Respect the latch, not just the events. Retiring the opener-thread
+      // watch drops the subtree from `kickoffEvents`, which is where the closer
+      // lives — so once resolved, the marker check below can no longer see it
+      // and would classify every teammate as silent and re-run the closer on
+      // each revisit. The latch is the durable "already resolved" signal.
+      kickoffResolved
     )
       return;
     const opener = markerEvent(kickoffEvents, openerMarker);
@@ -780,6 +821,7 @@ export function useWelcomeKickoff(
     activeCommunity?.relayUrl,
     agentSet,
     kickoffEvents,
+    kickoffResolved,
     channelId,
     isActiveWelcome,
     queryClient,

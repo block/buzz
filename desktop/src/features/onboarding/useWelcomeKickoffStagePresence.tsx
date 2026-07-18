@@ -3,7 +3,10 @@ import * as React from "react";
 import { isWelcomeSetupSystemMessage } from "@/features/channels/ui/ChannelPane.helpers";
 import type { TimelineMessage } from "@/features/messages/types";
 import { WelcomeKickoffStage } from "@/features/onboarding/ui/WelcomeKickoffStage";
-import { useWelcomeKickoffStage } from "@/features/onboarding/useWelcomeKickoffStage";
+import {
+  isWelcomeKickoffSettingUp,
+  useWelcomeKickoffStage,
+} from "@/features/onboarding/useWelcomeKickoffStage";
 import {
   isWelcomeChannel,
   notifyWelcomeSurfaceReady,
@@ -53,6 +56,6 @@ export function useWelcomeKickoffStagePresence(
     ) : null;
   return {
     welcomeKickoffStage,
-    welcomeKickoffSettingUp: phase === "active" || phase === "timed-out",
+    welcomeKickoffSettingUp: isWelcomeKickoffSettingUp(phase),
   };
 }
