@@ -191,3 +191,48 @@ export function formatOwnerLabel(
     truncatePubkey(ownerPubkey)
   );
 }
+
+/**
+ * Appends an agent's owner to a display name only when that name collides with
+ * another visible result. The returned label is presentation-only; callers
+ * keep the original display name for selection and mention insertion.
+ */
+export function formatDisambiguatedAgentName(input: {
+  displayName: string;
+  hasNameCollision: boolean;
+  isAgent?: boolean;
+  ownerLabel?: string | null;
+}) {
+  const { displayName, hasNameCollision, isAgent, ownerLabel } = input;
+  const normalizedOwnerLabel = ownerLabel?.trim();
+
+  if (!hasNameCollision || !isAgent || !normalizedOwnerLabel) {
+    return displayName;
+  }
+
+  return `${displayName} (${normalizedOwnerLabel})`;
+}
+
+/** Case-insensitive display-name counts for a currently visible result set. */
+export function countVisibleDisplayNames(
+  displayNames: readonly (string | null | undefined)[],
+) {
+  const counts = new Map<string, number>();
+
+  for (const displayName of displayNames) {
+    const normalizedName = displayName?.trim().toLowerCase();
+    if (!normalizedName) {
+      continue;
+    }
+    counts.set(normalizedName, (counts.get(normalizedName) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
+export function hasVisibleDisplayNameCollision(
+  displayName: string,
+  counts: ReadonlyMap<string, number>,
+) {
+  return (counts.get(displayName.trim().toLowerCase()) ?? 0) > 1;
+}

@@ -20,7 +20,12 @@ import {
   useUserSearchFetchMoreOnScroll,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
-import { formatOwnerLabel } from "@/features/profile/lib/identity";
+import {
+  countVisibleDisplayNames,
+  formatDisambiguatedAgentName,
+  formatOwnerLabel,
+  hasVisibleDisplayNameCollision,
+} from "@/features/profile/lib/identity";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -374,6 +379,13 @@ export function MembersSidebar({
     userSearchResults,
     rawMembers,
   ]);
+  const addSearchNameCounts = React.useMemo(
+    () =>
+      countVisibleDisplayNames(
+        addSearchResults.map((user) => formatAddCandidateName(user)),
+      ),
+    [addSearchResults],
+  );
   const isAddSearchLoading =
     userSearchQuery.isLoading ||
     managedAgentsQuery.isLoading ||
@@ -708,23 +720,39 @@ export function MembersSidebar({
                             Not in this channel
                           </SearchResultSectionTitle>
                         ) : null}
-                        {addSearchResults.map((user) => (
-                          <AddMemberSearchResultRow
-                            disabled={
-                              addingMemberPubkeys.has(user.pubkey) || isArchived
-                            }
-                            key={user.pubkey}
-                            onSelect={(selectedUser) => {
-                              void handleAddSearchResult(selectedUser);
-                            }}
-                            ownerLabel={formatOwnerLabel(
-                              user.ownerPubkey,
-                              identityQuery.data?.pubkey,
-                              addSearchOwnerProfilesQuery.data?.profiles,
-                            )}
-                            user={user}
-                          />
-                        ))}
+                        {addSearchResults.map((user) => {
+                          const ownerLabel = formatOwnerLabel(
+                            user.ownerPubkey,
+                            identityQuery.data?.pubkey,
+                            addSearchOwnerProfilesQuery.data?.profiles,
+                          );
+                          const displayName = formatAddCandidateName(user);
+
+                          return (
+                            <AddMemberSearchResultRow
+                              disabled={
+                                addingMemberPubkeys.has(user.pubkey) ||
+                                isArchived
+                              }
+                              displayName={formatDisambiguatedAgentName({
+                                displayName,
+                                hasNameCollision:
+                                  hasVisibleDisplayNameCollision(
+                                    displayName,
+                                    addSearchNameCounts,
+                                  ),
+                                isAgent: user.isAgent,
+                                ownerLabel,
+                              })}
+                              key={user.pubkey}
+                              onSelect={(selectedUser) => {
+                                void handleAddSearchResult(selectedUser);
+                              }}
+                              ownerLabel={ownerLabel}
+                              user={user}
+                            />
+                          );
+                        })}
                         {isAddSearchLoading ? (
                           <p className="px-4 py-3 text-sm text-muted-foreground">
                             Searching...
@@ -851,11 +879,13 @@ function SearchResultSectionTitle({
 
 function AddMemberSearchResultRow({
   disabled,
+  displayName,
   onSelect,
   ownerLabel,
   user,
 }: {
   disabled: boolean;
+  displayName: string;
   onSelect: (user: UserSearchResult) => void;
   ownerLabel?: string | null;
   user: UserSearchResult;
@@ -869,7 +899,7 @@ function AddMemberSearchResultRow({
       data-testid={`channel-user-search-result-${user.pubkey}`}
     >
       <button
-        aria-label={`Select ${formatAddCandidateName(user)}`}
+        aria-label={`Select ${displayName}`}
         className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
         disabled={disabled}
         onClick={() => onSelect(user)}
@@ -885,8 +915,11 @@ function AddMemberSearchResultRow({
         {user.isAgent ? (
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
-              <span className="truncate text-sm font-medium tracking-tight">
-                {formatAddCandidateName(user)}
+              <span
+                className="truncate text-sm font-medium tracking-tight"
+                data-testid="channel-user-search-result-name"
+              >
+                {displayName}
               </span>
               <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
                 <Bot aria-hidden="true" className="h-4 w-4" />

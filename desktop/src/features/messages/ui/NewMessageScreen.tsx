@@ -7,6 +7,10 @@ import {
 } from "@/features/channels/hooks";
 import type { Channel } from "@/shared/api/types";
 import { useSendMessageMutation } from "@/features/messages/hooks";
+import {
+  countVisibleDisplayNames,
+  hasVisibleDisplayNameCollision,
+} from "@/features/profile/lib/identity";
 import { getKeyboardSearchSelection } from "@/features/profile/lib/userCandidateSearch";
 import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -72,6 +76,13 @@ export function NewMessageScreen() {
   const isSearchTransitionPending = searchQuery.trim() !== deferredSearchQuery;
   const visibleSearchResults =
     isSearchTransitionPending || isDirectoryLoading ? [] : searchResults;
+  const visibleSearchNameCounts = React.useMemo(
+    () =>
+      countVisibleDisplayNames(
+        visibleSearchResults.map((user) => formatRecipientName(user)),
+      ),
+    [visibleSearchResults],
+  );
   const showRecipientPicker = isRecipientPickerOpen && !isPending;
   const highlightedRecipientIndex = React.useMemo(() => {
     if (!showRecipientPicker || visibleSearchResults.length === 0) {
@@ -518,6 +529,10 @@ export function NewMessageScreen() {
                           isKeyboardHighlighted={
                             highlightedRecipient?.pubkey === user.pubkey
                           }
+                          hasNameCollision={hasVisibleDisplayNameCollision(
+                            formatRecipientName(user),
+                            visibleSearchNameCounts,
+                          )}
                           key={user.pubkey}
                           onSelect={handleResultSelect}
                           ownerProfiles={ownerProfiles}

@@ -12,6 +12,11 @@ import {
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import {
+  countVisibleDisplayNames,
+  formatDisambiguatedAgentName,
+  hasVisibleDisplayNameCollision,
+} from "@/features/profile/lib/identity";
 
 export type MentionSuggestion = {
   pubkey?: string;
@@ -66,12 +71,11 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
 
   // Name collisions are the impersonation vector: a vanity-ground key can
   // wear any display name. When two suggestions share a name, surface each
-  // one's npub (truncated; full key in the hover tooltip) to tell them apart.
-  const nameCounts = new Map<string, number>();
-  for (const suggestion of suggestions) {
-    const name = suggestion.displayName.toLowerCase();
-    nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
-  }
+  // one's owner in the title (when known) and npub (truncated; full key in the
+  // hover tooltip) to tell them apart.
+  const nameCounts = countVisibleDisplayNames(
+    suggestions.map((suggestion) => suggestion.displayName),
+  );
 
   return (
     <div
@@ -101,8 +105,16 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             (suggestion.teamId ? `team-${suggestion.teamId}` : null) ??
             suggestion.displayName;
           const agentLabel = "agent";
-          const hasNameCollision =
-            (nameCounts.get(suggestion.displayName.toLowerCase()) ?? 0) > 1;
+          const hasNameCollision = hasVisibleDisplayNameCollision(
+            suggestion.displayName,
+            nameCounts,
+          );
+          const displayName = formatDisambiguatedAgentName({
+            displayName: suggestion.displayName,
+            hasNameCollision,
+            isAgent: suggestion.isAgent,
+            ownerLabel: suggestion.ownerLabel,
+          });
           const collisionNpub =
             hasNameCollision && suggestion.pubkey
               ? safeNpub(suggestion.pubkey)
@@ -140,9 +152,10 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span
                   className="min-w-0 break-words font-medium leading-snug"
-                  title={suggestion.displayName}
+                  data-testid="mention-suggestion-name"
+                  title={displayName}
                 >
-                  {suggestion.displayName}
+                  {displayName}
                 </span>
                 {suggestion.kind === "team" ||
                 suggestion.isAgent ||

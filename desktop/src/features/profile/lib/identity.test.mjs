@@ -1,7 +1,61 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { profileLookupsEqual } from "./identity.ts";
+import {
+  countVisibleDisplayNames,
+  formatDisambiguatedAgentName,
+  hasVisibleDisplayNameCollision,
+  profileLookupsEqual,
+} from "./identity.ts";
+
+test("formatDisambiguatedAgentName appends an owner for colliding agents", () => {
+  assert.equal(
+    formatDisambiguatedAgentName({
+      displayName: "Bumble",
+      hasNameCollision: true,
+      isAgent: true,
+      ownerLabel: "sergior",
+    }),
+    "Bumble (sergior)",
+  );
+  assert.equal(
+    formatDisambiguatedAgentName({
+      displayName: "Bumble",
+      hasNameCollision: true,
+      isAgent: true,
+      ownerLabel: "you",
+    }),
+    "Bumble (you)",
+  );
+});
+
+test("formatDisambiguatedAgentName leaves humans and unique agents unchanged", () => {
+  assert.equal(
+    formatDisambiguatedAgentName({
+      displayName: "Bumble",
+      hasNameCollision: true,
+      isAgent: false,
+      ownerLabel: null,
+    }),
+    "Bumble",
+  );
+  assert.equal(
+    formatDisambiguatedAgentName({
+      displayName: "Bumble",
+      hasNameCollision: false,
+      isAgent: true,
+      ownerLabel: "sergior",
+    }),
+    "Bumble",
+  );
+});
+
+test("visible display-name collisions are case-insensitive", () => {
+  const counts = countVisibleDisplayNames(["Bumble", " bUmBlE ", "Fizz"]);
+
+  assert.equal(hasVisibleDisplayNameCollision("bumble", counts), true);
+  assert.equal(hasVisibleDisplayNameCollision("Fizz", counts), false);
+});
 
 const summary = (over = {}) => ({
   displayName: "Ada",
