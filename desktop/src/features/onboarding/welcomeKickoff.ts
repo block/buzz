@@ -87,7 +87,27 @@ const kickoffCoordinator = createWelcomeKickoffCoordinator();
 const closerInFlight = new Set<string>();
 const TEAMMATE_READY_POLL_MS = 250;
 const TEAMMATE_READY_WAIT_MS = 60_000;
-const TEAMMATE_INTRO_WAIT_MS = 15_000;
+/**
+ * Give-up backstop for teammates that are neither intro'd nor detectably failed
+ * — i.e. alive but silent. **Not** an expectation of how fast an intro arrives.
+ *
+ * It does not gate the happy path: once every teammate is resolved (intro'd, or
+ * `failedAfterKickoff`-detected), the closer fires on `CLOSER_BEAT_MS` and this
+ * timer is cleared. Raising it costs the normal case nothing — it only delays
+ * the moment we give up on a silent teammate.
+ *
+ * So it must be long enough that "taking longer than expected" is *true* when it
+ * fires. `unresolved` means "no intro seen yet", which is ignorance, not a fact;
+ * announcing it early states a falsehood, and the closer marker is terminal
+ * (`sendWelcomeKickoffCloser`) so nothing ever corrects it. At 15s this
+ * routinely beat two cold agents through harness dispatch + a full LLM turn
+ * (observed 2026-07-18: intros landed ~60s in, and the false "taking longer"
+ * closer had already been stamped final at 15s). A real failure does not wait
+ * for this — `failedAfterKickoff` resolves crashed teammates immediately.
+ *
+ * See docs/welcome-kickoff-silent-failures.md §1.
+ */
+const TEAMMATE_INTRO_BACKSTOP_MS = 120_000;
 const CLOSER_BEAT_MS = 3_000;
 const closerAbortControllers = new Map<string, AbortController>();
 const closerTimeouts = new Map<
@@ -713,7 +733,7 @@ export function useWelcomeKickoff(
     if (unresolved.length > 0) {
       if (!closerTimeouts.has(channelId)) {
         const elapsedMs = Math.max(0, Date.now() - opener.created_at * 1_000);
-        const waitMs = Math.max(0, TEAMMATE_INTRO_WAIT_MS - elapsedMs);
+        const waitMs = Math.max(0, TEAMMATE_INTRO_BACKSTOP_MS - elapsedMs);
         const timeout = globalThis.setTimeout(() => {
           closerTimeouts.delete(channelId);
           if (focusedWelcomeChannelRef.current !== channelId) return;
