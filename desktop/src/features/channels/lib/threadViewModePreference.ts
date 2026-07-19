@@ -18,7 +18,7 @@ export type ThreadViewMode = "focus" | "split";
 const STORAGE_KEY = "buzz.channels.threadViewMode";
 
 /** Layout used when nothing is stored, or the stored value is unrecognized. */
-const DEFAULT_THREAD_VIEW_MODE: ThreadViewMode = "focus";
+const DEFAULT_THREAD_VIEW_MODE: ThreadViewMode = "split";
 
 const listeners = new Set<() => void>();
 
