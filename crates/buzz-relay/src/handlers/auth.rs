@@ -402,15 +402,15 @@ mod tests {
         ]);
 
         let extracted = extract_auth_tag_json(&event).expect("auth tag present");
-        let expected =
-            serde_json::to_string(&["auth", owner.as_str(), "", sig.as_str()]).unwrap();
+        let expected = serde_json::to_string(&["auth", owner.as_str(), "", sig.as_str()]).unwrap();
         assert_eq!(extracted, expected);
     }
 
     /// No `auth` tag → `None` (the direct-member path, tag absent).
     #[test]
     fn no_auth_tag_returns_none() {
-        let event = signed_event_with_tags(vec![Tag::parse(["u", "https://relay/git/x/y"]).unwrap()]);
+        let event =
+            signed_event_with_tags(vec![Tag::parse(["u", "https://relay/git/x/y"]).unwrap()]);
         assert_eq!(extract_auth_tag_json(&event), None);
     }
 
