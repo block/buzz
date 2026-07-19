@@ -72,6 +72,7 @@ test.describe("NIP-IA archive button gate", () => {
   }) => {
     await installMockBridge(page, {
       relayRole: "admin",
+      relayRequiresMembership: true,
       oaOwnerIsMe: false,
       archivedIdentities: [],
     });
@@ -122,6 +123,7 @@ test.describe("NIP-IA archive button gate", () => {
   }) => {
     await installMockBridge(page, {
       relayRole: "admin",
+      relayRequiresMembership: true,
       oaOwnerIsMe: false,
       archivedIdentities: [ALICE_PUBKEY],
     });
