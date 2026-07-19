@@ -23,7 +23,6 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   PROJECT_EVENT_VISUALS,
   type ProjectEventKind,
-  ProjectEventTypeIcon,
 } from "./ProjectEventTypeIcon";
 
 type ActivityKind = ProjectEventKind;
@@ -72,58 +71,6 @@ const ACTIVITY_LIMIT = 30;
 
 function contentPreview(content: string) {
   return markdownToPlainText(content).replace(/\s+/g, " ").trim().slice(0, 280);
-}
-
-function ActivityTimelineBranch({
-  compact,
-  first,
-}: {
-  compact: boolean;
-  first: boolean;
-}) {
-  return (
-    <>
-      {first ? null : (
-        <>
-          <span
-            aria-hidden="true"
-            className={cn(
-              "pointer-events-none absolute left-[3px] z-[1] h-4 w-[3px] bg-card",
-              compact ? "top-4" : "top-7",
-            )}
-          />
-          <span
-            aria-hidden="true"
-            className={cn(
-              "pointer-events-none absolute left-1 z-[2] h-2 w-2.5 rounded-bl-lg border-b border-l border-border/45",
-              compact ? "top-4" : "top-7",
-            )}
-          />
-        </>
-      )}
-      <span
-        aria-hidden="true"
-        className={cn(
-          "pointer-events-none absolute left-1 z-[2] h-2 w-2.5 rounded-tl-lg border-l border-t border-border/45",
-          compact ? "top-6" : "top-9",
-        )}
-      />
-      <span
-        aria-hidden="true"
-        className={cn(
-          "pointer-events-none absolute left-3 z-[5] h-6 w-6 rounded-full bg-card",
-          compact ? "top-3" : "top-6",
-        )}
-      />
-      <span
-        aria-hidden="true"
-        className={cn(
-          "pointer-events-none absolute left-9 z-[1] h-px w-1 bg-border/45",
-          compact ? "top-6" : "top-9",
-        )}
-      />
-    </>
-  );
 }
 
 function buildActivityItems({
@@ -437,27 +384,9 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
     <div
       className={cn("relative", props.compact ? "space-y-2.5" : "space-y-3")}
     >
-      <div
-        aria-hidden="true"
-        className={cn(
-          "absolute bottom-2 left-1 w-px bg-border/45",
-          props.compact ? "top-8" : "top-11",
-        )}
-      />
-      {items.map((item, index) => {
+      {items.map((item) => {
         return (
-          <div className="relative pl-10" key={item.id}>
-            <ActivityTimelineBranch
-              compact={props.compact === true}
-              first={index === 0}
-            />
-            <ProjectEventTypeIcon
-              className={cn(
-                "absolute left-3 z-10",
-                props.compact ? "top-3" : "top-6",
-              )}
-              kind={item.kind}
-            />
+          <div className="relative" key={item.id}>
             <ActivityCard
               compact={props.compact === true}
               item={item}

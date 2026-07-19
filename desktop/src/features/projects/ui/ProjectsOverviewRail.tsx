@@ -10,10 +10,7 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
-import {
-  ProjectsContributionGraph,
-  ProjectsContributionLegend,
-} from "./ProjectsContributionGraph";
+import { ProjectsContributionGraph } from "./ProjectsContributionGraph";
 
 type ProjectsOverviewRailProps = {
   profiles?: UserProfileLookup;
@@ -96,12 +93,9 @@ export function ProjectsOverviewRail({
 
       <div className="order-5 min-w-0 border-t border-border/40 px-4 pb-4 pt-3 xl:order-none xl:col-start-2 xl:row-start-2 xl:border-t-0">
         <section className="space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <h3 className="text-base font-semibold text-foreground">
-              Contribution Activity
-            </h3>
-            <ProjectsContributionLegend />
-          </div>
+          <h3 className="text-base font-semibold text-foreground">
+            Contribution Activity
+          </h3>
           <ProjectsContributionGraph activityByDay={activityByDay} compact />
         </section>
       </div>

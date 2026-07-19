@@ -624,7 +624,7 @@ export function ProjectsView() {
       >
         <div className="px-4 pb-7 pt-7 sm:px-6 sm:pb-8 sm:pt-8">
           <div className="mx-auto w-full max-w-6xl">{projectsHeader}</div>
-          <div className="sticky top-0 z-30 -mx-4 border-b border-border/60 bg-background/80 backdrop-blur-xl supports-backdrop-filter:bg-background/65 dark:bg-background/75 dark:supports-backdrop-filter:bg-background/60 sm:-mx-6">
+          <div className="sticky top-0 z-30 -mx-4 bg-background/80 backdrop-blur-xl supports-backdrop-filter:bg-background/65 dark:bg-background/75 dark:supports-backdrop-filter:bg-background/60 sm:-mx-6">
             <div className="px-4 sm:px-6">
               <div className="mx-auto w-full max-w-6xl">
                 {projectsNavigation}
