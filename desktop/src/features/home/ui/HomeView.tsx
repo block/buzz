@@ -715,7 +715,7 @@ export function HomeView({
           {showListPane || showDetailPane ? (
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute inset-x-0 top-0 z-30 h-13 bg-background/75 backdrop-blur-md supports-backdrop-filter:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/35"
+              className="pointer-events-none absolute inset-x-0 top-0 z-30 h-13 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55"
               data-testid="home-inbox-shared-header-backdrop"
             />
           ) : null}
