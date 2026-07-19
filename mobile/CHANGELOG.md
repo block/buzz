@@ -1,5 +1,12 @@
 # Changelog
 
+## mobile-v0.4.7
+
+- fix(ui): relabel agent owner attribution from "owned by" to "managed by" ([#2133](https://github.com/block/buzz/pull/2133)) ([`a1e977cd1`](https://github.com/block/buzz/commit/a1e977cd1bda3f5421533b47f12c38f4a336224e))
+- chore(release): release Buzz Mobile version 0.4.6-rc.1 ([#2049](https://github.com/block/buzz/pull/2049)) ([`3aba3a531`](https://github.com/block/buzz/commit/3aba3a5316ae8bb1aed518e01e68c3e3a2166a46))
+- Strip media metadata on clients and reject it at the relay ([#2006](https://github.com/block/buzz/pull/2006)) ([`5cfd69cb0`](https://github.com/block/buzz/commit/5cfd69cb0cf1dc63d718454defe3b8a8aaf5f15b))
+
+
 ## mobile-v0.4.6-rc.1
 
 - Strip media metadata on clients and reject it at the relay ([#2006](https://github.com/block/buzz/pull/2006)) ([`5cfd69cb`](https://github.com/block/buzz/commit/5cfd69cb0cf1dc63d718454defe3b8a8aaf5f15b))
