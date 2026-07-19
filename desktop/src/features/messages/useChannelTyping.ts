@@ -57,8 +57,15 @@ function isTypingCompletionEvent(event: RelayEvent | null | undefined) {
   );
 }
 
-function getTypingScopeId(event: RelayEvent) {
-  return getThreadReference(event.tags).parentId ?? null;
+/**
+ * Thread scope for a typing/completion event: the thread root, not the
+ * immediate reply parent. Agents replying deep in a thread tag their nested
+ * parent, but every thread surface (ingress badge, open-thread composer)
+ * keys on the thread head id. Exported for tests.
+ */
+export function getTypingScopeId(event: Pick<RelayEvent, "tags">) {
+  const reference = getThreadReference(event.tags);
+  return reference.rootId ?? reference.parentId ?? null;
 }
 
 function getTypingStateKey(pubkey: string, threadHeadId: string | null) {

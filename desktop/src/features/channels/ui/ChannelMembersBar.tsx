@@ -22,6 +22,8 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { AddChannelBotDialog } from "./AddChannelBotDialog";
+import { ChannelThreadsAttentionMenu } from "./ChannelThreadsAttentionMenu";
+import type { ThreadAttentionRow } from "@/features/channels/lib/threadAttention";
 
 type ChannelMembersBarProps = {
   channel: Channel;
@@ -29,7 +31,10 @@ type ChannelMembersBarProps = {
   isAddBotOpen?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
   onManageChannel: () => void;
+  onSelectAttentionThread?: (threadHeadId: string) => void;
   onToggleMembers: () => void;
+  threadAttentionRows?: readonly ThreadAttentionRow[];
+  threadAttentionUnreadCount?: number;
   variant?: "inline" | "compact";
 };
 
@@ -39,7 +44,10 @@ export function ChannelMembersBar({
   isAddBotOpen: isAddBotOpenProp,
   onAddBotOpenChange,
   onManageChannel,
+  onSelectAttentionThread,
   onToggleMembers,
+  threadAttentionRows,
+  threadAttentionUnreadCount = 0,
   variant = "inline",
 }: ChannelMembersBarProps) {
   const [uncontrolledAddBotOpen, setUncontrolledAddBotOpen] =
@@ -133,43 +141,56 @@ export function ChannelMembersBar({
     />
   );
 
+  const threadsAttentionMenu =
+    onSelectAttentionThread && threadAttentionRows ? (
+      <ChannelThreadsAttentionMenu
+        onSelectThread={onSelectAttentionThread}
+        rows={threadAttentionRows}
+        unreadCount={threadAttentionUnreadCount}
+      />
+    ) : null;
+
   const controls =
     variant === "compact" ? (
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <Button
-            aria-label="Channel actions"
-            data-testid="channel-actions-menu-trigger"
-            size="icon"
-            type="button"
-            variant="outline"
-          >
-            <EllipsisVertical />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48" forceMount>
-          <DropdownMenuItem
-            data-testid="channel-members-trigger"
-            onSelect={onToggleMembers}
-          >
-            <Users />
-            <span>Members</span>
-            <span className="ml-auto text-xs text-muted-foreground">
-              {memberCount}
-            </span>
-          </DropdownMenuItem>
-          {huddleIndicator}
-          <DropdownMenuItem
-            data-testid="channel-management-trigger"
-            onSelect={onManageChannel}
-          >
-            <Settings2 />
-            <span>Manage channel</span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <div className="flex items-center gap-[6px]">
+        {threadsAttentionMenu}
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label="Channel actions"
+              data-testid="channel-actions-menu-trigger"
+              size="icon"
+              type="button"
+              variant="outline"
+            >
+              <EllipsisVertical />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48" forceMount>
+            <DropdownMenuItem
+              data-testid="channel-members-trigger"
+              onSelect={onToggleMembers}
+            >
+              <Users />
+              <span>Members</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                {memberCount}
+              </span>
+            </DropdownMenuItem>
+            {huddleIndicator}
+            <DropdownMenuItem
+              data-testid="channel-management-trigger"
+              onSelect={onManageChannel}
+            >
+              <Settings2 />
+              <span>Manage channel</span>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
     ) : (
       <div className="flex items-center gap-[6px]">
+        {threadsAttentionMenu}
         <Button
           aria-label={`View channel members (${memberCount})`}
           className="h-8 px-2.5"

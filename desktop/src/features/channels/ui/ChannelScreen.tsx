@@ -79,6 +79,7 @@ import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelUnreadState } from "./useChannelUnreadState";
+import { useThreadAttentionRows } from "./useThreadAttention";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760,
   EMPTY_RELAY_EVENTS: RelayEvent[] = [];
@@ -490,6 +491,7 @@ export function ChannelScreen({
     handleEditSave,
     handleExpandThreadReplies,
     handleOpenThread,
+    handleOpenThreadFocused,
     handleSendMessage,
     handleSendThreadReply,
     handleSelectThreadReplyTarget,
@@ -747,6 +749,18 @@ export function ChannelScreen({
     [],
   );
 
+  const { rows: threadAttentionRows, unreadCount: threadAttentionUnreadCount } =
+    useThreadAttentionRows({
+      botTypingEntries,
+      threadSummaries,
+      threadUnreadCounts,
+      timelineMessages,
+    });
+
+  // Forums render a different pane without the thread panel, so the header
+  // attention control would be a dead affordance there — gate it off.
+  const isForumChannel = activeChannel?.channelType === "forum";
+
   const channelHeader = React.useMemo(
     () => (
       <ChannelScreenHeader
@@ -764,8 +778,13 @@ export function ChannelScreen({
         onAddBotOpenChange={setIsAddBotOpen}
         onJoinChannel={joinChannelMutation.mutateAsync}
         onManageChannel={handleManageChannel}
+        onSelectAttentionThread={
+          isForumChannel ? undefined : handleOpenThreadFocused
+        }
         onToggleMembers={handleToggleMembers}
         showHeaderContent={!isSinglePanelView}
+        threadAttentionRows={isForumChannel ? undefined : threadAttentionRows}
+        threadAttentionUnreadCount={threadAttentionUnreadCount}
         transparentChrome={activeChannel?.channelType !== "forum"}
       />
     ),
@@ -783,8 +802,12 @@ export function ChannelScreen({
       joinChannelMutation.isPending,
       joinChannelMutation.mutateAsync,
       handleManageChannel,
+      handleOpenThreadFocused,
       handleToggleMembers,
+      isForumChannel,
       isSinglePanelView,
+      threadAttentionRows,
+      threadAttentionUnreadCount,
     ],
   );
 

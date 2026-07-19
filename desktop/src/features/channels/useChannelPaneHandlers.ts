@@ -199,6 +199,33 @@ export function useChannelPaneHandlers({
     ],
   );
 
+  /**
+   * Open a thread from the header attention menu: always opens (no toggle)
+   * and scroll-focuses the thread head. Distinct from handleOpenThread, whose
+   * toggle semantics would close an already-open thread on re-select.
+   */
+  const handleOpenThreadFocused = React.useCallback(
+    (threadHeadId: string) => {
+      deferPanelState(() => {
+        onOptimisticOpenThreadHeadIdChange(threadHeadId);
+        setOpenThreadHeadId(threadHeadId);
+        setThreadReplyTargetId(threadHeadId);
+        setThreadScrollTargetId(threadHeadId);
+        setExpandedThreadReplyIds(new Set());
+      });
+      setEditTargetId(null);
+    },
+    [
+      deferPanelState,
+      onOptimisticOpenThreadHeadIdChange,
+      setEditTargetId,
+      setExpandedThreadReplyIds,
+      setOpenThreadHeadId,
+      setThreadReplyTargetId,
+      setThreadScrollTargetId,
+    ],
+  );
+
   const handleSelectThreadReplyTarget = React.useCallback(
     (message: { id: string }) => {
       if (threadReplyTargetIdRef.current === message.id) {
@@ -345,6 +372,7 @@ export function useChannelPaneHandlers({
     handleEditSave,
     handleExpandThreadReplies,
     handleOpenThread,
+    handleOpenThreadFocused,
     handleSendMessage,
     handleSendThreadReply,
     handleSelectThreadReplyTarget,

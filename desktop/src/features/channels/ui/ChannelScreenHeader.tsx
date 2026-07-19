@@ -15,6 +15,7 @@ import {
 } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import { Button } from "@/shared/ui/button";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
+import type { ThreadAttentionRow } from "@/features/channels/lib/threadAttention";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const DM_HEADER_AVATAR_SIZE = 32;
@@ -40,7 +41,10 @@ type ChannelScreenHeaderProps = {
   onAddBotOpenChange?: (open: boolean) => void;
   onJoinChannel?: () => Promise<void>;
   onManageChannel: () => void;
+  onSelectAttentionThread?: (threadHeadId: string) => void;
   onToggleMembers: () => void;
+  threadAttentionRows?: readonly ThreadAttentionRow[];
+  threadAttentionUnreadCount?: number;
 };
 
 export function ChannelScreenHeader({
@@ -60,7 +64,10 @@ export function ChannelScreenHeader({
   transparentChrome = false,
   onJoinChannel,
   onManageChannel,
+  onSelectAttentionThread,
   onToggleMembers,
+  threadAttentionRows,
+  threadAttentionUnreadCount,
 }: ChannelScreenHeaderProps) {
   const isGroupDm =
     activeChannel?.channelType === "dm" &&
@@ -90,7 +97,10 @@ export function ChannelScreenHeader({
         isAddBotOpen={isAddBotOpen}
         onAddBotOpenChange={onAddBotOpenChange}
         onManageChannel={onManageChannel}
+        onSelectAttentionThread={onSelectAttentionThread}
         onToggleMembers={onToggleMembers}
+        threadAttentionRows={threadAttentionRows}
+        threadAttentionUnreadCount={threadAttentionUnreadCount}
         variant={actionsVariant}
       />
     )
