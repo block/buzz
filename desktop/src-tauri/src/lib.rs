@@ -426,7 +426,7 @@ pub fn run() {
             .build()
     });
 
-    // Only configured release builds register the updater; local builds omit it.
+    // Register the updater only in configured release builds; omit it locally.
     #[cfg(buzz_updater_enabled)]
     let builder = if cfg!(debug_assertions) {
         builder
