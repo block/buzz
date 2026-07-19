@@ -17,6 +17,9 @@ use crate::{
 mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
 
+mod stop;
+pub use stop::stop_managed_agent_process;
+
 mod sweep;
 pub(crate) use sweep::sweep_untracked_bundle_harnesses;
 
@@ -2099,79 +2102,6 @@ pub fn start_managed_agent_process(
     record.last_error_code = None;
 
     runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
-    Ok(())
-}
-
-pub fn stop_managed_agent_process(
-    app: &AppHandle,
-    record: &mut ManagedAgentRecord,
-    runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
-) -> Result<(), String> {
-    let key = runtimes
-        .keys()
-        .find(|key| key.pubkey == record.pubkey)
-        .cloned();
-    let Some(key) = key else {
-        // Legacy PID cleanup only; pair receipts are restored separately.
-        if let Some(pid) = record.runtime_pid.take() {
-            if process_is_running(pid)
-                && process_belongs_to_us(pid)
-                && process_has_buzz_marker(pid, &current_instance_id(app))
-            {
-                terminate_process(pid)?;
-            }
-            record.updated_at = now_iso();
-        }
-        super::remove_agent_pid_file(app, &record.pubkey);
-        return Ok(());
-    };
-    let Some(mut runtime) = runtimes.remove(&key) else {
-        return Ok(());
-    };
-
-    // On Unix, kill the entire process group via terminate_process.
-    // On Windows, drop the Job Object handle (KILL_ON_JOB_CLOSE) so the whole
-    // harness tree dies — Child::kill() would orphan the agent workers + MCP
-    // servers. If job assignment failed at spawn, fall back to Child::kill().
-    #[cfg(unix)]
-    terminate_process(runtime.child.id())?;
-    #[cfg(windows)]
-    match runtime.job.take() {
-        Some(job) => drop(job),
-        None => runtime
-            .child
-            .kill()
-            .map_err(|error| format!("failed to kill agent process: {error}"))?,
-    }
-    #[cfg(not(any(unix, windows)))]
-    runtime
-        .child
-        .kill()
-        .map_err(|error| format!("failed to kill agent process: {error}"))?;
-    let status = runtime
-        .child
-        .wait()
-        .map_err(|error| format!("failed to wait for agent shutdown: {error}"))?;
-    let now = now_iso();
-    record.runtime_pid = None;
-    record.updated_at = now.clone();
-    record.last_stopped_at = Some(now);
-    record.last_exit_code = status.code();
-    record.last_error = None;
-    record.last_error_code = None;
-
-    super::remove_agent_runtime_receipt(app, &key);
-
-    append_log_marker(
-        &runtime.log_path,
-        &format!(
-            "=== stopped {} ({}) at {} ===",
-            record.name,
-            record.pubkey,
-            now_iso()
-        ),
-    )?;
-
     Ok(())
 }
 
