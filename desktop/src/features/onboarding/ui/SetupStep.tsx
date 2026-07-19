@@ -129,6 +129,26 @@ function useSetupFlashState(setupFlashToken: number) {
   return isFlashing;
 }
 
+function RuntimeErrorTooltip({
+  children,
+  detail,
+}: {
+  children: React.ReactNode;
+  detail: string;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent
+        className="max-w-80 bg-black text-left text-xs text-white shadow-sm"
+        side="top"
+      >
+        <p className="text-xs leading-4 text-white">{detail}</p>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function RuntimeStatus({
   installError,
   installSuccess,
@@ -198,17 +218,18 @@ function RuntimeStatus({
           SET UP
         </Button>
         {methodsQuery.error instanceof Error ? (
-          <span className="pointer-events-none absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
-            Sign-in unavailable
-          </span>
+          <RuntimeErrorTooltip detail="Couldn’t load sign-in options.">
+            <span className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
+              Sign-in unavailable
+            </span>
+          </RuntimeErrorTooltip>
         ) : null}
         {connectMutation.error instanceof Error ? (
-          <span
-            className="pointer-events-none absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
-            title={connectMutation.error.message}
-          >
-            Sign-in failed
-          </span>
+          <RuntimeErrorTooltip detail="Couldn’t start sign-in. Try again.">
+            <span className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
+              Sign-in failed
+            </span>
+          </RuntimeErrorTooltip>
         ) : null}
       </div>
     );
@@ -492,12 +513,11 @@ function getOnboardingAuthMethods(
 function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   if (runtime.authStatus.status === "config_invalid") {
     return (
-      <p
-        className="pointer-events-none absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
-        title={runtime.authStatus.diagnostic}
-      >
-        Configuration invalid
-      </p>
+      <RuntimeErrorTooltip detail="Check this runtime’s configuration and try again.">
+        <p className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
+          Configuration invalid
+        </p>
+      </RuntimeErrorTooltip>
     );
   }
   if (
@@ -505,9 +525,11 @@ function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
     runtime.authStatus.status === "unknown"
   ) {
     return (
-      <p className="pointer-events-none absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
-        Status unavailable
-      </p>
+      <RuntimeErrorTooltip detail="Couldn’t verify authentication.">
+        <p className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
+          Status unavailable
+        </p>
+      </RuntimeErrorTooltip>
     );
   }
   return null;
@@ -591,25 +613,15 @@ function RuntimeCard({
         ) : null}
       </div>
       {installError ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <p
-              className="absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
-              data-testid={`onboarding-runtime-error-${runtime.id}`}
-            >
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              <span className="min-w-0 truncate">Setup failed</span>
-            </p>
-          </TooltipTrigger>
-          <TooltipContent
-            className="max-w-80 bg-black text-left text-xs text-white shadow-sm"
-            side="top"
+        <RuntimeErrorTooltip detail={runtimeDetailText(runtime)}>
+          <p
+            className="absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
+            data-testid={`onboarding-runtime-error-${runtime.id}`}
           >
-            <p className="text-xs leading-4 text-white">
-              {runtimeDetailText(runtime)}
-            </p>
-          </TooltipContent>
-        </Tooltip>
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 truncate">Setup failed</span>
+          </p>
+        </RuntimeErrorTooltip>
       ) : (
         <RuntimeAuthError runtime={runtime} />
       )}
