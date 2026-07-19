@@ -133,6 +133,8 @@ type E2eConfig = {
     } | null;
     /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
     builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
+    /** Structured error returned when onboarding tries to bind the local identity. */
+    builderlabBindError?: { code?: string; message?: string };
     /** Communities owned by the mocked Builderlab account. */
     builderlabCommunities?: Array<{
       id?: string;
@@ -8790,11 +8792,16 @@ export function maybeInstallE2eTauriMocks() {
         if (activeConfig?.mock) activeConfig.mock.builderlabAuth = nextAuth;
         return nextAuth;
       }
+      case "clear_builderlab_auth":
+        if (activeConfig?.mock) activeConfig.mock.builderlabAuth = null;
+        return null;
       case "get_builderlab_nostr_identity":
         return activeConfig?.mock?.builderlabIdentity
           ? { identity: activeConfig.mock.builderlabIdentity }
           : { error: { code: "missing_mapping", setup_needed: true } };
       case "bind_builderlab_nostr_identity": {
+        if (activeConfig?.mock?.builderlabBindError)
+          return { error: activeConfig.mock.builderlabBindError };
         const activeIdentity = identity ?? DEFAULT_MOCK_IDENTITY;
         const nextIdentity = {
           pubkey_hex: activeIdentity.pubkey,
@@ -8804,6 +8811,9 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig.mock.builderlabIdentity = nextIdentity;
         return { identity: nextIdentity };
       }
+      case "delete_builderlab_nostr_identity":
+        if (activeConfig?.mock) activeConfig.mock.builderlabIdentity = null;
+        return {};
       case "list_builderlab_communities":
         return {
           communities: activeConfig?.mock?.builderlabCommunities ?? [],

@@ -4,7 +4,9 @@ import { AlertCircle, CheckCircle2, LoaderCircle } from "lucide-react";
 import {
   bindBuilderlabIdentity,
   checkHostedCommunityName,
+  clearBuilderlabAuth,
   createHostedCommunity,
+  deleteBuilderlabIdentity,
   getBuilderlabAuth,
   HOSTED_COMMUNITY_LIMIT,
   HOSTED_COMMUNITY_SUFFIX,
@@ -84,6 +86,27 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
       await loadAccount();
     });
 
+  const signOut = () =>
+    run("Signing out…", async () => {
+      await clearBuilderlabAuth();
+      setAuth(null);
+      setIdentity(null);
+      setCommunities([]);
+      setName("");
+      setAvailability(null);
+    });
+
+  const goBack = () => {
+    if (!auth) {
+      onBack();
+      return;
+    }
+    void run("Signing out…", async () => {
+      await clearBuilderlabAuth();
+      onBack();
+    });
+  };
+
   const connectIdentity = () =>
     run("Connecting identity…", async () => {
       const response = await bindBuilderlabIdentity();
@@ -108,6 +131,36 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
       boundPubkey.toLowerCase() !== localPubkey.toLowerCase(),
   );
   const localNpub = localPubkey ? safeNpub(localPubkey) : null;
+
+  const switchToDeviceIdentity = () =>
+    run("Switching identity…", async () => {
+      const released = await deleteBuilderlabIdentity();
+      if (released.error) {
+        throw new Error(
+          hostedCommunityErrorMessage(
+            released.error,
+            released.correlation_id,
+            "Could not disconnect the account's previous Buzz identity.",
+          ),
+        );
+      }
+      const bound = await bindBuilderlabIdentity();
+      if (bound.error) {
+        await loadAccount();
+        throw new Error(
+          bound.error.code === "pubkey_already_bound"
+            ? "This device's Buzz identity belongs to a different Builderlab account and can't be moved from here. Sign out, then sign in with the account that already owns this identity."
+            : hostedCommunityErrorMessage(
+                bound.error,
+                bound.correlation_id,
+                "Could not connect this device's Buzz identity.",
+              ),
+        );
+      }
+      setIdentity(bound.identity ?? null);
+      await loadAccount();
+    });
+
   const activeCommunities = communities.filter(
     (community) => !community.archived_at && hostedCommunityRelayUrl(community),
   );
@@ -250,15 +303,30 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
                   This account uses a different Buzz identity
                 </h2>
                 <p className="mt-2 text-sm text-foreground/70">
-                  Sign in with the account connected to this device, or switch
-                  the identity from Hosted communities settings on a configured
-                  Buzz installation.
+                  This Builderlab account is connected to another Buzz identity.
+                  You can disconnect that identity and reconnect this device, or
+                  sign out to use a different email.
                 </p>
                 <p className="mt-3 break-all font-mono text-xs text-foreground/60">
                   Account: {identity.npub ?? boundPubkey}
                   <br />
                   This device: {localNpub ?? localPubkey}
                 </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button
+                    disabled={busy}
+                    onClick={() => void switchToDeviceIdentity()}
+                  >
+                    {action ?? "Use this device's identity"}
+                  </Button>
+                  <Button
+                    disabled={busy}
+                    onClick={() => void signOut()}
+                    variant="outline"
+                  >
+                    Sign in with a different email
+                  </Button>
+                </div>
               </div>
             </div>
           </section>
@@ -374,7 +442,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
         <Button
           className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
           disabled={busy}
-          onClick={onBack}
+          onClick={goBack}
           type="button"
           variant="ghost"
         >

@@ -852,6 +852,140 @@ test("first-community owner can create and connect a hosted community", async ({
     .toContain("wss://bee-lab.communities.buzz.xyz");
 });
 
+test("first-community owner can replace a mismatched account identity", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "old-owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: "f".repeat(64) },
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page
+    .getByRole("button", { name: "Create or connect to my own community" })
+    .click();
+  await expect(
+    page.getByRole("heading", {
+      name: "This account uses a different Buzz identity",
+    }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Use this device's identity" })
+    .click();
+  await expect(
+    page.getByText("Signed in as old-owner@example.com"),
+  ).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
+    .toEqual(
+      expect.arrayContaining([
+        "delete_builderlab_nostr_identity",
+        "bind_builderlab_nostr_identity",
+      ]),
+    );
+});
+
+test("first-community explains when the local identity belongs to another account", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "wrong-owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: "e".repeat(64) },
+      builderlabBindError: { code: "pubkey_already_bound" },
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page
+    .getByRole("button", { name: "Create or connect to my own community" })
+    .click();
+  await page
+    .getByRole("button", { name: "Use this device's identity" })
+    .click();
+  await expect(
+    page.getByText(
+      "This device's Buzz identity belongs to a different Builderlab account and can't be moved from here. Sign out, then sign in with the account that already owns this identity.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Connect this Buzz identity" }),
+  ).toBeVisible();
+});
+
+test("back clears Builderlab auth before returning to first-community choices", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page
+    .getByRole("button", { name: "Create or connect to my own community" })
+    .click();
+  await page.getByRole("button", { name: "Back" }).click();
+  await page
+    .getByRole("button", { name: "Create or connect to my own community" })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Continue with Builderlab" }),
+  ).toBeVisible();
+});
+
 test("first-community shows the scenario cards for localhost", async ({
   page,
 }) => {

@@ -94,6 +94,10 @@ export function getBuilderlabAuth() {
   return invoke<BuilderlabAuth | null>("get_builderlab_auth");
 }
 
+export function clearBuilderlabAuth() {
+  return invoke<void>("clear_builderlab_auth");
+}
+
 export function startBuilderlabLogin() {
   return invoke<BuilderlabAuth>("start_builderlab_login");
 }
@@ -133,6 +137,10 @@ export async function loadHostedCommunityAccount(): Promise<HostedCommunityAccou
 
 export function bindBuilderlabIdentity() {
   return invoke<HostedIdentityResponse>("bind_builderlab_nostr_identity");
+}
+
+export function deleteBuilderlabIdentity() {
+  return invoke<HostedIdentityResponse>("delete_builderlab_nostr_identity");
 }
 
 export function checkHostedCommunityName(name: string) {
