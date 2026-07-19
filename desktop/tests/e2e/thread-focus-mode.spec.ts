@@ -105,6 +105,12 @@ test("focus and split preserve reading context and interaction ownership", async
     body.locator(`[data-message-id="${anchorId}"]`),
   ).toBeInViewport();
 
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("focus-thread-drawer-overlay")).toHaveCount(0);
+  await expect(channel).not.toHaveAttribute("inert", "");
+
+  await summary.click();
+  await expect(drawer).toBeVisible();
   await page.getByTestId("focus-thread-drawer-scrim").click({
     position: { x: 24, y: 200 },
   });
