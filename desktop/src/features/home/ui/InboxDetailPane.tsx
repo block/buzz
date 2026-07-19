@@ -497,31 +497,48 @@ export function InboxDetailPane({
                 );
 
               return (
-                <React.Fragment key={message.id}>
-                  {isAfterSeparator ? (
-                    <div className="mx-6 my-3 border-t border-border/60" />
-                  ) : null}
-                  <InboxMessageRow
-                    agentPubkeys={agentPubkeys}
-                    canReply={canReply}
-                    channelId={item.item.channelId}
-                    isContinuation={isContinuation}
-                    isFocusHighlightVisible={isFocusHighlightVisible}
-                    message={message}
-                    onSelectReplyTarget={handleSelectReplyTarget}
-                    onToggleReaction={onToggleReaction}
-                  />
-                </React.Fragment>
+                <InboxMessageRow
+                  agentPubkeys={agentPubkeys}
+                  canReply={canReply}
+                  channelId={item.item.channelId}
+                  isContinuation={isContinuation}
+                  isFirst={index === 0}
+                  isFocusHighlightVisible={isFocusHighlightVisible}
+                  key={message.id}
+                  message={message}
+                  onSelectReplyTarget={handleSelectReplyTarget}
+                  onToggleReaction={onToggleReaction}
+                />
               );
             })}
           </div>
         </div>
 
         <div
-          className="pointer-events-none absolute inset-x-0 bottom-0 z-40 bg-background"
+          className="pointer-events-none absolute inset-x-0 bottom-0 z-40 isolate before:absolute before:inset-x-0 before:bottom-0 before:h-12 before:bg-gradient-to-b before:from-transparent before:to-background before:content-[''] after:absolute after:inset-x-0 after:bottom-0 after:h-4 after:bg-background after:content-['']"
           data-testid="home-inbox-detail-composer-overlay"
           ref={composerWrapperRef}
         >
+          <span
+            aria-hidden="true"
+            className="absolute bottom-4 left-4 h-4 w-4 bg-background"
+            style={{
+              maskImage:
+                "radial-gradient(circle at top right, transparent 0 1rem, black calc(1rem + 0.5px))",
+              WebkitMaskImage:
+                "radial-gradient(circle at top right, transparent 0 1rem, black calc(1rem + 0.5px))",
+            }}
+          />
+          <span
+            aria-hidden="true"
+            className="absolute bottom-4 right-4 h-4 w-4 bg-background"
+            style={{
+              maskImage:
+                "radial-gradient(circle at top left, transparent 0 1rem, black calc(1rem + 0.5px))",
+              WebkitMaskImage:
+                "radial-gradient(circle at top left, transparent 0 1rem, black calc(1rem + 0.5px))",
+            }}
+          />
           <div className="pointer-events-auto">
             <MessageComposer
               audienceContext={{

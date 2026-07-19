@@ -4,7 +4,6 @@ import * as React from "react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
-  clearDraftEntry,
   getActiveDraftEntries,
   renameDraftEntry,
   useDraftsSnapshot,
@@ -45,20 +44,20 @@ const SENT_DRAFT_PREFIX = "sent:";
 const THREAD_DRAFT_PREFIX = "thread:";
 const UNKNOWN_CHANNEL_LABEL = "Unknown channel";
 
-type DraftListEntry = {
+export type DraftListEntry = {
   draft: DraftState;
   key: string;
 };
 
-type DraftSection = {
-  entries: DraftListEntry[];
-  label: string;
-  status: DraftState["status"];
-};
-
-type DraftSource = {
+export type DraftSource = {
   channel: Channel | null;
   label: string;
+};
+
+export type DraftViewItem = {
+  entry: DraftListEntry;
+  rootStatus: RootStatus;
+  source: DraftSource;
 };
 
 const UNKNOWN_DRAFT_SOURCE: DraftSource = {
@@ -78,7 +77,7 @@ function parseDraftTime(value: string): number {
   return Number.isFinite(time) ? time : 0;
 }
 
-function formatDraftCreatedAt(draft: DraftState): string {
+export function formatDraftCreatedAt(draft: DraftState): string {
   const time = parseDraftTime(draft.createdAt);
   return time === 0
     ? "Unknown time"
@@ -97,7 +96,7 @@ function getOriginalDraftKey(draftKey: string): string {
     : sentPayload;
 }
 
-function getThreadRootId(draftKey: string): string | null {
+export function getThreadRootId(draftKey: string): string | null {
   const originalDraftKey = getOriginalDraftKey(draftKey);
   if (!originalDraftKey.startsWith(THREAD_DRAFT_PREFIX)) {
     return null;
@@ -113,7 +112,7 @@ function isVisibleDraft(entry: DraftListEntry): boolean {
   return content.length > 0 || attachmentCount > 0;
 }
 
-function getDraftPreview(draft: DraftState): string {
+export function getDraftPreview(draft: DraftState): string {
   const content = draft.content.trim();
   if (content.length > 0) {
     return content;
@@ -127,17 +126,6 @@ function getDraftPreview(draft: DraftState): string {
     return `${attachmentCount} attachments`;
   }
   return "Empty draft";
-}
-
-function readDraftSections(): DraftSection[] {
-  const active = getActiveDraftEntries().filter(isVisibleDraft);
-  const sections: DraftSection[] = [];
-
-  if (active.length > 0) {
-    sections.push({ label: "Drafts", status: "active", entries: active });
-  }
-
-  return sections;
 }
 
 function resolveDraftSources({
@@ -236,6 +224,65 @@ export function canSendDraft(
   return true;
 }
 
+type GoChannel = ReturnType<typeof useAppNavigation>["goChannel"];
+
+export async function openDraftEntry(
+  entry: DraftListEntry,
+  goChannel: GoChannel,
+): Promise<void> {
+  if (!entry.draft.channelId) return;
+
+  if (entry.key.startsWith(INBOX_REPLY_PREFIX)) {
+    const migrated = await migrateInboxReplyDraft(entry.key, entry.draft, {
+      getEventById,
+      getChannelIdFromTags,
+      getThreadReference,
+      renameDraftEntry,
+    });
+    if (!migrated) return;
+    await goChannel(migrated.channelId, {
+      messageId: migrated.conversationId,
+      threadRootId: migrated.conversationId,
+    });
+    return;
+  }
+
+  const threadRootId = getThreadRootId(entry.key);
+  await goChannel(
+    entry.draft.channelId,
+    threadRootId ? { messageId: threadRootId, threadRootId } : undefined,
+  );
+}
+
+export async function sendDraftEntry(
+  entry: DraftListEntry,
+  goChannel: GoChannel,
+): Promise<void> {
+  if (!entry.draft.channelId) return;
+
+  if (entry.key.startsWith(INBOX_REPLY_PREFIX)) {
+    const migrated = await migrateInboxReplyDraft(entry.key, entry.draft, {
+      getEventById,
+      getChannelIdFromTags,
+      getThreadReference,
+      renameDraftEntry,
+    });
+    if (!migrated) return;
+    await goChannel(migrated.channelId, {
+      autoSend: migrated.newDraftKey,
+      messageId: migrated.conversationId,
+      threadRootId: migrated.conversationId,
+    });
+    return;
+  }
+
+  const threadRootId = getThreadRootId(entry.key);
+  await goChannel(entry.draft.channelId, {
+    ...(threadRootId ? { messageId: threadRootId, threadRootId } : {}),
+    autoSend: entry.key,
+  });
+}
+
 // ── Send confirmation dialog ──────────────────────────────────────────────────
 
 type SendConfirmDialogProps = {
@@ -246,7 +293,7 @@ type SendConfirmDialogProps = {
   open: boolean;
 };
 
-function SendConfirmDialog({
+export function SendConfirmDialog({
   channelLabel,
   isDm,
   onCancel,
@@ -289,15 +336,19 @@ function DraftRow({
   entry,
   onDelete,
   onOpen,
+  onSelect,
   onSend,
   rootStatus,
+  selected,
   source,
 }: {
   entry: DraftListEntry;
   onDelete: (draftKey: string) => void;
   onOpen: (entry: DraftListEntry) => void;
+  onSelect: () => void;
   onSend: (entry: DraftListEntry) => void;
   rootStatus: RootStatus;
+  selected: boolean;
   source: DraftSource;
 }) {
   const isSent = entry.draft.status === "sent";
@@ -316,15 +367,15 @@ function DraftRow({
     <div
       className={cn(
         "group/draft-row relative rounded-md border border-border/70 bg-background transition-colors hover:bg-muted/40 focus-within:bg-muted/40",
+        selected && "border-primary/30 bg-muted/60",
         isOrphaned && "opacity-50",
       )}
       data-testid={`home-draft-item-${entry.key}`}
     >
       <button
-        aria-label={`Open draft in ${channelLabel}`}
+        aria-label={`View draft in ${channelLabel}`}
         className="block w-full min-w-0 px-3 py-3 text-left disabled:cursor-default"
-        disabled={!canOpen}
-        onClick={() => onOpen(entry)}
+        onClick={onSelect}
         type="button"
       >
         <div className="min-w-0 pr-0 transition-[padding] group-hover/draft-row:pr-20 group-focus-within/draft-row:pr-20">
@@ -458,41 +509,28 @@ export function useActiveDraftCount(
   return deriveActiveDraftCount(activeDrafts, rootStatusMap);
 }
 
-// ── DraftsPanel ──────────────────────────────────────────────────────────────
+// ── Shared draft view model ──────────────────────────────────────────────────
 
-export function DraftsPanel() {
-  const { goChannel } = useAppNavigation();
+export function useDraftViewItems(enabled: boolean): DraftViewItem[] {
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey;
   const channelsQuery = useChannelsQuery();
 
-  // Collapse the old `sections` state + `refreshDrafts` pattern onto a
-  // reactive snapshot: every draft write re-renders via useSyncExternalStore.
   useDraftsSnapshot();
-  const sections = readDraftSections();
+  const drafts = getActiveDraftEntries().filter(isVisibleDraft);
 
-  const drafts = React.useMemo(
-    () => sections.flatMap((section) => section.entries),
-    [sections],
-  );
-
-  // Collect unique thread-root IDs from active drafts only (sent drafts cannot
-  // be sent/orphaned). Deduplicated on root id — multiple drafts can share one.
   const threadRootIds = React.useMemo(() => {
     const ids = new Set<string>();
-    for (const entry of sections.flatMap((s) =>
-      s.status === "active" ? s.entries : [],
-    )) {
+    for (const entry of drafts) {
       const rootId = getThreadRootId(entry.key);
       if (rootId) {
         ids.add(rootId);
       }
     }
     return [...ids];
-  }, [sections]);
+  }, [drafts]);
 
-  // Panel is always mounted when visible; `isOpen=true` enables root queries.
-  const rootStatusMap = useDraftRootStatus(threadRootIds, true);
+  const rootStatusMap = useDraftRootStatus(threadRootIds, enabled);
 
   const profilePubkeys = React.useMemo(
     () => [
@@ -522,6 +560,36 @@ export function DraftsPanel() {
     [channelsQuery.data, currentPubkey, drafts, profiles],
   );
 
+  return drafts.map((entry) => {
+    const threadRootId = getThreadRootId(entry.key);
+    return {
+      entry,
+      rootStatus:
+        threadRootId !== null
+          ? (rootStatusMap.get(threadRootId) ?? "checking")
+          : "available",
+      source: sources.get(entry.key) ?? UNKNOWN_DRAFT_SOURCE,
+    };
+  });
+}
+
+// ── DraftsPanel ──────────────────────────────────────────────────────────────
+
+type DraftsPanelProps = {
+  items: DraftViewItem[];
+  onDeleteDraft: (draftKey: string) => void;
+  onSelectDraft: (draftKey: string) => void;
+  selectedDraftKey: string | null;
+};
+
+export function DraftsPanel({
+  items,
+  onDeleteDraft,
+  onSelectDraft,
+  selectedDraftKey,
+}: DraftsPanelProps) {
+  const { goChannel } = useAppNavigation();
+
   // Send confirmation dialog state.
   const [sendTarget, setSendTarget] = React.useState<DraftListEntry | null>(
     null,
@@ -529,52 +597,17 @@ export function DraftsPanel() {
 
   const handleOpen = React.useCallback(
     (entry: DraftListEntry) => {
-      if (!entry.draft.channelId) {
-        return;
-      }
-
-      // Legacy inbox-reply:<eventId> keys were written by the old InboxDetailPane
-      // before stable conversation IDs were introduced. Migrate them on open:
-      // resolve the embedded event to derive the thread root, verify the channel
-      // tag matches the stored channelId, re-key to thread:<conversationId>, and
-      // navigate to the correct thread composer with the migrated content.
-      if (entry.key.startsWith(INBOX_REPLY_PREFIX)) {
-        void (async () => {
-          const migrated = await migrateInboxReplyDraft(
-            entry.key,
-            entry.draft,
-            {
-              getEventById,
-              getChannelIdFromTags,
-              getThreadReference,
-              renameDraftEntry,
-            },
-          );
-          // Navigate only on successful migration; any failure leaves the
-          // legacy draft untouched and the user in place.
-          if (!migrated) return;
-          void goChannel(migrated.channelId, {
-            messageId: migrated.conversationId,
-            threadRootId: migrated.conversationId,
-          });
-        })();
-        return;
-      }
-
-      const threadRootId = getThreadRootId(entry.key);
-      void goChannel(
-        entry.draft.channelId,
-        threadRootId ? { messageId: threadRootId, threadRootId } : undefined,
-      );
+      void openDraftEntry(entry, goChannel);
     },
     [goChannel],
   );
 
-  const handleDelete = React.useCallback((draftKey: string) => {
-    clearDraftEntry(draftKey);
-    // No manual refresh needed — clearDraftEntry notifies subscribers and
-    // useDraftsSnapshot() causes DraftsPanel to re-render automatically.
-  }, []);
+  const handleDelete = React.useCallback(
+    (draftKey: string) => {
+      onDeleteDraft(draftKey);
+    },
+    [onDeleteDraft],
+  );
 
   const handleSendRequest = React.useCallback((entry: DraftListEntry) => {
     setSendTarget(entry);
@@ -588,44 +621,18 @@ export function DraftsPanel() {
     if (!sendTarget) return;
     const entry = sendTarget;
     setSendTarget(null);
-
-    if (!entry.draft.channelId) return;
-
-    // Legacy inbox-reply: keys: migrate first, then auto-send with new key.
-    if (entry.key.startsWith(INBOX_REPLY_PREFIX)) {
-      void (async () => {
-        const migrated = await migrateInboxReplyDraft(entry.key, entry.draft, {
-          getEventById,
-          getChannelIdFromTags,
-          getThreadReference,
-          renameDraftEntry,
-        });
-        if (!migrated) return;
-        void goChannel(migrated.channelId, {
-          messageId: migrated.conversationId,
-          threadRootId: migrated.conversationId,
-          autoSend: migrated.newDraftKey,
-        });
-      })();
-      return;
-    }
-
-    const threadRootId = getThreadRootId(entry.key);
-    void goChannel(entry.draft.channelId, {
-      ...(threadRootId ? { messageId: threadRootId, threadRootId } : {}),
-      autoSend: entry.key,
-    });
+    void sendDraftEntry(entry, goChannel);
   }, [sendTarget, goChannel]);
 
-  const sendDialogSource = sendTarget
-    ? (sources.get(sendTarget.key) ?? UNKNOWN_DRAFT_SOURCE)
-    : UNKNOWN_DRAFT_SOURCE;
+  const sendDialogSource =
+    items.find((item) => item.entry.key === sendTarget?.key)?.source ??
+    UNKNOWN_DRAFT_SOURCE;
   const sendDialogIsDm = sendDialogSource.channel?.channelType === "dm";
   const sendDialogChannelLabel = sendDialogSource.channel
     ? sendDialogSource.label
     : UNKNOWN_CHANNEL_LABEL;
 
-  if (sections.length === 0) {
+  if (items.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
         <FileText className="h-8 w-8 text-muted-foreground/50" />
@@ -636,31 +643,25 @@ export function DraftsPanel() {
 
   return (
     <>
-      <div className="flex-1 space-y-4 overflow-y-auto p-4">
-        {sections.map((section) => (
-          <div className="space-y-2" key={section.status}>
-            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              {section.label}
-            </h3>
-            {section.entries.map((entry) => {
-              const threadRootId = getThreadRootId(entry.key);
-              const rootStatus: RootStatus =
-                threadRootId !== null
-                  ? (rootStatusMap.get(threadRootId) ?? "checking")
-                  : "available";
-              return (
-                <DraftRow
-                  entry={entry}
-                  key={entry.key}
-                  onDelete={handleDelete}
-                  onOpen={handleOpen}
-                  onSend={handleSendRequest}
-                  rootStatus={rootStatus}
-                  source={sources.get(entry.key) ?? UNKNOWN_DRAFT_SOURCE}
-                />
-              );
-            })}
-          </div>
+      <div
+        className="flex-1 space-y-2 overflow-y-auto p-4"
+        data-testid="home-inbox-drafts-list"
+      >
+        <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Drafts
+        </h3>
+        {items.map(({ entry, rootStatus, source }) => (
+          <DraftRow
+            entry={entry}
+            key={entry.key}
+            onDelete={handleDelete}
+            onOpen={handleOpen}
+            onSelect={() => onSelectDraft(entry.key)}
+            onSend={handleSendRequest}
+            rootStatus={rootStatus}
+            selected={entry.key === selectedDraftKey}
+            source={source}
+          />
         ))}
       </div>
 

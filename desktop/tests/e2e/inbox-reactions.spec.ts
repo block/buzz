@@ -140,6 +140,18 @@ test("inbox reaction on a thread-reply mention persists after refetch", async ({
   await expect(selectedMessage.getByLabel("Toggle ❤️ reaction")).toBeVisible();
 
   await selectedMessage.hover();
+  const actionBar = page.getByTestId(`message-action-bar-${replyEvent.id}`);
+  const [actionBarBox, selectedMessageBox] = await Promise.all([
+    actionBar.boundingBox(),
+    selectedMessage.boundingBox(),
+  ]);
+  expect(actionBarBox).not.toBeNull();
+  expect(selectedMessageBox).not.toBeNull();
+  if (!actionBarBox || !selectedMessageBox) {
+    throw new Error("Inbox message action bar bounds were unavailable.");
+  }
+  expect(actionBarBox.y).toBeGreaterThanOrEqual(selectedMessageBox.y);
+
   await selectedMessage
     .getByRole("button", { name: "React with :+1:" })
     .click();
