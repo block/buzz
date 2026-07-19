@@ -1711,7 +1711,10 @@ pub fn spawn_agent_child(
         .unwrap_or(super::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS);
     command.env("BUZZ_ACP_MAX_TURN_DURATION", max_dur.to_string());
     command.env("BUZZ_ACP_AGENTS", record.parallelism.to_string());
+    // Legacy default. User env may override this while the experiment is off;
+    // enabled experiment state is authoritatively finalized at the spawn boundary.
     command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
+    let session_scope = crate::commands::experiments::acp_session_scope(app);
     command.env("BUZZ_ACP_DEDUP", "queue");
     if let Some(meta) = runtime_meta {
         for (key, value) in meta.default_env {
@@ -1864,6 +1867,11 @@ pub fn spawn_agent_child(
     // goose → MCP servers) because neither buzz-acp nor goose calls
     // env_clear().
     command.env("BUZZ_MANAGED_AGENT", current_instance_id(app));
+
+    // Finalize after every default and user env write. Enabled experiment state
+    // must be authoritative; disabled state only removes the new variable and
+    // preserves the legacy handling override chosen above or supplied by users.
+    finalize_acp_session_scope_env(&mut command, session_scope);
 
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
@@ -2118,6 +2126,18 @@ pub(crate) fn resolve_effective_prompt_model_provider(
         ),
         None => (record_prompt, record_model, record_provider),
     }
+}
+
+fn finalize_acp_session_scope_env(
+    command: &mut std::process::Command,
+    scope: crate::commands::experiments::AcpSessionScope,
+) {
+    let value = match scope {
+        crate::commands::experiments::AcpSessionScope::Thread => "thread",
+        crate::commands::experiments::AcpSessionScope::Channel => "channel",
+    };
+    command.env("BUZZ_ACP_SESSION_SCOPE", value);
+    command.env_remove("BUZZ_ACP_TOP_LEVEL_SESSIONS");
 }
 
 #[cfg(test)]

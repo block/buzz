@@ -36,8 +36,8 @@ use filter::SubscriptionRule;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
 use pool::{
-    AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
-    PromptResult, PromptSource, SessionState, TimeoutKind,
+    AgentPool, ClaimOutcome, ControlSignal, ConversationSessionKey, IdleSwitchResult, OwnedAgent,
+    PromptContext, PromptOutcome, PromptResult, PromptSource, SessionState, TimeoutKind,
 };
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
@@ -735,6 +735,11 @@ fn handle_relay_observer_control_event(
 }
 
 /// Handle a `cancel_turn` control frame: signal the in-flight task to cancel.
+///
+/// An optional `rootEventId` targets one thread scope exactly. Without it,
+/// the frame acts only when exactly one scope is in flight for the channel;
+/// with several, the target is ambiguous and nothing is touched
+/// (`status: "ambiguous_target"`). Control never fans out across roots.
 fn handle_cancel_turn_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
@@ -748,9 +753,29 @@ fn handle_cancel_turn_control(
         tracing::warn!("observer cancel_turn control frame missing valid channelId");
         return;
     };
+    let root_event_id = payload
+        .get("rootEventId")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
 
-    let fired = signal_in_flight_task(pool, channel_id, ControlSignal::Cancel);
-    let status = if fired { "sent" } else { "no_active_turn" };
+    let status = match resolve_control_frame_scope(pool, channel_id, root_event_id) {
+        Ok(Some(scope)) => {
+            if signal_in_flight_task(pool, &scope, ControlSignal::Cancel) {
+                "sent"
+            } else {
+                "no_active_turn"
+            }
+        }
+        Ok(None) => "no_active_turn",
+        Err(in_flight) => {
+            tracing::warn!(
+                channel_id = %channel_id,
+                in_flight,
+                "cancel_turn without rootEventId while multiple scopes in flight — refusing"
+            );
+            "ambiguous_target"
+        }
+    };
     if let Some(observer) = observer {
         observer.emit(
             "control_result",
@@ -769,6 +794,26 @@ fn handle_cancel_turn_control(
     }
 }
 
+/// Resolve a control frame's target scope from its optional `rootEventId`.
+///
+/// `Some(root)` targets that thread scope exactly (in-flight or not — the
+/// signal send reports `no_active_turn` if it isn't). `None` falls back to
+/// the channel-level exactly-one rule; `Err(n)` reports `n` in-flight scopes
+/// (ambiguous — touch nothing).
+fn resolve_control_frame_scope(
+    pool: &AgentPool,
+    channel_id: Uuid,
+    root_event_id: Option<String>,
+) -> Result<Option<ConversationSessionKey>, usize> {
+    match root_event_id {
+        Some(root) => Ok(Some(ConversationSessionKey {
+            channel_id,
+            root_event_id: Some(root),
+        })),
+        None => resolve_channel_control_scope(pool, channel_id),
+    }
+}
+
 /// Handle a `switch_model` control frame (Phase 3a, Option ii).
 ///
 /// Busy path: deliver `SwitchModel` over the in-flight task's oneshot — the
@@ -780,6 +825,13 @@ fn handle_cancel_turn_control(
 /// Idle path: validate against the cached catalog *before* invalidating
 /// (pre-cancel guard), then set `desired_model` + invalidate. The override
 /// takes visible effect on the agent's next turn.
+///
+/// An optional `rootEventId` targets one live thread scope exactly. Without it,
+/// a busy channel is only switchable when exactly one scope is in flight;
+/// with several, the live-turn target is ambiguous and nothing is touched
+/// (`status: "ambiguous_target"`). Live-turn control never fans out across
+/// roots. Once an exact live target accepts the switch, the durable model
+/// preference is intentionally propagated to idle roots in the same channel.
 fn handle_switch_model_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
@@ -797,34 +849,50 @@ fn handle_switch_model_control(
         tracing::warn!("observer switch_model control frame missing modelId");
         return;
     };
+    let root_event_id = payload
+        .get("rootEventId")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
 
-    // A turn is in flight for this channel iff a task_map entry exists. The
-    // agent is moved out of the pool during a turn, so the control oneshot is
-    // the only reachable lever; an idle channel has no such entry.
-    let turn_in_flight = pool
-        .task_map()
-        .values()
-        .any(|m| m.channel_id == Some(channel_id));
-
-    let status = if turn_in_flight {
-        // Busy path: deliver over the oneshot. `false` means the oneshot was
-        // already consumed this turn (a prior cancel/interrupt) — the turn is
-        // already ending, so the switch cannot land on it.
-        if signal_in_flight_task(
-            pool,
-            channel_id,
-            ControlSignal::SwitchModel(model_id.to_string()),
-        ) {
-            "sent"
-        } else {
-            "turn_ending"
+    // A turn is in flight for a scope iff a task_map entry exists. The agent
+    // is moved out of the pool during a turn, so the control oneshot is the
+    // only reachable lever; an idle scope has no such entry.
+    let status = match resolve_control_frame_scope(pool, channel_id, root_event_id) {
+        Ok(Some(scope))
+            if pool
+                .task_map()
+                .values()
+                .any(|m| m.scope.as_ref() == Some(&scope)) =>
+        {
+            // Busy path: deliver over the oneshot. `false` means the oneshot
+            // was already consumed this turn (a prior cancel/interrupt) — the
+            // turn is already ending, so the switch cannot land on it.
+            if signal_in_flight_task(
+                pool,
+                &scope,
+                ControlSignal::SwitchModel(model_id.to_string()),
+            ) {
+                pool.switch_other_idle_channel_roots(channel_id, model_id);
+                "sent"
+            } else {
+                "turn_ending"
+            }
         }
-    } else {
-        // Idle path: validate against the cached catalog before invalidating.
-        match pool.switch_idle_agent_model(channel_id, model_id) {
-            IdleSwitchResult::Switched => "switched",
-            IdleSwitchResult::UnsupportedModel => "unsupported_model",
-            IdleSwitchResult::NoIdleAgent => "no_active_turn",
+        Ok(_) => {
+            // Idle path: validate against the cached catalog before invalidating.
+            match pool.switch_idle_agent_model(channel_id, model_id) {
+                IdleSwitchResult::Switched => "switched",
+                IdleSwitchResult::UnsupportedModel => "unsupported_model",
+                IdleSwitchResult::NoIdleAgent => "no_active_turn",
+            }
+        }
+        Err(in_flight) => {
+            tracing::warn!(
+                channel_id = %channel_id,
+                in_flight,
+                "switch_model without rootEventId while multiple scopes in flight — refusing"
+            );
+            "ambiguous_target"
         }
     };
 
@@ -996,10 +1064,10 @@ struct RespawnResult {
 /// stream.
 ///
 /// Carries enough identity to operate on the right withheld event in
-/// `EventQueue::withheld_native_steer`: `channel_id` is the routing key,
+/// `EventQueue::withheld_native_steer`: `scope` is the routing key,
 /// `event_id` is the hex id of the single event the steer carried.
 struct SteerAckEvent {
-    channel_id: Uuid,
+    scope: ConversationSessionKey,
     event_id: String,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
@@ -1074,7 +1142,7 @@ impl Drop for RespawnGuard {
 // worker threads (Rust 2024 edition safety requirement).
 
 pub fn run() -> Result<()> {
-    config::propagate_legacy_env_vars();
+    config::propagate_legacy_env_vars()?;
     tokio_main()
 }
 
@@ -1455,7 +1523,7 @@ async fn tokio_main() -> Result<()> {
         base_prompt: if config.no_base_prompt {
             None
         } else if let Some(content) = base_prompt_content {
-            Some(Box::leak(content.into_boxed_str()))
+            Some(Box::leak(content.into_boxed_str()) as &str)
         } else {
             Some(include_str!("base_prompt.md"))
         },
@@ -1514,7 +1582,7 @@ async fn tokio_main() -> Result<()> {
     } else {
         None
     };
-    let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
+    let mut typing_scopes: HashMap<ConversationSessionKey, ThreadTags> = HashMap::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Runs at the TOP of every loop iteration via Instant check — cannot be
@@ -1651,8 +1719,8 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
-                    typing_channels.insert(channel_id, thread_tags);
+                for (scope, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                    typing_scopes.insert(scope, thread_tags);
                 }
             }
         }
@@ -1687,8 +1755,8 @@ async fn tokio_main() -> Result<()> {
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
-                typing_channels.insert(channel_id, thread_tags);
+            for (scope, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                typing_scopes.insert(scope, thread_tags);
             }
         }
 
@@ -1833,7 +1901,7 @@ async fn tokio_main() -> Result<()> {
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
-                                    typing_channels.remove(&ch);
+                                    typing_scopes.retain(|scope, _| scope.channel_id != ch);
                                     // Best-effort: clean up 👀 on drained events.
                                     // Note: the relay revokes membership before
                                     // emitting the notification, so this DELETE may
@@ -1907,16 +1975,44 @@ async fn tokio_main() -> Result<()> {
                             if is_cancel {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = signal_in_flight_task(
-                                            &mut pool,
+                                        // Resolve the target scope from the
+                                        // event's thread tags: a threaded
+                                        // !cancel hits its root exactly; a
+                                        // top-level one acts only when a
+                                        // single scope is in flight (never
+                                        // fan-out across roots).
+                                        match resolve_event_control_scope(
+                                            &pool,
+                                            &config,
+                                            &buzz_event.event,
                                             buzz_event.channel_id,
-                                            ControlSignal::Cancel,
-                                        );
-                                        if !fired {
-                                            tracing::warn!(
-                                                channel_id = %buzz_event.channel_id,
-                                                "!cancel received but no in-flight task — no-op"
-                                            );
+                                        ) {
+                                            Ok(Some(scope)) => {
+                                                if !signal_in_flight_task(
+                                                    &mut pool,
+                                                    &scope,
+                                                    ControlSignal::Cancel,
+                                                ) {
+                                                    tracing::warn!(
+                                                        channel_id = %buzz_event.channel_id,
+                                                        "!cancel received but no in-flight task — no-op"
+                                                    );
+                                                }
+                                            }
+                                            Ok(None) => {
+                                                tracing::warn!(
+                                                    channel_id = %buzz_event.channel_id,
+                                                    "!cancel received but no in-flight task — no-op"
+                                                );
+                                            }
+                                            Err(in_flight) => {
+                                                tracing::warn!(
+                                                    channel_id = %buzz_event.channel_id,
+                                                    in_flight,
+                                                    "top-level !cancel while multiple threads in flight — \
+                                                     ambiguous target, touching nothing (reply in the thread to cancel it)"
+                                                );
+                                            }
                                         }
                                         continue; // consume event — do NOT push to queue
                                     }
@@ -1945,23 +2041,46 @@ async fn tokio_main() -> Result<()> {
                             if is_rotate {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = signal_in_flight_task(
-                                            &mut pool,
+                                        // Same scope resolution as !cancel: a
+                                        // threaded !rotate hits its root; a
+                                        // top-level one needs an unambiguous
+                                        // (single or zero) in-flight target.
+                                        match resolve_event_control_scope(
+                                            &pool,
+                                            &config,
+                                            &buzz_event.event,
                                             buzz_event.channel_id,
-                                            ControlSignal::Rotate,
-                                        );
-                                        if fired {
-                                            tracing::info!(
-                                                channel_id = %buzz_event.channel_id,
-                                                "!rotate received — cancelling in-flight turn and rotating session"
-                                            );
-                                        } else {
-                                            let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
-                                            tracing::info!(
-                                                channel_id = %buzz_event.channel_id,
-                                                invalidated,
-                                                "!rotate received — invalidated idle channel session(s)"
-                                            );
+                                        ) {
+                                            Ok(scope) => {
+                                                let fired = scope.is_some_and(|scope| {
+                                                    signal_in_flight_task(
+                                                        &mut pool,
+                                                        &scope,
+                                                        ControlSignal::Rotate,
+                                                    )
+                                                });
+                                                if fired {
+                                                    tracing::info!(
+                                                        channel_id = %buzz_event.channel_id,
+                                                        "!rotate received — cancelling in-flight turn and rotating session"
+                                                    );
+                                                } else {
+                                                    let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                                    tracing::info!(
+                                                        channel_id = %buzz_event.channel_id,
+                                                        invalidated,
+                                                        "!rotate received — invalidated idle channel session(s)"
+                                                    );
+                                                }
+                                            }
+                                            Err(in_flight) => {
+                                                tracing::warn!(
+                                                    channel_id = %buzz_event.channel_id,
+                                                    in_flight,
+                                                    "top-level !rotate while multiple threads in flight — \
+                                                     ambiguous target, touching nothing (reply in the thread to rotate it)"
+                                                );
+                                            }
                                         }
                                         continue; // consume event — do NOT push to queue
                                     }
@@ -2025,11 +2144,19 @@ async fn tokio_main() -> Result<()> {
                             // backed payload) so the cost is negligible.
                             let event_for_steer = buzz_event.event.clone();
                             let prompt_tag_for_steer = prompt_tag.clone();
+                            let scope = conversation_scope_for_event(
+                                &config,
+                                &event_for_steer,
+                                buzz_event.channel_id,
+                                &event_id_hex,
+                            );
+                            let conversation_root = scope.root_event_id.clone();
                             let accepted = queue.push(QueuedEvent {
                                 channel_id: buzz_event.channel_id,
                                 event: buzz_event.event,
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
+                                conversation_root,
                             });
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
@@ -2044,9 +2171,11 @@ async fn tokio_main() -> Result<()> {
                                 });
                             }
                             // Event is already queued. If mode requires it AND
-                            // the channel has an in-flight task, fire cancel —
+                            // the scope has an in-flight task, fire cancel —
                             // OR take the non-cancelling (ACP steer) fork for Steer signals.
-                            if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
+                            // Scope-exact: a busy sibling thread in the same
+                            // channel never triggers a signal for this one.
+                            if accepted && queue.is_scope_in_flight(&scope) {
                                 // Author eligibility (owner ∪ allowlist ∪ siblings)
                                 // is already enforced by the inbound author gate
                                 // above, so the mid-turn signal fires for every
@@ -2073,7 +2202,7 @@ async fn tokio_main() -> Result<()> {
                                         && try_native_steer(
                                             &mut pool,
                                             &mut queue,
-                                            buzz_event.channel_id,
+                                            &scope,
                                             event_for_steer,
                                             prompt_tag_for_steer,
                                             &steer_ack_tx,
@@ -2081,16 +2210,16 @@ async fn tokio_main() -> Result<()> {
                                     if !native_attempted {
                                         signal_in_flight_task(
                                             &mut pool,
-                                            buzz_event.channel_id,
+                                            &scope,
                                             signal,
                                         );
                                     }
                                 }
                             }
-                            for (channel_id, thread_tags) in
+                            for (scope, thread_tags) in
                                 dispatch_pending(&mut pool, &mut queue, &ctx)
                             {
-                                typing_channels.insert(channel_id, thread_tags);
+                                typing_scopes.insert(scope, thread_tags);
                             }
                         }
                         None => {
@@ -2113,10 +2242,10 @@ async fn tokio_main() -> Result<()> {
                     let _ = result_rx;
                     if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
-                        for (channel_id, thread_tags) in
+                        for (scope, thread_tags) in
                             dispatch_pending(&mut pool, &mut queue, &ctx)
                         {
-                            typing_channels.insert(channel_id, thread_tags);
+                            typing_scopes.insert(scope, thread_tags);
                         }
                     } else if pool.any_idle() {
                         dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
@@ -2155,14 +2284,17 @@ async fn tokio_main() -> Result<()> {
                     // Use try_publish (non-blocking) for typing indicators —
                     // they're ephemeral and must not block the main loop during
                     // relay reconnection (#35).
-                    for (&ch, thread_tags) in &typing_channels {
+                    for (scope, thread_tags) in &typing_scopes {
                         if let Ok(event) = relay.build_typing_event(
-                            ch,
+                            scope.channel_id,
                             thread_tags.root_event_id.as_deref(),
                             thread_tags.parent_event_id.as_deref(),
                         ) {
                             if let Err(e) = relay.try_publish_event(event) {
-                                tracing::debug!("typing indicator dropped for {ch}: {e}");
+                                tracing::debug!(
+                                    "typing indicator dropped for {}: {e}",
+                                    scope.channel_id
+                                );
                             }
                         }
                     }
@@ -2177,9 +2309,9 @@ async fn tokio_main() -> Result<()> {
 
         match pool_event {
             Some(PoolEvent::Result(result)) => {
-                // Stop typing indicator for the completed channel.
-                if let PromptSource::Channel(ch) = &result.source {
-                    typing_channels.remove(ch);
+                // Stop typing indicator for the completed scope.
+                if let PromptSource::Channel(key) = &result.source {
+                    typing_scopes.remove(key);
                 }
                 if handle_prompt_result(
                     &mut pool,
@@ -2203,7 +2335,7 @@ async fn tokio_main() -> Result<()> {
                     &config,
                     &mut heartbeat_in_flight,
                     &removed_channels,
-                    &mut typing_channels,
+                    &mut typing_scopes,
                     &mut crash_history,
                     &respawn_tx,
                     &mut respawn_tasks,
@@ -2212,8 +2344,8 @@ async fn tokio_main() -> Result<()> {
                 {
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
-                    typing_channels.insert(channel_id, thread_tags);
+                for (scope, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                    typing_scopes.insert(scope, thread_tags);
                 }
             }
             Some(PoolEvent::Panic(join_error)) => {
@@ -2225,7 +2357,7 @@ async fn tokio_main() -> Result<()> {
                     join_error,
                     &mut heartbeat_in_flight,
                     &removed_channels,
-                    &mut typing_channels,
+                    &mut typing_scopes,
                     &mut crash_history,
                     &respawn_tx,
                     &mut respawn_tasks,
@@ -2235,12 +2367,12 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
-                    typing_channels.insert(channel_id, thread_tags);
+                for (scope, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                    typing_scopes.insert(scope, thread_tags);
                 }
             }
             Some(PoolEvent::SteerAck(SteerAckEvent {
-                channel_id,
+                scope,
                 event_id,
                 ack,
             })) => {
@@ -2323,7 +2455,8 @@ async fn tokio_main() -> Result<()> {
                     Err(_recv_err) => (true, false, false),
                 };
                 tracing::info!(
-                    channel = %channel_id,
+                    channel = %scope.channel_id,
+                    root = scope.root_event_id.as_deref().unwrap_or("<channel>"),
                     event_id = %event_id,
                     ?ack,
                     release_withheld,
@@ -2332,28 +2465,28 @@ async fn tokio_main() -> Result<()> {
                     "non-cancelling steer ack received"
                 );
                 if drop_withheld {
-                    queue.remove_event(channel_id, &event_id);
+                    queue.remove_event(&scope, &event_id);
                 }
                 if release_withheld {
-                    queue.release_native_steer(channel_id, &event_id);
+                    queue.release_native_steer(&scope, &event_id);
                 }
                 if signal_fallback {
                     // Universal cancel+merge fallback. Note: the
                     // queued event has already been released to the
-                    // front of `queues[channel_id]`, so the cancel
+                    // front of `queues[scope]`, so the cancel
                     // will pick it up as part of the merged batch and
                     // re-prompt the agent.
-                    signal_in_flight_task(&mut pool, channel_id, ControlSignal::Steer);
+                    signal_in_flight_task(&mut pool, &scope, ControlSignal::Steer);
                 }
                 // After releasing a withheld event, give dispatch a chance
                 // to re-flush. If the prompt is still in flight, the
-                // channel stays `in_flight_channels` and `flush_next`
+                // scope stays `in_flight_scopes` and `flush_next`
                 // skips it — but a Steer fallback signal sent above will
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
-                    typing_channels.insert(channel_id, thread_tags);
+                for (scope, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                    typing_scopes.insert(scope, thread_tags);
                 }
             }
             None => {} // relay/heartbeat/shutdown branches handled inline above
@@ -2512,26 +2645,103 @@ fn mode_gate_signal(
     }
 }
 
-/// Send a control signal to the in-flight task for `channel_id`.
+/// Send a control signal to the in-flight task for `scope`.
 /// Returns `true` if a signal was sent, `false` if no in-flight task was found.
 fn signal_in_flight_task(
     pool: &mut AgentPool,
-    channel_id: uuid::Uuid,
+    scope: &ConversationSessionKey,
     mode: ControlSignal,
 ) -> bool {
     let entry = pool
         .task_map_mut()
         .values_mut()
-        .find(|m| m.channel_id == Some(channel_id));
+        .find(|m| m.scope.as_ref() == Some(scope));
 
     if let Some(meta) = entry {
         if let Some(tx) = meta.control_tx.take() {
-            tracing::info!(channel = %channel_id, ?mode, "control signal sent to in-flight task");
+            tracing::info!(
+                channel = %scope.channel_id,
+                root = scope.root_event_id.as_deref().unwrap_or("<channel>"),
+                ?mode,
+                "control signal sent to in-flight task"
+            );
             let _ = tx.send(mode);
             return true;
         }
     }
     false
+}
+
+fn conversation_scope_for_event(
+    config: &Config,
+    event: &nostr::Event,
+    channel_id: uuid::Uuid,
+    event_id_hex: &str,
+) -> ConversationSessionKey {
+    let root_event_id = if matches!(config.session_scope, config::SessionScope::Thread) {
+        let tags = queue::parse_thread_tags(event);
+        Some(
+            tags.root_event_id
+                .unwrap_or_else(|| event_id_hex.to_owned()),
+        )
+    } else {
+        None
+    };
+    ConversationSessionKey {
+        channel_id,
+        root_event_id,
+    }
+}
+
+/// Resolve a channel-level control action (no explicit root) to a single
+/// in-flight scope.
+///
+/// Control never fans out across roots: with more than one scope in flight
+/// for the channel the target is ambiguous and the caller must touch
+/// nothing. `Ok(None)` means no turn is in flight at all.
+fn resolve_channel_control_scope(
+    pool: &AgentPool,
+    channel_id: uuid::Uuid,
+) -> Result<Option<ConversationSessionKey>, usize> {
+    let mut scopes = pool
+        .task_map()
+        .values()
+        .filter_map(|m| m.scope.as_ref())
+        .filter(|scope| scope.channel_id == channel_id);
+    let Some(first) = scopes.next() else {
+        return Ok(None);
+    };
+    let extra = scopes.count();
+    if extra == 0 {
+        Ok(Some(first.clone()))
+    } else {
+        Err(extra + 1)
+    }
+}
+
+/// Resolve the scope an inbound control event (owner `!cancel` / `!rotate`)
+/// targets.
+///
+/// Thread mode: a threaded event targets its outermost root exactly; a
+/// top-level event falls back to the channel-level exactly-one rule via
+/// [`resolve_channel_control_scope`]. Channel mode: always the channel scope.
+fn resolve_event_control_scope(
+    pool: &AgentPool,
+    config: &Config,
+    event: &nostr::Event,
+    channel_id: uuid::Uuid,
+) -> Result<Option<ConversationSessionKey>, usize> {
+    if matches!(config.session_scope, config::SessionScope::Thread) {
+        match queue::parse_thread_tags(event).root_event_id {
+            Some(root) => Ok(Some(ConversationSessionKey {
+                channel_id,
+                root_event_id: Some(root),
+            })),
+            None => resolve_channel_control_scope(pool, channel_id),
+        }
+    } else {
+        Ok(Some(ConversationSessionKey::channel(channel_id)))
+    }
 }
 
 /// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
@@ -2561,11 +2771,12 @@ fn signal_in_flight_task(
 fn try_native_steer(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
-    channel_id: uuid::Uuid,
+    scope: &ConversationSessionKey,
     event: nostr::Event,
     prompt_tag: String,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
 ) -> bool {
+    let channel_id = scope.channel_id;
     // Build the steer body: framing strings come from
     // `queue::native_steer_framing()` (Eva's drift-proof requirement —
     // native and cancel+merge fallback share these so the agent gets the
@@ -2595,14 +2806,14 @@ fn try_native_steer(
         ack_tx,
     };
 
-    match pool.send_steer(channel_id, request) {
+    match pool.send_steer(scope, request) {
         Ok(()) => {
             // Withhold the queued event synchronously BEFORE spawning
             // the watcher: this closes the race where `mark_complete`
-            // clears `in_flight_channels` and a stray `flush_next` could
+            // clears `in_flight_scopes` and a stray `flush_next` could
             // re-deliver the event via normal dispatch. See
-            // `EventQueue::mark_native_steer_pending` docs at queue.rs:606.
-            let withheld = queue.mark_native_steer_pending(channel_id, &event_id_hex);
+            // `EventQueue::mark_native_steer_pending` docs.
+            let withheld = queue.mark_native_steer_pending(scope, &event_id_hex);
             if !withheld {
                 // Race: the event was already drained out of the queue
                 // before we got here (e.g. a concurrent flush picked it
@@ -2620,10 +2831,11 @@ fn try_native_steer(
             }
             let ack_tx_clone = steer_ack_tx.clone();
             let event_id_for_watcher = event_id_hex.clone();
+            let scope_for_watcher = scope.clone();
             tokio::spawn(async move {
                 let ack = ack_rx.await;
                 let _ = ack_tx_clone.send(SteerAckEvent {
-                    channel_id,
+                    scope: scope_for_watcher,
                     event_id: event_id_for_watcher,
                     ack,
                 });
@@ -2644,12 +2856,23 @@ fn try_native_steer(
 // ── dispatch_pending ──────────────────────────────────────────────────────────
 
 /// Flush queued work to available agents.
+///
+/// Busy scopes don't block the loop: a batch whose retained root is owned by
+/// a busy slot is requeued (timestamps preserved) and dispatch continues with
+/// other scopes — head-of-line blocking across roots is exactly what
+/// thread-scoped sessions exist to remove. Only pool exhaustion stops the
+/// loop.
 fn dispatch_pending(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
-) -> Vec<(Uuid, ThreadTags)> {
-    let mut dispatched_channels = Vec::new();
+) -> Vec<(ConversationSessionKey, ThreadTags)> {
+    let mut dispatched_scopes = Vec::new();
+    // Batches whose retained root's owner is busy this pass. Held (scope
+    // still marked in-flight) so `flush_next` cannot re-select the scope —
+    // restoring it mid-loop would livelock on flush → busy → restore.
+    // Restored after the loop.
+    let mut busy_batches: Vec<FlushBatch> = Vec::new();
     loop {
         let batch = match queue.flush_next() {
             Some(b) => b,
@@ -2661,14 +2884,23 @@ fn dispatch_pending(
             .last()
             .map(|event| queue::parse_thread_tags(&event.event))
             .unwrap_or_default();
-        let affinity_hit = pool.has_session_for(channel_id);
-        let mut agent = match pool.try_claim(Some(channel_id)) {
-            Some(a) => a,
-            None => {
+        let session_key = batch.scope_key();
+        let affinity_hit = pool.has_session_for(&session_key);
+        let mut agent = match pool.try_claim(Some(&session_key)) {
+            ClaimOutcome::Claimed(a) => a,
+            ClaimOutcome::BusyOwner => {
+                tracing::debug!(
+                    channel = %channel_id,
+                    root = session_key.root_event_id.as_deref().unwrap_or("<channel>"),
+                    "busy_owner — holding scope, continuing dispatch"
+                );
+                busy_batches.push(batch);
+                continue;
+            }
+            ClaimOutcome::Exhausted => {
                 let pending = queue.pending_channels();
-                tracing::debug!(pending_channels = pending, "pool_exhausted");
-                queue.requeue_preserve_timestamps(batch);
-                queue.mark_complete(channel_id);
+                tracing::debug!(pending_scopes = pending, "pool_exhausted");
+                busy_batches.push(batch);
                 break;
             }
         };
@@ -2719,21 +2951,27 @@ fn dispatch_pending(
             abort_handle.id(),
             pool::TaskMeta {
                 agent_index,
-                channel_id: Some(channel_id),
+                scope: Some(session_key.clone()),
                 turn_id,
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
             },
         );
-        dispatched_channels.push((channel_id, typing_scope));
+        dispatched_scopes.push((session_key, typing_scope));
+    }
+    // Return held busy/exhausted batches to the queue exactly as flushed.
+    for batch in busy_batches {
+        let scope = batch.scope_key();
+        queue.restore_unclaimed(batch);
+        queue.mark_complete(&scope);
     }
     tracing::debug!(
-        dispatched = dispatched_channels.len(),
+        dispatched = dispatched_scopes.len(),
         queue_depth = queue.pending_channels(),
         "dispatch_pending"
     );
-    dispatched_channels
+    dispatched_scopes
 }
 
 /// Spawn a task that posts a user-visible failure notice to the relay.
@@ -2855,7 +3093,7 @@ fn handle_prompt_result(
     }
 
     match &result.source {
-        PromptSource::Channel(ch) => queue.mark_complete(*ch),
+        PromptSource::Channel(key) => queue.mark_complete(key),
         PromptSource::Heartbeat => *heartbeat_in_flight = false,
     }
 
@@ -2891,7 +3129,7 @@ fn handle_prompt_result(
     let harness_pid = std::process::id();
 
     let channel_id = match &result.source {
-        PromptSource::Channel(ch) => Some(*ch),
+        PromptSource::Channel(key) => Some(key.channel_id),
         PromptSource::Heartbeat => None,
     };
     let turn_id = result.turn_id.clone();
@@ -3087,7 +3325,7 @@ fn recover_panicked_agent(
     join_error: tokio::task::JoinError,
     heartbeat_in_flight: &mut bool,
     removed_channels: &HashSet<Uuid>,
-    typing_channels: &mut HashMap<Uuid, ThreadTags>,
+    typing_scopes: &mut HashMap<ConversationSessionKey, ThreadTags>,
     crash_history: &mut [SlotCircuit],
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
@@ -3102,25 +3340,25 @@ fn recover_panicked_agent(
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
-        if let Some(ch) = meta.channel_id {
-            if !removed_channels.contains(&ch) {
+        if let Some(ref scope) = meta.scope {
+            if !removed_channels.contains(&scope.channel_id) {
                 // Dead-letter on exhaustion is logged inside requeue(); a
                 // panic path has no outcome to report, so no notice here.
                 let _ = queue.requeue(batch);
                 tracing::warn!("requeued batch for panicked agent {i}");
             } else {
                 tracing::debug!(
-                    channel_id = %ch,
+                    channel_id = %scope.channel_id,
                     "dropping panicked batch for removed channel"
                 );
             }
         }
     }
 
-    if let Some(ch) = meta.channel_id {
-        queue.mark_complete(ch);
-        typing_channels.remove(&ch);
-        tracing::warn!("cleared wedged in-flight channel {ch} from panicked agent {i}");
+    if let Some(ref scope) = meta.scope {
+        queue.mark_complete(scope);
+        typing_scopes.remove(scope);
+        tracing::warn!("cleared wedged in-flight scope {scope:?} from panicked agent {i}");
     } else {
         *heartbeat_in_flight = false;
         tracing::warn!("cleared wedged heartbeat_in_flight from panicked agent {i}");
@@ -3130,7 +3368,11 @@ fn recover_panicked_agent(
         observer.emit(
             "agent_panic",
             Some(i),
-            &observer::context_for(meta.channel_id, None, Some(meta.turn_id)),
+            &observer::context_for(
+                meta.scope.as_ref().map(|s| s.channel_id),
+                None,
+                Some(meta.turn_id),
+            ),
             serde_json::json!({
                 "outcome": "panic",
                 "error": format!("Agent task panicked: {join_error}"),
@@ -3185,7 +3427,7 @@ fn drain_ready_join_results(
     config: &Config,
     heartbeat_in_flight: &mut bool,
     removed_channels: &HashSet<Uuid>,
-    typing_channels: &mut HashMap<Uuid, ThreadTags>,
+    typing_scopes: &mut HashMap<ConversationSessionKey, ThreadTags>,
     crash_history: &mut [SlotCircuit],
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
@@ -3201,7 +3443,7 @@ fn drain_ready_join_results(
                 join_error,
                 heartbeat_in_flight,
                 removed_channels,
-                typing_channels,
+                typing_scopes,
                 crash_history,
                 respawn_tx,
                 respawn_tasks,
@@ -3224,8 +3466,8 @@ fn dispatch_heartbeat(
         return;
     }
     let agent = match pool.try_claim(None) {
-        Some(a) => a,
-        None => return,
+        pool::ClaimOutcome::Claimed(a) => a,
+        pool::ClaimOutcome::BusyOwner | pool::ClaimOutcome::Exhausted => return,
     };
 
     let prompt_text = ctx
@@ -3255,7 +3497,7 @@ fn dispatch_heartbeat(
         abort_handle.id(),
         pool::TaskMeta {
             agent_index,
-            channel_id: None,
+            scope: None,
             turn_id,
             recoverable_batch: None,
             control_tx: None,
@@ -3834,8 +4076,8 @@ mod owner_control_command_tests {
     #[tokio::test]
     async fn signal_in_flight_task_sends_rotate_once() {
         let mut pool = AgentPool::from_slots(vec![]);
-        let channel_id = Uuid::new_v4();
-        let other_channel_id = Uuid::new_v4();
+        let scope = ConversationSessionKey::channel(Uuid::new_v4());
+        let other_scope = ConversationSessionKey::channel(Uuid::new_v4());
         let (control_tx, control_rx) = tokio::sync::oneshot::channel();
 
         let abort_handle = pool.join_set.spawn(async {});
@@ -3843,7 +4085,7 @@ mod owner_control_command_tests {
             abort_handle.id(),
             pool::TaskMeta {
                 agent_index: 0,
-                channel_id: Some(channel_id),
+                scope: Some(scope.clone()),
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
@@ -3853,18 +4095,18 @@ mod owner_control_command_tests {
 
         assert!(!signal_in_flight_task(
             &mut pool,
-            other_channel_id,
+            &other_scope,
             ControlSignal::Rotate
         ));
         assert!(signal_in_flight_task(
             &mut pool,
-            channel_id,
+            &scope,
             ControlSignal::Rotate
         ));
         assert_eq!(control_rx.await.unwrap(), ControlSignal::Rotate);
         assert!(!signal_in_flight_task(
             &mut pool,
-            channel_id,
+            &scope,
             ControlSignal::Rotate
         ));
     }
@@ -4135,7 +4377,9 @@ mod build_mcp_servers_tests {
     /// Env-var-touching tests must run serially — env vars are process-global.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn test_config() -> Config {
+    /// `pub(super)` so sibling test modules (e.g. `dispatch_scope_tests`)
+    /// can borrow a baseline Config instead of duplicating the literal.
+    pub(super) fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
@@ -4173,6 +4417,7 @@ mod build_mcp_servers_tests {
             has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
+            session_scope: config::SessionScope::Channel,
             no_base_prompt: false,
             base_prompt_content: None,
         }
@@ -4338,6 +4583,7 @@ mod error_outcome_emission_tests {
             has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
+            session_scope: config::SessionScope::Channel,
             no_base_prompt: false,
             base_prompt_content: None,
         }
@@ -4380,6 +4626,177 @@ mod error_outcome_emission_tests {
         }
     }
 
+    #[tokio::test]
+    async fn root_affinity_waits_for_busy_owner_instead_of_using_idle_slot() {
+        let first = dummy_agent(0).await;
+        let second = dummy_agent(1).await;
+        let mut pool = AgentPool::from_slots(vec![Some(first), Some(second)]);
+        let key = pool::ConversationSessionKey {
+            channel_id: Uuid::new_v4(),
+            root_event_id: Some("root-a".into()),
+        };
+
+        let mut owner = pool
+            .try_claim(Some(&key))
+            .claimed()
+            .expect("root should reserve slot 0");
+        assert_eq!(owner.index, 0);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                scope: Some(key.clone()),
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        assert!(pool.any_idle(), "slot 1 remains idle");
+        assert!(
+            matches!(pool.try_claim(Some(&key)), pool::ClaimOutcome::BusyOwner),
+            "reply must wait for the reserved root owner"
+        );
+        pool.task_map_mut().remove(&task_id);
+        owner.state.insert_session(key.clone(), "session-a".into());
+        pool.return_agent(owner);
+        assert_eq!(pool.try_claim(Some(&key)).claimed().unwrap().index, 0);
+    }
+
+    async fn pool_with_retained_root() -> (AgentPool, pool::ConversationSessionKey) {
+        let first = dummy_agent(0).await;
+        let second = dummy_agent(1).await;
+        let mut pool = AgentPool::from_slots(vec![Some(first), Some(second)]);
+        let key = pool::ConversationSessionKey {
+            channel_id: Uuid::new_v4(),
+            root_event_id: Some("root-a".into()),
+        };
+        let mut owner = pool.try_claim(Some(&key)).claimed().unwrap();
+        owner.state.insert_session(key.clone(), "session-a".into());
+        pool.return_agent(owner);
+        (pool, key)
+    }
+
+    #[tokio::test]
+    async fn root_owner_is_cleared_after_lru_eviction() {
+        let (mut pool, key) = pool_with_retained_root().await;
+        let mut owner = pool.try_claim(Some(&key)).claimed().unwrap();
+        for index in 0..=pool::SessionState::MAX_CHANNEL_SESSIONS {
+            owner.state.insert_session(
+                pool::ConversationSessionKey {
+                    channel_id: key.channel_id,
+                    root_event_id: Some(format!("new-root-{index}")),
+                },
+                format!("session-{index}"),
+            );
+        }
+        assert!(!owner.state.contains_session(&key));
+        pool.return_agent(owner);
+        pool.agents_mut()[0] = None;
+        assert_eq!(pool.try_claim(Some(&key)).claimed().unwrap().index, 1);
+    }
+
+    #[tokio::test]
+    async fn root_owner_is_cleared_by_channel_invalidation() {
+        let (mut pool, key) = pool_with_retained_root().await;
+        assert_eq!(pool.invalidate_channel_sessions(key.channel_id), 1);
+        pool.agents_mut()[0] = None;
+        assert_eq!(pool.try_claim(Some(&key)).claimed().unwrap().index, 1);
+    }
+
+    #[tokio::test]
+    async fn stale_dead_root_owner_falls_back_to_live_slot() {
+        let (mut pool, key) = pool_with_retained_root().await;
+        pool.agents_mut()[0] = None;
+        assert_eq!(pool.try_claim(Some(&key)).claimed().unwrap().index, 1);
+    }
+
+    #[tokio::test]
+    async fn dead_slot_cleanup_removes_all_root_reservations() {
+        let first = dummy_agent(0).await;
+        let second = dummy_agent(1).await;
+        let mut pool = AgentPool::from_slots(vec![Some(first), Some(second)]);
+        let channel_id = Uuid::new_v4();
+        let keys: Vec<_> = ["root-a", "root-b"]
+            .into_iter()
+            .map(|root| pool::ConversationSessionKey {
+                channel_id,
+                root_event_id: Some(root.into()),
+            })
+            .collect();
+        for key in &keys {
+            let mut owner = pool.try_claim(Some(key)).claimed().unwrap();
+            owner
+                .state
+                .insert_session(key.clone(), format!("session-{key:?}"));
+            pool.return_agent(owner);
+        }
+        pool.agents_mut()[0] = None;
+        // Every reservation owned by the dead slot is pruned lazily on the
+        // next claim; both roots recreate on the surviving slot.
+        let first_claim = pool.try_claim(Some(&keys[0])).claimed().unwrap();
+        assert_eq!(first_claim.index, 1);
+        pool.return_agent(first_claim);
+        assert_eq!(pool.try_claim(Some(&keys[1])).claimed().unwrap().index, 1);
+    }
+
+    #[tokio::test]
+    async fn idle_model_switch_invalidates_all_roots_across_slots() {
+        let channel_id = Uuid::new_v4();
+        let key_a = pool::ConversationSessionKey {
+            channel_id,
+            root_event_id: Some("a".into()),
+        };
+        let key_b = pool::ConversationSessionKey {
+            channel_id,
+            root_event_id: Some("b".into()),
+        };
+        let mut first = dummy_agent(0).await;
+        first
+            .state
+            .insert_session(key_a.clone(), "session-a".into());
+        let mut second = dummy_agent(1).await;
+        second
+            .state
+            .insert_session(key_b.clone(), "session-b".into());
+        let mut pool = AgentPool::from_slots(vec![Some(first), Some(second)]);
+        assert_eq!(
+            pool.switch_idle_agent_model(channel_id, "new-model"),
+            IdleSwitchResult::Switched
+        );
+        for agent in pool.agents_mut().iter().flatten() {
+            assert!(!agent.state.has_channel_state(&channel_id));
+            assert_eq!(agent.desired_model.as_deref(), Some("new-model"));
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_model_switch_invalidates_other_idle_roots() {
+        let channel_id = Uuid::new_v4();
+        let busy_key = pool::ConversationSessionKey {
+            channel_id,
+            root_event_id: Some("busy".into()),
+        };
+        let idle_key = pool::ConversationSessionKey {
+            channel_id,
+            root_event_id: Some("idle".into()),
+        };
+        let mut first = dummy_agent(0).await;
+        first
+            .state
+            .insert_session(busy_key.clone(), "session-busy".into());
+        let mut second = dummy_agent(1).await;
+        second.state.insert_session(idle_key, "session-idle".into());
+        let mut pool = AgentPool::from_slots(vec![Some(first), Some(second)]);
+        let busy = pool.try_claim(Some(&busy_key)).claimed().unwrap();
+        pool.switch_other_idle_channel_roots(channel_id, "new-model");
+        let idle = pool.agents_mut()[1].as_ref().unwrap();
+        assert!(!idle.state.has_channel_state(&channel_id));
+        assert_eq!(idle.desired_model.as_deref(), Some("new-model"));
+        pool.return_agent(busy);
+    }
+
     /// Drive one error outcome through `handle_prompt_result` and return how
     /// many `turn_error` events it emitted to the observer feed.
     async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
@@ -4395,7 +4812,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
-                channel_id: None,
+                scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -4418,7 +4835,7 @@ mod error_outcome_emission_tests {
 
         let result = PromptResult {
             agent,
-            source: PromptSource::Channel(Uuid::new_v4()),
+            source: PromptSource::Channel(pool::ConversationSessionKey::channel(Uuid::new_v4())),
             turn_id: "test-turn-id".to_string(),
             outcome,
             batch: None,
@@ -4461,6 +4878,14 @@ mod error_outcome_emission_tests {
     async fn panic_event_retains_task_turn_id() {
         let mut pool = AgentPool::from_slots(vec![]);
         let channel_id = Uuid::new_v4();
+        let panic_scope = ConversationSessionKey {
+            channel_id,
+            root_event_id: Some("root-a".into()),
+        };
+        let sibling_scope = ConversationSessionKey {
+            channel_id,
+            root_event_id: Some("root-b".into()),
+        };
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let abort_handle = pool.join_set.spawn(async move {
             let _ = started_tx.send(());
@@ -4471,7 +4896,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
-                channel_id: Some(channel_id),
+                scope: Some(panic_scope.clone()),
                 turn_id: "panic-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -4486,7 +4911,10 @@ mod error_outcome_emission_tests {
         let config = test_config();
         let mut heartbeat_in_flight = false;
         let removed_channels = HashSet::new();
-        let mut typing_channels = HashMap::new();
+        let mut typing_scopes = HashMap::from([
+            (panic_scope.clone(), ThreadTags::default()),
+            (sibling_scope.clone(), ThreadTags::default()),
+        ]);
         let mut crash_history = vec![SlotCircuit {
             crash_times: Vec::new(),
             open_until: None,
@@ -4503,7 +4931,7 @@ mod error_outcome_emission_tests {
             join_error,
             &mut heartbeat_in_flight,
             &removed_channels,
-            &mut typing_channels,
+            &mut typing_scopes,
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -4520,6 +4948,14 @@ mod error_outcome_emission_tests {
             Some(channel_id.to_string().as_str())
         );
         assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
+        assert!(
+            !typing_scopes.contains_key(&panic_scope),
+            "panic cleanup must remove only the failed root's typing state"
+        );
+        assert!(
+            typing_scopes.contains_key(&sibling_scope),
+            "panic cleanup must preserve a sibling root's typing state"
+        );
     }
 
     #[tokio::test]
@@ -4560,7 +4996,7 @@ mod error_outcome_emission_tests {
                 task_id,
                 crate::pool::TaskMeta {
                     agent_index: 0,
-                    channel_id: None,
+                    scope: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
@@ -4581,7 +5017,9 @@ mod error_outcome_emission_tests {
             let observer = ObserverHandle::in_process();
             let result = PromptResult {
                 agent,
-                source: PromptSource::Channel(Uuid::new_v4()),
+                source: PromptSource::Channel(
+                    pool::ConversationSessionKey::channel(Uuid::new_v4()),
+                ),
                 turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: None,
@@ -4624,6 +5062,7 @@ mod error_outcome_emission_tests {
                 .sign_with_keys(&keys)
                 .unwrap();
             FlushBatch {
+                conversation_root: None,
                 channel_id: Uuid::new_v4(),
                 events: vec![BatchEvent {
                     event,
@@ -4645,7 +5084,7 @@ mod error_outcome_emission_tests {
                 task_id,
                 crate::pool::TaskMeta {
                     agent_index: 0,
-                    channel_id: None,
+                    scope: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
@@ -4665,7 +5104,7 @@ mod error_outcome_emission_tests {
             let mut respawn_tasks = tokio::task::JoinSet::new();
             let result = PromptResult {
                 agent,
-                source: PromptSource::Channel(channel_id),
+                source: PromptSource::Channel(pool::ConversationSessionKey::channel(channel_id)),
                 turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: Some(batch),
@@ -4685,7 +5124,7 @@ mod error_outcome_emission_tests {
             );
             (
                 queue.pending_channels(),
-                queue.queued_event_count(&channel_id),
+                queue.queued_event_count(&ConversationSessionKey::channel(channel_id)),
             )
         };
 
@@ -4740,6 +5179,7 @@ mod error_outcome_emission_tests {
         );
         let channel_id = Uuid::new_v4();
         let batch = FlushBatch {
+            conversation_root: None,
             channel_id,
             events: vec![BatchEvent {
                 event: original_event.clone(),
@@ -4757,7 +5197,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
-                channel_id: None,
+                scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -4770,6 +5210,7 @@ mod error_outcome_emission_tests {
         // out on drain — so it is already queued by the time
         // handle_prompt_result runs.
         queue.push(QueuedEvent {
+            conversation_root: None,
             channel_id,
             event: new_event.clone(),
             received_at: std::time::Instant::now(),
@@ -4789,7 +5230,7 @@ mod error_outcome_emission_tests {
         let grace = std::time::Duration::from_secs(5);
         let result = PromptResult {
             agent,
-            source: PromptSource::Channel(channel_id),
+            source: PromptSource::Channel(pool::ConversationSessionKey::channel(channel_id)),
             turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::CancelDrainTimeout(grace),
             batch: Some(batch),
@@ -4896,7 +5337,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
-                channel_id: None,
+                scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -4918,7 +5359,7 @@ mod error_outcome_emission_tests {
         let grace = std::time::Duration::from_secs(5);
         let result = PromptResult {
             agent,
-            source: PromptSource::Channel(Uuid::new_v4()),
+            source: PromptSource::Channel(pool::ConversationSessionKey::channel(Uuid::new_v4())),
             turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::CancelDrainTimeout(grace),
             // Explicit Stop already dropped the batch upstream in
@@ -4993,6 +5434,610 @@ mod error_outcome_emission_tests {
     async fn application_error_emits_exactly_one_feed_event() {
         let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
+    }
+}
+
+#[cfg(test)]
+mod dispatch_scope_tests {
+    //! Pins the concurrency contract of thread-scoped dispatch:
+    //!
+    //! - Distinct roots in one channel dispatch to distinct workers in one
+    //!   `dispatch_pending` pass — no cross-root head-of-line blocking.
+    //! - A retained root whose owning slot is busy is skipped (batch restored
+    //!   losslessly), while other scopes keep dispatching. The root never
+    //!   migrates to another slot.
+    //! - Pool exhaustion restores the undispatched batch losslessly.
+
+    use super::*;
+    use crate::acp::AcpClient;
+    use crate::pool::{AgentPool, OwnedAgent, PromptContext};
+    use crate::queue::QueuedEvent;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    async fn dummy_agent(index: usize) -> OwnedAgent {
+        OwnedAgent {
+            index,
+            acp: AcpClient::spawn("cat", &[], &[], false)
+                .await
+                .expect("spawn cat as inert agent"),
+            state: Default::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        }
+    }
+
+    fn test_ctx() -> Arc<PromptContext> {
+        let keys = nostr::Keys::generate();
+        Arc::new(PromptContext {
+            mcp_servers: vec![],
+            initial_message: None,
+            idle_timeout: Duration::from_secs(60),
+            max_turn_duration: Duration::from_secs(120),
+            turn_liveness_interval: Duration::ZERO,
+            dedup_mode: DedupMode::Queue,
+            system_prompt: None,
+            team_instructions: None,
+            heartbeat_prompt: None,
+            base_prompt: None,
+            cwd: ".".to_string(),
+            rest_client: relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url: "http://127.0.0.1:0".to_string(),
+                keys: keys.clone(),
+                auth_tag_json: None,
+            },
+            channel_info: std::collections::HashMap::new(),
+            context_message_limit: 0,
+            max_turns_per_session: 0,
+            permission_mode: config::PermissionMode::Default,
+            agent_keys: keys,
+            agent_owner_pubkey: None,
+            memory_enabled: false,
+            harness_name: "goose".to_string(),
+        })
+    }
+
+    fn push_rooted(queue: &mut EventQueue, ch: Uuid, root: &str, content: &str) {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), content)
+            .tags([])
+            .sign_with_keys(&keys)
+            .unwrap();
+        queue.push(QueuedEvent {
+            channel_id: ch,
+            conversation_root: Some(root.into()),
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        });
+    }
+
+    fn tagged_event(content: &str, tags: impl IntoIterator<Item = nostr::Tag>) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    }
+
+    fn push_via_config_scope(
+        queue: &mut EventQueue,
+        config: &Config,
+        ch: Uuid,
+        event: nostr::Event,
+    ) -> ConversationSessionKey {
+        let event_id = event.id.to_hex();
+        let scope = conversation_scope_for_event(config, &event, ch, &event_id);
+        queue.push(QueuedEvent {
+            channel_id: ch,
+            conversation_root: scope.root_event_id.clone(),
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        });
+        scope
+    }
+
+    fn key(ch: Uuid, root: &str) -> ConversationSessionKey {
+        ConversationSessionKey {
+            channel_id: ch,
+            root_event_id: Some(root.into()),
+        }
+    }
+
+    /// A `test_ctx` whose channel registry marks `ch` as a DM. Scope
+    /// derivation and dispatch must not consult `channel_type`, so every
+    /// assertion made against this context must match the stream-channel
+    /// behaviour pinned by the tests above.
+    fn test_ctx_dm(ch: Uuid) -> Arc<PromptContext> {
+        let ctx = test_ctx();
+        let mut ctx = Arc::into_inner(ctx).expect("fresh ctx has a single owner");
+        ctx.channel_info.insert(
+            ch,
+            relay::ChannelInfo {
+                name: "dm".into(),
+                channel_type: "dm".into(),
+            },
+        );
+        Arc::new(ctx)
+    }
+
+    /// DM equivalence, part 0: scope derivation is channel-type-agnostic by
+    /// construction. For byte-identical tag shapes, a DM channel and a stream
+    /// channel derive the same root component in both modes — DMs are private
+    /// channels, not a separate scoping model.
+    #[test]
+    fn dm_and_stream_channels_derive_identical_scope_components() {
+        let mut config = build_mcp_servers_tests::test_config();
+        let dm_ch = Uuid::new_v4();
+        let stream_ch = Uuid::new_v4();
+
+        let cases: Vec<Vec<nostr::Tag>> = vec![
+            // Top-level DM message: no thread tags at all.
+            vec![],
+            // Reply chain: explicit outermost root + intermediate parent.
+            vec![
+                nostr::Tag::parse(["e", "outer-root", "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", "intermediate-parent", "", "reply"]).unwrap(),
+            ],
+            // Direct reply: reply tag only, no explicit root marker.
+            vec![nostr::Tag::parse(["e", "outer-root", "", "reply"]).unwrap()],
+        ];
+
+        for scope_mode in [config::SessionScope::Thread, config::SessionScope::Channel] {
+            config.session_scope = scope_mode;
+            for tags in &cases {
+                let event = tagged_event("same shape", tags.clone());
+                let id = event.id.to_hex();
+                let dm = conversation_scope_for_event(&config, &event, dm_ch, &id);
+                let stream = conversation_scope_for_event(&config, &event, stream_ch, &id);
+                assert_eq!(dm.channel_id, dm_ch);
+                assert_eq!(stream.channel_id, stream_ch);
+                assert_eq!(
+                    dm.root_event_id, stream.root_event_id,
+                    "root derivation must be identical across channel types (mode {scope_mode:?}, tags {tags:?})"
+                );
+            }
+        }
+    }
+
+    /// DM equivalence, thread mode: two top-level DM messages (no thread
+    /// tags — each is its own outermost root) derive distinct root scopes and
+    /// dispatch concurrently to distinct workers, exactly like two roots in a
+    /// stream channel. The context registers the channel as a DM to prove the
+    /// dispatch path never special-cases `channel_type`.
+    #[tokio::test]
+    async fn dm_thread_mode_top_level_messages_are_distinct_concurrent_roots() {
+        let mut config = build_mcp_servers_tests::test_config();
+        config.session_scope = config::SessionScope::Thread;
+        let mut pool =
+            AgentPool::from_slots(vec![Some(dummy_agent(0).await), Some(dummy_agent(1).await)]);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        let first = tagged_event("dm one", []);
+        let second = tagged_event("dm two", []);
+        let first_root = first.id.to_hex();
+        let second_root = second.id.to_hex();
+        let first_scope = push_via_config_scope(&mut queue, &config, ch, first);
+        let second_scope = push_via_config_scope(&mut queue, &config, ch, second);
+
+        // Untagged events root at their own id: distinct scopes, never merged.
+        assert_eq!(first_scope, key(ch, &first_root));
+        assert_eq!(second_scope, key(ch, &second_root));
+        assert_ne!(first_scope, second_scope);
+
+        let dispatched = dispatch_pending(&mut pool, &mut queue, &test_ctx_dm(ch));
+
+        let scopes: HashSet<_> = dispatched.iter().map(|(s, _)| s.clone()).collect();
+        assert_eq!(
+            scopes,
+            HashSet::from([first_scope.clone(), second_scope.clone()])
+        );
+        assert!(queue.is_scope_in_flight(&first_scope));
+        assert!(queue.is_scope_in_flight(&second_scope));
+        assert!(!pool.any_idle(), "both workers must be running DM roots");
+    }
+
+    /// DM equivalence, thread mode: a threaded DM reply joins the session of
+    /// its outermost root, sharing one batch with the earlier message — same
+    /// join rule as `nested_reply_joins_outermost_root_session_scope`.
+    #[test]
+    fn dm_thread_mode_reply_joins_outermost_root_scope() {
+        let mut config = build_mcp_servers_tests::test_config();
+        config.session_scope = config::SessionScope::Thread;
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        let opener = tagged_event("dm opener", []);
+        let opener_root = opener.id.to_hex();
+        let reply = tagged_event(
+            "dm reply",
+            [
+                nostr::Tag::parse(["e", opener_root.as_str(), "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", "intermediate-parent", "", "reply"]).unwrap(),
+            ],
+        );
+
+        let opener_scope = push_via_config_scope(&mut queue, &config, ch, opener);
+        let reply_scope = push_via_config_scope(&mut queue, &config, ch, reply);
+
+        assert_eq!(opener_scope, key(ch, &opener_root));
+        assert_eq!(reply_scope, opener_scope);
+        let batch = queue.flush_next().expect("shared DM root batch");
+        assert_eq!(batch.scope_key(), opener_scope);
+        assert_eq!(batch.events.len(), 2);
+        assert!(queue.flush_next().is_none());
+    }
+
+    /// DM equivalence, channel mode: distinct DM messages collapse to the
+    /// bare `(channel, None)` scope and serialize onto a single worker, with
+    /// the second worker idle — the legacy contract, unchanged for DMs.
+    #[tokio::test]
+    async fn dm_channel_mode_collapses_to_channel_scope_and_serializes() {
+        let mut config = build_mcp_servers_tests::test_config();
+        config.session_scope = config::SessionScope::Channel;
+        let mut pool =
+            AgentPool::from_slots(vec![Some(dummy_agent(0).await), Some(dummy_agent(1).await)]);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        let top_level = tagged_event("dm top-level", []);
+        let threaded = tagged_event(
+            "dm threaded reply",
+            [nostr::Tag::parse(["e", "dm-root", "", "root"]).unwrap()],
+        );
+        for event in [top_level, threaded] {
+            assert_eq!(
+                push_via_config_scope(&mut queue, &config, ch, event),
+                ConversationSessionKey::channel(ch)
+            );
+        }
+
+        let dispatched = dispatch_pending(&mut pool, &mut queue, &test_ctx_dm(ch));
+        assert_eq!(dispatched.len(), 1);
+        assert_eq!(dispatched[0].0, ConversationSessionKey::channel(ch));
+        assert_eq!(pool.task_map().len(), 1);
+        assert!(
+            pool.any_idle(),
+            "second worker must remain idle in channel mode for DMs"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_channel_mode_serializes_distinct_thread_roots() {
+        let mut config = build_mcp_servers_tests::test_config();
+        config.session_scope = config::SessionScope::Channel;
+        let mut pool =
+            AgentPool::from_slots(vec![Some(dummy_agent(0).await), Some(dummy_agent(1).await)]);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        for root in ["root-a", "root-b"] {
+            let event = tagged_event(root, [nostr::Tag::parse(["e", root, "", "root"]).unwrap()]);
+            assert_eq!(
+                push_via_config_scope(&mut queue, &config, ch, event),
+                ConversationSessionKey::channel(ch)
+            );
+        }
+
+        let dispatched = dispatch_pending(&mut pool, &mut queue, &test_ctx());
+        assert_eq!(dispatched.len(), 1);
+        assert_eq!(dispatched[0].0, ConversationSessionKey::channel(ch));
+        assert_eq!(pool.task_map().len(), 1);
+        assert!(
+            pool.any_idle(),
+            "second worker must remain idle in channel mode"
+        );
+    }
+
+    #[test]
+    fn nested_reply_joins_outermost_root_session_scope() {
+        let mut config = build_mcp_servers_tests::test_config();
+        config.session_scope = config::SessionScope::Thread;
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let direct = tagged_event(
+            "direct",
+            [nostr::Tag::parse(["e", "outer-root", "", "reply"]).unwrap()],
+        );
+        let nested = tagged_event(
+            "nested",
+            [
+                nostr::Tag::parse(["e", "outer-root", "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", "intermediate-parent", "", "reply"]).unwrap(),
+            ],
+        );
+        let direct_scope = push_via_config_scope(&mut queue, &config, ch, direct);
+        let nested_scope = push_via_config_scope(&mut queue, &config, ch, nested);
+
+        assert_eq!(direct_scope, key(ch, "outer-root"));
+        assert_eq!(nested_scope, direct_scope);
+        let batch = queue.flush_next().expect("shared outer-root batch");
+        assert_eq!(batch.scope_key(), key(ch, "outer-root"));
+        assert_eq!(batch.events.len(), 2);
+        assert!(queue.flush_next().is_none());
+    }
+
+    #[tokio::test]
+    async fn two_roots_in_one_channel_dispatch_concurrently_to_distinct_workers() {
+        let mut pool =
+            AgentPool::from_slots(vec![Some(dummy_agent(0).await), Some(dummy_agent(1).await)]);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        push_rooted(&mut queue, ch, "root-a", "for a");
+        push_rooted(&mut queue, ch, "root-b", "for b");
+
+        let dispatched = dispatch_pending(&mut pool, &mut queue, &test_ctx());
+
+        let scopes: Vec<_> = dispatched.iter().map(|(s, _)| s.clone()).collect();
+        assert!(scopes.contains(&key(ch, "root-a")));
+        assert!(scopes.contains(&key(ch, "root-b")));
+        assert!(queue.is_scope_in_flight(&key(ch, "root-a")));
+        assert!(queue.is_scope_in_flight(&key(ch, "root-b")));
+        // Distinct workers: both slots checked out, distinct task scopes.
+        assert!(!pool.any_idle());
+        let task_scopes: HashSet<_> = pool
+            .task_map()
+            .values()
+            .filter_map(|m| m.scope.clone())
+            .collect();
+        assert_eq!(task_scopes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn busy_root_owner_is_skipped_without_blocking_other_scopes() {
+        let mut pool =
+            AgentPool::from_slots(vec![Some(dummy_agent(0).await), Some(dummy_agent(1).await)]);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Slot 0 retains root-a's session…
+        let mut owner = pool
+            .try_claim(Some(&key(ch, "root-a")))
+            .claimed()
+            .expect("claim slot 0 for root-a");
+        owner
+            .state
+            .insert_session(key(ch, "root-a"), "session-a".into());
+        pool.return_agent(owner);
+        // …and is then checked out busy on an unrelated scope.
+        let busy = pool
+            .try_claim(Some(&key(ch, "root-busy")))
+            .claimed()
+            .expect("slot 0 is first idle");
+        assert_eq!(busy.index, 0);
+        let task_id = pool.join_set.spawn(std::future::pending()).id();
+        pool.task_map_mut().insert(
+            task_id,
+            pool::TaskMeta {
+                agent_index: 0,
+                scope: Some(key(ch, "root-busy")),
+                turn_id: "busy-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        drop(busy); // stays checked out — slot 0 empty
+
+        push_rooted(&mut queue, ch, "root-a", "must wait for owner");
+        push_rooted(&mut queue, ch, "root-b", "must not be blocked");
+
+        let dispatched = dispatch_pending(&mut pool, &mut queue, &test_ctx());
+
+        // root-b dispatched (on slot 1) despite root-a being older and busy.
+        let scopes: Vec<_> = dispatched.iter().map(|(s, _)| s.clone()).collect();
+        assert_eq!(scopes, vec![key(ch, "root-b")]);
+        // root-a restored losslessly: queued again, not in flight, and NOT
+        // migrated to slot 1.
+        assert!(!queue.is_scope_in_flight(&key(ch, "root-a")));
+        assert_eq!(queue.queued_event_count(&key(ch, "root-a")), 1);
+        assert!(
+            pool.task_map()
+                .values()
+                .all(|m| m.scope != Some(key(ch, "root-a"))),
+            "busy-owned root must never run on another slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_slot_a_then_b_then_a_reclaims_retained_provider_session() {
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(0).await)]);
+        let ch = Uuid::new_v4();
+        let a = key(ch, "root-a");
+        let b = key(ch, "root-b");
+
+        let mut first_a = pool
+            .try_claim(Some(&a))
+            .claimed()
+            .expect("first A dispatch");
+        first_a
+            .state
+            .insert_session(a.clone(), "provider-session-a".into());
+        let a_owner = first_a.index;
+        pool.return_agent(first_a);
+
+        let mut dispatched_b = pool
+            .try_claim(Some(&b))
+            .claimed()
+            .expect("B dispatches after A completes");
+        assert_eq!(dispatched_b.index, a_owner);
+        dispatched_b
+            .state
+            .insert_session(b.clone(), "provider-session-b".into());
+        pool.return_agent(dispatched_b);
+
+        let later_a = pool
+            .try_claim(Some(&a))
+            .claimed()
+            .expect("later A dispatch");
+        assert_eq!(later_a.index, a_owner);
+        assert!(
+            later_a.state.contains_session(&a),
+            "A must reclaim its retained provider session after B used the slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_exhaustion_restores_undispatched_batch_losslessly() {
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(0).await)]);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        push_rooted(&mut queue, ch, "root-a", "gets the only agent");
+        push_rooted(&mut queue, ch, "root-b", "waits for capacity");
+
+        let dispatched = dispatch_pending(&mut pool, &mut queue, &test_ctx());
+
+        let scopes: Vec<_> = dispatched.iter().map(|(s, _)| s.clone()).collect();
+        assert_eq!(scopes, vec![key(ch, "root-a")]);
+        assert!(!queue.is_scope_in_flight(&key(ch, "root-b")));
+        assert_eq!(queue.queued_event_count(&key(ch, "root-b")), 1);
+        // Next pass with a freed agent picks root-b up.
+        pool.agents_mut()[0] = Some(dummy_agent(0).await);
+        let next = dispatch_pending(&mut pool, &mut queue, &test_ctx());
+        // Note: root-a is still in flight, so only root-b dispatches.
+        let next_scopes: Vec<_> = next.iter().map(|(s, _)| s.clone()).collect();
+        assert_eq!(next_scopes, vec![key(ch, "root-b")]);
+    }
+
+    // ── control-scope resolution ─────────────────────────────────────────
+
+    fn insert_in_flight_scope(pool: &mut AgentPool, scope: ConversationSessionKey) {
+        let task_id = pool.join_set.spawn(std::future::pending()).id();
+        let agent_index = pool.task_map().len();
+        pool.task_map_mut().insert(
+            task_id,
+            pool::TaskMeta {
+                agent_index,
+                scope: Some(scope),
+                turn_id: Uuid::new_v4().to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_control_resolves_only_when_exactly_one_scope_in_flight() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let ch = Uuid::new_v4();
+
+        // No turns: nothing to act on.
+        assert_eq!(resolve_channel_control_scope(&pool, ch), Ok(None));
+
+        // Exactly one: unambiguous.
+        insert_in_flight_scope(&mut pool, key(ch, "root-a"));
+        assert_eq!(
+            resolve_channel_control_scope(&pool, ch),
+            Ok(Some(key(ch, "root-a")))
+        );
+
+        // Two scopes in the channel: ambiguous, touch nothing.
+        insert_in_flight_scope(&mut pool, key(ch, "root-b"));
+        assert_eq!(resolve_channel_control_scope(&pool, ch), Err(2));
+
+        // A busy scope in a DIFFERENT channel never bleeds in.
+        let other = Uuid::new_v4();
+        assert_eq!(resolve_channel_control_scope(&pool, other), Ok(None));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_channel_cancel_handler_is_a_no_op_for_all_live_roots() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let ch = Uuid::new_v4();
+        let mut receivers = Vec::new();
+        for (agent_index, root) in ["root-a", "root-b"].into_iter().enumerate() {
+            let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+            let task_id = pool.join_set.spawn(std::future::pending()).id();
+            pool.task_map_mut().insert(
+                task_id,
+                pool::TaskMeta {
+                    agent_index,
+                    scope: Some(key(ch, root)),
+                    turn_id: Uuid::new_v4().to_string(),
+                    recoverable_batch: None,
+                    control_tx: Some(control_tx),
+                    steer_tx: None,
+                },
+            );
+            receivers.push(control_rx);
+        }
+
+        handle_cancel_turn_control(
+            &serde_json::json!({
+                "type": "cancel_turn",
+                "channelId": ch.to_string(),
+            }),
+            &mut pool,
+            None,
+        );
+
+        for mut receiver in receivers {
+            assert_eq!(
+                receiver.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty),
+                "ambiguous channel-only cancel must not signal either root"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn control_frame_root_event_id_targets_one_scope_exactly() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let ch = Uuid::new_v4();
+        insert_in_flight_scope(&mut pool, key(ch, "root-a"));
+        insert_in_flight_scope(&mut pool, key(ch, "root-b"));
+
+        // Explicit root bypasses the ambiguity rule.
+        assert_eq!(
+            resolve_control_frame_scope(&pool, ch, Some("root-b".into())),
+            Ok(Some(key(ch, "root-b")))
+        );
+        // Without it, two in-flight scopes are ambiguous.
+        assert_eq!(resolve_control_frame_scope(&pool, ch, None), Err(2));
+    }
+
+    #[tokio::test]
+    async fn threaded_event_control_targets_its_own_root() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let ch = Uuid::new_v4();
+        insert_in_flight_scope(&mut pool, key(ch, "aaaa"));
+        insert_in_flight_scope(&mut pool, key(ch, "bbbb"));
+
+        let mut config = build_mcp_servers_tests::test_config();
+        config.session_scope = config::SessionScope::Thread;
+
+        // A reply inside thread bbbb targets bbbb exactly — never fans out.
+        let keys = Keys::generate();
+        let threaded = EventBuilder::new(Kind::Custom(9), "!cancel")
+            .tags([nostr::Tag::parse(["e", "bbbb", "", "root"]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(
+            resolve_event_control_scope(&pool, &config, &threaded, ch),
+            Ok(Some(key(ch, "bbbb")))
+        );
+
+        // A top-level !cancel with two threads in flight is ambiguous.
+        let top_level = EventBuilder::new(Kind::Custom(9), "!cancel")
+            .tags([])
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(
+            resolve_event_control_scope(&pool, &config, &top_level, ch),
+            Err(2)
+        );
+
+        // Channel mode: always the channel scope, regardless of threads.
+        config.session_scope = config::SessionScope::Channel;
+        assert_eq!(
+            resolve_event_control_scope(&pool, &config, &threaded, ch),
+            Ok(Some(ConversationSessionKey::channel(ch)))
+        );
     }
 }
 

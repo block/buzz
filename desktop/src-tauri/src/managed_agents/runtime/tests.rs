@@ -760,3 +760,56 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
     unsafe { libc::kill(-(intermediate_pid as i32), libc::SIGKILL) };
     let _ = intermediate.wait();
 }
+
+fn command_env(
+    command: &std::process::Command,
+) -> std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> {
+    command
+        .get_envs()
+        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
+        .collect()
+}
+
+#[test]
+fn thread_scope_finalization_overrides_legacy_env_without_forcing_queue() {
+    let mut command = std::process::Command::new("buzz-acp");
+    command.env("BUZZ_ACP_TOP_LEVEL_SESSIONS", "false");
+    command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
+    super::finalize_acp_session_scope_env(
+        &mut command,
+        crate::commands::experiments::AcpSessionScope::Thread,
+    );
+    let env = command_env(&command);
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("BUZZ_ACP_SESSION_SCOPE"))
+            .unwrap(),
+        "thread"
+    );
+    assert!(!env.contains_key(std::ffi::OsStr::new("BUZZ_ACP_TOP_LEVEL_SESSIONS")));
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("BUZZ_ACP_MULTIPLE_EVENT_HANDLING"))
+            .unwrap(),
+        "steer"
+    );
+}
+
+#[test]
+fn channel_scope_finalization_preserves_handling_override() {
+    let mut command = std::process::Command::new("buzz-acp");
+    command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "interrupt");
+    super::finalize_acp_session_scope_env(
+        &mut command,
+        crate::commands::experiments::AcpSessionScope::Channel,
+    );
+    let env = command_env(&command);
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("BUZZ_ACP_SESSION_SCOPE"))
+            .unwrap(),
+        "channel"
+    );
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("BUZZ_ACP_MULTIPLE_EVENT_HANDLING"))
+            .unwrap(),
+        "interrupt"
+    );
+}

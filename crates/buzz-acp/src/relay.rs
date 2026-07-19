@@ -353,6 +353,14 @@ impl RestClient {
     /// Accepts a slice of `nostr::Filter` (serialized as JSON array).
     /// Returns the events as a `serde_json::Value` (JSON array of event objects).
     pub async fn query(&self, filters: &[nostr::Filter]) -> Result<Value, RelayError> {
+        let value = serde_json::to_value(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        self.query_value(&value).await
+    }
+
+    /// Query using raw bridge filters, including Buzz-only extensions such as
+    /// `top_level` and `include_summaries` that `nostr::Filter` cannot express.
+    pub async fn query_value(&self, filters: &Value) -> Result<Value, RelayError> {
         let body_bytes = serde_json::to_vec(filters)
             .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
         let resp = self.bridge_post("/query", &body_bytes).await?;
