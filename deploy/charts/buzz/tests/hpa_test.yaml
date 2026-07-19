@@ -1,0 +1,79 @@
+suite: relay horizontal pod autoscaler
+templates:
+  - templates/hpa.yaml
+  - templates/deployment.yaml
+  - templates/secret-chart.yaml
+set:
+  relayUrl: wss://buzz.example.com
+  ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+  externalPostgresql.url: postgres://u:p@h:5432/d
+  externalRedis.url: redis://h:6379
+  s3.endpoint: http://minio:9000
+  s3.accessKey: a
+  s3.secretKey: s
+tests:
+  - it: omits the HPA by default
+    template: templates/hpa.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: scales the relay on either CPU or average pod WebSockets
+    template: templates/hpa.yaml
+    set:
+      autoscaling.enabled: true
+    asserts:
+      - isAPIVersion:
+          of: autoscaling/v2
+      - isKind:
+          of: HorizontalPodAutoscaler
+      - equal:
+          path: spec.minReplicas
+          value: 5
+      - equal:
+          path: spec.maxReplicas
+          value: 15
+      - equal:
+          path: spec.scaleTargetRef.name
+          value: RELEASE-NAME-buzz
+      - equal:
+          path: spec.metrics[0].resource.target.averageUtilization
+          value: 65
+      - equal:
+          path: spec.metrics[1].pods.metric.name
+          value: buzz_ws_connections_active
+      - equal:
+          path: spec.metrics[1].pods.target.averageValue
+          value: "5000"
+      - equal:
+          path: spec.behavior.scaleDown.stabilizationWindowSeconds
+          value: 600
+
+  - it: supports CPU-only autoscaling without a custom metrics adapter
+    template: templates/hpa.yaml
+    set:
+      autoscaling.enabled: true
+      autoscaling.websocketMetricEnabled: false
+    asserts:
+      - lengthEqual:
+          path: spec.metrics
+          count: 1
+      - equal:
+          path: spec.metrics[0].type
+          value: Resource
+      - equal:
+          path: spec.metrics[0].resource.name
+          value: cpu
+
+  - it: leaves Deployment replicas to the HPA and disables in-process huddle audio
+    template: templates/deployment.yaml
+    set:
+      autoscaling.enabled: true
+    asserts:
+      - notExists:
+          path: spec.replicas
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_HUDDLE_AUDIO_AVAILABLE
+            value: "false"

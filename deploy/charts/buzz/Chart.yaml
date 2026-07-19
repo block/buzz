@@ -7,7 +7,7 @@ description: |
   PostgreSQL and Redis. Configurable for single-node evaluation
   (subcharts on) and HA production (external services, existingSecret).
 type: application
-version: 0.1.3
+version: 0.1.5
 appVersion: "0.1.0"
 home: https://github.com/block/buzz
 sources:
@@ -23,8 +23,8 @@ maintainers:
     url: https://github.com/block
 annotations:
   artifacthub.io/changes: |
-    - kind: added
-      description: Initial chart for Buzz relay.
+    - kind: changed
+      description: Allow CPU-only relay autoscaling when no custom-metrics adapter is installed.
   artifacthub.io/license: Apache-2.0
 
 # Optional eval-only subcharts. Production deploys disable both and point

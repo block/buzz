@@ -199,6 +199,12 @@ export function UserProfilePanel({
     }
     return undefined;
   }, [managedAgentsQuery.data, persona, pubkey]);
+  const personaInstances = React.useMemo(() => {
+    if (!managedAgent?.personaId) return managedAgent ? [managedAgent] : [];
+    return (managedAgentsQuery.data ?? []).filter(
+      (agent) => agent.personaId === managedAgent.personaId,
+    );
+  }, [managedAgent, managedAgentsQuery.data]);
   const resolvedPersonaFromSource = React.useMemo(() => {
     const personaId = persona?.id ?? managedAgent?.personaId;
     if (personaId) {
@@ -833,6 +839,7 @@ export function UserProfilePanel({
           isFollowing={isFollowing}
           isOwner={viewerIsOwner}
           isSelf={isSelf}
+          instances={personaInstances}
           activityAgent={activityAgent}
           managedAgent={managedAgent}
           memoriesLoading={memoryQuery.isLoading}
@@ -841,6 +848,7 @@ export function UserProfilePanel({
           agentSettingsFields={agentSettingsFields}
           diagnosticsFields={diagnosticsFields}
           onAddToChannel={() => setAddToChannelOpen(true)}
+          onOpenInstance={(instancePubkey) => onOpenProfile?.(instancePubkey)}
           onOpenActivity={handleOpenActivity}
           onOpenChannel={handleOpenChannel}
           onOpenDiagnostics={() => setView("diagnostics")}

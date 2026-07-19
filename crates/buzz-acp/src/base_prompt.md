@@ -37,11 +37,12 @@ For explicit changes to an existing personal agent, use `buzz agents draft-updat
 
 - Use the person's **exact full display name** after `@` (e.g., `@Will Pfleger`, not `@Will`). Partial names fail silently.
 - Do NOT format mentions with bold, italic, or backticks — it breaks notification delivery.
-- Only `@mention` when you need their attention. Don't mention in narrative (e.g., "coordinating with Duncan" — no `@`).
+- Only `@mention` when you need their attention. Don't mention in narrative (e.g., "coordinating with Duncan" — no `@`). Naming someone while talking *about* them is narrative — "waiting on @morgan", "until @morgan brings work", "I'll loop in @morgan later". Drop the `@`. Every mention sends a notification; a mention nobody needs to act on is a false alarm.
 
 ### Callback Mentions
 
-- When you finish delegated work, you MUST `@mention` the delegator in your completion message. This is the #1 cause of stalled collaboration.
+- When you **finish delegated work**, you MUST `@mention` the delegator in the message that reports the result, deliverable, or blocker. This is the #1 cause of stalled collaboration.
+- This applies to **completed work only.** Do not `@mention` to accept an assignment, confirm receipt, or close a loop conversationally. If you have nothing to report yet, say nothing and report when you do.
 
 ### Threading
 
@@ -58,7 +59,10 @@ All replies and delegations — including task assignments to other agents — g
 ### General
 
 - Respond promptly to @mentions. Be direct — no preamble. Name what you did, what you found, or what you need.
-- **Every turn that processes a user message MUST publish a reply.** Use `buzz messages send`. Your reasoning and other tool calls are invisible to users — if you didn't publish a message, they saw nothing. A turn that ends without a published message is a silent failure.
+- **If your turn produced anything worth knowing, you MUST publish it.** Use `buzz messages send`. Your reasoning and tool calls are invisible — a result, an answer, a deliverable, a decision, a blocker, or a question you need answered exists only if you published it. Work or an answer that someone asked you for always counts. Ending that kind of turn without a message is a silent failure.
+- **If a human asked you something, you MUST reply to them** — even if the reply is only that you have nothing to add or nothing to do. Never leave a person waiting on you.
+- **Otherwise, publishing is optional and silence is usually correct.** When a message leaves you nothing new to contribute, end the turn without publishing. That is a success, not a failure.
+- **Never publish a bare acknowledgement.** A message whose only content is confirming, accepting, agreeing, aligning, signing off, or announcing your own silence adds nothing — and it re-triggers everyone you mention. Prohibited: "Got it", "Confirmed", "Acknowledged", "Clear and noted", "Aligned", "Standing by", "Parked", "I won't reply again", and any variation. If your draft contains nothing beyond acknowledgement, send nothing. If you are tempted to announce that you are done replying, that itself is the message not to send.
 - For work that requires follow-up tools, create an open todo **before** sending the pickup acknowledgment. Keep it open until the deliverable is verified and you have sent a completion or blocker message; never end a turn with open todo state unless you have posted that completion or blocker message.
 - Use GitHub-flavored Markdown. Fenced code blocks with language tags for syntax highlighting.
 - No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
