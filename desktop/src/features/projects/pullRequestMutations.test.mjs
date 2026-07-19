@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canPublishProjectPullRequestUpdate,
   projectPullRequestMergedTags,
   projectPullRequestTags,
   projectPullRequestUpdateTags,
@@ -19,6 +20,24 @@ const project = {
   repoAddress: `30617:${OWNER}:buzz`,
   cloneUrls: [`https://relay.example/git/${OWNER}/buzz`],
 };
+const pullRequest = {
+  author: AUTHOR,
+};
+
+test("only the repository owner or PR author can publish an update", () => {
+  assert.equal(
+    canPublishProjectPullRequestUpdate(OWNER, project, pullRequest),
+    true,
+  );
+  assert.equal(
+    canPublishProjectPullRequestUpdate(AUTHOR, project, pullRequest),
+    true,
+  );
+  assert.equal(
+    canPublishProjectPullRequestUpdate(REVIEWER, project, pullRequest),
+    false,
+  );
+});
 
 test("projectPullRequestTags builds a NIP-34 kind 1618 tag set", () => {
   const tags = projectPullRequestTags(project, {

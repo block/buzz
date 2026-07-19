@@ -5,6 +5,7 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/project-pr-review";
 const REVIEWER_AGENT_PUBKEY = "a".repeat(64);
+const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 
 // The projects surface is a preview feature — opt in before the app mounts.
 // Must run before installMockBridge so React reads the override on mount.
@@ -66,8 +67,25 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   await page.getByTestId("project-reviewer-search").fill("bob");
   await page
     .getByTestId(`project-reviewer-result-${TEST_IDENTITIES.bob.pubkey}`)
-    .click();
+    .evaluate((button) => {
+      button.click();
+      button.click();
+    });
   await expect(page.getByText("Review requested.")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_SIGNED_EVENTS__?.filter(
+            (event) =>
+              event.kind === 1 &&
+              event.tags.some(
+                (tag) => tag[0] === "t" && tag[1] === "review-request",
+              ),
+          ).length ?? 0,
+      ),
+    )
+    .toBe(1);
   // The requested reviewer appears in the reviewers row and the timeline.
   await expect(page.getByText("Requested a review from bob")).toBeVisible({
     timeout: 10_000,
@@ -174,6 +192,19 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
       ).length ?? 0,
   );
   expect(mergeCommandCount).toBe(1);
+  const mergePayload = await page.evaluate(() =>
+    window.__BUZZ_E2E_COMMAND_PAYLOADS__?.find(
+      (entry) => entry.command === "merge_project_pull_request",
+    ),
+  );
+  expect(mergePayload?.payload).toMatchObject({
+    input: {
+      expectedCommit: expect.any(String),
+      sourceBranch: expect.any(String),
+      targetBranch: "main",
+      targetOwner: DEFAULT_MOCK_PUBKEY,
+    },
+  });
 });
 
 test("managed agent repository owner can merge", async ({ page }) => {
@@ -230,9 +261,70 @@ test("managed agent repository owner can merge", async ({ page }) => {
   );
   expect(mergePayload?.payload).toMatchObject({
     input: {
+      expectedCommit: expect.any(String),
+      sourceBranch: expect.any(String),
+      targetBranch: "main",
       targetOwner: TEST_IDENTITIES.alice.pubkey,
     },
   });
+});
+
+test("viewer without repository ownership cannot merge", async ({ page }) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript((owner) => {
+    window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ = owner;
+  }, TEST_IDENTITIES.alice.pubkey);
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: REVIEWER_AGENT_PUBKEY,
+        name: "Reviewer Bot",
+      },
+    ],
+  });
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "Pull Request" }).click();
+  const prRow = page.getByTestId("project-pull-request-row").first();
+  await expect(prRow).toBeVisible({ timeout: 10_000 });
+  await prRow.getByRole("button", { name: /^#/ }).click();
+
+  await expect(
+    page.getByRole("button", { name: "Merge", exact: true }),
+  ).toHaveCount(0);
+  const mergeCommandCount = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_COMMANDS__?.filter(
+        (command) => command === "merge_project_pull_request",
+      ).length ?? 0,
+  );
+  expect(mergeCommandCount).toBe(0);
+
+  const authorizationError = await page.evaluate(async (targetOwner) => {
+    try {
+      await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.(
+        "merge_project_pull_request",
+        {
+          input: {
+            expectedCommit: "1".repeat(40),
+            pullRequestAuthor: "2".repeat(64),
+            pullRequestId: "3".repeat(64),
+            repoAddress: `30617:${targetOwner}:buzz`,
+            sourceBranch: "feature/untrusted",
+            statusCreatedAt: 1,
+            targetBranch: "main",
+            targetOwner,
+          },
+        },
+      );
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }, TEST_IDENTITIES.alice.pubkey);
+  expect(authorizationError).toContain(
+    "Only the repository owner or the owner of its managed agent",
+  );
 });
 
 test("project without a checkout can be cloned", async ({ page }) => {
@@ -296,12 +388,20 @@ test("pushed local branch can open a pull request", async ({ page }) => {
   await page
     .getByTestId("create-pull-request-body")
     .fill("Adds the missing desktop write path.");
-  await page.getByTestId("create-pull-request-submit").click();
+  await page.getByTestId("create-pull-request-submit").evaluate((button) => {
+    button.click();
+    button.click();
+  });
   await expect(page.getByText("Pull request created.")).toBeVisible();
 
-  const createdEvent = await page.evaluate(() =>
-    window.__BUZZ_E2E_SIGNED_EVENTS__?.find((event) => event.kind === 1618),
+  const createdEvents = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_SIGNED_EVENTS__?.filter(
+        (event) => event.kind === 1618,
+      ) ?? [],
   );
+  expect(createdEvents).toHaveLength(1);
+  const [createdEvent] = createdEvents;
   expect(createdEvent?.tags).toContainEqual([
     "branch-name",
     "feature/projects-workflow",

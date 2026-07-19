@@ -599,15 +599,17 @@ export function ProjectsView() {
         onOpenChange={setCreateProjectOpen}
         open={createProjectOpen}
       />
-      <CreatePullRequestDialog
-        onCreated={async (createdProject, pullRequestId) => {
-          await goProject(createdProject.id, { pullRequestId });
-        }}
-        onOpenChange={setCreatePullRequestOpen}
-        open={createPullRequestOpen}
-        projects={projects}
-        reposDir={activeCommunity?.reposDir}
-      />
+      {createPullRequestOpen ? (
+        <CreatePullRequestDialog
+          onCreated={async (createdProject, pullRequestId) => {
+            await goProject(createdProject.id, { pullRequestId });
+          }}
+          onOpenChange={setCreatePullRequestOpen}
+          open
+          projects={projects}
+          reposDir={activeCommunity?.reposDir}
+        />
+      ) : null}
       <CreateProjectIssueDialog
         onCreated={async (createdProject, issueId) => {
           await goProject(createdProject.id, { issueId });

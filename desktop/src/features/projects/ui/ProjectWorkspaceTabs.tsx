@@ -470,12 +470,12 @@ export function WorkspaceTabs({
           repoContributors={displayedContributors}
         />
       </TabsContent>
-      {createPullRequestAction ? (
+      {createPullRequestAction && createPullRequestOpen ? (
         <CreatePullRequestDialog
           initialProjectId={project.id}
           onCreated={createPullRequestAction.onCreated}
           onOpenChange={setCreatePullRequestOpen}
-          open={createPullRequestOpen}
+          open
           projects={createPullRequestAction.projects}
           reposDir={createPullRequestAction.reposDir}
         />

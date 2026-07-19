@@ -52,6 +52,7 @@ export function PullRequestReviewersRow({
 }) {
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [reviewerQuery, setReviewerQuery] = React.useState("");
+  const requestInFlightRef = React.useRef(false);
   const requestReviewMutation =
     useRequestProjectPullRequestReviewMutation(project);
   const deferredReviewerQuery = React.useDeferredValue(reviewerQuery.trim());
@@ -89,6 +90,8 @@ export function PullRequestReviewersRow({
 
   const handleRequest = React.useCallback(
     async (pubkey: string, reviewerLabel: string) => {
+      if (requestReviewMutation.isPending || requestInFlightRef.current) return;
+      requestInFlightRef.current = true;
       try {
         await requestReviewMutation.mutateAsync({
           pullRequest,
@@ -103,6 +106,8 @@ export function PullRequestReviewersRow({
         toast.error(
           error instanceof Error ? error.message : "Failed to request review.",
         );
+      } finally {
+        requestInFlightRef.current = false;
       }
     },
     [pullRequest, requestReviewMutation, signAsManagedOwner],
@@ -182,8 +187,9 @@ export function PullRequestReviewersRow({
                   const label = reviewerSearchLabel(candidate);
                   return (
                     <button
-                      className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent"
+                      className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
                       data-testid={`project-reviewer-result-${candidate.pubkey}`}
+                      disabled={requestReviewMutation.isPending}
                       key={candidate.pubkey}
                       onClick={() => {
                         void handleRequest(candidate.pubkey, label);

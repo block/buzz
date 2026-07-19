@@ -14,7 +14,35 @@ use url::Url;
 /// Wall-clock cap for a single git invocation. Remote operations talk to
 /// relay-supplied clone URLs, so a slow or adversarial remote must not pin
 /// `spawn_blocking` threads indefinitely.
-const GIT_TIMEOUT: Duration = Duration::from_secs(60);
+const LOCAL_GIT_TIMEOUT: Duration = Duration::from_secs(60);
+const REMOTE_GIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn git_subcommand<'a>(args: &'a [&str]) -> Option<&'a str> {
+    let mut index = 0;
+    while let Some(argument) = args.get(index).copied() {
+        match argument {
+            "-c" | "--config" | "-C" | "--git-dir" | "--work-tree" => index += 2,
+            "--no-pager" | "--paginate" | "--end-of-options" => index += 1,
+            argument
+                if argument.starts_with("--config=")
+                    || argument.starts_with("--git-dir=")
+                    || argument.starts_with("--work-tree=") =>
+            {
+                index += 1;
+            }
+            argument if argument.starts_with('-') => index += 1,
+            subcommand => return Some(subcommand),
+        }
+    }
+    None
+}
+
+fn git_needs_credentials(args: &[&str]) -> bool {
+    matches!(
+        git_subcommand(args),
+        Some("clone" | "fetch" | "push" | "pull" | "ls-remote" | "merge")
+    )
+}
 
 pub(crate) struct GitAuthConfig {
     git_path: std::path::PathBuf,
@@ -41,10 +69,12 @@ pub(crate) fn run_git(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    let needs_credentials = matches!(
-        args.first().copied(),
-        Some("clone" | "fetch" | "push" | "pull" | "ls-remote")
-    );
+    let needs_credentials = git_needs_credentials(args);
+    let timeout = if needs_credentials {
+        REMOTE_GIT_TIMEOUT
+    } else {
+        LOCAL_GIT_TIMEOUT
+    };
     configure_git_auth(&mut command, auth, needs_credentials);
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
@@ -66,12 +96,12 @@ pub(crate) fn run_git(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                if started.elapsed() > GIT_TIMEOUT {
+                if started.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = stdout_thread.join();
                     let _ = stderr_thread.join();
-                    return Err(format!("git timed out after {}s", GIT_TIMEOUT.as_secs()));
+                    return Err(format!("git timed out after {}s", timeout.as_secs()));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -256,7 +286,41 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_branch, validate_clone_url, validate_clone_url_against_relay};
+    use super::{
+        clean_branch, git_needs_credentials, git_subcommand, validate_clone_url,
+        validate_clone_url_against_relay,
+    };
+
+    #[test]
+    fn git_subcommand_skips_global_config_options() {
+        assert_eq!(
+            git_subcommand(&[
+                "-c",
+                "user.name=Buzz User",
+                "-c",
+                "user.email=user@example.com",
+                "merge",
+                "HEAD",
+            ]),
+            Some("merge")
+        );
+        assert_eq!(
+            git_subcommand(&["--config=credential.useHttpPath=true", "fetch", "origin"]),
+            Some("fetch")
+        );
+    }
+
+    #[test]
+    fn remote_and_promisor_operations_receive_credentials() {
+        assert!(git_needs_credentials(&["fetch", "origin"]));
+        assert!(git_needs_credentials(&[
+            "-c",
+            "user.name=Buzz User",
+            "merge",
+            "HEAD"
+        ]));
+        assert!(!git_needs_credentials(&["rev-parse", "HEAD"]));
+    }
 
     #[test]
     fn clean_branch_accepts_plain_and_prefixed_names() {

@@ -133,6 +133,20 @@ fn validate_repo_address(repo_address: &str, owner: &str) -> Result<(), String> 
     Ok(())
 }
 
+fn validate_merge_status_metadata(
+    repo_address: &str,
+    owner: &str,
+    pull_request_id: &str,
+    pull_request_author: &str,
+) -> Result<(String, String), String> {
+    validate_repo_address(repo_address, owner)?;
+    let pull_request_id = normalize_event_id(pull_request_id)
+        .ok_or_else(|| "Invalid pull request event ID.".to_string())?;
+    let pull_request_author = normalize_event_id(pull_request_author)
+        .ok_or_else(|| "Invalid pull request author.".to_string())?;
+    Ok((pull_request_id, pull_request_author))
+}
+
 fn build_merged_status_event(
     keys: &Keys,
     repo_address: &str,
@@ -142,13 +156,11 @@ fn build_merged_status_event(
     created_at: u64,
 ) -> Result<String, String> {
     let owner = keys.public_key().to_hex();
-    validate_repo_address(repo_address, &owner)?;
-    let pull_request_id = normalize_event_id(pull_request_id)
-        .ok_or_else(|| "Invalid pull request event ID.".to_string())?;
-    let pull_request_author = normalize_event_id(pull_request_author)
-        .ok_or_else(|| "Invalid pull request author.".to_string())?;
+    let (pull_request_id, pull_request_author) =
+        validate_merge_status_metadata(repo_address, &owner, pull_request_id, pull_request_author)?;
     let merge_commit =
         normalize_commit(merge_commit).ok_or_else(|| "Invalid merge commit.".to_string())?;
+    let created_at = created_at.max(Timestamp::now().as_secs());
 
     let mut raw_tags = vec![
         vec!["e", pull_request_id.as_str(), "", "root"],
@@ -424,6 +436,12 @@ pub async fn merge_project_pull_request(
     }
     let expected_commit = normalize_commit(&expected_commit)
         .ok_or_else(|| "Invalid pull request commit.".to_string())?;
+    let (pull_request_id, pull_request_author) = validate_merge_status_metadata(
+        &repo_address,
+        &merger_pubkey,
+        &pull_request_id,
+        &pull_request_author,
+    )?;
     let auth = build_git_auth_config_for_keys(&owner_identity.keys)?;
 
     let git_result = tauri::async_runtime::spawn_blocking(move || {
@@ -451,7 +469,6 @@ pub async fn merge_project_pull_request(
             &[
                 "fetch",
                 "--quiet",
-                "--depth=100",
                 "--end-of-options",
                 source_clone_url.as_str(),
                 source_branch.as_str(),
@@ -538,8 +555,9 @@ pub async fn merge_project_pull_request(
 mod tests {
     use super::{
         build_merged_status_event, build_review_request_event, normalize_commit, same_repository,
+        validate_merge_status_metadata,
     };
-    use nostr::{Event, JsonUtil, Keys};
+    use nostr::{Event, JsonUtil, Keys, Timestamp};
 
     #[test]
     fn normalize_commit_accepts_sha1_and_sha256_hex() {
@@ -573,6 +591,7 @@ mod tests {
         let pull_request_author = "b".repeat(64);
         let merge_commit = "e".repeat(40);
         let repo_address = format!("30617:{owner}:buzz");
+        let before = Timestamp::now().as_secs();
         let event = Event::from_json(
             build_merged_status_event(
                 &keys,
@@ -588,12 +607,59 @@ mod tests {
 
         assert_eq!(event.pubkey, keys.public_key());
         assert_eq!(event.kind.as_u16(), 1631);
-        assert_eq!(event.created_at.as_secs(), 123);
+        assert!(event.created_at.as_secs() >= before);
         assert!(event
             .tags
             .iter()
             .any(|tag| tag.as_slice() == ["merge-commit", merge_commit.as_str()]));
         assert!(event.verify().is_ok());
+    }
+
+    #[test]
+    fn merged_status_preserves_a_newer_requested_timestamp() {
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_hex();
+        let requested = Timestamp::now().as_secs() + 10;
+        let event = Event::from_json(
+            build_merged_status_event(
+                &keys,
+                &format!("30617:{owner}:buzz"),
+                &"d".repeat(64),
+                &"b".repeat(64),
+                &"e".repeat(40),
+                requested,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(event.created_at.as_secs(), requested);
+    }
+
+    #[test]
+    fn merge_status_metadata_is_rejected_before_git_work() {
+        let owner = "a".repeat(64);
+        assert!(validate_merge_status_metadata(
+            &format!("30617:{}:buzz", "b".repeat(64)),
+            &owner,
+            &"d".repeat(64),
+            &"e".repeat(64),
+        )
+        .is_err());
+        assert!(validate_merge_status_metadata(
+            &format!("30617:{owner}:buzz"),
+            &owner,
+            "not-an-event-id",
+            &"e".repeat(64),
+        )
+        .is_err());
+        assert!(validate_merge_status_metadata(
+            &format!("30617:{owner}:buzz"),
+            &owner,
+            &"d".repeat(64),
+            "not-an-author",
+        )
+        .is_err());
     }
 
     #[test]

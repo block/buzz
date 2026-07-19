@@ -46,6 +46,7 @@ export function CreateProjectWorkItemDialog({
   const [body, setBody] = React.useState("");
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const titleInputRef = React.useRef<HTMLInputElement>(null);
+  const submitInFlightRef = React.useRef(false);
   const testIdPrefix = `create-${itemName}`;
   const itemLabel = itemName === "issue" ? "issue" : "pull request";
 
@@ -63,8 +64,10 @@ export function CreateProjectWorkItemDialog({
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isCreating || submitDisabled || submitInFlightRef.current) return;
     const trimmedTitle = workItemTitle.trim();
     if (!trimmedTitle) return;
+    submitInFlightRef.current = true;
     setErrorMessage(null);
     try {
       await onCreate({ title: trimmedTitle, body: body.trim() });
@@ -75,6 +78,8 @@ export function CreateProjectWorkItemDialog({
           ? error.message
           : `Failed to create ${itemLabel}.`,
       );
+    } finally {
+      submitInFlightRef.current = false;
     }
   }
 

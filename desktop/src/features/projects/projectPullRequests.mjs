@@ -125,12 +125,19 @@ function reviewersForPullRequest(pullRequest, comments) {
   return [...reviewers];
 }
 
-/** Latest approval comment per author, oldest first. */
-function approvalsForPullRequest(comments) {
+/** Latest trusted approval per author, oldest first. */
+function approvalsForPullRequest(pullRequest, comments, reviewers) {
+  const author = pullRequest.pubkey.toLowerCase();
+  const trustedApprovers = new Set(reviewers);
+  for (const actor of allowedActorsForRoot(pullRequest)) {
+    if (actor !== author) trustedApprovers.add(actor);
+  }
+
   const byAuthor = new Map();
   for (const comment of comments) {
     if (!comment.isApproval) continue;
     const key = comment.author.toLowerCase();
+    if (!trustedApprovers.has(key)) continue;
     const existing = byAuthor.get(key);
     if (!existing || comment.createdAt > existing.createdAt) {
       byAuthor.set(key, comment);
@@ -157,7 +164,7 @@ export function eventToProjectPullRequest(
     eventToPullRequestComment,
   );
   const reviewers = reviewersForPullRequest(pullRequest, comments);
-  const approvals = approvalsForPullRequest(comments);
+  const approvals = approvalsForPullRequest(pullRequest, comments, reviewers);
   const title =
     getTag(pullRequest, "subject") ||
     pullRequest.content.split("\n")[0] ||

@@ -6,6 +6,7 @@ import {
 } from "@/shared/api/projectGit";
 import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import {
   KIND_GIT_PR_UPDATE,
   KIND_GIT_PULL_REQUEST,
@@ -92,6 +93,19 @@ export function projectPullRequestMergedTags(
   ];
 }
 
+/** Whether the active identity may publish a trusted update for this PR. */
+export function canPublishProjectPullRequestUpdate(
+  viewerPubkey: string,
+  project: Project,
+  pullRequest: ProjectPullRequest,
+) {
+  const viewer = normalizePubkey(viewerPubkey);
+  return (
+    viewer === normalizePubkey(project.owner) ||
+    viewer === normalizePubkey(pullRequest.author)
+  );
+}
+
 async function publishProjectPullRequest(
   project: Project,
   input: CreateProjectPullRequestInput,
@@ -133,6 +147,14 @@ export async function publishProjectPullRequestUpdate({
   pullRequest: ProjectPullRequest;
 }): Promise<boolean> {
   if (pullRequest.commit?.toLowerCase() === commit.toLowerCase()) return false;
+  const identity = await getIdentity();
+  if (
+    !canPublishProjectPullRequestUpdate(identity.pubkey, project, pullRequest)
+  ) {
+    throw new Error(
+      "Only the pull request author or repository owner can publish its update.",
+    );
+  }
   const event = await signRelayEvent({
     kind: KIND_GIT_PR_UPDATE,
     content: "",

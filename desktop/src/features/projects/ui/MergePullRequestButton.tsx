@@ -33,6 +33,7 @@ export function MergePullRequestButton({
   const mergeMutation = useMergeProjectPullRequestMutation(project);
   const publishMergedMutation =
     usePublishProjectPullRequestMergedMutation(project);
+  const targetBranch = pullRequest.targetBranch ?? project.defaultBranch;
 
   const handleMerge = React.useCallback(async () => {
     try {
@@ -99,9 +100,9 @@ export function MergePullRequestButton({
         <AlertDialogHeader>
           <AlertDialogTitle>Merge pull request?</AlertDialogTitle>
           <AlertDialogDescription>
-            Merge {pullRequest.branchName} into {project.defaultBranch} and push
-            the result to the repository. The remote will reject the operation
-            if the branch changed or conflicts.
+            Merge {pullRequest.branchName} into {targetBranch} and push the
+            result to the repository. The remote will reject the operation if
+            the branch changed or conflicts.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

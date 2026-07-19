@@ -248,7 +248,7 @@ desktop-e2e-integration: _ensure-migrations
 # Run only the e2e specs changed vs origin/main (both projects) before pushing
 desktop-e2e-pre-push: _ensure-migrations
     git fetch origin main
-    cd {{desktop_dir}} && pnpm build && pnpm exec playwright test --only-changed=origin/main
+    cd {{desktop_dir}} && pnpm build:e2e && pnpm exec playwright test --only-changed=origin/main
 
 # Run all checks suitable for CI / pre-push (no infra needed)
 ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
@@ -340,7 +340,7 @@ mesh-e2e-confidence:
 desktop-screenshot *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    just desktop-build
+    pnpm -C {{desktop_dir}} build:e2e
     cd {{desktop_dir}}
     if ! curl -sf http://127.0.0.1:4173/ >/dev/null 2>&1; then
         python3 -m http.server 4173 -d dist >/dev/null 2>&1 &

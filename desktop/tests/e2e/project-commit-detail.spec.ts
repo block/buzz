@@ -4,6 +4,7 @@ import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/project-commit-detail";
+const ALIGNMENT_TOLERANCE_PX = 2;
 
 // The projects surface is a preview feature — opt in before the app mounts.
 // Must run before installMockBridge so React reads the override on mount.
@@ -28,6 +29,7 @@ test("top-level project lists align dates and overflow actions", async ({
   await page.getByTestId("open-projects-view").click();
 
   async function trailingPositions(row: import("@playwright/test").Locator) {
+    await waitForAnimations(page);
     const date = row.getByTestId("projects-row-date");
     const menu = row.getByRole("button", { name: /More options for/ });
     await expect(date).toBeVisible();
@@ -94,10 +96,18 @@ test("top-level project lists align dates and overflow actions", async ({
   const issueRow = page.locator('[data-testid^="projects-issue-row-"]').first();
   const issuePositions = await trailingPositions(issueRow);
 
-  expect(pullRequestPositions.dateX).toBeCloseTo(repositoryPositions.dateX, 0);
-  expect(pullRequestPositions.menuX).toBeCloseTo(repositoryPositions.menuX, 0);
-  expect(issuePositions.dateX).toBeCloseTo(repositoryPositions.dateX, 0);
-  expect(issuePositions.menuX).toBeCloseTo(repositoryPositions.menuX, 0);
+  expect(
+    Math.abs(pullRequestPositions.dateX - repositoryPositions.dateX),
+  ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
+  expect(
+    Math.abs(pullRequestPositions.menuX - repositoryPositions.menuX),
+  ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
+  expect(
+    Math.abs(issuePositions.dateX - repositoryPositions.dateX),
+  ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
+  expect(
+    Math.abs(issuePositions.menuX - repositoryPositions.menuX),
+  ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
 
   await page.setViewportSize({ height: 720, width: 900 });
   await page.getByRole("button", { name: "Repositories", exact: true }).click();

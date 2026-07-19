@@ -9231,13 +9231,28 @@ export function maybeInstallE2eTauriMocks() {
       case "merge_project_pull_request": {
         const { input } = payload as {
           input: {
+            expectedCommit: string;
             pullRequestAuthor: string;
             pullRequestId: string;
             repoAddress: string;
+            sourceBranch: string;
             statusCreatedAt: number;
+            targetBranch: string;
             targetOwner: string;
           };
         };
+        const normalizedTargetOwner = input.targetOwner.toLowerCase();
+        const canSignAsOwner =
+          (identity?.pubkey ?? MOCK_IDENTITY_PUBKEY).toLowerCase() ===
+            normalizedTargetOwner ||
+          mockManagedAgents.some(
+            (agent) => agent.pubkey.toLowerCase() === normalizedTargetOwner,
+          );
+        if (!canSignAsOwner) {
+          throw new Error(
+            "Only the repository owner or the owner of its managed agent can merge pull requests.",
+          );
+        }
         const mergeCommit = "abcdef0123456789abcdef0123456789abcdef01";
         const statusEvent = createMockEvent(
           KIND_GIT_STATUS_MERGED,

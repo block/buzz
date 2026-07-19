@@ -6,8 +6,6 @@ import {
   pullProjectLocalRepository,
   pushProjectLocalRepository,
 } from "@/shared/api/projectGit";
-import { getIdentity } from "@/shared/api/tauriIdentity";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { Project, ProjectPullRequest } from "@/features/projects/hooks";
 import { publishProjectPullRequestUpdate } from "./pullRequestMutations";
 
@@ -79,16 +77,6 @@ export function usePushProjectLocalRepositoryMutation(
         (pullRequest.status === "Open" || pullRequest.status === "Draft")
       ) {
         try {
-          const identity = await getIdentity();
-          const viewer = normalizePubkey(identity.pubkey);
-          if (
-            viewer !== normalizePubkey(project.owner) &&
-            viewer !== normalizePubkey(pullRequest.author)
-          ) {
-            throw new Error(
-              "Only the pull request author or repository owner can publish its update.",
-            );
-          }
           const updated = await publishProjectPullRequestUpdate({
             commit: result.commit,
             mergeBase: result.mergeBase,

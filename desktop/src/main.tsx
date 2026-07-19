@@ -94,9 +94,12 @@ function renderApp() {
 }
 
 async function installE2eBridgeIfConfigured() {
-  // Keep the large E2E bridge out of the normal startup path and production
-  // bundle; only load it when tests explicitly inject an E2E config.
-  if (!(window as E2eWindow).__BUZZ_E2E__) {
+  // The mock bridge is compiled only into dev and explicit E2E builds. A
+  // pre-bootstrap global alone must never activate mock IPC in production.
+  if (
+    !(import.meta.env.DEV || import.meta.env.MODE === "e2e") ||
+    !(window as E2eWindow).__BUZZ_E2E__
+  ) {
     return;
   }
 
