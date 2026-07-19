@@ -70,6 +70,9 @@ export function HuddleAttachment({
     [message.body],
   );
   const { activeEphemeralChannelId, isStarting, joinHuddle } = useHuddle();
+  const isCurrentHuddle =
+    Boolean(ephemeralChannelId) &&
+    activeEphemeralChannelId === ephemeralChannelId;
   const queryClient = useQueryClient();
   const [isJoining, setIsJoining] = React.useState(false);
   const [lifecycleState, setLifecycleState] =
@@ -78,11 +81,13 @@ export function HuddleAttachment({
         ? reconstructHuddleState(
             [messageLifecycleEvent(message)],
             ephemeralChannelId,
+            { isCurrentHuddle },
           )
         : {
             ended: true,
             participants: new Set(),
             startCreatedAt: null,
+            staleDeadlineMs: null,
           },
     );
 
@@ -114,11 +119,12 @@ export function HuddleAttachment({
       const state = reconstructHuddleState(
         seenEvents.values(),
         huddleChannelId,
+        { isCurrentHuddle },
       );
       setLifecycleState(state);
       const staleDelay = state.ended
         ? null
-        : huddleStalenessDelayMs(state.startCreatedAt);
+        : huddleStalenessDelayMs(state.staleDeadlineMs);
       if (staleDelay !== null)
         staleTimeout = setTimeout(updateState, staleDelay);
     }
@@ -150,6 +156,7 @@ export function HuddleAttachment({
   }, [
     channelId,
     ephemeralChannelId,
+    isCurrentHuddle,
     message.body,
     message.createdAt,
     message.id,
@@ -160,9 +167,6 @@ export function HuddleAttachment({
 
   const participantCount = lifecycleState.participants.size;
   const isEnded = lifecycleState.ended;
-  const isCurrentHuddle =
-    Boolean(ephemeralChannelId) &&
-    activeEphemeralChannelId === ephemeralChannelId;
   const canJoin = Boolean(
     channelId && ephemeralChannelId && !isEnded && !isCurrentHuddle,
   );

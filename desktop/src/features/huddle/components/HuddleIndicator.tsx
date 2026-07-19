@@ -19,7 +19,7 @@ import {
 type ActiveHuddle = {
   ephemeralChannelId: string;
   participants: Set<string>;
-  startCreatedAt: number | null;
+  staleDeadlineMs: number | null;
 };
 
 type HuddleIndicatorProps = {
@@ -44,7 +44,7 @@ export function HuddleIndicator({
   onStart,
   startDisabled,
 }: HuddleIndicatorProps) {
-  const { joinHuddle, isStarting } = useHuddle();
+  const { activeEphemeralChannelId, joinHuddle, isStarting } = useHuddle();
   const queryClient = useQueryClient();
   const [activeHuddle, setActiveHuddle] = React.useState<ActiveHuddle | null>(
     null,
@@ -76,7 +76,9 @@ export function HuddleIndicator({
         .map(([ephemeralChannelId, events]) => ({
           ephemeralChannelId,
           events,
-          state: reconstructHuddleState(events, ephemeralChannelId),
+          state: reconstructHuddleState(events, ephemeralChannelId, {
+            isCurrentHuddle: activeEphemeralChannelId === ephemeralChannelId,
+          }),
           lastEventCreatedAt: Math.max(
             ...events.map((event) => event.created_at),
           ),
@@ -92,14 +94,14 @@ export function HuddleIndicator({
         ? {
             ephemeralChannelId: latest.ephemeralChannelId,
             participants: latest.state.participants,
-            startCreatedAt: latest.state.startCreatedAt,
+            staleDeadlineMs: latest.state.staleDeadlineMs,
           }
         : null;
 
       if (!disposed) {
         setActiveHuddle(huddle);
         const staleDelay = huddle
-          ? huddleStalenessDelayMs(huddle.startCreatedAt)
+          ? huddleStalenessDelayMs(huddle.staleDeadlineMs)
           : null;
         if (staleDelay !== null) {
           staleTimeout = setTimeout(reconstruct, staleDelay);
@@ -138,7 +140,7 @@ export function HuddleIndicator({
       cleanup?.();
       setActiveHuddle(null);
     };
-  }, [channelId]);
+  }, [activeEphemeralChannelId, channelId]);
 
   // When the local user ends/leaves a huddle, the backend transitions to idle
   // and emits huddle-state-changed. Clear the indicator immediately rather than
