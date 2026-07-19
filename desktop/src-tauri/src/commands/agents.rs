@@ -176,13 +176,9 @@ pub(super) fn build_agent_archive_request(
     {
         None
     } else {
-        // Bridge to the buzz-sdk nostr types via hex round-trip, exactly like
-        // the create path (see create_managed_agent's auth-tag phase).
-        let compat_owner = nostr::Keys::parse(&keys.secret_key().to_secret_hex())
-            .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
-        let compat_agent = nostr::PublicKey::from_hex(agent_pubkey)
+        let agent = nostr::PublicKey::from_hex(agent_pubkey)
             .map_err(|e| format!("invalid agent pubkey: {e}"))?;
-        let tag_json = buzz_sdk_pkg::nip_oa::compute_auth_tag(&compat_owner, &compat_agent, "")
+        let tag_json = buzz_sdk_pkg::nip_oa::compute_auth_tag(keys, &agent, "")
             .map_err(|e| format!("failed to build owner auth tag: {e}"))?;
         let parts: Vec<String> = serde_json::from_str(&tag_json)
             .map_err(|e| format!("failed to parse owner auth tag: {e}"))?;
