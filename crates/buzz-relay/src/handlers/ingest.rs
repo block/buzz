@@ -2353,8 +2353,19 @@ async fn ingest_event_inner(
 
     // Any successfully stored channel-scoped event keeps the channel alive.
     // Skip kind:9007 (create) — the deadline was just set during creation.
+    // Skip permanent channels: the fresh per-request `channel_row` already
+    // tells us `ttl_seconds` is NULL, so the UPDATE would match zero rows by
+    // its own predicate — pure wasted round trip on the hot path. Only a
+    // *positive* "no TTL" skips; a missing/unfetched row (kind:9007 pre-create,
+    // transient `get_channel` error swallowed by `.ok()`) still bumps, so an
+    // ephemeral channel can never archive early because of a failed prefetch.
+    // Race note: a concurrent `update_channel` that sets a TTL resets
+    // `ttl_deadline` itself (NOW() + ttl), making the skipped bump redundant.
     if let Some(ch_id) = channel_id {
-        if kind_u32 != KIND_NIP29_CREATE_GROUP {
+        let known_permanent = channel_row
+            .as_ref()
+            .is_some_and(|row| row.ttl_seconds.is_none());
+        if kind_u32 != KIND_NIP29_CREATE_GROUP && !known_permanent {
             if let Err(e) = state.db.bump_ttl_deadline(tenant.community(), ch_id).await {
                 warn!(channel = %ch_id, "TTL deadline bump failed: {e}");
             }
