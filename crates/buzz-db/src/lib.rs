@@ -1220,12 +1220,13 @@ impl Db {
         event::get_events_by_ids(&self.pool, community_id, ids).await
     }
 
-    /// Exclusively claim the next due event-to-push matcher job.
-    pub async fn claim_due_push_match(
+    /// Exclusively claim a batch of due matcher jobs from one community.
+    pub async fn claim_due_push_match_batch(
         &self,
+        limit: i64,
         lease_until: DateTime<Utc>,
-    ) -> Result<Option<push::ClaimedMatch>> {
-        push::claim_due_match(&self.pool, lease_until).await
+    ) -> Result<Option<push::ClaimedMatchBatch>> {
+        push::claim_due_match_batch(&self.pool, limit, lease_until).await
     }
 
     /// Load active endpoint-enabled leases eligible for push matching.
@@ -1236,18 +1237,30 @@ impl Db {
         push::active_match_leases(&self.pool, community).await
     }
 
-    /// Complete a matcher job if its claim fence is still held.
-    pub async fn complete_push_match(&self, job: &push::ClaimedMatch) -> Result<bool> {
-        push::complete_match(&self.pool, job).await
+    /// Complete matcher jobs from one claimed batch while the fence holds.
+    pub async fn complete_push_match_batch(
+        &self,
+        community: CommunityId,
+        claim_id: uuid::Uuid,
+        event_ids: &[Vec<u8>],
+    ) -> Result<u64> {
+        push::complete_match_batch(&self.pool, community, claim_id, event_ids).await
     }
 
-    /// Release a matcher claim for retry at the supplied time.
-    pub async fn retry_push_match(
+    /// Release fenced matcher claims from one batch for retry.
+    pub async fn retry_push_match_batch(
         &self,
-        job: &push::ClaimedMatch,
+        community: CommunityId,
+        claim_id: uuid::Uuid,
+        event_ids: &[Vec<u8>],
         next: DateTime<Utc>,
-    ) -> Result<bool> {
-        push::retry_match(&self.pool, job, next).await
+    ) -> Result<u64> {
+        push::retry_match_batch(&self.pool, community, claim_id, event_ids, next).await
+    }
+
+    /// Delete exhausted matcher jobs (periodic sweep, off the claim path).
+    pub async fn reap_exhausted_push_matches(&self) -> Result<u64> {
+        push::reap_exhausted_matches(&self.pool).await
     }
 
     /// Idempotently enqueue a wake for a matched lease and event.
@@ -1532,6 +1545,17 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<bool> {
         channel::is_member(&self.pool, community_id, channel_id, pubkey).await
+    }
+
+    /// Return the active (channel, pubkey) membership pairs among the given
+    /// sets, in one statement.
+    pub async fn membership_pairs(
+        &self,
+        community_id: CommunityId,
+        channel_ids: &[Uuid],
+        pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<(Uuid, Vec<u8>)>> {
+        channel::membership_pairs(&self.pool, community_id, channel_ids, pubkeys).await
     }
 
     /// Returns all active members of a channel.

@@ -1561,6 +1561,14 @@ mod tests {
         assert_eq!(stale_ttl, None);
 
         let mut activation = pool.begin().await.expect("begin TTL activation");
+        // Model the repaired update_channel protocol (migration 0024): the
+        // TTL transition holds the per-channel advisory key EXCLUSIVE, which
+        // is what the event trigger's shared acquisition now waits on.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("buzz_channel_ttl:{community_uuid}:{racing}"))
+            .execute(&mut *activation)
+            .await
+            .expect("acquire exclusive channel TTL key");
         let activation_deadline: DateTime<Utc> = sqlx::query_scalar(
             "UPDATE channels \
              SET ttl_seconds = 60, ttl_deadline = clock_timestamp() + interval '60 seconds' \
@@ -1603,6 +1611,99 @@ mod tests {
             final_deadline > activation_deadline + chrono::Duration::milliseconds(50),
             "later event must extend TTL beyond activation deadline: activation={activation_deadline}, final={final_deadline}"
         );
+    }
+
+    /// T1a repair regression test (migration 0024): permanent-channel event
+    /// commits must not serialize on the channel row. The 0022 trigger took
+    /// `FOR UPDATE` on the channel tuple before testing `ttl_seconds`, so
+    /// concurrent commits into one hot permanent channel queued at commit
+    /// time (deferred trigger) — invisible to any single-connection test.
+    /// This holds N insert transactions at a barrier past their INSERTs,
+    /// then proves (a) while all N sit pre-commit, no transaction holds a
+    /// row-level lock on the channel tuple, and (b) all N commits succeed
+    /// with the channel row untouched (permanent ⇒ no deadline write).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn permanent_channel_event_commits_do_not_lock_the_channel_row() {
+        const N: usize = 8;
+        // setup_pool's default cap (10) covers N held transactions plus the
+        // pg_locks inspector connection.
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        // Open N transactions, run the full event INSERT in each (the deferred
+        // trigger fires at COMMIT), and park them at a barrier.
+        let mut txs = Vec::new();
+        for i in 0..N {
+            let mut tx = pool.begin().await.expect("begin insert txn");
+            let event = make_text_event(&format!("hot channel event {i}"));
+            sqlx::query(
+                "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+                 VALUES ($1,$2,$3,$4,9,$5,$6,$7,now(),$8)",
+            )
+            .bind(community_uuid)
+            .bind(event.id.as_bytes().as_slice())
+            .bind(event.pubkey.as_bytes().as_slice())
+            .bind(DateTime::from_timestamp(event.created_at.as_secs() as i64, 0).unwrap())
+            .bind(serde_json::to_value(&event.tags).unwrap())
+            .bind(&event.content)
+            .bind(event.sig.serialize().as_slice())
+            .bind(channel)
+            .execute(&mut *tx)
+            .await
+            .expect("insert event inside held txn");
+            txs.push(tx);
+        }
+
+        // With all N transactions holding completed INSERTs, none may hold a
+        // row-level lock on the channels tuple. (The 0022 trigger would not
+        // have taken it yet either — it locks at COMMIT — so also verify the
+        // commit phase below completes without mutual blocking.)
+        let tuple_locks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks l \
+             JOIN pg_class c ON c.oid = l.relation \
+             WHERE c.relname = 'channels' AND l.locktype = 'tuple'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect pg_locks");
+        assert_eq!(tuple_locks, 0, "no channel tuple locks while txns are held");
+
+        // Release all commits concurrently. Under 0022 these serialized on the
+        // channel row (each holding it across its WAL flush); under 0024 the
+        // shared advisory key admits them all. Join with a timeout so a
+        // regression fails fast instead of hanging the suite.
+        let commits = txs
+            .into_iter()
+            .map(|tx| tokio::spawn(async move { tx.commit().await }))
+            .collect::<Vec<_>>();
+        for c in commits {
+            tokio::time::timeout(std::time::Duration::from_secs(10), c)
+                .await
+                .expect("concurrent permanent-channel commits must not block")
+                .expect("join commit task")
+                .expect("commit succeeds");
+        }
+
+        let deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("read deadline after commits");
+        assert_eq!(deadline, None, "permanent channel must remain untouched");
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id = $1 AND channel_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("count stored events");
+        assert_eq!(stored as usize, N);
     }
 
     #[tokio::test]

@@ -538,6 +538,33 @@ pub async fn is_member(
     Ok(cnt > 0)
 }
 
+/// Return which of the given (channel, pubkey) combinations are active
+/// memberships, restricted to non-deleted channels — one statement for any
+/// batch size (T2b). Semantics per pair match [`is_member`].
+pub async fn membership_pairs(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_ids: &[Uuid],
+    pubkeys: &[Vec<u8>],
+) -> Result<Vec<(Uuid, Vec<u8>)>> {
+    if channel_ids.is_empty() || pubkeys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT cm.channel_id, cm.pubkey FROM channel_members cm \
+         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
+         WHERE cm.community_id = $1 AND cm.channel_id = ANY($2) AND cm.pubkey = ANY($3) AND cm.removed_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_ids)
+    .bind(pubkeys)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| Ok((row.try_get("channel_id")?, row.try_get("pubkey")?)))
+        .collect()
+}
+
 /// Returns all active members of the given channel.
 ///
 /// Returns an empty list if the channel has been soft-deleted.
@@ -1076,9 +1103,32 @@ pub async fn update_channel(
     q = q.bind(community_id.as_uuid());
     q = q.bind(channel_id);
 
-    let result = q.execute(pool).await?;
-    if result.rows_affected() == 0 {
-        return Err(DbError::ChannelNotFound(channel_id));
+    // T1a repair: a TTL change can flip this channel's event-trigger fast
+    // path (migration 0024 reads ttl_seconds under a SHARED per-channel
+    // advisory lock). Take the same key EXCLUSIVE before the UPDATE so a
+    // concurrent event either sees the committed TTL or strictly precedes
+    // this transition — whose own deadline reset is then the latest word.
+    // Non-TTL updates don't touch the fast path and skip the lock.
+    if updates.ttl_seconds.is_some() {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "buzz_channel_ttl:{}:{}",
+                community_id.as_uuid(),
+                channel_id
+            ))
+            .execute(&mut *tx)
+            .await?;
+        let result = q.execute(&mut *tx).await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::ChannelNotFound(channel_id));
+        }
+        tx.commit().await?;
+    } else {
+        let result = q.execute(pool).await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::ChannelNotFound(channel_id));
+        }
     }
 
     get_channel(pool, community_id, channel_id).await

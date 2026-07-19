@@ -818,6 +818,10 @@ CREATE INDEX push_match_queue_due
 CREATE INDEX push_match_queue_recovery
     ON push_match_queue (lease_until) WHERE state = 'matching';
 
+-- T1b push gate (keep in sync with migrations/0023). Enqueue only when the
+-- community has an active, endpoint-enabled, unexpired lease; the shared
+-- advisory lock pairs with the exclusive lock taken by lease activations
+-- (crates/buzz-db/src/push.rs) to close the lost-wake race.
 CREATE FUNCTION enqueue_push_match_job() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -825,9 +829,19 @@ BEGIN
     -- Centralizing it on the events table covers every durable producer,
     -- including internal paths that bypass live dispatch.
     IF NEW.kind IN (7, 9, 1059, 40007, 46010) THEN
-        INSERT INTO push_match_queue (community_id, event_id)
-        VALUES (NEW.community_id, NEW.id)
-        ON CONFLICT DO NOTHING;
+        PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('buzz_push_gate:' || NEW.community_id::text, 0));
+        IF EXISTS (
+            SELECT 1 FROM push_leases
+            WHERE community_id = NEW.community_id
+              AND active
+              AND endpoint_enabled
+              AND expires_at > EXTRACT(EPOCH FROM now())::bigint
+        ) THEN
+            INSERT INTO push_match_queue (community_id, event_id)
+            VALUES (NEW.community_id, NEW.id)
+            ON CONFLICT DO NOTHING;
+        END IF;
     END IF;
     RETURN NEW;
 END
@@ -836,6 +850,53 @@ $$;
 CREATE TRIGGER events_enqueue_push_match
 AFTER INSERT ON events
 FOR EACH ROW EXECUTE FUNCTION enqueue_push_match_job();
+
+-- Channel TTL refresh (keep in sync with migrations/0024). Runs deferred, in
+-- the transaction that makes a channel-scoped event durable, so a TTL
+-- transition committed while ingest was in flight is never missed. The
+-- per-channel advisory lock is SHARED here — permanent-channel commits admit
+-- each other — and taken EXCLUSIVE by TTL transitions (update_channel in
+-- crates/buzz-db/src/channel.rs), which forces the same total order the
+-- 0022 row lock provided without serializing the hot path.
+CREATE FUNCTION refresh_channel_ttl_after_event_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    channel_ttl INTEGER;
+BEGIN
+    -- Kind 9007 creates the channel and initializes its deadline itself.
+    IF NEW.channel_id IS NOT NULL AND NEW.kind <> 9007 THEN
+        BEGIN
+            PERFORM pg_advisory_xact_lock_shared(hashtextextended(
+                'buzz_channel_ttl:' || NEW.community_id::text || ':' || NEW.channel_id::text, 0));
+
+            SELECT ttl_seconds INTO channel_ttl
+            FROM channels
+            WHERE community_id = NEW.community_id AND id = NEW.channel_id;
+
+            IF channel_ttl IS NOT NULL THEN
+                UPDATE channels
+                SET ttl_deadline = clock_timestamp() + make_interval(secs => ttl_seconds)
+                WHERE community_id = NEW.community_id
+                  AND id = NEW.channel_id
+                  AND ttl_seconds IS NOT NULL
+                  AND archived_at IS NULL
+                  AND deleted_at IS NULL;
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            -- Preserve the existing best-effort contract: a TTL refresh failure
+            -- must not reject an otherwise valid durable event.
+            RAISE WARNING 'channel TTL refresh failed for community %, channel %: %',
+                NEW.community_id, NEW.channel_id, SQLERRM;
+        END;
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
+AFTER INSERT ON events
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
 
 -- Replica-fence floor guard (keep in sync with migrations/0021). A deferred
 -- constraint trigger re-checks, inside COMMIT processing, that channel-bearing
