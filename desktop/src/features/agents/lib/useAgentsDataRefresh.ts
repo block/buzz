@@ -32,6 +32,9 @@ export function useAgentsDataRefresh(): void {
       void queryClient.invalidateQueries({
         queryKey: managedAgentRuntimesQueryKey,
       });
+      // Pair startup also changes the legacy managed-agent scalar status.
+      // Keep that cache synchronized for consumers outside pair-runtime UI.
+      void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     });
 
     const unlisten = listen("agents-data-changed", () => {

@@ -202,15 +202,20 @@ export function MembersSidebarMemberCard({
             className="mt-1 normal-case tracking-normal"
             data-testid={`sidebar-managed-agent-status-${member.pubkey}`}
             variant={
-              managedAgentRuntime &&
-              agentCommunityAvailability(managedAgentRuntime) === "Here"
-                ? "default"
-                : "secondary"
+              managedAgentRuntime
+                ? agentCommunityAvailability(managedAgentRuntime) === "Here"
+                  ? "default"
+                  : "secondary"
+                : managedAgent && isManagedAgentActive(managedAgent)
+                  ? "default"
+                  : "secondary"
             }
           >
             {managedAgentRuntime
               ? agentCommunityAvailability(managedAgentRuntime)
-              : "Unavailable"}
+              : managedAgent && isManagedAgentActive(managedAgent)
+                ? "Running"
+                : "Stopped"}
           </Badge>
         ) : null}
         {managedAgent ? (

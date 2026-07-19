@@ -590,17 +590,17 @@ export function getAgentTranscript(
   return state?.items ?? EMPTY_TRANSCRIPT;
 }
 
+export function shouldObserveManagedAgents(
+  agents: readonly Pick<ManagedAgent, "pubkey">[],
+): boolean {
+  return agents.length > 0;
+}
+
 export function useManagedAgentObserverBridge(
   agents: readonly Pick<ManagedAgent, "pubkey" | "status">[],
 ) {
   const subscriptionId = React.useId();
-  const hasActiveAgent = React.useMemo(
-    () =>
-      agents.some(
-        (agent) => agent.status === "running" || agent.status === "deployed",
-      ),
-    [agents],
-  );
+  const hasManagedAgent = shouldObserveManagedAgents(agents);
 
   const agentPubkeys = React.useMemo(
     () => agents.map((agent) => agent.pubkey),
@@ -618,11 +618,11 @@ export function useManagedAgentObserverBridge(
   }, [subscriptionId, agentPubkeys]);
 
   React.useEffect(() => {
-    if (!hasActiveAgent) {
+    if (!hasManagedAgent) {
       return;
     }
     void ensureRelayObserverSubscription();
-  }, [hasActiveAgent]);
+  }, [hasManagedAgent]);
 
   // Wire up config-surface query invalidation when session_config_captured fires.
   const queryClient = useQueryClient();

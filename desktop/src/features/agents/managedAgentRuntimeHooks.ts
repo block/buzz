@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 
 import {
   listManagedAgentRuntimes,
@@ -9,6 +14,52 @@ import {
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
 
 export const managedAgentRuntimesQueryKey = ["managed-agent-runtimes"] as const;
+
+export function mergeManagedAgentRuntimeStatuses(
+  baseline: readonly ManagedAgentRuntimeStatus[] | undefined,
+  current: readonly ManagedAgentRuntimeStatus[] | undefined,
+  reconciled: readonly ManagedAgentRuntimeStatus[],
+): ManagedAgentRuntimeStatus[] {
+  const baselineByPair = new Map(
+    (baseline ?? []).map((runtime) => [runtimePairKey(runtime), runtime]),
+  );
+  const currentByPair = new Map(
+    (current ?? []).map((runtime) => [runtimePairKey(runtime), runtime]),
+  );
+  const reconciledPairs = new Set<string>();
+  const merged = reconciled.map((runtime) => {
+    const key = runtimePairKey(runtime);
+    reconciledPairs.add(key);
+    const currentRuntime = currentByPair.get(key);
+    const baselineRuntime = baselineByPair.get(key);
+    // A status event or user action may update this pair while startup
+    // reconciliation is discovering others. Only preserve cache rows that
+    // changed after the reconcile began; otherwise its result is newer.
+    return currentRuntime && currentRuntime !== baselineRuntime
+      ? { ...runtime, ...currentRuntime }
+      : runtime;
+  });
+
+  for (const runtime of current ?? []) {
+    if (!reconciledPairs.has(runtimePairKey(runtime))) merged.push(runtime);
+  }
+  return merged;
+}
+
+function runtimePairKey(runtime: ManagedAgentRuntimeStatus): string {
+  return JSON.stringify([runtime.pubkey, runtime.relayUrl]);
+}
+
+export function cacheReconciledManagedAgentRuntimes(
+  queryClient: QueryClient,
+  baseline: readonly ManagedAgentRuntimeStatus[] | undefined,
+  runtimes: readonly ManagedAgentRuntimeStatus[],
+): void {
+  queryClient.setQueryData<ManagedAgentRuntimeStatus[]>(
+    managedAgentRuntimesQueryKey,
+    (current) => mergeManagedAgentRuntimeStatuses(baseline, current, runtimes),
+  );
+}
 
 export function useManagedAgentRuntimesQuery(options?: { enabled?: boolean }) {
   return useQuery({
