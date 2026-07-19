@@ -1,5 +1,5 @@
 use super::*;
-use crate::managed_agents::types::RespondTo;
+use crate::managed_agents::types::{ConversationMode, RespondTo};
 use std::collections::BTreeMap;
 
 fn record() -> ManagedAgentRecord {
