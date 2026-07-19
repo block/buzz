@@ -438,8 +438,8 @@ pub struct AppState {
     pub db: Db,
     /// Redis pool for readiness health checks.
     pub redis_pool: deadpool_redis::Pool,
-    /// Audit event service.
-    pub audit: Arc<AuditService>,
+    /// Audit event service, absent when audit logging is disabled.
+    pub audit: Option<Arc<AuditService>>,
     /// Pub/sub manager for broadcasting events to subscribers.
     pub pubsub: Arc<PubSubManager>,
     /// Authentication service.
@@ -497,9 +497,8 @@ pub struct AppState {
     /// access check so open channels stay zero-cost. Invalidated on a flip.
     pub channel_visibility_cache: Arc<moka::sync::Cache<(CommunityId, Uuid), String>>,
 
-    /// Bounded channel for audit logging — backpressure instead of unbounded spawns.
-    /// Uses .send().await (blocks caller if full) because audit entries must not be lost.
-    pub audit_tx: mpsc::Sender<buzz_audit::NewAuditEntry>,
+    /// Bounded channel for audit logging, absent when audit logging is disabled.
+    pub audit_tx: Option<mpsc::Sender<buzz_audit::NewAuditEntry>>,
     /// Media storage client (S3/MinIO).
     pub media_storage: Arc<MediaStorage>,
     /// Git object-store backend (content-addressed packs/manifests plus
@@ -571,7 +570,7 @@ impl AppState {
         config: Config,
         db: Db,
         redis_pool: deadpool_redis::Pool,
-        audit: AuditService,
+        audit: impl Into<Option<AuditService>>,
         pubsub: Arc<PubSubManager>,
         auth: AuthService,
         search: SearchService,
@@ -583,12 +582,16 @@ impl AppState {
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
 
-        let audit_arc = Arc::new(audit);
+        let audit_arc = audit.into().map(Arc::new);
         let (audit_tx, mut audit_rx) = mpsc::channel::<buzz_audit::NewAuditEntry>(1000);
-        let audit_for_worker = Arc::clone(&audit_arc);
+        let audit_for_worker = audit_arc.clone();
         let audit_cancel = CancellationToken::new();
         let audit_cancel_worker = audit_cancel.clone();
         let audit_worker_handle = tokio::spawn(async move {
+            let Some(audit_for_worker) = audit_for_worker else {
+                audit_cancel_worker.cancelled().await;
+                return;
+            };
             // Normal operation: process entries as they arrive.
             loop {
                 tokio::select! {
@@ -631,6 +634,7 @@ impl AppState {
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
+        let audit_enabled = audit_arc.is_some();
         let state = Self {
             config: Arc::new(config),
             db,
@@ -678,7 +682,7 @@ impl AppState {
                     .support_invalidation_closures()
                     .build(),
             ),
-            audit_tx,
+            audit_tx: audit_enabled.then_some(audit_tx),
             media_storage: Arc::new(media_storage),
             git_store,
             audio_rooms: Arc::new(AudioRoomManager::new()),

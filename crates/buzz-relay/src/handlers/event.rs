@@ -545,6 +545,9 @@ async fn enqueue_event_created_audit(
     actor_pubkey_hex: &str,
     event_id_hex: &str,
 ) {
+    let Some(audit_tx) = &state.audit_tx else {
+        return;
+    };
     // Audit via bounded channel (capacity 1000). Uses .send().await so entries
     // are never silently dropped — backpressure propagates to the event handler
     // if the queue is full. This is intentional: the audit advisory lock already
@@ -568,7 +571,7 @@ async fn enqueue_event_created_audit(
             "channel_id": stored_event.channel_id,
         }),
     };
-    if let Err(e) = state.audit_tx.send(audit_entry).await {
+    if let Err(e) = audit_tx.send(audit_entry).await {
         error!(event_id = %event_id_hex, "Audit channel closed — entry lost: {e}");
         metrics::counter!("buzz_audit_send_errors_total").increment(1);
     }

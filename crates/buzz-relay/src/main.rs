@@ -316,17 +316,19 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => error!("Failed to backfill d_tags: {e}"),
     }
 
-    let audit_pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .min_connections(1)
-        .connect(&config.database_url)
-        .await
-        .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
-    let audit = AuditService::new(audit_pool);
-    // Audit schema is provisioned by the sqlx migrations at startup (the
-    // `audit_log` DDL is part of the migrated schema), so there is no runtime
-    // schema-ensure step.
-    info!("Audit service ready");
+    let audit = if config.audit_enabled {
+        let audit_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .min_connections(1)
+            .connect(&config.database_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
+        info!("Audit service ready");
+        Some(AuditService::new(audit_pool))
+    } else {
+        info!("Audit logging disabled by BUZZ_AUDIT_ENABLED");
+        None
+    };
 
     let redis_pool = {
         let cfg = deadpool_redis::Config::from_url(&config.redis_url);

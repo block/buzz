@@ -190,6 +190,10 @@ pub struct Config {
     /// serving media GET/HEAD. Default off for staged client rollout.
     pub require_media_get_auth: bool,
 
+    /// Whether tamper-evident audit logging is enabled. Defaults to true.
+    /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
+    pub audit_enabled: bool,
+
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
     /// of the client-provided one. Useful for testing ephemeral expiry quickly.
@@ -341,9 +345,9 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
     Ok(url)
 }
 
-fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
+fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
     match std::env::var(name) {
-        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(ConfigError::InvalidValue(format!(
             "{name} must be valid UTF-8: {error}"
         ))),
@@ -355,6 +359,10 @@ fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
             ))),
         },
     }
+}
+
+fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
+    parse_bool(name, false)
 }
 
 fn ensure_git_repo_path(
@@ -738,6 +746,7 @@ impl Config {
         let terms_markdown = read_policy_markdown("BUZZ_TERMS_OF_SERVICE_MARKDOWN")?;
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
+        let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
@@ -849,6 +858,7 @@ impl Config {
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
             require_media_get_auth,
+            audit_enabled,
             ephemeral_ttl_override,
             git_repo_path,
             git_max_pack_bytes,
@@ -951,6 +961,39 @@ mod tests {
             set.as_deref(),
             Some("postgres://buzz:pw@replica:5432/buzz") // sadscan:disable np.postgres.1
         );
+    }
+
+    #[test]
+    fn audit_logging_defaults_on_and_accepts_explicit_off() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
+        std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        assert!(parse_bool("BUZZ_AUDIT_ENABLED", true).unwrap());
+        std::env::set_var("BUZZ_AUDIT_ENABLED", "false");
+        assert!(!parse_bool("BUZZ_AUDIT_ENABLED", true).unwrap());
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_AUDIT_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        }
+    }
+
+    #[test]
+    fn audit_logging_rejects_invalid_boolean() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
+        std::env::set_var("BUZZ_AUDIT_ENABLED", "sometimes");
+        let result = parse_bool("BUZZ_AUDIT_ENABLED", true);
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_AUDIT_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        }
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_AUDIT_ENABLED")
+        ));
     }
 
     #[test]
