@@ -636,7 +636,9 @@ for (const authStatus of [
       await setupButton.click();
       await expect(card).toHaveAttribute("aria-checked", "true");
     } else if (authStatus.status === "unknown") {
-      const error = card.getByText("Status unavailable");
+      const error = card.getByRole("status", {
+        name: /Status unavailable/,
+      });
       await expect(error).toBeVisible();
       await expect(error).toHaveCSS("font-size", "12px");
       await expect(error).toHaveCSS("position", "absolute");
@@ -650,7 +652,9 @@ for (const authStatus of [
       await card.click();
       await expect(card).toHaveAttribute("aria-checked", "true");
     } else {
-      const error = card.getByText("Configuration invalid");
+      const error = card.getByRole("status", {
+        name: /Configuration invalid/,
+      });
       await expect(error).toBeVisible();
       await expect(error).toHaveCSS("font-size", "12px");
       await expect(error).toHaveCSS("position", "absolute");
@@ -717,7 +721,7 @@ test("unavailable sign-in options use the compact error and tooltip pattern", as
   const setupButton = card.getByTestId(
     "onboarding-runtime-instructions-claude",
   );
-  const error = card.getByText("Sign-in unavailable");
+  const error = card.getByRole("status", { name: /Sign-in unavailable/ });
   await expect(error).toBeVisible();
   await expect(error).toHaveCSS("font-size", "12px");
   await expect(error).toHaveCSS("position", "absolute");
@@ -775,7 +779,7 @@ test("failed sign-in uses the compact error and tooltip pattern", async ({
 
   await setupButton.click();
 
-  const error = card.getByText("Sign-in failed");
+  const error = card.getByRole("status", { name: /Sign-in failed/ });
   await expect(error).toBeVisible();
   await expect(error).toHaveCSS("font-size", "12px");
   await expect(error).toHaveCSS("position", "absolute");
@@ -786,6 +790,28 @@ test("failed sign-in uses the compact error and tooltip pattern", async ({
     "Couldn’t start sign-in. Try again.",
   );
   await expect(page.getByRole("tooltip")).not.toContainText(connectionError);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("tooltip")).toBeHidden();
+  await error.focus();
+  const tooltip = page.getByRole("tooltip");
+  await expect(tooltip).toHaveText("Couldn’t start sign-in. Try again.");
+  await expect(error).toHaveAccessibleName(
+    "Sign-in failed. Couldn’t start sign-in. Try again.",
+  );
+  const [cardBox, setupBox, tooltipBox] = await Promise.all([
+    card.boundingBox(),
+    setupButton.boundingBox(),
+    tooltip.boundingBox(),
+  ]);
+  expect(cardBox).not.toBeNull();
+  expect(setupBox).not.toBeNull();
+  expect(tooltipBox).not.toBeNull();
+  expect(tooltipBox?.y).toBeGreaterThanOrEqual(
+    (cardBox?.y ?? 0) + (cardBox?.height ?? 0),
+  );
+  expect(tooltipBox?.y).toBeGreaterThanOrEqual(
+    (setupBox?.y ?? 0) + (setupBox?.height ?? 0),
+  );
   await expect(setupButton).toBeVisible();
   expect(
     await heading.evaluate((element) => element.getBoundingClientRect().top),

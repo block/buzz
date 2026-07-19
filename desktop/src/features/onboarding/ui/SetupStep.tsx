@@ -23,6 +23,7 @@ import {
   runtimeCanBeSelected,
 } from "./onboardingRuntimeSelection";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { RuntimeErrorTooltip } from "./RuntimeErrorTooltip";
 import { OnboardingFooter } from "./OnboardingFooter";
 import { getRuntimeDisplayLabel, RuntimeIcon } from "./RuntimeIcon";
 import {
@@ -129,26 +130,6 @@ function useSetupFlashState(setupFlashToken: number) {
   return isFlashing;
 }
 
-function RuntimeErrorTooltip({
-  children,
-  detail,
-}: {
-  children: React.ReactNode;
-  detail: string;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent
-        className="max-w-80 bg-black text-left text-xs text-white shadow-sm"
-        side="top"
-      >
-        <p className="text-xs leading-4 text-white">{detail}</p>
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
 function RuntimeStatus({
   installError,
   installSuccess,
@@ -218,18 +199,18 @@ function RuntimeStatus({
           SET UP
         </Button>
         {methodsQuery.error instanceof Error ? (
-          <RuntimeErrorTooltip detail="Couldn’t load sign-in options.">
-            <span className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
-              Sign-in unavailable
-            </span>
-          </RuntimeErrorTooltip>
+          <RuntimeErrorTooltip
+            className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
+            detail="Couldn’t load sign-in options."
+            label="Sign-in unavailable"
+          />
         ) : null}
         {connectMutation.error instanceof Error ? (
-          <RuntimeErrorTooltip detail="Couldn’t start sign-in. Try again.">
-            <span className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
-              Sign-in failed
-            </span>
-          </RuntimeErrorTooltip>
+          <RuntimeErrorTooltip
+            className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
+            detail="Couldn’t start sign-in. Try again."
+            label="Sign-in failed"
+          />
         ) : null}
       </div>
     );
@@ -513,11 +494,11 @@ function getOnboardingAuthMethods(
 function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   if (runtime.authStatus.status === "config_invalid") {
     return (
-      <RuntimeErrorTooltip detail="Check this runtime’s configuration and try again.">
-        <p className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
-          Configuration invalid
-        </p>
-      </RuntimeErrorTooltip>
+      <RuntimeErrorTooltip
+        className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
+        detail="Check this runtime’s configuration and try again."
+        label="Configuration invalid"
+      />
     );
   }
   if (
@@ -525,11 +506,11 @@ function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
     runtime.authStatus.status === "unknown"
   ) {
     return (
-      <RuntimeErrorTooltip detail="Couldn’t verify authentication.">
-        <p className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
-          Status unavailable
-        </p>
-      </RuntimeErrorTooltip>
+      <RuntimeErrorTooltip
+        className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
+        detail="Couldn’t verify authentication."
+        label="Status unavailable"
+      />
     );
   }
   return null;
@@ -613,15 +594,13 @@ function RuntimeCard({
         ) : null}
       </div>
       {installError ? (
-        <RuntimeErrorTooltip detail={runtimeDetailText(runtime)}>
-          <p
-            className="absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
-            data-testid={`onboarding-runtime-error-${runtime.id}`}
-          >
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-            <span className="min-w-0 truncate">Setup failed</span>
-          </p>
-        </RuntimeErrorTooltip>
+        <RuntimeErrorTooltip
+          className="absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
+          detail={runtimeDetailText(runtime)}
+          label="Setup failed"
+          showIcon
+          testId={`onboarding-runtime-error-${runtime.id}`}
+        />
       ) : (
         <RuntimeAuthError runtime={runtime} />
       )}
