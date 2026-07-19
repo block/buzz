@@ -9419,6 +9419,8 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
+      case "relay_requires_membership":
+        return true;
       case "discover_acp_providers":
         return handleDiscoverAcpRuntimes(activeConfig);
       case "discover_acp_auth_methods":

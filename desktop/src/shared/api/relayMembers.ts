@@ -1,5 +1,5 @@
 import { relayClient } from "@/shared/api/relayClient";
-import { getRelayHttpUrl, signRelayEvent } from "@/shared/api/tauri";
+import { invokeTauri, signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import type {
   RelayEvent,
@@ -123,18 +123,7 @@ export async function listRelayMembers(): Promise<RelayMember[]> {
 }
 
 async function relayRequiresMembership(): Promise<boolean> {
-  const base = (await getRelayHttpUrl()).replace(/\/+$/, "");
-  const response = await fetch(`${base}/info`, {
-    headers: { Accept: "application/nostr+json" },
-  });
-  if (!response.ok) {
-    throw new Error(`Relay information request failed (${response.status}).`);
-  }
-  const info = (await response.json()) as { supported_nips?: unknown };
-  return (
-    Array.isArray(info.supported_nips) &&
-    info.supported_nips.some((nip) => nip === 43)
-  );
+  return invokeTauri<boolean>("relay_requires_membership");
 }
 
 export async function getMyRelayMembershipLookup(): Promise<RelayMembershipLookup> {

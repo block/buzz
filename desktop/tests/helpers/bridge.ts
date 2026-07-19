@@ -610,16 +610,6 @@ export async function installBridge(page: Page, options: BridgeOptions) {
       ? TEST_IDENTITIES[options.user ?? "tyler"]
       : undefined;
 
-  if (options.mode === "mock") {
-    const relayHttpUrl = options.relayHttpUrl ?? DEFAULT_RELAY_HTTP_URL;
-    await page.route(`${relayHttpUrl.replace(/\/+$/, "")}/info`, (route) =>
-      route.fulfill({
-        body: JSON.stringify({ supported_nips: [43] }),
-        contentType: "application/nostr+json",
-      }),
-    );
-  }
-
   // Most specs seed a community so useCommunityInit doesn't show WelcomeSetup.
   // skipOnboardingSeed only controls the onboarding-completion flag.
   if (!options.skipCommunitySeed) {
