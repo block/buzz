@@ -117,6 +117,65 @@ test("invite requires age and legal consent before opening Buzz", async ({
   expect(consentBox?.width).toBe(acceptButtonBox?.width);
 });
 
+test("invite asks Safari users to choose their Mac download", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    userAgent:
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Version/26.5 Safari/605.1.15",
+  });
+  await context.addInitScript(() => {
+    Object.defineProperties(navigator, {
+      platform: { configurable: true, value: "MacIntel" },
+      maxTouchPoints: { configurable: true, value: 0 },
+      userAgentData: { configurable: true, value: undefined },
+    });
+  });
+  const page = await context.newPage();
+  await page.route("**/api/join-policy", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ policy: null }),
+    });
+  });
+  await page.route("https://api.github.com/**", async (route) => {
+    await route.fulfill({ status: 500 });
+  });
+
+  await page.goto("/invite/demo-code");
+  const download = page.getByRole("link", { name: "Download it now" });
+  await expect(download).toHaveAttribute("aria-haspopup", "dialog");
+  await download.click();
+
+  const chooser = page.getByRole("dialog", {
+    name: "Which Mac do you have?",
+  });
+  await expect(chooser).toBeVisible();
+  await expect(chooser.getByRole("link", { name: /Newer Mac/ })).toContainText(
+    "2021 or later, or a late-2020 Mac with an Apple M1 chip",
+  );
+  await expect(chooser.getByRole("link", { name: /Older Mac/ })).toContainText(
+    "2019 or earlier, or a 2020 Mac with an Intel processor",
+  );
+  await expect(chooser.getByText("About This Mac")).toBeVisible();
+
+  const openedPagePromise = context.waitForEvent("page");
+  await chooser.getByRole("link", { name: /Newer Mac/ }).click();
+  const openedPage = await openedPagePromise;
+  await expect(chooser).toBeHidden();
+  await expect(openedPage).toHaveURL("https://github.com/block/buzz/releases");
+  await expect(page).toHaveURL(/\/invite\/demo-code$/);
+  await openedPage.close();
+
+  await download.click();
+  await expect(chooser).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(chooser).toBeHidden();
+  await expect(download).toBeFocused();
+  await context.close();
+});
+
 test("invite download falls back for mobile and non-desktop devices", async ({
   browser,
 }) => {

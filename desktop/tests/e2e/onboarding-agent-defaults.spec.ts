@@ -636,13 +636,35 @@ for (const authStatus of [
       await setupButton.click();
       await expect(card).toHaveAttribute("aria-checked", "true");
     } else if (authStatus.status === "unknown") {
+      const error = card.getByRole("status", {
+        name: /Status unavailable/,
+      });
+      await expect(error).toBeVisible();
+      await expect(error).toHaveCSS("font-size", "12px");
+      await expect(error).toHaveCSS("position", "absolute");
+      await error.hover();
+      await expect(page.getByRole("tooltip")).toHaveText(
+        "Couldn’t verify authentication.",
+      );
       await expect(
-        card.getByText("Couldn’t verify authentication"),
-      ).toBeVisible();
+        card.getByRole("button", { name: "Check Claude again" }),
+      ).toHaveText("CHECK AGAIN");
       await card.click();
       await expect(card).toHaveAttribute("aria-checked", "true");
     } else {
-      await expect(card.getByText("Fix Claude config")).toBeVisible();
+      const error = card.getByRole("status", {
+        name: /Configuration invalid/,
+      });
+      await expect(error).toBeVisible();
+      await expect(error).toHaveCSS("font-size", "12px");
+      await expect(error).toHaveCSS("position", "absolute");
+      await error.hover();
+      await expect(page.getByRole("tooltip")).toHaveText(
+        "Check this runtime’s configuration and try again.",
+      );
+      await expect(page.getByRole("tooltip")).not.toContainText(
+        "Fix Claude config",
+      );
       await card.click();
       await expect(card).toHaveAttribute("aria-checked", "true");
     }
@@ -676,6 +698,199 @@ test("setup cards only show checks after user selection", async ({ page }) => {
   await expect(
     page.getByTestId("onboarding-runtime-installed-goose"),
   ).toHaveText("INSTALLED");
+});
+
+test("unavailable sign-in options use the compact error and tooltip pattern", async ({
+  page,
+}) => {
+  const discoveryError = "Auth discovery failed with sensitive details";
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("claude", { status: "logged_out" }),
+      ],
+      acpAuthMethodsError: discoveryError,
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const card = page.getByTestId("onboarding-runtime-claude");
+  const setupButton = card.getByTestId(
+    "onboarding-runtime-instructions-claude",
+  );
+  const error = card.getByRole("status", { name: /Sign-in unavailable/ });
+  await expect(error).toBeVisible();
+  await expect(error).toHaveCSS("font-size", "12px");
+  await expect(error).toHaveCSS("position", "absolute");
+  await expect(error).toHaveCSS("white-space", "nowrap");
+  await expect(error).not.toHaveAttribute("title");
+  await error.hover();
+  await expect(page.getByRole("tooltip")).toHaveText(
+    "Couldn’t load sign-in options.",
+  );
+  await expect(page.getByRole("tooltip")).not.toContainText(discoveryError);
+  await expect(setupButton).toBeVisible();
+  await expect(setupButton).toHaveText("SET UP");
+});
+
+test("failed sign-in uses the compact error and tooltip pattern", async ({
+  page,
+}) => {
+  const connectionError = "Terminal launch failed with sensitive details";
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("claude", { status: "logged_out" }),
+      ],
+      acpAuthMethods: {
+        claude: {
+          methods: [
+            {
+              id: "login",
+              name: "Sign in",
+              description: null,
+              type: "terminal",
+            },
+          ],
+        },
+      },
+      connectAcpRuntimeError: connectionError,
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const card = page.getByTestId("onboarding-runtime-claude");
+  const setupButton = card.getByTestId(
+    "onboarding-runtime-instructions-claude",
+  );
+  const heading = card.getByRole("heading", { name: "Claude" });
+  const headingTopBefore = await heading.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
+  const setupTopBefore = await setupButton.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
+
+  await setupButton.click();
+
+  const error = card.getByRole("status", { name: /Sign-in failed/ });
+  await expect(error).toBeVisible();
+  await expect(error).toHaveCSS("font-size", "12px");
+  await expect(error).toHaveCSS("position", "absolute");
+  await expect(error).toHaveCSS("white-space", "nowrap");
+  await expect(error).not.toHaveAttribute("title");
+  await error.hover();
+  await expect(page.getByRole("tooltip")).toHaveText(
+    "Couldn’t start sign-in. Try again.",
+  );
+  await expect(page.getByRole("tooltip")).not.toContainText(connectionError);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("tooltip")).toBeHidden();
+  await error.focus();
+  const tooltip = page.getByRole("tooltip");
+  await expect(tooltip).toHaveText("Couldn’t start sign-in. Try again.");
+  await expect(error).toHaveAccessibleName(
+    "Sign-in failed. Couldn’t start sign-in. Try again.",
+  );
+  const [cardBox, setupBox, tooltipBox] = await Promise.all([
+    card.boundingBox(),
+    setupButton.boundingBox(),
+    tooltip.boundingBox(),
+  ]);
+  expect(cardBox).not.toBeNull();
+  expect(setupBox).not.toBeNull();
+  expect(tooltipBox).not.toBeNull();
+  expect(tooltipBox?.y).toBeGreaterThanOrEqual(
+    (cardBox?.y ?? 0) + (cardBox?.height ?? 0),
+  );
+  expect(tooltipBox?.y).toBeGreaterThanOrEqual(
+    (setupBox?.y ?? 0) + (setupBox?.height ?? 0),
+  );
+  await expect(setupButton).toBeVisible();
+  expect(
+    await heading.evaluate((element) => element.getBoundingClientRect().top),
+  ).toBe(headingTopBefore);
+  expect(
+    await setupButton.evaluate(
+      (element) => element.getBoundingClientRect().top,
+    ),
+  ).toBe(setupTopBefore);
+});
+
+test("failed install pins a single-line 12px error without moving card content", async ({
+  page,
+}) => {
+  const installError = "Install already in progress with additional details";
+  await installMockBridge(
+    page,
+    {
+      installAcpRuntimeResult: {
+        success: false,
+        steps: [
+          {
+            step: "Install adapter",
+            command: "npm install adapter",
+            success: false,
+            stdout: "",
+            stderr: installError,
+            exit_code: 1,
+          },
+        ],
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const card = page.getByTestId("onboarding-runtime-claude");
+  const setupButton = page.getByTestId("onboarding-runtime-install-claude");
+  const heading = card.getByRole("heading", { name: "Claude" });
+  const headingTopBefore = await heading.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
+  const detail = card.getByText("CLI detected; ACP adapter missing.");
+  const detailTopBefore = await detail.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
+  const setupTopBefore = await setupButton.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
+
+  await setupButton.click();
+
+  const error = page.getByTestId("onboarding-runtime-error-claude");
+  await expect(error).toBeVisible();
+  await expect(error).toHaveText(/Setup failed/);
+  await expect(error).not.toHaveAttribute("title");
+  await expect(setupButton).toBeVisible();
+  await expect(setupButton).toHaveText("SET UP");
+  await expect(error).toHaveCSS("font-size", "12px");
+  await expect(error).toHaveCSS("position", "absolute");
+  await expect(error).toHaveCSS("white-space", "nowrap");
+  await expect(error.locator("span")).toHaveCSS("text-overflow", "ellipsis");
+  await error.hover();
+  await expect(page.getByRole("tooltip")).toHaveText(
+    "Setup couldn’t be completed. Try again.",
+  );
+  await expect(page.getByRole("tooltip")).not.toContainText(installError);
+  expect(
+    await heading.evaluate((element) => element.getBoundingClientRect().top),
+  ).toBe(headingTopBefore);
+  expect(
+    await detail.evaluate((element) => element.getBoundingClientRect().top),
+  ).toBe(detailTopBefore);
+  expect(
+    await setupButton.evaluate(
+      (element) => element.getBoundingClientRect().top,
+    ),
+  ).toBe(setupTopBefore);
 });
 
 test("successful install still waits for refreshed runtime readiness", async ({

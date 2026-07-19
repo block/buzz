@@ -1,6 +1,6 @@
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check, Copy, Info } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { normalizeRelayUrl } from "@/features/communities/relayProbe";
@@ -186,18 +186,27 @@ export function WelcomeSetup({
               direction={transitionDirection}
               transitionKey={`join-${transitionDirection}`}
             >
-              <div className="w-full max-w-[500px]">
-                <h1 className="text-title font-normal">
-                  Request access to community
+              <div className="w-full max-w-[760px]">
+                <h1
+                  aria-label="Request access to community"
+                  className="text-title font-normal"
+                >
+                  Request access to a community
                 </h1>
-                <p className="mt-3 text-sm leading-6 text-foreground/80">
+                <p className="mx-auto mt-3 max-w-[430px] text-sm leading-6">
                   Ask the community host to send you an invite link or add you
                   directly using your public key.
                 </p>
               </div>
-              <div className="flex w-full flex-1 items-center justify-center pb-4 pt-12">
-                <div className="w-full max-w-4xl space-y-7">
-                  <div>
+              <div className="flex w-full flex-1 items-center justify-center pb-2 pt-6">
+                <div className="w-full max-w-4xl space-y-16">
+                  <section aria-labelledby="welcome-join-key-step">
+                    <h2
+                      className="mb-4 text-sm font-normal"
+                      id="welcome-join-key-step"
+                    >
+                      Step 1: Share your public key
+                    </h2>
                     <div
                       className={ONBOARDING_KEY_FRAME_CLASS}
                       data-testid="welcome-join-npub-frame"
@@ -213,7 +222,7 @@ export function WelcomeSetup({
                         </div>
                         <Button
                           aria-label="Copy npub"
-                          className="h-10 w-10 shrink-0 text-muted-foreground hover:text-foreground"
+                          className="h-10 w-10 shrink-0 text-[var(--buzz-onboarding-backup-ink)] hover:bg-transparent hover:text-foreground"
                           disabled={!npub}
                           onClick={() => {
                             void writeTextToClipboard(npub).then(() => {
@@ -240,67 +249,56 @@ export function WelcomeSetup({
                       <p className="mt-4 text-sm text-destructive">
                         {identityError}
                       </p>
-                    ) : (
-                      <p className="mx-auto mt-4 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
-                        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                        <span>
-                          This is safe to share. It does not reveal your private
-                          key.
-                        </span>
-                      </p>
-                    )}
-                  </div>
+                    ) : null}
+                  </section>
                   <form
-                    className="mx-auto w-full max-w-[680px] text-left"
+                    aria-labelledby="welcome-join-url-step"
+                    className="mx-auto w-full"
+                    id="welcome-join-form"
                     onSubmit={handleJoin}
                   >
-                    <label
-                      className="text-sm font-medium"
-                      htmlFor="welcome-join-community-url"
+                    <h2
+                      className="mb-4 text-sm font-normal"
+                      id="welcome-join-url-step"
                     >
-                      Community URL
-                    </label>
-                    <div className="mt-2 flex items-start gap-3">
-                      <div className="min-w-0 flex-1">
-                        <Input
-                          autoCapitalize="none"
-                          autoCorrect="off"
-                          data-testid="welcome-join-community-url"
-                          id="welcome-join-community-url"
-                          onChange={(event) => {
-                            setRelayUrl(event.target.value);
-                            setRelayUrlError(null);
-                          }}
-                          placeholder="https://community.example.com"
-                          spellCheck={false}
-                          type="url"
-                          value={relayUrl}
-                        />
-                        {relayUrlError ? (
-                          <p className="mt-2 text-sm text-destructive">
-                            {relayUrlError}
-                          </p>
-                        ) : (
-                          <p className="mt-2 text-xs leading-5 text-foreground/70">
-                            Once the host adds your public key, enter the URL to
-                            join. You can retry if access is not ready yet.
-                          </p>
-                        )}
-                      </div>
-                      <Button
-                        className="h-10 shrink-0 rounded-full px-6"
-                        disabled={!relayUrl.trim()}
-                        type="submit"
-                      >
-                        Join community
-                      </Button>
-                    </div>
+                      Step 2: Paste in your community URL
+                    </h2>
+                    <Input
+                      aria-label="Community URL"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      className="h-auto rounded-xl border-0 bg-white/50 px-8 py-7 text-center font-mono !text-4xl text-[color:var(--buzz-onboarding-backup-ink)] shadow-none placeholder:text-[color:var(--buzz-onboarding-backup-ink)] placeholder:opacity-10 focus-visible:ring-1 focus-visible:ring-[rgb(113_113_6_/_0.5)]"
+                      data-testid="welcome-join-community-url"
+                      id="welcome-join-community-url"
+                      onChange={(event) => {
+                        setRelayUrl(event.target.value);
+                        setRelayUrlError(null);
+                      }}
+                      placeholder="Enter community URL"
+                      spellCheck={false}
+                      type="url"
+                      value={relayUrl}
+                    />
+                    {relayUrlError ? (
+                      <p className="mt-3 text-sm text-destructive">
+                        {relayUrlError}
+                      </p>
+                    ) : null}
                   </form>
                 </div>
               </div>
               <OnboardingFooter>
                 <Button
-                  className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+                  className="h-10 w-44 rounded-full"
+                  disabled={!relayUrl.trim()}
+                  form="welcome-join-form"
+                  type="submit"
+                >
+                  <span aria-hidden>Next</span>
+                  <span className="sr-only">Join community</span>
+                </Button>
+                <Button
+                  className="h-10 w-44 rounded-full bg-foreground/10 hover:bg-foreground/15"
                   onClick={() => showPage("welcome")}
                   type="button"
                   variant="ghost"

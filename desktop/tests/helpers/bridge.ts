@@ -130,6 +130,7 @@ type MockBridgeOptions = {
   acpRuntimesCatalog?: Record<string, unknown>[];
   acpRuntimesDelayMs?: number;
   acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
+  acpAuthMethodsError?: string;
   connectAcpRuntimeResult?: { launched: boolean };
   connectAcpRuntimeDelayMs?: number;
   connectAcpRuntimeError?: string;

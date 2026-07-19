@@ -285,6 +285,13 @@
     --buzz-onboarding-emoji-picker-background: 245, 245, 245;
     --buzz-onboarding-emoji-picker-color: 23, 23, 23;
     --buzz-onboarding-emoji-picker-input: 255, 255, 255;
+    --buzz-onboarding-avatar-dialog-bg: 255 255 255;
+    --buzz-onboarding-avatar-accent-bg: 240 240 205;
+    --buzz-onboarding-avatar-accent-fg: 113 113 6;
+    --buzz-onboarding-avatar-action-bg: 23 23 23;
+    --buzz-onboarding-avatar-action-fg: 240 240 205;
+    --buzz-onboarding-avatar-control-fg: 113 113 6;
+    --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
   }
 
   .buzz-onboarding-key-text {
@@ -310,9 +317,20 @@
     --buzz-onboarding-emoji-picker-background: 38, 38, 38;
     --buzz-onboarding-emoji-picker-color: 250, 250, 250;
     --buzz-onboarding-emoji-picker-input: 10, 10, 10;
+    --buzz-onboarding-avatar-dialog-bg: 24 24 20;
+    --buzz-onboarding-avatar-accent-bg: 211 211 163;
+    --buzz-onboarding-avatar-accent-fg: 24 24 20;
+    --buzz-onboarding-avatar-action-bg: 113 113 6;
+    --buzz-onboarding-avatar-action-fg: 240 240 205;
+    --buzz-onboarding-avatar-control-fg: 224 224 176;
+    --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
   }
 
-  .buzz-onboarding-neutral-theme[data-system-color-scheme="light"] {
+  .buzz-onboarding-neutral-theme[data-system-color-scheme="light"],
+  .dark
+    .buzz-onboarding-neutral-theme[data-system-color-scheme="light"]:not(
+      .buzz-startup-shell
+    ) {
     --background: 0 0% 100%;
     --foreground: 0 0% 9%;
     --primary: 0 0% 9%;
@@ -329,6 +347,13 @@
     --buzz-onboarding-emoji-picker-background: 245, 245, 245;
     --buzz-onboarding-emoji-picker-color: 23, 23, 23;
     --buzz-onboarding-emoji-picker-input: 255, 255, 255;
+    --buzz-onboarding-avatar-dialog-bg: 255 255 255;
+    --buzz-onboarding-avatar-accent-bg: 240 240 205;
+    --buzz-onboarding-avatar-accent-fg: 113 113 6;
+    --buzz-onboarding-avatar-action-bg: 23 23 23;
+    --buzz-onboarding-avatar-action-fg: 240 240 205;
+    --buzz-onboarding-avatar-control-fg: 113 113 6;
+    --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
   }
 
   .buzz-onboarding-neutral-theme[data-system-color-scheme="dark"]:not(
@@ -350,6 +375,13 @@
     --buzz-onboarding-emoji-picker-background: 38, 38, 38;
     --buzz-onboarding-emoji-picker-color: 250, 250, 250;
     --buzz-onboarding-emoji-picker-input: 10, 10, 10;
+    --buzz-onboarding-avatar-dialog-bg: 24 24 20;
+    --buzz-onboarding-avatar-accent-bg: 211 211 163;
+    --buzz-onboarding-avatar-accent-fg: 24 24 20;
+    --buzz-onboarding-avatar-action-bg: 113 113 6;
+    --buzz-onboarding-avatar-action-fg: 240 240 205;
+    --buzz-onboarding-avatar-control-fg: 224 224 176;
+    --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
   }
 
   /* The key-import card is viewport-centered on ordinary windows, independent

@@ -23,6 +23,7 @@ import {
   runtimeCanBeSelected,
 } from "./onboardingRuntimeSelection";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { RuntimeErrorTooltip } from "./RuntimeErrorTooltip";
 import { OnboardingFooter } from "./OnboardingFooter";
 import { getRuntimeDisplayLabel, RuntimeIcon } from "./RuntimeIcon";
 import {
@@ -153,6 +154,7 @@ function RuntimeStatus({
       runtime.authStatus.status === "logged_out",
   });
   const connectMutation = useConnectAcpRuntimeMutation();
+  const runtimesQuery = useAcpRuntimesQuery();
   const authMethods = getOnboardingAuthMethods(
     runtime,
     methodsQuery.data?.methods ?? [],
@@ -197,14 +199,18 @@ function RuntimeStatus({
           SET UP
         </Button>
         {methodsQuery.error instanceof Error ? (
-          <span className="text-2xs text-destructive">
-            Couldn’t load sign-in options.
-          </span>
+          <RuntimeErrorTooltip
+            className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
+            detail="Couldn’t load sign-in options."
+            label="Sign-in unavailable"
+          />
         ) : null}
         {connectMutation.error instanceof Error ? (
-          <span className="text-2xs text-destructive">
-            {connectMutation.error.message}
-          </span>
+          <RuntimeErrorTooltip
+            className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
+            detail="Couldn’t start sign-in. Try again."
+            label="Sign-in failed"
+          />
         ) : null}
       </div>
     );
@@ -223,11 +229,44 @@ function RuntimeStatus({
     );
   }
 
-  if (installError) {
+  if (
+    runtime.availability === "available" &&
+    runtime.authStatus.status === "unknown"
+  ) {
     return (
-      <div className="flex h-8 w-8 items-center justify-center">
-        <AlertTriangle className="h-4 w-4 text-destructive" />
-      </div>
+      <Button
+        aria-label={`Check ${runtime.label} again`}
+        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+        disabled={runtimesQuery.isFetching}
+        onClick={(event) => {
+          event.stopPropagation();
+          void runtimesQuery.refetch();
+        }}
+        type="button"
+        variant="ghost"
+      >
+        {runtimesQuery.isFetching ? "CHECKING…" : "CHECK AGAIN"}
+      </Button>
+    );
+  }
+
+  if (installError && runtime.canAutoInstall) {
+    return (
+      <Button
+        aria-label={`Retry ${runtime.label} setup`}
+        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+        data-setup-flash={isSetupFlashing ? "true" : undefined}
+        data-testid={`onboarding-runtime-install-${runtime.id}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onSelect();
+          onInstall();
+        }}
+        type="button"
+        variant="ghost"
+      >
+        SET UP
+      </Button>
     );
   }
 
@@ -402,7 +441,7 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   if (runtime.availability === "cli_missing") {
     return "ACP adapter detected; CLI missing.";
   }
-  return "Not installed yet.";
+  return "";
 }
 
 function isSupportedOnboardingAuthMethod(
@@ -452,36 +491,26 @@ function getOnboardingAuthMethods(
   return supported;
 }
 
-function RuntimeAuthActions({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
-  const runtimesQuery = useAcpRuntimesQuery();
-
+function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   if (runtime.authStatus.status === "config_invalid") {
     return (
-      <p className="mt-2 text-2xs leading-4 text-destructive">
-        {runtime.authStatus.diagnostic}
-      </p>
+      <RuntimeErrorTooltip
+        className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
+        detail="Check this runtime’s configuration and try again."
+        label="Configuration invalid"
+      />
     );
   }
-  if (runtime.authStatus.status === "unknown") {
+  if (
+    runtime.availability === "available" &&
+    runtime.authStatus.status === "unknown"
+  ) {
     return (
-      <div className="mt-2 flex flex-col items-center gap-1.5">
-        <span className="text-2xs text-muted-foreground">
-          Couldn’t verify authentication.
-        </span>
-        <Button
-          disabled={runtimesQuery.isFetching}
-          className="h-6 rounded-full px-2 text-2xs"
-          onClick={(event) => {
-            event.stopPropagation();
-            void runtimesQuery.refetch();
-          }}
-          size="sm"
-          type="button"
-          variant="ghost"
-        >
-          {runtimesQuery.isFetching ? "Checking…" : "Check again"}
-        </Button>
-      </div>
+      <RuntimeErrorTooltip
+        className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
+        detail="Couldn’t verify authentication."
+        label="Status unavailable"
+      />
     );
   }
   return null;
@@ -552,18 +581,29 @@ function RuntimeCard({
           runtime={runtime}
           setupFlashToken={setupFlashToken}
         />
-        {!isAvailable && !installError ? (
-          <p className="max-w-[13rem] text-2xs leading-4 text-muted-foreground">
+        {!isAvailable && runtimeDetailText(runtime) ? (
+          <p
+            aria-hidden={installError ? "true" : undefined}
+            className={cn(
+              "max-w-[13rem] text-2xs leading-4 text-muted-foreground",
+              installError && "invisible",
+            )}
+          >
             {runtimeDetailText(runtime)}
           </p>
         ) : null}
-        {installError ? (
-          <p className="max-w-[13rem] text-2xs leading-4 text-destructive">
-            {installError}
-          </p>
-        ) : null}
-        <RuntimeAuthActions runtime={runtime} />
       </div>
+      {installError ? (
+        <RuntimeErrorTooltip
+          className="absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
+          detail="Setup couldn’t be completed. Try again."
+          label="Setup failed"
+          showIcon
+          testId={`onboarding-runtime-error-${runtime.id}`}
+        />
+      ) : (
+        <RuntimeAuthError runtime={runtime} />
+      )}
     </div>
   );
 }

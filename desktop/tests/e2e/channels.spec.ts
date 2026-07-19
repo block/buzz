@@ -2773,6 +2773,21 @@ test("channel header omits the add agent action", async ({ page }) => {
   await expect(page.getByTestId("channel-management-trigger")).toBeVisible();
 });
 
+test("channel header actions show tooltips", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+  for (const [testId, label] of [
+    ["channel-members-trigger", "Channel members"],
+    ["channel-huddle-tooltip-trigger", "Huddle"],
+    ["channel-management-trigger", "Channel settings"],
+  ] as const) {
+    await page.getByTestId(testId).hover();
+    await expect(page.getByRole("tooltip", { name: label })).toBeVisible();
+  }
+});
+
 test("members sidebar collapses same-persona managed agents", async ({
   page,
 }) => {

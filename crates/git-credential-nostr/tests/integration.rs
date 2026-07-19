@@ -18,8 +18,12 @@ fn run_helper(input: &str, env_vars: &[(&str, &str)]) -> std::process::Output {
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .current_dir(std::env::temp_dir())
         .env_remove("NOSTR_PRIVATE_KEY")
-        // Prevent git config on the test machine from supplying a keyfile.
+        .env_remove("BUZZ_AUTH_TAG")
+        .env_remove("GIT_CONFIG_COUNT")
+        // Prevent git config on the test machine from supplying credentials.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("HOME", std::env::temp_dir());
     for (k, v) in env_vars {
@@ -114,6 +118,69 @@ fn happy_path() {
     assert!(event["pubkey"].is_string(), "event missing 'pubkey'");
     assert!(event["sig"].is_string(), "event missing 'sig'");
     assert!(event["tags"].is_array(), "event missing 'tags'");
+}
+
+/// A Buzz-managed agent must carry its NIP-OA owner attestation inside the
+/// signed NIP-98 event so the relay can admit it through the owner's membership.
+#[test]
+fn includes_nip_oa_auth_tag_in_signed_event() {
+    let agent_keys = Keys::generate();
+    let owner_keys = Keys::generate();
+    let nsec = agent_keys.secret_key().to_bech32().unwrap();
+    let auth_tag = serde_json::to_string(&[
+        "auth",
+        owner_keys.public_key().to_hex().as_str(),
+        "",
+        &"00".repeat(64),
+    ])
+    .expect("serialize auth tag");
+
+    let out = run_helper(
+        &valid_input(),
+        &[("NOSTR_PRIVATE_KEY", &nsec), ("BUZZ_AUTH_TAG", &auth_tag)],
+    );
+    assert!(
+        out.status.success(),
+        "helper failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let credential = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("credential="))
+        .expect("credential output");
+    let event_json = base64::engine::general_purpose::STANDARD
+        .decode(credential)
+        .expect("base64 credential");
+    let event: nostr::Event = serde_json::from_slice(&event_json).expect("NIP-98 event");
+
+    assert!(
+        event.verify().is_ok(),
+        "auth tag must be covered by the event signature"
+    );
+    assert!(event.tags.iter().any(|tag| tag.as_slice()
+        == [
+            "auth",
+            owner_keys.public_key().to_hex().as_str(),
+            "",
+            serde_json::from_str::<Vec<String>>(&auth_tag).unwrap()[3].as_str(),
+        ]));
+}
+
+/// A configured but malformed owner attestation must fail closed rather than
+/// silently authenticating the agent without delegation.
+#[test]
+fn malformed_nip_oa_auth_tag_fails_closed() {
+    let nsec = fresh_nsec();
+    let out = run_helper(
+        &valid_input(),
+        &[("NOSTR_PRIVATE_KEY", &nsec), ("BUZZ_AUTH_TAG", "not-json")],
+    );
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid NIP-OA auth tag"));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("credential="));
 }
 
 /// Old git (no `capability[]=authtype` in input) → empty line on stdout, exit 0.
@@ -264,7 +331,10 @@ fn bad_keyfile_permissions() {
 
     let out = run_helper(
         &valid_input(),
-        &[("HOME", git_config_dir.to_str().unwrap())],
+        &[
+            ("HOME", git_config_dir.to_str().unwrap()),
+            ("GIT_CONFIG_GLOBAL", git_config_file.to_str().unwrap()),
+        ],
     );
 
     // Clean up regardless of outcome.
