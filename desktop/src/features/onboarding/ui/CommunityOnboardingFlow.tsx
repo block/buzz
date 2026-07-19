@@ -496,7 +496,7 @@ export function CommunityOnboardingFlow({
                 )}
               >
                 <Button
-                  className={ONBOARDING_PRIMARY_CTA_CLASS}
+                  className={`${ONBOARDING_PRIMARY_CTA_CLASS} w-20`}
                   data-testid="community-profile-next"
                   disabled={
                     !displayName.trim() || isPending || isUploadingAvatar
@@ -505,6 +505,16 @@ export function CommunityOnboardingFlow({
                   type="button"
                 >
                   Next
+                </Button>
+                <Button
+                  className="h-9 w-20 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+                  data-testid="community-profile-back"
+                  disabled={isPending || isUploadingAvatar}
+                  onClick={onCancel}
+                  type="button"
+                  variant="ghost"
+                >
+                  Back
                 </Button>
               </OnboardingFooter>
               <Dialog

@@ -971,7 +971,7 @@ test("canceling a join to an existing inactive community preserves it", async ({
     .toEqual(["active-community", "existing-community"]);
 });
 
-test("connected first-community profile step cannot discard resumable onboarding", async ({
+test("connected first-community profile step offers equal-width Next and Back controls", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -1226,9 +1226,26 @@ test("connected first-community profile step cannot discard resumable onboarding
   await page.keyboard.press("Escape");
   await expect(avatarDialog).toHaveCount(0);
   await expect(avatarButton).toBeFocused();
-  await expect(page.getByTestId("community-profile-next")).toHaveText("Next");
-  await expect(page.getByTestId("community-profile-next")).toBeDisabled();
-  await expect(page.getByTestId("community-profile-back")).toHaveCount(0);
+  const nextButton = page.getByTestId("community-profile-next");
+  const backButton = page.getByTestId("community-profile-back");
+  await expect(nextButton).toHaveText("Next");
+  await expect(nextButton).toBeDisabled();
+  await expect(backButton).toHaveText("Back");
+  await expect(backButton).toBeEnabled();
+  const [nextBox, backBox] = await Promise.all([
+    nextButton.boundingBox(),
+    backButton.boundingBox(),
+  ]);
+  if (!nextBox || !backBox) {
+    throw new Error("Could not measure community profile navigation controls");
+  }
+  expect(Math.abs(nextBox.width - backBox.width)).toBeLessThanOrEqual(1);
+  expect(nextBox.width).toBeLessThanOrEqual(160);
+
+  await backButton.click();
+  await expect(
+    page.getByRole("heading", { name: "Request access to community" }),
+  ).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(
@@ -1236,7 +1253,7 @@ test("connected first-community profile step cannot discard resumable onboarding
         COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
       ),
     )
-    .not.toBeNull();
+    .toBeNull();
 });
 
 test("membership denial on community profile save offers recovery", async ({
