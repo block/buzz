@@ -246,6 +246,8 @@ type E2eConfig = {
     // fail open (no mod-DM detection), matching the Rust command's contract.
     relaySelf?: string | null;
     oaOwnerIsMe?: boolean;
+    /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
+    relayRequiresMembership?: boolean;
     relayRole?: "owner" | "admin" | "member" | null;
     // Descriptors returned by the mocked `pick_and_upload_media` /
     // `upload_media_bytes` commands. Lets a spec drive the attachment flow
@@ -9420,7 +9422,7 @@ export function maybeInstallE2eTauriMocks() {
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
       case "relay_requires_membership":
-        return true;
+        return activeConfig?.mock?.relayRequiresMembership ?? false;
       case "discover_acp_providers":
         return handleDiscoverAcpRuntimes(activeConfig);
       case "discover_acp_auth_methods":

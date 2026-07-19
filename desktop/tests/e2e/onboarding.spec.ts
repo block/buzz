@@ -26,28 +26,14 @@ async function setRelayConnectionState(
   page: Page,
   state: RelayConnectionState,
 ) {
-  if (state !== "connected") {
-    await page.waitForFunction(() => {
-      const win = window as Window & {
-        __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
-        __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
-      };
-      return (
-        typeof win.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function" &&
-        typeof win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ === "function" &&
-        win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__() === "connected"
-      );
-    });
-  } else {
-    await page.waitForFunction(
-      () =>
-        typeof (
-          window as Window & {
-            __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
-          }
-        ).__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function",
-    );
-  }
+  await page.waitForFunction(
+    () =>
+      typeof (
+        window as Window & {
+          __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
+        }
+      ).__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function",
+  );
   await page.evaluate((nextState) => {
     const testWindow = window as Window & {
       __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (
@@ -58,6 +44,12 @@ async function setRelayConnectionState(
       testWindow.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__;
     if (!setConnectionState) {
       throw new Error("Mock relay connection state helper is not installed.");
+    }
+    // Open-relay onboarding may not start a socket before the test exercises
+    // connectivity UI. Establish the same connected baseline explicitly so a
+    // delayed mock handshake cannot overwrite the degraded state.
+    if (nextState !== "connected") {
+      setConnectionState("connected");
     }
     setConnectionState(nextState);
   }, state);
@@ -2337,6 +2329,27 @@ test("existing relay profile with display name auto-completes onboarding", async
   await expectHomeView(page);
 });
 
+test("open relay skips membership gating during onboarding", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      relayRequiresMembership: false,
+      relayRole: null,
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
+  await expect(page.getByTestId("membership-denied")).toHaveCount(0);
+});
+
 test("membership denial can import a different invited key", async ({
   page,
 }) => {
@@ -2344,6 +2357,7 @@ test("membership denial can import a different invited key", async ({
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },
@@ -2482,6 +2496,7 @@ test("membership denied shows all four affordances and change-community edits no
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },
@@ -2557,6 +2572,7 @@ test("cancel from profile Back preserves drafts and denied Back returns to inter
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },
@@ -2600,6 +2616,7 @@ test("denied on relay A then paste relay B invite URL switches community to B", 
   await installMockBridge(
     page,
     {
+      relayRequiresMembership: true,
       relayRole: null,
     },
     { skipOnboardingSeed: true },
