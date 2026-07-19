@@ -7,7 +7,7 @@ description: |
   PostgreSQL and Redis. Configurable for single-node evaluation
   (subcharts on) and HA production (external services, existingSecret).
 type: application
-version: 0.1.5
+version: 0.1.6
 appVersion: "0.1.0"
 home: https://github.com/block/buzz
 sources:
@@ -23,8 +23,8 @@ maintainers:
     url: https://github.com/block
 annotations:
   artifacthub.io/changes: |
-    - kind: changed
-      description: Allow CPU-only relay autoscaling when no custom-metrics adapter is installed.
+    - kind: added
+      description: Optional READ_DATABASE_URL env (secretKeyRef) enabling relay read-replica routing; absent key preserves prior behavior.
   artifacthub.io/license: Apache-2.0
 
 # Optional eval-only subcharts. Production deploys disable both and point

@@ -32,11 +32,12 @@ type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
   defaultRelayUrl: string;
+  initialPage?: WelcomeSetupPage;
   initialTransitionMode?: WelcomeTransitionMode;
   onBack: () => void;
 };
 
-const CREATE_COMMUNITY_URL = "https://buzz.xyz";
+const CREATE_COMMUNITY_URL = "https://app.builderlab.xyz/signup?returnTo=/buzz";
 const LOCAL_DEV_RELAY_URLS = new Set([
   "ws://localhost:3000",
   "ws://127.0.0.1:3000",
@@ -50,10 +51,11 @@ function isLocalDevRelayUrl(relayUrl: string) {
 
 export function WelcomeSetup({
   defaultRelayUrl,
+  initialPage = "welcome",
   initialTransitionMode = "initial",
   onBack,
 }: WelcomeSetupProps) {
-  const [page, setPage] = React.useState<WelcomeSetupPage>("welcome");
+  const [page, setPage] = React.useState<WelcomeSetupPage>(initialPage);
   const [transitionMode, setTransitionMode] =
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
   const [npub, setNpub] = React.useState("");

@@ -142,13 +142,18 @@ async fn main() -> anyhow::Result<()> {
 
     let db_config = DbConfig {
         database_url: config.database_url.clone(),
+        read_database_url: config.read_database_url.clone(),
         ..DbConfig::default()
     };
     let db = Db::new(&db_config).await.map_err(|e| {
         error!("Failed to connect to Postgres: {e}");
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
-    info!("Postgres connected");
+    if db.has_read_pool() {
+        info!("Postgres connected (writer + read replica)");
+    } else {
+        info!("Postgres connected");
+    }
 
     let auto_migrate =
         buzz_auto_migrate_enabled(std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref());
@@ -164,6 +169,26 @@ async fn main() -> anyhow::Result<()> {
 
     if let Err(e) = db.ensure_future_partitions(3).await {
         error!("Failed to ensure partitions: {e}");
+    }
+
+    // Freshness fence probe: cursor pages route to the replica only for
+    // history the probe has verified as fully replayed. Deliberately AFTER
+    // the migration decision: spawn_fence_probe first verifies the
+    // commit-time floor guard (catalog shape + observed behavior through the
+    // armed pool) against the live schema, so a relay running with
+    // BUZZ_AUTO_MIGRATE off and migration 0021 unapplied can never open the
+    // fence over an unenforced floor. Verification failure is loud but
+    // non-fatal: the fence stays closed and every cursor page routes to the
+    // writer.
+    match db.spawn_fence_probe().await {
+        Ok(true) => info!("Replica fence probe started (floor guard verified)"),
+        Ok(false) => {}
+        Err(e) => {
+            error!(
+                "Replica fence disabled — floor guard verification failed: {e}. \
+                 All cursor reads stay on the writer."
+            );
+        }
     }
 
     // NIP-43: if membership enforcement is on, a valid owner pubkey is required.
@@ -339,13 +364,21 @@ async fn main() -> anyhow::Result<()> {
     // Postgres FTS: the searchable row IS the persisted event row (its
     // `tsvector` column is populated by the `insert_event` write), so there is
     // no external collection to provision — the search service just queries the
-    // same Postgres over its own pool.
+    // same Postgres over its own pool. Search is lag-tolerant, so it prefers
+    // the read replica when one is configured.
+    let search_db_url = config
+        .read_database_url
+        .as_deref()
+        .unwrap_or(&config.database_url);
     let search_pool = sqlx::postgres::PgPoolOptions::new()
-        .connect(&config.database_url)
+        .connect(search_db_url)
         .await
         .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
     let search = SearchService::new(search_pool);
-    info!("Search service ready (Postgres FTS)");
+    info!(
+        replica = config.read_database_url.is_some(),
+        "Search service ready (Postgres FTS)"
+    );
 
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
@@ -918,6 +951,28 @@ async fn main() -> anyhow::Result<()> {
                 metrics::gauge!("buzz_db_pool_idle").set(db_stats.idle as f64);
                 metrics::gauge!("buzz_db_pool_active").set(active as f64);
                 metrics::gauge!("buzz_db_pool_max").set(db_stats.max as f64);
+
+                if let Some(read_stats) = pool_state.db.read_pool_stats() {
+                    let read_active = read_stats.size.saturating_sub(read_stats.idle);
+                    metrics::gauge!("buzz_db_read_pool_size").set(read_stats.size as f64);
+                    metrics::gauge!("buzz_db_read_pool_idle").set(read_stats.idle as f64);
+                    metrics::gauge!("buzz_db_read_pool_active").set(read_active as f64);
+                    metrics::gauge!("buzz_db_read_pool_max").set(read_stats.max as f64);
+
+                    // Fence observability: 1 when replica routing is
+                    // eligible, and the verified-freshness lag in seconds.
+                    // Closed/stale fence reports open=0 with lag untouched.
+                    match pool_state.db.fence().verified_through() {
+                        Some(fence_ts) => {
+                            let lag = (chrono::Utc::now() - fence_ts).num_seconds();
+                            metrics::gauge!("buzz_db_replica_fence_open").set(1.0);
+                            metrics::gauge!("buzz_db_replica_fence_lag_seconds").set(lag as f64);
+                        }
+                        None => {
+                            metrics::gauge!("buzz_db_replica_fence_open").set(0.0);
+                        }
+                    }
+                }
 
                 let rs = pool_state.redis_pool.status();
                 metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);

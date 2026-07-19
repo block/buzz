@@ -54,7 +54,9 @@ type RawFeedItem = {
   created_at: number;
   channel_id: string | null;
   channel_name: string;
-  channel_type: string;
+  // Native FeedItemInfo.channel_type is Option<String>: serde emits `null`,
+  // never omits the key.
+  channel_type: string | null;
   tags: string[][];
   category: "mention" | "needs_action" | "activity" | "agent_activity";
 };
@@ -275,7 +277,7 @@ export async function invokeTauri<T>(
   }
 }
 
-function fromRawFeedItem(item: RawFeedItem) {
+export function fromRawFeedItem(item: RawFeedItem) {
   return {
     id: item.id,
     kind: item.kind,
@@ -284,7 +286,10 @@ function fromRawFeedItem(item: RawFeedItem) {
     createdAt: item.created_at,
     channelId: item.channel_id,
     channelName: item.channel_name,
-    channelType: item.channel_type,
+    // Canonicalize the wire `null` to undefined so FeedItem's optional
+    // channelType contract holds at runtime (enrichment and the DM
+    // notification filter both key off `=== undefined`).
+    channelType: item.channel_type ?? undefined,
     tags: item.tags,
     category: item.category,
   };

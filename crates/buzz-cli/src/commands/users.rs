@@ -265,7 +265,7 @@ pub async fn cmd_get_presence(client: &BuzzClient, pubkeys_csv: &str) -> Result<
         .iter()
         .map(|e| {
             serde_json::json!({
-                "pubkey": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
+                "pubkey": presence_subject(e),
                 "status": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
                 "updated_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
             })
@@ -274,6 +274,20 @@ pub async fn cmd_get_presence(client: &BuzzClient, pubkeys_csv: &str) -> Result<
     let output = serde_json::to_string(&presence).unwrap_or_default();
     println!("{output}");
     Ok(())
+}
+
+fn presence_subject(event: &serde_json::Value) -> &str {
+    event
+        .get("tags")
+        .and_then(|tags| tags.as_array())
+        .and_then(|tags| {
+            tags.iter()
+                .find_map(|tag| match tag.as_array()?.as_slice() {
+                    [name, subject, ..] if name == "p" => subject.as_str(),
+                    _ => None,
+                })
+        })
+        .unwrap_or_else(|| event.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""))
 }
 
 /// Set presence status — sign and submit a kind:20001 presence update event via WebSocket.
@@ -317,5 +331,29 @@ pub async fn dispatch(
         }
         UsersCmd::Presence { pubkeys } => cmd_get_presence(client, &pubkeys).await,
         UsersCmd::SetPresence { status } => cmd_set_presence(client, &status.to_string()).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::presence_subject;
+    use serde_json::json;
+
+    #[test]
+    fn presence_subject_uses_p_tag() {
+        let event = json!({"pubkey": "relay", "tags": [["p", "user"]]});
+        assert_eq!(presence_subject(&event), "user");
+    }
+
+    #[test]
+    fn presence_subject_falls_back_to_author_without_p_tag() {
+        let event = json!({"pubkey": "user", "tags": [["status", "online"]]});
+        assert_eq!(presence_subject(&event), "user");
+    }
+
+    #[test]
+    fn presence_subject_falls_back_to_author_for_malformed_p_tag() {
+        let event = json!({"pubkey": "user", "tags": [["p"]]});
+        assert_eq!(presence_subject(&event), "user");
     }
 }

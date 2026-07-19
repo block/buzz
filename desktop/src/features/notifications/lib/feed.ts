@@ -10,7 +10,9 @@ export function enrichFeedItemChannel(
   item: FeedItem,
   channels: readonly NotificationChannel[],
 ): FeedItem {
-  if (!item.channelId || item.channelName.trim()) {
+  const needsName = !item.channelName.trim();
+  const needsType = item.channelType === undefined;
+  if (!item.channelId || (!needsName && !needsType)) {
     return item;
   }
 
@@ -19,10 +21,13 @@ export function enrichFeedItemChannel(
     return item;
   }
 
+  // Fill each missing field independently: the backend feed may supply a
+  // channel name but no type (or vice versa), and the DM-exclusion filter in
+  // eligibleFeedNotificationItems depends on channelType being resolved.
   return {
     ...item,
-    channelName: channel.name,
-    channelType: item.channelType ?? channel.channelType,
+    channelName: needsName ? channel.name : item.channelName,
+    channelType: needsType ? channel.channelType : item.channelType,
   };
 }
 
@@ -73,19 +78,28 @@ export function collectHomeAlertItems(feed: HomeFeedResponse) {
 export function eligibleFeedNotificationItems(
   feed: HomeFeedResponse,
   options: { mentions: boolean; needsAction: boolean },
+  channels: readonly NotificationChannel[] = [],
 ) {
   const items: FeedItem[] = [];
 
   // DM notifications are handled by the real-time WebSocket hook, so we
-  // exclude DM items here to avoid duplicate toasts.
+  // exclude DM items here to avoid duplicate toasts. The backend feed emits
+  // no channelType, so resolve it from the loaded channel list BEFORE
+  // filtering — otherwise every DM sails through as `undefined !== "dm"`.
   if (options.mentions) {
     items.push(
-      ...feed.feed.mentions.filter((item) => item.channelType !== "dm"),
+      ...feed.feed.mentions
+        .map((item) => enrichFeedItemChannel(item, channels))
+        .filter((item) => item.channelType !== "dm"),
     );
   }
 
   if (options.needsAction) {
-    items.push(...feed.feed.needsAction);
+    items.push(
+      ...feed.feed.needsAction.map((item) =>
+        enrichFeedItemChannel(item, channels),
+      ),
+    );
   }
 
   return items.sort((left, right) => left.createdAt - right.createdAt);

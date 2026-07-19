@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.18
+
+- fix(desktop): recover first community joins ([#2087](https://github.com/block/buzz/pull/2087)) ([`775cf672d`](https://github.com/block/buzz/commit/775cf672d11d43b07b27941a41bd2e52a9111466))
+- fix: recover community access visibility ([#2074](https://github.com/block/buzz/pull/2074)) ([`ca384d082`](https://github.com/block/buzz/commit/ca384d082d9804ec53a3fd12ccbf4a0846b21d92))
+
+
 ## v0.4.17
 
 - fix(desktop): onboarding defaults — API key field and model search ([#2081](https://github.com/block/buzz/pull/2081)) ([`741610f13`](https://github.com/block/buzz/commit/741610f138f9e0f31c7a0b78ef4a498b7df02688))

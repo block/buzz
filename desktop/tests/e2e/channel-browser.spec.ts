@@ -257,8 +257,16 @@ test("canceling section create does not affect the next global create", async ({
   await page
     .getByTestId(`section-actions-${CUSTOM_SECTION.id}-quick-create`)
     .click();
+  // Gate on the dialog mounting before dismissing it. Escape sent before mount
+  // is dropped (no handler yet), and not.toBeVisible() then passes vacuously
+  // against a dialog that hasn't rendered — so the dialog opens *after* the
+  // assertion and its overlay swallows every later click.
+  await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  // The overlay outlives the content by one exit animation; wait for it to
+  // detach so it can't intercept the next click.
+  await expect(page.getByTestId("dialog-overlay")).toHaveCount(0);
 
   await page.getByTestId("section-actions-channels-quick-create").click();
   const channelName = `global-after-cancel-${Date.now()}`;
