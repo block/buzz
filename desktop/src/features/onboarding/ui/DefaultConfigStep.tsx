@@ -195,11 +195,6 @@ function AgentDefaultsSection({
             config={config}
             isCustomModelEditing={isCustomModelEditing}
             isCustomProvider={isCustomProvider}
-            autoSelectModelOnProviderChange
-            disableModelSelectDuringDiscovery={false}
-            effortPlaceholderLabel="Select effort level"
-            keepSelectedModelValueLabel
-            modelPlaceholderLabel="Select a model"
             onConfigChange={(next) => {
               // Always apply optimistically so the UI never reverts mid-save,
               // then enqueue the persist — the coalescer serialises multiple
@@ -209,20 +204,10 @@ function AgentDefaultsSection({
             }}
             onCustomModelEditingChange={setIsCustomModelEditing}
             onIsCustomProviderChange={setIsCustomProvider}
-            preserveCredentialEnvVarsOnProviderChange
-            effortLabel="Effort"
             placeholderClassName="text-foreground/70"
-            providerLabel="Provider"
-            requireProviderForModelAndEffort
             selectClassName="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
-            showAdvancedFields={false}
-            showCustomModelOption={false}
-            showCustomProviderOption={false}
-            showDescriptions={false}
+            disclosure="onboarding-essential"
             showProviderField={selectedRuntimeSupportsModelProvider}
-            showRequiredIndicators={false}
-            showProviderPlaceholderOption={false}
-            showUnavailableEffortOptions={false}
             unstyled
             useCustomSelect
           />
