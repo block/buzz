@@ -624,12 +624,11 @@ test("first-community choices expose npub and invite input", async ({
   await page
     .getByRole("button", { name: "Create or connect to my own community" })
     .click();
+  // Sign-in opens as a modal over the (blurred) "Your communities" page.
   await expect(
-    page.getByRole("heading", { name: "Your communities" }),
+    page.getByRole("heading", { name: "Sign in to Buzz" }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Continue with Builderlab" }),
-  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
   await page.getByRole("button", { name: "Back" }).click();
 
   await page.getByRole("button", { name: "Add me to a community" }).click();
@@ -829,13 +828,11 @@ test("first-community owner can create and connect a hosted community", async ({
   await page
     .getByRole("button", { name: "Create or connect to my own community" })
     .click();
-  await page.getByRole("button", { name: "Continue with Builderlab" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
   await expect(
     page.getByRole("heading", { name: "Connect this Buzz identity" }),
   ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Connect this Buzz identity" })
-    .click();
+  await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByText("Signed in as owner@example.com")).toBeVisible();
   await page
     .getByRole("textbox", { name: "Community address" })
@@ -925,12 +922,10 @@ test("first-community can cancel a closed-browser sign-in and retry", async ({
   await page
     .getByRole("button", { name: "Create or connect to my own community" })
     .click();
-  await page.getByRole("button", { name: "Continue with Builderlab" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByText("Waiting for your browser…")).toBeVisible();
   await page.getByRole("button", { name: "Cancel sign-in" }).click();
-  await expect(
-    page.getByRole("button", { name: "Continue with Builderlab" }),
-  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
     .toEqual(expect.arrayContaining(["cancel_builderlab_login"]));
@@ -939,7 +934,7 @@ test("first-community can cancel a closed-browser sign-in and retry", async ({
     if (window.__BUZZ_E2E_CONFIG__?.mock)
       window.__BUZZ_E2E_CONFIG__.mock.builderlabLoginDelayMs = 0;
   });
-  await page.getByRole("button", { name: "Continue with Builderlab" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
   await expect(
     page.getByRole("heading", { name: "Connect this Buzz identity" }),
   ).toBeVisible();
@@ -1036,7 +1031,7 @@ test("first-community explains when the local identity belongs to another accoun
     ),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Connect this Buzz identity" }),
+    page.getByRole("heading", { name: "Connect this Buzz identity" }),
   ).toBeVisible();
 });
 
@@ -1074,9 +1069,7 @@ test("back clears Builderlab auth before returning to first-community choices", 
   await page
     .getByRole("button", { name: "Create or connect to my own community" })
     .click();
-  await expect(
-    page.getByRole("button", { name: "Continue with Builderlab" }),
-  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
 });
 
 test("first-community shows the scenario cards for localhost", async ({

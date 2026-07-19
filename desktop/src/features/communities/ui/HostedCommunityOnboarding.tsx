@@ -26,6 +26,31 @@ import { safeNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { OnboardingFooter } from "@/features/onboarding/ui/OnboardingFooter";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "@/features/onboarding/ui/OnboardingChrome";
+import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/shared/ui/dialog";
+
+/**
+ * Branded translucent frame reused across the post-login page — mirrors the
+ * fuzzy-white key/invite frames (`bg-white/…` on the onboarding shell) so the
+ * "Your communities" page reads as part of onboarding rather than a plain
+ * black-on-white form.
+ */
+const BRAND_SECTION_CLASS = "rounded-xl bg-white/55 p-6 text-left";
+
+/**
+ * The sign-in and identity-linking steps live in a modal that opens over the
+ * "Your communities" page (which blurs behind the Radix overlay). It composes
+ * its own panel (`surface="none"`) so it can re-establish the always-light
+ * onboarding theme inside the portal, matching the shell behind it.
+ */
+const MODAL_PANEL_CLASS =
+  "buzz-onboarding-neutral-theme buzz-startup-shell relative w-full max-w-md rounded-2xl !bg-none bg-white p-8 text-center text-foreground shadow-2xl";
 
 export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
   const onboarding = useCommunityOnboarding();
@@ -268,123 +293,52 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
   };
 
   const busy = action !== null;
+  // The account is set up once we're signed in with a linked, matching
+  // identity. Until then the sign-in / link-identity modal drives the flow and
+  // the page behind it shows a blurred preview of where communities will land.
+  const ready = Boolean(auth && identity && !identityMismatch);
+  const modalOpen = !loading && !ready;
+
+  const errorBox = error ? (
+    <div
+      className="flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/5 p-4 text-left text-sm text-destructive"
+      role="alert"
+    >
+      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+      <span>{error}</span>
+    </div>
+  ) : null;
 
   return (
     <div className="flex w-full max-w-[640px] flex-col items-center text-center">
       <h1 className="text-title font-normal">Your communities</h1>
       <p className="mx-auto mt-3 max-w-[480px] text-sm leading-6 text-foreground/80">
-        Sign in to connect a community you already own on this machine, or
-        create a new one.
+        Connect a community you already own on this machine, or create a new
+        one.
       </p>
 
       <div className="mt-10 w-full space-y-5 text-left">
-        {error ? (
-          <div
-            className="flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive"
-            role="alert"
-          >
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>{error}</span>
-          </div>
-        ) : null}
-
         {loading ? (
           <div className="flex justify-center py-10" role="status">
             <LoaderCircle className="h-6 w-6 animate-spin" />
-            <span className="sr-only">Checking Builderlab sign-in</span>
+            <span className="sr-only">Checking sign-in</span>
           </div>
-        ) : !auth ? (
-          <section className="rounded-xl bg-white/75 p-6 text-center">
-            <h2 className="font-medium">Sign in or create an account</h2>
-            <p className="mt-2 text-sm text-foreground/70">
-              Builderlab provides Block-hosted Buzz communities. Authentication
-              opens in your browser and returns here.
-            </p>
-            {action === "Signing in…" ? (
-              <div className="mt-5 flex flex-col items-center gap-3">
-                <div className="flex items-center gap-2 text-sm text-foreground/70">
-                  <LoaderCircle className="h-4 w-4 animate-spin" />
-                  Waiting for your browser…
-                </div>
-                <Button onClick={cancelSignIn} variant="outline">
-                  Cancel sign-in
-                </Button>
-              </div>
-            ) : (
-              <Button className="mt-5 rounded-full px-6" onClick={signIn}>
-                Continue with Builderlab
-              </Button>
-            )}
-          </section>
-        ) : !identity ? (
-          <section className="rounded-xl bg-white/75 p-6 text-center">
-            <h2 className="font-medium">Connect this Buzz identity</h2>
-            <p className="mt-2 text-sm text-foreground/70">
-              Link this device’s Buzz key to{" "}
-              {auth.email ?? auth.name ?? "your Builderlab account"}. Buzz signs
-              a one-time challenge locally; your private key never leaves
-              Desktop.
-            </p>
-            <Button
-              className="mt-5 rounded-full px-6"
-              disabled={busy}
-              onClick={() => void connectIdentity()}
-            >
-              {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
-              {action ?? "Connect this Buzz identity"}
-            </Button>
-          </section>
-        ) : identityMismatch ? (
-          <section className="rounded-xl border border-amber-500/50 bg-amber-500/5 p-6">
-            <div className="flex items-start gap-2">
-              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-              <div>
-                <h2 className="font-medium">
-                  This account uses a different Buzz identity
-                </h2>
-                <p className="mt-2 text-sm text-foreground/70">
-                  This Builderlab account is connected to another Buzz identity.
-                  You can disconnect that identity and reconnect this device, or
-                  sign out to use a different email.
-                </p>
-                <p className="mt-3 break-all font-mono text-xs text-foreground/60">
-                  Account: {identity.npub ?? boundPubkey}
-                  <br />
-                  This device: {localNpub ?? localPubkey}
-                </p>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <Button
-                    disabled={busy}
-                    onClick={() => void switchToDeviceIdentity()}
-                  >
-                    {action ?? "Use this device's identity"}
-                  </Button>
-                  <Button
-                    disabled={busy}
-                    onClick={() => void signOut()}
-                    variant="outline"
-                  >
-                    Sign in with a different email
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </section>
-        ) : (
+        ) : ready ? (
           <>
-            <div className="flex items-center gap-2 rounded-xl bg-white/60 px-4 py-3 text-sm text-foreground/70">
+            {errorBox}
+            <div className="flex items-center gap-2 rounded-xl bg-white/45 px-4 py-3 text-sm text-foreground/70">
               <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-              Signed in{auth.email ? ` as ${auth.email}` : ""} with this Buzz
+              Signed in{auth?.email ? ` as ${auth.email}` : ""} with this Buzz
               identity
             </div>
 
             {activeCommunities.length > 0 ? (
-              <section className="rounded-xl bg-white/75 p-5">
+              <section className={BRAND_SECTION_CLASS}>
                 <h2 className="font-medium">Connect to one you own</h2>
                 <ul className="mt-3 space-y-2">
                   {activeCommunities.map((community, index) => (
                     <li
-                      className="flex items-center justify-between gap-4 rounded-lg border border-foreground/10 bg-white/50 p-3"
+                      className="flex items-center justify-between gap-4 rounded-lg bg-white/50 p-3"
                       key={community.id ?? community.normalized_host ?? index}
                     >
                       <div className="min-w-0">
@@ -416,7 +370,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
               </section>
             ) : null}
 
-            <form className="rounded-xl bg-white/75 p-5" onSubmit={create}>
+            <form className={BRAND_SECTION_CLASS} onSubmit={create}>
               <h2 className="font-medium">Create a new community</h2>
               <p className="mt-1 text-sm text-foreground/70">
                 Choose the address your team will use to connect.
@@ -462,7 +416,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
                 </p>
               ) : null}
               <Button
-                className="mt-4 rounded-full px-6"
+                className={`mt-4 ${ONBOARDING_PRIMARY_CTA_CLASS}`}
                 disabled={
                   !validName ||
                   availability === false ||
@@ -479,20 +433,148 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
               </Button>
             </form>
           </>
+        ) : (
+          // Blurred behind the sign-in modal: a soft preview so the backdrop
+          // reads as the destination "Your communities" page.
+          <div aria-hidden className="space-y-4 opacity-70">
+            <div className="h-12 rounded-xl bg-white/40" />
+            <div className="h-40 rounded-xl bg-white/40" />
+          </div>
         )}
       </div>
 
-      <OnboardingFooter>
-        <Button
-          className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
-          disabled={busy}
-          onClick={goBack}
-          type="button"
-          variant="ghost"
+      {/* The modal carries its own Back control; only show the docked footer
+          Back when the page is the interactive surface (no modal on top). */}
+      {!modalOpen ? (
+        <OnboardingFooter>
+          <Button
+            className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+            disabled={busy}
+            onClick={goBack}
+            type="button"
+            variant="ghost"
+          >
+            Back
+          </Button>
+        </OnboardingFooter>
+      ) : null}
+
+      <Dialog
+        open={modalOpen}
+        onOpenChange={(open) => {
+          if (!open && !busy) goBack();
+        }}
+      >
+        <DialogContent
+          className="max-w-md"
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          showCloseButton={false}
+          surface="none"
         >
-          Back
-        </Button>
-      </OnboardingFooter>
+          <div className={MODAL_PANEL_CLASS}>
+            <BuzzMark className="mx-auto mb-6 h-auto w-10" />
+
+            {!auth ? (
+              <>
+                <DialogTitle className="text-lg font-medium tracking-normal">
+                  Sign in to Buzz
+                </DialogTitle>
+                <DialogDescription className="mx-auto mt-2 max-w-xs text-sm text-foreground/70">
+                  Sign in to connect a community you already own, or create a
+                  new one. Sign-in opens in your browser and returns here.
+                </DialogDescription>
+                {errorBox ? <div className="mt-5">{errorBox}</div> : null}
+                {action === "Signing in…" ? (
+                  <div className="mt-6 flex flex-col items-center gap-3">
+                    <div className="flex items-center gap-2 text-sm text-foreground/70">
+                      <LoaderCircle className="h-4 w-4 animate-spin" />
+                      Waiting for your browser…
+                    </div>
+                    <Button onClick={cancelSignIn} variant="outline">
+                      Cancel sign-in
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    className={`mt-6 ${ONBOARDING_PRIMARY_CTA_CLASS}`}
+                    onClick={signIn}
+                  >
+                    Continue
+                  </Button>
+                )}
+              </>
+            ) : !identity ? (
+              <>
+                <DialogTitle className="text-lg font-medium tracking-normal">
+                  Connect this Buzz identity
+                </DialogTitle>
+                <DialogDescription className="mx-auto mt-2 max-w-xs text-sm text-foreground/70">
+                  Link this device’s Buzz key to{" "}
+                  {auth.email ?? auth.name ?? "your account"}. Buzz signs a
+                  one-time challenge locally — your private key never leaves
+                  Desktop.
+                </DialogDescription>
+                {errorBox ? <div className="mt-5">{errorBox}</div> : null}
+                <Button
+                  className={`mt-6 ${ONBOARDING_PRIMARY_CTA_CLASS}`}
+                  disabled={busy}
+                  onClick={() => void connectIdentity()}
+                >
+                  {busy ? (
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                  ) : null}
+                  {busy ? action : "Continue"}
+                </Button>
+              </>
+            ) : (
+              <>
+                <DialogTitle className="text-lg font-medium tracking-normal">
+                  This account uses a different Buzz identity
+                </DialogTitle>
+                <DialogDescription className="mx-auto mt-2 max-w-sm text-sm text-foreground/70">
+                  This account is connected to another Buzz identity. You can
+                  disconnect that identity and reconnect this device, or sign
+                  out to use a different email.
+                </DialogDescription>
+                <p className="mx-auto mt-3 max-w-sm break-all text-left font-mono text-xs text-foreground/60">
+                  Account: {identity.npub ?? boundPubkey}
+                  <br />
+                  This device: {localNpub ?? localPubkey}
+                </p>
+                {errorBox ? <div className="mt-5">{errorBox}</div> : null}
+                <div className="mt-6 flex flex-wrap justify-center gap-2">
+                  <Button
+                    className={ONBOARDING_PRIMARY_CTA_CLASS}
+                    disabled={busy}
+                    onClick={() => void switchToDeviceIdentity()}
+                  >
+                    {busy ? action : "Use this device's identity"}
+                  </Button>
+                  <Button
+                    className="h-[2.375rem] rounded-full px-6"
+                    disabled={busy}
+                    onClick={() => void signOut()}
+                    variant="outline"
+                  >
+                    Sign in with a different email
+                  </Button>
+                </div>
+              </>
+            )}
+
+            <div className="mt-6">
+              <button
+                className="text-sm text-foreground/60 underline-offset-4 hover:text-foreground hover:underline disabled:opacity-50"
+                disabled={busy}
+                onClick={goBack}
+                type="button"
+              >
+                Back
+              </button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
