@@ -233,6 +233,14 @@ pub(crate) async fn get_builderlab_auth(
     }
 }
 
+#[tauri::command]
+pub(crate) fn clear_builderlab_auth(
+    session: tauri::State<'_, BuilderlabSession>,
+) -> Result<(), String> {
+    *session.0.lock().map_err(|error| error.to_string())? = None;
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct NostrIdentityChallenge {
     challenge_id: String,
@@ -285,9 +293,9 @@ pub(crate) async fn get_builderlab_nostr_identity(
     authenticated_json(
         &app_state.http_client,
         &session,
-        reqwest::Method::GET,
+        reqwest::Method::POST,
         "/v1/buzz/nostr-identities/current",
-        serde_json::Value::Null,
+        serde_json::json!({}),
     )
     .await
 }
@@ -326,6 +334,21 @@ pub(crate) async fn bind_builderlab_nostr_identity(
             "nonce": challenge.nonce,
             "signed_payload": nostr::JsonUtil::as_json(&event),
         }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn list_builderlab_communities(
+    app_state: tauri::State<'_, crate::app_state::AppState>,
+    session: tauri::State<'_, BuilderlabSession>,
+) -> Result<serde_json::Value, String> {
+    authenticated_json(
+        &app_state.http_client,
+        &session,
+        reqwest::Method::POST,
+        "/v1/buzz/communities/list",
+        serde_json::json!({}),
     )
     .await
 }
