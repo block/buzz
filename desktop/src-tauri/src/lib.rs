@@ -426,9 +426,7 @@ pub fn run() {
             .build()
     });
 
-    // Only register the updater in release builds that were compiled with a
-    // real updater configuration. Local unsigned builds omit that config and
-    // should still launch for debugging.
+    // Only configured release builds register the updater; local builds omit it.
     #[cfg(buzz_updater_enabled)]
     let builder = if cfg!(debug_assertions) {
         builder
