@@ -724,13 +724,18 @@ test("failed install pins a single-line 12px error without moving card content",
   const error = page.getByTestId("onboarding-runtime-error-claude");
   await expect(error).toBeVisible();
   await expect(error).toHaveText(/Setup failed/);
-  await expect(error).toHaveAttribute("title", new RegExp(installError));
+  await expect(error).not.toHaveAttribute("title");
   await expect(setupButton).toBeVisible();
   await expect(setupButton).toHaveText("SET UP");
   await expect(error).toHaveCSS("font-size", "12px");
   await expect(error).toHaveCSS("position", "absolute");
   await expect(error).toHaveCSS("white-space", "nowrap");
   await expect(error.locator("span")).toHaveCSS("text-overflow", "ellipsis");
+  await error.hover();
+  await expect(
+    page.getByRole("tooltip").getByText("CLI detected; ACP adapter missing."),
+  ).toBeVisible();
+  await expect(page.getByRole("tooltip")).not.toContainText(installError);
   expect(
     await heading.evaluate((element) => element.getBoundingClientRect().top),
   ).toBe(headingTopBefore);

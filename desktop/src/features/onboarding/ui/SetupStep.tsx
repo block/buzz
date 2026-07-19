@@ -579,20 +579,37 @@ function RuntimeCard({
           setupFlashToken={setupFlashToken}
         />
         {!isAvailable && runtimeDetailText(runtime) ? (
-          <p className="max-w-[13rem] text-2xs leading-4 text-muted-foreground">
+          <p
+            aria-hidden={installError ? "true" : undefined}
+            className={cn(
+              "max-w-[13rem] text-2xs leading-4 text-muted-foreground",
+              installError && "invisible",
+            )}
+          >
             {runtimeDetailText(runtime)}
           </p>
         ) : null}
       </div>
       {installError ? (
-        <p
-          className="pointer-events-none absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
-          data-testid={`onboarding-runtime-error-${runtime.id}`}
-          title={installError}
-        >
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0 truncate">Setup failed</span>
-        </p>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <p
+              className="absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
+              data-testid={`onboarding-runtime-error-${runtime.id}`}
+            >
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 truncate">Setup failed</span>
+            </p>
+          </TooltipTrigger>
+          <TooltipContent
+            className="max-w-80 bg-black text-left text-xs text-white shadow-sm"
+            side="top"
+          >
+            <p className="text-xs leading-4 text-white">
+              {runtimeDetailText(runtime)}
+            </p>
+          </TooltipContent>
+        </Tooltip>
       ) : (
         <RuntimeAuthError runtime={runtime} />
       )}
