@@ -624,7 +624,7 @@ export function AgentDefinitionDialog({
             : selectedRuntime.availability === "cli_missing"
               ? `${selectedRuntime.label} ACP adapter is installed but the CLI is missing.`
               : `${selectedRuntime.label} is not installed.`}{" "}
-        Visit Settings &gt; Doctor to set it up.
+        Visit Settings &gt; Agents to set it up.
       </p>
     ) : null;
   const advancedFieldsTransition = shouldReduceMotion

@@ -43,7 +43,7 @@ function requirementKey(
 /**
  * Returns true when every requirement in the nudge is a `cli_login` surface.
  * Non-authOnly all-cli_login cards (at least one install-state row) route to
- * Doctor — install/login problems can't be fixed in Edit Agent. AuthOnly cards
+ * Agent runtimes — install/login problems can't be fixed in Edit Agent. AuthOnly cards
  * (every row is `availability === "available"`) are purely informational and
  * do not route anywhere.
  */
@@ -65,8 +65,8 @@ export function shouldOpenDoctor(
 
 /**
  * Returns true when the card is all-cli_login AND every requirement is in the
- * `available` state (tooling installed, just needs login). In this case Doctor
- * has no auth functionality and is a misleading dead-end — the card becomes
+ * `available` state (tooling installed, just needs login). In this case Agent
+ * runtimes has no auth functionality and is a misleading dead-end — the card becomes
  * purely informational (no trigger, no CTA, no pointer/hover affordance).
  */
 function isAuthOnly(reqs: ConfigNudgePayload["requirements"]): boolean {
@@ -140,7 +140,7 @@ function firstFocusTarget(
  * Mirrors `firstFocusTarget` but operates on one row — used so per-row
  * Edit Agent CTAs focus the field that row describes, not the first editable
  * field on the card.
- * Returns `undefined` for `cli_login` requirements (Doctor, not Edit Agent).
+ * Returns `undefined` for `cli_login` requirements (Agent runtimes, not Edit Agent).
  */
 export function focusTargetForRequirement(
   req: ConfigNudgePayload["requirements"][number],
@@ -164,15 +164,15 @@ export function focusTargetForRequirement(
  *
  * Routing:
  * (A) Any card with a `git_bash` requirement, or one whose requirements are all
- *     install-state `cli_login`, opens Settings → Doctor. A card-level
- *     "Open Doctor →" label in `AttachmentActions` confirms the action at rest.
+ *     install-state `cli_login`, opens Settings → Agent runtimes. A card-level
+ *     Agent runtimes label in `AttachmentActions` confirms the action at rest.
  * (A-auth) A card whose requirements are all available `cli_login` surfaces is
- *     purely informational: Doctor cannot authenticate a CLI, and `setup_copy`
+ *     purely informational: Agent runtimes cannot authenticate a CLI, and `setup_copy`
  *     already gives the needed command.
  * (B) Other mixed cards open Edit Agent as the card-level fallback. Their rows
  *     carry inline CTAs for the matching destination: install-state `cli_login`
- *     opens Doctor; `env_key` and `normalized_field` open Edit Agent. A
- *     `git_bash` row is covered by the card-level Doctor route, so it does not
+ *     opens Agent runtimes; `env_key` and `normalized_field` open Edit Agent. A
+ *     `git_bash` row is covered by the card-level Agent runtimes route, so it does not
  *     render a redundant row action.
  */
 export function ConfigNudgeCard({
@@ -196,10 +196,10 @@ export function ConfigNudgeCard({
   const openDoctor = () => {
     if (!onOpenSettings) {
       console.warn(
-        "[ConfigNudgeCard] onOpenSettings is null — Doctor deep-link unavailable on this surface",
+        "[ConfigNudgeCard] onOpenSettings is null — Agent runtimes deep-link unavailable on this surface",
       );
     }
-    onOpenSettings?.("doctor");
+    onOpenSettings?.("agents");
   };
 
   const openEditAgent = (focus?: EditAgentFocusTarget) => {
@@ -209,7 +209,7 @@ export function ConfigNudgeCard({
 
   const handleOpen = () => {
     if (shouldOpenDoctor(nudge.requirements)) {
-      // Git Bash and install-state CLI requirements both resolve in Doctor.
+      // Git Bash and install-state CLI requirements both resolve in Agent runtimes.
       // Informational-only cards never mount this trigger.
       openDoctor();
     } else {
@@ -219,7 +219,7 @@ export function ConfigNudgeCard({
   };
 
   const handleOpenDoctor = (e: React.MouseEvent) => {
-    // (B) Per-row Doctor CTA — stop propagation so the card trigger doesn't
+    // (B) Per-row Agent runtimes CTA — stop propagation so the card trigger doesn't
     // double-fire to Edit Agent on mixed cards.
     e.stopPropagation();
     openDoctor();
@@ -266,11 +266,13 @@ export function ConfigNudgeCard({
           ))}
         </div>
       </AttachmentContent>
-      {/* (A) Doctor-routed cards have one card-level CTA. Informational-only
+      {/* (A) Agent-runtime-routed cards have one card-level CTA. Informational-only
           cards have none; other mixed cards render their own row CTAs. */}
       {opensDoctor && !informationalOnly && (
         <AttachmentActions className="items-end self-end">
-          <span className="text-xs text-muted-foreground">Open Doctor →</span>
+          <span className="text-xs text-muted-foreground">
+            Open Agent runtimes →
+          </span>
         </AttachmentActions>
       )}
       {/* Informational-only cards are purely informational — no trigger, no routing. */}
@@ -278,7 +280,7 @@ export function ConfigNudgeCard({
         <AttachmentTrigger
           aria-label={
             opensDoctor
-              ? `Open Doctor settings for ${nudge.agent_name}`
+              ? `Open Agent runtimes settings for ${nudge.agent_name}`
               : `Open Edit Agent for ${nudge.agent_name}`
           }
           onClick={handleOpen}
@@ -352,11 +354,11 @@ function RequirementRow({
           <span className="flex-1 [overflow-wrap:anywhere]">
             {cliLoginMessage(requirement)}
           </span>
-          {/* (B) Per-row Doctor CTA — shown only on mixed cards where the
+          {/* (B) Per-row Agent runtimes CTA — shown only on mixed cards where the
               card-level trigger opens Edit Agent (not auth-only cards). When
-              allCliLogin is true the card trigger already routes to Doctor; the
+              allCliLogin is true the card trigger already routes to Agent runtimes; the
               per-row button is redundant and is suppressed. Also suppressed for
-              `available` cli_login rows — Doctor has no auth functionality and
+              `available` cli_login rows — Agent runtimes has no auth functionality and
               the setup_copy already provides the exact login command.
               stopPropagation prevents double-fire on mixed cards where both
               card and row CTAs are visible. */}
@@ -366,7 +368,7 @@ function RequirementRow({
               onClick={onOpenDoctor}
               type="button"
             >
-              Open Doctor →
+              Open Agent runtimes →
             </button>
           )}
         </div>
@@ -381,7 +383,7 @@ function RequirementRow({
       );
     case "cli_config_invalid": {
       // Config-invalid rows are purely informational — the user must edit an
-      // external file. No Doctor CTA (Doctor can't repair ~/.codex/config.toml)
+      // external file. No Agent runtimes CTA (Buzz can't repair ~/.codex/config.toml)
       // and no Edit Agent CTA (the field isn't managed by Buzz).
       const cli = requirement.probe_args[0] ?? "the CLI";
       const configFile = `~/.${cli}/config.toml`;

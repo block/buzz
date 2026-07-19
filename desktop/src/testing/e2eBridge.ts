@@ -129,11 +129,13 @@ type E2eConfig = {
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
     acpRuntimesDelayMs?: number;
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
+    acpAuthMethodsErrors?: Record<string, string>;
     acpAuthMethodsError?: string;
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
     connectAcpRuntimeDelayMs?: number;
     connectAcpRuntimeError?: string;
     activePersonaIds?: string[];
+    installAcpRuntimeDelayMs?: number;
     installAcpRuntimeResult?: RawInstallRuntimeResult;
     /** Sequence of results for successive `install_acp_runtime` calls.
      *  Call N returns results[N]; when exhausted the last entry repeats.
@@ -6736,11 +6738,15 @@ async function handleDiscoverAcpAuthMethods(
   args: { runtimeId?: string },
   config: E2eConfig | undefined,
 ): Promise<RawAcpAuthMethodsResult> {
-  const error = config?.mock?.acpAuthMethodsError;
-  if (error) {
-    throw new Error(error);
+  const globalError = config?.mock?.acpAuthMethodsError;
+  if (globalError) {
+    throw new Error(globalError);
   }
   const runtimeId = args.runtimeId ?? "";
+  const perRuntimeError = config?.mock?.acpAuthMethodsErrors?.[runtimeId];
+  if (perRuntimeError) {
+    throw new Error(perRuntimeError);
+  }
   const configured = config?.mock?.acpAuthMethods?.[runtimeId];
   if (configured) {
     return configured;
@@ -6786,6 +6792,10 @@ async function handleInstallAcpRuntime(
   },
   config: E2eConfig | undefined,
 ): Promise<RawInstallRuntimeResult> {
+  const delayMs = config?.mock?.installAcpRuntimeDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
   const sequence = config?.mock?.installAcpRuntimeResults;
   if (sequence && sequence.length > 0) {
     const idx = Math.min(installCallCount, sequence.length - 1);

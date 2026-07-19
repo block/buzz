@@ -1,13 +1,5 @@
 import * as React from "react";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  Circle,
-  Download,
-  ExternalLink,
-  RefreshCw,
-  XCircle,
-} from "lucide-react";
+import { EllipsisVertical, ExternalLink, RefreshCw } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
@@ -17,292 +9,272 @@ import {
   useGitBashPrerequisiteQuery,
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
-import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
-import type {
-  AcpAuthMethod,
-  AcpRuntimeCatalogEntry,
-  AuthStatus,
-} from "@/shared/api/types";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { SettingsOptionGroup } from "./SettingsOptionGroup";
-import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/shared/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
+import { SectionHeader } from "@/shared/ui/PageHeader";
+import { Spinner } from "@/shared/ui/spinner";
+import { Switch } from "@/shared/ui/switch";
 
-function StatusIcon({
-  availability,
-}: {
-  availability: AcpRuntimeCatalogEntry["availability"];
-}) {
-  switch (availability) {
-    case "available":
-      return <CheckCircle2 className="h-4 w-4 text-status-added" />;
-    case "adapter_missing":
-      return <AlertTriangle className="h-4 w-4 text-warning" />;
-    case "adapter_outdated":
-      return <AlertTriangle className="h-4 w-4 text-warning" />;
-    case "cli_missing":
-      return <AlertTriangle className="h-4 w-4 text-warning" />;
-    case "not_installed":
-      return <Circle className="h-4 w-4 text-muted-foreground/50" />;
-  }
+const RUNTIME_LOGO_URLS: Record<string, string> = {
+  "buzz-agent": "/app-icon@2x.png",
+  claude: "/runtime-icons/claude.png",
+  codex: "/runtime-icons/codex.png",
+  goose: "/runtime-icons/goose.svg",
+};
+
+const RUNTIME_LOGO_SCALE: Record<string, string> = {
+  "buzz-agent": "scale-110",
+  claude: "scale-110",
+  codex: "scale-110",
+  goose: "scale-125",
+};
+
+const RUNTIME_SORT_PRIORITY: Record<string, number> = {
+  "buzz-agent": 0,
+  goose: 1,
+};
+
+function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+  const avatarUrl = RUNTIME_LOGO_URLS[runtime.id] ?? runtime.avatarUrl;
+
+  return (
+    <ProfileAvatar
+      avatarUrl={avatarUrl}
+      className="h-9 w-9 rounded-xl bg-background shadow-none"
+      imageClassName={RUNTIME_LOGO_SCALE[runtime.id]}
+      label={runtime.label}
+      testId={`doctor-runtime-logo-${runtime.id}`}
+    />
+  );
 }
 
-function AuthStatusBadge({ authStatus }: { authStatus: AuthStatus }) {
-  switch (authStatus.status) {
-    case "logged_in":
-      return (
-        <span className="inline-flex items-center gap-1 text-xs text-status-added">
-          <CheckCircle2 className="h-3 w-3" />
-          Authenticated
-        </span>
-      );
-    case "logged_out":
-      return (
-        <span className="inline-flex items-center gap-1 text-xs text-warning">
-          <AlertTriangle className="h-3 w-3" />
-          Not authenticated
-        </span>
-      );
-    case "config_invalid":
-      return (
-        <span className="inline-flex items-center gap-1 text-xs text-destructive">
-          <XCircle className="h-3 w-3" />
-          Config error
-        </span>
-      );
-    case "not_applicable":
-    case "unknown":
-      return null;
-  }
-}
-
-function AuthMethodButtonLabel({ method }: { method: AcpAuthMethod }) {
-  return <>{method.name || method.id}</>;
-}
-
-function ConnectAccountActions({
+function RuntimeOverflowMenu({
+  authMethods,
+  connectingMethodId,
+  isConnecting,
+  onConnect,
   runtime,
 }: {
+  authMethods: AcpAuthMethod[];
+  connectingMethodId: string | null;
+  isConnecting: boolean;
+  onConnect: (method: AcpAuthMethod) => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
-  const authMethodsQuery = useAcpAuthMethodsQuery(runtime.id, {
-    enabled:
-      runtime.availability === "available" &&
-      runtime.authStatus.status === "logged_out",
-  });
-  const connectMutation = useConnectAcpRuntimeMutation();
-  const [terminalLaunchMethodId, setTerminalLaunchMethodId] = React.useState<
-    string | null
-  >(null);
+  const hasInstructions =
+    runtime.installInstructionsUrl.trim().length > 0 &&
+    (runtime.availability !== "available" ||
+      runtime.authStatus.status === "logged_out" ||
+      runtime.authStatus.status === "config_invalid");
+  const hasActions =
+    runtime.nodeRequired || hasInstructions || authMethods.length > 0;
 
-  if (runtime.authStatus.status !== "logged_out") {
+  if (!hasActions) {
     return null;
   }
 
-  const methods = authMethodsQuery.data?.methods ?? [];
-  const isConnecting = connectMutation.isPending;
-
-  function connect(method: AcpAuthMethod) {
-    connectMutation.mutate(
-      { runtimeId: runtime.id, methodId: method.id },
-      {
-        onSuccess: (result) => {
-          if (result.launched && method.type === "terminal") {
-            setTerminalLaunchMethodId(method.id);
-          }
-        },
-      },
-    );
-  }
-
-  if (authMethodsQuery.isLoading) {
-    return (
-      <p className="mt-2 text-sm text-muted-foreground">
-        Looking for account connection options...
-      </p>
-    );
-  }
-
-  if (authMethodsQuery.error instanceof Error) {
-    return (
-      <p className="mt-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
-        Couldn&apos;t load account connection options:{" "}
-        {authMethodsQuery.error.message}
-      </p>
-    );
-  }
-
-  if (methods.length === 0) {
-    return (
-      <p className="mt-2 text-sm text-muted-foreground">
-        This adapter did not advertise a built-in login flow. Use the manual
-        instructions above, then click Re-run.
-      </p>
-    );
-  }
-
   return (
-    <div className="mt-2 space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        {methods.map((method) => {
-          const pending =
-            isConnecting && connectMutation.variables?.methodId === method.id;
-          return (
-            <Button
-              disabled={isConnecting}
-              key={method.id}
-              onClick={() => connect(method)}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              {pending ? <RefreshCw className="h-4 w-4 animate-spin" /> : null}
-              {pending ? (
-                "Connecting..."
-              ) : (
-                <AuthMethodButtonLabel method={method} />
-              )}
-            </Button>
-          );
-        })}
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Buzz launches the adapter&apos;s own login flow and then re-checks the{" "}
-        {runtime.label} CLI. Credentials stay with {runtime.label}.
-      </p>
-      {terminalLaunchMethodId ? (
-        <p className="text-xs text-muted-foreground">
-          Finish signing in from the Terminal window, then click Re-run to
-          re-check {runtime.label}.
-        </p>
-      ) : null}
-      {methods.map((method) =>
-        method.description ? (
-          <p className="text-xs text-muted-foreground" key={method.id}>
-            <span className="font-medium text-foreground/80">
-              {method.name || method.id}:
-            </span>{" "}
-            {method.description}
-          </p>
-        ) : null,
-      )}
-      {connectMutation.error instanceof Error ? (
-        <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
-          {connectMutation.error.message}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
-function InstallActions({
-  hasError,
-  isInstalling,
-  onInstall,
-  runtime,
-}: {
-  hasError: boolean;
-  isInstalling: boolean;
-  onInstall: () => void;
-  runtime: AcpRuntimeCatalogEntry;
-}) {
-  const showInstall = runtime.canAutoInstall && !runtime.nodeRequired;
-  const installLabel =
-    runtime.availability === "adapter_missing"
-      ? "Install ACP adapter"
-      : runtime.availability === "adapter_outdated"
-        ? "Update ACP adapter"
-        : `Install ${runtime.label}`;
-  const pendingLabel =
-    runtime.availability === "adapter_missing" ||
-    runtime.availability === "adapter_outdated"
-      ? "Installing adapter..."
-      : `Installing ${runtime.label}...`;
-
-  return (
-    <div className="mt-2 space-y-2">
-      {showInstall ? (
-        <p className="text-xs text-muted-foreground">
-          Buzz uses the official installer and adds the ACP adapter. After it
-          finishes, Buzz will show the vendor&apos;s sign-in flow here.
-        </p>
-      ) : null}
-      <div className="flex items-center gap-2">
-        {showInstall ? (
-          <Button
-            disabled={isInstalling}
-            onClick={onInstall}
-            size="sm"
-            type="button"
-            variant="outline"
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <button
+          aria-label={`Open actions for ${runtime.label}`}
+          className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          data-testid={`doctor-runtime-menu-${runtime.id}`}
+          type="button"
+        >
+          <EllipsisVertical className="h-4 w-4" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        onCloseAutoFocus={(event) => event.preventDefault()}
+      >
+        {authMethods.map((method) => (
+          <DropdownMenuItem
+            disabled={isConnecting}
+            key={method.id}
+            onSelect={() => onConnect(method)}
           >
-            {isInstalling ? (
-              <RefreshCw className="h-4 w-4 animate-spin" />
-            ) : hasError ? (
-              <RefreshCw className="h-4 w-4" />
-            ) : (
-              <Download className="h-4 w-4" />
-            )}
-            {isInstalling
-              ? pendingLabel
-              : hasError
-                ? `Retry ${installLabel}`
-                : installLabel}
-          </Button>
+            {isConnecting && connectingMethodId === method.id ? (
+              <Spinner aria-hidden className="h-4 w-4 border-2" />
+            ) : null}
+            {method.name || method.id}
+          </DropdownMenuItem>
+        ))}
+        {runtime.nodeRequired ? (
+          <DropdownMenuItem onSelect={() => void openUrl("https://nodejs.org")}>
+            <ExternalLink className="h-4 w-4" />
+            Install Node.js
+          </DropdownMenuItem>
         ) : null}
-        <button
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-          onClick={() => void openUrl(runtime.installInstructionsUrl)}
-          type="button"
-        >
-          <ExternalLink className="h-4 w-4" />
-          View instructions
-        </button>
-      </div>
+        {hasInstructions ? (
+          <DropdownMenuItem
+            onSelect={() => void openUrl(runtime.installInstructionsUrl)}
+          >
+            <ExternalLink className="h-4 w-4" />
+            Instructions
+          </DropdownMenuItem>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function RuntimeActions({
+  authMethods,
+  connectingMethodId,
+  installSuccess,
+  isConnecting,
+  isInstalling,
+  onConnect,
+  onInstall,
+  runtime,
+}: {
+  authMethods: AcpAuthMethod[];
+  connectingMethodId: string | null;
+  installSuccess: boolean;
+  isConnecting: boolean;
+  isInstalling: boolean;
+  onConnect: (method: AcpAuthMethod) => void;
+  onInstall: () => void;
+  runtime: AcpRuntimeCatalogEntry;
+}) {
+  const isAvailable = runtime.availability === "available";
+  const canInstall = runtime.canAutoInstall && !runtime.nodeRequired;
+  const isOn = isAvailable || installSuccess;
+  const isWorking = isInstalling || isConnecting;
+
+  return (
+    <div className="ml-auto flex shrink-0 items-center justify-end gap-1">
+      <RuntimeOverflowMenu
+        authMethods={authMethods}
+        connectingMethodId={connectingMethodId}
+        isConnecting={isConnecting}
+        onConnect={onConnect}
+        runtime={runtime}
+      />
+      {isWorking ? (
+        <div className="flex h-5 w-9 items-center justify-center text-muted-foreground">
+          <Spinner
+            aria-label={`${runtime.label} ${isInstalling ? "installing" : "connecting"}`}
+            className="h-4 w-4 border-2"
+            data-testid={`doctor-runtime-loading-${runtime.id}`}
+          />
+        </div>
+      ) : (
+        <Switch
+          aria-label={`${runtime.label} availability`}
+          checked={isOn}
+          className="disabled:cursor-default disabled:opacity-100"
+          data-testid={`doctor-runtime-toggle-${runtime.id}`}
+          disabled={isAvailable || installSuccess || !canInstall}
+          onCheckedChange={(checked) => {
+            if (checked) {
+              onInstall();
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
 
-/**
- * Node.js callout when required, or the install actions when it is not.
- * Used for both `adapter_missing` and `not_installed` availability states.
- * The `cli_missing` branch is intentionally excluded — its install path does
- * not involve npm, so no Node.js gate applies.
- */
-function NodeRequiredOrInstall({
-  hasError,
+function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+  const label =
+    runtime.authStatus.status === "config_invalid"
+      ? "Config error"
+      : runtime.availability === "adapter_missing"
+        ? "Adapter needed"
+        : runtime.availability === "adapter_outdated"
+          ? "Update needed"
+          : runtime.availability === "cli_missing"
+            ? "CLI needed"
+            : null;
+
+  if (!label) {
+    return null;
+  }
+
+  const isConfigError = runtime.authStatus.status === "config_invalid";
+
+  return (
+    <>
+      <span aria-hidden="true" className="text-muted-foreground/50">
+        ·
+      </span>
+      <span
+        className={cn(
+          "inline-flex shrink-0 items-center rounded-md px-2 py-0.5 text-xs font-medium",
+          isConfigError
+            ? "bg-destructive/10 text-destructive"
+            : "bg-muted text-muted-foreground",
+        )}
+        data-testid={`doctor-runtime-status-${runtime.id}`}
+      >
+        {label}
+      </span>
+    </>
+  );
+}
+
+function RuntimeHeader({
+  authMethods,
+  connectingMethodId,
+  installSuccess,
+  isConnecting,
   isInstalling,
+  onConnect,
   onInstall,
   runtime,
 }: {
-  hasError: boolean;
+  authMethods: AcpAuthMethod[];
+  connectingMethodId: string | null;
+  installSuccess: boolean;
+  isConnecting: boolean;
   isInstalling: boolean;
+  onConnect: (method: AcpAuthMethod) => void;
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
-  if (runtime.nodeRequired) {
-    return (
-      <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-sm text-amber-700 dark:text-amber-400">
-        Node.js is required to install this adapter.{" "}
-        <button
-          className="underline underline-offset-2 hover:no-underline"
-          onClick={() => void openUrl("https://nodejs.org")}
-          type="button"
-        >
-          Install Node.js
-        </button>
-        , then click Re-run.
-      </p>
-    );
-  }
   return (
-    <InstallActions
-      hasError={hasError}
-      isInstalling={isInstalling}
-      onInstall={onInstall}
-      runtime={runtime}
-    />
+    <div className="flex items-center justify-between gap-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <RuntimeLogo runtime={runtime} />
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <p className="min-w-0 text-sm font-medium">{runtime.label}</p>
+          <RuntimeStatusChip runtime={runtime} />
+        </div>
+      </div>
+      <RuntimeActions
+        authMethods={authMethods}
+        connectingMethodId={connectingMethodId}
+        installSuccess={installSuccess}
+        isConnecting={isConnecting}
+        isInstalling={isInstalling}
+        onConnect={onConnect}
+        onInstall={onInstall}
+        runtime={runtime}
+      />
+    </div>
   );
 }
 
@@ -319,181 +291,80 @@ function RuntimeRow({
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
+  const [terminalLaunchMethodId, setTerminalLaunchMethodId] = React.useState<
+    string | null
+  >(null);
+  const [isUpdateWarningOpen, setIsUpdateWarningOpen] = React.useState(false);
+  const canConnectAccount =
+    runtime.availability === "available" &&
+    runtime.authStatus.status === "logged_out";
+  const authMethodsQuery = useAcpAuthMethodsQuery(runtime.id, {
+    enabled: canConnectAccount,
+  });
+  const authMethods = canConnectAccount
+    ? (authMethodsQuery.data?.methods ?? [])
+    : [];
+  const connectMutation = useConnectAcpRuntimeMutation();
+  const connectionError = connectMutation.error
+    ? `Couldn't connect ${runtime.label}: ${
+        connectMutation.error instanceof Error
+          ? connectMutation.error.message
+          : "Connection failed."
+      }`
+    : authMethodsQuery.error
+      ? `Couldn't load sign-in options: ${
+          authMethodsQuery.error instanceof Error
+            ? authMethodsQuery.error.message
+            : "Request failed."
+        }`
+      : null;
+
   return (
     <div
-      className={cn(
-        "flex min-h-16 items-start gap-3 px-4 py-3 text-sm",
-        runtime.availability === "available"
-          ? "bg-background/60"
-          : runtime.availability === "adapter_missing" ||
-              runtime.availability === "adapter_outdated" ||
-              runtime.availability === "cli_missing"
-            ? "bg-amber-500/5"
-            : "bg-muted/20",
-      )}
+      className="min-h-16 rounded-2xl border border-border/60 bg-muted/20 px-4 py-3.5 text-sm"
       data-testid={`doctor-runtime-${runtime.id}`}
     >
-      <div className="mt-0.5 shrink-0">
-        <StatusIcon availability={runtime.availability} />
-      </div>
+      <div className="min-w-0">
+        <RuntimeHeader
+          authMethods={authMethods}
+          connectingMethodId={connectMutation.variables?.methodId ?? null}
+          installSuccess={installSuccess}
+          isConnecting={connectMutation.isPending}
+          isInstalling={isInstalling}
+          onConnect={(method) => {
+            setTerminalLaunchMethodId(null);
+            connectMutation.mutate(
+              {
+                runtimeId: runtime.id,
+                methodId: method.id,
+              },
+              {
+                onSuccess: (result) => {
+                  if (result.launched && method.type === "terminal") {
+                    setTerminalLaunchMethodId(method.id);
+                  }
+                },
+              },
+            );
+          }}
+          onInstall={() => {
+            if (runtime.availability === "adapter_outdated") {
+              setIsUpdateWarningOpen(true);
+              return;
+            }
+            onInstall();
+          }}
+          runtime={runtime}
+        />
 
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="text-sm font-medium">{runtime.label}</p>
-          {runtime.command ? (
-            <code className="rounded bg-muted px-1.5 py-0.5 text-2xs">
-              {runtime.command}
-            </code>
-          ) : null}
-        </div>
-
-        {runtime.availability === "available" &&
-        runtime.command &&
-        runtime.binaryPath ? (
-          <>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              Available via{" "}
-              {describeResolvedCommand(runtime.command, runtime.binaryPath)}.
-            </p>
-            {runtime.defaultArgs.length > 0 ? (
-              <p className="mt-2 text-xs text-muted-foreground">
-                Default args:{" "}
-                <code className="font-mono">
-                  {runtime.defaultArgs.join(", ")}
-                </code>
-              </p>
-            ) : null}
-            {runtime.underlyingCliPath &&
-            runtime.underlyingCliPath !== runtime.binaryPath ? (
-              <div className="mt-1 space-y-0.5">
-                <p className="break-all font-mono text-2xs text-muted-foreground/80">
-                  <span className="text-muted-foreground">CLI:</span>{" "}
-                  {runtime.underlyingCliPath}
-                </p>
-                <p className="break-all font-mono text-2xs text-muted-foreground/80">
-                  <span className="text-muted-foreground">ACP adapter:</span>{" "}
-                  {runtime.binaryPath}
-                </p>
-              </div>
-            ) : (
-              <>
-                <p className="mt-1 break-all font-mono text-2xs text-muted-foreground/80">
-                  {runtime.binaryPath}
-                </p>
-                <p className="mt-1 text-2xs text-muted-foreground/60">
-                  ACP support built-in — no separate adapter needed.
-                </p>
-              </>
-            )}
-            {/*
-             * Auth badge renders only for `available` runtimes: non-available
-             * entries always have auth_status: unknown (no probe was run), which
-             * AuthStatusBadge maps to null. Rendering it here is self-consistent.
-             */}
-            {runtime.authStatus.status !== "not_applicable" &&
-            runtime.authStatus.status !== "unknown" ? (
-              <div className="mt-2">
-                <AuthStatusBadge authStatus={runtime.authStatus} />
-              </div>
-            ) : null}
-            {/* Login hint shown when not logged in or the config is invalid */}
-            {runtime.loginHint &&
-            runtime.authStatus.status !== "not_applicable" &&
-            runtime.authStatus.status !== "unknown" ? (
-              <p className="mt-1 text-sm text-muted-foreground">
-                {runtime.authStatus.status === "config_invalid"
-                  ? `Config error: ${runtime.authStatus.diagnostic}`
-                  : runtime.loginHint}
-              </p>
-            ) : null}
-            <ConnectAccountActions runtime={runtime} />
-          </>
-        ) : runtime.availability === "adapter_missing" ? (
-          <>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              CLI detected at{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
-                {runtime.underlyingCliPath ?? "unknown path"}
-              </code>{" "}
-              but ACP adapter not found.
-            </p>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              {runtime.installHint}
-            </p>
-            <NodeRequiredOrInstall
-              hasError={installError !== null}
-              isInstalling={isInstalling}
-              onInstall={onInstall}
-              runtime={runtime}
-            />
-          </>
-        ) : runtime.availability === "adapter_outdated" ? (
-          <>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              ACP adapter found at{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
-                {runtime.binaryPath ?? "unknown path"}
-              </code>{" "}
-              but it is from the deprecated package. Reinstall to enable relay
-              connectivity.
-            </p>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              This updates the machine-global{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
-                codex-acp
-              </code>{" "}
-              adapter. Older Buzz releases using the legacy adapter contract may
-              lose community access until{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
-                @zed-industries/codex-acp@0.16.0
-              </code>{" "}
-              is restored.
-            </p>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              {runtime.installHint}
-            </p>
-            <InstallActions
-              hasError={installError !== null}
-              isInstalling={isInstalling}
-              onInstall={onInstall}
-              runtime={runtime}
-            />
-          </>
-        ) : runtime.availability === "cli_missing" ? (
-          <>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              ACP adapter found at{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
-                {runtime.binaryPath ?? "unknown path"}
-              </code>{" "}
-              but the {runtime.label} CLI is not installed.
-            </p>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              {runtime.installHint}
-            </p>
-            <InstallActions
-              hasError={installError !== null}
-              isInstalling={isInstalling}
-              onInstall={onInstall}
-              runtime={runtime}
-            />
-          </>
-        ) : (
-          <>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              Not installed
-            </p>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              {runtime.installHint}
-            </p>
-            <NodeRequiredOrInstall
-              hasError={installError !== null}
-              isInstalling={isInstalling}
-              onInstall={onInstall}
-              runtime={runtime}
-            />
-          </>
-        )}
+        {runtime.authStatus.status === "config_invalid" ? (
+          <p
+            className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
+            data-testid={`doctor-runtime-config-error-${runtime.id}`}
+          >
+            Config error: {runtime.authStatus.diagnostic}
+          </p>
+        ) : null}
 
         {installSuccess && runtime.availability !== "available" ? (
           <p className="mt-2 rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-1.5 text-sm text-green-700 dark:text-green-400">
@@ -505,12 +376,53 @@ function RuntimeRow({
             {installError}
           </p>
         ) : null}
+        {connectionError ? (
+          <p
+            className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
+            data-testid={`doctor-runtime-error-${runtime.id}`}
+          >
+            {connectionError}
+          </p>
+        ) : null}
+        {canConnectAccount && terminalLaunchMethodId ? (
+          <p
+            className="mt-2 rounded-lg border border-border/60 bg-background/60 px-3 py-1.5 text-sm text-muted-foreground"
+            data-testid={`doctor-runtime-terminal-guidance-${runtime.id}`}
+          >
+            Finish signing in from the Terminal window, then click Check again
+            to re-check {runtime.label}.
+          </p>
+        ) : null}
       </div>
+      <AlertDialog
+        onOpenChange={setIsUpdateWarningOpen}
+        open={isUpdateWarningOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Update {runtime.label} adapter?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This replaces the machine-wide codex-acp adapter. Older Buzz
+              releases using the legacy adapter may lose community access until
+              @zed-industries/codex-acp@0.16.0 is restored.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={onInstall}
+              data-testid={`doctor-runtime-confirm-update-${runtime.id}`}
+            >
+              Update
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
 
-function GitBashRow({
+function GitBashCard({
   prerequisite,
 }: {
   prerequisite: NonNullable<
@@ -519,39 +431,48 @@ function GitBashRow({
 }) {
   return (
     <div
-      className="flex min-h-16 items-start gap-3 bg-amber-500/5 px-4 py-3 text-sm"
+      className={cn(
+        "min-h-16 rounded-2xl border px-4 py-4 text-sm",
+        prerequisite.available
+          ? "border-border/60 bg-muted/20"
+          : "border-amber-500/20 bg-amber-500/5",
+      )}
       data-testid="doctor-git-bash"
     >
-      <div className="mt-0.5 shrink-0">
-        {prerequisite.available ? (
-          <CheckCircle2 className="h-4 w-4 text-status-added" />
-        ) : (
-          <AlertTriangle className="h-4 w-4 text-warning" />
-        )}
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium">Git Bash</p>
-        {prerequisite.available ? (
-          <p className="mt-1 break-all font-mono text-2xs text-muted-foreground/80">
-            {prerequisite.path}
-          </p>
-        ) : (
-          <>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Required for buzz-agent shell tools on Windows.
-            </p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {prerequisite.installHint}
-            </p>
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <p className="text-sm font-medium">Git Bash</p>
+            <span aria-hidden="true" className="text-muted-foreground/50">
+              ·
+            </span>
+            <span
+              className={cn(
+                "inline-flex shrink-0 items-center rounded-md px-2 py-0.5 text-xs font-medium",
+                prerequisite.available
+                  ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                  : "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+              )}
+            >
+              {prerequisite.available ? "Available" : "Action needed"}
+            </span>
+          </div>
+          {!prerequisite.available ? (
             <button
-              className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+              className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
               onClick={() => void openUrl(prerequisite.installInstructionsUrl)}
               type="button"
             >
               <ExternalLink className="h-4 w-4" /> Install Git for Windows
             </button>
-          </>
-        )}
+          ) : null}
+        </div>
+        {!prerequisite.available ? (
+          <div className="mt-3 space-y-1 text-sm text-muted-foreground">
+            <p>Required for buzz-agent shell tools on Windows.</p>
+            <p>{prerequisite.installHint}</p>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -560,7 +481,15 @@ function GitBashRow({
 export function DoctorSettingsPanel() {
   const runtimesQuery = useAcpRuntimesQuery();
   const gitBashQuery = useGitBashPrerequisiteQuery();
-  const runtimes = runtimesQuery.data ?? [];
+  const runtimes = React.useMemo(
+    () =>
+      [...(runtimesQuery.data ?? [])].sort(
+        (left, right) =>
+          (RUNTIME_SORT_PRIORITY[left.id] ?? Number.MAX_SAFE_INTEGER) -
+          (RUNTIME_SORT_PRIORITY[right.id] ?? Number.MAX_SAFE_INTEGER),
+      ),
+    [runtimesQuery.data],
+  );
   const isRefreshing = runtimesQuery.isFetching;
   const installMutation = useInstallAcpRuntimeMutation();
   const [installResults, setInstallResults] = React.useState<
@@ -617,10 +546,14 @@ export function DoctorSettingsPanel() {
   }
 
   return (
-    <section className="min-w-0" data-testid="settings-doctor">
-      <SettingsSectionHeader
-        title="Doctor"
-        description="Verify the ACP runtime commands available to the desktop app."
+    <section
+      className="min-w-0 space-y-4"
+      data-testid="settings-agent-runtimes"
+    >
+      <SectionHeader
+        className="items-center"
+        title="Agent runtimes"
+        description="Choose which agent tools Buzz can use on this device."
         action={
           <Button
             disabled={isRefreshing}
@@ -636,63 +569,56 @@ export function DoctorSettingsPanel() {
             <RefreshCw
               className={cn("h-4 w-4", isRefreshing && "animate-spin")}
             />
-            Re-run
+            Check again
           </Button>
         }
       />
 
-      <div className="space-y-5">
-        <SettingsOptionGroup>
-          {gitBashQuery.data ? (
-            <>
-              <div className="px-4 py-3 text-sm">
-                <h2 className="text-lg font-semibold tracking-tight">
-                  System prerequisites
-                </h2>
-                <p className="mt-1 text-sm font-normal text-muted-foreground">
-                  Windows tools required by supported agents.
-                </p>
-              </div>
-              <GitBashRow prerequisite={gitBashQuery.data} />
-            </>
-          ) : null}
-          <div className="px-4 py-3 text-sm">
-            <h2 className="text-lg font-semibold tracking-tight">
-              Agent CLIs and ACP runtimes
-            </h2>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              Installation status of supported agent CLIs and their ACP
-              runtimes.
-            </p>
-          </div>
+      <div className="space-y-8">
+        {gitBashQuery.data ? (
+          <section>
+            <div className="mb-3 text-sm">
+              <h2 className="text-lg font-semibold tracking-tight">
+                System prerequisites
+              </h2>
+              <p className="mt-1 text-sm font-normal text-muted-foreground">
+                Windows tools required by supported agents.
+              </p>
+            </div>
+            <GitBashCard prerequisite={gitBashQuery.data} />
+          </section>
+        ) : null}
 
+        <section aria-label="Supported agent runtimes">
           {runtimesQuery.isLoading ? (
-            <div className="px-4 py-3 text-sm font-normal text-muted-foreground">
-              Looking for ACP runtimes...
+            <div className="rounded-2xl bg-muted/20 px-4 py-4 text-sm font-normal text-muted-foreground">
+              Checking agent runtimes...
             </div>
           ) : runtimes.length > 0 ? (
-            runtimes.map((runtime) => (
-              <RuntimeRow
-                installError={installResults[runtime.id]?.error ?? null}
-                installSuccess={installResults[runtime.id]?.success ?? false}
-                isInstalling={installingIds.has(runtime.id)}
-                key={runtime.id}
-                onInstall={() => handleInstall(runtime.id)}
-                runtime={runtime}
-              />
-            ))
+            <div className="space-y-3" data-testid="doctor-runtime-list">
+              {runtimes.map((runtime) => (
+                <RuntimeRow
+                  installError={installResults[runtime.id]?.error ?? null}
+                  installSuccess={installResults[runtime.id]?.success ?? false}
+                  isInstalling={installingIds.has(runtime.id)}
+                  key={runtime.id}
+                  onInstall={() => handleInstall(runtime.id)}
+                  runtime={runtime}
+                />
+              ))}
+            </div>
           ) : (
-            <div className="bg-amber-500/10 px-4 py-3 text-sm text-warning">
-              No known ACP runtimes found.
+            <div className="rounded-2xl bg-amber-500/10 px-4 py-4 text-sm text-warning">
+              No supported agent runtimes found.
             </div>
           )}
 
           {runtimesQuery.error instanceof Error ? (
-            <p className="bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            <p className="mt-3 rounded-2xl bg-destructive/10 px-4 py-4 text-sm text-destructive">
               {runtimesQuery.error.message}
             </p>
           ) : null}
-        </SettingsOptionGroup>
+        </section>
       </div>
     </section>
   );
