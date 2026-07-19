@@ -969,8 +969,11 @@ test("config page shows Agent defaults form", async ({ page }) => {
   await expect(page.getByLabel("OpenAI API Key")).toHaveCount(0);
   await expect(effortSelect).toBeVisible();
   await expect(
-    page.getByText("This will be set as your default model configuration"),
-  ).toHaveCount(0);
+    page.getByText(
+      "This will be set as your default model configuration across Buzz. You can always change this in your Settings or give specific agents a different configuration.",
+      { exact: true },
+    ),
+  ).toBeVisible();
   await expect(page.getByTestId("agent-readiness-badge")).toHaveCount(0);
 
   await waitForAnimations(page);

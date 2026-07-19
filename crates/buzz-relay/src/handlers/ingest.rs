@@ -2351,16 +2351,6 @@ async fn ingest_event_inner(
         });
     }
 
-    // Any successfully stored channel-scoped event keeps the channel alive.
-    // Skip kind:9007 (create) — the deadline was just set during creation.
-    if let Some(ch_id) = channel_id {
-        if kind_u32 != KIND_NIP29_CREATE_GROUP {
-            if let Err(e) = state.db.bump_ttl_deadline(tenant.community(), ch_id).await {
-                warn!(channel = %ch_id, "TTL deadline bump failed: {e}");
-            }
-        }
-    }
-
     if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)

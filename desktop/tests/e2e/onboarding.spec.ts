@@ -729,6 +729,29 @@ test("first-community choices expose npub and invite input", async ({
   ).toBe(true);
   await expect(page.getByTestId("invite-redeem-submit")).toHaveText("Next");
   await expect(page.getByTestId("invite-redeem-submit")).toBeDisabled();
+  const inviteFrame = page.getByTestId("invite-redeem-input-frame");
+  const initialInviteFrameBox = await inviteFrame.boundingBox();
+  expect(initialInviteFrameBox).not.toBeNull();
+  const invalidInviteTip = page.getByTestId("invalid-invite-tip");
+  await expect(invalidInviteTip).toHaveAttribute("aria-hidden", "true");
+  await expect(invalidInviteTip).toHaveCSS("opacity", "0");
+
+  await inviteInput.fill("awefi");
+  await expect(page.getByLabel("Relay URL")).toHaveCount(0);
+  await expect(page.getByTestId("invite-redeem-submit")).toBeDisabled();
+  await expect(invalidInviteTip).toBeVisible();
+  await expect(invalidInviteTip).toHaveAttribute("aria-hidden", "false");
+  await expect(invalidInviteTip).toHaveCSS("opacity", "1");
+  await expect(invalidInviteTip).toHaveCSS("color", "rgb(113, 113, 6)");
+  await expect(invalidInviteTip).toHaveCSS("text-align", "center");
+  const invalidInviteFrameBox = await inviteFrame.boundingBox();
+  expect(invalidInviteFrameBox?.y).toBe(initialInviteFrameBox?.y);
+
+  await inviteInput.fill("https://default.example.com/invite/abc123");
+  await expect(page.getByLabel("Relay URL")).toHaveCount(0);
+  await expect(page.getByTestId("invite-redeem-submit")).toBeEnabled();
+  await expect(invalidInviteTip).toHaveAttribute("aria-hidden", "true");
+  await expect(invalidInviteTip).toHaveCSS("opacity", "0");
 });
 
 test("first-community shows the scenario cards for localhost", async ({

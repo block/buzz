@@ -21,7 +21,7 @@ test("backup step appears on fresh-key path after profile submit", async ({
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(
     page.getByRole("heading", {
-      name: "Your unique identity has been created",
+      name: "Your unique identity key has been created",
     }),
   ).toBeVisible();
 });

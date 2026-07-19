@@ -108,6 +108,8 @@ export function InviteRedeemForm({
     ("relayWsUrl" in parsed ||
       (isBareCode && bareCodeRelayUrl.trim().length > 0));
   const isOnboardingSpotlight = variant === "onboarding-spotlight";
+  const showInvalidInviteTip =
+    isOnboardingSpotlight && inviteInput.trim().length > 0 && !canSubmit;
 
   const handleSubmit = React.useCallback(
     async (event: React.FormEvent) => {
@@ -309,6 +311,20 @@ export function InviteRedeemForm({
           />
         </div>
       )}
+
+      {isOnboardingSpotlight ? (
+        <p
+          aria-hidden={!showInvalidInviteTip}
+          aria-live="polite"
+          className={cn(
+            "min-h-5 w-full max-w-4xl text-center text-sm text-[#717106] transition-opacity duration-150 ease-out",
+            showInvalidInviteTip ? "opacity-100" : "opacity-0",
+          )}
+          data-testid="invalid-invite-tip"
+        >
+          Please enter a valid invite link
+        </p>
+      ) : null}
 
       {needsRelayField ? (
         <div

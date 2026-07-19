@@ -135,7 +135,7 @@ export function NewMessageResultRow({
               </div>
               {ownerLabel ? (
                 <span className="block truncate text-xs text-muted-foreground">
-                  owned by {ownerLabel}
+                  managed by {ownerLabel}
                 </span>
               ) : null}
             </div>

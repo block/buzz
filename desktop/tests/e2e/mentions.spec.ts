@@ -300,7 +300,7 @@ test("thread autocomplete keeps multiple long names readable in a narrow panel",
       row.getByTestId("mention-suggestion-avatar-fallback"),
     ).toBeVisible();
     await expect(row.getByText("agent")).toBeVisible();
-    await expect(row.getByText("owned by you")).toBeVisible();
+    await expect(row.getByText("managed by you")).toBeVisible();
 
     await expect(row.getByText(name)).not.toHaveCSS(
       "text-overflow",
@@ -1738,7 +1738,7 @@ test("agent profile popover shows its owner", async ({ page }) => {
     profilePopover.getByTestId(
       `user-profile-popover-owner-${OWNED_AGENT_PROFILE_PUBKEY}`,
     ),
-  ).toHaveText("owned by bob");
+  ).toHaveText("managed by bob");
 });
 
 test("agent profile popover labels an agent owned by the viewer as you", async ({
@@ -1778,7 +1778,7 @@ test("agent profile popover labels an agent owned by the viewer as you", async (
     profilePopover.getByTestId(
       `user-profile-popover-owner-${OWNED_AGENT_PROFILE_PUBKEY}`,
     ),
-  ).toHaveText("owned by you");
+  ).toHaveText("managed by you");
 });
 
 test("agent profile popover falls back to the owner's pubkey", async ({
@@ -1818,7 +1818,7 @@ test("agent profile popover falls back to the owner's pubkey", async ({
     profilePopover.getByTestId(
       `user-profile-popover-owner-${OWNED_AGENT_PROFILE_PUBKEY}`,
     ),
-  ).toHaveText("owned by 11111111…1111");
+  ).toHaveText("managed by 11111111…1111");
 });
 
 test("human profile popover does not show an owner", async ({ page }) => {

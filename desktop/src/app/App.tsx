@@ -410,7 +410,6 @@ function CommunityApp({
       // Show welcome setup for first-run users with no communities
       appContent = (
         <WelcomeSetup
-          defaultRelayUrl={community.defaultRelayUrl}
           initialPage={resumeFirstCommunityJoin ? "join" : undefined}
           onBack={onBackToMachineConfig}
         />

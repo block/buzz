@@ -31,26 +31,16 @@ type WelcomeSetupPage = "welcome" | "join" | "invite";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
-  defaultRelayUrl: string;
   initialPage?: WelcomeSetupPage;
   initialTransitionMode?: WelcomeTransitionMode;
   onBack: () => void;
 };
 
 const CREATE_COMMUNITY_URL = "https://app.builderlab.xyz/signup?returnTo=/buzz";
-const LOCAL_DEV_RELAY_URLS = new Set([
-  "ws://localhost:3000",
-  "ws://127.0.0.1:3000",
-]);
 const COMMUNITY_OPTION_CARD_CLASS =
   "flex min-h-24 w-full max-w-[352px] items-center justify-center rounded-xl bg-white/75 px-6 py-4 text-center text-sm font-normal leading-6 text-foreground transition-colors duration-150 ease-out hover:bg-white/85 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-foreground/35";
 
-function isLocalDevRelayUrl(relayUrl: string) {
-  return LOCAL_DEV_RELAY_URLS.has(relayUrl.trim().replace(/\/$/, ""));
-}
-
 export function WelcomeSetup({
-  defaultRelayUrl,
   initialPage = "welcome",
   initialTransitionMode = "initial",
   onBack,
@@ -324,11 +314,6 @@ export function WelcomeSetup({
               </div>
               <div className="flex w-full flex-1 items-center justify-center pb-4 pt-12">
                 <InviteRedeemForm
-                  defaultRelayUrl={
-                    isLocalDevRelayUrl(defaultRelayUrl)
-                      ? undefined
-                      : defaultRelayUrl
-                  }
                   error={null}
                   isRedeeming={false}
                   onCancel={() => showPage("welcome")}

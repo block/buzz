@@ -76,7 +76,7 @@ class _MentionSuggestions extends StatelessWidget {
 
 /// The secondary info line under a mention suggestion — mirrors desktop's
 /// `MentionAutocomplete` subtitle: bot icon + "agent" (or an "admin" badge
-/// for human admins), then "owned by …" / "not in channel".
+/// for human admins), then "managed by …" / "not in channel".
 abstract final class _MentionSuggestionInfo {
   static Widget? build(
     BuildContext context, {
@@ -93,9 +93,9 @@ abstract final class _MentionSuggestionInfo {
 
     final String? detail;
     if (ownerLabel != null && notInChannel) {
-      detail = 'owned by $ownerLabel \u00b7 not in channel';
+      detail = 'managed by $ownerLabel \u00b7 not in channel';
     } else if (ownerLabel != null) {
-      detail = 'owned by $ownerLabel';
+      detail = 'managed by $ownerLabel';
     } else if (notInChannel) {
       detail = 'not in channel';
     } else {

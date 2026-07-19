@@ -123,18 +123,20 @@ test("agent owner label identifies the agent and owner", async ({ page }) => {
 
   await expect(ownerTreatment.locator("svg")).toBeVisible();
   await expect(
-    ownerTreatment.getByText("owned by", { exact: true }),
+    ownerTreatment.getByText("managed by", { exact: true }),
   ).toBeVisible();
   await expect(ownerTreatment.locator(".font-semibold")).toHaveText("bob");
   await expect(ownerTreatment.getByRole("button")).toHaveAccessibleName("bob");
-  await expect(ownerTreatment.locator(".sr-only")).toHaveText("Agent owned by");
+  await expect(ownerTreatment.locator(".sr-only")).toHaveText(
+    "Agent managed by",
+  );
 
   const joinedRow = page
     .getByTestId("system-message-row")
     .filter({ hasText: "alice" })
     .filter({ hasText: "joined the channel" });
   await expect(joinedRow.getByTestId("message-agent-owner")).toContainText(
-    "owned bybob",
+    "managed bybob",
   );
 });
 

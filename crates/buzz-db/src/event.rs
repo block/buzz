@@ -1454,6 +1454,157 @@ mod tests {
         id
     }
 
+    async fn make_test_channel(
+        pool: &PgPool,
+        community_id: Uuid,
+        ttl_seconds: Option<i32>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO channels \
+             (id, community_id, name, created_by, ttl_seconds, ttl_deadline) \
+             VALUES ($1, $2, $3, $4, $5, \
+                     CASE WHEN $5 IS NULL THEN NULL \
+                          ELSE clock_timestamp() + make_interval(secs => $5) END)",
+        )
+        .bind(id)
+        .bind(community_id)
+        .bind(format!("event-ttl-test-{}", id.simple()))
+        .bind(vec![7_u8; 32])
+        .bind(ttl_seconds)
+        .execute(pool)
+        .await
+        .expect("insert test channel");
+        id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn event_insert_ttl_trigger_handles_permanent_ephemeral_duplicate_and_activation_race() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+
+        let permanent = make_test_channel(&pool, community_uuid, None).await;
+        let permanent_event = make_text_event("permanent channel event");
+        assert!(
+            insert_event(&pool, community, &permanent_event, Some(permanent))
+                .await
+                .expect("insert permanent event")
+                .1
+        );
+        let permanent_deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(permanent)
+        .fetch_one(&pool)
+        .await
+        .expect("read permanent deadline");
+        assert_eq!(permanent_deadline, None);
+
+        let ephemeral = make_test_channel(&pool, community_uuid, Some(60)).await;
+        let initial_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(ephemeral)
+        .fetch_one(&pool)
+        .await
+        .expect("read initial ephemeral deadline");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let ephemeral_event = make_text_event("ephemeral channel event");
+        assert!(
+            insert_event(&pool, community, &ephemeral_event, Some(ephemeral))
+                .await
+                .expect("insert ephemeral event")
+                .1
+        );
+        let bumped_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(ephemeral)
+        .fetch_one(&pool)
+        .await
+        .expect("read bumped ephemeral deadline");
+        assert!(bumped_deadline > initial_deadline);
+        assert!(
+            !insert_event(&pool, community, &ephemeral_event, Some(ephemeral))
+                .await
+                .expect("insert duplicate event")
+                .1
+        );
+        let duplicate_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(ephemeral)
+        .fetch_one(&pool)
+        .await
+        .expect("read deadline after duplicate");
+        assert_eq!(duplicate_deadline, bumped_deadline);
+
+        // Reproduce the blocked stale-prefetch ordering: ingest has already
+        // observed a permanent channel, then TTL activation locks/updates the
+        // row before the event INSERT reaches its trigger. The trigger must
+        // wait and refresh from the later event after activation commits.
+        let racing = make_test_channel(&pool, community_uuid, None).await;
+        let stale_ttl: Option<i32> = sqlx::query_scalar(
+            "SELECT ttl_seconds FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(racing)
+        .fetch_one(&pool)
+        .await
+        .expect("prefetch permanent channel");
+        assert_eq!(stale_ttl, None);
+
+        let mut activation = pool.begin().await.expect("begin TTL activation");
+        let activation_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "UPDATE channels \
+             SET ttl_seconds = 60, ttl_deadline = clock_timestamp() + interval '60 seconds' \
+             WHERE community_id = $1 AND id = $2 RETURNING ttl_deadline",
+        )
+        .bind(community_uuid)
+        .bind(racing)
+        .fetch_one(&mut *activation)
+        .await
+        .expect("activate TTL while holding channel row lock");
+
+        let race_pool = pool.clone();
+        let racing_event = make_text_event("event after stale permanent prefetch");
+        let insert = tokio::spawn(async move {
+            insert_event(&race_pool, community, &racing_event, Some(racing)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !insert.is_finished(),
+            "event trigger must wait on TTL activation"
+        );
+        activation.commit().await.expect("commit TTL activation");
+        assert!(
+            insert
+                .await
+                .expect("join racing insert")
+                .expect("racing insert")
+                .1
+        );
+
+        let final_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(racing)
+        .fetch_one(&pool)
+        .await
+        .expect("read deadline after racing event");
+        assert!(
+            final_deadline > activation_deadline + chrono::Duration::milliseconds(50),
+            "later event must extend TTL beyond activation deadline: activation={activation_deadline}, final={final_deadline}"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn get_event_by_id_is_scoped_when_event_id_collides_across_communities() {
