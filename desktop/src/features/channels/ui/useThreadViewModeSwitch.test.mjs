@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { findTopVisibleThreadMessageId } from "./useThreadViewModeSwitch.ts";
+import {
+  findTopVisibleThreadMessageId,
+  getResolvedThreadTargets,
+} from "./useThreadViewModeSwitch.ts";
 
 function row(id, top, bottom) {
   return {
@@ -22,6 +25,23 @@ test("finds the first thread message crossing the viewport top", () => {
   };
 
   assert.equal(findTopVisibleThreadMessageId(body), "crossing");
+});
+
+test("resolves both sources when a layout anchor matches the external target", () => {
+  assert.deepEqual(
+    getResolvedThreadTargets({
+      externalTargetId: "reply-b",
+      layoutTargetId: "reply-b",
+    }),
+    { resolveExternal: true, resolveLayout: true },
+  );
+  assert.deepEqual(
+    getResolvedThreadTargets({
+      externalTargetId: "reply-b",
+      layoutTargetId: "reply-c",
+    }),
+    { resolveExternal: false, resolveLayout: true },
+  );
 });
 
 test("returns null without a mounted thread body or visible message", () => {

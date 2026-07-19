@@ -37,6 +37,7 @@ import { THREAD_SURFACE_KEY } from "@/features/channels/lib/threadFocusLayout";
 import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout";
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
+import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import {
@@ -512,8 +513,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
   const threadViewMode = useThreadViewMode();
-  const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
-    useThreadViewModeSwitch(onThreadScrollTargetResolved);
   // Focus mode is a wide-viewport-only alternative to the split thread pane:
   // narrow viewports keep their existing single-panel / floating-overlay
   // behavior untouched. It applies to the thread panel only — channel
@@ -522,6 +521,14 @@ export const ChannelPane = React.memo(function ChannelPane({
     threadViewMode === "focus" &&
     useSplitAuxiliaryPane &&
     (Boolean(threadHeadMessage) || shouldShowThreadSkeleton);
+  const { channelIsCovered, markExitComplete } =
+    useFocusDrawerPresence(useFocusThreadDrawer);
+  const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
+    useThreadViewModeSwitch({
+      externalScrollTargetId: threadScrollTargetId,
+      onExternalTargetResolved: onThreadScrollTargetResolved,
+      onModeChange: markExitComplete,
+    });
   const selectedAgent = React.useMemo(
     () =>
       agentSessionSelection.resolveSelectedAgentSession({
@@ -539,10 +546,6 @@ export const ChannelPane = React.memo(function ChannelPane({
       shouldShowThreadSkeleton ||
       Boolean(activeChannel && selectedAgent) ||
       Boolean(profilePanelPubkey));
-  // Every auxiliary panel is keyed because they share one `AnimatePresence`
-  // below: it needs a stable identity per panel to tell "this panel closed"
-  // apart from "a different panel replaced it". Only the focus drawer declares
-  // an `exit`, so every other panel still unmounts on the same frame as before.
   const wrapAux = (
     panel: React.ReactNode,
     testId: string,
@@ -560,8 +563,6 @@ export const ChannelPane = React.memo(function ChannelPane({
         {panel}
       </RightAuxiliaryPane>
     ) : (
-      // Narrow viewports render the panel bare. The fragment exists only to
-      // carry the key; it adds no DOM.
       <React.Fragment key={options.key ?? testId}>{panel}</React.Fragment>
     );
   const wrapThreadPanel = (panel: React.ReactNode) =>
@@ -576,8 +577,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     ) : (
       wrapAux(panel, "message-thread-panel", { key: THREAD_SURFACE_KEY })
     );
-  // The toggle only exists where both layouts do. Narrow viewports have no split
-  // pane to offer, so a control switching to it would be a broken promise.
   const threadHeaderLeading = useSplitAuxiliaryPane ? (
     <ThreadViewModeToggle onChange={changeThreadViewMode} />
   ) : undefined;
@@ -604,7 +603,7 @@ export const ChannelPane = React.memo(function ChannelPane({
         <section
           aria-label="Channel messages and composer"
           className="relative z-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
-          inert={useFocusThreadDrawer ? true : undefined}
+          inert={channelIsCovered ? true : undefined}
           data-testid="channel-drop-zone"
           onDragEnter={
             canDropInMainColumn ? mainComposerMedia.handleDragEnter : undefined
@@ -832,7 +831,7 @@ export const ChannelPane = React.memo(function ChannelPane({
        * animate. It can hold the real thread through the exit rather than a
        * frozen snapshot because the panel is fully prop-driven.
        */}
-      <AnimatePresence>
+      <AnimatePresence onExitComplete={markExitComplete}>
         {channelManagementOpen && activeChannel ? (
           <ChannelManagementAuxiliaryPanel
             activeChannel={activeChannel}

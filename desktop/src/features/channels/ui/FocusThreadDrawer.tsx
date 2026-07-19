@@ -151,7 +151,10 @@ export function FocusThreadDrawer({
     drawerRef.current?.focus({ preventScroll: true });
 
     return () => {
-      previousFocusRef.current?.focus({ preventScroll: true });
+      const previousFocus = previousFocusRef.current;
+      requestAnimationFrame(() => {
+        previousFocus?.focus({ preventScroll: true });
+      });
     };
   }, []);
 

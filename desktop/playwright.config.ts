@@ -74,6 +74,7 @@ export default defineConfig({
         "**/boot-splash.spec.ts",
         "**/thread-reply-anchor-roleplay.spec.ts",
         "**/threadpane-ultrawide.spec.ts",
+        "**/thread-focus-mode.spec.ts",
         "**/animated-avatar.spec.ts",
         "**/reminders.spec.ts",
         "**/reminder-click-repro.spec.ts",
