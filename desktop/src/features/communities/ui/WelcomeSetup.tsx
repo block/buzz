@@ -214,7 +214,10 @@ export function WelcomeSetup({
               </div>
               <div className="flex w-full flex-1 items-center justify-center">
                 <div className="w-full max-w-[920px] space-y-16">
-                  <section aria-labelledby="welcome-join-key-step">
+                  <section
+                    aria-labelledby="welcome-join-key-step"
+                    className="translate-y-12"
+                  >
                     <h2
                       className="relative z-10 mb-8 text-sm font-normal"
                       id="welcome-join-key-step"

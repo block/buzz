@@ -643,6 +643,7 @@ test("first-community choices expose npub and invite input", async ({
   await expectCommunityBranchFramePosition(page, joinKeyFrame);
   const joinKeyFrameBox = await joinKeyFrame.boundingBox();
   expect(joinKeyFrameBox?.width).toBeGreaterThan(700);
+  await expect(joinKeyFrame).toHaveClass(/buzz-card-textured/);
   const joinKeyFrameStyles = await joinKeyFrame.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
@@ -650,8 +651,8 @@ test("first-community choices expose npub and invite input", async ({
       borderRadius: styles.borderRadius,
     };
   });
-  expect(joinKeyFrameStyles.backgroundColor).toMatch(/(0\.5\)|\/ 0\.5\))/);
-  expect(joinKeyFrameStyles.borderRadius).toBe("12px");
+  expect(joinKeyFrameStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
+  expect(joinKeyFrameStyles.borderRadius).toBe("0px");
   await expect
     .poll(() =>
       joinNpub.evaluate((element) => {
@@ -687,6 +688,7 @@ test("first-community choices expose npub and invite input", async ({
   await expectCommunityBranchFramePosition(page, inviteInputFrame);
   const inviteInputFrameBox = await inviteInputFrame.boundingBox();
   expect(inviteInputFrameBox?.width).toBeGreaterThan(700);
+  await expect(inviteInputFrame).toHaveClass(/buzz-card-textured/);
   const inviteInputFrameStyles = await inviteInputFrame.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
@@ -694,8 +696,8 @@ test("first-community choices expose npub and invite input", async ({
       borderRadius: styles.borderRadius,
     };
   });
-  expect(inviteInputFrameStyles.backgroundColor).toMatch(/(0\.5\)|\/ 0\.5\))/);
-  expect(inviteInputFrameStyles.borderRadius).toBe("12px");
+  expect(inviteInputFrameStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
+  expect(inviteInputFrameStyles.borderRadius).toBe("0px");
   await expect
     .poll(() =>
       inviteInput.evaluate((element) => {
