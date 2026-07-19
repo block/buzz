@@ -171,6 +171,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "buzz.envSecretName" . }}
                   key: DATABASE_URL
+            - name: READ_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: READ_DATABASE_URL
+                  optional: true
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:

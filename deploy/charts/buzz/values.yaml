@@ -58,6 +58,7 @@ ownerPubkey: ""
 #   BUZZ_RELAY_PRIVATE_KEY        — 64-char hex; relay identity (rotation = identity change)
 #   BUZZ_GIT_HOOK_HMAC_SECRET     — 32+ chars; required when replicaCount > 1
 #   DATABASE_URL                  — full Postgres URL (preferred over externalPostgresql.url)
+#   READ_DATABASE_URL             — optional Postgres read-replica URL; omit to keep all reads on the writer
 #   REDIS_URL                     — full Redis URL with auth
 #   BUZZ_S3_ACCESS_KEY            — S3 access key
 #   BUZZ_S3_SECRET_KEY            — S3 secret key
