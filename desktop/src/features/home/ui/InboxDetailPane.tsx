@@ -23,6 +23,7 @@ import { getThreadReference } from "@/features/messages/lib/threading";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
+import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import type { Channel, UserProfileSummary } from "@/shared/api/types";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
@@ -130,6 +131,7 @@ export function InboxDetailPane({
   // Refs for the shared anchored-scroll hook's container and content roots.
   const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
   const contentRef = React.useRef<HTMLDivElement | null>(null);
+  const composerWrapperRef = React.useRef<HTMLDivElement | null>(null);
   const [replyTargetId, setReplyTargetId] = React.useState<string | null>(null);
   const [isFocusHighlightVisible, setIsFocusHighlightVisible] =
     React.useState(true);
@@ -319,6 +321,12 @@ export function InboxDetailPane({
     setCapturedDefaultParentId(fallback);
   }, [conversationId, selectedEventId, item, latchedDefaultParentId]);
 
+  useComposerHeightPadding(
+    scrollContainerRef,
+    composerWrapperRef,
+    conversationId,
+  );
+
   if (!item) {
     return (
       <section
@@ -379,7 +387,7 @@ export function InboxDetailPane({
       ref={detailPaneRef}
     >
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        <TopChromeInsetHeader flush>
+        <TopChromeInsetHeader flush transparent>
           <div className="px-5 py-2">
             <div className="flex min-h-9 min-w-0 items-center justify-between gap-3">
               <div
@@ -468,7 +476,8 @@ export function InboxDetailPane({
 
         <div
           aria-busy={isThreadContextLoading}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 [overflow-anchor:none]"
+          className="-mt-13 min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 pt-13 [overflow-anchor:none]"
+          data-testid="home-inbox-detail-scroll"
           onScroll={onScroll}
           ref={scrollContainerRef}
         >
@@ -508,7 +517,11 @@ export function InboxDetailPane({
           </div>
         </div>
 
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
+        <div
+          className="pointer-events-none absolute inset-x-0 bottom-0 z-40 bg-background"
+          data-testid="home-inbox-detail-composer-overlay"
+          ref={composerWrapperRef}
+        >
           <div className="pointer-events-auto">
             <MessageComposer
               audienceContext={{
