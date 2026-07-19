@@ -239,12 +239,7 @@ export function MessageThreadPanel({
   >(null);
   const isOverlay = useIsThreadPanelOverlay();
   const threadHeadId = threadHead?.id ?? null;
-  // The app-level Escape shortcut marks the channel read. Focus mode is the
-  // foreground surface, so it claims Escape during capture before that
-  // background action can consume the same key.
-  useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusMode, {
-    capture: isFocusMode,
-  });
+  useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusMode);
   const hasConstrainedColumn = columnMaxWidthPx != null;
   useComposerHeightPadding(
     threadBodyRef,

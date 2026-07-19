@@ -106,9 +106,7 @@ export function MessageThreadPanelSkeleton({
 }: MessageThreadPanelSkeletonProps) {
   const isOverlay = useIsThreadPanelOverlay();
   const hasConstrainedColumn = columnMaxWidthPx != null;
-  useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusMode, {
-    capture: isFocusMode,
-  });
+  useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusMode);
 
   const threadHeaderContent = (
     <AuxiliaryPanelHeaderGroup
