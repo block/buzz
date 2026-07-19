@@ -596,7 +596,7 @@ function RuntimeCard({
       {installError ? (
         <RuntimeErrorTooltip
           className="absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
-          detail={runtimeDetailText(runtime)}
+          detail="Setup couldn’t be completed. Try again."
           label="Setup failed"
           showIcon
           testId={`onboarding-runtime-error-${runtime.id}`}

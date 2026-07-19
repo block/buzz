@@ -876,9 +876,9 @@ test("failed install pins a single-line 12px error without moving card content",
   await expect(error).toHaveCSS("white-space", "nowrap");
   await expect(error.locator("span")).toHaveCSS("text-overflow", "ellipsis");
   await error.hover();
-  await expect(
-    page.getByRole("tooltip").getByText("CLI detected; ACP adapter missing."),
-  ).toBeVisible();
+  await expect(page.getByRole("tooltip")).toHaveText(
+    "Setup couldn’t be completed. Try again.",
+  );
   await expect(page.getByRole("tooltip")).not.toContainText(installError);
   expect(
     await heading.evaluate((element) => element.getBoundingClientRect().top),
