@@ -636,13 +636,14 @@ for (const authStatus of [
       await setupButton.click();
       await expect(card).toHaveAttribute("aria-checked", "true");
     } else if (authStatus.status === "unknown") {
+      await expect(card.getByText("Status unavailable")).toBeVisible();
       await expect(
-        card.getByText("Couldn’t verify authentication"),
-      ).toBeVisible();
+        card.getByRole("button", { name: "Check Claude again" }),
+      ).toHaveText("CHECK AGAIN");
       await card.click();
       await expect(card).toHaveAttribute("aria-checked", "true");
     } else {
-      await expect(card.getByText("Fix Claude config")).toBeVisible();
+      await expect(card.getByText("Configuration invalid")).toBeVisible();
       await card.click();
       await expect(card).toHaveAttribute("aria-checked", "true");
     }
@@ -714,11 +715,18 @@ test("failed install pins a single-line 12px error without moving card content",
   const detailTopBefore = await detail.evaluate(
     (element) => element.getBoundingClientRect().top,
   );
+  const setupTopBefore = await setupButton.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
 
   await setupButton.click();
 
   const error = page.getByTestId("onboarding-runtime-error-claude");
   await expect(error).toBeVisible();
+  await expect(error).toHaveText(/Setup failed/);
+  await expect(error).toHaveAttribute("title", new RegExp(installError));
+  await expect(setupButton).toBeVisible();
+  await expect(setupButton).toHaveText("SET UP");
   await expect(error).toHaveCSS("font-size", "12px");
   await expect(error).toHaveCSS("position", "absolute");
   await expect(error).toHaveCSS("white-space", "nowrap");
@@ -729,6 +737,11 @@ test("failed install pins a single-line 12px error without moving card content",
   expect(
     await detail.evaluate((element) => element.getBoundingClientRect().top),
   ).toBe(detailTopBefore);
+  expect(
+    await setupButton.evaluate(
+      (element) => element.getBoundingClientRect().top,
+    ),
+  ).toBe(setupTopBefore);
 });
 
 test("successful install still waits for refreshed runtime readiness", async ({
