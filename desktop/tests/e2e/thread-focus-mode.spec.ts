@@ -43,6 +43,99 @@ async function topVisibleMessageId(
   });
 }
 
+/**
+ * The channel header must own its pixels, not merely be "visible".
+ *
+ * Regression guard for the focus-mode launch: a `z-0` on the channel section
+ * created a stacking context that flattened the header's `z-30` beneath the
+ * sibling shared header backdrop (also `z-30`), painting the backdrop over the
+ * name and actions. Neither `toBeVisible()` nor `elementFromPoint` can catch
+ * this — the backdrop is `pointer-events-none`, so hit-testing skips it. We
+ * compare CSS paint order directly: walk each element's stacking-context
+ * chain, find the branches under their common stacking context, and check the
+ * header's branch wins (higher z-index, or later in DOM order on a tie).
+ */
+async function expectChannelHeaderUnobscured(
+  page: import("@playwright/test").Page,
+) {
+  const title = page.getByTestId("chat-title");
+  await expect(title).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const titleEl = document.querySelector('[data-testid="chat-title"]');
+        const backdropEl = document.querySelector(
+          '[data-testid="channel-shared-header-backdrop"]',
+        );
+        if (!titleEl) return "missing title";
+        if (!backdropEl) return "missing backdrop";
+
+        const createsStackingContext = (el: Element): boolean => {
+          const style = getComputedStyle(el);
+          if (style.position !== "static" && style.zIndex !== "auto")
+            return true;
+          if (parseFloat(style.opacity) < 1) return true;
+          if (style.transform !== "none") return true;
+          if (style.filter !== "none") return true;
+          const backdropFilter =
+            style.backdropFilter ??
+            (style as unknown as { webkitBackdropFilter?: string })
+              .webkitBackdropFilter;
+          if (backdropFilter && backdropFilter !== "none") return true;
+          if (style.isolation === "isolate") return true;
+          if (
+            style.contain.includes("paint") ||
+            style.contain.includes("strict")
+          )
+            return true;
+          return false;
+        };
+
+        // Chain of stacking-context roots from the element up to <html>.
+        const stackingChain = (el: Element): Element[] => {
+          const chain: Element[] = [el];
+          let current: Element | null = el.parentElement;
+          while (current) {
+            if (
+              createsStackingContext(current) ||
+              current === document.documentElement
+            ) {
+              chain.push(current);
+            }
+            current = current.parentElement;
+          }
+          return chain;
+        };
+
+        const titleChain = stackingChain(titleEl);
+        const backdropChain = stackingChain(backdropEl);
+        const common = titleChain.find((el) => backdropChain.includes(el));
+        if (!common) return "no common stacking context";
+
+        // Branch = the child-of-common entry each element paints through.
+        const titleBranch = titleChain[titleChain.indexOf(common) - 1];
+        const backdropBranch = backdropChain[backdropChain.indexOf(common) - 1];
+        if (!titleBranch || !backdropBranch) return "degenerate chain";
+
+        const effectiveZ = (el: Element): number => {
+          const z = getComputedStyle(el).zIndex;
+          return z === "auto" ? 0 : parseInt(z, 10);
+        };
+        const titleZ = effectiveZ(titleBranch);
+        const backdropZ = effectiveZ(backdropBranch);
+        if (titleZ !== backdropZ) {
+          return titleZ > backdropZ ? true : "backdrop paints above header";
+        }
+        // Tie: later in DOM order paints on top.
+        const order = backdropBranch.compareDocumentPosition(titleBranch);
+        return (order & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+          ? true
+          : "backdrop paints above header";
+      }),
+    )
+    .toBe(true);
+}
+
 test("focus and split preserve reading context and interaction ownership", async ({
   page,
 }) => {
@@ -55,6 +148,7 @@ test("focus and split preserve reading context and interaction ownership", async
   const rootId = await seedLongThread(page);
 
   await page.getByTestId("channel-general").click();
+  await expectChannelHeaderUnobscured(page);
   const summary = page.locator(
     `[data-testid="message-thread-summary"][data-thread-head-id="${rootId}"]`,
   );
@@ -89,6 +183,7 @@ test("focus and split preserve reading context and interaction ownership", async
     .click();
   await expect(drawer).toHaveCount(0);
   await expect(channel).not.toHaveAttribute("inert", "");
+  await expectChannelHeaderUnobscured(page);
   await expect(page.getByTestId("thread-view-mode-toggle")).toBeFocused();
   await expect(
     body.locator(`[data-message-id="${anchorId}"]`),
