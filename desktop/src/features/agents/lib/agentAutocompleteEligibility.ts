@@ -1,4 +1,4 @@
-import type { Channel, RelayAgent } from "@/shared/api/types";
+import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
@@ -54,6 +54,45 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
+export function isActiveManagedAgent(agent: Pick<ManagedAgent, "status">) {
+  return agent.status === "running" || agent.status === "deployed";
+}
+
+export function getActiveManagedAgentMetadata(
+  agents:
+    | readonly Pick<ManagedAgent, "pubkey" | "personaId" | "status">[]
+    | undefined,
+) {
+  const activeAgents = (agents ?? []).filter(isActiveManagedAgent);
+  return {
+    personaIds: new Set(
+      activeAgents
+        .map((agent) => agent.personaId)
+        .filter((personaId): personaId is string => Boolean(personaId)),
+    ),
+    pubkeys: new Set(
+      activeAgents.map((agent) => normalizePubkey(agent.pubkey)),
+    ),
+  };
+}
+
+export function getPreferredAgentPubkeys({
+  managedAgents,
+  relayAgents,
+}: {
+  managedAgents: readonly Pick<ManagedAgent, "pubkey" | "status">[] | undefined;
+  relayAgents: readonly Pick<RelayAgent, "pubkey" | "status">[] | undefined;
+}) {
+  return new Set([
+    ...(managedAgents ?? [])
+      .filter(isActiveManagedAgent)
+      .map((agent) => normalizePubkey(agent.pubkey)),
+    ...(relayAgents ?? [])
+      .filter((agent) => agent.status !== "offline")
+      .map((agent) => normalizePubkey(agent.pubkey)),
+  ]);
+}
+
 export function shouldHideAgentFromMentions({
   isAgent,
   isMember,
@@ -94,6 +133,7 @@ type AgentAutocompleteCandidate = {
   isAgent?: boolean;
   isManagedAgent?: boolean;
   isMember?: boolean;
+  kind?: "identity" | "persona" | "team";
   personaId?: string | null;
 };
 
@@ -111,7 +151,9 @@ function agentIdentityKey<T extends AgentAutocompleteCandidate>(
   }
 
   if (candidate.personaId) {
-    return `persona:${candidate.personaId}`;
+    return candidate.kind === "persona"
+      ? `persona-template:${candidate.personaId}`
+      : `persona:${candidate.personaId}`;
   }
 
   const label = normalizeLabel(getLabel(candidate));
@@ -146,8 +188,8 @@ function agentCandidateRank<T extends AgentAutocompleteCandidate>(
     : null;
 
   return [
-    candidate.isMember === true ? 0 : 1,
     pubkey && preferredPubkeys.has(pubkey) ? 0 : 1,
+    candidate.isMember === true ? 0 : 1,
     candidate.isManagedAgent === true ? 0 : 1,
     candidate.personaId ? 0 : 1,
     ownerPubkey && ownerPubkey === normalizedCurrentPubkey ? 0 : 1,
