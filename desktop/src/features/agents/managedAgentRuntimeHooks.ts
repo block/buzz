@@ -41,7 +41,9 @@ export function useManagedAgentRuntimeAction() {
         managedAgentRuntimesQueryKey,
         (current = []) => {
           const index = current.findIndex(
-            (candidate) => candidate.runtimeId === runtime.runtimeId,
+            (candidate) =>
+              candidate.pubkey === runtime.pubkey &&
+              candidate.relayUrl === runtime.relayUrl,
           );
           if (index === -1) return [...current, runtime];
           return current.map((candidate, candidateIndex) =>

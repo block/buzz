@@ -5,10 +5,10 @@ import {
   agentCommunityAvailability,
   agentCommunityStatusDetail,
   findManagedAgentRuntime,
+  managedAgentRuntimeKey,
 } from "./managedAgentRuntimeStatus.ts";
 
 const runtime = (overrides = {}) => ({
-  runtimeId: "runtime-a",
   pubkey: "aa",
   relayUrl: "wss://relay.example",
   localSetup: true,
@@ -51,6 +51,13 @@ test("unavailable detail distinguishes stopped and failed", () => {
       runtime({ lifecycle: "failed", error: "Relay timed out" }),
     ),
     "Relay timed out",
+  );
+});
+
+test("pair key cannot collide at component boundaries", () => {
+  assert.notEqual(
+    managedAgentRuntimeKey(runtime({ pubkey: "ab", relayUrl: "c" })),
+    managedAgentRuntimeKey(runtime({ pubkey: "a", relayUrl: "bc" })),
   );
 });
 

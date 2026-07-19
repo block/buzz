@@ -320,10 +320,8 @@ export type ManagedAgentRuntimeLifecycle =
   | "stopped";
 
 export type ManagedAgentRuntimeStatus = {
-  /** Opaque backend-owned identity for this canonical agent + relay pair. */
-  runtimeId: string;
   pubkey: string;
-  /** Original community descriptor, present on startup reconciliation results. */
+  /** Exact submitted descriptor, present only on startup reconcile results. */
   requestedRelayUrl?: string;
   /** Canonical, backend-owned pair identity component. Do not normalize in TS. */
   relayUrl: string;

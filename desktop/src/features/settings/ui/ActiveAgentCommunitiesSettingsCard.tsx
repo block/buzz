@@ -8,6 +8,7 @@ import {
 import {
   agentCommunityAvailability,
   agentCommunityStatusDetail,
+  managedAgentRuntimeKey,
 } from "@/features/agents/managedAgentRuntimeStatus";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
@@ -19,9 +20,9 @@ export function ActiveAgentCommunitiesSettingsCard() {
   const agentsQuery = useManagedAgentsQuery();
   const runtimesQuery = useManagedAgentRuntimesQuery();
   const action = useManagedAgentRuntimeAction();
-  const [pendingRuntimeId, setPendingRuntimeId] = React.useState<string | null>(
-    null,
-  );
+  const [pendingRuntimeKey, setPendingRuntimeKey] = React.useState<
+    string | null
+  >(null);
 
   const agentNames = React.useMemo(
     () =>
@@ -36,7 +37,7 @@ export function ActiveAgentCommunitiesSettingsCard() {
   const runtimes = runtimesQuery.data ?? [];
 
   async function runAction(runtime: ManagedAgentRuntimeStatus) {
-    setPendingRuntimeId(runtime.runtimeId);
+    setPendingRuntimeKey(managedAgentRuntimeKey(runtime));
     try {
       await action.mutateAsync({
         action:
@@ -52,7 +53,7 @@ export function ActiveAgentCommunitiesSettingsCard() {
         relayUrl: runtime.relayUrl,
       });
     } finally {
-      setPendingRuntimeId(null);
+      setPendingRuntimeKey(null);
     }
   }
 
@@ -73,12 +74,13 @@ export function ActiveAgentCommunitiesSettingsCard() {
           runtimes.map((runtime) => {
             const status = agentCommunityAvailability(runtime);
             const detail = agentCommunityStatusDetail(runtime);
-            const pending = pendingRuntimeId === runtime.runtimeId;
+            const runtimeKey = managedAgentRuntimeKey(runtime);
+            const pending = pendingRuntimeKey === runtimeKey;
             return (
               <div
                 className="flex items-center gap-3 border-b border-border/60 px-4 py-3 last:border-b-0"
-                data-testid={`agent-community-runtime-${runtime.runtimeId}`}
-                key={runtime.runtimeId}
+                data-testid="agent-community-runtime"
+                key={runtimeKey}
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">

@@ -18,6 +18,11 @@ export function useManagedAgentRuntimeReconciliation(
       .then((runtimes) => {
         queryClient.setQueryData(managedAgentRuntimesQueryKey, runtimes);
       })
-      .catch(() => undefined);
+      .catch((error) => {
+        console.warn(
+          "[managed-agent-runtimes] startup reconcile failed:",
+          error,
+        );
+      });
   }, [communities, queryClient]);
 }

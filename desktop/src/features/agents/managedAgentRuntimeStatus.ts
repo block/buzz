@@ -35,6 +35,12 @@ export function agentCommunityStatusDetail(
   return null;
 }
 
+export function managedAgentRuntimeKey(
+  runtime: Pick<ManagedAgentRuntimeStatus, "pubkey" | "relayUrl">,
+): string {
+  return JSON.stringify([runtime.pubkey, runtime.relayUrl]);
+}
+
 export function findManagedAgentRuntime(
   runtimes: readonly ManagedAgentRuntimeStatus[],
   pubkey: string,
