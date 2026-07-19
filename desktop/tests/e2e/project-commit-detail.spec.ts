@@ -258,7 +258,7 @@ test("pull request and issue feeds share the commit row structure", async ({
   await prRows.first().getByRole("button", { name: /^#/ }).click();
   await expect(
     page.getByRole("navigation", { name: "Project breadcrumb" }),
-  ).toContainText("PRs");
+  ).toContainText("Pull Request");
 
   // Step back to the feed so the community tabs are available again.
   await page

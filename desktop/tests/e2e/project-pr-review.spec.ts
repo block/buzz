@@ -62,7 +62,7 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   await expect(approve).toBeVisible();
 
   // Request a review from bob via the reviewers dropdown.
-  await page.getByRole("button", { name: "Request" }).click();
+  await page.getByRole("button", { name: "Request", exact: true }).click();
   await page.getByTestId("project-reviewer-search").fill("bob");
   await page
     .getByTestId(`project-reviewer-result-${TEST_IDENTITIES.bob.pubkey}`)
