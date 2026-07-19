@@ -110,11 +110,9 @@ export async function detectBuzzDownloadPlatform(
 function assetPattern(platform: BuzzDownloadPlatform): RegExp | undefined {
   switch (platform.operatingSystem) {
     case "macos":
-      // Safari withholds CPU architecture and reports MacIntel on Apple
-      // Silicon. The Intel build remains compatible there through Rosetta.
-      return platform.architecture === "arm64"
-        ? /_aarch64\.dmg$/i
-        : /_x64\.dmg$/i;
+      if (platform.architecture === "arm64") return /_aarch64\.dmg$/i;
+      if (platform.architecture === "x64") return /_x64\.dmg$/i;
+      return undefined;
     case "windows":
       return /_x64-setup[^/]*\.exe$/i;
     case "linux":
@@ -141,8 +139,9 @@ export function selectBuzzDownloadUrl(
   return undefined;
 }
 
-export async function resolveBuzzDownloadUrl(): Promise<string> {
-  const platform = await detectBuzzDownloadPlatform(navigator);
+export async function resolveBuzzDownloadUrlForPlatform(
+  platform: BuzzDownloadPlatform,
+): Promise<string> {
   try {
     const cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) ?? "null") as {
       expiresAt: number;
@@ -187,4 +186,10 @@ export async function resolveBuzzDownloadUrl(): Promise<string> {
   } catch {
     return BUZZ_RELEASES_URL;
   }
+}
+
+export async function resolveBuzzDownloadUrl(): Promise<string> {
+  return resolveBuzzDownloadUrlForPlatform(
+    await detectBuzzDownloadPlatform(navigator),
+  );
 }

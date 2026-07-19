@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.4.19
+
+- Polish onboarding runtime error states ([#2116](https://github.com/block/buzz/pull/2116)) ([`31090b186`](https://github.com/block/buzz/commit/31090b186f95f26e6a91107d7c40856ccfffe4f5))
+- feat(desktop): add tooltips to channel header actions ([#2115](https://github.com/block/buzz/pull/2115)) ([`cab47905a`](https://github.com/block/buzz/commit/cab47905a86a53cf5ff66a8c0cb359f8abf9eeae))
+- feat(desktop): add focused thread mode ([#2108](https://github.com/block/buzz/pull/2108)) ([`2d0bd6ec4`](https://github.com/block/buzz/commit/2d0bd6ec4af084a71a1383a0ee8bb74ad277c121))
+- feat(desktop): polish community access request ([#2112](https://github.com/block/buzz/pull/2112)) ([`860263b1b`](https://github.com/block/buzz/commit/860263b1b6bf3da6eaf23bc0cd8e3675f987a705))
+- Align intro-to-your-team onboarding ([#2102](https://github.com/block/buzz/pull/2102)) ([`b6aa71789`](https://github.com/block/buzz/commit/b6aa71789d2eb72c7f64d7de2794991aab2655ca))
+- Add native Builderlab auth and community client ([#2099](https://github.com/block/buzz/pull/2099)) ([`8908bd6b7`](https://github.com/block/buzz/commit/8908bd6b71734d2d00ce2ba7bd65d6affd6fe012))
+- Open community creation signup from desktop ([#2110](https://github.com/block/buzz/pull/2110)) ([`af4b7087d`](https://github.com/block/buzz/commit/af4b7087dc3ede97c3f4f95f8bbc0b97fd05c162))
+- fix(desktop): stop DMs from firing duplicate desktop notifications ([#2105](https://github.com/block/buzz/pull/2105)) ([`da2e2592a`](https://github.com/block/buzz/commit/da2e2592a333f41f7a1c59ee700b3259f8e0bf0c))
+- Polish community profile onboarding UI ([#2088](https://github.com/block/buzz/pull/2088)) ([`c81806d1c`](https://github.com/block/buzz/commit/c81806d1c842cf2ad63e5bf2d615e45c05070b88))
+- test(desktop): fix Escape-before-mount race in channel browser e2e ([#2101](https://github.com/block/buzz/pull/2101)) ([`d011c3f74`](https://github.com/block/buzz/commit/d011c3f7471a00dff31f2ce77cb0b51e14cd5570))
+- style(desktop): match PendingInviteGate to startup interstitials ([#2097](https://github.com/block/buzz/pull/2097)) ([`68bd8630e`](https://github.com/block/buzz/commit/68bd8630e02abde064688feb31f4305a07788f60))
+- Remove additional agents gallery ([#2098](https://github.com/block/buzz/pull/2098)) ([`836cf5f6e`](https://github.com/block/buzz/commit/836cf5f6ed38d141eb3f6945e22ada2db9e99d02))
+- fix(agents): stop the reply loop and the premature kickoff closer ([#2094](https://github.com/block/buzz/pull/2094)) ([`284a76c1c`](https://github.com/block/buzz/commit/284a76c1c7e75b4f331ce8017df27610f30bf59f))
+
+
 ## v0.4.18
 
 - fix(desktop): recover first community joins ([#2087](https://github.com/block/buzz/pull/2087)) ([`775cf672d`](https://github.com/block/buzz/commit/775cf672d11d43b07b27941a41bd2e52a9111466))

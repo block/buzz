@@ -374,3 +374,58 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::extract_auth_tag_json;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    /// Build a signed NIP-98 (kind 27235) event carrying the given tags. The
+    /// `auth` tag lives inside the signed event exactly as the git and
+    /// WebSocket auth paths receive it.
+    fn signed_event_with_tags(tags: Vec<Tag>) -> nostr::Event {
+        EventBuilder::new(Kind::HttpAuth, "")
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign auth event")
+    }
+
+    /// A single `auth` tag is extracted verbatim as its JSON-array string —
+    /// this is the exact value fed to `verify_auth_tag` on the git path.
+    #[test]
+    fn single_auth_tag_extracted_verbatim() {
+        let owner = Keys::generate().public_key().to_hex();
+        let sig = "00".repeat(64);
+        let event = signed_event_with_tags(vec![
+            Tag::parse(["u", "https://relay/git/x/y"]).unwrap(),
+            Tag::parse(["auth", owner.as_str(), "", sig.as_str()]).unwrap(),
+        ]);
+
+        let extracted = extract_auth_tag_json(&event).expect("auth tag present");
+        let expected = serde_json::to_string(&["auth", owner.as_str(), "", sig.as_str()]).unwrap();
+        assert_eq!(extracted, expected);
+    }
+
+    /// No `auth` tag → `None` (the direct-member path, tag absent).
+    #[test]
+    fn no_auth_tag_returns_none() {
+        let event =
+            signed_event_with_tags(vec![Tag::parse(["u", "https://relay/git/x/y"]).unwrap()]);
+        assert_eq!(extract_auth_tag_json(&event), None);
+    }
+
+    /// More than one `auth` tag → `None`. Per NIP-OA, an ambiguous set of
+    /// attestations is treated as no valid attestation (fail-closed), so a
+    /// second forged tag cannot smuggle an alternate delegation past the gate.
+    #[test]
+    fn duplicate_auth_tags_return_none() {
+        let a = Keys::generate().public_key().to_hex();
+        let b = Keys::generate().public_key().to_hex();
+        let sig = "00".repeat(64);
+        let event = signed_event_with_tags(vec![
+            Tag::parse(["auth", a.as_str(), "", sig.as_str()]).unwrap(),
+            Tag::parse(["auth", b.as_str(), "", sig.as_str()]).unwrap(),
+        ]);
+        assert_eq!(extract_auth_tag_json(&event), None);
+    }
+}

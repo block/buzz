@@ -185,11 +185,19 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // The ±60s timestamp window + URL scoping + HTTPS transport provide sufficient
         // replay protection for v1. Per-request signing requires protocol changes.
 
-        // Relay membership gate (NIP-43).
-        let auth_tag = parts
+        let event: nostr::Event = serde_json::from_str(&event_json)
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid auth event").into_response())?;
+
+        // Relay membership gate (NIP-43). Git cannot carry a standalone
+        // x-auth-tag header through the credential-helper protocol, so agents
+        // attach their NIP-OA attestation to the signed NIP-98 event, matching
+        // the WebSocket NIP-42 flow.
+        let event_auth_tag = crate::handlers::auth::extract_auth_tag_json(&event);
+        let header_auth_tag = parts
             .headers
             .get("x-auth-tag")
-            .and_then(|v| v.to_str().ok());
+            .and_then(|value| value.to_str().ok());
+        let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
         if crate::api::relay_members::enforce_relay_membership(
             state,
             tenant.community(),

@@ -948,7 +948,7 @@ export function useMentions(
 
       if (event.key === "Escape") {
         event.preventDefault();
-        setMentionQuery(null);
+        cancelMentionAutocomplete(); // full cancel incl. pending debounce
         return { handled: true };
       }
 
@@ -956,6 +956,7 @@ export function useMentions(
     },
     [
       activePersonaIds,
+      cancelMentionAutocomplete,
       currentPubkey,
       isMentionOpen,
       mentionCandidatesWithTeams,

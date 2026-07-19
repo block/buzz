@@ -3,16 +3,16 @@ import Picker from "@emoji-mart/react";
 import { Link2, UploadCloud } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
-import { createPortal, flushSync } from "react-dom";
+import { flushSync } from "react-dom";
 
 import { AnimatedAvatarCapture } from "@/features/profile/ui/AnimatedAvatarCapture";
 import { AvatarCustomColorPanel } from "@/features/profile/ui/AvatarCustomColorPanel";
+import { ProfileAvatarModeTabs } from "@/features/profile/ui/ProfileAvatarModeTabs";
 import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import { Spinner } from "@/shared/ui/spinner";
-import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import {
   AVATAR_COLORS,
   AVATAR_COLOR_SWATCHES,
@@ -33,12 +33,13 @@ import {
   useEmojiMartStyles,
   useEmojiMartThemeVars,
 } from "./ProfileAvatarEditor.utils";
-
 export { parseEmojiAvatarDataUrl } from "./ProfileAvatarEditor.utils";
+export type { AvatarMode } from "./ProfileAvatarEditor.types";
+import type {
+  AvatarMode,
+  ProfileAvatarEditorProps,
+} from "./ProfileAvatarEditor.types";
 
-export type AvatarMode = "image" | "emoji" | "animated";
-
-const MODE_TAB_ORDER: AvatarMode[] = ["image", "emoji", "animated"];
 const DONE_BUTTON_CONTENT_TRANSITION = {
   duration: 0.14,
   ease: [0.23, 1, 0.32, 1],
@@ -59,39 +60,10 @@ function waitForPendingButtonPaint() {
     }
 
     window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        setTimeout(resolve, 0);
-      });
+      window.requestAnimationFrame(() => setTimeout(resolve, 0));
     });
   });
 }
-
-type ProfileAvatarEditorProps = {
-  avatarUrl: string;
-  previewName: string;
-  onUrlChange: (url: string) => void;
-  emojiPickerTheme?: "auto" | "dark" | "light";
-  emojiPickerThemeVars?: React.CSSProperties;
-  onEmojiAvatarChange?: () => void;
-  onCustomColorPickerOpenChange?: (isOpen: boolean) => void;
-  onModeChange?: (mode: AvatarMode) => void;
-  onUploadedAvatarChange?: (url: string | null) => void;
-  onUploadingChange?: (isUploading: boolean) => void;
-  onAnimatedAvatarApply?: (url: string) => void;
-  onDone?: () => void;
-  donePending?: boolean;
-  showEmojiColorControlsWhenEmpty?: boolean;
-  disabled?: boolean;
-  testIdPrefix?: string;
-  /** Host element the animated tab renders its live preview into. */
-  animatedPreviewContainer?: HTMLElement | null;
-  /** Optional host element for the mode tabs; undefined keeps them inline. */
-  modeTabsContainer?: HTMLElement | null;
-  /** Fires when the animated tab starts/stops occupying the host preview. */
-  onAnimatedPreviewActiveChange?: (active: boolean) => void;
-  /** Caption shown under the host preview while animated capture is active. */
-  onAnimatedPreviewCaptionChange?: (caption: string | null) => void;
-};
 
 type EmojiMartEmoji = {
   native?: string;
@@ -132,6 +104,7 @@ export function ProfileAvatarEditor({
   modeTabsContainer,
   onAnimatedPreviewActiveChange,
   onAnimatedPreviewCaptionChange,
+  presentation = "default",
 }: ProfileAvatarEditorProps) {
   const { burstEmoji } = useEmojiBurst();
   const shouldReduceMotion = useReducedMotion();
@@ -166,11 +139,29 @@ export function ProfileAvatarEditor({
     number | null
   >(null);
   const documentEmojiMartThemeVars = useEmojiMartThemeVars();
-  const emojiMartThemeVars = emojiPickerThemeVars ?? documentEmojiMartThemeVars;
+  const emojiMartThemeVars = React.useMemo(
+    () =>
+      ({
+        ...(emojiPickerThemeVars ?? documentEmojiMartThemeVars),
+        ...(presentation === "onboarding-modal"
+          ? {
+              "--buzz-emoji-picker-category-icon-size": "18px",
+              "--buzz-emoji-picker-fade-height": "56px",
+              "--buzz-emoji-picker-fade-opacity": "1",
+              "--buzz-emoji-picker-nav-button-size": "32px",
+              "--buzz-emoji-picker-nav-padding-x": "12px",
+              "--buzz-emoji-picker-padding": "10px",
+              "--buzz-emoji-picker-scroll-padding-top": "18px",
+            }
+          : null),
+      }) as React.CSSProperties,
+    [documentEmojiMartThemeVars, emojiPickerThemeVars, presentation],
+  );
   const customColorDraft = React.useMemo(
     () => hsvToHex(customHue, customSaturation, customValue),
     [customHue, customSaturation, customValue],
   );
+  const isOnboardingModal = presentation === "onboarding-modal";
   const shouldShowColorControls =
     mode === "emoji" &&
     (selectedEmoji !== null || showEmojiColorControlsWhenEmpty);
@@ -268,20 +259,55 @@ export function ProfileAvatarEditor({
   }, [mode, onDone]);
 
   React.useEffect(() => {
-    if (!isAnimatedDoneQueued) {
-      return;
-    }
+    if (!isAnimatedDoneQueued) return;
     setIsAnimatedDoneQueued(false);
     onDone?.();
   }, [isAnimatedDoneQueued, onDone]);
 
   useEmojiMartStyles(emojiPickerContainerRef, mode === "emoji");
 
+  React.useEffect(() => {
+    if (mode !== "emoji") return;
+
+    let animationFrame = 0;
+    let observer: MutationObserver | null = null;
+    const syncSelectedEmojiButton = () => {
+      const shadowRoot =
+        emojiPickerContainerRef.current?.querySelector(
+          "em-emoji-picker",
+        )?.shadowRoot;
+      if (!shadowRoot) {
+        animationFrame = window.requestAnimationFrame(syncSelectedEmojiButton);
+        return;
+      }
+
+      shadowRoot
+        .querySelectorAll('button[data-buzz-selected="true"]')
+        .forEach((button) => {
+          button.removeAttribute("data-buzz-selected");
+        });
+      if (selectedEmoji) {
+        shadowRoot.querySelectorAll(".category button").forEach((button) => {
+          if (button.getAttribute("aria-label") === selectedEmoji) {
+            button.setAttribute("data-buzz-selected", "true");
+          }
+        });
+      }
+
+      observer ??= new MutationObserver(syncSelectedEmojiButton);
+      observer.observe(shadowRoot, { childList: true, subtree: true });
+    };
+
+    animationFrame = window.requestAnimationFrame(syncSelectedEmojiButton);
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      observer?.disconnect();
+    };
+  }, [mode, selectedEmoji]);
+
   React.useLayoutEffect(() => {
     const node = modeContentRef.current;
-    if (!node) {
-      return;
-    }
+    if (!node) return;
 
     const updateModeContentHeight = () => {
       setModeContentHeight(node.getBoundingClientRect().height);
@@ -313,9 +339,7 @@ export function ProfileAvatarEditor({
   }, [avatarUrl]);
 
   React.useEffect(() => {
-    if (!shouldShowColorControls) {
-      setIsCustomColorPickerOpen(false);
-    }
+    if (!shouldShowColorControls) setIsCustomColorPickerOpen(false);
   }, [shouldShowColorControls]);
 
   React.useLayoutEffect(() => {
@@ -472,63 +496,26 @@ export function ProfileAvatarEditor({
     onDone &&
     !isAnyCustomColorPickerVisible &&
     (mode !== "animated" || hasAnimatedApply || isDoneButtonPending);
-  const modeTabs = (
-    <Tabs
-      className="w-full"
-      onValueChange={(nextMode) => {
-        if (isInputDisabled) {
-          return;
-        }
-        updateMode(nextMode as AvatarMode);
-      }}
-      value={mode}
-    >
-      <TabsList
-        aria-label="Avatar type"
-        className="relative isolate grid h-14 w-full grid-cols-3 overflow-hidden rounded-full bg-muted p-1 text-muted-foreground"
-      >
-        <div
-          aria-hidden="true"
-          className="absolute bottom-1 left-1 top-1 z-0 rounded-full bg-background shadow transition-transform duration-[250ms] ease-out"
-          style={{
-            transform: `translateX(${MODE_TAB_ORDER.indexOf(mode) * 100}%)`,
-            width: "calc((100% - 8px) / 3)",
-          }}
-        />
-        <TabsTrigger
-          className="relative z-10 h-full rounded-full bg-transparent text-sm font-medium shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
-          disabled={isInputDisabled}
-          value="image"
-        >
-          Image
-        </TabsTrigger>
-        <TabsTrigger
-          className="relative z-10 h-full rounded-full bg-transparent text-sm font-medium shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
-          disabled={isInputDisabled}
-          value="emoji"
-        >
-          Emoji
-        </TabsTrigger>
-        <TabsTrigger
-          className="relative z-10 h-full rounded-full bg-transparent text-sm font-medium shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
-          disabled={isInputDisabled}
-          value="animated"
-        >
-          Animated
-        </TabsTrigger>
-      </TabsList>
-    </Tabs>
+  const isDoneButtonDisabled =
+    disabled ||
+    isDoneButtonPending ||
+    (isOnboardingModal && mode === "animated" && !hasAnimatedApply);
+  const modeTabsContent = (
+    <ProfileAvatarModeTabs
+      disabled={isInputDisabled}
+      mode={mode}
+      onModeChange={updateMode}
+      portalContainer={modeTabsContainer}
+      presentation={presentation}
+    />
   );
-  const modeTabsContent =
-    modeTabsContainer === undefined
-      ? modeTabs
-      : modeTabsContainer
-        ? createPortal(modeTabs, modeTabsContainer)
-        : null;
 
   return (
     <fieldset
-      className="mx-auto w-full max-w-[576px] border-0 p-0 text-sm"
+      className={cn(
+        "mx-auto w-full border-0 p-0 text-sm",
+        isOnboardingModal ? "max-w-[456px]" : "max-w-[576px]",
+      )}
       data-testid={`${testIdPrefix}-editor`}
       disabled={isInputDisabled}
       onDragEnter={(event) => {
@@ -582,26 +569,54 @@ export function ProfileAvatarEditor({
       }}
     >
       <legend className="sr-only">Avatar image picker</legend>
-      <div className="relative">
-        <div className="relative grid w-full gap-4">
+      <div
+        className="relative"
+        style={
+          isOnboardingModal
+            ? { minHeight: isAnyCustomColorPickerVisible ? 704 : 454 }
+            : undefined
+        }
+      >
+        <div
+          className={cn(
+            "relative w-full",
+            isOnboardingModal ? "flex min-h-[inherit] flex-col" : "grid gap-4",
+          )}
+        >
           {modeTabsContent}
 
           <div
-            className="overflow-hidden transition-[height] duration-[250ms] ease-out"
+            className={cn(
+              "transition-[height] duration-[250ms] ease-out",
+              isOnboardingModal
+                ? cn(
+                    "flex min-h-0 flex-1 items-center overflow-visible",
+                    shouldShowColorControls && "py-6",
+                  )
+                : "overflow-hidden",
+            )}
+            data-testid={`${testIdPrefix}-mode-content-shell`}
             style={
-              modeContentHeight === null
+              isOnboardingModal || modeContentHeight === null
                 ? undefined
                 : { height: modeContentHeight }
             }
           >
-            <div className="overflow-visible" ref={modeContentRef}>
+            <div
+              className={cn("overflow-visible", isOnboardingModal && "w-full")}
+              ref={modeContentRef}
+            >
               {mode === "image" ? (
                 <div className="grid content-start gap-3">
                   <button
                     className={cn(
-                      "relative flex h-[120px] flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-[250ms] ease-out hover:bg-muted/80 disabled:opacity-60",
+                      isOnboardingModal
+                        ? "relative flex h-32 flex-col items-center justify-center overflow-hidden rounded-lg border border-dashed border-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.7)] bg-transparent text-[rgb(var(--buzz-onboarding-avatar-control-fg))] transition-[background-color,border-color,box-shadow,color] duration-[250ms] ease-out hover:bg-[color:rgb(var(--buzz-onboarding-avatar-accent-bg)_/_0.18)] disabled:opacity-60"
+                        : "relative flex h-[120px] flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-[250ms] ease-out hover:bg-muted/80 disabled:opacity-60",
                       isImageDropActive &&
-                        "border-primary bg-primary/10 text-primary ring-1 ring-primary/35 hover:bg-primary/10",
+                        (isOnboardingModal
+                          ? "border-[rgb(var(--buzz-onboarding-avatar-control-fg))] bg-[color:rgb(var(--buzz-onboarding-avatar-accent-bg)_/_0.24)]"
+                          : "border-primary bg-primary/10 text-primary ring-1 ring-primary/35 hover:bg-primary/10"),
                     )}
                     data-dragging={isImageDropActive ? "true" : undefined}
                     data-testid={`${testIdPrefix}-upload`}
@@ -617,7 +632,7 @@ export function ProfileAvatarEditor({
                       )}
                       data-testid={`${testIdPrefix}-drop-mask`}
                     />
-                    {isUploading ? (
+                    {isOnboardingModal ? null : isUploading ? (
                       <Spinner
                         aria-hidden
                         className="relative h-8 w-8 border-2 text-muted-foreground"
@@ -632,14 +647,22 @@ export function ProfileAvatarEditor({
                     )}
                     <span
                       className={cn(
-                        "relative text-sm font-medium text-muted-foreground transition-colors duration-[250ms] ease-out",
-                        isImageDropActive && "text-primary",
+                        "relative transition-colors duration-[250ms] ease-out",
+                        isOnboardingModal
+                          ? "text-sm font-normal text-[rgb(var(--buzz-onboarding-avatar-control-fg))]"
+                          : "text-sm font-medium text-muted-foreground",
+                        isImageDropActive &&
+                          (isOnboardingModal
+                            ? "text-[rgb(var(--buzz-onboarding-avatar-control-fg))]"
+                            : "text-primary"),
                       )}
                     >
                       {isUploading ? (
                         "Uploading..."
                       ) : isImageDropActive ? (
                         "Drop image here"
+                      ) : isOnboardingModal ? (
+                        "Drag or browse"
                       ) : (
                         <>
                           Drop or{" "}
@@ -651,12 +674,26 @@ export function ProfileAvatarEditor({
                     </span>
                   </button>
 
-                  <div className="flex h-16 items-center gap-3 rounded-xl bg-muted px-5 transition-colors duration-[250ms] ease-out focus-within:bg-muted/80">
-                    <Link2 className="h-4 w-4 text-muted-foreground" />
+                  <div
+                    className={cn(
+                      "flex items-center transition-colors duration-[250ms] ease-out",
+                      isOnboardingModal
+                        ? "h-[52px] rounded-lg border border-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.45)] bg-transparent px-5 focus-within:border-[rgb(var(--buzz-onboarding-avatar-control-fg))]"
+                        : "h-16 gap-3 rounded-xl bg-muted px-5 focus-within:bg-muted/80",
+                    )}
+                  >
+                    {isOnboardingModal ? null : (
+                      <Link2 className="h-4 w-4 text-muted-foreground" />
+                    )}
                     <input
                       autoCapitalize="none"
                       autoCorrect="off"
-                      className="min-w-0 flex-1 bg-transparent text-sm font-medium text-foreground outline-none placeholder:text-muted-foreground"
+                      className={cn(
+                        "min-w-0 flex-1 bg-transparent outline-none",
+                        isOnboardingModal
+                          ? "text-center text-sm font-normal text-foreground placeholder:text-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.55)]"
+                          : "text-sm font-medium text-foreground placeholder:text-muted-foreground",
+                      )}
                       data-testid={`${testIdPrefix}-url`}
                       disabled={isInputDisabled}
                       onBlur={() => {
@@ -679,7 +716,11 @@ export function ProfileAvatarEditor({
                           applyUrl();
                         }
                       }}
-                      placeholder="Paste a URL (Slack profile, etc.)"
+                      placeholder={
+                        isOnboardingModal
+                          ? "Paste a URL"
+                          : "Paste a URL (Slack profile, etc.)"
+                      }
                       spellCheck={false}
                       type="url"
                       value={urlDraft}
@@ -708,6 +749,8 @@ export function ProfileAvatarEditor({
                   onPreviewCaptionChange={onAnimatedPreviewCaptionChange}
                   previewContainer={animatedPreviewContainer}
                   registerApply={registerAnimatedApply}
+                  autoStartCamera={isOnboardingModal}
+                  compactReview={isOnboardingModal}
                   showApplyButton={!onDone}
                   testIdPrefix={testIdPrefix}
                 />
@@ -723,8 +766,8 @@ export function ProfileAvatarEditor({
                       data={emojiData}
                       dynamicWidth
                       emojiButtonRadius="999px"
-                      emojiButtonSize={64}
-                      emojiSize={48}
+                      emojiButtonSize={isOnboardingModal ? 44 : 64}
+                      emojiSize={isOnboardingModal ? 28 : 48}
                       icons="outline"
                       navPosition="bottom"
                       onEmojiSelect={(
@@ -741,7 +784,9 @@ export function ProfileAvatarEditor({
                           selectedEmoji === null
                             ? randomInitialEmojiAvatarColor()
                             : selectedColor;
-                        burstEmoji(emoji.native, event);
+                        if (!isOnboardingModal) {
+                          burstEmoji(emoji.native, event);
+                        }
                         setSelectedEmoji(emoji.native);
                         setSelectedColor(nextColor);
                         applyEmojiAvatar(emoji.native, nextColor);
@@ -768,7 +813,10 @@ export function ProfileAvatarEditor({
                     inert={shouldShowColorControls ? undefined : true}
                   >
                     <div
-                      className="grid grid-cols-8 justify-items-center gap-3 rounded-xl bg-muted p-4 transition-colors duration-[250ms] ease-out"
+                      className={cn(
+                        "grid grid-cols-8 justify-items-center rounded-xl bg-muted transition-colors duration-[250ms] ease-out",
+                        isOnboardingModal ? "gap-2 p-3" : "gap-3 p-4",
+                      )}
                       data-testid={`${testIdPrefix}-color-grid`}
                     >
                       {AVATAR_COLOR_SWATCHES.map((swatch) => {
@@ -794,7 +842,8 @@ export function ProfileAvatarEditor({
                             }
                             aria-pressed={isSelected}
                             className={cn(
-                              "relative h-10 w-10 scroll-mb-52 rounded-full border border-border transition-transform duration-200 ease-out hover:scale-[1.15] focus-visible:scale-[1.15] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                              "relative scroll-mb-52 rounded-full border border-border transition-transform duration-200 ease-out hover:scale-[1.15] focus-visible:scale-[1.15] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                              isOnboardingModal ? "h-7 w-7" : "h-10 w-10",
                               isCustomSwatch &&
                                 !selectedEmoji &&
                                 "cursor-not-allowed opacity-45 hover:scale-100 focus-visible:scale-100",
@@ -818,7 +867,10 @@ export function ProfileAvatarEditor({
                           >
                             {isSelected ? (
                               <span
-                                className="absolute inset-1 rounded-full border-[3px]"
+                                className={cn(
+                                  "absolute rounded-full border-[3px]",
+                                  isOnboardingModal ? "inset-0.5" : "inset-1",
+                                )}
                                 style={{
                                   borderColor: contrastColorForBackground(
                                     isCustomSwatch ? selectedColor : swatch,
@@ -853,11 +905,18 @@ export function ProfileAvatarEditor({
 
           <AnimatePresence initial={false}>
             {shouldShowDoneButton ? (
-              <Button asChild className="mt-2 h-12 w-full rounded-xl">
+              <Button
+                asChild
+                className={cn(
+                  isOnboardingModal
+                    ? "mx-auto mt-0 h-[2.375rem] min-w-24 rounded-full bg-[rgb(var(--buzz-onboarding-avatar-action-bg))] px-6 text-sm font-medium text-[rgb(var(--buzz-onboarding-avatar-action-fg))] hover:bg-[color:rgb(var(--buzz-onboarding-avatar-action-bg)_/_0.9)]"
+                    : "mt-2 h-12 w-full rounded-xl",
+                )}
+              >
                 <motion.button
                   animate={{ opacity: 1, scale: 1 }}
                   data-testid={`${testIdPrefix}-done`}
-                  disabled={disabled || isDoneButtonPending}
+                  disabled={isDoneButtonDisabled}
                   exit={
                     shouldReduceMotion
                       ? { opacity: 0 }
@@ -915,7 +974,7 @@ export function ProfileAvatarEditor({
                           key="ready"
                           transition={DONE_BUTTON_CONTENT_TRANSITION}
                         >
-                          Done
+                          {isOnboardingModal ? "Save" : "Done"}
                         </motion.span>
                       )}
                     </AnimatePresence>

@@ -3277,6 +3277,14 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("owner saves it"));
         assert!(prompt.contains("Do not ask about runtime, provider, model, credentials"));
     }
+
+    #[test]
+    fn shared_base_prompt_teaches_real_newlines_for_multiline_messages() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("pass real newline bytes through stdin"));
+        assert!(prompt.contains("single-quoted shell strings preserve `\\n` literally"));
+        assert!(prompt.contains("buzz messages send ... --content -"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {
