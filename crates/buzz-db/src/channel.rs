@@ -1312,25 +1312,6 @@ pub async fn get_member_role(
     Ok(row.map(|r| r.try_get("role")).transpose()?)
 }
 
-/// Bump the TTL deadline for an ephemeral channel after a new message.
-///
-/// No-op for permanent channels or channels that are already archived/deleted.
-pub async fn bump_ttl_deadline(
-    pool: &PgPool,
-    community_id: CommunityId,
-    channel_id: Uuid,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE channels SET ttl_deadline = NOW() + (ttl_seconds || ' seconds')::interval \
-         WHERE community_id = $1 AND id = $2 AND ttl_seconds IS NOT NULL AND archived_at IS NULL AND deleted_at IS NULL",
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 /// Archive ephemeral channels whose TTL deadline has passed.
 ///
 /// Returns the `(community_id, host, channel_id)` list that was archived. Idempotent — the

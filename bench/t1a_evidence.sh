@@ -2,13 +2,13 @@
 # T1a correctness evidence (runnable from this lane tip).
 #
 # Proves, against a live relay built from this tree:
-#   1. permanent channel: kind:9 ingest emits ZERO `UPDATE channels ... ttl` statements
-#      (pg_stat_statements assertion, not absence-of-log);
+#   1. permanent channel: kind:9 ingest emits no separate top-level TTL UPDATE
+#      transaction (the deferred trigger's conditional statement stays inside the
+#      event transaction and affects zero rows);
 #   2. ephemeral channel: the TTL bump is still observed (ttl_deadline strictly advances
 #      across a message);
-#   3. TTL-set-during-ingest race: setting a TTL on a permanent channel concurrent with
-#      a message burst leaves ttl_deadline set and in the future (update_channel's own
-#      deadline reset covers the skipped bump).
+#   3. TTL-set-during-ingest race: messages committed after concurrent TTL activation
+#      extend the deadline beyond the activation update's own deadline.
 #
 # Usage: bench/t1a_evidence.sh <pg_container> <db_url> <relay_ws_url> <community_uuid>
 # Requires: relay running FROM THIS TREE against <db_url>; psql via docker exec;
@@ -34,7 +34,7 @@ mkchan() { # $1 name, $2 ttl_seconds or NULL -> echoes uuid
 
 FAIL=0
 
-echo "== 1. permanent channel: zero TTL UPDATE statements =="
+echo "== 1. permanent channel: zero separate top-level TTL UPDATE statements =="
 PERM=$(mkchan t1a-perm NULL)
 sql "select pg_stat_statements_reset()" >/dev/null
 env -u BUZZ_AUTH_TAG BUZZ_RELAY_URL="$RELAY" "$BIN" "$PERM" 20 10 2 /tmp/t1a-perm.lat >/tmp/t1a-perm.json
@@ -59,11 +59,13 @@ env -u BUZZ_AUTH_TAG BUZZ_RELAY_URL="$RELAY" "$BIN" "$RACE" 50 6 4 /tmp/t1a-race
 BPID=$!
 sleep 2
 # update_channel-equivalent: set TTL and reset deadline in one statement, mid-burst.
-sql "update channels set ttl_seconds=600, ttl_deadline=now() + interval '600 seconds', updated_at=now() where id='$RACE' and deleted_at is null"
+ACTIVATION_DEADLINE=$(sql "update channels set ttl_seconds=600, ttl_deadline=clock_timestamp() + interval '600 seconds', updated_at=now() where id='$RACE' and deleted_at is null returning extract(epoch from ttl_deadline)")
 wait "$BPID"
-ROW=$(sql "select ttl_seconds, (ttl_deadline > now()) from channels where id='$RACE'")
-echo "post-race: $ROW"
-[[ "$ROW" == "600|t" ]] || { echo "FAIL: expected ttl=600 with future deadline"; FAIL=1; }
+ROW=$(sql "select ttl_seconds, extract(epoch from ttl_deadline) from channels where id='$RACE'")
+echo "activation_deadline=$ACTIVATION_DEADLINE post-race=$ROW"
+FINAL_DEADLINE="${ROW#*|}"
+python3 -c "import sys; sys.exit(0 if float('$FINAL_DEADLINE') > float('$ACTIVATION_DEADLINE') else 1)" \
+  || { echo "FAIL: later message did not extend TTL beyond activation deadline"; FAIL=1; }
 # and subsequent messages now bump it (channel is ephemeral now)
 D0=$(sql "select extract(epoch from ttl_deadline) from channels where id='$RACE'")
 sleep 2

@@ -532,9 +532,12 @@ mod tests {
                 let normalized = normalize_sql(statement);
                 let updates_channels =
                     identifier_after_keyword(statement, "update").as_deref() == Some("channels");
+                let update_assignments = normalized
+                    .split_once(" set ")
+                    .map(|(_, tail)| tail.split_once(" where ").map_or(tail, |(set, _)| set));
                 let mutates_with_update = updates_channels
-                    && normalized.contains(" set ")
-                    && normalized.contains("community_id");
+                    && update_assignments
+                        .is_some_and(|assignments| assignments.contains("community_id"));
                 let alters_channels = identifier_after_keyword(statement, "alter table").as_deref()
                     == Some("channels");
                 let drops_channels = identifier_after_keyword(statement, "drop table").as_deref()
@@ -557,7 +560,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 21);
+        assert_eq!(migrations.len(), 22);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -839,6 +842,16 @@ mod tests {
             .sql
             .as_str()
             .contains("join_policy_acceptances"));
+
+        // Channel TTL refresh belongs to the event insertion transaction so a
+        // concurrent permanent -> ephemeral transition cannot be missed.
+        assert_eq!(migrations[21].version, 22);
+        let ttl_refresh = migrations[21].sql.as_str();
+        assert!(ttl_refresh.contains("CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl"));
+        assert!(ttl_refresh.contains("AFTER INSERT ON events"));
+        assert!(ttl_refresh.contains("DEFERRABLE INITIALLY DEFERRED"));
+        assert!(ttl_refresh.contains("clock_timestamp()"));
+        assert!(ttl_refresh.contains("NEW.kind <> 9007"));
     }
 
     #[test]
@@ -1081,7 +1094,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(21));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(22));
     }
 
     #[tokio::test]

@@ -1688,15 +1688,6 @@ impl Db {
         channel::get_member_role(&self.pool, community_id, channel_id, pubkey).await
     }
 
-    /// Bump the TTL deadline for an ephemeral channel after a new message.
-    pub async fn bump_ttl_deadline(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-    ) -> Result<()> {
-        channel::bump_ttl_deadline(&self.pool, community_id, channel_id).await
-    }
-
     /// Archive ephemeral channels whose TTL deadline has passed.
     pub async fn reap_expired_ephemeral_channels(
         &self,
