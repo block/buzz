@@ -38,6 +38,7 @@ import {
   KIND_REPO_ANNOUNCEMENT,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
+  KIND_TEXT_NOTE,
   KIND_USER_STATUS,
 } from "@/shared/constants/kinds";
 import type {
@@ -357,13 +358,13 @@ type E2eConfig = {
     /**
      * The `restarted_count` returned by `set_global_agent_config`. Defaults to
      * 0 (no agents restarted). Set to a positive integer to drive the
-     * "Saved. Restarted N agent(s)." status text in GlobalAgentConfigSettingsCard.
+     * "Saved. Restarted N agent(s)." status text in AgentDefaultsSettingsCard.
      */
     globalConfigRestartedCount?: number;
     /**
      * The `failed_restart_count` returned by `set_global_agent_config`. Defaults
      * to 0. Set to a positive integer to drive the "M failed to restart — check
-     * the Agents tab." status text in GlobalAgentConfigSettingsCard.
+     * the Agents tab." status text in AgentDefaultsSettingsCard.
      */
     globalConfigFailedRestartCount?: number;
     /**
@@ -936,6 +937,28 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    /** Project event kinds rejected once, in order, to exercise retry flows. */
+    __BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?: number[];
+    /** Overrides the first mock repository owner for delegated-owner tests. */
+    __BUZZ_E2E_PROJECT_OWNER_OVERRIDE__?: string;
+    __BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__?: {
+      local_path: string | null;
+      local_branch: string | null;
+      local_head: string | null;
+      local_short_head: string | null;
+      remote_branch: string | null;
+      remote_head: string | null;
+      remote_short_head: string | null;
+      merge_base: string | null;
+      ahead_count: number;
+      behind_count: number;
+      has_uncommitted_changes: boolean;
+      has_untracked_files: boolean;
+      can_push: boolean;
+      push_block_reason: string | null;
+      can_pull: boolean;
+      pull_block_reason: string | null;
+    };
     __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: ConnectionState) => void;
     __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => ConnectionState;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
@@ -4711,7 +4734,11 @@ function buildMockProjectEvents(): RelayEvent[] {
   const historyDays = 26 * 7;
 
   for (const [projectIndex, seed] of MOCK_PROJECT_SEEDS.entries()) {
-    const repoAddress = `${KIND_REPO_ANNOUNCEMENT}:${seed.owner}:${seed.dtag}`;
+    const owner =
+      projectIndex === 0
+        ? (window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? seed.owner)
+        : seed.owner;
+    const repoAddress = `${KIND_REPO_ANNOUNCEMENT}:${owner}:${seed.dtag}`;
     const authors = [seed.owner, ...seed.contributors];
     const random = mulberry32(projectIndex + 1);
 
@@ -4723,10 +4750,10 @@ function buildMockProjectEvents(): RelayEvent[] {
           ["d", seed.dtag],
           ["name", seed.name],
           ["description", seed.description],
-          ["clone", `https://relay.example.com/git/${seed.dtag}.git`],
+          ["clone", `https://relay.example.com/git/${owner}/${seed.dtag}`],
           ...seed.contributors.map((pubkey) => ["p", pubkey]),
         ],
-        seed.owner,
+        owner,
         now - (historyDays + 30 + projectIndex) * daySeconds,
         `mock-project-${seed.dtag}`.replace(/[^a-zA-Z0-9]/g, ""),
       ),
@@ -4759,6 +4786,15 @@ function buildMockProjectEvents(): RelayEvent[] {
           ["a", repoAddress],
           ["subject", subject],
           ...(kind === KIND_GIT_ISSUE ? [] : [["c", commitHash]]),
+          ...(kind === KIND_GIT_PULL_REQUEST
+            ? [
+                ["branch-name", `feature/mock-${dayOffset}-${index}`],
+                [
+                  "clone",
+                  `https://relay.example.com/git/${owner}/${seed.dtag}`,
+                ],
+              ]
+            : []),
         ];
 
         events.push(createMockEvent(kind, subject, tags, author, createdAt));
@@ -8484,6 +8520,31 @@ function sendToMockSocket(args: {
     }
 
     if (isMockProjectScopedEvent(event)) {
+      if (event.pubkey !== DEFAULT_MOCK_IDENTITY.pubkey) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "invalid: event pubkey does not match authenticated identity",
+        ]);
+        return;
+      }
+      const rejectionIndex =
+        window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.indexOf(event.kind) ??
+        -1;
+      if (rejectionIndex >= 0) {
+        window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.splice(
+          rejectionIndex,
+          1,
+        );
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "mock project event rejection",
+        ]);
+        return;
+      }
       getMockProjectEventStore().push(event);
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
@@ -9170,35 +9231,168 @@ export function maybeInstallE2eTauriMocks() {
       case "get_project_local_repo_diff":
         return null;
       case "get_project_repo_sync_status":
-        return {
-          local_path: null,
-          local_branch: null,
-          local_head: null,
-          local_short_head: null,
-          remote_branch: "main",
-          remote_head: "0123456789abcdef0123456789abcdef01234567",
-          remote_short_head: "0123456",
-          ahead_count: 0,
-          behind_count: 0,
-          has_uncommitted_changes: false,
-          has_untracked_files: false,
-          can_push: false,
-          push_block_reason: "No local checkout found.",
-          can_pull: false,
-          pull_block_reason: "No local checkout found.",
-        };
+        return (
+          window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__ ?? {
+            local_path: null,
+            local_branch: null,
+            local_head: null,
+            local_short_head: null,
+            remote_branch: "main",
+            remote_head: "0123456789abcdef0123456789abcdef01234567",
+            remote_short_head: "0123456",
+            merge_base: "0123456789abcdef0123456789abcdef01234567",
+            ahead_count: 0,
+            behind_count: 0,
+            has_uncommitted_changes: false,
+            has_untracked_files: false,
+            can_push: false,
+            push_block_reason: "No local checkout found.",
+            can_pull: false,
+            pull_block_reason: "No local checkout found.",
+          }
+        );
       case "list_project_local_repositories":
         return [];
-      case "push_project_local_repository":
+      case "push_project_local_repository": {
+        const input = payload as { branchName?: string | null };
+        const status = window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__;
+        const branch = input.branchName ?? status?.remote_branch ?? "main";
+        const commit =
+          status?.local_head ?? "0123456789abcdef0123456789abcdef01234567";
+        if (status) {
+          status.remote_branch = branch;
+          status.remote_head = commit;
+          status.remote_short_head = commit.slice(0, 7);
+          status.ahead_count = 0;
+          status.can_push = false;
+          status.push_block_reason = "Local branch is already pushed.";
+        }
         return {
           pushed: true,
-          message: "Pushed main to remote.",
+          message: `Pushed ${branch} to remote.`,
+          branch,
+          commit,
+          merge_base:
+            status?.merge_base ?? "0123456789abcdef0123456789abcdef01234567",
         };
+      }
       case "pull_project_local_repository":
         return {
           pulled: true,
           message: "Pulled main from remote.",
         };
+      case "clone_project_repository":
+        return {
+          path: "/tmp/buzz/REPOS/mock-project",
+          cloned: true,
+          message: "Cloned repository.",
+        };
+      case "sign_project_pull_request_review_request": {
+        const { input } = payload as {
+          input: {
+            pullRequestId: string;
+            repoAddress: string;
+            reviewerLabel: string;
+            reviewers: string[];
+            targetOwner: string;
+          };
+        };
+        const event = createMockEvent(
+          KIND_TEXT_NOTE,
+          `Requested a review from ${input.reviewerLabel}`,
+          [
+            ["e", input.pullRequestId, "", "root"],
+            ["a", input.repoAddress],
+            ...input.reviewers.map((reviewer) => ["p", reviewer]),
+            ["t", "review-request"],
+          ],
+          input.targetOwner,
+        );
+        window.__BUZZ_E2E_SIGNED_EVENTS__?.push({
+          content: event.content,
+          kind: event.kind,
+          tags: event.tags,
+        });
+        getMockProjectEventStore().push(event);
+        return null;
+      }
+      case "publish_project_pull_request_merged_status": {
+        const { input } = payload as {
+          input: { statusEvent: string; targetOwner: string };
+        };
+        const event = JSON.parse(input.statusEvent) as RelayEvent;
+        if (event.pubkey !== input.targetOwner) {
+          throw new Error("mock merged status owner mismatch");
+        }
+        getMockProjectEventStore().push(event);
+        return null;
+      }
+      case "merge_project_pull_request": {
+        const { input } = payload as {
+          input: {
+            expectedCommit: string;
+            pullRequestAuthor: string;
+            pullRequestId: string;
+            repoAddress: string;
+            sourceBranch: string;
+            statusCreatedAt: number;
+            targetBranch: string;
+            targetOwner: string;
+          };
+        };
+        const normalizedTargetOwner = input.targetOwner.toLowerCase();
+        const canSignAsOwner =
+          (identity?.pubkey ?? MOCK_IDENTITY_PUBKEY).toLowerCase() ===
+            normalizedTargetOwner ||
+          mockManagedAgents.some(
+            (agent) => agent.pubkey.toLowerCase() === normalizedTargetOwner,
+          );
+        if (!canSignAsOwner) {
+          throw new Error(
+            "Only the repository owner or the owner of its managed agent can merge pull requests.",
+          );
+        }
+        const mergeCommit = "abcdef0123456789abcdef0123456789abcdef01";
+        const statusEvent = createMockEvent(
+          KIND_GIT_STATUS_MERGED,
+          "",
+          [
+            ["e", input.pullRequestId, "", "root"],
+            ["a", input.repoAddress],
+            ["p", input.targetOwner],
+            ["p", input.pullRequestAuthor],
+            ["merge-commit", mergeCommit],
+            ["r", mergeCommit],
+          ],
+          input.targetOwner,
+          input.statusCreatedAt,
+        );
+        window.__BUZZ_E2E_SIGNED_EVENTS__?.push({
+          content: statusEvent.content,
+          kind: statusEvent.kind,
+          tags: statusEvent.tags,
+        });
+        const rejectionIndex =
+          window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.indexOf(
+            statusEvent.kind,
+          ) ?? -1;
+        let statusPublicationError: string | null = null;
+        if (rejectionIndex >= 0) {
+          window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.splice(
+            rejectionIndex,
+            1,
+          );
+          statusPublicationError = "mock project event rejection";
+        } else {
+          getMockProjectEventStore().push(statusEvent);
+        }
+        return {
+          message: "Merged feature into main.",
+          merge_commit: mergeCommit,
+          status_event: JSON.stringify(statusEvent),
+          status_publication_error: statusPublicationError,
+        };
+      }
       case "get_relay_ws_url":
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":

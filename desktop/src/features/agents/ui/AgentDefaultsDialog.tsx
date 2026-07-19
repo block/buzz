@@ -1,9 +1,9 @@
 import * as React from "react";
 
 import {
-  GlobalAgentConfigEditor,
+  AgentDefaultsEditor,
   type GlobalAgentConfigSaveResult,
-} from "./GlobalAgentConfigEditor";
+} from "./AgentDefaultsEditor";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -23,7 +23,7 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 
-export function AgentAiDefaultsDialog({
+export function AgentDefaultsDialog({
   open,
   onOpenChange,
   returnFocusRef,
@@ -93,7 +93,7 @@ export function AgentAiDefaultsDialog({
               running agents.
             </DialogDescription>
           </DialogHeader>
-          <GlobalAgentConfigEditor
+          <AgentDefaultsEditor
             onDirtyChange={setDirty}
             onSaveSuccess={handleSaveSuccess}
             onSavingChange={setSaving}

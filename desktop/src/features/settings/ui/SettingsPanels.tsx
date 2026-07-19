@@ -77,7 +77,7 @@ import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
-import { GlobalAgentConfigSettingsCard } from "./GlobalAgentConfigSettingsCard";
+import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
@@ -814,7 +814,7 @@ export function renderSettingsSection(
         <div className="space-y-12">
           <PreventSleepSettingsCard />
           <DoctorSettingsPanel />
-          <GlobalAgentConfigSettingsCard />
+          <AgentDefaultsSettingsCard />
         </div>
       );
     case "channel-templates":

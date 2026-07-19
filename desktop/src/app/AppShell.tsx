@@ -14,6 +14,7 @@ import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
+import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
 import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
 import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
@@ -33,7 +34,6 @@ import {
   useHomeFeedNotifications,
   useHomeFeedNotificationState,
 } from "@/features/notifications/hooks";
-import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
@@ -567,68 +567,11 @@ export function AppShell() {
     [openSearchHit],
   );
 
-  // Prevent webview file:/// navigation on file drop outside the composer.
-  // Scoped to file drags only (text drag-and-drop into inputs still works).
-  // Composer's onDrop fires first (React synthetic before window bubble).
-  React.useEffect(() => {
-    function preventNavigation(e: DragEvent) {
-      if (e.dataTransfer?.types.includes("Files")) {
-        e.preventDefault();
-      }
-    }
-    window.addEventListener("dragover", preventNavigation);
-    window.addEventListener("drop", preventNavigation);
-    return () => {
-      window.removeEventListener("dragover", preventNavigation);
-      window.removeEventListener("drop", preventNavigation);
-    };
-  }, []);
-
-  React.useEffect(() => {
-    let isCancelled = false;
-
-    const startPreconnect = () => {
-      if (isCancelled) {
-        return;
-      }
-
-      void relayClient.preconnect().catch((error) => {
-        if (!isCancelled) {
-          console.error("Failed to preconnect to relay", error);
-        }
-      });
-    };
-
-    if ("requestIdleCallback" in window) {
-      const idleId = window.requestIdleCallback(startPreconnect, {
-        timeout: 1_500,
-      });
-      return () => {
-        isCancelled = true;
-        window.cancelIdleCallback(idleId);
-      };
-    }
-
-    const timeoutId = globalThis.setTimeout(startPreconnect, 250);
-    return () => {
-      isCancelled = true;
-      globalThis.clearTimeout(timeoutId);
-    };
-  }, []);
-
-  React.useEffect(() => {
-    const count =
-      unreadChannelNotificationCount + homeBadgeCountExcludingHighPriority;
-    void setDesktopAppBadge(
-      count
-        ? { kind: "count", count }
-        : { kind: unreadChannelIds.size ? "dot" : "none" },
-    );
-  }, [
+  useAppShellLifecycleEffects({
     homeBadgeCountExcludingHighPriority,
     unreadChannelIds,
     unreadChannelNotificationCount,
-  ]);
+  });
 
   // Dispatch `buzz://message` deep links into the router.
   useMessageDeepLinks();

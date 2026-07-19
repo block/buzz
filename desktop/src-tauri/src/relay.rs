@@ -570,10 +570,23 @@ pub async fn submit_event_with_keys(
     keys: &Keys,
     auth_tag: Option<&str>,
 ) -> Result<SubmitEventResponse, String> {
-    let url = format!("{}/events", relay_api_base_url_with_override(state));
     let event = builder
         .sign_with_keys(keys)
         .map_err(|e| format!("failed to sign event: {e}"))?;
+    submit_signed_event_with_keys(&event, state, keys, auth_tag).await
+}
+
+/// POST an already-signed event using the same explicit identity for NIP-98.
+pub async fn submit_signed_event_with_keys(
+    event: &nostr::Event,
+    state: &AppState,
+    keys: &Keys,
+    auth_tag: Option<&str>,
+) -> Result<SubmitEventResponse, String> {
+    if event.pubkey != keys.public_key() {
+        return Err("signed event does not match the publishing identity".to_string());
+    }
+    let url = format!("{}/events", relay_api_base_url_with_override(state));
     let body_bytes = event.as_json().into_bytes();
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 

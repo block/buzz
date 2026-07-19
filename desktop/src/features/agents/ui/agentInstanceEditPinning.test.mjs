@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
-} from "./personaDialogPickers.tsx";
+} from "./agentConfigOptions.tsx";
 import {
   computeEditAgentFormValidity,
   hasMissingRequiredEnvKey,

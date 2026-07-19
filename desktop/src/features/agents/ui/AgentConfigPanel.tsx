@@ -25,7 +25,7 @@ import type {
   NormalizedConfig,
   NormalizedField,
 } from "@/shared/api/types";
-import { providerDisplayLabel } from "./personaDialogPickers";
+import { providerDisplayLabel } from "./agentConfigOptions";
 
 type Props = {
   pubkey: string;

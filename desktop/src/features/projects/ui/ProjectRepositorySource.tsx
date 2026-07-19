@@ -17,6 +17,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { PROJECT_PANEL_ACTION_BUTTON_CLASS } from "./projectPanelStyles";
 
 /** Branch picker shared by the readme and files panel headers. */
 export function RepositoryBranchDropdown({
@@ -46,14 +47,14 @@ export function RepositoryBranchDropdown({
         <Button
           className={
             compact
-              ? "h-6 max-w-full gap-1 px-1.5 font-mono text-xs font-medium"
+              ? "h-7 max-w-full gap-1.5 rounded-md bg-muted px-3 font-mono text-sm font-medium hover:bg-muted/80"
               : "h-6 max-w-full gap-1.5 px-2 font-mono text-sm font-semibold"
           }
           size="sm"
           type="button"
           variant="ghost"
         >
-          <GitBranch className="h-3 w-3 shrink-0 text-muted-foreground" />
+          <GitBranch className="h-4 w-4 shrink-0 text-muted-foreground" />
           <span className="truncate">{branch}</span>
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         </Button>
@@ -114,12 +115,12 @@ export function RepoSourceDropdown({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          className="h-6 max-w-full shrink-0 gap-1 px-1.5 text-xs font-medium"
+          className="h-7 max-w-full shrink-0 gap-1.5 rounded-md bg-muted px-3 text-sm font-medium hover:bg-muted/80"
           size="sm"
           type="button"
           variant="ghost"
         >
-          <SourceIcon className="h-3 w-3 shrink-0 text-muted-foreground" />
+          <SourceIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
           <span className="truncate">
             {isLocal ? controls.localLabel : controls.remoteLabel}
           </span>
@@ -164,7 +165,7 @@ export function RepoSyncActionButton({
     const count = controls.behindCount ?? 0;
     return (
       <Button
-        className="h-6 shrink-0 gap-1 rounded-full px-2.5 text-xs"
+        className={PROJECT_PANEL_ACTION_BUTTON_CLASS}
         disabled={controls.pullDisabled}
         onClick={controls.onPull}
         size="sm"
@@ -172,9 +173,9 @@ export function RepoSyncActionButton({
         variant="ghost"
       >
         {controls.pullPending ? (
-          <Loader2 className="h-3 w-3 animate-spin" />
+          <Loader2 className="h-4 w-4 animate-spin" />
         ) : (
-          <DownloadCloud className="h-3 w-3" />
+          <DownloadCloud className="h-4 w-4" />
         )}
         Pull{count > 0 ? ` ${count}` : ""}
       </Button>
@@ -182,10 +183,9 @@ export function RepoSyncActionButton({
   }
 
   if (push) {
-    const count = controls.aheadCount ?? 0;
     return (
       <Button
-        className="h-6 shrink-0 gap-1 rounded-full px-2.5 text-xs"
+        className={PROJECT_PANEL_ACTION_BUTTON_CLASS}
         disabled={controls.pushDisabled}
         onClick={controls.onPush}
         size="sm"
@@ -193,11 +193,11 @@ export function RepoSyncActionButton({
         variant="ghost"
       >
         {controls.pushPending ? (
-          <Loader2 className="h-3 w-3 animate-spin" />
+          <Loader2 className="h-4 w-4 animate-spin" />
         ) : (
-          <UploadCloud className="h-3 w-3" />
+          <UploadCloud className="h-4 w-4" />
         )}
-        Push{count > 0 ? ` ${count}` : ""}
+        Push
       </Button>
     );
   }
@@ -205,7 +205,7 @@ export function RepoSyncActionButton({
   if (!controls.onFetch) return null;
   return (
     <Button
-      className="h-6 shrink-0 gap-1 rounded-full px-2.5 text-xs"
+      className={PROJECT_PANEL_ACTION_BUTTON_CLASS}
       disabled={controls.fetchPending}
       onClick={controls.onFetch}
       size="sm"
@@ -213,9 +213,9 @@ export function RepoSyncActionButton({
       variant="ghost"
     >
       {controls.fetchPending ? (
-        <Loader2 className="h-3 w-3 animate-spin" />
+        <Loader2 className="h-4 w-4 animate-spin" />
       ) : (
-        <RefreshCw className="h-3 w-3" />
+        <RefreshCw className="h-4 w-4" />
       )}
       Fetch
     </Button>

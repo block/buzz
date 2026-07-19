@@ -6,6 +6,8 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export type ProjectsViewMode = "grid" | "list";
+export type ProjectsRepositoryScope = "all" | "mine" | "local";
+export type ProjectsWorkItemScope = "all" | "mine";
 export type ProjectsFilter =
   | "all"
   | "mine"
@@ -19,6 +21,10 @@ export type ProjectsSort = "updated" | "created" | "name";
 
 const PROJECTS_VIEW_MODE_STORAGE_KEY = "buzz.projects.viewMode";
 const PROJECTS_FILTER_STORAGE_KEY = "buzz.projects.filter";
+const PROJECTS_REPOSITORY_SCOPE_STORAGE_KEY = "buzz.projects.repositoryScope";
+const PROJECTS_PULL_REQUEST_SCOPE_STORAGE_KEY =
+  "buzz.projects.pullRequestScope";
+const PROJECTS_ISSUE_SCOPE_STORAGE_KEY = "buzz.projects.issueScope";
 const PROJECTS_SORT_STORAGE_KEY = "buzz.projects.sort";
 
 export function readStoredViewMode(): ProjectsViewMode | null {
@@ -63,6 +69,66 @@ export function writeStoredFilter(filter: ProjectsFilter) {
   } catch {
     // Persistence is best-effort; the in-memory toggle still works.
   }
+}
+
+export function readStoredRepositoryScope(): ProjectsRepositoryScope {
+  try {
+    const value = globalThis.localStorage?.getItem(
+      PROJECTS_REPOSITORY_SCOPE_STORAGE_KEY,
+    );
+    if (value === "mine" || value === "local") return value;
+    const legacyFilter = globalThis.localStorage?.getItem(
+      PROJECTS_FILTER_STORAGE_KEY,
+    );
+    return legacyFilter === "mine" || legacyFilter === "local"
+      ? legacyFilter
+      : "all";
+  } catch {
+    return "all";
+  }
+}
+
+export function writeStoredRepositoryScope(scope: ProjectsRepositoryScope) {
+  try {
+    globalThis.localStorage?.setItem(
+      PROJECTS_REPOSITORY_SCOPE_STORAGE_KEY,
+      scope,
+    );
+  } catch {
+    // Persistence is best-effort; the in-memory filter still works.
+  }
+}
+
+function readStoredWorkItemScope(key: string): ProjectsWorkItemScope {
+  try {
+    return globalThis.localStorage?.getItem(key) === "mine" ? "mine" : "all";
+  } catch {
+    return "all";
+  }
+}
+
+function writeStoredWorkItemScope(key: string, scope: ProjectsWorkItemScope) {
+  try {
+    globalThis.localStorage?.setItem(key, scope);
+  } catch {
+    // Persistence is best-effort; the in-memory filter still works.
+  }
+}
+
+export function readStoredPullRequestScope(): ProjectsWorkItemScope {
+  return readStoredWorkItemScope(PROJECTS_PULL_REQUEST_SCOPE_STORAGE_KEY);
+}
+
+export function writeStoredPullRequestScope(scope: ProjectsWorkItemScope) {
+  writeStoredWorkItemScope(PROJECTS_PULL_REQUEST_SCOPE_STORAGE_KEY, scope);
+}
+
+export function readStoredIssueScope(): ProjectsWorkItemScope {
+  return readStoredWorkItemScope(PROJECTS_ISSUE_SCOPE_STORAGE_KEY);
+}
+
+export function writeStoredIssueScope(scope: ProjectsWorkItemScope) {
+  writeStoredWorkItemScope(PROJECTS_ISSUE_SCOPE_STORAGE_KEY, scope);
 }
 
 export function readStoredSort(): ProjectsSort {
@@ -176,14 +242,14 @@ export function projectPeople(
   ];
 }
 
-function normalizeRepositoryUrl(url: string) {
+export function normalizeRepositoryUrl(url: string) {
   try {
     const parsed = new URL(url);
     const normalizedPath = parsed.pathname
       .replace(/\/+$/, "")
       .replace(/\.git$/i, "")
       .toLowerCase();
-    return `${parsed.hostname.toLowerCase()}${normalizedPath}`;
+    return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${normalizedPath}`;
   } catch {
     return url
       .trim()

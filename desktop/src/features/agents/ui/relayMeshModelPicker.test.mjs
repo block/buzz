@@ -5,7 +5,7 @@ import {
   modelDropdownOptions,
   relayMeshModelPickerState,
 } from "./relayMeshModelPicker.ts";
-import { AUTO_MODEL_DROPDOWN_VALUE } from "./personaDialogPickers.tsx";
+import { AUTO_MODEL_DROPDOWN_VALUE } from "./agentConfigOptions.tsx";
 
 const fallback = [{ id: "", label: "Default model" }];
 const live = [

@@ -241,8 +241,8 @@ jobs:
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
-      - name: Desktop build
-        run: just desktop-build
+      - name: Desktop E2E build
+        run: pnpm -C desktop build:e2e
       - name: Desktop smoke e2e
         run: cd desktop && pnpm exec playwright test --project=smoke --shard=${{ matrix.shard }}/4
       - name: Summarize flaky tests
@@ -393,8 +393,8 @@ jobs:
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
-      - name: Desktop build
-        run: just desktop-build
+      - name: Desktop E2E build
+        run: pnpm -C desktop build:e2e
       - name: Wait for integration services
         run: |
           wait_healthy() {

@@ -89,7 +89,7 @@ export function ReadmePanel({
   const header = (
     <>
       {sourceControls ? (
-        <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
+        <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
           <RepoSourceDropdown controls={sourceControls} />
           <RepositoryBranchDropdown
             branch={sourceControls.branch}

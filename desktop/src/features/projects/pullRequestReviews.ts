@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
+import { signProjectPullRequestReviewRequest } from "@/shared/api/projectGit";
 import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import {
@@ -79,11 +80,13 @@ async function requestProjectPullRequestReview({
   pullRequest,
   reviewers,
   reviewerLabel,
+  signAsManagedOwner,
 }: {
   project: Project;
   pullRequest: ProjectPullRequest;
   reviewers: string[];
   reviewerLabel: string;
+  signAsManagedOwner: boolean;
 }): Promise<void> {
   if (reviewers.length === 0) {
     throw new Error("Select at least one reviewer.");
@@ -91,6 +94,16 @@ async function requestProjectPullRequestReview({
   const reviewerPubkeys = [
     ...new Set(reviewers.map((pubkey) => pubkey.toLowerCase())),
   ];
+  if (signAsManagedOwner) {
+    await signProjectPullRequestReviewRequest({
+      targetOwner: project.owner,
+      repoAddress: project.repoAddress,
+      pullRequestId: pullRequest.id,
+      reviewers: reviewerPubkeys,
+      reviewerLabel,
+    });
+    return;
+  }
   const event = await signRelayEvent({
     kind: KIND_TEXT_NOTE,
     content: `Requested a review from ${reviewerLabel}`,
@@ -138,7 +151,9 @@ async function approveProjectPullRequest({
   );
 }
 
-function usePullRequestWriteInvalidation(project: Project | null | undefined) {
+export function useProjectPullRequestWriteInvalidation(
+  project: Project | null | undefined,
+) {
   const queryClient = useQueryClient();
   return React.useCallback(() => {
     void queryClient.invalidateQueries({
@@ -156,7 +171,7 @@ function usePullRequestWriteInvalidation(project: Project | null | undefined) {
 export function useUpdateProjectPullRequestStatusMutation(
   project: Project | null | undefined,
 ) {
-  const invalidate = usePullRequestWriteInvalidation(project);
+  const invalidate = useProjectPullRequestWriteInvalidation(project);
 
   return useMutation({
     mutationFn: ({
@@ -176,17 +191,19 @@ export function useUpdateProjectPullRequestStatusMutation(
 export function useRequestProjectPullRequestReviewMutation(
   project: Project | null | undefined,
 ) {
-  const invalidate = usePullRequestWriteInvalidation(project);
+  const invalidate = useProjectPullRequestWriteInvalidation(project);
 
   return useMutation({
     mutationFn: ({
       pullRequest,
       reviewers,
       reviewerLabel,
+      signAsManagedOwner,
     }: {
       pullRequest: ProjectPullRequest;
       reviewers: string[];
       reviewerLabel: string;
+      signAsManagedOwner: boolean;
     }) => {
       if (!project) throw new Error("No project selected.");
       return requestProjectPullRequestReview({
@@ -194,6 +211,7 @@ export function useRequestProjectPullRequestReviewMutation(
         pullRequest,
         reviewers,
         reviewerLabel,
+        signAsManagedOwner,
       });
     },
     onSuccess: invalidate,
@@ -203,7 +221,7 @@ export function useRequestProjectPullRequestReviewMutation(
 export function useApproveProjectPullRequestMutation(
   project: Project | null | undefined,
 ) {
-  const invalidate = usePullRequestWriteInvalidation(project);
+  const invalidate = useProjectPullRequestWriteInvalidation(project);
 
   return useMutation({
     mutationFn: ({ pullRequest }: { pullRequest: ProjectPullRequest }) => {

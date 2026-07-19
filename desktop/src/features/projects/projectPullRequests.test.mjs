@@ -22,11 +22,20 @@ function pullRequestEvent(overrides = {}) {
       ["a", REPO_ADDRESS],
       ["subject", "Add feature"],
       ["c", "1111111111111111111111111111111111111111"],
+      ["branch-name", "feature/demo"],
+      ["target-branch", "release"],
       ["clone", `https://relay.example/git/${OWNER}/demo`],
     ],
     ...overrides,
   };
 }
+
+test("reads source and target branches from the pull request", () => {
+  const pullRequest = eventToProjectPullRequest(pullRequestEvent());
+
+  assert.equal(pullRequest.branchName, "feature/demo");
+  assert.equal(pullRequest.targetBranch, "release");
+});
 
 function updateEvent({ pubkey, createdAt, commit, cloneUrl }) {
   return {
@@ -247,6 +256,8 @@ test("reviewers come from root p tags plus trusted review requests", () => {
 
 test("approvals keep the latest per author and flag comments", () => {
   const reviewer = "d".repeat(64);
+  const event = pullRequestEvent();
+  event.tags.push(["p", reviewer]);
   const firstApproval = commentEvent({
     pubkey: reviewer,
     createdAt: 200,
@@ -266,7 +277,7 @@ test("approvals keep the latest per author and flag comments", () => {
   });
 
   const pullRequest = eventToProjectPullRequest(
-    pullRequestEvent(),
+    event,
     [],
     [firstApproval, plainComment, secondApproval],
   );
@@ -281,6 +292,41 @@ test("approvals keep the latest per author and flag comments", () => {
   assert.equal(
     pullRequest.comments.filter((comment) => comment.isReviewRequest).length,
     0,
+  );
+});
+
+test("approvals only count requested reviewers and the repository owner", () => {
+  const reviewer = "d".repeat(64);
+  const event = pullRequestEvent();
+  event.tags.push(["p", reviewer]);
+  const comments = [
+    commentEvent({
+      pubkey: reviewer,
+      createdAt: 200,
+      labels: ["approval"],
+    }),
+    commentEvent({
+      pubkey: OWNER,
+      createdAt: 210,
+      labels: ["approval"],
+    }),
+    commentEvent({
+      pubkey: ATTACKER,
+      createdAt: 220,
+      labels: ["approval"],
+    }),
+    commentEvent({
+      pubkey: AUTHOR,
+      createdAt: 230,
+      labels: ["approval"],
+    }),
+  ];
+
+  const pullRequest = eventToProjectPullRequest(event, [], comments);
+
+  assert.deepEqual(
+    pullRequest.approvals.map((approval) => approval.author),
+    [reviewer, OWNER],
   );
 });
 

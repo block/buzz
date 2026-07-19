@@ -6,7 +6,7 @@ import {
 } from "@/features/agents/openSnapshotImportFromUrlEvent";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
-import { AgentAiDefaultsDialog } from "./AgentAiDefaultsDialog";
+import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentDialog } from "./AgentDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
@@ -241,7 +241,7 @@ export function AgentsView() {
         </div>
       </div>
 
-      <AgentAiDefaultsDialog
+      <AgentDefaultsDialog
         onOpenChange={setIsAiDefaultsOpen}
         open={isAiDefaultsOpen}
         returnFocusRef={aiDefaultsTriggerRef}

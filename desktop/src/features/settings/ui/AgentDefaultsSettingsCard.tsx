@@ -1,7 +1,7 @@
-import { GlobalAgentConfigEditor } from "@/features/agents/ui/GlobalAgentConfigEditor";
+import { AgentDefaultsEditor } from "@/features/agents/ui/AgentDefaultsEditor";
 import { SectionHeader } from "@/shared/ui/PageHeader";
 
-export function GlobalAgentConfigSettingsCard() {
+export function AgentDefaultsSettingsCard() {
   return (
     <section
       className="min-w-0 space-y-4"
@@ -11,7 +11,7 @@ export function GlobalAgentConfigSettingsCard() {
         title="Agent defaults"
         description="Provider, model, effort, and environment settings inherited by local agents. Agent-specific settings always take priority."
       />
-      <GlobalAgentConfigEditor />
+      <AgentDefaultsEditor />
     </section>
   );
 }

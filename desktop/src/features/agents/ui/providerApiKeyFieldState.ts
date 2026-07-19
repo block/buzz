@@ -5,7 +5,7 @@ import {
   getBakedSatisfiedEnvKeys,
   getProviderApiKeyEnvVar,
   isGloballySatisfiedCredentialKey,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 
 export type ProviderApiKeyFieldState = {
   advancedRequiredEnvKeys: readonly string[];

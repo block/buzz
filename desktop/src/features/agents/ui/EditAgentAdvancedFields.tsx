@@ -6,7 +6,7 @@ import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 import type { AgentPersona } from "@/shared/api/types";
 import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";

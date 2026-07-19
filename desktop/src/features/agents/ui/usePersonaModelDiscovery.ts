@@ -10,8 +10,8 @@ import {
   formatModelDiscoveryErrorStatus,
   type PersonaModelDiscoveryStatus,
 } from "./personaModelDiscoveryStatus";
-import type { PersonaModelOption } from "./personaDialogPickers";
-import { providerRequiresExplicitModel } from "./personaDialogPickers";
+import type { PersonaModelOption } from "./agentConfigOptions";
+import { providerRequiresExplicitModel } from "./agentConfigOptions";
 
 export const MODEL_DISCOVERY_LOADING_VALUE = "__model_discovery_loading__";
 

@@ -63,6 +63,7 @@ export type ProjectRepoSyncStatus = {
   remoteBranch: string | null;
   remoteHead: string | null;
   remoteShortHead: string | null;
+  mergeBase: string | null;
   aheadCount: number;
   behindCount: number;
   hasUncommittedChanges: boolean;
@@ -76,9 +77,25 @@ export type ProjectRepoSyncStatus = {
 export type ProjectRepoPushResult = {
   pushed: boolean;
   message: string;
+  branch: string;
+  commit: string;
+  mergeBase: string | null;
 };
 
 export type ProjectRepoPullResult = {
   pulled: boolean;
   message: string;
+};
+
+export type ProjectRepoCloneResult = {
+  path: string;
+  cloned: boolean;
+  message: string;
+};
+
+export type ProjectRepoMergeResult = {
+  message: string;
+  mergeCommit: string;
+  statusEvent: string;
+  statusPublicationError: string | null;
 };

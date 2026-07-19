@@ -1,5 +1,3 @@
-import type { ReactNode } from "react";
-
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -7,23 +5,16 @@ import {
 import type {
   Project,
   ProjectActivitySummary,
-  ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
-import {
-  languageForPath,
-  topLanguagesFromCounts,
-} from "@/features/projects/lib/projectLanguages";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { LanguageChips, OverviewRailSection } from "./ProjectOverviewPanel";
+import { OverviewRailSection } from "./ProjectOverviewPanel";
+import { ProjectsContributionGraph } from "./ProjectsContributionGraph";
 
 type ProjectsOverviewRailProps = {
-  children: ReactNode;
   profiles?: UserProfileLookup;
   projects: Project[];
-  snapshots?: Record<string, ProjectRepoSnapshot>;
-  snapshotsLoading?: boolean;
   summaries?: Record<string, ProjectActivitySummary>;
 };
 
@@ -44,30 +35,29 @@ function overviewPeople(
   ];
 }
 
-function overviewLanguages(
-  snapshots: Record<string, ProjectRepoSnapshot> | undefined,
+function overviewActivityByDay(
+  projects: Project[],
+  summaries: Record<string, ProjectActivitySummary> | undefined,
 ) {
-  const counts: Record<string, number> = {};
-  for (const snapshot of Object.values(snapshots ?? {})) {
-    for (const file of snapshot.files) {
-      const language = languageForPath(file.path);
-      if (language) counts[language] = (counts[language] ?? 0) + 1;
+  const merged: Record<string, number> = {};
+  for (const project of projects) {
+    const byDay = summaries?.[project.repoAddress]?.activityByDay;
+    if (!byDay) continue;
+    for (const [day, count] of Object.entries(byDay)) {
+      merged[day] = (merged[day] ?? 0) + count;
     }
   }
-  return topLanguagesFromCounts(counts);
+  return merged;
 }
 
-/** Workspace people and language metadata for the overview side rail. */
+/** Workspace people and contribution activity for the overview side rail. */
 export function ProjectsOverviewRail({
-  children,
   profiles,
   projects,
-  snapshots,
-  snapshotsLoading,
   summaries,
 }: ProjectsOverviewRailProps) {
   const people = overviewPeople(projects, summaries);
-  const languages = overviewLanguages(snapshots);
+  const activityByDay = overviewActivityByDay(projects, summaries);
 
   return (
     <>
@@ -101,25 +91,13 @@ export function ProjectsOverviewRail({
         </OverviewRailSection>
       </div>
 
-      <div className="order-5 min-w-0 space-y-7 border-t border-border/40 px-4 pb-4 pt-3 xl:order-none xl:col-start-2 xl:row-span-2 xl:row-start-2 xl:border-t-0">
-        <OverviewRailSection title="Top Languages" titleClassName="text-base">
-          {languages.length > 0 ? (
-            <LanguageChips languages={languages} />
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              {snapshotsLoading
-                ? "Scanning repositories..."
-                : "No language data is available yet."}
-            </p>
-          )}
-        </OverviewRailSection>
-
-        <OverviewRailSection
-          title="Active Repositories"
-          titleClassName="text-base"
-        >
-          {children}
-        </OverviewRailSection>
+      <div className="order-5 min-w-0 border-t border-border/40 px-4 pb-4 pt-3 xl:order-none xl:col-start-2 xl:row-start-2 xl:border-t-0">
+        <section className="space-y-2">
+          <h3 className="text-base font-semibold text-foreground">
+            Contribution Activity
+          </h3>
+          <ProjectsContributionGraph activityByDay={activityByDay} compact />
+        </section>
       </div>
     </>
   );

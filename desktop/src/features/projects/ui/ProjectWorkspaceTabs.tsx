@@ -1,5 +1,13 @@
-import { SquareTerminal } from "lucide-react";
+import {
+  CircleDot,
+  Download,
+  GitPullRequest,
+  Plus,
+  RefreshCw,
+  SquareTerminal,
+} from "lucide-react";
 import * as React from "react";
+import type { ComponentType } from "react";
 
 import type {
   Project,
@@ -33,11 +41,78 @@ import {
   PullRequestTabsList,
 } from "./ProjectWorkspaceTabList";
 import { ProjectPullRequestFilesChangedPanel } from "./ProjectPullRequestFilesChangedPanel";
+import { CreatePullRequestDialog } from "./CreatePullRequestDialog";
+import {
+  CreateIssueDialog,
+  type CreateIssueDialogInput,
+} from "./CreateIssueDialog";
+import { PROJECT_PANEL_ACTION_BUTTON_CLASS } from "./projectPanelStyles";
+
+type CloneRepositoryAction = {
+  onClone: () => void;
+  pending: boolean;
+};
+
+type CreatePullRequestAction = {
+  projects: Project[];
+  reposDir?: string | null;
+  onCreated: (project: Project, pullRequestId: string) => void | Promise<void>;
+};
+
+type CreateIssueAction = {
+  onCreate: (input: CreateIssueDialogInput) => Promise<void>;
+  pending: boolean;
+};
+
+type UpdatePullRequestAction = {
+  onUpdate: () => void;
+  pending: boolean;
+};
+
+function WorkItemListHeader({
+  actionDisabled = false,
+  actionLabel,
+  actionTitle,
+  icon: Icon,
+  onAction,
+  title,
+}: {
+  actionDisabled?: boolean;
+  actionLabel: string;
+  actionTitle?: string;
+  icon: ComponentType<{ className?: string }>;
+  onAction: () => void;
+  title: string;
+}) {
+  return (
+    <div className="flex min-h-14 items-center gap-2 border-border/50 border-b px-4 py-3">
+      <Icon className="h-4 w-4 text-muted-foreground" />
+      <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
+        {title}
+      </span>
+      <Button
+        className={PROJECT_PANEL_ACTION_BUTTON_CLASS}
+        disabled={actionDisabled}
+        onClick={onAction}
+        size="xs"
+        title={actionTitle}
+        variant="ghost"
+      >
+        <Plus className="h-4 w-4" />
+        {actionLabel}
+      </Button>
+    </div>
+  );
+}
 
 export function WorkspaceTabs({
+  cloneAction,
   commitDiff,
   commitDiffError,
   commitDiffLoading,
+  createIssueAction,
+  createPullRequestAction,
+  updatePullRequestAction,
   localSnapshot,
   localSnapshotError,
   localSnapshotLoading,
@@ -67,9 +142,13 @@ export function WorkspaceTabs({
   terminalTitle,
   viewerGitIdentity,
 }: {
+  cloneAction?: CloneRepositoryAction;
   commitDiff: ProjectRepoDiff | null | undefined;
   commitDiffError: unknown;
   commitDiffLoading: boolean;
+  createIssueAction: CreateIssueAction;
+  createPullRequestAction?: CreatePullRequestAction;
+  updatePullRequestAction?: UpdatePullRequestAction;
   localSnapshot: ProjectLocalRepoSnapshot | null | undefined;
   localSnapshotError: unknown;
   localSnapshotLoading: boolean;
@@ -122,6 +201,9 @@ export function WorkspaceTabs({
     ) ?? null;
   const isPullRequestSelected = Boolean(selectedPullRequest);
   const [selectedTab, setSelectedTab] = React.useState("overview");
+  const [createIssueOpen, setCreateIssueOpen] = React.useState(false);
+  const [createPullRequestOpen, setCreatePullRequestOpen] =
+    React.useState(false);
 
   React.useEffect(() => {
     onSelectedTabChange?.(selectedTab);
@@ -180,7 +262,7 @@ export function WorkspaceTabs({
       onValueChange={handleTabChange}
       value={selectedTab}
     >
-      <div className="flex min-w-0 items-center gap-1">
+      <div className="flex h-10 min-w-0 items-center gap-1">
         <ProjectTabsList prsActive={isPullRequestSelected} />
         {onOpenTerminal ? (
           <Button
@@ -194,8 +276,33 @@ export function WorkspaceTabs({
             <SquareTerminal className="h-[1.125rem] w-[1.125rem]" />
           </Button>
         ) : null}
+        {cloneAction ? (
+          <Button
+            className="h-8 shrink-0 gap-1.5"
+            disabled={cloneAction.pending}
+            onClick={cloneAction.onClone}
+            size="sm"
+            title="Clone repository"
+            variant="outline"
+          >
+            <Download className="h-4 w-4" />
+            {cloneAction.pending ? "Cloning…" : "Clone"}
+          </Button>
+        ) : null}
+        {updatePullRequestAction ? (
+          <Button
+            className="h-8 shrink-0 gap-1.5"
+            disabled={updatePullRequestAction.pending}
+            onClick={updatePullRequestAction.onUpdate}
+            size="sm"
+            title="Publish the pushed commit to this pull request"
+            variant="outline"
+          >
+            <RefreshCw className="h-4 w-4" />
+            {updatePullRequestAction.pending ? "Updating…" : "Update PR"}
+          </Button>
+        ) : null}
       </div>
-
       {selectedPullRequest ? (
         <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
           {/* Two full-height columns: the meta rail runs all the way to the
@@ -279,6 +386,7 @@ export function WorkspaceTabs({
           />
         ) : (
           <ActivityPanel
+            branch={sourceControls?.branch}
             error={displayedSnapshotError}
             isLoading={displayedSnapshotLoading}
             onSelectCommit={(commit) => onSelectedCommitHashChange(commit.hash)}
@@ -295,6 +403,17 @@ export function WorkspaceTabs({
         className="m-0 overflow-hidden rounded-xl border border-border/60 bg-card"
         value="prs"
       >
+        <WorkItemListHeader
+          actionDisabled={
+            !createPullRequestAction ||
+            createPullRequestAction.projects.length === 0
+          }
+          actionLabel="Pull Request"
+          actionTitle="Choose a repository and branches to compare."
+          icon={GitPullRequest}
+          onAction={() => setCreatePullRequestOpen(true)}
+          title="Pull Requests"
+        />
         <PullRequestsPanel
           error={pullRequestsError}
           isLoading={pullRequestsLoading}
@@ -311,6 +430,13 @@ export function WorkspaceTabs({
         className="m-0 overflow-hidden rounded-xl border border-border/60 bg-card"
         value="issues"
       >
+        <WorkItemListHeader
+          actionDisabled={createIssueAction.pending}
+          actionLabel="Issues"
+          icon={CircleDot}
+          onAction={() => setCreateIssueOpen(true)}
+          title="Issues"
+        />
         <ProjectIssuesPanel
           onSelectedIssueIdChange={onSelectedIssueIdChange}
           profiles={profiles}
@@ -344,6 +470,23 @@ export function WorkspaceTabs({
           repoContributors={displayedContributors}
         />
       </TabsContent>
+      {createPullRequestAction && createPullRequestOpen ? (
+        <CreatePullRequestDialog
+          initialProjectId={project.id}
+          onCreated={createPullRequestAction.onCreated}
+          onOpenChange={setCreatePullRequestOpen}
+          open
+          projects={createPullRequestAction.projects}
+          reposDir={createPullRequestAction.reposDir}
+        />
+      ) : null}
+      <CreateIssueDialog
+        isCreating={createIssueAction.pending}
+        onCreate={createIssueAction.onCreate}
+        onOpenChange={setCreateIssueOpen}
+        open={createIssueOpen}
+        projectName={project.name}
+      />
     </Tabs>
   );
 }
