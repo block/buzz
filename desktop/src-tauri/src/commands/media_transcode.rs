@@ -410,17 +410,17 @@ pub(super) fn extract_poster_frame(
     Ok(output)
 }
 
-/// Transcode video and extract poster frame. Returns (video_bytes, Option<poster_bytes>).
+/// Transcode video and extract a poster frame without loading the video into RAM.
 ///
-/// Poster extraction is best-effort — if it fails, returns `None` for the poster
-/// and the video bytes are still valid. All temp files are cleaned up.
-pub(super) fn transcode_and_extract_poster(
+/// Returns the transcoded temp-file path plus optional poster bytes. The caller
+/// owns the video path and must remove it after upload. Poster extraction is
+/// best-effort because the video remains usable without a thumbnail.
+pub(super) fn transcode_and_extract_poster_path(
     source: &std::path::Path,
-) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+) -> Result<(std::path::PathBuf, Option<Vec<u8>>), String> {
     let ffmpeg_path = find_ffmpeg()?;
     let transcoded = transcode_to_mp4(source, &ffmpeg_path)?;
 
-    // Extract poster from the transcoded file (not the original — guarantees decodability).
     let poster_bytes = match extract_poster_frame(&transcoded, &ffmpeg_path) {
         Ok(poster_path) => {
             let bytes = std::fs::read(&poster_path).ok();
@@ -433,6 +433,14 @@ pub(super) fn transcode_and_extract_poster(
         }
     };
 
+    Ok((transcoded, poster_bytes))
+}
+
+/// Compatibility helper for byte-based upload entry points.
+pub(super) fn transcode_and_extract_poster(
+    source: &std::path::Path,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+    let (transcoded, poster_bytes) = transcode_and_extract_poster_path(source)?;
     let video_bytes =
         std::fs::read(&transcoded).map_err(|e| format!("failed to read transcoded file: {e}"));
     let _ = std::fs::remove_file(&transcoded);

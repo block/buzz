@@ -67,3 +67,20 @@ pub fn set_window_vibrancy(
         Ok(())
     }
 }
+
+/// Perform the native alignment haptic used by sidebar controls.
+#[tauri::command]
+pub fn perform_sidebar_default_haptic() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{
+            NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
+            NSHapticFeedbackPerformer,
+        };
+
+        NSHapticFeedbackManager::defaultPerformer().performFeedbackPattern_performanceTime(
+            NSHapticFeedbackPattern::Alignment,
+            NSHapticFeedbackPerformanceTime::Now,
+        );
+    }
+}

@@ -9753,6 +9753,12 @@ export function maybeInstallE2eTauriMocks() {
         return await resolveMockUploadDescriptors(activeConfig);
       case "pick_and_upload_image":
         return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
+      case "begin_staged_media_upload":
+        return crypto.randomUUID();
+      case "append_staged_media_chunk":
+      case "cancel_staged_media_upload":
+        return null;
+      case "finish_staged_media_upload":
       case "upload_media_bytes":
         return (await resolveMockUploadDescriptors(activeConfig))[0];
       case "fetch_media_bytes": {

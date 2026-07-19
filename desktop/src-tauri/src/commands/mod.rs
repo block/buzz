@@ -23,6 +23,7 @@ mod legacy_storage;
 mod link_preview;
 pub(crate) mod media;
 mod media_download;
+mod media_staged;
 mod media_transcode;
 #[cfg(feature = "mesh-llm")]
 pub(crate) mod mesh_llm;
@@ -72,6 +73,7 @@ pub use legacy_storage::*;
 pub use link_preview::*;
 pub use media::*;
 pub use media_download::*;
+pub use media_staged::*;
 #[cfg(feature = "mesh-llm")]
 pub use mesh_llm::*;
 pub use messages::*;

@@ -88,6 +88,19 @@ test("dropping a file on the channel column attaches it to the composer", async 
   await expect(page.getByTestId("message-composer")).toContainText(
     "quarterly-report.pdf",
   );
+  const uploadCommands = await page.evaluate(
+    () =>
+      (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+        .__BUZZ_E2E_COMMANDS__ ?? [],
+  );
+  expect(uploadCommands).toEqual(
+    expect.arrayContaining([
+      "begin_staged_media_upload",
+      "append_staged_media_chunk",
+      "finish_staged_media_upload",
+    ]),
+  );
+  expect(uploadCommands).not.toContain("upload_media_bytes");
 });
 
 test("forum posts emit a FileCard for generic attachments, not a broken image", async ({

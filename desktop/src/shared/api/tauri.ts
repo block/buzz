@@ -557,6 +557,62 @@ export async function pickAndUploadMedia(): Promise<BlobDescriptor[]> {
   return invokeTauri<BlobDescriptor[]>("pick_and_upload_media", {});
 }
 
+const MEDIA_UPLOAD_CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * Stage a browser File in bounded chunks, then let Rust transcode and stream it.
+ * This avoids materializing the entire file as a JS number array or Rust Vec.
+ */
+export async function uploadMediaFile(
+  file: File,
+  progressId?: string,
+): Promise<BlobDescriptor> {
+  const uploadId = await invokeTauri<string>("begin_staged_media_upload", {});
+  try {
+    const reader = file.stream().getReader();
+    let pending = new Uint8Array(0);
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      let bytes = value;
+      if (pending.length > 0) {
+        const combined = new Uint8Array(pending.length + value.length);
+        combined.set(pending);
+        combined.set(value, pending.length);
+        bytes = combined;
+        pending = new Uint8Array(0);
+      }
+      let offset = 0;
+      while (bytes.length - offset >= MEDIA_UPLOAD_CHUNK_BYTES) {
+        await invokeTauri("append_staged_media_chunk", {
+          uploadId,
+          data: Array.from(
+            bytes.subarray(offset, offset + MEDIA_UPLOAD_CHUNK_BYTES),
+          ),
+        });
+        offset += MEDIA_UPLOAD_CHUNK_BYTES;
+      }
+      pending = bytes.slice(offset);
+    }
+    if (pending.length > 0) {
+      await invokeTauri("append_staged_media_chunk", {
+        uploadId,
+        data: Array.from(pending),
+      });
+    }
+    return await invokeTauri<BlobDescriptor>("finish_staged_media_upload", {
+      uploadId,
+      filename: file.name,
+      progressId,
+    });
+  } catch (error) {
+    await invokeTauri("cancel_staged_media_upload", { uploadId }).catch(
+      () => undefined,
+    );
+    throw error;
+  }
+}
+
 export async function uploadMediaBytes(
   data: number[],
   filename?: string,

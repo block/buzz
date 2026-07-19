@@ -4,6 +4,7 @@ import {
   type BlobDescriptor,
   pickAndUploadMedia,
   uploadMediaBytes,
+  uploadMediaFile,
 } from "@/shared/api/tauri";
 
 /**
@@ -409,11 +410,8 @@ export function useMediaUpload() {
         // Fire-and-forget each upload concurrently — slot preserves order
         (async () => {
           try {
-            const buffer = await file.arrayBuffer();
-            if (isUploadCanceled(previewId)) return;
-            const descriptor = await uploadMediaBytes(
-              [...new Uint8Array(buffer)],
-              file.name,
+            const descriptor = await uploadMediaFile(
+              file,
               uploadProgressId(previewId),
             );
             fillSlot(slotIndex, descriptor, previewId);
@@ -423,13 +421,7 @@ export function useMediaUpload() {
         })();
       }
     },
-    [
-      reserveSlots,
-      fillSlot,
-      isUploadCanceled,
-      onUploadError,
-      reserveUploadingPreview,
-    ],
+    [reserveSlots, fillSlot, onUploadError, reserveUploadingPreview],
   );
 
   const handleDragEnter = React.useCallback(
@@ -506,11 +498,8 @@ export function useMediaUpload() {
         const previewId = reserveUploadingPreview(file, slotIndex);
         (async () => {
           try {
-            const buffer = await file.arrayBuffer();
-            if (isUploadCanceled(previewId)) return;
-            const descriptor = await uploadMediaBytes(
-              [...new Uint8Array(buffer)],
-              file.name,
+            const descriptor = await uploadMediaFile(
+              file,
               uploadProgressId(previewId),
             );
             fillSlot(slotIndex, descriptor, previewId);
@@ -520,13 +509,7 @@ export function useMediaUpload() {
         })();
       }
     },
-    [
-      reserveSlots,
-      fillSlot,
-      isUploadCanceled,
-      onUploadError,
-      reserveUploadingPreview,
-    ],
+    [reserveSlots, fillSlot, onUploadError, reserveUploadingPreview],
   );
 
   /** Upload a File directly — used by Tiptap's editorProps.handlePaste. */
@@ -535,11 +518,8 @@ export function useMediaUpload() {
       const previewId = reserveUploadingPreview(file);
       setUploadingCount((c) => c + 1);
       try {
-        const buffer = await file.arrayBuffer();
-        if (isUploadCanceled(previewId)) return;
-        const descriptor = await uploadMediaBytes(
-          [...new Uint8Array(buffer)],
-          file.name,
+        const descriptor = await uploadMediaFile(
+          file,
           uploadProgressId(previewId),
         );
         onUploaded(descriptor, previewId);
@@ -547,7 +527,7 @@ export function useMediaUpload() {
         onUploadError(err, previewId);
       }
     },
-    [isUploadCanceled, onUploaded, onUploadError, reserveUploadingPreview],
+    [onUploaded, onUploadError, reserveUploadingPreview],
   );
 
   /**

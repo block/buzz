@@ -12,7 +12,7 @@ use crate::relay::{
 
 use super::media_transcode::{
     has_heic_extension, is_heic_file, is_video_file, transcode_and_extract_poster,
-    transcode_heic_path_to_jpeg_bytes,
+    transcode_and_extract_poster_path, transcode_heic_path_to_jpeg_bytes,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,7 +141,7 @@ const BLOCKED_MIME: &[&str] = &[
 /// control characters, and bounds length to 255. Mirrors the relay's filename
 /// validation so a sanitized name always passes ingest. Returns a fallback when
 /// the result would be empty.
-pub(crate) fn sanitize_filename(name: &str) -> String {
+pub(super) fn sanitize_filename(name: &str) -> String {
     // Keep only the final path segment — defend against `../` and absolute paths
     // regardless of separator style.
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
@@ -344,11 +344,7 @@ fn sign_blossom_upload_auth(
         .map_err(|e| e.to_string())
 }
 
-/// Execute the upload HTTP request. Shared by all upload entry points.
-// TODO(v2): Stream large video files to the relay instead of buffering in RAM.
-// Current approach works for videos up to ~100MB but will OOM on 500MB files.
-// Fix: use reqwest's Body::wrap_stream() to stream from the temp file directly.
-// The server already supports streaming upload via process_video_upload.
+/// Execute a buffered upload HTTP request. Shared by byte-based upload entry points.
 fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
     matches!(
         status,
@@ -399,6 +395,123 @@ async fn send_upload_attempt(
         req.body(body).send().await
     };
     response.map_err(|error| classify_request_error(&error))
+}
+
+async fn send_upload_file_attempt(
+    state: &State<'_, AppState>,
+    url: String,
+    auth_header: &str,
+    mime: &str,
+    sha256: &str,
+    path: &std::path::Path,
+    progress: Option<&(tauri::AppHandle, String)>,
+) -> Result<reqwest::Response, String> {
+    use futures_util::StreamExt;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
+    use tokio_util::io::ReaderStream;
+
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("failed to open upload file: {e}"))?;
+    let total = file
+        .metadata()
+        .await
+        .map_err(|e| format!("failed to stat upload file: {e}"))?
+        .len();
+    let sent = Arc::new(AtomicU64::new(0));
+    let progress = progress.cloned();
+    let stream = ReaderStream::new(file).map(move |chunk| {
+        if let (Ok(bytes), Some((app, progress_id))) = (&chunk, &progress) {
+            use tauri::Emitter;
+            let sent = sent.fetch_add(bytes.len() as u64, Ordering::Relaxed) + bytes.len() as u64;
+            let _ = app.emit(
+                "media-upload-progress",
+                serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
+            );
+        }
+        chunk
+    });
+
+    state
+        .http_client
+        .put(url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", mime)
+        .header("X-SHA-256", sha256)
+        .header(reqwest::header::CONTENT_LENGTH, total)
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await
+        .map_err(|error| classify_request_error(&error))
+}
+
+async fn sha256_file(path: &std::path::Path) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("failed to open upload file: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|e| format!("failed to hash upload file: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+async fn do_upload_file(
+    path: &std::path::Path,
+    mime: &str,
+    state: &State<'_, AppState>,
+    progress: Option<(tauri::AppHandle, String)>,
+) -> Result<BlobDescriptor, String> {
+    let sha256 = sha256_file(path).await?;
+    let base_url = relay_api_base_url_with_override(state);
+    let auth_event = {
+        let keys = state.signing_keys()?;
+        sign_blossom_upload_auth(&keys, &sha256, 3600, &base_url)?
+    };
+    let auth_header = format!(
+        "Nostr {}",
+        URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
+    );
+
+    let mut response = send_upload_file_attempt(
+        state,
+        format!("{base_url}/upload"),
+        &auth_header,
+        mime,
+        &sha256,
+        path,
+        progress.as_ref(),
+    )
+    .await?;
+    if should_retry_legacy_upload(response.status()) {
+        response = send_upload_file_attempt(
+            state,
+            format!("{base_url}/media/upload"),
+            &auth_header,
+            mime,
+            &sha256,
+            path,
+            progress.as_ref(),
+        )
+        .await?;
+    }
+    if !response.status().is_success() {
+        return Err(relay_error_message(response).await);
+    }
+    parse_json_response::<BlobDescriptor>(response).await
 }
 
 async fn do_upload(
@@ -496,6 +609,17 @@ pub async fn upload_media(
     do_upload(body, &mime, &state, None).await
 }
 
+enum PreparedUpload {
+    Bytes {
+        body: Vec<u8>,
+        mime: String,
+    },
+    File {
+        path: std::path::PathBuf,
+        mime: String,
+    },
+}
+
 /// Read a picked path through the TOCTOU-safe pipeline (fd pin → sniff →
 /// transcode-or-passthrough → MIME validation → upload).
 ///
@@ -503,10 +627,11 @@ pub async fn upload_media(
 /// not an image (videos and non-image files error out; HEIC/HEIF still
 /// transcode to JPEG, which is an image). This keeps discarded/non-image
 /// files from ever leaving the client on image-only surfaces.
-async fn process_picked_path(
+pub(super) async fn process_picked_path(
     path: std::path::PathBuf,
     state: &State<'_, AppState>,
     images_only: bool,
+    progress: Option<(tauri::AppHandle, String)>,
 ) -> Result<BlobDescriptor, String> {
     // Pin the inode by opening the fd BEFORE spawn_blocking. This prevents a
     // local attacker from swapping the file between dialog return and read.
@@ -520,11 +645,10 @@ async fn process_picked_path(
 
     // All sync I/O (sniff, transcode, read) runs off the async runtime to
     // avoid blocking Tokio worker threads during long ffmpeg transcodes.
-    let (body, poster_bytes) =
-        tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+    let (prepared, poster_bytes) = tokio::task::spawn_blocking(
+        move || -> Result<(PreparedUpload, Option<Vec<u8>>), String> {
             use std::io::Read;
 
-            // Sniff magic bytes from the pinned fd — no re-open, no TOCTOU.
             let mut header = [0u8; 4096];
             let n = file.read(&mut header).map_err(|e| e.to_string())?;
 
@@ -532,48 +656,57 @@ async fn process_picked_path(
                 if images_only {
                     return Err("Please choose an image file.".to_string());
                 }
-                // ffmpeg needs a path, not an fd. Resolve the fd's real path
-                // so we pass the actual inode's location, not the original
-                // (potentially swapped) pathname. Same pattern as upload_media.
-                // IMPORTANT: keep `file` alive (fd open) until after transcode
-                // completes — this prevents the inode from being unlinked or
-                // the resolved path from becoming stale during the ffmpeg run.
                 let fd_path = fd_real_path(&file)?;
-                let result = transcode_and_extract_poster(&fd_path);
-                drop(file); // release fd only after ffmpeg is done
-                result
+                let (path, poster) = transcode_and_extract_poster_path(&fd_path)?;
+                drop(file);
+                Ok((
+                    PreparedUpload::File {
+                        path,
+                        mime: "video/mp4".to_string(),
+                    },
+                    poster,
+                ))
             } else if heic_by_ext || is_heic_file(&header[..n]) {
-                // HEIC/HEIF still: Chromium/the webview can't decode it, so
-                // transcode to JPEG before upload (mirrors mobile). Resolve the
-                // fd's real path so ffmpeg reads the pinned inode, and keep
-                // `file` alive until the transcode finishes.
                 let fd_path = fd_real_path(&file)?;
-                let result = transcode_heic_path_to_jpeg_bytes(&fd_path).map(|jpeg| (jpeg, None));
-                drop(file); // release fd only after ffmpeg is done
-                result
+                let jpeg = transcode_heic_path_to_jpeg_bytes(&fd_path)?;
+                drop(file);
+                Ok((
+                    PreparedUpload::Bytes {
+                        body: jpeg,
+                        mime: "image/jpeg".to_string(),
+                    },
+                    None,
+                ))
             } else {
-                // Image: read the rest from the already-open fd (TOCTOU-safe).
-                let mut bytes = header[..n].to_vec();
-                file.read_to_end(&mut bytes)
+                let mut body = header[..n].to_vec();
+                file.read_to_end(&mut body)
                     .map_err(|e| format!("failed to read file: {e}"))?;
-                Ok((bytes, None))
+                let mime = detect_and_validate_mime(&body)?;
+                let body = sanitize_image_for_upload(body, &mime)?;
+                Ok((PreparedUpload::Bytes { body, mime }, None))
             }
-        })
-        .await
-        .map_err(|e| format!("transcode task failed: {e}"))??;
+        },
+    )
+    .await
+    .map_err(|e| format!("transcode task failed: {e}"))??;
 
-    let mime = detect_and_validate_mime(&body)?;
-    let body = sanitize_image_for_upload(body, &mime)?;
-
-    // Image-only surfaces (e.g. "Send feedback"): reject anything that didn't
-    // sniff as an image, BEFORE the upload leaves the client.
-    if images_only && !mime.starts_with("image/") {
-        return Err("Please choose an image file.".to_string());
+    if images_only {
+        let mime = match &prepared {
+            PreparedUpload::Bytes { mime, .. } | PreparedUpload::File { mime, .. } => mime,
+        };
+        if !mime.starts_with("image/") {
+            return Err("Please choose an image file.".to_string());
+        }
     }
 
-    // Upload video first, then poster (best-effort). If poster upload fails,
-    // the video descriptor is returned without an image field.
-    let mut descriptor = do_upload(body, &mime, state, None).await?;
+    let mut descriptor = match &prepared {
+        PreparedUpload::Bytes { body, mime } => do_upload(body.clone(), mime, state, None).await?,
+        PreparedUpload::File { path, mime } => {
+            let result = do_upload_file(path, mime, state, progress).await;
+            let _ = tokio::fs::remove_file(path).await;
+            result?
+        }
+    };
 
     if let Some(poster) = poster_bytes {
         match do_upload(poster, "image/jpeg", state, None).await {
@@ -628,7 +761,7 @@ pub async fn pick_and_upload_media(
     let mut descriptors = Vec::with_capacity(file_paths.len());
     for file_path in file_paths {
         let path = file_path.as_path().ok_or("invalid path")?.to_path_buf();
-        let descriptor = process_picked_path(path, &state, false).await?;
+        let descriptor = process_picked_path(path, &state, false, None).await?;
         descriptors.push(descriptor);
     }
 
@@ -669,7 +802,7 @@ pub async fn pick_and_upload_image(
     };
 
     let path = file_path.as_path().ok_or("invalid path")?.to_path_buf();
-    let descriptor = process_picked_path(path, &state, true).await?;
+    let descriptor = process_picked_path(path, &state, true, None).await?;
     Ok(Some(descriptor))
 }
 
@@ -748,190 +881,6 @@ pub async fn upload_media_bytes(
     Ok(descriptor)
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_server_authority_default_ports() {
-        assert_eq!(
-            extract_server_authority("https://relay.example.com"),
-            Some("relay.example.com".to_string())
-        );
-        assert_eq!(
-            extract_server_authority("https://relay.example.com:443"),
-            Some("relay.example.com".to_string())
-        );
-        assert_eq!(
-            extract_server_authority("http://relay.example.com:80"),
-            Some("relay.example.com".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_server_authority_non_default_ports() {
-        assert_eq!(
-            extract_server_authority("http://localhost:3000"),
-            Some("localhost:3000".to_string())
-        );
-        assert_eq!(
-            extract_server_authority("https://relay.example.com:8443"),
-            Some("relay.example.com:8443".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_server_authority_ipv6() {
-        assert_eq!(
-            extract_server_authority("http://[::1]:3000"),
-            Some("[::1]:3000".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_server_authority_invalid() {
-        assert_eq!(extract_server_authority("not-a-url"), None);
-        assert_eq!(extract_server_authority(""), None);
-    }
-
-    #[test]
-    fn test_sign_blossom_get_auth_header_shape() {
-        let keys = Keys::generate();
-        let header = sign_blossom_get_auth_header(&keys, "http://localhost:3000", 600).unwrap();
-        let b64 = header.strip_prefix("Nostr ").expect("Nostr scheme prefix");
-        let json = URL_SAFE_NO_PAD.decode(b64).unwrap();
-        let event = nostr::Event::from_json(std::str::from_utf8(&json).unwrap()).unwrap();
-
-        assert_eq!(event.kind, Kind::from(24242));
-        event.verify().expect("valid signature");
-
-        let tag = |name: &str| -> Option<String> {
-            event.tags.iter().find_map(|t| {
-                let v = t.as_slice();
-                (v.first().map(String::as_str) == Some(name)).then(|| v[1].clone())
-            })
-        };
-        assert_eq!(tag("t").as_deref(), Some("get"));
-        assert_eq!(tag("server").as_deref(), Some("localhost:3000"));
-        // Server-scoped token: no x tag (BUD-01 allows x OR server).
-        assert!(tag("x").is_none());
-        let expiration: u64 = tag("expiration").unwrap().parse().unwrap();
-        let now = Timestamp::now().as_secs();
-        assert!(expiration > now && expiration <= now + 600);
-    }
-
-    #[test]
-    fn test_sign_blossom_get_auth_header_invalid_base_url() {
-        let keys = Keys::generate();
-        assert!(sign_blossom_get_auth_header(&keys, "not-a-url", 600).is_err());
-    }
-
-    #[test]
-    fn test_detect_and_validate_mime_jpeg() {
-        // Minimal JPEG: SOI + EOI
-        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0];
-        assert_eq!(detect_and_validate_mime(&jpeg).unwrap(), "image/jpeg");
-    }
-
-    #[test]
-    fn test_detect_and_validate_mime_accepts_text_as_octet_stream() {
-        // Plain text has no magic bytes — infer returns None, so it's accepted
-        // as opaque binary (served as a download). This is the common Slack case.
-        let text = b"hello world";
-        assert_eq!(
-            detect_and_validate_mime(text).unwrap(),
-            "application/octet-stream"
-        );
-    }
-
-    #[test]
-    fn test_detect_and_validate_mime_rejects_html() {
-        let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
-        assert!(detect_and_validate_mime(html).is_err());
-    }
-
-    #[test]
-    fn test_image_sanitizer_bakes_exif_orientation() {
-        let source = image::RgbImage::from_fn(2, 3, |x, y| {
-            image::Rgb([(x * 80) as u8, (y * 60) as u8, 32])
-        });
-        let mut encoded = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 95)
-            .encode_image(&source)
-            .unwrap();
-
-        // Minimal little-endian Exif IFD with Orientation=6 (rotate 90°).
-        let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0".to_vec();
-        exif.extend_from_slice(&[
-            0x12, 0x01, // Orientation tag
-            0x03, 0x00, // SHORT
-            0x01, 0x00, 0x00, 0x00, // count=1
-            0x06, 0x00, 0x00, 0x00, // value=6
-            0x00, 0x00, 0x00, 0x00, // next IFD
-        ]);
-        let segment_len = (exif.len() + 2) as u16;
-        let mut oriented = encoded[..2].to_vec();
-        oriented.extend_from_slice(&[0xff, 0xe1]);
-        oriented.extend_from_slice(&segment_len.to_be_bytes());
-        oriented.extend_from_slice(&exif);
-        oriented.extend_from_slice(&encoded[2..]);
-
-        let sanitized = sanitize_image_for_upload(oriented, "image/jpeg").unwrap();
-        let decoded =
-            image::load_from_memory_with_format(&sanitized, image::ImageFormat::Jpeg).unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (3, 2));
-        assert!(!sanitized.windows(6).any(|bytes| bytes == b"Exif\0\0"));
-    }
-
-    #[test]
-    fn test_animated_png_and_webp_are_not_flattened() {
-        let mut apng = b"\x89PNG\r\n\x1a\n".to_vec();
-        apng.extend_from_slice(&8u32.to_be_bytes());
-        apng.extend_from_slice(b"acTL");
-        apng.extend_from_slice(&[0; 8]);
-        apng.extend_from_slice(&[0; 4]);
-        assert!(is_animated_image(&apng, "image/png"));
-        assert_eq!(
-            sanitize_image_for_upload(apng.clone(), "image/png").unwrap(),
-            apng
-        );
-
-        let mut webp = b"RIFF\x0c\0\0\0WEBPANIM".to_vec();
-        webp.extend_from_slice(&0u32.to_le_bytes());
-        assert!(is_animated_image(&webp, "image/webp"));
-        assert_eq!(
-            sanitize_image_for_upload(webp.clone(), "image/webp").unwrap(),
-            webp
-        );
-    }
-
-    #[test]
-    fn test_legacy_upload_retry_statuses_are_narrow() {
-        assert!(should_retry_legacy_upload(reqwest::StatusCode::NOT_FOUND));
-        assert!(should_retry_legacy_upload(
-            reqwest::StatusCode::METHOD_NOT_ALLOWED
-        ));
-        assert!(!should_retry_legacy_upload(
-            reqwest::StatusCode::UNPROCESSABLE_ENTITY
-        ));
-        assert!(!should_retry_legacy_upload(
-            reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
-        ));
-    }
-
-    #[test]
-    fn test_sanitize_filename() {
-        assert_eq!(sanitize_filename("report.pdf"), "report.pdf");
-        // Strips directory components and traversal.
-        assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
-        assert_eq!(sanitize_filename("/abs/path/notes.txt"), "notes.txt");
-        assert_eq!(sanitize_filename(r"C:\Users\me\doc.docx"), "doc.docx");
-        // Empty / separator-only falls back.
-        assert_eq!(sanitize_filename(""), "file");
-        assert_eq!(sanitize_filename("/"), "file");
-        // Control chars removed.
-        assert_eq!(sanitize_filename("a\nb\tc.txt"), "abc.txt");
-    }
-}
+#[path = "media_tests.rs"]
+mod tests;

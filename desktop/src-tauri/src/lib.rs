@@ -64,37 +64,6 @@ use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
 #[tauri::command]
-fn perform_sidebar_default_haptic() {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_app_kit::{
-            NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
-            NSHapticFeedbackPerformer,
-        };
-
-        NSHapticFeedbackManager::defaultPerformer().performFeedbackPattern_performanceTime(
-            NSHapticFeedbackPattern::Alignment,
-            NSHapticFeedbackPerformanceTime::Now,
-        );
-    }
-}
-
-/// Performs the window action matching the macOS "double-click a window's
-/// title bar to" preference (`AppleActionOnDoubleClick`).
-///
-/// macOS values are `Minimize`, `Maximize` (default when unset), `Fill`, or
-/// `None`.
-/// The desktop app uses a web-based title-bar drag region, so the frontend
-/// forwards double-clicks here and suppresses Tauri's injected drag-region
-/// handler, whose default macOS path hardcodes maximize.
-///
-/// For `Fill`, resize to the current monitor work area instead of using
-/// Tauri's maximize path, which maps to macOS zoom for titled, resizable
-/// windows.
-///
-/// On non-macOS platforms this always toggles maximize (the historical
-/// behavior).
-#[tauri::command]
 fn title_bar_double_click(window: tauri::Window) {
     #[cfg(target_os = "macos")]
     {
@@ -838,6 +807,10 @@ pub fn run() {
             upload_media,
             pick_and_upload_media,
             pick_and_upload_image,
+            begin_staged_media_upload,
+            append_staged_media_chunk,
+            finish_staged_media_upload,
+            cancel_staged_media_upload,
             upload_media_bytes,
             download_image,
             download_file,
