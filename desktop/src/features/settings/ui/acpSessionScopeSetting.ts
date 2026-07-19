@@ -35,7 +35,8 @@ async function restartRunningLocalAgents(
  * processes must converge on one authoritative scope. Rollback is only claimed
  * after the rollback write is confirmed; if that write fails, the authoritative
  * value is re-read and UI/processes reconcile to it. If the authority cannot be
- * read either, `onUnrecoverable` fires and nothing pretends to know the scope.
+ * read, or any process fails to reconcile under it, `onUnrecoverable` fires and
+ * nothing pretends to know the scope.
  */
 export async function applyAcpSessionScopeSetting(
   previous: boolean,
@@ -72,7 +73,11 @@ export async function applyAcpSessionScopeSetting(
       }
     }
     // Reconcile every affected process under the confirmed authoritative
-    // scope — never under an assumed one.
+    // scope — never under an assumed one. Any failure here means a process
+    // may still be running under the wrong scope (or not running at all),
+    // so convergence must not be claimed: finish every attempt, then
+    // surface hard recovery instead of committing a normal UI scope.
+    let reconciliationFailed = false;
     for (const agent of agents) {
       if (agent.status !== "running" || agent.backend.type !== "local")
         continue;
@@ -80,13 +85,18 @@ export async function applyAcpSessionScopeSetting(
         await deps.stopAgent(agent.pubkey);
         await deps.startAgent(agent.pubkey);
       } catch (rollbackError) {
+        reconciliationFailed = true;
         console.error(
           `Failed to roll back ACP session-scope process ${agent.pubkey}`,
           rollbackError,
         );
       }
     }
-    deps.setUi(authoritative);
+    if (reconciliationFailed) {
+      deps.onUnrecoverable();
+    } else {
+      deps.setUi(authoritative);
+    }
     throw error;
   }
 }

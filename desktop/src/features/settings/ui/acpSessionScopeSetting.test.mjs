@@ -89,7 +89,7 @@ describe("ACP session scope setting", () => {
     assert.equal(calls.at(-1)[1], false);
   });
 
-  it("attempts every process rollback even when one rollback restart fails", async () => {
+  it("attempts every process rollback and surfaces hard recovery when one rollback restart fails", async () => {
     const first = {
       pubkey: "first",
       status: "running",
@@ -120,6 +120,8 @@ describe("ACP session scope setting", () => {
       applyAcpSessionScopeSetting(false, true, deps),
       /apply failed/,
     );
+    // Every process rollback is still attempted, but a failed reconciliation
+    // must surface hard recovery instead of claiming a normal scope.
     assert.deepEqual(calls, [
       ["backend", "thread"],
       ["stop", "first"],
@@ -131,9 +133,33 @@ describe("ACP session scope setting", () => {
       ["start", "first"],
       ["stop", "second"],
       ["start", "second"],
-      ["ui", false],
+      ["unrecoverable"],
     ]);
     assert.equal(secondStarts, 2);
+    assert.ok(!calls.some((c) => c[0] === "ui"));
+  });
+
+  it("surfaces hard recovery when a rollback stop fails", async () => {
+    let stops = 0;
+    const { calls, deps } = harness({
+      stopAgent: async (pubkey) => {
+        calls.push(["stop", pubkey]);
+        stops += 1;
+        if (stops === 2) throw new Error("rollback stop failed");
+      },
+      startAgent: async (pubkey) => {
+        calls.push(["start", pubkey]);
+        if (calls.filter((c) => c[0] === "start").length === 1)
+          throw new Error("apply failed");
+      },
+    });
+    await assert.rejects(
+      applyAcpSessionScopeSetting(false, true, deps),
+      /apply failed/,
+    );
+    // The process may still be running under the wrong scope: no UI claim.
+    assert.ok(calls.some((c) => c[0] === "unrecoverable"));
+    assert.ok(!calls.some((c) => c[0] === "ui"));
   });
 
   it("reconciles UI and processes to the re-read authoritative scope when rollback persistence fails", async () => {
