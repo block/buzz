@@ -26,10 +26,7 @@ import { safeNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { OnboardingFooter } from "@/features/onboarding/ui/OnboardingFooter";
-import {
-  ONBOARDING_INK_ICON_CLASS,
-  ONBOARDING_PRIMARY_CTA_CLASS,
-} from "@/features/onboarding/ui/OnboardingChrome";
+import { ONBOARDING_INK_ICON_CLASS } from "@/features/onboarding/ui/OnboardingChrome";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import {
   Dialog,
@@ -45,6 +42,14 @@ import {
  * black-on-white form.
  */
 const BRAND_SECTION_CLASS = "rounded-xl bg-white/55 p-6 text-left";
+
+/**
+ * Primary-CTA styling for this onboarding surface: the shared onboarding pill
+ * shape, but with the pill's crisp near-white `primary-foreground` label (the
+ * Button default) instead of the shared pale-blue onboarding CTA label
+ * (`--buzz-onboarding-cta-label`), which reads washed-out on the textured card.
+ */
+const MODAL_CTA_CLASS = "h-[2.375rem] rounded-full px-6";
 
 export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
   const onboarding = useCommunityOnboarding();
@@ -295,11 +300,15 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
 
   const errorBox = error ? (
     <div
-      className="flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/5 p-4 text-left text-sm text-destructive"
+      className="flex items-start gap-3 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-left"
       role="alert"
     >
-      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-      <span>{error}</span>
+      <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-destructive/15 text-destructive">
+        <AlertCircle className="h-4 w-4" />
+      </span>
+      <span className="text-sm font-medium leading-5 text-destructive">
+        {error}
+      </span>
     </div>
   ) : null;
 
@@ -410,7 +419,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
                 </p>
               ) : null}
               <Button
-                className={`mt-4 ${ONBOARDING_PRIMARY_CTA_CLASS}`}
+                className={`mt-4 ${MODAL_CTA_CLASS}`}
                 disabled={
                   !validName ||
                   availability === false ||
@@ -466,11 +475,11 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
           surface="textured"
         >
           <div className="mx-auto flex w-full max-w-xs flex-col items-center py-2 text-center">
-            <BuzzMark className="mb-5 h-auto w-9" />
+            <BuzzMark className="mb-5 h-auto w-9 text-foreground" />
 
             {!auth ? (
               <>
-                <DialogTitle className="text-xl font-normal text-foreground">
+                <DialogTitle className="text-xl font-medium text-foreground">
                   Sign in to Buzz
                 </DialogTitle>
                 <DialogDescription className="mt-3 text-sm leading-6 text-[color:var(--buzz-onboarding-backup-ink)]">
@@ -492,16 +501,22 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
                   </div>
                 ) : (
                   <Button
-                    className={`mt-6 ${ONBOARDING_PRIMARY_CTA_CLASS}`}
+                    className={`mt-6 ${MODAL_CTA_CLASS}`}
                     onClick={signIn}
                   >
                     Continue
                   </Button>
                 )}
+                {/* Quiet breadcrumb: Buzz itself is open source; this hosted
+                    relay is the one account-backed piece of the flow. */}
+                <p className="mt-6 max-w-[16rem] border-t border-foreground/10 pt-4 text-xs leading-5 text-foreground/55">
+                  Buzz is open source. Builderlab hosts the relay for this
+                  account.
+                </p>
               </>
             ) : !identity ? (
               <>
-                <DialogTitle className="text-xl font-normal text-foreground">
+                <DialogTitle className="text-xl font-medium text-foreground">
                   Connect this Buzz identity
                 </DialogTitle>
                 <DialogDescription className="mt-3 text-sm leading-6 text-[color:var(--buzz-onboarding-backup-ink)]">
@@ -514,7 +529,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
                   <div className="mt-5 w-full">{errorBox}</div>
                 ) : null}
                 <Button
-                  className={`mt-6 ${ONBOARDING_PRIMARY_CTA_CLASS}`}
+                  className={`mt-6 ${MODAL_CTA_CLASS}`}
                   disabled={busy}
                   onClick={() => void connectIdentity()}
                 >
@@ -526,7 +541,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
               </>
             ) : (
               <>
-                <DialogTitle className="text-xl font-normal text-foreground">
+                <DialogTitle className="text-xl font-medium text-foreground">
                   This account uses a different Buzz identity
                 </DialogTitle>
                 <DialogDescription className="mt-3 text-sm leading-6 text-[color:var(--buzz-onboarding-backup-ink)]">
@@ -543,7 +558,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
                 ) : null}
                 <div className="mt-6 flex flex-col items-stretch gap-2">
                   <Button
-                    className={ONBOARDING_PRIMARY_CTA_CLASS}
+                    className={MODAL_CTA_CLASS}
                     disabled={busy}
                     onClick={() => void switchToDeviceIdentity()}
                   >
