@@ -985,18 +985,15 @@ test("connected first-community profile step cannot discard resumable onboarding
   await expect(
     page.getByRole("heading", { name: "Build your profile" }),
   ).toBeVisible();
-  const profileMain = page.getByTestId("community-profile-main");
-  const profileMainBox = await profileMain.boundingBox();
-  const viewport = page.viewportSize();
-  if (!profileMainBox || !viewport) {
-    throw new Error("Could not measure community profile body position");
+  const profileHeading = page.getByRole("heading", {
+    name: "Build your profile",
+  });
+  await expect(profileHeading).toBeVisible();
+  const profileHeadingBox = await profileHeading.boundingBox();
+  if (!profileHeadingBox) {
+    throw new Error("Could not measure community profile heading position");
   }
-  const chromeOffset = 106;
-  const footerOffset = 144;
-  const profileMainCenterY = profileMainBox.y + profileMainBox.height / 2;
-  const centeredInUsableLaneY =
-    chromeOffset + (viewport.height - chromeOffset - footerOffset) / 2;
-  expect(Math.abs(profileMainCenterY - centeredInUsableLaneY)).toBeLessThan(32);
+  expect(Math.abs(profileHeadingBox.y - 106)).toBeLessThan(8);
   const nameKey = page.getByTestId("community-profile-name-key");
   const avatarButton = page.getByTestId("community-avatar-open");
   await expect(nameKey).toBeVisible();

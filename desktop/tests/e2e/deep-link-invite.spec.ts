@@ -243,7 +243,7 @@ test("queued add-community links open and acknowledge one at a time", async ({
     ]);
 });
 
-test("Welcome failure can be skipped without abandoning community onboarding", async ({
+test("Welcome failure can go back without abandoning community onboarding", async ({
   page,
 }) => {
   const welcomeError = "Channel creation is not permitted.";
@@ -291,30 +291,26 @@ test("Welcome failure can be skipped without abandoning community onboarding", a
     );
   }
 
-  await page.getByRole("button", { name: "Enter hive" }).click();
+  await page.getByRole("button", { name: "Take me to Buzz" }).click();
 
   await expect(page.getByText(welcomeError)).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Preparing Welcome…" }),
+    page.getByRole("button", { name: "Take me to Buzz" }),
   ).toBeEnabled();
-  const skip = page.getByRole("button", { name: "Skip for now" });
-  await expect(skip).toBeVisible();
-  await skip.click();
+  await expect(page.getByRole("button", { name: "Back" })).toBeVisible();
+  await page.getByRole("button", { name: "Back" }).click();
 
-  const completionKey = `buzz-community-onboarding-complete.v1:${encodeURIComponent(COMMUNITY_RELAY_URL)}:${WELCOME_FAILURE_PUBKEY}`;
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(
-        ({ completion, transaction }) => ({
-          completion: window.localStorage.getItem(completion),
-          transaction: window.localStorage.getItem(transaction),
-        }),
-        { completion: completionKey, transaction: TRANSACTION_STORAGE_KEY },
+        (transaction) => window.localStorage.getItem(transaction),
+        TRANSACTION_STORAGE_KEY,
       ),
     )
-    .toEqual({ completion: "true", transaction: null });
-  await expect(page.getByTestId("community-onboarding-flow")).toHaveCount(0);
-  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    .toContain('"stage":"profile"');
 });
 
 test("persisted deep-link invite hands off to Joining after machine onboarding", async ({
