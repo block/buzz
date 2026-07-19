@@ -37,7 +37,7 @@ type WelcomeSetupProps = {
   onBack: () => void;
 };
 
-const CREATE_COMMUNITY_URL = "https://buzz.xyz";
+const CREATE_COMMUNITY_URL = "https://app.builderlab.xyz/signup?returnTo=/buzz";
 const LOCAL_DEV_RELAY_URLS = new Set([
   "ws://localhost:3000",
   "ws://127.0.0.1:3000",

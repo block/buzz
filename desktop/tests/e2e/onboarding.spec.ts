@@ -636,7 +636,9 @@ test("first-community choices expose npub and invite input", async ({
           ?.payload;
       }),
     )
-    .toMatchObject({ url: "https://buzz.xyz" });
+    .toMatchObject({
+      url: "https://app.builderlab.xyz/signup?returnTo=/buzz",
+    });
 
   await page.getByRole("button", { name: "Add me to a community" }).click();
   await expect(page.getByTestId("welcome-join-npub")).toHaveText(
