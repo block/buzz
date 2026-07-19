@@ -114,7 +114,7 @@ export function AppShell() {
   const mainInsetRef = React.useRef<HTMLElement>(null);
   const location = useLocation();
   const queryClient = useQueryClient();
-  useManagedAgentRuntimeReconciliation(communitiesHook.communities);
+  useManagedAgentRuntimeReconciliation(communitiesHook.communities); // sync storage snapshot
   const {
     goAgents,
     goChannel,

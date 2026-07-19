@@ -79,6 +79,8 @@ export function ActiveAgentCommunitiesSettingsCard() {
             return (
               <div
                 className="flex items-center gap-3 border-b border-border/60 px-4 py-3 last:border-b-0"
+                data-pubkey={runtime.pubkey}
+                data-relay-url={runtime.relayUrl}
                 data-testid="agent-community-runtime"
                 key={runtimeKey}
               >
