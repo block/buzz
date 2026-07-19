@@ -146,6 +146,8 @@ export function CommunityOnboardingFlow({
     [],
   );
   const [isPending, setIsPending] = React.useState(false);
+  const [starterChannelFailureCount, setStarterChannelFailureCount] =
+    React.useState(0);
   const [deniedPubkey, setDeniedPubkey] = React.useState("");
   const [isMembershipDenied, setIsMembershipDenied] = React.useState(false);
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] =
@@ -248,6 +250,7 @@ export function CommunityOnboardingFlow({
       }
       await finish();
     } catch (error) {
+      setStarterChannelFailureCount((count) => count + 1);
       update({
         error: error instanceof Error ? error.message : String(error),
       });
@@ -257,6 +260,7 @@ export function CommunityOnboardingFlow({
 
   const backToProfile = React.useCallback(() => {
     if (isPending) return;
+    setStarterChannelFailureCount(0);
     update({ stage: "profile", error: undefined });
   }, [isPending, update]);
 
@@ -530,17 +534,26 @@ export function CommunityOnboardingFlow({
                 ) : null}
               </div>
               {transaction.error ? (
-                <p className="text-sm text-destructive">{transaction.error}</p>
+                <p className="text-sm text-destructive">
+                  {transaction.error}
+                  {starterChannelFailureCount === 1 ? " Try again." : null}
+                </p>
               ) : null}
               <OnboardingFooter>
                 <Button
                   className={ONBOARDING_PRIMARY_CTA_CLASS}
                   data-testid="community-team-intro-enter"
                   disabled={isPending || transaction.stage === "entering"}
-                  onClick={() => void finalize()}
+                  onClick={() =>
+                    void (starterChannelFailureCount >= 2
+                      ? finish()
+                      : finalize())
+                  }
                 >
                   {isPending || transaction.stage === "entering" ? (
                     <LoadingDots label="Preparing Welcome" />
+                  ) : starterChannelFailureCount >= 2 ? (
+                    "Skip for now"
                   ) : (
                     "Take me to Buzz"
                   )}

@@ -243,7 +243,7 @@ test("queued add-community links open and acknowledge one at a time", async ({
     ]);
 });
 
-test("Welcome failure can go back without abandoning community onboarding", async ({
+test("Welcome failure retries once before allowing starter channel setup to be skipped", async ({
   page,
 }) => {
   const welcomeError = "Channel creation is not permitted.";
@@ -277,7 +277,7 @@ test("Welcome failure can go back without abandoning community onboarding", asyn
   );
   await installMockBridge(
     page,
-    { ensureStarterChannelsErrors: [welcomeError, welcomeError] },
+    { ensureStarterChannelsErrors: [welcomeError, welcomeError, welcomeError] },
     { relayWsUrl: COMMUNITY_RELAY_URL, skipOnboardingSeed: true },
   );
   await page.goto("/");
@@ -291,18 +291,51 @@ test("Welcome failure can go back without abandoning community onboarding", asyn
     );
   }
 
-  await page.getByRole("button", { name: "Take me to Buzz" }).click();
+  const enterButton = page.getByRole("button", { name: "Take me to Buzz" });
+  await enterButton.click();
 
-  await expect(page.getByText(welcomeError)).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Take me to Buzz" }),
-  ).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Back" })).toBeVisible();
-  await page.getByRole("button", { name: "Back" }).click();
+  await expect(page.getByText(`${welcomeError} Try again.`)).toBeVisible();
+  await expect(enterButton).toBeEnabled();
+  const backButton = page.getByRole("button", { name: "Back" });
+  await expect(backButton).toBeVisible();
+  await backButton.click();
 
   await expect(
     page.getByRole("heading", { name: "Build your profile" }),
   ).toBeVisible();
+  await page.getByLabel("Community display name").fill("Tyler");
+  await page.getByTestId("community-profile-next").click();
+
+  await enterButton.click();
+  await expect(page.getByText(`${welcomeError} Try again.`)).toBeVisible();
+  await expect(enterButton).toBeEnabled();
+
+  await enterButton.click();
+
+  const skipButton = page.getByRole("button", { name: "Skip for now" });
+  await expect(page.getByText(welcomeError, { exact: true })).toBeVisible();
+  await expect(skipButton).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Back" })).toBeVisible();
+
+  const starterChannelAttempts = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_COMMANDS__?.filter(
+        (command) => command === "ensure_starter_channels",
+      ).length ?? 0,
+  );
+  expect(starterChannelAttempts).toBe(3);
+
+  await skipButton.click();
+
+  await expect(page.getByTestId("community-onboarding-flow")).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () =>
+        window.__BUZZ_E2E_COMMANDS__?.filter(
+          (command) => command === "ensure_starter_channels",
+        ).length ?? 0,
+    ),
+  ).toBe(3);
   await expect
     .poll(() =>
       page.evaluate(
@@ -310,7 +343,7 @@ test("Welcome failure can go back without abandoning community onboarding", asyn
         TRANSACTION_STORAGE_KEY,
       ),
     )
-    .toContain('"stage":"profile"');
+    .toBeNull();
 });
 
 test("persisted deep-link invite hands off to Joining after machine onboarding", async ({
