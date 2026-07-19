@@ -105,6 +105,18 @@ async function fetchMembershipListEvent(): Promise<RelayEvent | null> {
   return events[events.length - 1] ?? null;
 }
 
+/** Loads the NIP-43 snapshot only when the relay advertises membership support. */
+export async function loadRelayMembershipLookup(
+  pubkey: string,
+  membershipRequired: boolean,
+  fetchSnapshot: () => Promise<RelayEvent | null> = fetchMembershipListEvent,
+): Promise<RelayMembershipLookup> {
+  if (!membershipRequired) {
+    return relayMembershipLookupFromEvent(null, pubkey, false);
+  }
+  return relayMembershipLookupFromEvent(await fetchSnapshot(), pubkey, true);
+}
+
 export async function listRelayMembers(): Promise<RelayMember[]> {
   const event = await fetchMembershipListEvent();
   return event ? relayMembersFromEvent(event) : [];
@@ -126,13 +138,11 @@ async function relayRequiresMembership(): Promise<boolean> {
 }
 
 export async function getMyRelayMembershipLookup(): Promise<RelayMembershipLookup> {
-  const [{ pubkey }, event] = await Promise.all([
+  const [{ pubkey }, membershipRequired] = await Promise.all([
     getIdentity(),
-    fetchMembershipListEvent(),
+    relayRequiresMembership(),
   ]);
-  const membershipRequired =
-    event !== null || (await relayRequiresMembership());
-  return relayMembershipLookupFromEvent(event, pubkey, membershipRequired);
+  return loadRelayMembershipLookup(pubkey, membershipRequired);
 }
 
 export async function getMyRelayMembership(): Promise<RelayMember | null> {
