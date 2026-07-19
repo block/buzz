@@ -1,7 +1,7 @@
 import { Columns2, PanelRightOpen } from "lucide-react";
 
 import {
-  setThreadViewMode,
+  type ThreadViewMode,
   useThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
 import { Button } from "@/shared/ui/button";
@@ -47,7 +47,11 @@ const THREAD_VIEW_MODE_TOGGLE = {
  * conventional pattern and still routinely misread as showing the current state;
  * the glyph cannot disambiguate itself, so the label has to.
  */
-export function ThreadViewModeToggle() {
+export function ThreadViewModeToggle({
+  onChange,
+}: {
+  onChange: (mode: ThreadViewMode) => void;
+}) {
   const viewMode = useThreadViewMode();
   const { icon: Icon, label, target } = THREAD_VIEW_MODE_TOGGLE[viewMode];
 
@@ -58,7 +62,7 @@ export function ThreadViewModeToggle() {
           aria-label={label}
           className="shrink-0"
           data-testid="thread-view-mode-toggle"
-          onClick={() => setThreadViewMode(target)}
+          onClick={() => onChange(target)}
           size="icon"
           type="button"
           variant="ghost"

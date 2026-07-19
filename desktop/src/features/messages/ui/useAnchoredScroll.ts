@@ -102,8 +102,10 @@ type UseAnchoredScrollOptions = {
   messages: Array<{ id: string }>;
   splitPanelOpen?: boolean;
 
-  /** When set, scroll to and highlight this message on mount and on change. */
+  /** When set, scroll to this message on mount and on change. */
   targetMessageId?: string | null;
+  /** Whether a targeted message should pulse after scrolling to it. */
+  highlightTargetMessage?: boolean;
   /** Keeps a targeted message centered until the user deliberately scrolls. */
   pinTargetCentered?: boolean;
   onTargetReached?: (messageId: string) => void;
@@ -224,6 +226,7 @@ export function useAnchoredScroll({
   splitPanelOpen = false,
 
   targetMessageId = null,
+  highlightTargetMessage = true,
   pinTargetCentered = false,
   onTargetReached,
   virtualScrollToMessage,
@@ -622,7 +625,11 @@ export function useAnchoredScroll({
         // render or two later. If centering fails now, leave the timeline at
         // its default position and let the post-mount target effect (keyed on
         // `messages`) retry once the row lands, rather than marking it handled.
-        if (scrollToMessageImperative(targetMessageId, { highlight: true })) {
+        if (
+          scrollToMessageImperative(targetMessageId, {
+            highlight: highlightTargetMessage,
+          })
+        ) {
           handledTargetIdRef.current = targetMessageId;
           onTargetReached?.(targetMessageId);
         } else {
@@ -729,6 +736,7 @@ export function useAnchoredScroll({
     prevMessageCountRef.current = messages.length;
     prevMessagesRef.current = messages;
   }, [
+    highlightTargetMessage,
     isLoading,
     messages,
     onTargetReached,
@@ -834,7 +842,11 @@ export function useAnchoredScroll({
       `[data-message-id="${targetMessageId}"]`,
     );
     if (!el && virtualizerOwnsPrependAnchoring) {
-      if (scrollToMessageImperative(targetMessageId, { highlight: true })) {
+      if (
+        scrollToMessageImperative(targetMessageId, {
+          highlight: highlightTargetMessage,
+        })
+      ) {
         handledTargetIdRef.current = targetMessageId;
         onTargetReached?.(targetMessageId);
       }
@@ -847,9 +859,12 @@ export function useAnchoredScroll({
       return;
     }
     handledTargetIdRef.current = targetMessageId;
-    scrollToMessageImperative(targetMessageId, { highlight: true });
+    scrollToMessageImperative(targetMessageId, {
+      highlight: highlightTargetMessage,
+    });
     onTargetReached?.(targetMessageId);
   }, [
+    highlightTargetMessage,
     isLoading,
     messages,
     onTargetReached,

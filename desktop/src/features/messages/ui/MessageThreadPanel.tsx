@@ -19,6 +19,7 @@ import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManag
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
+import type { ThreadPanelLayoutProps } from "@/features/channels/lib/threadPanelLayout";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { cn } from "@/shared/lib/cn";
@@ -47,23 +48,15 @@ import { useComposerHeightPadding } from "./useComposerHeightPadding";
 import { useAnchoredScroll } from "./useAnchoredScroll";
 import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 
-type MessageThreadPanelProps = {
+type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   channel: Channel | null;
   channelId: string | null;
   channelName: string;
-  /**
-   * Max width (px) for the centered message column and composer.
-   *
-   * Set by the focus-mode thread drawer, which is far wider than a comfortable
-   * reading measure. When unset, the list and composer fill the panel as usual.
-   */
-  columnMaxWidthPx?: number;
   currentPubkey?: string;
   disabled?: boolean;
   firstUnreadReplyId?: string | null;
   huddleMemberPubkeys?: readonly string[];
   huddleMemberPubkeysPending?: boolean;
-  layout?: "standalone" | "split";
   editTarget?: {
     author: string;
     body: string;
@@ -71,15 +64,6 @@ type MessageThreadPanelProps = {
     imetaMedia?: ImetaMedia[];
   } | null;
   isSending: boolean;
-  isSinglePanelView?: boolean;
-  /**
-   * Control rendered ahead of the "Thread" title.
-   *
-   * A slot rather than something this panel builds itself: the layout controls
-   * that belong here are owned by whatever placed the panel, and the panel is
-   * rendered in contexts that have no view modes at all.
-   */
-  headerLeading?: React.ReactNode;
   onCancelEdit?: () => void;
   onCancelReply: () => void;
   onClose: () => void;
@@ -95,6 +79,7 @@ type MessageThreadPanelProps = {
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandReplies: (message: TimelineMessage) => void;
   onScrollTargetResolved: () => void;
+  scrollTargetHighlights?: boolean;
   onSelectReplyTarget: (message: TimelineMessage) => void;
   onSend: (
     content: string,
@@ -123,7 +108,6 @@ type MessageThreadPanelProps = {
   threadHeadVideoReviewContext?: VideoReviewContext;
   toolbarExtraActions?: React.ReactNode;
   widthPx: number;
-  transparentChrome?: boolean;
   isFollowingThread?: boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
   onFollowThread?: () => void;
@@ -207,6 +191,7 @@ export function MessageThreadPanel({
   editTarget,
   headerLeading,
   isSending,
+  isFocusMode,
   isSinglePanelView = false,
   isFollowingThread,
   isMessageUnreadById,
@@ -229,6 +214,7 @@ export function MessageThreadPanel({
   profiles,
   replyTargetMessage,
   scrollTargetId,
+  scrollTargetHighlights = true,
   threadHead,
   threadHeadVideoReviewContext,
   threadReplies,
@@ -253,11 +239,8 @@ export function MessageThreadPanel({
   >(null);
   const isOverlay = useIsThreadPanelOverlay();
   const threadHeadId = threadHead?.id ?? null;
-  // The focus-mode drawer is neither a floating overlay nor a narrow
-  // single-panel view by layout, so it has to opt into Esc-to-close explicitly
-  // rather than inheriting it from either of those conditions.
-  const isFocusColumn = columnMaxWidthPx != null;
-  useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusColumn);
+  useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusMode);
+  const hasConstrainedColumn = columnMaxWidthPx != null;
   useComposerHeightPadding(
     threadBodyRef,
     threadComposerWrapperRef,
@@ -371,7 +354,7 @@ export function MessageThreadPanel({
   // card and the streaming-in `pending` state would both leave a rule hanging
   // over an empty region or a placeholder.
   const showThreadHeadDivider =
-    isFocusColumn && (threadRepliesPending || repliesRenderState === "list");
+    isFocusMode && (threadRepliesPending || repliesRenderState === "list");
 
   const threadMessages = React.useMemo(
     () => deferredThreadReplies.map((entry) => entry.message),
@@ -503,6 +486,7 @@ export function MessageThreadPanel({
       contentRef: threadContentRef,
       isLoading: threadRepliesPending || repliesRenderState === "pending",
       messages: threadMessages,
+      highlightTargetMessage: scrollTargetHighlights,
       onTargetReached: onScrollTargetResolved,
       scrollContainerRef: threadBodyRef,
       targetMessageId: scrollTargetId,
@@ -545,9 +529,11 @@ export function MessageThreadPanel({
       ref={threadBodyRef}
     >
       <div
-        className={cn(isFocusColumn && THREAD_PANEL_COLUMN_CLASS)}
+        className={cn(hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS)}
         ref={threadContentRef}
-        style={isFocusColumn ? { maxWidth: columnMaxWidthPx } : undefined}
+        style={
+          hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
+        }
       >
         <div
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-1 pt-0")}
@@ -831,9 +817,11 @@ export function MessageThreadPanel({
         <div
           className={cn(
             "pointer-events-auto",
-            isFocusColumn && THREAD_PANEL_COLUMN_CLASS,
+            hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS,
           )}
-          style={isFocusColumn ? { maxWidth: columnMaxWidthPx } : undefined}
+          style={
+            hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
+          }
         >
           <MessageComposer
             audienceContext={{
@@ -902,7 +890,7 @@ export function MessageThreadPanel({
         // sliver as its way back, so it takes no back control of its own. The
         // narrow view still needs one.
         leading={headerLeading}
-        onBack={isSinglePanelView && !isFocusColumn ? onClose : undefined}
+        onBack={isSinglePanelView && !isFocusMode ? onClose : undefined}
       >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
@@ -913,7 +901,7 @@ export function MessageThreadPanel({
     <AuxiliaryPanel
       className="relative"
       // The focus drawer animates itself; a second slide here would compound.
-      enterMotion={!isFocusColumn}
+      enterMotion={!isFocusMode}
       footer={threadFooter}
       header={
         <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>

@@ -36,6 +36,7 @@ import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
 import { THREAD_SURFACE_KEY } from "@/features/channels/lib/threadFocusLayout";
 import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout";
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
+import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import {
@@ -511,6 +512,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
   const threadViewMode = useThreadViewMode();
+  const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
+    useThreadViewModeSwitch(onThreadScrollTargetResolved);
   // Focus mode is a wide-viewport-only alternative to the split thread pane:
   // narrow viewports keep their existing single-panel / floating-overlay
   // behavior untouched. It applies to the thread panel only — channel
@@ -561,12 +564,6 @@ export const ChannelPane = React.memo(function ChannelPane({
       // carry the key; it adds no DOM.
       <React.Fragment key={options.key ?? testId}>{panel}</React.Fragment>
     );
-  // The thread panel is the one panel that can open as a focus drawer instead
-  // of a split pane. Everything else goes through `wrapAux` unchanged.
-  //
-  // Both layouts share one key because switching modes reframes the same thread,
-  // rather than closing one thread and opening another. The switch is a stable
-  // cut: shared-element projection scales text and also destabilizes pane resize.
   const wrapThreadPanel = (panel: React.ReactNode) =>
     useFocusThreadDrawer ? (
       <FocusThreadDrawer
@@ -582,7 +579,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   // The toggle only exists where both layouts do. Narrow viewports have no split
   // pane to offer, so a control switching to it would be a broken promise.
   const threadHeaderLeading = useSplitAuxiliaryPane ? (
-    <ThreadViewModeToggle />
+    <ThreadViewModeToggle onChange={changeThreadViewMode} />
   ) : undefined;
   const threadLayoutProps = getThreadPanelLayout({
     headerLeading: threadHeaderLeading,
@@ -607,6 +604,7 @@ export const ChannelPane = React.memo(function ChannelPane({
         <section
           aria-label="Channel messages and composer"
           className="relative z-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+          inert={useFocusThreadDrawer ? true : undefined}
           data-testid="channel-drop-zone"
           onDragEnter={
             canDropInMainColumn ? mainComposerMedia.handleDragEnter : undefined
@@ -882,12 +880,13 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onExpandReplies={onExpandThreadReplies}
                 onSelectReplyTarget={onSelectThreadReplyTarget}
                 onSend={onSendThreadReply}
-                onScrollTargetResolved={onThreadScrollTargetResolved}
+                onScrollTargetResolved={resolveScrollTarget}
                 onToggleReaction={onToggleReaction}
                 onUnfollowThread={onUnfollowThread}
                 profiles={profiles}
                 replyTargetMessage={threadReplyTargetMessage}
-                scrollTargetId={threadScrollTargetId}
+                scrollTargetHighlights={!layoutScrollTargetId}
+                scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
                 threadHead={threadHeadMessage}
                 threadHeadVideoReviewContext={threadHeadVideoReviewContext}
                 widthPx={threadPanelWidthPx}

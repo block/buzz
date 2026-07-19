@@ -1,3 +1,4 @@
+import type { ThreadPanelLayoutProps } from "@/features/channels/lib/threadPanelLayout";
 import {
   THREAD_PANEL_COLUMN_CLASS,
   THREAD_PANEL_COMPOSER_GUTTER_CLASS,
@@ -15,14 +16,9 @@ import {
 } from "@/shared/layout/AuxiliaryPanel";
 import { Skeleton } from "@/shared/ui/skeleton";
 
-type MessageThreadPanelSkeletonProps = {
-  /** See `MessageThreadPanel` — set by the focus-mode thread drawer. */
-  columnMaxWidthPx?: number;
-  isSinglePanelView?: boolean;
-  layout?: "standalone" | "split";
+type MessageThreadPanelSkeletonProps = ThreadPanelLayoutProps & {
   onClose: () => void;
   widthPx: number;
-  transparentChrome?: boolean;
 };
 
 /** Placeholder row standing in for a thread message while replies load. */
@@ -58,16 +54,18 @@ function ThreadComposerSkeleton({
 }: {
   columnMaxWidthPx?: number;
 }) {
-  const isFocusColumn = columnMaxWidthPx != null;
+  const hasConstrainedColumn = columnMaxWidthPx != null;
 
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
       <div
         className={cn(
           "pointer-events-auto",
-          isFocusColumn && THREAD_PANEL_COLUMN_CLASS,
+          hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS,
         )}
-        style={isFocusColumn ? { maxWidth: columnMaxWidthPx } : undefined}
+        style={
+          hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
+        }
       >
         <div
           className={cn(
@@ -98,6 +96,8 @@ function ThreadComposerSkeleton({
 /** Loading state for the thread panel, in every layout the real panel supports. */
 export function MessageThreadPanelSkeleton({
   columnMaxWidthPx,
+  headerLeading,
+  isFocusMode,
   isSinglePanelView = false,
   layout = "standalone",
   onClose,
@@ -105,16 +105,15 @@ export function MessageThreadPanelSkeleton({
   transparentChrome = false,
 }: MessageThreadPanelSkeletonProps) {
   const isOverlay = useIsThreadPanelOverlay();
-  // A focus drawer is neither an overlay nor a single-panel view by layout, so
-  // Esc has to be enabled for it explicitly. See `MessageThreadPanel`.
-  const isFocusColumn = columnMaxWidthPx != null;
-  useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusColumn);
+  const hasConstrainedColumn = columnMaxWidthPx != null;
+  useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusMode);
 
   const threadHeaderContent = (
     <AuxiliaryPanelHeaderGroup
       backButtonAriaLabel="Back to conversation"
       // Matches the loaded panel's header so it doesn't shift on resolve.
-      onBack={isSinglePanelView && !isFocusColumn ? onClose : undefined}
+      leading={headerLeading}
+      onBack={isSinglePanelView && !isFocusMode ? onClose : undefined}
     >
       <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
     </AuxiliaryPanelHeaderGroup>
@@ -126,8 +125,10 @@ export function MessageThreadPanelSkeleton({
       data-testid="message-thread-loading"
     >
       <div
-        className={cn(isFocusColumn && THREAD_PANEL_COLUMN_CLASS)}
-        style={isFocusColumn ? { maxWidth: columnMaxWidthPx } : undefined}
+        className={cn(hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS)}
+        style={
+          hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
+        }
       >
         <div
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-1 pt-0")}
@@ -157,7 +158,7 @@ export function MessageThreadPanelSkeleton({
     <AuxiliaryPanel
       className="relative"
       // See `MessageThreadPanel`: the focus drawer owns the slide.
-      enterMotion={!isFocusColumn}
+      enterMotion={!isFocusMode}
       footer={<ThreadComposerSkeleton columnMaxWidthPx={columnMaxWidthPx} />}
       header={
         <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>

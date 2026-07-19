@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from "motion/react";
-import type * as React from "react";
+import * as React from "react";
 
 import {
   THREAD_FOCUS_DRAWER_TRAVEL_PX,
@@ -140,6 +140,20 @@ export function FocusThreadDrawer({
 }: FocusThreadDrawerProps) {
   const prefersReducedMotion = useReducedMotion();
   const travelPx = prefersReducedMotion ? 0 : THREAD_FOCUS_DRAWER_TRAVEL_PX;
+  const drawerRef = React.useRef<HTMLDivElement>(null);
+  const previousFocusRef = React.useRef<HTMLElement | null>(null);
+
+  React.useLayoutEffect(() => {
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    drawerRef.current?.focus({ preventScroll: true });
+
+    return () => {
+      previousFocusRef.current?.focus({ preventScroll: true });
+    };
+  }, []);
 
   return (
     <div
@@ -182,7 +196,11 @@ export function FocusThreadDrawer({
           // see the token for why a `border-l` cannot.
           "absolute inset-y-0 right-0 flex flex-col overflow-hidden rounded-l-2xl bg-background shadow-panel-left",
         )}
+        aria-label="Thread"
         data-testid="focus-thread-drawer"
+        ref={drawerRef}
+        role="complementary"
+        tabIndex={-1}
         exit={{
           opacity: 0,
           transition: prefersReducedMotion
