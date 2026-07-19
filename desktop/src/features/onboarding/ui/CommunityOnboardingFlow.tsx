@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Plus, Users, X } from "lucide-react";
+import { Plus, Users } from "lucide-react";
 
 import {
   markCommunityOnboardingComplete,
@@ -25,7 +25,9 @@ import { listPersonas } from "@/shared/api/tauriPersonas";
 import { relayClient } from "@/shared/api/relayClient";
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { MembershipDenied } from "./MembershipDenied";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
@@ -34,7 +36,6 @@ import {
   OnboardingChrome,
 } from "./OnboardingChrome";
 import { OnboardingFooter, OnboardingFooterProvider } from "./OnboardingFooter";
-import { ONBOARDING_KEY_FRAME_CLASS } from "./NsecMaskedDisplay";
 
 function isRelayMembershipDeniedError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -71,10 +72,12 @@ function AvatarCircle({
   avatarUrl,
   onClick,
   previewName,
+  triggerRef,
 }: {
   avatarUrl: string;
   onClick: () => void;
   previewName: string;
+  triggerRef?: React.Ref<HTMLButtonElement>;
 }) {
   const emojiAvatar = parseEmojiAvatarDataUrl(avatarUrl);
   const hasAvatar = avatarUrl.trim().length > 0;
@@ -85,6 +88,7 @@ function AvatarCircle({
       className="group block shrink-0 rounded-full"
       data-testid="community-avatar-open"
       onClick={onClick}
+      ref={triggerRef}
       type="button"
     >
       {emojiAvatar ? (
@@ -138,6 +142,7 @@ export function CommunityOnboardingFlow({
 }) {
   const { transaction, update, clear } = useCommunityOnboarding();
   const queryClient = useQueryClient();
+  const systemColorScheme = useSystemColorScheme();
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
@@ -154,6 +159,10 @@ export function CommunityOnboardingFlow({
     React.useState(false);
   const [isCurtainFading, setIsCurtainFading] = React.useState(false);
   const nameInputRef = React.useRef<HTMLInputElement | null>(null);
+  const avatarTriggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const avatarEditorContentRef = React.useRef<HTMLDivElement | null>(null);
+  const [avatarEditorDialogHeight, setAvatarEditorDialogHeight] =
+    React.useState<number | null>(null);
 
   // Also fetch on "entering": the curtain is a fresh mount of this component,
   // so the team-intro fetch from the pre-curtain instance isn't in this state.
@@ -276,6 +285,25 @@ export function CommunityOnboardingFlow({
     }
   }, [isAvatarEditorOpen, isProfileStage]);
 
+  React.useLayoutEffect(() => {
+    if (!isAvatarEditorOpen) {
+      setAvatarEditorDialogHeight(null);
+      return;
+    }
+
+    const content = avatarEditorContentRef.current;
+    if (!content) return;
+
+    const updateHeight = () => {
+      setAvatarEditorDialogHeight(content.getBoundingClientRect().height + 64);
+    };
+    updateHeight();
+
+    const resizeObserver = new ResizeObserver(updateHeight);
+    resizeObserver.observe(content);
+    return () => resizeObserver.disconnect();
+  }, [isAvatarEditorOpen]);
+
   if (!transaction) return null;
 
   if (isMembershipDenied) {
@@ -353,6 +381,7 @@ export function CommunityOnboardingFlow({
         isCurtainFading &&
           "pointer-events-none opacity-0 transition-opacity ease-out motion-reduce:transition-none",
       )}
+      data-system-color-scheme={systemColorScheme}
       data-testid="community-onboarding-flow"
       style={
         isCurtainFading
@@ -405,93 +434,120 @@ export function CommunityOnboardingFlow({
               </div>
             </>
           ) : isProfileStage ? (
-            isAvatarEditorOpen ? (
+            <>
               <div
-                className={cn("relative", ONBOARDING_KEY_FRAME_CLASS)}
-                data-testid="community-avatar-editor-key-frame"
+                className={cn(
+                  "flex min-h-0 w-full flex-1 flex-col transition-[filter,opacity] duration-200 ease-out",
+                  isAvatarEditorOpen &&
+                    "pointer-events-none opacity-45 blur-[3px]",
+                )}
+                data-testid="community-profile-main"
               >
-                <Button
-                  aria-label="Close avatar editor"
-                  className="absolute -right-3 -top-3 h-9 w-9 rounded-full"
-                  data-testid="community-avatar-close"
-                  onClick={() => setIsAvatarEditorOpen(false)}
-                  size="icon"
-                  type="button"
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-                <ProfileAvatarEditor
-                  avatarUrl={avatarUrl}
-                  disabled={isPending}
-                  emojiPickerTheme="auto"
-                  emojiPickerThemeVars={NEUTRAL_EMOJI_PICKER_THEME_VARS}
-                  onDone={() => setIsAvatarEditorOpen(false)}
-                  onUploadingChange={setIsUploadingAvatar}
-                  onUrlChange={setAvatarUrl}
-                  previewName={displayName.trim() || "Your profile"}
-                  testIdPrefix="community-avatar"
-                />
-              </div>
-            ) : (
-              <>
-                <div className="w-full" data-testid="community-profile-main">
+                <div className="shrink-0">
                   <h1 className="text-title font-normal">Build your profile</h1>
                   <p className="mx-auto mt-3 max-w-[380px] text-sm leading-6 text-foreground/80">
                     Add a name and avatar. They’ll show up on your messages,
                     reactions, and agent handoffs.
                   </p>
-                  <div className="mt-8 flex w-full flex-col items-center">
-                    <AvatarCircle
-                      avatarUrl={avatarUrl}
-                      onClick={() => setIsAvatarEditorOpen(true)}
-                      previewName={displayName.trim() || "Your profile"}
-                    />
-                    <label
-                      className="mt-7 block w-full max-w-[412px] text-left"
-                      htmlFor="community-display-name"
-                    >
-                      <span className="mb-2 block pl-4 text-sm text-foreground">
-                        Your name
-                      </span>
-                      <Input
-                        aria-label="Community display name"
-                        autoCapitalize="words"
-                        autoComplete="name"
-                        autoCorrect="off"
-                        className="h-14 rounded-2xl border-[color:rgb(113_113_6_/_0.28)] bg-white/95 px-5 text-sm shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-1 focus-visible:ring-[var(--buzz-onboarding-backup-ink)] md:text-sm"
-                        data-testid="community-profile-name-key"
-                        disabled={isPending || isUploadingAvatar}
-                        id="community-display-name"
-                        onChange={(event) => setDisplayName(event.target.value)}
-                        placeholder="First and last name"
-                        ref={nameInputRef}
-                        spellCheck={false}
-                        type="text"
-                        value={displayName}
-                      />
-                    </label>
-                  </div>
-                  {transaction.error ? (
-                    <p className="mt-4 text-sm text-destructive">
-                      {transaction.error}
-                    </p>
-                  ) : null}
                 </div>
-                <OnboardingFooter>
-                  <Button
-                    className={ONBOARDING_PRIMARY_CTA_CLASS}
-                    data-testid="community-profile-next"
-                    disabled={
-                      !displayName.trim() || isPending || isUploadingAvatar
-                    }
-                    onClick={() => void saveProfile()}
-                    type="button"
+                <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center pt-8">
+                  <AvatarCircle
+                    avatarUrl={avatarUrl}
+                    onClick={() => setIsAvatarEditorOpen(true)}
+                    previewName={displayName.trim() || "Your profile"}
+                    triggerRef={avatarTriggerRef}
+                  />
+                  <label
+                    className="mt-7 block w-full max-w-[412px] text-left"
+                    htmlFor="community-display-name"
                   >
-                    Next
-                  </Button>
-                </OnboardingFooter>
-              </>
-            )
+                    <span className="mb-2 block pl-4 text-sm text-foreground">
+                      Your username
+                    </span>
+                    <Input
+                      aria-label="Community username"
+                      autoCapitalize="none"
+                      autoComplete="username"
+                      autoCorrect="off"
+                      className="h-14 rounded-2xl border-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.28)] bg-[rgb(var(--buzz-onboarding-avatar-dialog-bg)/0.95)] px-5 text-sm shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.5)] md:text-sm"
+                      data-testid="community-profile-name-key"
+                      disabled={isPending || isUploadingAvatar}
+                      id="community-display-name"
+                      onChange={(event) => setDisplayName(event.target.value)}
+                      placeholder="Enter your username here"
+                      ref={nameInputRef}
+                      spellCheck={false}
+                      type="text"
+                      value={displayName}
+                    />
+                  </label>
+                </div>
+                {transaction.error ? (
+                  <p className="mt-4 text-sm text-destructive">
+                    {transaction.error}
+                  </p>
+                ) : null}
+              </div>
+              <OnboardingFooter
+                className={cn(
+                  "transition-[filter,opacity] duration-200 ease-out",
+                  isAvatarEditorOpen &&
+                    "pointer-events-none opacity-45 blur-[3px]",
+                )}
+              >
+                <Button
+                  className={ONBOARDING_PRIMARY_CTA_CLASS}
+                  data-testid="community-profile-next"
+                  disabled={
+                    !displayName.trim() || isPending || isUploadingAvatar
+                  }
+                  onClick={() => void saveProfile()}
+                  type="button"
+                >
+                  Next
+                </Button>
+              </OnboardingFooter>
+              <Dialog
+                onOpenChange={(open) => setIsAvatarEditorOpen(open)}
+                open={isAvatarEditorOpen}
+              >
+                <DialogContent
+                  className="buzz-onboarding-neutral-theme w-[min(calc(100vw-2rem),560px)] max-w-[560px] gap-0 overflow-hidden rounded-[18px] bg-[rgb(var(--buzz-onboarding-avatar-dialog-bg))] px-8 pb-6 pt-10 text-sm text-foreground shadow-[0_28px_90px_rgb(var(--buzz-onboarding-avatar-dialog-shadow)_/_0.28),0_8px_28px_rgb(var(--buzz-onboarding-avatar-dialog-shadow)_/_0.18)] transition-[height] duration-[250ms] ease-out"
+                  closeButtonClassName="right-6 top-6 h-10 w-10 rounded-full bg-[rgb(var(--buzz-onboarding-avatar-action-bg))] text-[rgb(var(--buzz-onboarding-avatar-action-fg))] hover:bg-[rgb(var(--buzz-onboarding-avatar-action-bg)/0.9)] hover:text-[rgb(var(--buzz-onboarding-avatar-action-fg))]"
+                  data-system-color-scheme="light"
+                  data-testid="community-avatar-editor-key-frame"
+                  onCloseAutoFocus={(event) => {
+                    event.preventDefault();
+                    avatarTriggerRef.current?.focus();
+                  }}
+                  overlayVariant="transparent"
+                  style={
+                    avatarEditorDialogHeight === null
+                      ? undefined
+                      : { height: avatarEditorDialogHeight }
+                  }
+                >
+                  <DialogTitle className="sr-only">
+                    Edit your avatar
+                  </DialogTitle>
+                  <div ref={avatarEditorContentRef}>
+                    <ProfileAvatarEditor
+                      avatarUrl={avatarUrl}
+                      disabled={isPending}
+                      donePending={isUploadingAvatar}
+                      emojiPickerTheme="auto"
+                      emojiPickerThemeVars={NEUTRAL_EMOJI_PICKER_THEME_VARS}
+                      onDone={() => setIsAvatarEditorOpen(false)}
+                      onUploadingChange={setIsUploadingAvatar}
+                      onUrlChange={setAvatarUrl}
+                      presentation="onboarding-modal"
+                      previewName={displayName.trim() || "Your profile"}
+                      testIdPrefix="community-avatar"
+                    />
+                  </div>
+                </DialogContent>
+              </Dialog>
+            </>
           ) : (
             <>
               <h1 className="text-title font-normal">Meet your starter team</h1>

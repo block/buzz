@@ -71,7 +71,7 @@ const EMOJI_MART_SHADOW_CSS = `
   }
 
   #root {
-    --padding: 16px;
+    --padding: var(--buzz-emoji-picker-padding, 16px);
     --sidebar-width: 0px;
     display: flex;
     flex-direction: column;
@@ -79,7 +79,25 @@ const EMOJI_MART_SHADOW_CSS = `
     max-height: 100%;
     min-height: 0;
     overflow: hidden;
+    position: relative;
     width: 100% !important;
+  }
+
+  #root::after {
+    background: linear-gradient(
+      to bottom,
+      rgba(var(--buzz-emoji-picker-rgb-background), 0),
+      rgba(var(--buzz-emoji-picker-rgb-background), 0.98)
+    );
+    bottom: calc(var(--buzz-emoji-picker-nav-button-size, 40px) + 24px);
+    content: "";
+    height: var(--buzz-emoji-picker-fade-height, 0px);
+    left: 0;
+    opacity: var(--buzz-emoji-picker-fade-opacity, 0);
+    pointer-events: none;
+    position: absolute;
+    right: 0;
+    z-index: 3;
   }
 
   .scroll {
@@ -88,7 +106,7 @@ const EMOJI_MART_SHADOW_CSS = `
     overflow-y: auto;
     padding-left: var(--padding);
     padding-right: var(--padding);
-    padding-top: 28px;
+    padding-top: var(--buzz-emoji-picker-scroll-padding-top, 28px);
     width: 100%;
   }
 
@@ -110,7 +128,17 @@ const EMOJI_MART_SHADOW_CSS = `
   }
 
   .category button .background {
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: transparent;
+    transition: background-color var(--duration) var(--easing);
+  }
+
+  .category button:hover .background,
+  .category button[data-buzz-selected="true"] .background {
+    background-color: rgba(var(--em-rgb-color), 0.14);
+  }
+
+  .category button[data-buzz-selected="true"] .background {
+    background-color: rgba(var(--em-rgb-color), 0.2);
   }
 
   .row {
@@ -122,7 +150,7 @@ const EMOJI_MART_SHADOW_CSS = `
     display: flex;
     flex: 0 0 auto;
     justify-content: space-between;
-    padding: 8px 24px 16px;
+    padding: 8px var(--buzz-emoji-picker-nav-padding-x, 24px) 16px;
   }
 
   #nav .bar {
@@ -139,14 +167,14 @@ const EMOJI_MART_SHADOW_CSS = `
     border-radius: 999px;
     color: rgba(var(--em-rgb-color), 0.58);
     display: flex;
-    flex: 0 0 40px;
-    height: 40px;
+    flex: 0 0 var(--buzz-emoji-picker-nav-button-size, 40px);
+    height: var(--buzz-emoji-picker-nav-button-size, 40px);
     justify-content: center;
     transition:
       background-color var(--duration) var(--easing),
       color var(--duration) var(--easing),
       transform var(--duration) var(--easing);
-    width: 40px;
+    width: var(--buzz-emoji-picker-nav-button-size, 40px);
   }
 
   #nav button:hover,
@@ -164,8 +192,8 @@ const EMOJI_MART_SHADOW_CSS = `
 
   #nav svg,
   #nav img {
-    height: 24px;
-    width: 24px;
+    height: var(--buzz-emoji-picker-category-icon-size, 24px);
+    width: var(--buzz-emoji-picker-category-icon-size, 24px);
   }
 `;
 
