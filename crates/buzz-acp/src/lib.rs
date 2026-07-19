@@ -42,9 +42,7 @@ use pool::{
 };
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
-use thread_follow::{
-    ThreadFollowAdmission, ThreadFollowState, DEFAULT_FOLLOW_TTL, DEFAULT_MAX_FOLLOWED_THREADS,
-};
+use thread_follow::{ThreadFollowAdmission, ThreadFollowState, DEFAULT_MAX_FOLLOWED_THREADS};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -1466,7 +1464,7 @@ async fn tokio_main() -> Result<()> {
     let mut queue =
         EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
     let mut thread_follow = (config.subscribe_mode == SubscribeMode::ThreadFollow)
-        .then(|| ThreadFollowState::new(DEFAULT_FOLLOW_TTL, DEFAULT_MAX_FOLLOWED_THREADS));
+        .then(|| ThreadFollowState::new(DEFAULT_MAX_FOLLOWED_THREADS));
 
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
