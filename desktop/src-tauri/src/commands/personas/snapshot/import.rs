@@ -474,6 +474,7 @@ pub async fn confirm_agent_snapshot_import(
             // are always consistent at mint time.
             respond_to: minted.respond_to,
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
+            conversation_mode: Default::default(),
             is_builtin: false,
             is_active: true,
             source_team: None,

@@ -1396,6 +1396,7 @@ pub fn build_managed_agent_summary(
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
+        conversation_mode: record.conversation_mode,
     })
 }
 
@@ -1783,6 +1784,14 @@ pub fn spawn_agent_child(
     for key in &gate_remove {
         command.env_remove(key);
     }
+
+    // Conversation behavior is separate from the author gate: it controls
+    // whether the harness can admit unmentioned replies in a previously
+    // authorized thread, never who may seed that thread.
+    command.env(
+        "BUZZ_ACP_SUBSCRIBE",
+        record.conversation_mode.as_acp_subscribe(),
+    );
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 

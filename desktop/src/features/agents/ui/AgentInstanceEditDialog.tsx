@@ -16,6 +16,7 @@ import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlA
 import type {
   ManagedAgent,
   RespondToMode,
+  ConversationMode,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
 import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
@@ -153,6 +154,8 @@ export function AgentInstanceEditDialog({
   const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
     agent.respondToAllowlist,
   );
+  const [conversationMode, setConversationMode] =
+    React.useState<ConversationMode>(agent.conversationMode);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [avatarUrl, setAvatarUrl] = React.useState(agent.avatarUrl ?? "");
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -189,6 +192,7 @@ export function AgentInstanceEditDialog({
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
+      setConversationMode(agent.conversationMode);
       setAvatarUrl(agent.avatarUrl ?? "");
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
@@ -704,6 +708,10 @@ export function AgentInstanceEditDialog({
           ? undefined
           : submitEnvVars,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
+        conversationMode:
+          conversationMode !== agent.conversationMode
+            ? conversationMode
+            : undefined,
         // The allowlist is preserved across mode toggles in local UI state
         // (so a user can flip away from allowlist and back without losing
         // their entries), but we only send it on the wire when (a) it
@@ -1136,6 +1144,7 @@ export function AgentInstanceEditDialog({
                       agentArgs={agentArgs}
                       agentCommand={agentCommand}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
+                      conversationMode={conversationMode}
                       disabled={updateMutation.isPending}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
@@ -1162,6 +1171,7 @@ export function AgentInstanceEditDialog({
                       onAgentArgsChange={setAgentArgs}
                       onAgentCommandChange={setAgentCommand}
                       onAutoRestartChange={setAutoRestartOnConfigChange}
+                      onConversationModeChange={setConversationMode}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
                       onParallelismChange={setParallelism}

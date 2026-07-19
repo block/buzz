@@ -93,7 +93,7 @@ fn managed_agent_record_with_auth_tag_round_trips() {
 
 // ── Inbound author gate tests ────────────────────────────────────────
 
-use super::{validate_respond_to_allowlist, RespondTo};
+use super::{validate_respond_to_allowlist, ConversationMode, RespondTo};
 
 #[test]
 fn respond_to_default_is_owner_only() {
@@ -157,6 +157,16 @@ fn managed_agent_record_without_respond_to_fields_defaults_to_owner_only() {
     .expect("legacy record without respond_to fields should deserialize");
     assert_eq!(record.respond_to, RespondTo::OwnerOnly);
     assert!(record.respond_to_allowlist.is_empty());
+    assert_eq!(record.conversation_mode, ConversationMode::Mentions);
+}
+
+#[test]
+fn conversation_mode_maps_to_the_acp_subscription_value() {
+    assert_eq!(ConversationMode::Mentions.as_acp_subscribe(), "mentions");
+    assert_eq!(
+        ConversationMode::ThreadFollow.as_acp_subscribe(),
+        "thread-follow"
+    );
 }
 
 #[test]

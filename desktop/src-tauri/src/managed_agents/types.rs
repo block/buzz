@@ -124,6 +124,7 @@ impl AgentDefinition {
             last_error_code: None,
             respond_to: RespondTo::default(),
             respond_to_allowlist: Vec::new(),
+            conversation_mode: Default::default(),
             display_name: Some(self.display_name),
             slug: Some(self.id),
             runtime: self.runtime,
@@ -326,6 +327,11 @@ pub struct ManagedAgentRecord {
     /// Preserved across mode toggles so users don't lose state.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    /// Controls whether an authorized mention is required for every message or
+    /// opens a scoped thread conversation. Defaults to existing mention-only
+    /// behavior for saved agents.
+    #[serde(default)]
+    pub conversation_mode: ConversationMode,
     /// Optional display name distinct from the unique `name` handle. Absorbed
     /// from `AgentDefinition.display_name` (unified agent model, Phase 1A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -514,6 +520,7 @@ pub struct ManagedAgentSummary {
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
+    pub conversation_mode: ConversationMode,
 }
 
 #[derive(Debug, Serialize)]
@@ -762,6 +769,29 @@ pub enum RespondTo {
     OwnerOnly,
     Allowlist,
     Anyone,
+}
+
+/// Controls how an authorized invitation continues in a channel.
+///
+/// This is deliberately separate from [`RespondTo`]: `respond_to` answers who
+/// may invite an agent; conversation mode answers whether that invitation
+/// grants the agent access to later replies in the same thread.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConversationMode {
+    #[default]
+    Mentions,
+    ThreadFollow,
+}
+
+impl ConversationMode {
+    /// Value understood by buzz-acp's `--subscribe` / `BUZZ_ACP_SUBSCRIBE`.
+    pub fn as_acp_subscribe(self) -> &'static str {
+        match self {
+            Self::Mentions => "mentions",
+            Self::ThreadFollow => "thread-follow",
+        }
+    }
 }
 
 impl RespondTo {

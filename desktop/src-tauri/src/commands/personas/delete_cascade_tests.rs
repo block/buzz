@@ -55,6 +55,7 @@ fn make_agent(
         last_error_code: None,
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
+        conversation_mode: Default::default(),
         display_name: None,
         slug: None,
         runtime: None,

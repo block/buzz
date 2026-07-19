@@ -43,6 +43,7 @@ fn record() -> ManagedAgentRecord {
         last_error_code: None,
         respond_to: Default::default(),
         respond_to_allowlist: vec![],
+        conversation_mode: Default::default(),
         display_name: None,
         slug: None,
         runtime: None,
@@ -87,6 +88,17 @@ fn hash_is_deterministic() {
     assert_eq!(
         spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
         spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default())
+    );
+}
+
+#[test]
+fn conversation_behavior_edit_changes_hash() {
+    let rec = record();
+    let mut edited = rec.clone();
+    edited.conversation_mode = ConversationMode::ThreadFollow;
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 

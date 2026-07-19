@@ -384,7 +384,14 @@ export type ManagedAgent = {
    * `"allowlist"`. Preserved across mode toggles.
    */
   respondToAllowlist: string[];
+  /** Whether an authorized mention is required for each message, or opens a
+   * scoped thread conversation. */
+  conversationMode: ConversationMode;
 };
+
+/** Conversation admission policy. Separate from `RespondToMode`, which
+ * controls who may invite an agent. */
+export type ConversationMode = "mentions" | "thread-follow";
 
 /**
  * Inbound author gate mode. Mirrors `buzz-acp`'s `--respond-to` CLI flag.
@@ -446,6 +453,8 @@ export type CreateManagedAgentInput = {
    * normalized server-side (must be 64 hex chars each).
    */
   respondToAllowlist?: string[];
+  /** Defaults to mention-only behavior. */
+  conversationMode?: ConversationMode;
   relayMesh?: RelayMeshConfig;
 };
 
@@ -701,6 +710,8 @@ export type UpdateManagedAgentInput = {
    * (validated & normalized server-side).
    */
   respondToAllowlist?: string[];
+  /** Absent = don't touch. Present = set conversation admission behavior. */
+  conversationMode?: ConversationMode;
 };
 export type AgentPersona = {
   id: string;

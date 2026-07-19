@@ -894,6 +894,9 @@ pub async fn update_managed_agent(
         if input.respond_to_allowlist.is_some() {
             record.respond_to_allowlist = prospective_allowlist;
         }
+        if let Some(conversation_mode) = input.conversation_mode {
+            record.conversation_mode = conversation_mode;
+        }
 
         record.updated_at = now_iso();
 

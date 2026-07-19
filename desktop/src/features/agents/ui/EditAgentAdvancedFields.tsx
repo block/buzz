@@ -7,7 +7,7 @@ import {
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
 } from "./personaDialogPickers";
-import type { AgentPersona } from "@/shared/api/types";
+import type { AgentPersona, ConversationMode } from "@/shared/api/types";
 import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 
@@ -16,6 +16,7 @@ export function EditAgentAdvancedFields({
   agentArgs,
   agentCommand,
   autoRestartOnConfigChange,
+  conversationMode,
   disabled,
   envVars,
   fileSatisfiedEnvKeys,
@@ -40,12 +41,14 @@ export function EditAgentAdvancedFields({
   onParallelismChange,
   onRelayUrlChange,
   onAutoRestartChange,
+  onConversationModeChange,
   onSystemPromptChange,
 }: {
   acpCommand: string;
   agentArgs: string;
   agentCommand: string;
   autoRestartOnConfigChange: boolean;
+  conversationMode: ConversationMode;
   disabled: boolean;
   envVars: EnvVarsValue;
   fileSatisfiedEnvKeys: readonly string[];
@@ -78,6 +81,7 @@ export function EditAgentAdvancedFields({
   onParallelismChange: (value: string) => void;
   onRelayUrlChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
+  onConversationModeChange: (value: ConversationMode) => void;
   onSystemPromptChange: (value: string) => void;
 }) {
   return (
@@ -125,6 +129,35 @@ export function EditAgentAdvancedFields({
           {autoRestartOnConfigChange
             ? "Restarts this agent automatically when its configuration changes, once it is idle and connected."
             : "Configuration changes only show the restart badge; restart manually to apply them."}
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <label
+          className="text-sm font-medium text-foreground"
+          htmlFor="edit-agent-conversation-mode"
+        >
+          Conversation behavior
+        </label>
+        <select
+          className={cn(
+            "flex h-11 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs",
+            PERSONA_FIELD_CONTROL_CLASS,
+          )}
+          disabled={disabled}
+          id="edit-agent-conversation-mode"
+          onChange={(event) =>
+            onConversationModeChange(event.target.value as ConversationMode)
+          }
+          value={conversationMode}
+        >
+          <option value="mentions">Mention for each message</option>
+          <option value="thread-follow">Stay in thread after a mention</option>
+        </select>
+        <p className="text-xs text-muted-foreground">
+          {conversationMode === "thread-follow"
+            ? "An authorized mention invites this agent into that thread. Replies there continue normally; messages elsewhere in the channel do not reach it."
+            : "The agent needs an authorized @mention for each message."}
         </p>
       </div>
 

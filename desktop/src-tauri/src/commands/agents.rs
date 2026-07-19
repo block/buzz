@@ -720,6 +720,7 @@ pub async fn create_managed_agent(
             last_error_code: None,
             respond_to: minted.respond_to,
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
+            conversation_mode: input.conversation_mode,
             display_name: None,
             slug: None,
             runtime: None,

@@ -60,6 +60,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         last_error_code: None,
         respond_to: RespondTo::default(),
         respond_to_allowlist: vec![],
+        conversation_mode: Default::default(),
         runtime: None,
         name_pool: vec![],
         is_builtin: false,

@@ -597,6 +597,7 @@ pub async fn confirm_team_snapshot_import(
                     .unwrap_or_default()
             },
             respond_to_allowlist: definition.respond_to_allowlist.clone(),
+            conversation_mode: Default::default(),
             is_builtin: false,
             is_active: true,
             source_team: None,

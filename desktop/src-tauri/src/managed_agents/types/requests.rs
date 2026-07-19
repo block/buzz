@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{
     default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    RelayMeshConfig, RespondTo,
+    ConversationMode, RelayMeshConfig, RespondTo,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -183,6 +183,8 @@ pub struct CreateManagedAgentRequest {
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
+    pub conversation_mode: ConversationMode,
+    #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
 }
 
@@ -249,6 +251,10 @@ pub struct UpdateManagedAgentRequest {
     /// normalized server-side).
     #[serde(default)]
     pub respond_to_allowlist: Option<Vec<String>>,
+    /// Absent = don't touch. Present = change how mentions continue in a
+    /// channel, independently from the inbound author gate.
+    #[serde(default)]
+    pub conversation_mode: Option<ConversationMode>,
 }
 
 #[cfg(test)]

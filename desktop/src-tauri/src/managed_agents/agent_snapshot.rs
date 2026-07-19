@@ -521,6 +521,7 @@ mod tests {
             last_error_code: Some(42), // MUST NOT appear
             respond_to: RespondTo::default(),
             respond_to_allowlist: vec!["pubkey1hex".to_string()],
+            conversation_mode: Default::default(),
             slug: Some("test-agent".to_string()),
             runtime: Some("goose".to_string()),
             name_pool: vec!["Alice".to_string(), "Bob".to_string()],

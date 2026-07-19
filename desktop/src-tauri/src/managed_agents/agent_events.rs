@@ -200,6 +200,7 @@ mod tests {
             last_error_code: None,
             respond_to: RespondTo::Allowlist,
             respond_to_allowlist: vec!["79be667e".to_string()],
+            conversation_mode: Default::default(),
             // Unified-model fields carry real values so the exclusion test
             // proves they are absent from the wire, not vacuously empty.
             display_name: Some("Display Name Secretish".to_string()),

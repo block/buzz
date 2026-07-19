@@ -148,9 +148,11 @@ export type RawManagedAgent = {
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
   // Optional: pre-feature mock fixtures may omit these. Mapped to
-  // `"owner-only"` / `[]` in `fromRawManagedAgent`.
+  // "owner-only" / [] in `fromRawManagedAgent`.
   respond_to?: ManagedAgent["respondTo"];
   respond_to_allowlist?: string[];
+  // Optional for pre-feature fixtures; defaults to mention-only behavior.
+  conversation_mode?: ManagedAgent["conversationMode"];
 };
 
 type RawCreateManagedAgentResponse = {
@@ -684,6 +686,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     // Real agent records always include them (defaulted server-side).
     respondTo: agent.respond_to ?? "owner-only",
     respondToAllowlist: agent.respond_to_allowlist ?? [],
+    conversationMode: agent.conversation_mode ?? "mentions",
   };
 }
 
@@ -830,6 +833,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         backend: input.backend,
         respondTo: input.respondTo,
         respondToAllowlist: input.respondToAllowlist,
+        conversationMode: input.conversationMode,
         relayMesh: input.relayMesh,
       },
     },
