@@ -99,7 +99,7 @@ export function InboxMessageRow({
       ) : null}
       <article
         className={cn(
-          "group/message relative z-10 mx-1 flex gap-2.5 rounded-2xl px-2 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+          "group/message relative z-10 mx-1 flex gap-2.5 rounded-2xl px-2 py-1",
           isContinuation ? "items-center" : "items-start",
         )}
         data-message-id={message.id}

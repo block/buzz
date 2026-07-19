@@ -72,6 +72,14 @@ type MessageThreadPanelProps = {
   } | null;
   isSending: boolean;
   isSinglePanelView?: boolean;
+  /**
+   * Control rendered ahead of the "Thread" title.
+   *
+   * A slot rather than something this panel builds itself: the layout controls
+   * that belong here are owned by whatever placed the panel, and the panel is
+   * rendered in contexts that have no view modes at all.
+   */
+  headerLeading?: React.ReactNode;
   onCancelEdit?: () => void;
   onCancelReply: () => void;
   onClose: () => void;
@@ -197,6 +205,7 @@ export function MessageThreadPanel({
   huddleMemberPubkeysPending = false,
   layout = "standalone",
   editTarget,
+  headerLeading,
   isSending,
   isSinglePanelView = false,
   isFollowingThread,
@@ -667,7 +676,7 @@ export function MessageThreadPanel({
                       className={cn(
                         "flex flex-col gap-0",
                         entry.summary &&
-                          "group/message rounded-2xl px-0 py-0.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+                          "group/message rounded-2xl px-0 py-0.5",
                       )}
                       key={entry.message.renderKey ?? entry.message.id}
                     >
@@ -892,6 +901,7 @@ export function MessageThreadPanel({
         // width — it isn't the narrow single-column view, and it has the scrimmed
         // sliver as its way back, so it takes no back control of its own. The
         // narrow view still needs one.
+        leading={headerLeading}
         onBack={isSinglePanelView && !isFocusColumn ? onClose : undefined}
       >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>

@@ -31,8 +31,10 @@ import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
+import { ThreadViewModeToggle } from "@/features/channels/ui/ThreadViewModeToggle";
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
-import { THREAD_FOCUS_COLUMN_MAX_WIDTH_PX } from "@/features/channels/lib/threadFocusLayout";
+import { THREAD_SURFACE_KEY } from "@/features/channels/lib/threadFocusLayout";
+import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout";
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
@@ -538,11 +540,15 @@ export const ChannelPane = React.memo(function ChannelPane({
   // below: it needs a stable identity per panel to tell "this panel closed"
   // apart from "a different panel replaced it". Only the focus drawer declares
   // an `exit`, so every other panel still unmounts on the same frame as before.
-  const wrapAux = (panel: React.ReactNode, testId: string) =>
+  const wrapAux = (
+    panel: React.ReactNode,
+    testId: string,
+    options: { key?: string } = {},
+  ) =>
     useSplitAuxiliaryPane ? (
       <RightAuxiliaryPane
         canResetWidth={canResetThreadPanelWidth}
-        key={testId}
+        key={options.key ?? testId}
         onResetWidth={onResetThreadPanelWidth}
         onResizeStart={onThreadPanelResizeStart}
         testId={testId}
@@ -553,41 +559,37 @@ export const ChannelPane = React.memo(function ChannelPane({
     ) : (
       // Narrow viewports render the panel bare. The fragment exists only to
       // carry the key; it adds no DOM.
-      <React.Fragment key={testId}>{panel}</React.Fragment>
+      <React.Fragment key={options.key ?? testId}>{panel}</React.Fragment>
     );
   // The thread panel is the one panel that can open as a focus drawer instead
   // of a split pane. Everything else goes through `wrapAux` unchanged.
+  //
+  // Both layouts share one key because switching modes reframes the same thread,
+  // rather than closing one thread and opening another. The switch is a stable
+  // cut: shared-element projection scales text and also destabilizes pane resize.
   const wrapThreadPanel = (panel: React.ReactNode) =>
     useFocusThreadDrawer ? (
       <FocusThreadDrawer
         channelName={activeChannel?.name ?? "channel"}
-        key="focus-thread-drawer"
+        key={THREAD_SURFACE_KEY}
         onClose={onCloseThread}
       >
         {panel}
       </FocusThreadDrawer>
     ) : (
-      wrapAux(panel, "message-thread-panel")
+      wrapAux(panel, "message-thread-panel", { key: THREAD_SURFACE_KEY })
     );
-  // Inside a focus drawer the thread fills the drawer: 100% width, no border of
-  // its own (the drawer draws it) and no resize handle. `isSinglePanelView`
-  // is the only lever on `AuxiliaryPanel` that yields all three, and since the
-  // drawer is not an overlay the header mode resolves to `single-panel` either
-  // way — so the header renders identically apart from gaining a back button,
-  // which is a welcome second affordance back to the channel here.
-  const threadLayoutProps = useFocusThreadDrawer
-    ? ({
-        columnMaxWidthPx: THREAD_FOCUS_COLUMN_MAX_WIDTH_PX,
-        isSinglePanelView: true,
-        layout: "standalone",
-        transparentChrome: false,
-      } as const)
-    : ({
-        columnMaxWidthPx: undefined,
-        isSinglePanelView: useSplitAuxiliaryPane ? false : isSinglePanelView,
-        layout: useSplitAuxiliaryPane ? "split" : "standalone",
-        transparentChrome: useSplitAuxiliaryPane,
-      } as const);
+  // The toggle only exists where both layouts do. Narrow viewports have no split
+  // pane to offer, so a control switching to it would be a broken promise.
+  const threadHeaderLeading = useSplitAuxiliaryPane ? (
+    <ThreadViewModeToggle />
+  ) : undefined;
+  const threadLayoutProps = getThreadPanelLayout({
+    headerLeading: threadHeaderLeading,
+    isFocusDrawer: useFocusThreadDrawer,
+    isSinglePanelView,
+    useSplitAuxiliaryPane,
+  });
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
       {!isSinglePanelView ? (
@@ -604,7 +606,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       {!isSinglePanelView ? (
         <section
           aria-label="Channel messages and composer"
-          className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+          className="relative z-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           data-testid="channel-drop-zone"
           onDragEnter={
             canDropInMainColumn ? mainComposerMedia.handleDragEnter : undefined

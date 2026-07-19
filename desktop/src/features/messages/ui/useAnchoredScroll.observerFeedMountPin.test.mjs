@@ -313,7 +313,13 @@ test("auto-pins to bottom once loading clears, against content that already comm
       }),
     );
   });
-  // Flush the rAF-deferred scrollToBottomImperative.
+  assert.equal(
+    refs.container.current.scrollTop,
+    refs.container.current.scrollHeight,
+    "the first bottom pin happens in the layout effect before the next frame",
+  );
+
+  // Flush the rAF settling pass. Late measurements must preserve the same floor.
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
@@ -321,7 +327,7 @@ test("auto-pins to bottom once loading clears, against content that already comm
   assert.equal(
     refs.container.current.scrollTop,
     refs.container.current.scrollHeight,
-    "pin fires against the DOM as it exists when loading clears, not a stale mount snapshot",
+    "the settling pass keeps the view pinned against the committed DOM",
   );
 
   await act(async () => {

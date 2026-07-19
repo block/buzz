@@ -196,7 +196,7 @@ export function FocusThreadDrawer({
           prefersReducedMotion ? REDUCED_MOTION_TRANSITION : ENTER_TRANSITION
         }
       >
-        {children}
+        <div className="flex min-h-0 flex-1 flex-col">{children}</div>
       </motion.div>
     </div>
   );

@@ -40,3 +40,12 @@ export const THREAD_FOCUS_COLUMN_MAX_WIDTH_PX = 880;
  * eye to track a direction and for the ease to have somewhere to decelerate.
  */
 export const THREAD_FOCUS_DRAWER_TRAVEL_PX = 120;
+
+/**
+ * `AnimatePresence` key shared by both thread layouts.
+ *
+ * The split pane and the focus drawer are two containers for one thread, so
+ * presence is a property of the thread, not of either container. Keying them
+ * apart would make every view-mode switch read as a close followed by an open.
+ */
+export const THREAD_SURFACE_KEY = "message-thread-surface";

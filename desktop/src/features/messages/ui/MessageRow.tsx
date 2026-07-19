@@ -766,11 +766,7 @@ export const MessageRow = React.memo(
             "group/message relative z-10 rounded-2xl transition-colors",
             playEntrance && "motion-enter-conversation",
             "py-1",
-            hoverBackground
-              ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
-              : isThreadReplyLayout
-                ? "mx-1 px-2"
-                : "px-2",
+            hoverBackground || isThreadReplyLayout ? "mx-1 px-2" : "px-2",
             "flex gap-2.5",
             isContinuation ? "items-center" : "items-start",
             hasActiveReminder ? "bg-blue-500/10" : "",

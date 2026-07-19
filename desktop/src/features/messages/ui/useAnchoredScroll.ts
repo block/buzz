@@ -604,10 +604,13 @@ export function useAnchoredScroll({
     // to the requested target message, or to the bottom by default.
     if (!hasInitializedRef.current) {
       if (isLoading) return;
-      // Defer the scroll out of the layout effect so the current paint commits
-      // first; cancelled on channel switch via the reset effect's rAF guard.
+      // Establish the initial position before the browser paints. The follow-up
+      // frame is a settling pass for content whose measurements land with the
+      // commit (fonts, deferred rows, media), not the first bottom pin. Keeping
+      // both writes in the shared scroll owner gives every conversation surface
+      // the same first-frame behavior regardless of its surrounding animation.
       const pinToBottomOnMount = () => {
-        anchorRef.current = { kind: "at-bottom" };
+        scrollToBottomImperative("auto");
         mountPinRafIdRef.current = requestAnimationFrame(() => {
           mountPinRafIdRef.current = null;
           scrollToBottomImperative("auto");
