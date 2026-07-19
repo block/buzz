@@ -1,4 +1,4 @@
-import { CheckCheck, Link2, Plus, Settings2 } from "lucide-react";
+import { CheckCheck, Hexagon, Link2, Plus, Settings2 } from "lucide-react";
 import * as React from "react";
 
 import type { Community } from "@/features/communities/types";
@@ -27,6 +27,7 @@ type CommunityRailProps = {
   communities: Community[];
   activeCommunityId: string | null;
   onSwitchCommunity: (id: string) => void;
+  onShowCommunityHome: () => void;
   onAddCommunity: () => void;
   onUpdateCommunity: (
     id: string,
@@ -160,12 +161,15 @@ function CommunityButton({
  * `useCommunityUnread`) and switches relays on click. Right-click opens a
  * per-community menu: mark all as read, copy relay URL, community settings.
  *
- * Hidden entirely with a single community — a rail of one adds no value.
+ * The rail stays available whenever a community is active, even with a single
+ * saved community, because Community Home is the stable navigation target and
+ * null-selection state.
  */
 export function CommunityRail({
   communities,
   activeCommunityId,
   onSwitchCommunity,
+  onShowCommunityHome,
   onAddCommunity,
   onUpdateCommunity,
   onRemoveCommunity,
@@ -179,7 +183,7 @@ export function CommunityRail({
   const { markAllChannelsRead } = useAppShell();
   const [editingCommunity, setEditingCommunity] =
     React.useState<Community | null>(null);
-  if (communities.length <= 1) {
+  if (communities.length === 0) {
     return null;
   }
 
@@ -211,6 +215,21 @@ export function CommunityRail({
       )}
       data-testid="community-rail"
     >
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            aria-label="Community home"
+            className="flex h-9 w-9 items-center justify-center rounded-xl bg-sidebar-accent/70 text-sidebar-foreground outline-hidden ring-1 ring-sidebar-border/80 transition-all hover:scale-105 hover:bg-primary hover:text-primary-foreground focus-visible:scale-105"
+            data-testid="community-rail-home"
+            onClick={onShowCommunityHome}
+            type="button"
+          >
+            <Hexagon className="h-5 w-5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="right">Community home</TooltipContent>
+      </Tooltip>
+      <span className="h-px w-6 bg-sidebar-border/70" />
       {communities.map((community) => (
         <CommunityButton
           key={community.id}
@@ -262,7 +281,7 @@ export function CommunityRail({
         <TooltipContent side="right">Add community</TooltipContent>
       </Tooltip>
       <EditCommunityDialog
-        canRemove={communities.length > 1}
+        canRemove={communities.length > 0}
         onOpenChange={(open) => {
           if (!open) setEditingCommunity(null);
         }}

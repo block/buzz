@@ -373,7 +373,7 @@ export function CommunitySwitcher({
       )}
 
       <EditCommunityDialog
-        canRemove={communities.length > 1}
+        canRemove={communities.length > 0}
         onOpenChange={(open) => {
           if (!open) setEditingCommunity(null);
         }}

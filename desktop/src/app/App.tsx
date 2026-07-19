@@ -35,6 +35,7 @@ import {
   onAddCommunityPrefillAvailable,
   requestAddCommunityPrefill,
 } from "@/features/communities/addCommunityPrefill";
+import { CommunityHome } from "@/features/communities/ui/CommunityHome";
 import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
@@ -275,8 +276,7 @@ function CommunityApp({
   const communityOnboarding = useCommunityOnboarding();
   const connectingTransactionRef = useRef<string | null>(null);
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
-  const [resumeFirstCommunityJoin, setResumeFirstCommunityJoin] =
-    useState(false);
+  const [isJoinCommunityOpen, setIsJoinCommunityOpen] = useState(false);
 
   // Surface nest-related backend events (repos-dir errors, legacy migration)
   // as toasts. Mounted before useCommunityInit so the listeners are registered
@@ -302,6 +302,12 @@ function CommunityApp({
     communityKey,
     sharedIdentity,
   );
+
+  useEffect(() => {
+    if (activeCommunity !== null) {
+      setIsJoinCommunityOpen(false);
+    }
+  }, [activeCommunity]);
 
   const handleCommunityOnboardingConnect = useCallback(() => {
     const transaction = communityOnboarding.transaction;
@@ -353,10 +359,8 @@ function CommunityApp({
       return;
     }
     if (communities.length === 1) {
-      if (transaction.source === "first-community") {
-        setResumeFirstCommunityJoin(true);
-      }
       clearCommunities();
+      setIsJoinCommunityOpen(true);
       return;
     }
     removeCommunity(transaction.communityId);
@@ -407,13 +411,22 @@ function CommunityApp({
   let appContent: ReactNode = null;
   if (!transaction) {
     if (community.needsSetup) {
-      // Show welcome setup for first-run users with no communities
-      appContent = (
+      appContent = isJoinCommunityOpen ? (
         <WelcomeSetup
           defaultRelayUrl={community.defaultRelayUrl}
-          initialPage={resumeFirstCommunityJoin ? "join" : undefined}
-          onBack={onBackToMachineConfig}
+          initialPage="join"
+          onBack={() => setIsJoinCommunityOpen(false)}
         />
+      ) : (
+        <CommunityQueryProvider>
+          <CommunityHome
+            communities={communities}
+            onBackToMachineConfig={onBackToMachineConfig}
+            onJoinCommunity={() => setIsJoinCommunityOpen(true)}
+            onOpenCommunity={switchCommunity}
+            onRemoveCommunity={removeCommunity}
+          />
+        </CommunityQueryProvider>
       );
     } else if ("error" in community && community.error) {
       // Surface apply failures so the user can retry or change community.
@@ -489,10 +502,10 @@ function CommunityApp({
 }
 
 function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
-  const { activeCommunity } = useCommunities();
+  const { activeCommunity, communities } = useCommunities();
   const communityOnboarding = useCommunityOnboarding();
   const machine = useMachineOnboardingState({
-    hasConfiguredCommunity: activeCommunity !== null,
+    hasConfiguredCommunity: communities.length > 0,
     isSharedIdentity: sharedIdentity,
   });
   const [machineInitialPage, setMachineInitialPage] =

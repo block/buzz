@@ -94,14 +94,13 @@ const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
   return { default: module.SettingsScreen };
 });
-
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
 
   const communitiesHook = useCommunities();
-  const hasCommunityRail = communitiesHook.communities.length > 1;
+  const hasCommunityRail = communitiesHook.communities.length > 0;
   const addCommunityDialog = useAddCommunityDialogState();
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
@@ -771,6 +770,7 @@ export function AppShell() {
                       }
                       onAddCommunity={addCommunityDialog.openDialog}
                       onRemoveCommunity={communitiesHook.removeCommunity}
+                      onShowCommunityHome={communitiesHook.showCommunityHome}
                       onSwitchCommunity={handleSwitchCommunity}
                       onUpdateCommunity={communitiesHook.updateCommunity}
                       communities={communitiesHook.communities}

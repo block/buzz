@@ -10,6 +10,7 @@ import type { ReactNode } from "react";
 
 import type { Community } from "./types";
 import {
+  clearActiveCommunityId,
   clearCommunityStorage,
   loadActiveCommunityId,
   loadCommunities,
@@ -81,6 +82,8 @@ export type UseCommunitiesReturn = {
   addCommunity: (community: Community) => string;
   clearCommunities: () => void;
   removeCommunity: (id: string) => void;
+  /** Clear the current selection without removing any saved community. */
+  showCommunityHome: () => void;
   switchCommunity: (id: string) => void;
   /** Force the active community to re-init (e.g. after a deep-link reconnect). */
   reconnectCommunity: () => void;
@@ -122,7 +125,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   communitiesRef.current = communities;
 
   const activeCommunity = useMemo(
-    () => communities.find((w) => w.id === activeId) ?? communities[0] ?? null,
+    () => communities.find((community) => community.id === activeId) ?? null,
     [communities, activeId],
   );
 
@@ -162,39 +165,33 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
 
   const removeCommunity = useCallback(
     (id: string) => {
-      // GC self-profile caches for the removed community's relay. Mirror the
-      // updater guard (length > 1) so we only GC when removal will actually
-      // proceed. Runs outside the updater — updaters can execute twice under
-      // React StrictMode.
-      if (communities.length > 1) {
-        const removed = communities.find((w) => w.id === id);
-        if (removed) {
-          removeSelfProfileCachesForRelay(removed.relayUrl);
-          removeChannelSnapshotForRelay(removed.relayUrl);
-          removeMessageSnapshotsForRelay(removed.relayUrl);
-          clearSavedCommunitySnapshot(id);
-        }
-      }
+      const removed = communities.find((community) => community.id === id);
+      if (!removed) return;
+
+      removeSelfProfileCachesForRelay(removed.relayUrl);
+      removeChannelSnapshotForRelay(removed.relayUrl);
+      removeMessageSnapshotsForRelay(removed.relayUrl);
+      clearSavedCommunitySnapshot(id);
 
       setCommunitiesState((prev) => {
-        // Never allow removing the last community
-        if (prev.length <= 1) {
-          return prev;
-        }
-        const next = prev.filter((w) => w.id !== id);
+        const next = prev.filter((community) => community.id !== id);
         saveCommunities(next);
-
-        // If removing the active community, switch to first remaining
-        if (activeId === id && next.length > 0) {
-          saveActiveCommunityId(next[0].id);
-          setActiveId(next[0].id);
-        }
-
         return next;
       });
+
+      if (activeId === id) {
+        clearActiveCommunityId();
+        setActiveId(null);
+      }
     },
     [activeId, communities],
   );
+
+  const showCommunityHome = useCallback(() => {
+    if (activeId === null) return;
+    clearActiveCommunityId();
+    setActiveId(null);
+  }, [activeId]);
 
   const switchCommunity = useCallback(
     (id: string) => {
@@ -249,6 +246,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
     addCommunity,
     clearCommunities,
     removeCommunity,
+    showCommunityHome,
     switchCommunity,
     reconnectCommunity,
     updateCommunity,

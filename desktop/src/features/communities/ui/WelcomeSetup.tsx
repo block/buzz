@@ -301,7 +301,10 @@ export function WelcomeSetup({
               <OnboardingFooter>
                 <Button
                   className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
-                  onClick={() => showPage("welcome")}
+                  data-testid="welcome-setup-back"
+                  onClick={() =>
+                    initialPage === "join" ? onBack() : showPage("welcome")
+                  }
                   type="button"
                   variant="ghost"
                 >
