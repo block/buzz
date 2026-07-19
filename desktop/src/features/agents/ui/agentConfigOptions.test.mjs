@@ -6,7 +6,7 @@ import {
   getPersonaModelOptions,
   getPersonaProviderOptions,
   runtimeSupportsLlmProviderSelection,
-} from "./personaDialogPickers.tsx";
+} from "./agentConfigOptions.tsx";
 import { formatModelDiscoveryErrorStatus } from "./personaModelDiscoveryStatus.ts";
 
 // ── helpers ──────────────────────────────────────────────────────────────────

@@ -175,7 +175,7 @@ test.describe("global agent config screenshots", () => {
     });
   });
 
-  // Shot 01: GlobalAgentConfigSettingsCard populated with provider + model +
+  // Shot 01: AgentDefaultsSettingsCard populated with provider + model +
   // env var — shows the "Agent defaults" card in the Agents view as it looks
   // when a user has set global defaults.
   test("01-global-agent-config-card-populated", async ({ page }) => {

@@ -6,7 +6,7 @@ import {
   getPersonaProviderOptions,
   requiredCredentialEnvKeys,
   isMissingRequiredDropdownField,
-} from "./personaDialogPickers.tsx";
+} from "./agentConfigOptions.tsx";
 import {
   computeEditAgentFormValidity,
   hasMissingRequiredEnvKey,
@@ -142,7 +142,7 @@ test("editAgent_providerOptions_includesCurrentIfCustom", () => {
 
 test("editAgent_requiredDropdownField_onlyMarksMissingKnownField", async () => {
   const { isMissingRequiredDropdownField } = await import(
-    "./personaDialogPickers.tsx"
+    "./agentConfigOptions.tsx"
   );
 
   assert.equal(

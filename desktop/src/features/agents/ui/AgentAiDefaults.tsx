@@ -1,6 +1,6 @@
 import type * as React from "react";
 import type { InheritedDefault } from "./bakedEnvHelpers";
-import { getPersonaProviderOptions } from "./personaDialogPickers";
+import { getPersonaProviderOptions } from "./agentConfigOptions";
 import { Button } from "@/shared/ui/button";
 
 function providerLabel(providerId: string) {

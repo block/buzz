@@ -12,7 +12,7 @@ import type { EnvVarsValue } from "./EnvVarsEditor";
 import {
   AgentDropdownSelect,
   type AgentDropdownOption,
-} from "./personaProviderModelFields";
+} from "./agentConfigControls";
 import {
   BUZZ_AGENT_MAX_CONTEXT_TOKENS,
   BUZZ_AGENT_MAX_OUTPUT_TOKENS,
@@ -26,7 +26,7 @@ import {
  * Shared effort-select dropdown for the `BUZZ_AGENT_THINKING_EFFORT` env var.
  *
  * Used by both `BuzzAgentModelTuningFields` (per-agent/persona dialogs) and
- * `GlobalAgentConfigSettingsCard` (global defaults settings card) to ensure a
+ * `AgentDefaultsSettingsCard` (global defaults settings card) to ensure a
  * single rendering surface for this control.
  *
  * The caller is responsible for the auto-clear `useEffect` that resets the
@@ -79,7 +79,7 @@ export function EffortSelectField({
    * Per-agent callers (BuzzAgentModelTuningFields) pass `"Inherit (agent default)"`
    * to preserve the label that appeared before this component was extracted.
    *
-   * The global-defaults card (GlobalAgentConfigSettingsCard) passes
+   * The global-defaults card (AgentDefaultsSettingsCard) passes
    * `"Default (<effort>)"` when a semantic default exists and nothing is baked
    * in — so OSS users see "Default (medium)" rather than bare "Inherit".
    */

@@ -43,7 +43,7 @@ import {
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
   type PersonaDropdownOption,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 import {
   modelDropdownOptions as buildModelDropdownOptions,
   relayMeshModelPickerState,
@@ -76,10 +76,10 @@ import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
-import { getProviderApiKeyEnvVar } from "./personaDialogPickers";
+import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
-import { AgentAiDefaultsDialog } from "./AgentAiDefaultsDialog";
+import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -1099,7 +1099,7 @@ export function AgentInstanceEditDialog({
               inheritedProvider={inheritedProviderDefault}
             />
 
-            <AgentAiDefaultsDialog
+            <AgentDefaultsDialog
               onOpenChange={setAiDefaultsOpen}
               open={aiDefaultsOpen}
               returnFocusRef={aiDefaultsTriggerRef}

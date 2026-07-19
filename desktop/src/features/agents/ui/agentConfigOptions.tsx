@@ -12,7 +12,7 @@ export { getDefaultPersonaRuntime } from "../lib/resolvePersonaRuntime";
  *
  * All three dialog sites that show a provider picker import this constant —
  * `AgentDefinitionDialog`, `AgentInstanceEditDialog`, and
- * `GlobalAgentConfigSettingsCard` — making it the single source of truth for
+ * `AgentDefaultsSettingsCard` — making it the single source of truth for
  * which provider ids to suppress on Block builds.
  */
 export const BLOCK_BUILD_HIDDEN_PROVIDER_IDS: ReadonlySet<string> = new Set([

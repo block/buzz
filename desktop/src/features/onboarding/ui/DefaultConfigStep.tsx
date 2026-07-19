@@ -2,12 +2,12 @@ import * as React from "react";
 
 import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import {
-  GlobalAgentConfigFields,
+  AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
-} from "@/features/agents/ui/GlobalAgentConfigFields";
+} from "@/features/agents/ui/AgentConfigFields";
 import { BUZZ_AGENT_THINKING_EFFORT } from "@/features/agents/ui/buzzAgentConfig";
-import { runtimeSupportsLlmProviderSelection } from "@/features/agents/ui/personaDialogPickers";
-import { AgentDropdownSelect } from "@/features/agents/ui/personaProviderModelFields";
+import { runtimeSupportsLlmProviderSelection } from "@/features/agents/ui/agentConfigOptions";
+import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
 import { createSaveCoalescer } from "./saveCoalescer";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import {
@@ -189,7 +189,7 @@ function AgentDefaultsSection({
             />
           </div>
 
-          <GlobalAgentConfigFields
+          <AgentConfigFields
             bakedEnv={bakedEnv}
             selectedRuntime={selectedRuntime}
             config={config}

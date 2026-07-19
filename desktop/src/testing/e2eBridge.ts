@@ -357,13 +357,13 @@ type E2eConfig = {
     /**
      * The `restarted_count` returned by `set_global_agent_config`. Defaults to
      * 0 (no agents restarted). Set to a positive integer to drive the
-     * "Saved. Restarted N agent(s)." status text in GlobalAgentConfigSettingsCard.
+     * "Saved. Restarted N agent(s)." status text in AgentDefaultsSettingsCard.
      */
     globalConfigRestartedCount?: number;
     /**
      * The `failed_restart_count` returned by `set_global_agent_config`. Defaults
      * to 0. Set to a positive integer to drive the "M failed to restart — check
-     * the Agents tab." status text in GlobalAgentConfigSettingsCard.
+     * the Agents tab." status text in AgentDefaultsSettingsCard.
      */
     globalConfigFailedRestartCount?: number;
     /**

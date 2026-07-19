@@ -21,9 +21,9 @@ import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import { globalAgentConfigQueryKey } from "@/features/agents/useGlobalAgentConfig";
 import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import {
-  GlobalAgentConfigFields,
+  AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
-} from "@/features/agents/ui/GlobalAgentConfigFields";
+} from "@/features/agents/ui/AgentConfigFields";
 import { Button } from "@/shared/ui/button";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -32,19 +32,19 @@ export type GlobalAgentConfigSaveResult = Awaited<
   ReturnType<typeof setGlobalAgentConfig>
 >;
 
-type GlobalAgentConfigEditorProps = {
+type AgentDefaultsEditorProps = {
   onDirtyChange?: (dirty: boolean) => void;
   onSaveSuccess?: (result: GlobalAgentConfigSaveResult) => void;
   onSavingChange?: (saving: boolean) => void;
   secondaryAction?: React.ReactNode;
 };
 
-export function GlobalAgentConfigEditor({
+export function AgentDefaultsEditor({
   onDirtyChange,
   onSaveSuccess,
   onSavingChange,
   secondaryAction,
-}: GlobalAgentConfigEditorProps) {
+}: AgentDefaultsEditorProps) {
   const [config, setConfig] =
     React.useState<GlobalAgentConfig>(EMPTY_GLOBAL_CONFIG);
   const configRef = React.useRef(config);
@@ -178,7 +178,7 @@ export function GlobalAgentConfigEditor({
           Couldn't load agent defaults. Restart the app to try again.
         </div>
       ) : (
-        <GlobalAgentConfigFields
+        <AgentConfigFields
           bakedEnv={bakedEnv}
           selectedRuntime={buzzAgentRuntime}
           config={config}

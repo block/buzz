@@ -1,7 +1,7 @@
 /**
  * Controlled field group for global agent config (provider, model, effort, env vars).
  *
- * Used by GlobalAgentConfigSettingsCard (settings panel) and AgentDefaultsSection
+ * Used by AgentDefaultsSettingsCard (settings panel) and AgentDefaultsSection
  * (onboarding setup step). The parent manages load/save state; this component is
  * purely presentational and calls onConfigChange on every user edit.
  */
@@ -28,11 +28,11 @@ import {
   getProviderApiKeyEnvVar,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
-} from "@/features/agents/ui/personaDialogPickers";
+} from "@/features/agents/ui/agentConfigOptions";
 import {
   AgentDropdownSelect,
   AgentModelField,
-} from "@/features/agents/ui/personaProviderModelFields";
+} from "@/features/agents/ui/agentConfigControls";
 import { PersonaProviderApiKeyField } from "@/features/agents/ui/PersonaProviderApiKeyField";
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
 import {
@@ -61,7 +61,7 @@ const BAKED_STRUCTURED_KEYS = new Set([
   BUZZ_AGENT_THINKING_EFFORT,
 ]);
 
-export type GlobalAgentConfigFieldsProps = {
+export type AgentConfigFieldsProps = {
   bakedEnv: BakedEnvEntry[];
   selectedRuntime: AcpRuntimeCatalogEntry | undefined;
   config: GlobalAgentConfig;
@@ -96,7 +96,7 @@ export type GlobalAgentConfigFieldsProps = {
   useChevronSelectIcon?: boolean;
 };
 
-export function GlobalAgentConfigFields({
+export function AgentConfigFields({
   bakedEnv,
   selectedRuntime,
   config,
@@ -129,7 +129,7 @@ export function GlobalAgentConfigFields({
   unstyled = false,
   useCustomSelect = false,
   useChevronSelectIcon = false,
-}: GlobalAgentConfigFieldsProps) {
+}: AgentConfigFieldsProps) {
   const bakedProvider = React.useMemo(
     () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
     [bakedEnv],

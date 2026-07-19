@@ -10,7 +10,7 @@ import {
   isGloballySatisfiedCredentialKey,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 import { hasMissingRequiredEnvKey } from "./personaRuntimeModel";
 
 /** Derived required-credential state for the Edit Agent dialog's Advanced section. */

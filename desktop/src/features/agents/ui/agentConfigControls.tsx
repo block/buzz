@@ -22,7 +22,7 @@ import {
   hasPersonaModelOption,
   providerDisplayLabel,
   type PersonaModelOption,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 import { MODEL_DISCOVERY_LOADING_VALUE } from "./usePersonaModelDiscovery";
 import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
 

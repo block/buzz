@@ -51,8 +51,8 @@ import {
   PERSONA_LABEL_OPTIONAL_CLASS,
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
-} from "./personaDialogPickers";
-import { RequiredFieldLabel } from "./personaProviderModelFields";
+} from "./agentConfigOptions";
+import { RequiredFieldLabel } from "./agentConfigControls";
 import {
   modelDropdownOptions as buildModelDropdownOptions,
   relayMeshModelPickerState,
@@ -70,7 +70,7 @@ import {
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
-import { AgentAiDefaultsDialog } from "./AgentAiDefaultsDialog";
+import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import {
   AgentAiConfigurationModeField,
   HarnessModelDefaultNotice,
@@ -967,7 +967,7 @@ export function AgentDefinitionDialog({
               )
             ) : null}
 
-            <AgentAiDefaultsDialog
+            <AgentDefaultsDialog
               onOpenChange={setAiDefaultsOpen}
               open={runtimeCanChooseLlmProvider && aiDefaultsOpen}
               returnFocusRef={aiDefaultsTriggerRef}
