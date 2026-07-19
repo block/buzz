@@ -990,6 +990,7 @@ test("connected first-community profile step cannot discard resumable onboarding
   await expect(
     page.getByRole("heading", { name: "Build your profile" }),
   ).toBeVisible();
+  const profileMain = page.getByTestId("community-profile-main");
   const profileHeading = page.getByRole("heading", {
     name: "Build your profile",
   });
