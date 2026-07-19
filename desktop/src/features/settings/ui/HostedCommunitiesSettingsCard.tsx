@@ -40,6 +40,7 @@ import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 const HOST_SUFFIX = "communities.buzz.xyz";
 const VALID_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const MAX_COMMUNITIES = 3;
 
 type BuilderlabAuth = {
   email?: string;
@@ -101,7 +102,7 @@ function errorMessage(
     missing_mapping: "Connect your Buzz identity before creating a community.",
     invalid_name: "Use lowercase letters, numbers, and hyphens.",
     taken: "That Buzz address is already taken.",
-    limit_reached: "You have reached the hosted community limit.",
+    limit_reached: `You've reached the limit of ${MAX_COMMUNITIES} hosted communities.`,
     relay_unavailable: "Community provisioning is temporarily unavailable.",
     identity_already_bound:
       "This Builderlab account is connected to another Buzz identity.",
@@ -130,6 +131,7 @@ export function HostedCommunitiesSettingsCard() {
   const [identity, setIdentity] = React.useState<NostrIdentity | null>(null);
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
+  const [checkingName, setCheckingName] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [action, setAction] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -142,7 +144,11 @@ export function HostedCommunitiesSettingsCard() {
     ]);
     if (
       identityResponse.error &&
-      identityResponse.error.code !== "unauthorized"
+      identityResponse.error.code !== "unauthorized" &&
+      // `missing_mapping` (setup_needed) just means this account hasn't linked a
+      // Buzz identity yet — that's the connect-card empty state, not an error to
+      // surface at the top of the page.
+      !identityResponse.error.setup_needed
     ) {
       throw new Error(
         errorMessage(
@@ -372,29 +378,50 @@ export function HostedCommunitiesSettingsCard() {
   const validName =
     normalizedName.length <= 63 && VALID_NAME.test(normalizedName);
 
-  const checkAvailability = () => {
-    if (!validName) return Promise.resolve(false);
-    return run("Checking availability…", async () => {
-      const response = await invoke<AvailabilityResponse>(
-        "check_builderlab_community_name",
-        { name: normalizedName },
-      );
-      if (response.error) {
-        throw new Error(
-          errorMessage(
-            response.error,
-            response.correlation_id,
-            "Could not check this address.",
-          ),
-        );
-      }
-      setAvailability(response.available ?? false);
-    });
-  };
+  // Debounced typeahead availability check: once the user pauses on a valid
+  // address, check it ~500ms later so the result is ready before they click
+  // Create (no separate "check" click). onChange clears the previous result, so
+  // the indicator reflects the current input while typing.
+  React.useEffect(() => {
+    if (!identity || identityMismatch || !normalizedName || !validName) {
+      setCheckingName(false);
+      return;
+    }
+    let cancelled = false;
+    setCheckingName(true);
+    const handle = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await invoke<AvailabilityResponse>(
+            "check_builderlab_community_name",
+            { name: normalizedName },
+          );
+          if (cancelled) return;
+          setAvailability(
+            response.error ? null : (response.available ?? false),
+          );
+        } catch {
+          if (!cancelled) setAvailability(null);
+        } finally {
+          if (!cancelled) setCheckingName(false);
+        }
+      })();
+    }, 500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [normalizedName, validName, identity, identityMismatch]);
 
   const createCommunity = (event: React.FormEvent) => {
     event.preventDefault();
-    if (!validName || !identity || identityMismatch) return;
+    if (
+      !validName ||
+      !identity ||
+      identityMismatch ||
+      communities.length >= MAX_COMMUNITIES
+    )
+      return;
     void run("Creating community…", async () => {
       const availabilityResponse = await invoke<AvailabilityResponse>(
         "check_builderlab_community_name",
@@ -444,6 +471,7 @@ export function HostedCommunitiesSettingsCard() {
   };
 
   const busy = action != null;
+  const atCommunityLimit = communities.length >= MAX_COMMUNITIES;
 
   return (
     <section className="space-y-6" data-testid="hosted-communities-settings">
@@ -506,11 +534,14 @@ export function HostedCommunitiesSettingsCard() {
 
           {!identity ? (
             <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-5">
-              <h3 className="font-medium">Connect this Buzz identity</h3>
+              <h3 className="font-medium">
+                Link this account to your Buzz identity
+              </h3>
               <p className="mt-2 text-sm text-muted-foreground">
-                Community ownership is tied to your current Buzz key. Buzz will
-                sign a one-time challenge locally; your private key never leaves
-                Desktop.
+                This Builderlab account isn&apos;t linked to a Buzz identity
+                yet. Connect this device&apos;s key to create and own
+                communities under it — Buzz signs a one-time challenge locally,
+                so your private key never leaves Desktop.
               </p>
               <Button
                 className="mt-4"
@@ -580,7 +611,12 @@ export function HostedCommunitiesSettingsCard() {
 
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="font-medium">Your communities</h3>
+              <h3 className="font-medium">
+                Your communities
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  {communities.length} of {MAX_COMMUNITIES} used
+                </span>
+              </h3>
               <Button
                 variant="ghost"
                 size="sm"
@@ -636,13 +672,21 @@ export function HostedCommunitiesSettingsCard() {
                 Choose the address your team will use to connect.
               </p>
             </div>
+            {atCommunityLimit ? (
+              <p className="text-sm text-muted-foreground">
+                You&apos;ve reached the limit of {MAX_COMMUNITIES} hosted
+                communities. Transfer one to free up a slot before creating
+                another.
+              </p>
+            ) : null}
             <div className="flex max-w-xl items-center gap-2">
               <Input
                 aria-label="Community address"
                 autoComplete="off"
-                disabled={!identity || identityMismatch || busy}
+                disabled={
+                  !identity || identityMismatch || busy || atCommunityLimit
+                }
                 maxLength={63}
-                onBlur={() => void checkAvailability()}
                 onChange={(event) => {
                   setName(event.target.value.toLowerCase());
                   setAvailability(null);
@@ -659,13 +703,15 @@ export function HostedCommunitiesSettingsCard() {
               <p className="text-sm text-destructive">
                 Use lowercase letters, numbers, and single hyphens.
               </p>
-            ) : null}
-            {availability === false ? (
+            ) : validName && checkingName ? (
+              <p className="text-sm text-muted-foreground">
+                Checking availability…
+              </p>
+            ) : availability === false ? (
               <p className="text-sm text-destructive">
                 That address is already taken.
               </p>
-            ) : null}
-            {availability === true ? (
+            ) : availability === true ? (
               <p className="text-sm text-emerald-600">
                 That address is available.
               </p>
@@ -676,7 +722,9 @@ export function HostedCommunitiesSettingsCard() {
                 identityMismatch ||
                 !validName ||
                 availability === false ||
-                busy
+                checkingName ||
+                busy ||
+                atCommunityLimit
               }
               type="submit"
             >

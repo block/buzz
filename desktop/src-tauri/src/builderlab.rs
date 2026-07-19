@@ -15,6 +15,11 @@ use url::Url;
 const BUILDERLAB_API_BASE_URL: &str = "https://app.builderlab.xyz/api/goose";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const BB_SESSION_CREDENTIAL_HEADER: &str = "X-BB-Session-Credential";
+// Builderlab enforces an Origin check on the identity bind endpoints. Browsers
+// attach this automatically; the desktop reqwest client must set it explicitly
+// or challenge/verify fail with `invalid_origin`. It also seeds the challenge
+// body's `origin` field so both agree.
+const BUILDERLAB_ORIGIN: &str = "https://app.builderlab.xyz";
 
 #[derive(Default)]
 pub(crate) struct BuilderlabSession(Mutex<Option<StoredSession>>);
@@ -271,6 +276,7 @@ async fn authenticated_json(
     let response = client
         .request(method, api_url(path)?)
         .header(BB_SESSION_CREDENTIAL_HEADER, credential)
+        .header(reqwest::header::ORIGIN, BUILDERLAB_ORIGIN)
         .json(&body)
         .timeout(Duration::from_secs(60))
         .send()
@@ -282,9 +288,15 @@ async fn authenticated_json(
         .await
         .map_err(|error| format!("invalid Builderlab response: {error}"))?;
     if !status.is_success() {
-        return Err(format!(
-            "Builderlab request failed with HTTP {status}: {value}"
-        ));
+        // Builderlab error responses carry a structured `{ error: { code,
+        // message, setup_needed, ... } }` body. Pass those through as `Ok` so the
+        // frontend's typed handling and friendly per-code messages apply, instead
+        // of surfacing a raw JSON blob. Only fall back to a plain string when the
+        // body isn't the expected shape.
+        if value.get("error").is_some() {
+            return Ok(value);
+        }
+        return Err(format!("Builderlab request failed (HTTP {status})."));
     }
     Ok(value)
 }
@@ -314,9 +326,16 @@ pub(crate) async fn bind_builderlab_nostr_identity(
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/challenge",
-        serde_json::json!({ "origin": "https://app.builderlab.xyz" }),
+        serde_json::json!({ "origin": BUILDERLAB_ORIGIN }),
     )
     .await?;
+    // A structured error here (e.g. missing_mapping) arrives as an object with an
+    // `error` field rather than a challenge — hand it straight back so the
+    // frontend maps it to a friendly message instead of hitting a deserialize
+    // failure below.
+    if challenge_value.get("error").is_some() {
+        return Ok(challenge_value);
+    }
     let challenge: NostrIdentityChallenge = serde_json::from_value(challenge_value)
         .map_err(|error| format!("invalid Nostr identity challenge: {error}"))?;
     let keys = app_state.signing_keys()?;
