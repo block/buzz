@@ -26,6 +26,7 @@ import { relayClient } from "@/shared/api/relayClient";
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import { MembershipDenied } from "./MembershipDenied";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import {
@@ -33,11 +34,7 @@ import {
   OnboardingChrome,
 } from "./OnboardingChrome";
 import { OnboardingFooter, OnboardingFooterProvider } from "./OnboardingFooter";
-import {
-  ONBOARDING_KEY_FRAME_CLASS,
-  ONBOARDING_KEY_ROW_CLASS,
-  ONBOARDING_KEY_TEXT_CLASS,
-} from "./NsecMaskedDisplay";
+import { ONBOARDING_KEY_FRAME_CLASS } from "./NsecMaskedDisplay";
 
 function isRelayMembershipDeniedError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -92,7 +89,7 @@ function AvatarCircle({
     >
       {emojiAvatar ? (
         <span
-          className="flex h-28 w-28 items-center justify-center overflow-hidden rounded-full text-5xl shadow-xs"
+          className="flex h-36 w-36 items-center justify-center overflow-hidden rounded-full text-5xl shadow-xs"
           style={{ backgroundColor: emojiAvatar.color }}
         >
           {emojiAvatar.emoji}
@@ -100,12 +97,12 @@ function AvatarCircle({
       ) : hasAvatar ? (
         <ProfileAvatar
           avatarUrl={avatarUrl}
-          className="h-28 w-28 rounded-full text-3xl"
+          className="h-36 w-36 rounded-full text-4xl"
           label={previewName}
         />
       ) : (
-        <span className="flex h-28 w-28 items-center justify-center rounded-full text-[var(--buzz-onboarding-backup-ink)] transition-colors group-hover:bg-white/25">
-          <Plus className="h-8 w-8" aria-hidden="true" />
+        <span className="flex h-36 w-36 items-center justify-center rounded-full bg-white/30 text-[var(--buzz-onboarding-backup-ink)] transition-colors group-hover:bg-white/40">
+          <Plus className="h-7 w-7" aria-hidden="true" />
         </span>
       )}
     </button>
@@ -342,14 +339,11 @@ export function CommunityOnboardingFlow({
         <div
           className={cn(
             "relative w-full text-center",
-            isProfileStage || isTeamStage
-              ? "buzz-onboarding-step-frame flex flex-col justify-center"
-              : "flex min-h-dvh flex-col justify-center py-8",
             isProfileStage
-              ? "max-w-4xl"
+              ? "buzz-onboarding-step-frame flex max-w-[500px] flex-col justify-center"
               : isTeamStage
-                ? "max-w-[760px]"
-                : "max-w-[560px]",
+                ? "buzz-onboarding-step-frame flex max-w-[760px] flex-col justify-center"
+                : "flex min-h-dvh max-w-[560px] flex-col justify-center py-8",
           )}
           data-testid="community-onboarding-body"
         >
@@ -417,46 +411,36 @@ export function CommunityOnboardingFlow({
                     Add a name and avatar. They’ll show up on your messages,
                     reactions, and agent handoffs.
                   </p>
-                  <div className="mt-10 w-full max-w-4xl">
-                    <div
-                      className={ONBOARDING_KEY_FRAME_CLASS}
-                      data-testid="community-profile-key-frame"
+                  <div className="mt-8 flex w-full flex-col items-center">
+                    <AvatarCircle
+                      avatarUrl={avatarUrl}
+                      onClick={() => setIsAvatarEditorOpen(true)}
+                      previewName={displayName.trim() || "Your profile"}
+                    />
+                    <label
+                      className="mt-7 block w-full max-w-[412px] text-left"
+                      htmlFor="community-display-name"
                     >
-                      <div className={ONBOARDING_KEY_ROW_CLASS}>
-                        <AvatarCircle
-                          avatarUrl={avatarUrl}
-                          onClick={() => setIsAvatarEditorOpen(true)}
-                          previewName={displayName.trim() || "Your profile"}
-                        />
-                        <label
-                          className="min-w-0 flex-1"
-                          htmlFor="community-display-name"
-                        >
-                          <span className="sr-only">Your name</span>
-                          <input
-                            aria-label="Community display name"
-                            autoCapitalize="words"
-                            autoComplete="name"
-                            autoCorrect="off"
-                            className={cn(
-                              ONBOARDING_KEY_TEXT_CLASS,
-                              "border-0 bg-transparent p-0 shadow-none outline-none placeholder:text-[var(--buzz-onboarding-backup-ink)] placeholder:opacity-40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
-                            )}
-                            data-testid="community-profile-name-key"
-                            disabled={isPending || isUploadingAvatar}
-                            id="community-display-name"
-                            onChange={(event) =>
-                              setDisplayName(event.target.value)
-                            }
-                            placeholder="First and last name"
-                            ref={nameInputRef}
-                            spellCheck={false}
-                            type="text"
-                            value={displayName}
-                          />
-                        </label>
-                      </div>
-                    </div>
+                      <span className="mb-2 block pl-4 text-sm text-foreground">
+                        Your name
+                      </span>
+                      <Input
+                        aria-label="Community display name"
+                        autoCapitalize="words"
+                        autoComplete="name"
+                        autoCorrect="off"
+                        className="h-14 rounded-2xl border-[color:rgb(113_113_6_/_0.28)] bg-white/95 px-5 text-sm shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-1 focus-visible:ring-[var(--buzz-onboarding-backup-ink)] md:text-sm"
+                        data-testid="community-profile-name-key"
+                        disabled={isPending || isUploadingAvatar}
+                        id="community-display-name"
+                        onChange={(event) => setDisplayName(event.target.value)}
+                        placeholder="First and last name"
+                        ref={nameInputRef}
+                        spellCheck={false}
+                        type="text"
+                        value={displayName}
+                      />
+                    </label>
                   </div>
                   {transaction.error ? (
                     <p className="mt-4 text-sm text-destructive">

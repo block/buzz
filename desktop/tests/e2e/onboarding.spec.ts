@@ -997,43 +997,30 @@ test("connected first-community profile step cannot discard resumable onboarding
   const centeredInUsableLaneY =
     chromeOffset + (viewport.height - chromeOffset - footerOffset) / 2;
   expect(Math.abs(profileMainCenterY - centeredInUsableLaneY)).toBeLessThan(32);
-  const keyFrame = page.getByTestId("community-profile-key-frame");
   const nameKey = page.getByTestId("community-profile-name-key");
-  await expect(keyFrame).toBeVisible();
+  const avatarButton = page.getByTestId("community-avatar-open");
   await expect(nameKey).toBeVisible();
-  const keyFrameBox = await keyFrame.boundingBox();
-  expect(keyFrameBox?.width).toBeGreaterThan(700);
-  const keyFrameStyles = await keyFrame.evaluate((element) => {
+  await expect(avatarButton).toBeVisible();
+  const nameKeyBox = await nameKey.boundingBox();
+  const avatarButtonBox = await avatarButton.boundingBox();
+  expect(nameKeyBox?.width).toBeGreaterThan(380);
+  expect(avatarButtonBox?.width).toBe(144);
+  const nameKeyStyles = await nameKey.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
       backgroundColor: styles.backgroundColor,
       borderRadius: styles.borderRadius,
+      fontSize: styles.fontSize,
     };
   });
-  expect(keyFrameStyles.backgroundColor).toMatch(/(0\.5\)|\/ 0\.5\))/);
-  expect(keyFrameStyles.borderRadius).toBe("12px");
-  await expect
-    .poll(() =>
-      nameKey.evaluate((element) => {
-        const styles = window.getComputedStyle(element);
-        return {
-          color: styles.color,
-          fontFamily: styles.fontFamily,
-          fontSize: styles.fontSize,
-        };
-      }),
-    )
-    .toMatchObject({
-      color: "rgb(113, 113, 6)",
-      fontSize: "36px",
-    });
-  expect(
-    (
-      await nameKey.evaluate((element) =>
-        window.getComputedStyle(element).fontFamily.toLowerCase(),
-      )
-    ).includes("mono"),
-  ).toBe(true);
+  expect(nameKeyStyles.backgroundColor).toMatch(
+    /^(rgba\(255, 255, 255, 0\.95\)|oklab\(.+ \/ 0\.95\))$/,
+  );
+  expect(nameKeyStyles).toMatchObject({
+    borderRadius: "16px",
+    fontSize: "14px",
+  });
+  await expect(page.getByText("Your name", { exact: true })).toBeVisible();
   await expect(page.getByTestId("community-profile-next")).toHaveText("Next");
   await expect(page.getByTestId("community-profile-next")).toBeDisabled();
   await expect(page.getByTestId("community-profile-back")).toHaveCount(0);
