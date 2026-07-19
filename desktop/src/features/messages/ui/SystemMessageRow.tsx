@@ -761,7 +761,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
 
   return (
     <div
-      className="group/message relative mx-1 rounded-2xl px-2 py-1"
+      className="group/message relative mx-1 rounded-2xl px-2 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50"
       data-testid="system-message-row"
     >
       <div className="flex items-start gap-2.5">

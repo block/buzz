@@ -662,7 +662,7 @@ export function MessageThreadPanel({
                       className={cn(
                         "flex flex-col gap-0",
                         entry.summary &&
-                          "group/message rounded-2xl px-0 py-0.5",
+                          "group/message rounded-2xl px-0 py-0.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                       )}
                       key={entry.message.renderKey ?? entry.message.id}
                     >
