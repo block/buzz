@@ -255,7 +255,12 @@ async fn init_session(h: &mut Harness, mcp_servers: Value) -> String {
         .await;
     r["result"]["sessionId"]
         .as_str()
-        .expect("sessionId")
+        .unwrap_or_else(|| {
+            panic!(
+                "session/new did not return sessionId: response={r}, stderr={}",
+                h.stderr_text()
+            )
+        })
         .to_owned()
 }
 
@@ -1570,7 +1575,23 @@ async fn cancel_kills_inflight_tool_via_mcp_notification() {
     // the buzz-agent test binary (they share the same target dir).
     let self_bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_buzz-agent"));
     let dev_mcp_bin = self_bin.parent().unwrap().join("buzz-dev-mcp");
-    if !dev_mcp_bin.exists() {
+    let dev_mcp_is_executable = std::fs::metadata(&dev_mcp_bin)
+        .map(|metadata| {
+            if !metadata.is_file() || metadata.len() == 0 {
+                return false;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        })
+        .unwrap_or(false);
+    if !dev_mcp_is_executable {
         eprintln!(
             "SKIP: buzz-dev-mcp not built at {}; run `cargo build -p buzz-dev-mcp` first",
             dev_mcp_bin.display()
