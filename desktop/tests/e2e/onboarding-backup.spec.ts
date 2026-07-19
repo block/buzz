@@ -8,7 +8,7 @@ async function enterMachineBackup(page: import("@playwright/test").Page) {
     skipOnboardingSeed: true,
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Get started" }).click();
+  await page.getByRole("button", { name: "Create a new identity key" }).click();
 }
 
 const SHOTS = "test-results/screenshots-onboarding";
@@ -85,7 +85,9 @@ test("backup step back button returns to machine identity choice", async ({
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await page.getByTestId("onboarding-back").click();
 
-  await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Create a new identity key" }),
+  ).toBeVisible();
 });
 
 // ---------------------------------------------------------------------------
@@ -101,7 +103,7 @@ test("backup step shows error banner and retry button when get_nsec fails", asyn
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
-  await page.getByRole("button", { name: "Get started" }).click();
+  await page.getByRole("button", { name: "Create a new identity key" }).click();
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("backup-load-error")).toBeVisible();
@@ -125,7 +127,7 @@ test("backup step retry succeeds and shows key after initial failure", async ({
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
-  await page.getByRole("button", { name: "Get started" }).click();
+  await page.getByRole("button", { name: "Create a new identity key" }).click();
 
   await expect(page.getByTestId("backup-load-error")).toBeVisible();
 

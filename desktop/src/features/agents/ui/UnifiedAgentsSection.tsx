@@ -99,18 +99,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     () => buildUnifiedGroups(personas, agents),
     [personas, agents],
   );
-  const additionalPersonaAgents = React.useMemo(() => {
-    const additional: ManagedAgent[] = [];
-    for (const group of groups) {
-      const primary = pickProfileAgent(group.agents);
-      for (const agent of group.agents) {
-        if (primary?.pubkey !== agent.pubkey) {
-          additional.push(agent);
-        }
-      }
-    }
-    return additional;
-  }, [groups]);
   const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set());
   const {
     fileInputRef,
@@ -199,26 +187,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
             />
           </div>
 
-          {additionalPersonaAgents.length > 0 ? (
-            <CollapsibleAgentGroup
-              agents={additionalPersonaAgents}
-              collapsed={collapsed}
-              defaultModel={defaultModel}
-              groupKey="__additional_persona_agents__"
-              label="Additional agent instances"
-              startingAgentPubkey={startingAgentPubkey}
-              onToggle={toggle}
-              onOpenAgentProfile={onOpenAgentProfile}
-              onStartAgent={onStartAgent}
-            />
-          ) : null}
           {unknown.length > 0 ? (
             <CollapsibleAgentGroup
               agents={unknown}
               collapsed={collapsed}
               defaultModel={defaultModel}
               groupKey="__unknown__"
-              label="Unknown Agent"
+              label="Unknown agents"
               startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
@@ -473,7 +448,7 @@ function NewAgentCard({
           disabled={isPersonasPending}
           onClick={onCreatePersona}
         >
-          New agent
+          Create from scratch
         </DropdownMenuItem>
         {canChooseCatalog ? (
           <DropdownMenuItem

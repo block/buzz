@@ -14,6 +14,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 const TTL_OPTIONS: { label: string; value: number }[] = [
   { label: "1 day", value: 24 * 60 * 60 },
@@ -72,7 +73,7 @@ export function InviteLinkSection() {
   async function handleCopy() {
     if (!invite) return;
     try {
-      await navigator.clipboard.writeText(invite.url);
+      await writeTextToClipboard(invite.url);
       setCopied(true);
       toast.success("Invite link copied");
       setTimeout(() => setCopied(false), 2000);

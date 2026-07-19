@@ -1,6 +1,4 @@
-import { hexToBytes } from "@noble/hashes/utils.js";
 import { expect, test } from "@playwright/test";
-import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -82,36 +80,19 @@ test("avatar Next button still requires an avatar to be chosen", async ({
 // B4: Routing tests
 // ---------------------------------------------------------------------------
 
-test("import-key path skips backup and goes directly to avatar", async ({
-  page,
-}) => {
-  // Import tyler's OWN key (same pubkey = no component remount) so the
-  // identityWasImported flag persists in the same component instance.
+test("normal profile setup keeps the existing identity", async ({ page }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
   await page.goto("/");
 
-  // Profile page — click "Use existing key" to open the key import form.
   await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
-  await page.getByTestId("onboarding-import-key").click();
-  await expect(
-    page.getByRole("heading", { name: "Use your existing key" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("onboarding-import-key")).toHaveCount(0);
+  await expect(page.getByText("Create an identity key")).toHaveCount(0);
 
-  // Enter tyler's own nsec (same pubkey → no remount, identityWasImported stays true).
-  const tylerNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.tyler.privateKey));
-  await page.getByTestId("nostr-import-nsec-input").fill(tylerNsec);
-  await expect(page.getByTestId("nostr-import-npub-preview")).toBeVisible();
-  await page.getByTestId("nostr-import-submit").click();
-
-  // After import, the flow returns to profile with identityWasImported=true.
-  await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
 
-  // Backup page must NOT appear — avatar comes next on the import path.
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
-  await expect(page.getByTestId("onboarding-page-backup")).not.toBeVisible();
 });
 
 test("Back from the community avatar step returns to profile", async ({

@@ -677,12 +677,13 @@ pub const fn is_command_kind(kind: u32) -> bool {
     )
 }
 
-/// Returns `true` if `kind` is a relay-only sidecar kind.
+/// Returns `true` if `kind` may only be authored by the relay.
 /// Client submission of these kinds must be rejected.
 pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_CHANNEL_SUMMARY
+        KIND_NIP43_MEMBERSHIP_LIST
+            | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
@@ -753,6 +754,12 @@ mod tests {
         for &k in ALL_KINDS {
             assert!(seen.insert(k), "duplicate kind value: {k}");
         }
+    }
+
+    #[test]
+    fn nip43_membership_snapshot_is_relay_only() {
+        assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
+        assert!(!is_relay_only_kind(KIND_NIP43_LEAVE_REQUEST));
     }
 
     #[test]

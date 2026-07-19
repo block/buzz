@@ -21,6 +21,7 @@ import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type CommunityRailProps = {
   communities: Community[];
@@ -223,7 +224,7 @@ export function CommunityRail({
               </ContextMenuItem>
               <ContextMenuItem
                 onClick={() => {
-                  void navigator.clipboard.writeText(community.relayUrl);
+                  void writeTextToClipboard(community.relayUrl);
                 }}
               >
                 <Link2 className="h-4 w-4" />

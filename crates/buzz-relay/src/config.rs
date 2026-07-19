@@ -24,6 +24,15 @@ pub enum ConfigError {
     InvalidValue(String),
 }
 
+/// Deny-by-default read-only deployment-admin configuration.
+#[derive(Debug, Clone)]
+pub struct AdminConfig {
+    /// Exact admin HTTP authority.
+    pub host: String,
+    /// Optional admin SPA bundle directory.
+    pub web_dir: Option<std::path::PathBuf>,
+}
+
 /// Relay-hosted policy content presented on join surfaces.
 #[derive(Debug, Clone)]
 pub struct JoinPolicyConfig {
@@ -44,6 +53,9 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     /// Postgres database connection URL.
     pub database_url: String,
+    /// Optional read-replica connection URL (e.g. an Aurora `cluster-ro-`
+    /// endpoint). Unset means all reads stay on the writer.
+    pub read_database_url: Option<String>,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
@@ -219,6 +231,9 @@ pub struct Config {
     /// documents or age attestation are configured.
     pub join_policy: Option<JoinPolicyConfig>,
 
+    /// Deployment-admin API and SPA configuration. Absent means the surface is disabled.
+    pub admin: Option<AdminConfig>,
+
     /// Optional path to the web UI `dist/` directory.
     /// When set, the relay serves the invite landing page and its static assets.
     /// When unset, no static file serving happens (relay behaves as before).
@@ -364,6 +379,11 @@ impl Config {
 
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+
+        let read_database_url = std::env::var("READ_DATABASE_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
 
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
@@ -737,6 +757,35 @@ impl Config {
             })
         };
 
+        // Read-only deployment-admin surface. The route is absent when the host is unset.
+        let admin = match std::env::var("BUZZ_ADMIN_HOST")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            None => None,
+            Some(host) => {
+                if host.contains(['/', '\\', '@']) {
+                    return Err(ConfigError::InvalidValue(
+                        "BUZZ_ADMIN_HOST must be an exact authority".to_string(),
+                    ));
+                }
+                let web_dir = std::env::var("BUZZ_ADMIN_WEB_DIR")
+                    .ok()
+                    .map(|value| std::path::PathBuf::from(value.trim()))
+                    .filter(|value| !value.as_os_str().is_empty());
+                if let Some(ref dir) = web_dir {
+                    if !dir.join("index.html").is_file() {
+                        return Err(ConfigError::InvalidValue(format!(
+                            "BUZZ_ADMIN_WEB_DIR={} does not contain index.html",
+                            dir.display()
+                        )));
+                    }
+                }
+                Some(AdminConfig { host, web_dir })
+            }
+        };
+
         // Web UI static file serving
         let web_dir = std::env::var("BUZZ_WEB_DIR")
             .ok()
@@ -770,6 +819,7 @@ impl Config {
         Ok(Self {
             bind_addr,
             database_url,
+            read_database_url,
             redis_url,
             relay_url,
             pairing_relay_url,
@@ -810,6 +860,7 @@ impl Config {
             push_gateway_delivery_url,
             push_gateway_timeout,
             join_policy,
+            admin,
             web_dir,
             serve_git_web_gui,
         })
@@ -871,6 +922,34 @@ mod tests {
         assert!(
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
+        );
+    }
+
+    #[test]
+    fn read_database_url_unset_or_blank_is_none() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("READ_DATABASE_URL");
+
+        std::env::remove_var("READ_DATABASE_URL");
+        let unset = Config::from_env().expect("config").read_database_url;
+
+        std::env::set_var("READ_DATABASE_URL", "   ");
+        let blank = Config::from_env().expect("config").read_database_url;
+
+        std::env::set_var("READ_DATABASE_URL", "postgres://buzz:pw@replica:5432/buzz"); // sadscan:disable np.postgres.1
+        let set = Config::from_env().expect("config").read_database_url;
+
+        if let Some(value) = previous {
+            std::env::set_var("READ_DATABASE_URL", value);
+        } else {
+            std::env::remove_var("READ_DATABASE_URL");
+        }
+
+        assert_eq!(unset, None, "unset READ_DATABASE_URL must disable routing");
+        assert_eq!(blank, None, "blank READ_DATABASE_URL must disable routing");
+        assert_eq!(
+            set.as_deref(),
+            Some("postgres://buzz:pw@replica:5432/buzz") // sadscan:disable np.postgres.1
         );
     }
 

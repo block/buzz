@@ -18,7 +18,13 @@ export type CommunityOnboardingStage =
   | "connecting"
   | "profile"
   | "team-intro"
-  | "finalizing";
+  | "finalizing"
+  /**
+   * Backend setup is done and the app is mounting directly on the Welcome
+   * channel underneath the onboarding screen, which stays up as an opaque
+   * curtain until Welcome reports settled (or a safety timeout), then fades.
+   */
+  | "entering";
 
 export type CommunityOnboardingTransaction = {
   id: string;
@@ -36,6 +42,8 @@ export type CommunityOnboardingTransaction = {
    */
   policyReceipt?: string;
   communityId?: string;
+  previousCommunityId?: string;
+  addedCommunity?: boolean;
   createdAt: string;
   updatedAt: string;
   error?: string;
@@ -47,7 +55,14 @@ export type CommunityOnboardingTransaction = {
 export type CommunityOnboardingTransactionPatch = Partial<
   Pick<
     CommunityOnboardingTransaction,
-    "stage" | "communityId" | "communityName" | "error" | "acknowledged"
+    | "stage"
+    | "relayUrl"
+    | "communityId"
+    | "previousCommunityId"
+    | "addedCommunity"
+    | "communityName"
+    | "error"
+    | "acknowledged"
   >
 >;
 
@@ -84,9 +99,14 @@ function isTransaction(
     typeof transaction.communityName === "string" &&
     typeof transaction.createdAt === "string" &&
     typeof transaction.updatedAt === "string" &&
-    ["claiming", "connecting", "profile", "team-intro", "finalizing"].includes(
-      transaction.stage ?? "",
-    )
+    [
+      "claiming",
+      "connecting",
+      "profile",
+      "team-intro",
+      "finalizing",
+      "entering",
+    ].includes(transaction.stage ?? "")
   );
 }
 

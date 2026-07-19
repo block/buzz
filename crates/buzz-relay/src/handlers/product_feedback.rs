@@ -20,6 +20,18 @@ pub async fn handle(
 ) -> Result<(), String> {
     let category = parse_category(event)?;
     validate_body(&event.content)?;
+    let imeta_tags = event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "imeta")
+        .map(|tag| tag.as_slice().iter().map(ToString::to_string).collect())
+        .collect::<Vec<Vec<String>>>();
+    if !imeta_tags.is_empty() {
+        let media_base =
+            crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
+        crate::api::validate_imeta_tags(&imeta_tags, &media_base)?;
+        crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage).await?;
+    }
 
     let tags = serialize_tags(event)?;
     let event_created_at =

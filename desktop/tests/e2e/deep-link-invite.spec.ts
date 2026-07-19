@@ -110,6 +110,38 @@ test("connect deep link shows a static acknowledgment during setup", async ({
     .toContain('"acknowledged":true');
 });
 
+test("add-community deep link starts onboarding when no community is configured", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { pendingCommunityDeepLinks: [PENDING_ADD_COMMUNITY_LINK] },
+    { skipCommunitySeed: true },
+  );
+  await page.goto("/");
+
+  await expect(page.getByTestId("community-onboarding-flow")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        TRANSACTION_STORAGE_KEY,
+      ),
+    )
+    .toContain('"source":"add-community"');
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        TRANSACTION_STORAGE_KEY,
+      ),
+    )
+    .toContain('"communityName":"Acme Team"');
+});
+
 test("add-community deep link opens one editable prefill and acknowledges the queue", async ({
   page,
 }) => {
@@ -249,6 +281,15 @@ test("Welcome failure can be skipped without abandoning community onboarding", a
     { relayWsUrl: COMMUNITY_RELAY_URL, skipOnboardingSeed: true },
   );
   await page.goto("/");
+
+  for (const name of ["fizz", "honey", "bumble"]) {
+    const character = page.getByTestId(`starter-persona-${name}`);
+    await expect(character).toBeVisible();
+    await expect(character).toHaveAttribute(
+      "src",
+      `/onboarding/starter-team/${name}.png`,
+    );
+  }
 
   await page.getByRole("button", { name: "Enter hive" }).click();
 

@@ -1724,7 +1724,25 @@ test("channel date divider keeps the date sticky while the separator rule scroll
       return Number.parseInt(sharedBackdropZIndex, 10);
     })
     .toBeGreaterThan(Number.parseInt(metrics.dividerZIndex, 10));
-  await expect(page.getByTestId("channel-composer-overlay")).toBeVisible();
+  const composerOverlay = page.getByTestId("channel-composer-overlay");
+  await expect(composerOverlay).toBeVisible();
+  await expect(composerOverlay).toHaveCSS("backdrop-filter", "none");
+  await expect(composerOverlay).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(composerOverlay.getByTestId("message-composer")).not.toHaveCSS(
+    "backdrop-filter",
+    "none",
+  );
+  const composerActivityRow = composerOverlay.getByTestId(
+    "channel-composer-activity-row",
+  );
+  await expect(composerActivityRow).toHaveCSS("backdrop-filter", "none");
+  await expect(composerActivityRow).not.toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
   await expect
     .poll(async () => {
       const composerOverlayZIndex = await page

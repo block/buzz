@@ -21,6 +21,8 @@ export default defineConfig({
       testMatch: [
         "**/smoke.spec.ts",
         "**/onboarding-docked-cta-screenshots.spec.ts",
+        "**/identity-key-help.spec.ts",
+        "**/key-import-reveal.spec.ts",
         "**/navigation.spec.ts",
         "**/channels.spec.ts",
         "**/channel-shared-header-backdrop.spec.ts",
@@ -122,6 +124,7 @@ export default defineConfig({
         "**/onboarding.spec.ts",
         "**/stream.spec.ts",
         "**/integration.spec.ts",
+        "**/dm-double-notification.spec.ts",
         "**/profile.spec.ts",
         "**/sidebar.spec.ts",
         "**/sidebar-relay-card.spec.ts",

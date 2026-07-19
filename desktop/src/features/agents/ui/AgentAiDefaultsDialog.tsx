@@ -86,10 +86,11 @@ export function AgentAiDefaultsDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>AI defaults</DialogTitle>
+            <DialogTitle>Agent defaults</DialogTitle>
             <DialogDescription>
-              These settings are inherited by agents using AI defaults. Saving
-              may restart affected running agents.
+              These settings apply to all agents unless you override them.
+              Agent-specific settings always take priority. Changes may restart
+              running agents.
             </DialogDescription>
           </DialogHeader>
           <GlobalAgentConfigEditor
@@ -125,9 +126,11 @@ export function AgentAiDefaultsDialog({
           }}
         >
           <AlertDialogHeader>
-            <AlertDialogTitle>Discard changes to AI defaults?</AlertDialogTitle>
+            <AlertDialogTitle>
+              Discard changes to agent defaults?
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Unsaved changes made to AI defaults will be lost.
+              Unsaved changes made to agent defaults will be lost.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

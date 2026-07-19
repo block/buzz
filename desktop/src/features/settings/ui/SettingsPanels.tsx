@@ -11,6 +11,7 @@ import {
   Keyboard,
   LayoutTemplate,
   LockKeyhole,
+  MessagesSquare,
   MonitorCog,
   Moon,
   ShieldAlert,
@@ -63,6 +64,7 @@ import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
 import { GlobalAgentConfigSettingsCard } from "./GlobalAgentConfigSettingsCard";
+import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -76,6 +78,7 @@ export type SettingsSection =
   | "compute"
   | "appearance"
   | "shortcuts"
+  | "hosted-communities"
   | "community-members"
   | "moderation"
   | "custom-emoji"
@@ -94,6 +97,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "compute",
   "appearance",
   "shortcuts",
+  "hosted-communities",
   "community-members",
   "moderation",
   "custom-emoji",
@@ -174,6 +178,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "shortcuts",
     label: "Shortcuts",
     icon: Keyboard,
+  },
+  {
+    value: "hosted-communities",
+    label: "Hosted communities",
+    icon: MessagesSquare,
   },
   {
     value: "community-members",
@@ -719,6 +728,8 @@ export function renderSettingsSection(
       return <ThemeSettingsCard />;
     case "shortcuts":
       return <KeyboardShortcutsCard />;
+    case "hosted-communities":
+      return <HostedCommunitiesSettingsCard />;
     case "community-members":
       return (
         <CommunityMembersSettingsCard currentPubkey={props.currentPubkey} />

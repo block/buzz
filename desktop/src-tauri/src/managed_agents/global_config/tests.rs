@@ -266,6 +266,7 @@ fn roundtrip_serialization() {
         env_vars: BTreeMap::from([("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string())]),
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4".to_string()),
+        preferred_runtime: Some("claude".to_string()),
     };
     let json = serde_json::to_string(&config).expect("serialize");
     let back: GlobalAgentConfig = serde_json::from_str(&json).expect("deserialize");
@@ -582,6 +583,7 @@ fn populated_global_config_round_trips() {
             .collect(),
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-5".to_string()),
+        preferred_runtime: None,
     };
     let json = serde_json::to_string(&original).expect("serialization must not fail");
     let decoded: GlobalAgentConfig =

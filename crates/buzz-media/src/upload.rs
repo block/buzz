@@ -13,7 +13,8 @@ use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
-    mime_to_ext, validate_content, validate_file_content, validate_video_file,
+    looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content,
+    validate_video_file,
 };
 
 /// Shared buffered-upload pipeline for the image and generic-file paths.
@@ -230,13 +231,14 @@ pub async fn process_upload(
     .await
 }
 
-/// Process a generic (non-image, non-video) file upload end-to-end.
+/// Process a generic non-media file upload end-to-end.
 ///
-/// This is the catch-all attachment path: documents, archives, audio, text,
-/// data — anything that isn't a previewable image or an H.264 MP4. The body is
-/// fully buffered in RAM (bounded by `config.max_file_bytes` at the transport
-/// layer), validated against the deny-list + size cap, stored, and recorded in
-/// a minimal sidecar. No thumbnail, no dimensions, no duration.
+/// This is the catch-all attachment path for documents, archives, text, and
+/// data. Recognized image, video, and audio formats fail closed instead of
+/// entering exact-byte storage without their format-specific location policy.
+/// The body is fully buffered in RAM (bounded by `config.max_file_bytes` at the
+/// transport layer), validated against the deny-list + size cap, stored, and
+/// recorded in a minimal sidecar. No thumbnail, dimensions, or duration.
 ///
 /// The resulting blob is served with `Content-Disposition: attachment`, so the
 /// client always downloads it rather than rendering it inline.
@@ -391,15 +393,13 @@ pub async fn process_video_upload(
         (sha256_hex, total, sniff_buf)
     };
 
-    // --- 2. Magic-byte check (video/mp4 only) ---
-    // sniff_buf has up to MIN_SNIFF_BYTES (4 KiB) of leading bytes — enough for
-    // infer::get() to detect MP4 ftyp even if the first network chunk was tiny.
-    let mime = infer::get(&first_bytes)
-        .map(|t| t.mime_type().to_string())
-        .ok_or(MediaError::UnknownContentType)?;
-    if mime != "video/mp4" {
-        return Err(MediaError::DisallowedContentType(mime));
+    // --- 2. ISO-BMFF/MP4 structural check ---
+    // Do not depend on `infer`'s finite major-brand list: valid MP4 producers
+    // may use a proprietary major brand while declaring `isom` compatibility.
+    if !looks_like_mp4_iso_bmff(&first_bytes) {
+        return Err(MediaError::UnsupportedContainer);
     }
+    let mime = "video/mp4".to_string();
 
     // --- 3. Verify Blossom auth: x tag must match computed SHA-256 ---
     let auth = auth_event.clone();

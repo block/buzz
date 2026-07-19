@@ -16,11 +16,13 @@ const LIVENESS_INTERVAL_MS = 10_000;
  * graceful exits clear via turn_completed and working turns refresh on every
  * stream event. Derived from the interval so it tracks if the interval changes. */
 const REMOVE_AFTER_MS = LIVENESS_INTERVAL_MS * 2.5;
-/** Pause pruning once EVERY tracked turn has gone this long without activity —
- * the "all at once" signature of a relay drop (flaky VPN), where liveness frames
- * stop arriving for all agents simultaneously. Set below REMOVE_AFTER_MS so the
- * pause engages before the 25s prune would wipe the badges. */
+/** Pause pruning for an agent once ALL of its tracked turns have gone this long
+ * without activity — the "all at once" signature of that agent's frame stream
+ * being down. Set below REMOVE_AFTER_MS so the pause engages before the 25s
+ * prune would wipe badges. */
 const FRAME_GAP_PAUSE_MS = LIVENESS_INTERVAL_MS * 2;
+/** A silent agent is treated as dead after this bounded prune pause. */
+const PRUNE_PAUSE_MAX_MS = 3 * 60_000;
 /** Maximum concurrent active turns tracked per agent (matches pool size). */
 const MAX_TURNS_PER_AGENT = 4;
 /** Cap on per-agent terminal tombstones (A's resurrection guard). Only the
@@ -123,6 +125,11 @@ function sampleClockOffset(agentKey: string, timestamp: string): boolean {
   return true;
 }
 
+function parseTimestamp(timestamp: string): number | null {
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function startTurn(
   agentPubkey: string,
   channelId: string,
@@ -151,7 +158,7 @@ function startTurn(
     }
   }
 
-  const startedAt = Date.parse(timestamp) || Date.now();
+  const startedAt = parseTimestamp(timestamp) ?? Date.now();
   agentTurns.set(turnId, {
     turnId,
     channelId,
@@ -179,23 +186,31 @@ function recordActivity(agentPubkey: string, turnId: string | null): boolean {
  * A recovered liveness/acp frame for a turn no longer in the live map recreates
  * it, UNLESS C's tombstone shows the turn already terminally ended at or after
  * this frame's time (a stale frame must not revive a completed turn). The frame
- * carries no record of the original start, so the badge re-anchors to this
- * frame's timestamp — it resumes counting from recovery, which is the honest
- * floor for a turn whose true start is unrecoverable. Returns true on revive.
+ * may carry its original `startedAt` envelope field; when valid and not later
+ * than the frame, preserve the elapsed timer by anchoring to that timestamp.
+ * Old, malformed, or impossible future starts fall back to the recovery
+ * timestamp. Returns true on revive.
  */
 function resurrectTurn(agentPubkey: string, event: ObserverEvent): boolean {
   if (!event.turnId || !event.channelId) return false;
   const key = normalizePubkey(agentPubkey);
   const terminalAt = terminalAtByAgent.get(key)?.get(event.turnId);
-  const frameAt = Date.parse(event.timestamp);
+  const frameAt = parseTimestamp(event.timestamp);
   // Only revive when this frame is strictly newer than the recorded terminal.
-  if (
-    terminalAt !== undefined &&
-    (!Number.isFinite(frameAt) || frameAt <= terminalAt)
-  ) {
+  if (terminalAt !== undefined && (frameAt === null || frameAt <= terminalAt)) {
     return false;
   }
-  startTurn(agentPubkey, event.channelId, event.turnId, event.timestamp);
+  const startedAt =
+    typeof event.startedAt === "string" &&
+    parseTimestamp(event.startedAt) !== null
+      ? event.startedAt
+      : event.timestamp;
+  const startedAtMs = parseTimestamp(startedAt);
+  const safeStartedAt =
+    frameAt !== null && startedAtMs !== null && startedAtMs <= frameAt
+      ? startedAt
+      : event.timestamp;
+  startTurn(agentPubkey, event.channelId, event.turnId, safeStartedAt);
   return true;
 }
 
@@ -255,34 +270,34 @@ function endTurn(
   invalidateCache(key);
 }
 
-/** True when every tracked turn across every agent is simultaneously stale —
- * no turn has had activity within FRAME_GAP_PAUSE_MS. With no tracked turns
- * there is nothing to prune, so it returns false (never pause). */
-function shouldPausePrune(now: number): boolean {
+/** True when every tracked turn for one agent is stale, but only until the
+ * bounded backstop expires. Other agents' activity intentionally has no effect. */
+function shouldPausePrune(
+  agentTurns: Map<string, ActiveTurn>,
+  now: number,
+): boolean {
   let maxActivity = 0;
-  for (const agentTurns of activeTurnsByAgent.values())
-    for (const turn of agentTurns.values())
-      if (turn.lastActivityAt > maxActivity) maxActivity = turn.lastActivityAt;
-  return maxActivity > 0 && now - maxActivity > FRAME_GAP_PAUSE_MS;
+  for (const turn of agentTurns.values()) {
+    if (turn.lastActivityAt > maxActivity) maxActivity = turn.lastActivityAt;
+  }
+  const silentFor = now - maxActivity;
+  return (
+    maxActivity > 0 &&
+    silentFor > FRAME_GAP_PAUSE_MS &&
+    silentFor < PRUNE_PAUSE_MAX_MS
+  );
 }
 
 function pruneExpired() {
   const now = Date.now();
-  // Pause pruning when ALL tracked turns are simultaneously stale — the "all
-  // at once" signature of a relay drop, where every agent's liveness stops in
-  // the same instant. Gating on the MAX lastActivityAt (not a global frame
-  // clock) is what keeps this from over-pausing: a single live sibling turn
-  // keeps the max fresh, so a genuinely dead turn still prunes at 25s — no
-  // regression for the multi-agent crash case. Residual: a LONE turn kill -9'd
-  // under a HEALTHY relay (it was the only active turn) keeps its badge until
-  // the next frame instead of clearing at 25s, since local-only sensing cannot
-  // distinguish that from a drop. The badge self-heals the instant any frame
-  // arrives. Accepted tradeoff to keep badges visible through transient drops.
-  if (shouldPausePrune(now)) {
-    return;
-  }
   let changed = false;
   for (const [agentKey, agentTurns] of activeTurnsByAgent) {
+    // A single fresh tracked turn for this agent means a stale sibling is
+    // genuinely dead and must still prune at 25s. Conversely, all of this
+    // agent's turns going stale together identifies a per-agent frame-stream
+    // gap, regardless of whether other agents keep reporting activity.
+    if (shouldPausePrune(agentTurns, now)) continue;
+
     for (const [turnId, turn] of agentTurns) {
       if (now - turn.lastActivityAt > REMOVE_AFTER_MS) {
         agentTurns.delete(turnId);

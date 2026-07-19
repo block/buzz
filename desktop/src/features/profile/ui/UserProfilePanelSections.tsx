@@ -88,6 +88,7 @@ export type ProfileSummaryViewProps = {
   isFollowing: boolean;
   isOwner: boolean | undefined;
   isSelf: boolean;
+  instances: ManagedAgent[];
   managedAgent: ManagedAgent | undefined;
   memoriesLoading: boolean;
   memoryCount: number | undefined;
@@ -95,6 +96,7 @@ export type ProfileSummaryViewProps = {
   agentSettingsFields: ProfileField[];
   diagnosticsFields: ProfileField[];
   onAddToChannel: () => void;
+  onOpenInstance: (pubkey: string) => void;
   onOpenActivity: (channelId?: string | null) => void;
   onOpenChannel: (channelId: string) => void;
   onOpenDiagnostics: () => void;
@@ -198,6 +200,7 @@ export function ProfileSummaryView({
   isFollowing,
   isOwner,
   isSelf,
+  instances,
   managedAgent,
   memoriesLoading,
   memoryCount,
@@ -205,6 +208,7 @@ export function ProfileSummaryView({
   agentSettingsFields,
   diagnosticsFields,
   onAddToChannel,
+  onOpenInstance,
   onOpenActivity,
   onOpenChannel,
   onOpenDiagnostics,
@@ -248,6 +252,7 @@ export function ProfileSummaryView({
   const showActivityIngress = canViewActivity;
   const showInfoTab =
     agentInfoFields.length > 0 ||
+    instances.length > 1 ||
     isArchived ||
     showActivityIngress ||
     !showRuntimeTab;
@@ -388,8 +393,10 @@ export function ProfileSummaryView({
               agentInfoFields={agentInfoFields}
               callerChannelId={callerChannelId}
               channelIdToName={channelIdToName}
+              instances={instances}
               isArchived={isArchived}
               onOpenActivity={onOpenActivity}
+              onOpenInstance={onOpenInstance}
               pubkey={pubkey}
               showActivityIngress={showActivityIngress}
             />

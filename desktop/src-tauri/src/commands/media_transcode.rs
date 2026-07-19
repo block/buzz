@@ -7,6 +7,26 @@
 
 use crate::managed_agents::resolve_command;
 
+/// Build an ffmpeg command without inheriting user-controlled process knobs.
+///
+/// The binary path is resolved before this point, so a shell and `PATH` are not
+/// needed. Windows keeps only the OS variables required for process/DLL lookup.
+fn ffmpeg_command(path: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(path);
+    #[cfg(target_os = "windows")]
+    let required_windows_env: Vec<(&'static str, std::ffi::OsString)> =
+        ["SystemRoot", "WINDIR", "TEMP", "TMP"]
+            .into_iter()
+            .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
+            .collect();
+    command.env_clear().env("LANG", "C");
+    #[cfg(target_os = "windows")]
+    for (name, value) in required_windows_env {
+        command.env(name, value);
+    }
+    command
+}
+
 /// Locate ffmpeg using the same discovery logic as managed agents
 /// (login shell PATH, /opt/homebrew/bin, /usr/local/bin, etc.).
 /// Returns the resolved absolute path on success.
@@ -20,7 +40,7 @@ pub(super) fn find_ffmpeg() -> Result<std::path::PathBuf, String> {
             .to_string()
     })?;
 
-    match std::process::Command::new(&ffmpeg_path)
+    match ffmpeg_command(&ffmpeg_path)
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -168,11 +188,34 @@ pub(super) fn transcode_to_mp4(
     let output = std::env::temp_dir().join(format!("buzz-transcode-{}.mp4", uuid::Uuid::new_v4()));
 
     let result = run_ffmpeg_with_timeout(
-        std::process::Command::new(ffmpeg)
-            .args(["-y", "-loglevel", "error"]) // suppress progress spam — prevents stderr pipe deadlock
+        ffmpeg_command(ffmpeg)
+            .args([
+                "-y",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-protocol_whitelist",
+                "file,pipe",
+            ]) // suppress progress spam — prevents stderr pipe deadlock
             .arg("-i")
             .arg(source) // OsStr — handles non-UTF-8 paths on Unix
             .args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-map_metadata",
+                "-1",
+                "-map_chapters",
+                "-1",
+                "-sn",
+                "-dn",
+                "-fflags",
+                "+bitexact",
+                "-flags:v",
+                "+bitexact",
+                "-flags:a",
+                "+bitexact",
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -181,12 +224,16 @@ pub(super) fn transcode_to_mp4(
                 "23",
                 "-pix_fmt",
                 "yuv420p",
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                 "-c:a",
                 "aac",
                 "-b:a",
                 "128k",
                 "-movflags",
                 "+faststart",
+                "-metadata",
+                "encoder=",
             ])
             .arg(&output)
             .stdout(std::process::Stdio::null())
@@ -228,11 +275,27 @@ pub(super) fn transcode_heic_to_jpeg(
     let heic_timeout = std::time::Duration::from_secs(60);
 
     let result = run_ffmpeg_with_timeout(
-        std::process::Command::new(ffmpeg)
-            .args(["-y", "-loglevel", "error"]) // suppress progress spam — prevents stderr pipe deadlock
+        ffmpeg_command(ffmpeg)
+            .args([
+                "-y",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-protocol_whitelist",
+                "file,pipe",
+            ]) // suppress progress spam — prevents stderr pipe deadlock
             .arg("-i")
             .arg(source) // OsStr — handles non-UTF-8 paths on Unix
-            .args(["-frames:v", "1", "-q:v", "2"])
+            .args([
+                "-map",
+                "0:v:0",
+                "-map_metadata",
+                "-1",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+            ])
             .arg(&output)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped()),
@@ -287,8 +350,15 @@ pub(super) fn extract_poster_frame(
 
     // Try seeking to 1s first (avoids black first frames from fade-ins).
     let result = run_ffmpeg_with_timeout(
-        std::process::Command::new(ffmpeg)
-            .args(["-y", "-loglevel", "error"])
+        ffmpeg_command(ffmpeg)
+            .args([
+                "-y",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-protocol_whitelist",
+                "file,pipe",
+            ])
             .arg("-ss")
             .arg("1")
             .arg("-i")
@@ -311,8 +381,15 @@ pub(super) fn extract_poster_frame(
         }
         let _ = std::fs::remove_file(&output);
         let fallback = run_ffmpeg_with_timeout(
-            std::process::Command::new(ffmpeg)
-                .args(["-y", "-loglevel", "error"])
+            ffmpeg_command(ffmpeg)
+                .args([
+                    "-y",
+                    "-nostdin",
+                    "-loglevel",
+                    "error",
+                    "-protocol_whitelist",
+                    "file,pipe",
+                ])
                 .arg("-i")
                 .arg(mp4_path)
                 .args(["-vframes", "1", "-vf", "scale=640:-2", "-q:v", "2"])
@@ -489,6 +566,48 @@ mod tests {
         assert!(!has_heic_extension(Path::new("photo.jpg")));
         assert!(!has_heic_extension(Path::new("photo.png")));
         assert!(!has_heic_extension(Path::new("noextension")));
+    }
+
+    #[test]
+    fn test_transcode_to_mp4_drops_source_metadata() {
+        let Ok(ffmpeg) = find_ffmpeg() else {
+            eprintln!("skipping metadata round-trip: ffmpeg not found");
+            return;
+        };
+        let source =
+            std::env::temp_dir().join(format!("buzz-metadata-test-{}.mp4", uuid::Uuid::new_v4()));
+        let generated = std::process::Command::new(&ffmpeg)
+            .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=64x64:rate=1")
+            .args([
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-metadata",
+                "location=+37.7-122.4/",
+                "-metadata:s:v:0",
+                "title=private camera stream",
+            ])
+            .arg(&source)
+            .output()
+            .expect("run ffmpeg fixture generation");
+        if !generated.status.success() {
+            eprintln!("skipping metadata round-trip: ffmpeg cannot encode H.264");
+            let _ = std::fs::remove_file(&source);
+            return;
+        }
+
+        let output = transcode_to_mp4(&source, &ffmpeg).expect("transcode fixture");
+        let bytes = std::fs::read(&output).expect("read transcoded video");
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&output);
+        for secret in [b"+37.7-122.4/".as_slice(), b"private camera stream"] {
+            assert!(
+                !bytes.windows(secret.len()).any(|window| window == secret),
+                "source metadata survived transcode"
+            );
+        }
     }
 
     /// Round-trip transcode test, gated on ffmpeg being present so CI without

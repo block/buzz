@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 use crate::app_state::AppState;
+use crate::commands::clipboard::with_clipboard;
 use crate::commands::export_util::save_bytes_with_dialog;
 use crate::commands::media::{detect_and_validate_mime, mint_media_get_auth, sanitize_filename};
 use crate::commands::{
@@ -201,18 +202,15 @@ pub async fn copy_image_to_clipboard(
     // arboard requires main-thread access on macOS. Use a sync channel so the
     // async command can await the result.
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    let clipboard_app = app.clone();
     app.run_on_main_thread(move || {
-        let result = arboard::Clipboard::new()
-            .map_err(|e| format!("clipboard error: {e}"))
-            .and_then(|mut clipboard| {
-                clipboard
-                    .set_image(arboard::ImageData {
-                        width,
-                        height,
-                        bytes: std::borrow::Cow::Owned(raw),
-                    })
-                    .map_err(|e| format!("clipboard error: {e}"))
-            });
+        let result = with_clipboard(&clipboard_app, |clipboard| {
+            clipboard.set_image(arboard::ImageData {
+                width,
+                height,
+                bytes: std::borrow::Cow::Owned(raw),
+            })
+        });
         // Ignore send errors — the receiver dropped only if the command was
         // cancelled, in which case nobody is waiting for the result.
         let _ = tx.send(result);
@@ -235,20 +233,15 @@ pub async fn copy_text_to_clipboard(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    let clipboard_app = app.clone();
     app.run_on_main_thread(move || {
-        let result = arboard::Clipboard::new()
-            .map_err(|e| format!("clipboard error: {e}"))
-            .and_then(|mut clipboard| {
-                if let Some(html) = html {
-                    clipboard
-                        .set_html(html, Some(text))
-                        .map_err(|e| format!("clipboard error: {e}"))
-                } else {
-                    clipboard
-                        .set_text(text)
-                        .map_err(|e| format!("clipboard error: {e}"))
-                }
-            });
+        let result = with_clipboard(&clipboard_app, |clipboard| {
+            if let Some(html) = html {
+                clipboard.set_html(html, Some(text))
+            } else {
+                clipboard.set_text(text)
+            }
+        });
         let _ = tx.send(result);
     })
     .map_err(|e| format!("main thread dispatch failed: {e}"))?;

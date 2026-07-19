@@ -142,13 +142,18 @@ async fn main() -> anyhow::Result<()> {
 
     let db_config = DbConfig {
         database_url: config.database_url.clone(),
+        read_database_url: config.read_database_url.clone(),
         ..DbConfig::default()
     };
     let db = Db::new(&db_config).await.map_err(|e| {
         error!("Failed to connect to Postgres: {e}");
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
-    info!("Postgres connected");
+    if db.has_read_pool() {
+        info!("Postgres connected (writer + read replica)");
+    } else {
+        info!("Postgres connected");
+    }
 
     let auto_migrate =
         buzz_auto_migrate_enabled(std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref());
@@ -164,6 +169,26 @@ async fn main() -> anyhow::Result<()> {
 
     if let Err(e) = db.ensure_future_partitions(3).await {
         error!("Failed to ensure partitions: {e}");
+    }
+
+    // Freshness fence probe: cursor pages route to the replica only for
+    // history the probe has verified as fully replayed. Deliberately AFTER
+    // the migration decision: spawn_fence_probe first verifies the
+    // commit-time floor guard (catalog shape + observed behavior through the
+    // armed pool) against the live schema, so a relay running with
+    // BUZZ_AUTO_MIGRATE off and migration 0021 unapplied can never open the
+    // fence over an unenforced floor. Verification failure is loud but
+    // non-fatal: the fence stays closed and every cursor page routes to the
+    // writer.
+    match db.spawn_fence_probe().await {
+        Ok(true) => info!("Replica fence probe started (floor guard verified)"),
+        Ok(false) => {}
+        Err(e) => {
+            error!(
+                "Replica fence disabled — floor guard verification failed: {e}. \
+                 All cursor reads stay on the writer."
+            );
+        }
     }
 
     // NIP-43: if membership enforcement is on, a valid owner pubkey is required.
@@ -339,13 +364,21 @@ async fn main() -> anyhow::Result<()> {
     // Postgres FTS: the searchable row IS the persisted event row (its
     // `tsvector` column is populated by the `insert_event` write), so there is
     // no external collection to provision — the search service just queries the
-    // same Postgres over its own pool.
+    // same Postgres over its own pool. Search is lag-tolerant, so it prefers
+    // the read replica when one is configured.
+    let search_db_url = config
+        .read_database_url
+        .as_deref()
+        .unwrap_or(&config.database_url);
     let search_pool = sqlx::postgres::PgPoolOptions::new()
-        .connect(&config.database_url)
+        .connect(search_db_url)
         .await
         .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
     let search = SearchService::new(search_pool);
-    info!("Search service ready (Postgres FTS)");
+    info!(
+        replica = config.read_database_url.is_some(),
+        "Search service ready (Postgres FTS)"
+    );
 
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
@@ -461,34 +494,46 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // NIP-43: publish the initial membership list on startup so clients can
-    // REQ kind:13534 immediately without waiting for the next membership change.
+    // NIP-43: reconcile the event-backed roster for every provisioned
+    // community before opening the listener. `relay_members` is canonical;
+    // this repairs pre-snapshot communities and any publication that failed
+    // after a membership transaction committed.
     if config.require_relay_membership {
-        // Resolve the deployment's community from the configured relay URL
-        // host (single-community per deployment), failing closed if the host
-        // isn't mapped. Await publication before opening the listener so the
-        // first client query observes the roster.
-        match buzz_relay::tenant::bind_deployment_community(&state.db, &state.config.relay_url)
-            .await
+        match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots(&state).await
         {
-            Ok(tenant) => {
-                if let Err(e) = buzz_relay::handlers::side_effects::publish_nip43_membership_list(
-                    &tenant, &state,
+            Ok(count) => info!(count, "NIP-43 membership snapshots reconciled on startup"),
+            Err(error) => {
+                tracing::warn!(%error, "NIP-43 membership snapshot startup reconciliation failed")
+            }
+        }
+
+        let reconcile_state = Arc::clone(&state);
+        let interval_secs = std::env::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60)
+            .max(1);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots(
+                    &reconcile_state,
                 )
                 .await
                 {
-                    tracing::warn!(error = %e, "failed to publish initial NIP-43 membership list on startup");
-                } else {
-                    tracing::info!("NIP-43 membership list published on startup");
+                    Ok(count) if count > 0 => {
+                        info!(count, "NIP-43 membership snapshots repaired")
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "periodic NIP-43 membership snapshot reconciliation failed"
+                    ),
                 }
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = ?e,
-                    "initial NIP-43 membership list skipped: relay host is not mapped to a community"
-                );
-            }
-        }
+        });
     }
 
     // Emit kind:39000/39002 discovery events for channels that exist in the DB
@@ -906,6 +951,28 @@ async fn main() -> anyhow::Result<()> {
                 metrics::gauge!("buzz_db_pool_idle").set(db_stats.idle as f64);
                 metrics::gauge!("buzz_db_pool_active").set(active as f64);
                 metrics::gauge!("buzz_db_pool_max").set(db_stats.max as f64);
+
+                if let Some(read_stats) = pool_state.db.read_pool_stats() {
+                    let read_active = read_stats.size.saturating_sub(read_stats.idle);
+                    metrics::gauge!("buzz_db_read_pool_size").set(read_stats.size as f64);
+                    metrics::gauge!("buzz_db_read_pool_idle").set(read_stats.idle as f64);
+                    metrics::gauge!("buzz_db_read_pool_active").set(read_active as f64);
+                    metrics::gauge!("buzz_db_read_pool_max").set(read_stats.max as f64);
+
+                    // Fence observability: 1 when replica routing is
+                    // eligible, and the verified-freshness lag in seconds.
+                    // Closed/stale fence reports open=0 with lag untouched.
+                    match pool_state.db.fence().verified_through() {
+                        Some(fence_ts) => {
+                            let lag = (chrono::Utc::now() - fence_ts).num_seconds();
+                            metrics::gauge!("buzz_db_replica_fence_open").set(1.0);
+                            metrics::gauge!("buzz_db_replica_fence_lag_seconds").set(lag as f64);
+                        }
+                        None => {
+                            metrics::gauge!("buzz_db_replica_fence_open").set(0.0);
+                        }
+                    }
+                }
 
                 let rs = pool_state.redis_pool.status();
                 metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);

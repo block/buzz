@@ -151,7 +151,7 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     if let Some(cli) = runtime.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
             for cmd in runtime.cli_install_commands_for_os() {
-                let result = run_install_command("cli", cmd);
+                let result = run_install_command_with_retry("cli", cmd);
                 let success = result.success;
                 steps.push(result);
                 if !success {
@@ -212,7 +212,7 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
                 }
             };
 
-            let mut result = run_install_command("adapter", &planned);
+            let mut result = run_install_command_with_retry("adapter", &planned);
             if !result.success && result.hint.is_none() && is_npm_global_install(cmd) {
                 result.hint = npm_eacces_hint(&result.stderr, cmd);
             }
@@ -656,6 +656,72 @@ pub(crate) fn install_shell_from(
     resolved: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, String> {
     resolved.ok_or_else(|| crate::managed_agents::git_bash::GIT_BASH_INSTALL_HINT.to_string())
+}
+
+/// Maximum number of attempts for a transient-looking install command.
+const INSTALL_MAX_ATTEMPTS: u32 = 3;
+
+/// Run an install command, retrying transient failures with backoff.
+///
+/// Runtime installs pull artifacts over the network — Goose's `curl … | bash`
+/// fetches a native release-asset tarball from GitHub's CDN with no retry of
+/// its own, and the npm adapter installs hit the registry. A single blip there
+/// currently fails onboarding outright. This retries a command that ran to
+/// completion but exited nonzero (the transient-download signature) up to
+/// `INSTALL_MAX_ATTEMPTS` times. Failures with no exit code — a timeout or a
+/// shell that never spawned — are not retried, since re-running them just costs
+/// the user more time without a plausible path to success.
+fn run_install_command_with_retry(step: &str, command: &str) -> InstallStepResult {
+    run_install_with_retry(
+        INSTALL_MAX_ATTEMPTS,
+        |_attempt| run_install_command(step, command),
+        std::thread::sleep,
+    )
+}
+
+/// Core retry loop, decoupled from the real command runner and clock so it can
+/// be unit-tested without spawning shells or sleeping. `run` receives the
+/// 1-based attempt number.
+fn run_install_with_retry(
+    max_attempts: u32,
+    mut run: impl FnMut(u32) -> InstallStepResult,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> InstallStepResult {
+    let mut attempt = 1;
+    loop {
+        let result = run(attempt);
+        if result.success || !install_failure_is_retryable(&result) || attempt >= max_attempts {
+            return if attempt > 1 && !result.success {
+                annotate_retry_attempts(result, attempt)
+            } else {
+                result
+            };
+        }
+        sleep(install_retry_backoff(attempt));
+        attempt += 1;
+    }
+}
+
+/// Only retry commands that actually ran and exited nonzero — the signature of
+/// a transient download failure. A missing exit code means the command timed
+/// out or the shell failed to spawn, neither of which a retry is likely to fix.
+fn install_failure_is_retryable(result: &InstallStepResult) -> bool {
+    !result.success && result.exit_code.is_some()
+}
+
+/// Linear backoff: 3s before attempt 2, 6s before attempt 3.
+fn install_retry_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(3 * attempt as u64)
+}
+
+/// Prefix the surfaced error so the UI shows the install was retried rather than
+/// failed on a single unlucky attempt.
+fn annotate_retry_attempts(mut result: InstallStepResult, attempts: u32) -> InstallStepResult {
+    result.stderr = format!(
+        "install failed after {attempts} attempts (retried with backoff)\n{}",
+        result.stderr
+    );
+    result
 }
 
 fn run_install_command(step: &str, command: &str) -> InstallStepResult {
@@ -1281,6 +1347,128 @@ mod tests {
         assert!(
             buzz.cli_install_commands_for_os().is_empty(),
             "buzz-agent ships with the app — must never have install commands"
+        );
+    }
+
+    // ── install retry ─────────────────────────────────────────────────────────
+
+    /// Build an `InstallStepResult` with just the fields the retry loop reads.
+    fn step_result(success: bool, exit_code: Option<i32>, stderr: &str) -> InstallStepResult {
+        InstallStepResult {
+            step: "cli".to_string(),
+            command: "curl … | bash".to_string(),
+            success,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            exit_code,
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn test_retryable_only_for_nonzero_exit() {
+        // Ran to completion but exited nonzero — the transient-download signature.
+        assert!(install_failure_is_retryable(&step_result(
+            false,
+            Some(1),
+            ""
+        )));
+        // No exit code — timeout or shell-never-spawned; retry won't help.
+        assert!(!install_failure_is_retryable(&step_result(false, None, "")));
+        // Success is never retryable.
+        assert!(!install_failure_is_retryable(&step_result(
+            true,
+            Some(0),
+            ""
+        )));
+    }
+
+    #[test]
+    fn test_retry_backoff_is_linear() {
+        assert_eq!(install_retry_backoff(1), std::time::Duration::from_secs(3));
+        assert_eq!(install_retry_backoff(2), std::time::Duration::from_secs(6));
+    }
+
+    #[test]
+    fn test_retry_stops_on_first_success() {
+        let mut calls = 0;
+        let mut sleeps = 0;
+        let result = run_install_with_retry(
+            3,
+            |_| {
+                calls += 1;
+                step_result(true, Some(0), "")
+            },
+            |_| sleeps += 1,
+        );
+        assert!(result.success);
+        assert_eq!(calls, 1, "a first-attempt success must not re-run");
+        assert_eq!(sleeps, 0, "no backoff sleep when nothing is retried");
+    }
+
+    #[test]
+    fn test_retry_recovers_after_transient_failure() {
+        let mut calls = 0;
+        let result = run_install_with_retry(
+            3,
+            |attempt| {
+                calls += 1;
+                // Fail the first attempt with a nonzero exit, then succeed.
+                step_result(attempt >= 2, Some(if attempt >= 2 { 0 } else { 1 }), "blip")
+            },
+            |_| {},
+        );
+        assert!(result.success);
+        assert_eq!(calls, 2, "should retry once then succeed");
+        // A recovered install must not carry the retry-failure annotation.
+        assert!(!result.stderr.contains("attempts"));
+    }
+
+    #[test]
+    fn test_retry_does_not_retry_unretryable_failure() {
+        let mut calls = 0;
+        let result = run_install_with_retry(
+            3,
+            |_| {
+                calls += 1;
+                step_result(false, None, "timed out")
+            },
+            |_| {},
+        );
+        assert!(!result.success);
+        assert_eq!(calls, 1, "a failure with no exit code must not be retried");
+        assert_eq!(
+            result.stderr, "timed out",
+            "unretried failure is unannotated"
+        );
+    }
+
+    #[test]
+    fn test_retry_exhausts_attempts_and_annotates() {
+        let mut calls = 0;
+        let mut sleeps = 0;
+        let result = run_install_with_retry(
+            3,
+            |_| {
+                calls += 1;
+                step_result(false, Some(1), "download failed")
+            },
+            |_| sleeps += 1,
+        );
+        assert!(!result.success);
+        assert_eq!(calls, 3, "must try exactly max_attempts times");
+        assert_eq!(
+            sleeps, 2,
+            "backoff sleeps between attempts, not after the last"
+        );
+        assert!(
+            result.stderr.contains("after 3 attempts"),
+            "exhausted retries must surface the attempt count, got: {}",
+            result.stderr
+        );
+        assert!(
+            result.stderr.contains("download failed"),
+            "original stderr must be preserved"
         );
     }
 }

@@ -1,36 +1,34 @@
 import * as React from "react";
 
+import { closeAllWebSockets } from "@/shared/api/relayWebSocketClose";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 
-/**
- * Reloads the webview on the platform's reload shortcut (Cmd+R on macOS,
- * Ctrl+R elsewhere), matching browser behavior.
- *
- * `window.location.reload()` is the app's existing reload primitive (see
- * App.tsx, useCommunityInit.ts): it triggers a full reinit that re-reads
- * localStorage and reconnects relays.
- */
+const RELOAD_TEARDOWN_TIMEOUT_MS = 500;
+
+/** Reloads the webview after bounded native WebSocket teardown. */
 export function useReloadShortcut() {
   React.useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
+    async function handleKeyDown(event: KeyboardEvent) {
       if (
         !hasPrimaryShortcutModifier(event) ||
         event.altKey ||
-        event.shiftKey
+        event.shiftKey ||
+        event.key.toLowerCase() !== "r"
       ) {
-        return;
-      }
-      if (event.key.toLowerCase() !== "r") {
         return;
       }
 
       event.preventDefault();
+      await Promise.race([
+        closeAllWebSockets(),
+        new Promise<void>((resolve) =>
+          window.setTimeout(resolve, RELOAD_TEARDOWN_TIMEOUT_MS),
+        ),
+      ]);
       window.location.reload();
     }
 
     window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 }

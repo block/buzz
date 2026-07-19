@@ -1,6 +1,11 @@
 import { Archive, ArchiveRestore, Trash2 } from "lucide-react";
+import { useMemo, type ReactNode } from "react";
 
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
+import type { ChannelMember } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -33,6 +38,117 @@ type ChannelManagementModerationActionsProps = {
   resolvedChannelName: string;
   unarchiveChannelMutation: ChannelMutation;
 };
+
+type ChannelDeleteConfirmationDialogProps = {
+  channelName: string;
+  error: unknown;
+  isPending: boolean;
+  onConfirm: () => void;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
+  trigger?: ReactNode;
+};
+
+export function useChannelModerationCapabilities(
+  members: ChannelMember[] | undefined,
+  currentPubkey: string | undefined,
+  enabled: boolean,
+) {
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : undefined;
+  const selfRole = members?.find(
+    (member) => normalizePubkey(member.pubkey) === normalizedCurrentPubkey,
+  )?.role;
+  const ownerMemberPubkeys = useMemo(
+    () =>
+      (members ?? [])
+        .filter(
+          (member) =>
+            member.role === "owner" &&
+            normalizePubkey(member.pubkey) !== normalizedCurrentPubkey,
+        )
+        .map((member) => member.pubkey),
+    [members, normalizedCurrentPubkey],
+  );
+  const shouldResolveAgentOwnership =
+    enabled && selfRole !== "owner" && ownerMemberPubkeys.length > 0;
+  const ownerProfilesQuery = useUsersBatchQuery(ownerMemberPubkeys, {
+    enabled: shouldResolveAgentOwnership,
+  });
+  const canManageOwnedAgentChannel = ownerMemberPubkeys.some((pubkey) =>
+    ownsAuthorAgent(
+      ownerProfilesQuery.data?.profiles[normalizePubkey(pubkey)],
+      currentPubkey,
+    ),
+  );
+
+  return {
+    canDeleteChannel: selfRole === "owner" || canManageOwnedAgentChannel,
+    canManageChannel:
+      selfRole === "owner" ||
+      selfRole === "admin" ||
+      canManageOwnedAgentChannel,
+    error: shouldResolveAgentOwnership ? ownerProfilesQuery.error : null,
+    isLoading: shouldResolveAgentOwnership && ownerProfilesQuery.isLoading,
+  };
+}
+
+export function ChannelDeleteConfirmationDialog({
+  channelName,
+  error,
+  isPending,
+  onConfirm,
+  onOpenChange,
+  open,
+  trigger,
+}: ChannelDeleteConfirmationDialogProps) {
+  return (
+    <AlertDialog onOpenChange={onOpenChange} open={open}>
+      {trigger ? (
+        <AlertDialogTrigger asChild>{trigger}</AlertDialogTrigger>
+      ) : null}
+      <AlertDialogContent data-testid="channel-delete-confirmation-dialog">
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete channel?</AlertDialogTitle>
+          <AlertDialogDescription>
+            Delete {channelName} from the community list. This action cannot be
+            undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {error instanceof Error ? (
+          <p className="text-sm text-destructive">{error.message}</p>
+        ) : null}
+        <AlertDialogFooter>
+          <AlertDialogCancel asChild>
+            <Button
+              data-testid="channel-delete-cancel"
+              disabled={isPending}
+              type="button"
+              variant="outline"
+            >
+              Cancel
+            </Button>
+          </AlertDialogCancel>
+          <AlertDialogAction asChild>
+            <Button
+              data-testid="channel-delete-confirm"
+              disabled={isPending}
+              onClick={(event) => {
+                event.preventDefault();
+                onConfirm();
+              }}
+              type="button"
+              variant="destructive"
+            >
+              {isPending ? "Deleting..." : "Delete channel"}
+            </Button>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
 
 export function ChannelManagementModerationActions({
   archiveChannelMutation,
@@ -105,11 +221,16 @@ export function ChannelManagementModerationActions({
         </Button>
       )}
       {canDeleteChannel ? (
-        <AlertDialog
+        <ChannelDeleteConfirmationDialog
+          channelName={resolvedChannelName}
+          error={deleteChannelMutation.error}
+          isPending={deleteChannelMutation.isPending}
+          onConfirm={() => {
+            void handleDeleteChannel();
+          }}
           onOpenChange={handleDeleteDialogOpenChange}
           open={isDeleteDialogOpen}
-        >
-          <AlertDialogTrigger asChild>
+          trigger={
             <Button
               aria-label="Delete channel"
               data-testid="channel-management-delete"
@@ -121,50 +242,8 @@ export function ChannelManagementModerationActions({
             >
               <Trash2 className="h-4 w-4" />
             </Button>
-          </AlertDialogTrigger>
-          <AlertDialogContent data-testid="channel-delete-confirmation-dialog">
-            <AlertDialogHeader>
-              <AlertDialogTitle>Delete channel?</AlertDialogTitle>
-              <AlertDialogDescription>
-                Delete {resolvedChannelName} from the community list. This
-                action cannot be undone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            {deleteChannelMutation.error instanceof Error ? (
-              <p className="text-sm text-destructive">
-                {deleteChannelMutation.error.message}
-              </p>
-            ) : null}
-            <AlertDialogFooter>
-              <AlertDialogCancel asChild>
-                <Button
-                  data-testid="channel-delete-cancel"
-                  disabled={deleteChannelMutation.isPending}
-                  type="button"
-                  variant="outline"
-                >
-                  Cancel
-                </Button>
-              </AlertDialogCancel>
-              <AlertDialogAction asChild>
-                <Button
-                  data-testid="channel-delete-confirm"
-                  disabled={deleteChannelMutation.isPending}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    void handleDeleteChannel();
-                  }}
-                  type="button"
-                  variant="destructive"
-                >
-                  {deleteChannelMutation.isPending
-                    ? "Deleting..."
-                    : "Delete channel"}
-                </Button>
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+          }
+        />
       ) : null}
     </div>
   );

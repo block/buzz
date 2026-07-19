@@ -216,6 +216,44 @@ async fn test_connect_and_authenticate() {
 
 #[tokio::test]
 #[ignore]
+async fn test_client_submitted_nip43_membership_snapshots_are_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    // Prove this actor can submit a normal event so the rejection below is
+    // specifically the relay-only invariant, not a broader authorization failure.
+    create_test_channel(&keys).await;
+    let forged = EventBuilder::new(Kind::Custom(13_534), "")
+        .tags([Tag::parse(["member", &keys.public_key().to_hex(), "owner"]).unwrap()])
+        .sign_with_keys(&keys)
+        .expect("sign forged membership snapshot");
+
+    let mut ws = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let ok = ws
+        .send_event(forged.clone())
+        .await
+        .expect("submit forged snapshot via websocket");
+    assert!(!ok.accepted, "forged WebSocket snapshot must be rejected");
+    assert_eq!(ok.message, "restricted: relay-only kind");
+    ws.disconnect().await.expect("disconnect");
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&forged).unwrap())
+        .send()
+        .await
+        .expect("submit forged snapshot via HTTP");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = response.text().await.expect("read HTTP rejection");
+    assert!(
+        body.contains("restricted: relay-only kind"),
+        "unexpected HTTP rejection: {body}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn test_invite_mint_and_claim_admits_new_pubkey() {
     let owner = test_owner_keys();
     let joiner = Keys::generate();

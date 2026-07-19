@@ -86,15 +86,21 @@ pub async fn handle_req(
         }
     };
 
-    let mut accessible_channels = match state
-        .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
-        .await
-    {
-        Ok(ids) => ids,
-        Err(e) => {
-            warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
-            return;
+    let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
+        metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
+            .increment(1);
+        Vec::new()
+    } else {
+        match state
+            .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
         }
     };
     if let Some(allowed) = token_channel_ids.as_deref() {
@@ -816,6 +822,21 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
     true
 }
 
+/// Return whether every filter exclusively targets the globally stored NIP-43
+/// membership snapshot. Such requests cannot return channel-scoped rows, so
+/// resolving the caller's complete accessible-channel set is wasted I/O.
+fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
+    !filters.is_empty()
+        && filters.iter().all(|filter| {
+            filter.kinds.as_ref().is_some_and(|kinds| {
+                !kinds.is_empty()
+                    && kinds.iter().all(|kind| {
+                        kind.as_u16() as u32 == buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST
+                    })
+            })
+        })
+}
+
 /// Extract a channel UUID from a single filter's `#h` tag.
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
     for (tag_key, tag_values) in filter.generic_tags.iter() {
@@ -1321,6 +1342,20 @@ mod tests {
         assert!(count_fallback_exceeded(
             COUNT_FALLBACK_CANDIDATE_LIMIT as usize + 1
         ));
+    }
+
+    #[test]
+    fn nip43_only_filters_skip_channel_access_resolution() {
+        let membership = Filter::new().kind(nostr::Kind::Custom(13_534));
+        assert!(filters_are_nip43_membership_only(&[
+            membership.clone(),
+            membership,
+        ]));
+        assert!(!filters_are_nip43_membership_only(&[]));
+        assert!(!filters_are_nip43_membership_only(&[Filter::new()]));
+        assert!(!filters_are_nip43_membership_only(&[
+            Filter::new().kinds([nostr::Kind::Custom(13_534), nostr::Kind::TextNote]),
+        ]));
     }
 
     #[test]

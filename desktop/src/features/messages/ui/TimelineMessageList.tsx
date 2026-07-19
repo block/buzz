@@ -96,6 +96,7 @@ type TimelineMessageListProps = {
   /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
+  ownerProfiles?: UserProfileLookup;
   /** The message ID of the currently active find-in-channel match. */
   searchActiveMessageId?: string | null;
   /** Set of message IDs that match the current find-in-channel query. */
@@ -147,6 +148,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   onSendVideoReviewComment,
   onToggleReaction,
   profiles,
+  ownerProfiles,
   searchActiveMessageId = null,
   searchMatchingMessageIds,
   searchQuery,
@@ -237,6 +239,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               footer={messageFooters?.[item.entry.message.id] ?? null}
               onToggleReaction={onToggleReaction}
               profiles={profiles}
+              ownerProfiles={ownerProfiles}
             />
           );
         case "system-group":
@@ -249,6 +252,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               )}
               onToggleReaction={onToggleReaction}
               profiles={profiles}
+              ownerProfiles={ownerProfiles}
             />
           );
         case "message":
@@ -306,6 +310,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       onReply,
       onToggleReaction,
       profiles,
+      ownerProfiles,
       searchActiveMessageId,
       searchMatchingMessageIds,
       searchQuery,
@@ -782,6 +787,7 @@ function SystemRow({
   footer,
   onToggleReaction,
   profiles,
+  ownerProfiles,
 }: {
   currentPubkey?: string;
   entries?: MainTimelineEntry[];
@@ -789,6 +795,7 @@ function SystemRow({
   footer: React.ReactNode;
   onToggleReaction?: TimelineMessageListProps["onToggleReaction"];
   profiles?: UserProfileLookup;
+  ownerProfiles?: UserProfileLookup;
 }) {
   const systemEntries = entries ?? (entry ? [entry] : []);
   const firstEntry = systemEntries[0];
@@ -806,6 +813,7 @@ function SystemRow({
         currentPubkey={currentPubkey}
         onToggleReaction={onToggleReaction}
         profiles={profiles}
+        ownerProfiles={ownerProfiles}
       />
       {footer}
     </div>

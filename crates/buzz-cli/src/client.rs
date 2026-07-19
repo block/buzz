@@ -117,6 +117,13 @@ fn relay_server_tag(relay_url: &str) -> Option<String> {
     }
 }
 
+fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+    )
+}
+
 fn is_safe_media_path_segment(sha256_ext: &str) -> bool {
     let segments: Vec<&str> = sha256_ext.split('.').collect();
     match segments.as_slice() {
@@ -311,6 +318,20 @@ mod media_download_tests {
         assert!(!tags
             .iter()
             .any(|tag| tag.first().map(String::as_str) == Some("x")));
+    }
+
+    #[test]
+    fn legacy_upload_retry_statuses_are_narrow() {
+        assert!(should_retry_legacy_upload(reqwest::StatusCode::NOT_FOUND));
+        assert!(should_retry_legacy_upload(
+            reqwest::StatusCode::METHOD_NOT_ALLOWED
+        ));
+        assert!(!should_retry_legacy_upload(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ));
+        assert!(!should_retry_legacy_upload(
+            reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        ));
     }
 }
 
@@ -581,13 +602,14 @@ impl BuzzClient {
             URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
         );
 
-        // 7. PUT request to /media/upload — with generous per-request timeout.
+        // 7. PUT request to the BUD-02 /upload endpoint with a generous timeout.
         let upload_timeout = if mime.starts_with("video/") {
             Duration::from_secs(600)
         } else {
             Duration::from_secs(120)
         };
-        let url = format!("{}/media/upload", self.relay_url);
+        let url = format!("{}/upload", self.relay_url);
+        let upload_body = bytes::Bytes::from(bytes);
         let req = self
             .http
             .put(&url)
@@ -596,7 +618,26 @@ impl BuzzClient {
             .header("Content-Type", &mime)
             .header("X-SHA-256", &sha256);
 
-        let resp = self.with_auth_tag(req).body(bytes).send().await?;
+        let mut resp = self
+            .with_auth_tag(req)
+            .body(upload_body.clone())
+            .send()
+            .await?;
+        if should_retry_legacy_upload(resp.status()) {
+            let legacy_url = format!("{}/media/upload", self.relay_url);
+            let legacy_req = self
+                .http
+                .put(&legacy_url)
+                .timeout(upload_timeout)
+                .header("Authorization", &auth_header)
+                .header("Content-Type", &mime)
+                .header("X-SHA-256", &sha256);
+            resp = self
+                .with_auth_tag(legacy_req)
+                .body(upload_body)
+                .send()
+                .await?;
+        }
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();

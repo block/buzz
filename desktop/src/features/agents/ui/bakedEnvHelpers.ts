@@ -133,7 +133,7 @@ export function getAdvancedInheritedSummary(
     ...(effort.value ? [`effort ${effort.value}`] : []),
     ...(globalEnvLabel ? [globalEnvLabel] : []),
   ];
-  return `Using AI defaults: ${parts.join(" · ")}`;
+  return `Using agent defaults: ${parts.join(" · ")}`;
 }
 
 export function getInheritedAgentDefaults(

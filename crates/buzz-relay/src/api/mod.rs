@@ -1,5 +1,6 @@
 //! HTTP API — media, git, NIP-05, and the Nostr HTTP bridge.
 
+pub mod admin;
 pub mod bridge;
 pub mod events;
 pub mod git;

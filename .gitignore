@@ -1,6 +1,7 @@
 # Build artifacts
 /target/
 /dist/
+/admin-web/dist/
 
 # lefthook-generated hook scripts (machine-specific)
 .hooks/

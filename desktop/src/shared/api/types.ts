@@ -984,6 +984,8 @@ export type GlobalAgentConfig = {
   provider: string | null;
   /** Global fallback model identifier. Null = no global default. */
   model: string | null;
+  /** Preferred ACP runtime for agents without a persona-specific runtime. */
+  preferred_runtime: string | null;
 };
 
 /**

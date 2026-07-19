@@ -36,6 +36,37 @@ image:
 # in Postgres. Each replica can use its own ReadWriteOnce volume (or none).
 replicaCount: 1
 
+# ── Autoscaling ──────────────────────────────────────────────────────────────
+# Requires Metrics Server for CPU. Optional WebSocket scaling additionally
+# requires a custom-metrics adapter exposing its pod-level Prometheus gauge.
+# Kubernetes HPA uses the larger replica recommendation from enabled metrics.
+autoscaling:
+  enabled: false
+  minReplicas: 5
+  maxReplicas: 15
+  targetCPUUtilizationPercentage: 65
+  websocketMetricEnabled: true
+  websocketMetricName: buzz_ws_connections_active
+  targetWebsocketConnections: 5000
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+      selectPolicy: Min
+
 # ── Public URL ───────────────────────────────────────────────────────────────
 # Required. The wss:// URL clients use to connect. Drives:
 #   - RELAY_URL env (relay-side)
@@ -58,6 +89,7 @@ ownerPubkey: ""
 #   BUZZ_RELAY_PRIVATE_KEY        — 64-char hex; relay identity (rotation = identity change)
 #   BUZZ_GIT_HOOK_HMAC_SECRET     — 32+ chars; required when replicaCount > 1
 #   DATABASE_URL                  — full Postgres URL (preferred over externalPostgresql.url)
+#   READ_DATABASE_URL             — optional Postgres read-replica URL; omit to keep all reads on the writer
 #   REDIS_URL                     — full Redis URL with auth
 #   BUZZ_S3_ACCESS_KEY            — S3 access key
 #   BUZZ_S3_SECRET_KEY            — S3 secret key

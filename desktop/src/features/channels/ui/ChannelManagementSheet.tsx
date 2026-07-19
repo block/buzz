@@ -38,11 +38,8 @@ import {
   formatTtlDuration,
   parseTtlDuration,
 } from "@/features/channels/lib/ephemeralChannel";
-import { ownsAuthorAgent } from "@/features/profile/lib/identity";
-import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Button } from "@/shared/ui/button";
 import {
@@ -83,7 +80,11 @@ import {
   NarrativeGroup,
   ToggleRow,
 } from "./ChannelManagementSheetRows";
-import { ChannelManagementModerationActions } from "./ChannelManagementModerationActions";
+import {
+  ChannelManagementModerationActions,
+  useChannelModerationCapabilities,
+} from "./ChannelManagementModerationActions";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type ChannelManagementSheetProps = {
   channel: Channel | null;
@@ -136,37 +137,8 @@ export function ChannelManagementSheet({
     members.find((member) => member.pubkey === currentPubkey) ?? null;
   const hasResolvedMembership = membersQuery.data !== undefined;
 
-  // Collect owner-role member pubkeys to look up their NIP-OA ownerPubkey.
-  // This is what surfaces the "you own the agent that owns this channel" path.
-  const ownerMemberPubkeys = React.useMemo(
-    () =>
-      members
-        .filter((m) => m.role === "owner" && m.pubkey !== currentPubkey)
-        .map((m) => m.pubkey),
-    [members, currentPubkey],
-  );
-  const ownerProfilesQuery = useUsersBatchQuery(ownerMemberPubkeys, {
-    enabled: open && ownerMemberPubkeys.length > 0,
-  });
-  // True when an owner-role member of this channel is an agent owned by the
-  // current user — mirrors the relay's is_agent_owner gate.
-  const canManageOwnedAgentChannel = React.useMemo(() => {
-    if (!currentPubkey || !ownerProfilesQuery.data) return false;
-    return ownerMemberPubkeys.some((pubkey) =>
-      ownsAuthorAgent(
-        ownerProfilesQuery.data?.profiles[normalizePubkey(pubkey)],
-        currentPubkey,
-      ),
-    );
-  }, [currentPubkey, ownerMemberPubkeys, ownerProfilesQuery.data]);
-
-  const isSelfOwner = selfMember?.role === "owner";
-  // Capability: may delete this channel (self-owner OR owns the agent-owner).
-  const canDeleteChannel = isSelfOwner || canManageOwnedAgentChannel;
-  const canManageChannel =
-    selfMember?.role === "owner" ||
-    selfMember?.role === "admin" ||
-    canManageOwnedAgentChannel;
+  const { canDeleteChannel, canManageChannel } =
+    useChannelModerationCapabilities(membersQuery.data, currentPubkey, open);
   const canEditNarrative =
     canManageChannel && selfMember !== null && detail?.channelType !== "dm";
   const isArchived =
@@ -788,9 +760,9 @@ function ChannelManagementPanelContent({
                 icon={Copy}
                 label="Copy ID"
                 onClick={() => {
-                  void navigator.clipboard
-                    .writeText(resolvedChannel.id)
-                    .then(() => toast.success("Copied channel ID"));
+                  void writeTextToClipboard(resolvedChannel.id).then(() =>
+                    toast.success("Copied channel ID"),
+                  );
                 }}
                 testId="channel-management-copy-id-action"
               />

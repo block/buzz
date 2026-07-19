@@ -10,6 +10,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { HashSearch } from "@/shared/ui/icons";
 import {
   resolveUserLabel,
   resolveUserSecondaryLabel,
@@ -24,7 +25,7 @@ export type SearchResult =
       kind: "action";
       action: {
         description?: string;
-        id: "create-agent" | "create-channel";
+        id: "browse-channels" | "create-agent" | "create-channel";
         title: string;
       };
     }
@@ -69,6 +70,9 @@ export function resultIcon(
   channelLookup: ReadonlyMap<string, Channel>,
 ) {
   if (result.kind === "action") {
+    if (result.action.id === "browse-channels") {
+      return HashSearch;
+    }
     return result.action.id === "create-agent" ? Bot : Plus;
   }
 

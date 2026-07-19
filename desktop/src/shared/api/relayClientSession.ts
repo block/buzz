@@ -1,5 +1,4 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-
 import {
   createAuthEvent,
   getRelayWsUrl,
@@ -15,7 +14,6 @@ import {
 } from "@/shared/constants/kinds";
 import {
   getTextPayload,
-  sortEvents,
   type ConnectionState,
   type PendingEvent,
   type RelaySubscription,
@@ -30,6 +28,12 @@ import {
   buildGlobalStreamFilter,
 } from "@/shared/api/relayChannelFilters";
 import { collectWithConcurrency } from "@/shared/api/concurrency";
+import {
+  clearClosedRetry,
+  handleRelayClosed,
+  handleSubscriptionEose,
+  prepareSubscriptionEvent,
+} from "@/shared/api/relayClosedRecovery";
 import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
 import {
@@ -39,7 +43,6 @@ import {
 import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
-
 const RECONNECT_BASE_DELAY_MS = 1_000,
   RECONNECT_MAX_DELAY_MS = 30_000,
   EVENT_BATCH_MS = 16,
@@ -135,6 +138,8 @@ export class RelayClient {
       if (sub.mode === "history") {
         window.clearTimeout(sub.timeout);
         sub.reject(error);
+      } else {
+        clearClosedRetry(sub);
       }
       this.subscriptions.delete(subId);
     }
@@ -596,6 +601,7 @@ export class RelayClient {
       }
 
       this.subscriptions.delete(subId);
+      clearClosedRetry(active);
       await this.closeSubscription(subId);
     };
   }
@@ -769,6 +775,20 @@ export class RelayClient {
 
     if (type === "EOSE" && typeof rest[0] === "string") {
       this.handleEose(rest[0]);
+      return;
+    }
+
+    if (type === "CLOSED" && typeof rest[0] === "string") {
+      handleRelayClosed({
+        subscriptions: this.subscriptions,
+        subId: rest[0],
+        message: typeof rest[1] === "string" ? rest[1] : "",
+        sendReq: (subId, filter) =>
+          this.sendRawWithReconnectRetry(
+            ["REQ", subId, filter],
+            "Failed to restore relay subscription after CLOSED.",
+          ),
+      });
     }
   }
 
@@ -796,16 +816,7 @@ export class RelayClient {
       return;
     }
 
-    if (subscription.mode === "history") {
-      subscription.events.push(event);
-      return;
-    }
-
-    subscription.lastSeenCreatedAt = Math.max(
-      subscription.lastSeenCreatedAt ?? 0,
-      event.created_at,
-    );
-
+    if (!prepareSubscriptionEvent(subscription, event)) return;
     this.eventBuffer.push({ subId, event });
     this.flushTimeout ??= window.setTimeout(
       () => this.flushEventBuffer(),
@@ -828,21 +839,11 @@ export class RelayClient {
   }
 
   private handleEose(subId: string) {
-    const subscription = this.subscriptions.get(subId);
-    if (!subscription) {
-      return;
-    }
-
-    if (subscription.mode === "live") {
-      subscription.resolveReady?.();
-      subscription.resolveReady = undefined;
-      return;
-    }
-
-    window.clearTimeout(subscription.timeout);
-    this.subscriptions.delete(subId);
-    void this.closeSubscription(subId);
-    subscription.resolve(sortEvents(subscription.events));
+    handleSubscriptionEose({
+      subscriptions: this.subscriptions,
+      subId,
+      closeSubscription: (id) => this.closeSubscription(id),
+    });
   }
 
   private handleOk(eventId: string, success: boolean, message: string) {
@@ -1004,6 +1005,7 @@ export class RelayClient {
 
       subscription.resolveReady?.();
       subscription.resolveReady = undefined;
+      clearClosedRetry(subscription);
     }
 
     for (const [eventId, pendingEvent] of this.pendingEvents) {

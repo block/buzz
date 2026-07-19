@@ -88,6 +88,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   isTimelineLoading,
   entranceMessageId = null,
   onEntranceMessageComplete,
+  welcomeKickoffStage = null,
+  welcomeKickoffSettingUp = false,
   messages,
   threadSummaries,
   firstUnreadMessageId = null,
@@ -130,6 +132,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   unfollowThreadById,
   personaLookup,
   profiles,
+  ownerProfiles,
   openThreadHeadId,
   shouldShowThreadSkeleton,
   openAgentSessionChannelId,
@@ -603,6 +606,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             isMessageUnreadById={isMessageUnreadById}
             personaLookup={personaLookup}
             profiles={profiles}
+            ownerProfiles={ownerProfiles}
             unfollowThreadById={unfollowThreadById}
             emptyDescription={
               activeChannel?.channelType === "forum"
@@ -674,7 +678,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             </div>
           ) : (
             <div
-              className="pointer-events-none absolute inset-x-0 bottom-0 z-40 bg-background/70 backdrop-blur-md supports-[backdrop-filter]:bg-background/55"
+              className="pointer-events-none absolute inset-x-0 bottom-0 z-40"
               data-testid="channel-composer-overlay"
               ref={composerWrapperRef}
             >
@@ -684,7 +688,13 @@ export const ChannelPane = React.memo(function ChannelPane({
                     expiresAtMs={timeoutState.expiresAtMs}
                   />
                 ) : isActiveWelcomeChannel ? (
-                  <WelcomeComposerBanner state={welcomeComposerBannerState} />
+                  <div className="relative">
+                    {welcomeKickoffStage}
+                    <WelcomeComposerBanner
+                      settingUp={welcomeKickoffSettingUp}
+                      state={welcomeComposerBannerState}
+                    />
+                  </div>
                 ) : null}
                 <MessageComposer
                   channelId={activeChannel?.id ?? null}
@@ -725,7 +735,10 @@ export const ChannelPane = React.memo(function ChannelPane({
                   }
                   showTopBorder={false}
                 />
-                <div className="min-h-8 overflow-visible bg-transparent px-5 pb-1.5 pt-0">
+                <div
+                  className="min-h-8 overflow-visible bg-background px-5 pb-1.5 pt-0"
+                  data-testid="channel-composer-activity-row"
+                >
                   <div className="flex h-full w-full items-center gap-2 overflow-visible">
                     {hasComposerBotActivity ? (
                       <div className="flex min-w-0 flex-1 overflow-visible">

@@ -25,6 +25,12 @@ export type TimelineMessage = {
    */
   signerPubkey?: string;
   author: string;
+  /** True when the displayed author is known to be an agent. */
+  isAgent?: boolean;
+  /** Verified owner pubkey for an agent author, when available. */
+  ownerPubkey?: string | null;
+  /** Viewer-relative owner label (for example, "you" or "baxen"). */
+  ownerLabel?: string | null;
   avatarUrl?: string | null;
   role?: string;
   /** For bot messages, the display name of the persona this bot was created from. */

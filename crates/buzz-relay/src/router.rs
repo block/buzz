@@ -36,6 +36,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .max_image_bytes
         .max(state.config.media.max_video_bytes) as usize;
     let media_router = Router::new()
+        .route("/upload", put(api::media::upload_blob))
         .route("/media/upload", put(api::media::upload_blob))
         .route(
             "/media/{sha256_ext}",
@@ -47,6 +48,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let git_router = api::git::git_router(state.clone());
 
     let git_policy_router = api::git::git_policy_router(state.clone());
+
+    let admin_enabled = state.config.admin.is_some();
+    let admin_web_dir = state
+        .config
+        .admin
+        .as_ref()
+        .and_then(|config| config.web_dir.clone());
+    let admin_router = admin_enabled
+        .then(|| Router::new().nest("/api/admin/v1", api::admin::router(state.clone())));
 
     let api_router = Router::new()
         // WebSocket + NIP-11
@@ -126,28 +136,48 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(media_router)
         .merge(git_router)
         .merge(git_policy_router);
+    if let Some(admin_router) = admin_router {
+        merged = merged.merge(admin_router);
+    }
 
-    // When BUZZ_WEB_DIR is set, serve either the full SPA or its invite-only
-    // surface. Invite-only mode deliberately exposes only /invite/{code} and
-    // hashed build assets; root and repository browser routes remain absent.
-    if let Some(ref web_dir) = state.config.web_dir {
-        let index_path = web_dir.join("index.html");
-        let static_files = ServeDir::new(web_dir);
+    // Serve both bundles from one fallback. The admin host is checked first so
+    // it can never fall through to the public web bundle.
+    let web_dir = state.config.web_dir.clone();
+    if admin_web_dir.is_some() || web_dir.is_some() {
+        let admin_index = admin_web_dir.as_ref().map(|dir| dir.join("index.html"));
+        let admin_files = admin_web_dir.map(ServeDir::new);
+        let web_index = web_dir.as_ref().map(|dir| dir.join("index.html"));
+        let web_files = web_dir.map(ServeDir::new);
         let serve_git_web_gui = state.config.serve_git_web_gui;
+        let fallback_state = state.clone();
         let spa_fallback = tower::service_fn(move |req: axum::extract::Request| {
-            let index = index_path.clone();
-            let static_files = static_files.clone();
+            let admin_index = admin_index.clone();
+            let admin_files = admin_files.clone();
+            let web_index = web_index.clone();
+            let web_files = web_files.clone();
+            let state = fallback_state.clone();
             async move {
                 let path = req.uri().path();
-                if path.starts_with("/assets/") {
-                    return static_files
-                        .oneshot(req)
-                        .await
-                        .map(IntoResponse::into_response);
+                let admin_host = api::admin::is_admin_host(&state, req.headers());
+                if admin_host {
+                    if let (Some(index), Some(files)) = (admin_index, admin_files) {
+                        if path.starts_with("/assets/") {
+                            return files.oneshot(req).await.map(IntoResponse::into_response);
+                        }
+                        if is_admin_spa_path(path) {
+                            return Ok(read_spa_index(&index).await);
+                        }
+                    }
+                    return Ok(StatusCode::NOT_FOUND.into_response());
                 }
 
-                if should_serve_spa(path, serve_git_web_gui) {
-                    return Ok(read_spa_index(&index).await);
+                if let (Some(index), Some(files)) = (web_index, web_files) {
+                    if path.starts_with("/assets/") {
+                        return files.oneshot(req).await.map(IntoResponse::into_response);
+                    }
+                    if should_serve_spa(path, serve_git_web_gui) {
+                        return Ok(read_spa_index(&index).await);
+                    }
                 }
                 Ok(StatusCode::NOT_FOUND.into_response())
             }
@@ -159,6 +189,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(middleware::from_fn(track_metrics))
         .layer(TraceLayer::new_for_http())
         .layer(build_cors_layer(&state.config.cors_origins))
+}
+
+fn is_admin_spa_path(path: &str) -> bool {
+    path == "/"
+        || path == "/reports"
+        || path.starts_with("/reports/")
+        || path == "/feedback"
+        || path.starts_with("/feedback/")
 }
 
 fn is_invite_landing_path(path: &str) -> bool {
@@ -214,6 +252,25 @@ async fn nip11_or_ws_handler(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+
+    // `/` is an explicit relay route, so it never reaches the SPA fallback.
+    // Short-circuit the exact admin authority here and never let it serve the
+    // public web bundle, NIP-11 document, or WebSocket endpoint.
+    if api::admin::is_admin_host(&state, &headers) {
+        if !accept.contains("text/html") {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let Some(index) = state
+            .config
+            .admin
+            .as_ref()
+            .and_then(|config| config.web_dir.as_ref())
+            .map(|dir| dir.join("index.html"))
+        else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        return read_spa_index(&index).await;
+    }
 
     if accept.contains("application/nostr+json") {
         return Json(nip11_document(&state, raw_host).await).into_response();

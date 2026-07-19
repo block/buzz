@@ -17,6 +17,7 @@ import {
 } from "@/features/onboarding/welcomeGuide";
 import { isWelcomeChannel } from "@/features/onboarding/welcome";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import {
   startManagedAgent,
   stopManagedAgent,
@@ -24,6 +25,7 @@ import {
 import { hasManagedAgentChannelMessageMarker } from "@/shared/api/tauriManagedAgentMessageMarkers";
 import { sendManagedAgentChannelMessage } from "@/shared/api/tauriManagedAgentMessages";
 import { getPresence, listManagedAgents } from "@/shared/api/tauri";
+import { getProfile } from "@/shared/api/tauriProfiles";
 import type { Channel, ManagedAgent, RelayEvent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
@@ -85,9 +87,28 @@ const kickoffCoordinator = createWelcomeKickoffCoordinator();
 const closerInFlight = new Set<string>();
 const TEAMMATE_READY_POLL_MS = 250;
 const TEAMMATE_READY_WAIT_MS = 60_000;
-const TEAMMATE_INTRO_WAIT_MS = 15_000;
-const KICKOFF_BEAT_MS = 3_000;
-const CLOSER_BEAT_MS = 10_000;
+/**
+ * Give-up backstop for teammates that are neither intro'd nor detectably failed
+ * — i.e. alive but silent. **Not** an expectation of how fast an intro arrives.
+ *
+ * It does not gate the happy path: once every teammate is resolved (intro'd, or
+ * `failedAfterKickoff`-detected), the closer fires on `CLOSER_BEAT_MS` and this
+ * timer is cleared. Raising it costs the normal case nothing — it only delays
+ * the moment we give up on a silent teammate.
+ *
+ * So it must be long enough that "taking longer than expected" is *true* when it
+ * fires. `unresolved` means "no intro seen yet", which is ignorance, not a fact;
+ * announcing it early states a falsehood, and the closer marker is terminal
+ * (`sendWelcomeKickoffCloser`) so nothing ever corrects it. At 15s this
+ * routinely beat two cold agents through harness dispatch + a full LLM turn
+ * (observed 2026-07-18: intros landed ~60s in, and the false "taking longer"
+ * closer had already been stamped final at 15s). A real failure does not wait
+ * for this — `failedAfterKickoff` resolves crashed teammates immediately.
+ *
+ * See docs/welcome-kickoff-silent-failures.md §1.
+ */
+const TEAMMATE_INTRO_BACKSTOP_MS = 120_000;
+const CLOSER_BEAT_MS = 3_000;
 const closerAbortControllers = new Map<string, AbortController>();
 const closerTimeouts = new Map<
   string,
@@ -142,15 +163,23 @@ export function buildWelcomeKickoffOpener(
   lead: ManagedAgent,
   introTeammates: readonly ManagedAgent[],
   allTeammates: readonly ManagedAgent[] = introTeammates,
+  ownerName?: string | null,
 ) {
+  // Greet the new user by name when we know it. Paired with their pubkey in
+  // the p tags, the @mention renders as a pill and files the opener into
+  // their Inbox mentions feed.
+  const trimmedOwnerName = ownerName?.trim();
+  const greeting = trimmedOwnerName
+    ? `Hi @${trimmedOwnerName}, I'm ${lead.name}.`
+    : `Hi, I'm ${lead.name}.`;
   const introNames = formatMentionNames(introTeammates);
   if (introTeammates.length === 0) {
     const teammateNames = formatAgentNames(allTeammates);
     const teammatePhrase = teammateNames ? ` with ${teammateNames}` : "";
-    return `Hi, I'm ${lead.name}. Welcome to Buzz. This is your private home base, and I'm here${teammatePhrase} to help you get oriented or work through something you're building.\n\n${WELCOME_KICKOFF_CTA}`;
+    return `${greeting} Welcome to Buzz. This is your private home base, and I'm here${teammatePhrase} to help you get oriented or work through something you're building.\n\n${WELCOME_KICKOFF_CTA}`;
   }
 
-  return `Hi, I'm ${lead.name}. Welcome to Buzz. This is your private home base, and we're here to help you get oriented or work through something you're building.\n\n${introNames}, introduce ${introTeammates.length === 1 ? "yourself" : "yourselves"} in a sentence or two — share what you're good at and when to bring you in. Don't start any work yet.`;
+  return `${greeting} Welcome to Buzz. This is your private home base, and we're here to help you get oriented or work through something you're building.\n\n${introNames}, introduce ${introTeammates.length === 1 ? "yourself" : "yourselves"} in a sentence or two — share what you're good at and when to bring you in. Don't start any work yet.`;
 }
 
 export function onlineWelcomeTeammates(
@@ -186,7 +215,7 @@ export async function waitForWelcomeTeammatesOnline(
   const pubkeys = teammates.map((agent) => agent.pubkey);
   let latestOnline: ManagedAgent[] = [];
 
-  while (!options.isCancelled() && Date.now() < deadline) {
+  while (!options.isCancelled()) {
     try {
       latestOnline = onlineWelcomeTeammates(
         teammates,
@@ -198,15 +227,17 @@ export async function waitForWelcomeTeammatesOnline(
     } catch (error) {
       console.warn("Welcome teammate presence check failed; retrying.", error);
     }
+    if (Date.now() >= deadline) break;
     await new Promise((resolve) => globalThis.setTimeout(resolve, pollMs));
   }
   return options.isCancelled() ? [] : latestOnline;
 }
 
-export async function waitForWelcomeKickoffBeat(
-  options: { signal?: AbortSignal; waitMs?: number } = {},
-) {
-  const waitMs = options.waitMs ?? KICKOFF_BEAT_MS;
+export async function waitForWelcomeKickoffBeat(options: {
+  signal?: AbortSignal;
+  waitMs: number;
+}) {
+  const waitMs = options.waitMs;
   if (options.signal?.aborted) return false;
 
   return new Promise<boolean>((resolve) => {
@@ -349,11 +380,55 @@ export function selectWelcomeKickoffIntroTeammates(
   );
 }
 
+export type WelcomeKickoffOwner = {
+  pubkey: string;
+  displayName?: string | null;
+};
+
+/**
+ * The event view the kickoff classification reasons over: the channel's own
+ * events plus the opener's thread replies.
+ *
+ * Teammate intros (and the closer) are thread replies, which the channel
+ * window deliberately excludes — only broadcast replies reach the main
+ * timeline. So `channelEvents` alone shows the opener and never the intros,
+ * and the closer stalls until the user happens to open the thread. Merging the
+ * opener's subtree in is what lets the choreography resolve on its own.
+ *
+ * De-duplicated because the two sources legitimately overlap: the live
+ * subscription writes replies into the thread cache, and an open thread also
+ * feeds the same replies in through `channelEvents`.
+ */
+export function mergeKickoffEvents(
+  channelEvents: readonly RelayEvent[],
+  openerReplies: readonly RelayEvent[],
+): readonly RelayEvent[] {
+  if (openerReplies.length === 0) return channelEvents;
+  const seen = new Set(channelEvents.map((event) => event.id));
+  return [
+    ...channelEvents,
+    ...openerReplies.filter((event) => !seen.has(event.id)),
+  ];
+}
+
 export function buildWelcomeKickoffOpenerSendInput(
   agentSet: WelcomeAgentSet,
   introTeammates: readonly ManagedAgent[],
   channelId: string,
+  owner?: WelcomeKickoffOwner | null,
 ) {
+  // Greet the new user by name and tag their pubkey. The p tag renders the
+  // "@Name" in the copy as a mention pill and files the opener into their
+  // Inbox mentions feed, so the Inbox isn't an empty state on first visit.
+  const mentionPubkeys = introTeammates.map((agent) => agent.pubkey);
+  if (
+    owner?.pubkey &&
+    !mentionPubkeys.some(
+      (pubkey) => normalizePubkey(pubkey) === normalizePubkey(owner.pubkey),
+    )
+  ) {
+    mentionPubkeys.push(owner.pubkey);
+  }
   return {
     agentPubkey: agentSet.lead.pubkey,
     channelId,
@@ -361,10 +436,11 @@ export function buildWelcomeKickoffOpenerSendInput(
       agentSet.lead,
       introTeammates,
       agentSet.teammates,
+      owner?.displayName,
     ),
     marker: openerMarker,
     markerScope: "channel" as const,
-    mentionPubkeys: introTeammates.map((agent) => agent.pubkey),
+    mentionPubkeys,
     additionalMarkers: introTeammates.length === 0 ? [closerMarker] : [],
   };
 }
@@ -422,8 +498,44 @@ export function useWelcomeKickoff(
   const isActiveWelcome = isWelcomeChannel(activeChannel);
   const focusedWelcomeChannelRef = React.useRef<string | null>(null);
   focusedWelcomeChannelRef.current = isActiveWelcome ? channelId : null;
-  const channelEventsRef = React.useRef(channelEvents);
-  channelEventsRef.current = channelEvents;
+  // Watch the opener's thread subtree directly so teammate intro replies are
+  // visible to the closer classification even when the user never opens the
+  // thread. Without this, replies only surfaced through the UI's open-thread
+  // query and the closer stalled until the user clicked into the thread.
+  const openerEvent = React.useMemo(
+    () => markerEvent(channelEvents, openerMarker) ?? null,
+    [channelEvents],
+  );
+  // Retire the watch once the closer exists: the kickoff is resolved, so
+  // revisits to Welcome shouldn't keep refetching the subtree forever.
+  //
+  // This has to be a latch rather than a plain derivation. The closer is a
+  // *thread reply* to the opener (see sendWelcomeKickoffCloser), so it never
+  // appears in `channelEvents` unless the user happened to open the thread —
+  // deriving from `channelEvents` meant this never retired at all. Deriving
+  // from `kickoffEvents` instead is self-referential: it gates the query that
+  // feeds it, so retiring would drop the evidence that justified retiring and
+  // (on a cache eviction) flip the query back on. Latching per channel keeps
+  // the decision one-way and stable.
+  const [resolvedChannelId, setResolvedChannelId] = React.useState<
+    string | null
+  >(null);
+  const kickoffResolved = channelId !== null && resolvedChannelId === channelId;
+  const openerThreadQuery = useThreadReplies(
+    isActiveWelcome && !kickoffResolved ? activeChannel : null,
+    openerEvent?.id ?? null,
+  );
+  const kickoffEvents = React.useMemo(
+    () => mergeKickoffEvents(channelEvents, openerThreadQuery.data ?? []),
+    [channelEvents, openerThreadQuery.data],
+  );
+  React.useEffect(() => {
+    if (!channelId || kickoffResolved) return;
+    if (markerEvent(kickoffEvents, closerMarker) == null) return;
+    setResolvedChannelId(channelId);
+  }, [channelId, kickoffEvents, kickoffResolved]);
+  const channelEventsRef = React.useRef(kickoffEvents);
+  channelEventsRef.current = kickoffEvents;
   const agentSet = React.useMemo(
     () =>
       resolveWelcomeAgentSetForRelay(
@@ -451,9 +563,6 @@ export function useWelcomeKickoff(
     const isCancelled = () =>
       kickoffController.signal.aborted ||
       focusedWelcomeChannelRef.current !== channelId;
-    const landingBeat = waitForWelcomeKickoffBeat({
-      signal: kickoffController.signal,
-    });
     void (async () => {
       try {
         const welcomeTeam = await ensureWelcomeTeam(
@@ -546,13 +655,22 @@ export function useWelcomeKickoff(
             "Some Welcome teammates did not become ready; continuing with a degraded kickoff.",
           );
         }
-        if (!(await landingBeat) || isCancelled()) return;
+        if (isCancelled()) return;
 
+        // Best-effort: a missing profile should degrade to an ungreeted,
+        // untagged opener, never block the kickoff.
+        const owner = await getProfile()
+          .then((profile) => ({
+            pubkey: profile.pubkey,
+            displayName: profile.displayName,
+          }))
+          .catch(() => null);
         const openerResult = await sendManagedAgentChannelMessage(
           buildWelcomeKickoffOpenerSendInput(
             resolvedAgentSet,
             introTeammates,
             channelId,
+            owner,
           ),
         );
         if (!isCancelled()) onKickoffOpenerPosted?.(openerResult.eventId);
@@ -592,16 +710,22 @@ export function useWelcomeKickoff(
       !channelId ||
       !isActiveWelcome ||
       !agentSet ||
-      closerInFlight.has(channelId)
+      closerInFlight.has(channelId) ||
+      // Respect the latch, not just the events. Retiring the opener-thread
+      // watch drops the subtree from `kickoffEvents`, which is where the closer
+      // lives — so once resolved, the marker check below can no longer see it
+      // and would classify every teammate as silent and re-run the closer on
+      // each revisit. The latch is the durable "already resolved" signal.
+      kickoffResolved
     )
       return;
-    const opener = markerEvent(channelEvents, openerMarker);
-    if (!opener || markerEvent(channelEvents, closerMarker)) {
+    const opener = markerEvent(kickoffEvents, openerMarker);
+    if (!opener || markerEvent(kickoffEvents, closerMarker)) {
       return;
     }
 
     const { unresolved } = classifyWelcomeKickoffResolution(
-      channelEvents,
+      kickoffEvents,
       opener,
       agentSet,
     );
@@ -609,7 +733,7 @@ export function useWelcomeKickoff(
     if (unresolved.length > 0) {
       if (!closerTimeouts.has(channelId)) {
         const elapsedMs = Math.max(0, Date.now() - opener.created_at * 1_000);
-        const waitMs = Math.max(0, TEAMMATE_INTRO_WAIT_MS - elapsedMs);
+        const waitMs = Math.max(0, TEAMMATE_INTRO_BACKSTOP_MS - elapsedMs);
         const timeout = globalThis.setTimeout(() => {
           closerTimeouts.delete(channelId);
           if (focusedWelcomeChannelRef.current !== channelId) return;
@@ -717,7 +841,8 @@ export function useWelcomeKickoff(
   }, [
     activeCommunity?.relayUrl,
     agentSet,
-    channelEvents,
+    kickoffEvents,
+    kickoffResolved,
     channelId,
     isActiveWelcome,
     queryClient,

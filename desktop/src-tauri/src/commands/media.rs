@@ -153,6 +153,98 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
     }
 }
 
+/// Return true when a PNG/WebP payload declares animation.
+///
+/// Animated payloads are left byte-identical here so frame timing, looping,
+/// and disposal semantics are preserved. The relay's structural validator is
+/// still the authority that rejects any metadata-bearing animation.
+fn is_animated_image(body: &[u8], mime: &str) -> bool {
+    match mime {
+        "image/png" if body.starts_with(b"\x89PNG\r\n\x1a\n") => {
+            let mut offset = 8usize;
+            while offset.checked_add(12).is_some_and(|end| end <= body.len()) {
+                let length = u32::from_be_bytes([
+                    body[offset],
+                    body[offset + 1],
+                    body[offset + 2],
+                    body[offset + 3],
+                ]) as usize;
+                let Some(end) = offset.checked_add(12).and_then(|v| v.checked_add(length)) else {
+                    return false;
+                };
+                if end > body.len() {
+                    return false;
+                }
+                if &body[offset + 4..offset + 8] == b"acTL" {
+                    return true;
+                }
+                offset = end;
+            }
+            false
+        }
+        "image/webp"
+            if body.len() >= 12 && body.starts_with(b"RIFF") && &body[8..12] == b"WEBP" =>
+        {
+            let mut offset = 12usize;
+            while offset.checked_add(8).is_some_and(|end| end <= body.len()) {
+                let chunk = &body[offset..offset + 4];
+                if chunk == b"ANIM" || chunk == b"ANMF" {
+                    return true;
+                }
+                let length = u32::from_le_bytes([
+                    body[offset + 4],
+                    body[offset + 5],
+                    body[offset + 6],
+                    body[offset + 7],
+                ]) as usize;
+                let padded = length.checked_add(length & 1);
+                let Some(end) = padded.and_then(|v| offset.checked_add(8 + v)) else {
+                    return false;
+                };
+                if end > body.len() {
+                    return false;
+                }
+                offset = end;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec<u8>, String> {
+    let format = match mime {
+        "image/jpeg" => image::ImageFormat::Jpeg,
+        "image/png" => image::ImageFormat::Png,
+        "image/webp" => image::ImageFormat::WebP,
+        _ => return Ok(body),
+    };
+
+    if is_animated_image(&body, mime) {
+        return Ok(body);
+    }
+
+    use image::ImageDecoder;
+    let reader = image::ImageReader::with_format(std::io::Cursor::new(&body), format);
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|_| "failed to decode image for metadata removal".to_string())?;
+    decoder
+        .set_limits(image::Limits::default())
+        .map_err(|_| "image exceeds safe decoding limits".to_string())?;
+    let orientation = decoder
+        .orientation()
+        .map_err(|_| "failed to read image orientation".to_string())?;
+    let mut image = image::DynamicImage::from_decoder(decoder)
+        .map_err(|_| "failed to decode image for metadata removal".to_string())?;
+    image.apply_orientation(orientation);
+    let mut output = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut output, format)
+        .map_err(|_| "failed to encode image without metadata".to_string())?;
+    Ok(output.into_inner())
+}
+
 pub(crate) fn detect_and_validate_mime(body: &[u8]) -> Result<String, String> {
     let mime = infer::get(body)
         .map(|t| t.mime_type().to_string())
@@ -257,6 +349,58 @@ fn sign_blossom_upload_auth(
 // Current approach works for videos up to ~100MB but will OOM on 500MB files.
 // Fix: use reqwest's Body::wrap_stream() to stream from the temp file directly.
 // The server already supports streaming upload via process_video_upload.
+fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+    )
+}
+
+async fn send_upload_attempt(
+    state: &State<'_, AppState>,
+    url: String,
+    auth_header: &str,
+    mime: &str,
+    sha256: &str,
+    body: bytes::Bytes,
+    progress: Option<&(tauri::AppHandle, String)>,
+) -> Result<reqwest::Response, String> {
+    let req = state
+        .http_client
+        .put(url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", mime)
+        .header("X-SHA-256", sha256);
+
+    let response = if let Some((app, progress_id)) = progress {
+        use tauri::Emitter;
+        let app = app.clone();
+        let progress_id = progress_id.clone();
+        let total = body.len() as u64;
+        let chunk_size = 64 * 1024;
+        let chunk_count = body.len().div_ceil(chunk_size);
+        let mut sent: u64 = 0;
+        let stream = futures_util::stream::iter((0..chunk_count).map(move |i| {
+            let start = i * chunk_size;
+            let end = usize::min(start + chunk_size, body.len());
+            let chunk = body.slice(start..end);
+            sent += chunk.len() as u64;
+            let _ = app.emit(
+                "media-upload-progress",
+                serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
+            );
+            Ok::<bytes::Bytes, std::io::Error>(chunk)
+        }));
+        req.header(reqwest::header::CONTENT_LENGTH, total)
+            .body(reqwest::Body::wrap_stream(stream))
+            .send()
+            .await
+    } else {
+        req.body(body).send().await
+    };
+    response.map_err(|error| classify_request_error(&error))
+}
+
 async fn do_upload(
     body: Vec<u8>,
     mime: &str,
@@ -283,43 +427,29 @@ async fn do_upload(
         "Nostr {}",
         URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
     );
-    let req = state
-        .http_client
-        .put(format!("{base_url}/media/upload"))
-        .header("Authorization", &auth_header)
-        .header("Content-Type", mime)
-        .header("X-SHA-256", &sha256);
-
-    // With a progress channel, stream the body in chunks and emit a
-    // `media-upload-progress` event as each chunk is handed to the socket,
-    // so the renderer can draw a determinate progress bar.
-    let resp = if let Some((app, progress_id)) = progress {
-        use tauri::Emitter;
-        let total = body.len() as u64;
-        // Ref-counted slices of one buffer — no second copy of the payload.
-        let body = bytes::Bytes::from(body);
-        let chunk_size = 64 * 1024;
-        let chunk_count = body.len().div_ceil(chunk_size);
-        let mut sent: u64 = 0;
-        let stream = futures_util::stream::iter((0..chunk_count).map(move |i| {
-            let start = i * chunk_size;
-            let end = usize::min(start + chunk_size, body.len());
-            let chunk = body.slice(start..end);
-            sent += chunk.len() as u64;
-            let _ = app.emit(
-                "media-upload-progress",
-                serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
-            );
-            Ok::<bytes::Bytes, std::io::Error>(chunk)
-        }));
-        req.header(reqwest::header::CONTENT_LENGTH, total)
-            .body(reqwest::Body::wrap_stream(stream))
-            .send()
-            .await
-    } else {
-        req.body(body).send().await
+    let body = bytes::Bytes::from(body);
+    let mut resp = send_upload_attempt(
+        state,
+        format!("{base_url}/upload"),
+        &auth_header,
+        mime,
+        &sha256,
+        body.clone(),
+        progress.as_ref(),
+    )
+    .await?;
+    if should_retry_legacy_upload(resp.status()) {
+        resp = send_upload_attempt(
+            state,
+            format!("{base_url}/media/upload"),
+            &auth_header,
+            mime,
+            &sha256,
+            body,
+            progress.as_ref(),
+        )
+        .await?;
     }
-    .map_err(|e| classify_request_error(&e))?;
 
     if !resp.status().is_success() {
         return Err(relay_error_message(resp).await);
@@ -362,6 +492,7 @@ pub async fn upload_media(
     }
 
     let mime = detect_and_validate_mime(&body)?;
+    let body = sanitize_image_for_upload(body, &mime)?;
     do_upload(body, &mime, &state, None).await
 }
 
@@ -432,6 +563,7 @@ async fn process_picked_path(
         .map_err(|e| format!("transcode task failed: {e}"))??;
 
     let mime = detect_and_validate_mime(&body)?;
+    let body = sanitize_image_for_upload(body, &mime)?;
 
     // Image-only surfaces (e.g. "Send feedback"): reject anything that didn't
     // sniff as an image, BEFORE the upload leaves the client.
@@ -598,6 +730,7 @@ pub async fn upload_media_bytes(
     };
 
     let mime = detect_and_validate_mime(&body)?;
+    let body = sanitize_image_for_upload(body, &mime)?;
 
     // Upload video first, then poster (best-effort).
     let progress = progress_id.map(|id| (app, id));
@@ -717,6 +850,75 @@ mod tests {
     fn test_detect_and_validate_mime_rejects_html() {
         let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
         assert!(detect_and_validate_mime(html).is_err());
+    }
+
+    #[test]
+    fn test_image_sanitizer_bakes_exif_orientation() {
+        let source = image::RgbImage::from_fn(2, 3, |x, y| {
+            image::Rgb([(x * 80) as u8, (y * 60) as u8, 32])
+        });
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 95)
+            .encode_image(&source)
+            .unwrap();
+
+        // Minimal little-endian Exif IFD with Orientation=6 (rotate 90°).
+        let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0".to_vec();
+        exif.extend_from_slice(&[
+            0x12, 0x01, // Orientation tag
+            0x03, 0x00, // SHORT
+            0x01, 0x00, 0x00, 0x00, // count=1
+            0x06, 0x00, 0x00, 0x00, // value=6
+            0x00, 0x00, 0x00, 0x00, // next IFD
+        ]);
+        let segment_len = (exif.len() + 2) as u16;
+        let mut oriented = encoded[..2].to_vec();
+        oriented.extend_from_slice(&[0xff, 0xe1]);
+        oriented.extend_from_slice(&segment_len.to_be_bytes());
+        oriented.extend_from_slice(&exif);
+        oriented.extend_from_slice(&encoded[2..]);
+
+        let sanitized = sanitize_image_for_upload(oriented, "image/jpeg").unwrap();
+        let decoded =
+            image::load_from_memory_with_format(&sanitized, image::ImageFormat::Jpeg).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (3, 2));
+        assert!(!sanitized.windows(6).any(|bytes| bytes == b"Exif\0\0"));
+    }
+
+    #[test]
+    fn test_animated_png_and_webp_are_not_flattened() {
+        let mut apng = b"\x89PNG\r\n\x1a\n".to_vec();
+        apng.extend_from_slice(&8u32.to_be_bytes());
+        apng.extend_from_slice(b"acTL");
+        apng.extend_from_slice(&[0; 8]);
+        apng.extend_from_slice(&[0; 4]);
+        assert!(is_animated_image(&apng, "image/png"));
+        assert_eq!(
+            sanitize_image_for_upload(apng.clone(), "image/png").unwrap(),
+            apng
+        );
+
+        let mut webp = b"RIFF\x0c\0\0\0WEBPANIM".to_vec();
+        webp.extend_from_slice(&0u32.to_le_bytes());
+        assert!(is_animated_image(&webp, "image/webp"));
+        assert_eq!(
+            sanitize_image_for_upload(webp.clone(), "image/webp").unwrap(),
+            webp
+        );
+    }
+
+    #[test]
+    fn test_legacy_upload_retry_statuses_are_narrow() {
+        assert!(should_retry_legacy_upload(reqwest::StatusCode::NOT_FOUND));
+        assert!(should_retry_legacy_upload(
+            reqwest::StatusCode::METHOD_NOT_ALLOWED
+        ));
+        assert!(!should_retry_legacy_upload(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ));
+        assert!(!should_retry_legacy_upload(
+            reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        ));
     }
 
     #[test]

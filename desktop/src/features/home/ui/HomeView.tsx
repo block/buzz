@@ -333,6 +333,20 @@ export function HomeView({
     enabled: feedProfilePubkeys.length > 0,
   });
   const feedProfiles = feedProfilesQuery.data?.profiles;
+  const feedOwnerPubkeys = React.useMemo(
+    () => [
+      ...new Set(
+        Object.values(feedProfiles ?? {})
+          .map((profile) => profile.ownerPubkey)
+          .filter((pubkey): pubkey is string => Boolean(pubkey)),
+      ),
+    ],
+    [feedProfiles],
+  );
+  const feedOwnerProfilesQuery = useUsersBatchQuery(feedOwnerPubkeys, {
+    enabled: feedOwnerPubkeys.length > 0,
+  });
+  const feedOwnerProfiles = feedOwnerProfilesQuery.data?.profiles;
   // Agent set for the inbox list/detail bot badges: the community-scoped
   // baseline widened with this surface's profile lookup.
   const communityAgentPubkeys = useKnownAgentPubkeys();
@@ -477,6 +491,7 @@ export function HomeView({
       undefined,
       undefined,
       relaySelfPubkey,
+      feedOwnerProfiles,
     );
 
     return timelineMessages.map((message) =>
@@ -491,6 +506,7 @@ export function HomeView({
     channelMessages,
     currentPubkey,
     feedProfiles,
+    feedOwnerProfiles,
     relaySelfPubkey,
     selectedChannel,
     selectedEventId,

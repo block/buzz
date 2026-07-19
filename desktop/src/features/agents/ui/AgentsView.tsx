@@ -71,7 +71,10 @@ export function AgentsView() {
   const runningAgentCount = agents.managedAgents.filter((agent) =>
     isManagedAgentActive(agent),
   ).length;
-  const configuredGlobalModel = globalConfig.model?.trim();
+  // Show the resolved effective model, not just the structured `model` field:
+  // most providers persist the model as a provider env var (e.g. DATABRICKS_MODEL)
+  // or inherit a baked build default, leaving `globalConfig.model` null.
+  const configuredGlobalModel = inheritedDefaults.model.value;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile and teamActions.handleImportTeamSnapshotFile are stable
   React.useEffect(() => {
@@ -115,8 +118,8 @@ export function AgentsView() {
                   variant="outline"
                 >
                   {configuredGlobalModel
-                    ? `Global model: ${configuredGlobalModel}`
-                    : "Set global model"}
+                    ? `Default model: ${configuredGlobalModel}`
+                    : "Set agent defaults"}
                 </Button>
                 {runningAgentCount > 0 ? (
                   <Button

@@ -57,6 +57,9 @@ test("channel browser shows channels not yet joined", async ({ page }) => {
 
   await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Browse channels" }),
+  ).toBeVisible();
 
   // "design" and "sales" are open channels the mock user is NOT a member of
   await expect(page.getByTestId("browse-channel-design")).toBeVisible();
@@ -105,6 +108,33 @@ test("channel browser sorts alphabetically or by member count", async ({
   await expect(page.getByTestId("channel-browser-sort")).toHaveAttribute(
     "aria-label",
     "Sort channels: Most members",
+  );
+});
+
+test("channel browser sorts by recent activity", async ({ page }) => {
+  await page.goto("/");
+
+  await openChannelBrowser(page);
+  const rows = page.locator('[data-testid^="browse-channel-"]');
+
+  await page.getByTestId("channel-browser-sort").click();
+  await page.getByTestId("channel-browser-sort-recent").click();
+
+  await expect(rows).toHaveText([
+    /#all-replies/,
+    /#deep-history/,
+    /#general/,
+    /#agents/,
+    /#sales/,
+    /#engineering/,
+    /#design/,
+    /#random/,
+    /#secret-projects/,
+    /#welcome-everyone/,
+  ]);
+  await expect(page.getByTestId("channel-browser-sort")).toHaveAttribute(
+    "aria-label",
+    "Sort channels: Recent",
   );
 });
 
@@ -227,8 +257,16 @@ test("canceling section create does not affect the next global create", async ({
   await page
     .getByTestId(`section-actions-${CUSTOM_SECTION.id}-quick-create`)
     .click();
+  // Gate on the dialog mounting before dismissing it. Escape sent before mount
+  // is dropped (no handler yet), and not.toBeVisible() then passes vacuously
+  // against a dialog that hasn't rendered — so the dialog opens *after* the
+  // assertion and its overlay swallows every later click.
+  await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  // The overlay outlives the content by one exit animation; wait for it to
+  // detach so it can't intercept the next click.
+  await expect(page.getByTestId("dialog-overlay")).toHaveCount(0);
 
   await page.getByTestId("section-actions-channels-quick-create").click();
   const channelName = `global-after-cancel-${Date.now()}`;

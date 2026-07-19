@@ -8,6 +8,7 @@ export type ObserverEvent = {
   channelId: string | null;
   sessionId: string | null;
   turnId: string | null;
+  startedAt?: string | null;
   payload: unknown;
 };
 

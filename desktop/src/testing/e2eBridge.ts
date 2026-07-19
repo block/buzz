@@ -99,6 +99,10 @@ type MockPersonaSeed = {
   isActive?: boolean;
   sourceTeam?: string | null;
   envVars?: Record<string, string>;
+  runtime?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  namePool?: string[];
 };
 
 type MockTeamSeed = {
@@ -122,6 +126,7 @@ type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
+    acpRuntimesDelayMs?: number;
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     acpAuthMethodsErrors?: Record<string, string>;
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
@@ -166,6 +171,8 @@ type E2eConfig = {
     applyCommunityDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Close the first channel-window live REQ; its retry is accepted. */
+    closeChannelLiveSubscriptionOnce?: boolean;
     /** Reject successive kind-9 sends with these messages, then resume. */
     sendMessageErrors?: string[];
     /** Reject successive managed-agent starts, then resume. */
@@ -292,6 +299,7 @@ type E2eConfig = {
       env_vars: Record<string, string>;
       provider: string | null;
       model: string | null;
+      preferred_runtime?: string | null;
     };
     /** Baked build env returned by the display and key-name Tauri commands. */
     bakedBuildEnv?: Array<{
@@ -299,6 +307,9 @@ type E2eConfig = {
       masked: boolean;
       value: string;
     }>;
+    /** Delay (ms) applied to `get_baked_build_env` so specs can observe
+     *  initial render gating around build defaults. 0/undefined = instant. */
+    bakedBuildEnvDelayMs?: number;
     /** Delay (ms) applied to `set_global_agent_config` so tests can observe
      *  autosave behaviour while a request is in flight. 0/undefined = instant.
      *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
@@ -475,7 +486,9 @@ type RawFeedItem = {
   created_at: number;
   channel_id: string | null;
   channel_name: string;
-  channel_type?: string;
+  // Mirrors native FeedItemInfo.channel_type (Option<String>): the Tauri
+  // backend always emits the key, as `null` when unknown.
+  channel_type?: string | null;
   tags: string[][];
   category: "mention" | "needs_action" | "activity" | "agent_activity";
 };
@@ -1961,6 +1974,10 @@ function resetMockPersonas(config?: E2eConfig) {
       display_name: persona.displayName,
       avatar_url: persona.avatarUrl ?? null,
       system_prompt: persona.systemPrompt,
+      runtime: persona.runtime ?? null,
+      model: persona.model ?? null,
+      provider: persona.provider ?? null,
+      name_pool: persona.namePool ?? [],
       is_builtin: false,
       is_active: persona.isActive ?? true,
       source_team: persona.sourceTeam ?? null,
@@ -2564,6 +2581,7 @@ const mockReminderEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
+let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 
@@ -6551,6 +6569,11 @@ async function handleGetFeed(
       tags: (ev.tags ?? []) as string[][],
       channel_id: chId,
       channel_name: chId ? (channelNameMap.get(chId) ?? "") : "",
+      // Native-shaped: get_feed emits channel_type: null (Option<String>),
+      // never omits the key. Keeping the bridge faithful here is what lets
+      // the DM dedupe e2e catch null-vs-undefined regressions at the API
+      // conversion seam.
+      channel_type: null,
       category: "mention" as const,
     };
   });
@@ -6589,6 +6612,13 @@ async function handleListRelayAgents(
 async function handleDiscoverAcpRuntimes(
   config: E2eConfig | undefined,
 ): Promise<RawAcpRuntimeCatalogEntry[]> {
+  const delayMs = config?.mock?.acpRuntimesDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, delayMs);
+    });
+  }
+
   const configured = config?.mock?.acpRuntimesCatalog;
   if (configured) {
     return configured;
@@ -6702,6 +6732,12 @@ async function handleConnectAcpRuntime(
 // re-evaluated via addInitScript, so the counter starts at 0 for every test.
 let installCallCount = 0;
 let addChannelMembersCallCount = 0;
+let mockGlobalAgentConfig: {
+  env_vars: Record<string, string>;
+  provider: string | null;
+  model: string | null;
+  preferred_runtime?: string | null;
+} | null = null;
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
@@ -8237,6 +8273,16 @@ function sendToMockSocket(args: {
         channelIds.size === 1
           ? (channelIds.values().next().value as string)
           : undefined;
+      if (
+        getConfig()?.mock?.closeChannelLiveSubscriptionOnce &&
+        !mockClosedChannelLiveSubscription &&
+        onlyChannelId &&
+        kinds.has(KIND_CHANNEL_THREAD_SUMMARY)
+      ) {
+        mockClosedChannelLiveSubscription = true;
+        sendWsText(socket.handler, ["CLOSED", subId, "rate-limited"]);
+        return;
+      }
       socket.subscriptions.set(subId, {
         channelId: onlyChannelId ?? GLOBAL_MOCK_SUBSCRIPTION,
         kinds: kinds.size > 0 ? [...kinds] : null,
@@ -8454,6 +8500,10 @@ export function maybeInstallE2eTauriMocks() {
     return;
   }
 
+  mockClosedChannelLiveSubscription = false;
+  mockGlobalAgentConfig = config.mock?.globalAgentConfig
+    ? { ...config.mock.globalAgentConfig }
+    : null;
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
@@ -9404,8 +9454,12 @@ export function maybeInstallE2eTauriMocks() {
           supportsSwitching: false,
         };
       case "discover_agent_models": {
-        const input = (payload as { input?: { provider?: string } } | null)
-          ?.input;
+        const input = (
+          payload as {
+            input?: { agentCommand?: string; provider?: string };
+          } | null
+        )?.input;
+        const agentCommand = input?.agentCommand?.trim() ?? "";
         const provider = input?.provider?.trim() ?? "";
         const openAiModels = [
           { id: "gpt-5.5", name: "GPT-5.5", description: null },
@@ -9424,6 +9478,22 @@ export function maybeInstallE2eTauriMocks() {
             name: "Claude Sonnet 4.6",
             description: null,
           },
+        ];
+        const claudeRuntimeModels = [
+          {
+            id: "claude-sonnet-4-20250514",
+            name: "Claude Sonnet 4",
+            description: null,
+          },
+          {
+            id: "claude-opus-4-20250514",
+            name: "Claude Opus 4",
+            description: null,
+          },
+        ];
+        const codexRuntimeModels = [
+          { id: "codex-mini", name: "Codex mini", description: null },
+          { id: "codex-pro", name: "Codex pro", description: null },
         ];
         if (provider === "relay-mesh") {
           if (!mockMeshState.admitted) {
@@ -9446,7 +9516,11 @@ export function maybeInstallE2eTauriMocks() {
               ? openAiModels
               : provider === "anthropic"
                 ? anthropicModels
-                : [...anthropicModels, ...openAiModels];
+                : agentCommand.includes("claude")
+                  ? claudeRuntimeModels
+                  : agentCommand.includes("codex")
+                    ? codexRuntimeModels
+                    : [...anthropicModels, ...openAiModels];
         return {
           agentName: "mock-agent",
           agentVersion: "0.0.0",
@@ -9466,13 +9540,13 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       }
       case "get_global_agent_config": {
-        // Return the mock global agent config if provided; otherwise return
-        // an empty config (no global provider, model, or env vars).
+        // Return the mutable persisted mock value, seeded from the test config.
         return (
-          config?.mock?.globalAgentConfig ?? {
+          mockGlobalAgentConfig ?? {
             env_vars: {},
             provider: null,
             model: null,
+            preferred_runtime: null,
           }
         );
       }
@@ -9486,6 +9560,7 @@ export function maybeInstallE2eTauriMocks() {
               env_vars: Record<string, string>;
               provider: string | null;
               model: string | null;
+              preferred_runtime: string | null;
             };
           }
         ).config;
@@ -9500,6 +9575,7 @@ export function maybeInstallE2eTauriMocks() {
         if (saveDelayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, saveDelayMs));
         }
+        mockGlobalAgentConfig = savedConfig;
         // In the E2E environment there are no running agents to restart, so
         // the counts default to 0 unless a spec drives them explicitly.
         return {
@@ -9509,8 +9585,15 @@ export function maybeInstallE2eTauriMocks() {
             config?.mock?.globalConfigFailedRestartCount ?? 0,
         };
       }
-      case "get_baked_build_env":
+      case "get_baked_build_env": {
+        const bakedEnvDelayMs = config?.mock?.bakedBuildEnvDelayMs ?? 0;
+        if (bakedEnvDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, bakedEnvDelayMs),
+          );
+        }
         return config?.mock?.bakedBuildEnv ?? [];
+      }
       case "get_baked_build_env_keys":
         return (config?.mock?.bakedBuildEnv ?? []).map((entry) => entry.key);
       case "update_managed_agent":
@@ -9784,6 +9867,25 @@ export function maybeInstallE2eTauriMocks() {
         return connectMockSocket(
           payload as Parameters<typeof connectMockSocket>[0],
         );
+      case "plugin:websocket|disconnect": {
+        const { id } = payload as { id: number };
+        if (isRelayMode(activeConfig)) {
+          realSockets.get(id)?.close();
+          realSockets.delete(id);
+        } else {
+          const socket = mockSockets.get(id);
+          mockSockets.delete(id);
+          if (socket) sendWsClose(socket.handler);
+        }
+        return null;
+      }
+      case "plugin:websocket|disconnect_all":
+        for (const socket of realSockets.values()) socket.close();
+        realSockets.clear();
+        for (const socket of mockSockets.values()) sendWsClose(socket.handler);
+        mockSockets.clear();
+        mockWebsocketSendMutexWedged = false;
+        return null;
       case "plugin:websocket|send":
         if (isRelayMode(activeConfig)) {
           return sendToRealSocket(

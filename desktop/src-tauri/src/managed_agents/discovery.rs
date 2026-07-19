@@ -148,7 +148,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_command: None,
         mcp_hooks: false,
         underlying_cli: Some("goose"),
-        cli_install_commands: &["curl -fsSL https://github.com/block-open-source/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
+        cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
         cli_install_commands_windows: &[], // goose install script is already Windows-aware
         adapter_install_commands: &[],
         install_instructions_url: "https://block.github.io/goose/",

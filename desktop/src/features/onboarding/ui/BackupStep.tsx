@@ -10,7 +10,10 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
-import { NsecMaskedDisplay } from "./NsecMaskedDisplay";
+import {
+  NsecMaskedDisplay,
+  ONBOARDING_KEY_FRAME_CLASS,
+} from "./NsecMaskedDisplay";
 
 /**
  * Pure helper so the disabled logic can be unit-tested without a DOM.
@@ -123,7 +126,7 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
           </div>
         ) : nsec ? (
           // Translucent white card frames the key with equal padding.
-          <div className="w-full min-w-0 rounded-xl bg-white/50 px-8 py-6">
+          <div className={ONBOARDING_KEY_FRAME_CLASS}>
             <NsecMaskedDisplay nsec={nsec} variant="bare" />
           </div>
         ) : (

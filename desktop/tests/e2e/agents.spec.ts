@@ -269,7 +269,7 @@ test("agent avatar emoji picker scrolls inside its popover", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "New agent" }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
   await page.getByLabel("Add avatar").click();
@@ -1626,4 +1626,52 @@ test("personas referenced by teams cannot be deleted", async ({ page }) => {
   expect(error).toBe(
     "Analyst is still referenced by a team. Remove it from those teams first.",
   );
+});
+
+test("duplicate instances move from the agents gallery into the agent profile", async ({
+  page,
+}) => {
+  const personaId = "custom:duplicate-auditor";
+  const primaryPubkey = TEST_IDENTITIES.alice.pubkey;
+  const additionalPubkey = TEST_IDENTITIES.charlie.pubkey;
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: personaId,
+        displayName: "Duplicate Auditor",
+        systemPrompt: "You audit duplicate instances.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: primaryPubkey,
+        name: "Duplicate Auditor",
+        personaId,
+        status: "running",
+      },
+      {
+        pubkey: additionalPubkey,
+        name: "Duplicate Auditor",
+        personaId,
+        status: "stopped",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  await expect(page.getByText("Additional running agents")).toHaveCount(0);
+  await expect(
+    page.getByTestId(`managed-agent-${additionalPubkey}`),
+  ).toHaveCount(0);
+
+  await page.getByTestId(`persona-agent-row-${personaId}`).click();
+  await page.getByTestId("user-profile-instances").click();
+  await page.getByTestId(`user-profile-instance-${additionalPubkey}`).click();
+
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  await page.getByTestId("user-profile-settings-menu-trigger").click();
+  await expect(
+    page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
+  ).toBeVisible();
 });

@@ -5,6 +5,7 @@ import {
   useAvailableAcpRuntimes,
   useCreateChannelManagedAgentsMutation,
 } from "@/features/agents/hooks";
+import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import type { CreateChannelManagedAgentsResult } from "@/features/agents/channelAgents";
 import {
   emptyResolvedTeamPersonas,
@@ -50,6 +51,7 @@ export function AddTeamToChannelDialog({
   onOpenChange,
   onDeployed,
 }: AddTeamToChannelDialogProps) {
+  const { globalConfig } = useGlobalAgentConfig();
   const channelsQuery = useChannelsQuery();
   const providersQuery = useAvailableAcpRuntimes();
   const [channelId, setChannelId] = React.useState("");
@@ -69,7 +71,10 @@ export function AddTeamToChannelDialog({
   const runtimes = providersQuery.data ?? [];
   // Use the buzz-agent-first preference so the team-deploy fallback mirrors the
   // single-agent start path (buzz-agent → goose → first available).
-  const defaultProvider = getDefaultPersonaRuntime(runtimes);
+  const defaultProvider = getDefaultPersonaRuntime(
+    runtimes,
+    globalConfig.preferred_runtime,
+  );
 
   const teamPersonaResolution = React.useMemo(
     () =>

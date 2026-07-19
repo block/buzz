@@ -40,6 +40,7 @@ import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
+import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
@@ -459,6 +460,12 @@ export const MessageRow = React.memo(
     ) : (
       <MessageAuthorText as="h3">{message.author}</MessageAuthorText>
     );
+    const agentOwnerNode = message.isAgent ? (
+      <MessageAgentOwner
+        ownerLabel={message.ownerLabel}
+        ownerPubkey={message.ownerPubkey}
+      />
+    ) : null;
 
     const actionBarNode = (
       <div
@@ -545,6 +552,7 @@ export const MessageRow = React.memo(
         ) : (
           authorNode
         )}
+        {agentOwnerNode}
         {inlineMetadataNode}
         {message.personaDisplayName &&
         message.personaDisplayName !== message.author ? (
@@ -811,6 +819,9 @@ export const MessageRow = React.memo(
     prev.message.pubkey === next.message.pubkey &&
     prev.message.body === next.message.body &&
     prev.message.author === next.message.author &&
+    prev.message.isAgent === next.message.isAgent &&
+    prev.message.ownerPubkey === next.message.ownerPubkey &&
+    prev.message.ownerLabel === next.message.ownerLabel &&
     prev.message.avatarUrl === next.message.avatarUrl &&
     prev.message.accent === next.message.accent &&
     prev.message.time === next.message.time &&

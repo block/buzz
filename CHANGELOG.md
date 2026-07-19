@@ -1,5 +1,65 @@
 # Changelog
 
+## v0.4.18
+
+- fix(desktop): recover first community joins ([#2087](https://github.com/block/buzz/pull/2087)) ([`775cf672d`](https://github.com/block/buzz/commit/775cf672d11d43b07b27941a41bd2e52a9111466))
+- fix: recover community access visibility ([#2074](https://github.com/block/buzz/pull/2074)) ([`ca384d082`](https://github.com/block/buzz/commit/ca384d082d9804ec53a3fd12ccbf4a0846b21d92))
+
+
+## v0.4.17
+
+- fix(desktop): onboarding defaults — API key field and model search ([#2081](https://github.com/block/buzz/pull/2081)) ([`741610f13`](https://github.com/block/buzz/commit/741610f138f9e0f31c7a0b78ef4a498b7df02688))
+- feat(desktop): show agent owners in messages ([#2080](https://github.com/block/buzz/pull/2080)) ([`463db6de3`](https://github.com/block/buzz/commit/463db6de3ea8406b0825012fae08027414062b3d))
+- fix(desktop): restore onboarding provider choices ([#2079](https://github.com/block/buzz/pull/2079)) ([`b18a79476`](https://github.com/block/buzz/commit/b18a79476b8afa3d99c8f0247582466d88a37d0f))
+- Fix Claude onboarding terminal popup ([#2078](https://github.com/block/buzz/pull/2078)) ([`f125f0868`](https://github.com/block/buzz/commit/f125f0868473b2c047130f5f903e2dbf31225705))
+- fix(desktop): complete request access flow ([#2073](https://github.com/block/buzz/pull/2073)) ([`426497a18`](https://github.com/block/buzz/commit/426497a18e59863326ddc534f9b357d506e5751c))
+- fix(desktop): preserve profile descriptions across communities ([#2068](https://github.com/block/buzz/pull/2068)) ([`0dda0ad2f`](https://github.com/block/buzz/commit/0dda0ad2f682b13d12237061c24e3385e941c551))
+- Fix membership-denied community onboarding recovery ([#2072](https://github.com/block/buzz/pull/2072)) ([`f347dcac2`](https://github.com/block/buzz/commit/f347dcac25c589bf8c01160239fa24b97bfe5649))
+- feat(desktop): add channel archive and delete actions ([#2067](https://github.com/block/buzz/pull/2067)) ([`929d3aa12`](https://github.com/block/buzz/commit/929d3aa12f64013bbe25ab9762c7777523f5a606))
+- fix(desktop): restore channel browsing and add recent sorting ([#2065](https://github.com/block/buzz/pull/2065)) ([`2cb7753fa`](https://github.com/block/buzz/commit/2cb7753fa27d7aa2e53737404d34818d53047c65))
+- feat(desktop): polish onboarding harness ([#2039](https://github.com/block/buzz/pull/2039)) ([`66a0f7bcb`](https://github.com/block/buzz/commit/66a0f7bcb905bc81bbf97e794a25e7ec7241d40d))
+- Expose model selection for provider-locked runtimes ([#2071](https://github.com/block/buzz/pull/2071)) ([`3ad180a60`](https://github.com/block/buzz/commit/3ad180a60fb200b27bea2adfeb7fda5a60410c54))
+- Speed up the Welcome kickoff and show the team arriving ([#2066](https://github.com/block/buzz/pull/2066)) ([`1fdb73e17`](https://github.com/block/buzz/commit/1fdb73e17b3f741fac3eb14f71a78aa24869f107))
+- Add identity key help and reveal toggle to machine onboarding ([#2064](https://github.com/block/buzz/pull/2064)) ([`1bdd93849`](https://github.com/block/buzz/commit/1bdd93849145e22e4d58555644c4783c2a1a2a16))
+- fix(desktop): keep Private toggle when picking a channel template ([#2070](https://github.com/block/buzz/pull/2070)) ([`89bcbd826`](https://github.com/block/buzz/commit/89bcbd826b11623179d703a986511ca912d6a7f6))
+- fix(agents): explain why Create/Save is disabled and fix Codex/Claude gate ([#2050](https://github.com/block/buzz/pull/2050)) ([`87dc4dccb`](https://github.com/block/buzz/commit/87dc4dccba94fe380ddc67b5441e367b7ec69009))
+- fix(desktop): recover relay-closed subscriptions ([#2060](https://github.com/block/buzz/pull/2060)) ([`79598bdb3`](https://github.com/block/buzz/commit/79598bdb3fce1b0955caf3a903387ee1c8f64186))
+
+
+## v0.4.16
+
+- Polish private key onboarding texture ([#2051](https://github.com/block/buzz/pull/2051)) ([`7873135a0`](https://github.com/block/buzz/commit/7873135a0bf843116102796a1671bb4141c4ed23))
+- Fix community profile onboarding back navigation ([#2058](https://github.com/block/buzz/pull/2058)) ([`385dde113`](https://github.com/block/buzz/commit/385dde11387cd74b7e28c80a25c8d3570dbf5823))
+- fix(desktop): route text copies through native clipboard ([#2054](https://github.com/block/buzz/pull/2054)) ([`9f8285095`](https://github.com/block/buzz/commit/9f8285095992ff93b00d93458e43217543e310af))
+- BOT-1359: Continue onboarding after key import ([#2056](https://github.com/block/buzz/pull/2056)) ([`738d45636`](https://github.com/block/buzz/commit/738d45636737ee7835ed5ec84ba74889d570a4fe))
+- fix(desktop): route first community deep links into onboarding ([#2055](https://github.com/block/buzz/pull/2055)) ([`34ef70263`](https://github.com/block/buzz/commit/34ef702638612620ae1b3c506e2be51a5b4bf3ef))
+
+
+## v0.4.15
+
+- fix(desktop): honor selected onboarding runtime config ([#2047](https://github.com/block/buzz/pull/2047)) ([`0bbcafe9e`](https://github.com/block/buzz/commit/0bbcafe9e6893dcc77f2f813e749ab655cbfc51d))
+- Polish community onboarding flow ([#2048](https://github.com/block/buzz/pull/2048)) ([`2ea71de24`](https://github.com/block/buzz/commit/2ea71de24c8adc1f506e5afaa9ec02dca7593340))
+- fix(desktop): retry transient runtime installs and repoint Goose to official upstream ([#2046](https://github.com/block/buzz/pull/2046)) ([`51c2d1ca6`](https://github.com/block/buzz/commit/51c2d1ca62947f4a89bab99b145daada6b2f310e))
+- fix(agents): anchor active-turn timer to authoritative start time ([#2033](https://github.com/block/buzz/pull/2033)) ([`4be5c6ae3`](https://github.com/block/buzz/commit/4be5c6ae32b0601331f81771c387e50e339b8770))
+- Add preferred runtime onboarding ([#2040](https://github.com/block/buzz/pull/2040)) ([`c19e0ce2d`](https://github.com/block/buzz/commit/c19e0ce2d4e87bf76ace7b1233fa0fd0793f31aa))
+- fix(desktop): limit channel composer blur to input ([#2038](https://github.com/block/buzz/pull/2038)) ([`0e0383601`](https://github.com/block/buzz/commit/0e038360185971a6e5132bae27007d28a032b330))
+- Bug-bash round 2: table scroll, Goose instructions, workflow mention wake ([#2034](https://github.com/block/buzz/pull/2034)) ([`64b8fea6d`](https://github.com/block/buzz/commit/64b8fea6dce3be684aa0bac5dbd701e46dc7e432))
+- feat(desktop): clean up Agents page copy and streamline agent defaults ([#2031](https://github.com/block/buzz/pull/2031)) ([`3e80b7666`](https://github.com/block/buzz/commit/3e80b76666f46f6e821ca8d0bcdd4ca1429fa031))
+
+
+## v0.4.14
+
+- fix(desktop): restore Doctor ACP login discovery ([#2017](https://github.com/block/buzz/pull/2017)) ([`e179f88ad`](https://github.com/block/buzz/commit/e179f88ada02eadb636afea88f2d5b5cb82621fb))
+- feat(desktop): animate starter team onboarding ([#2032](https://github.com/block/buzz/pull/2032)) ([`1aab50e95`](https://github.com/block/buzz/commit/1aab50e950f2b7ef75cc6ec6e6055de681a4bff7))
+- fix(desktop): include exe dir and ~/.local/bin in provider discovery ([#2007](https://github.com/block/buzz/pull/2007)) ([`ac404ba67`](https://github.com/block/buzz/commit/ac404ba67f2f6fb0a986e865ded4402e445fd009))
+- fix(desktop): close mention popup after an exact name + trailing space ([#2030](https://github.com/block/buzz/pull/2030)) ([`fb0a4d5e7`](https://github.com/block/buzz/commit/fb0a4d5e7490aaf10eda1b37c138b737232de78d))
+- test(desktop): harden observer archive policy regression coverage ([#1994](https://github.com/block/buzz/pull/1994)) ([`fd2eaac73`](https://github.com/block/buzz/commit/fd2eaac73b2c3125ab242b4e931b54769303a9f0))
+- Bug-bash: mention/code-span, feed titles, autocomplete, edit-mentions, draft routing, and right-click media Download ([#2027](https://github.com/block/buzz/pull/2027)) ([`084e442d2`](https://github.com/block/buzz/commit/084e442d2dea0125742f5d410fb2ac99c3af225c))
+- fix(desktop): keep mesh allowlist on transient roster query failure ([#2024](https://github.com/block/buzz/pull/2024)) ([`f205e6693`](https://github.com/block/buzz/commit/f205e669306da82a4188fc8ace08cccc0399244d))
+- Polish Buzz theme and sidebar ([#1971](https://github.com/block/buzz/pull/1971)) ([`2121fd045`](https://github.com/block/buzz/commit/2121fd0452afd212caaaa6962c8710606417658a))
+- Welcome new users with a live agent team kickoff ([#1998](https://github.com/block/buzz/pull/1998)) ([`85fc64835`](https://github.com/block/buzz/commit/85fc64835e79a0310990e253877abe1b3d6a654c))
+
+
 ## v0.4.13
 
 - fix(desktop): compare relay media origins case-insensitively so uploads render when the saved community URL has uppercase characters

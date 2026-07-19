@@ -12,11 +12,13 @@ import type { AcpRuntime, AcpRuntimeCatalogEntry } from "@/shared/api/types";
  */
 export function getDefaultPersonaRuntime<T extends AcpRuntimeCatalogEntry>(
   runtimes: readonly T[],
+  preferredRuntimeId?: string | null,
 ): T | null {
   const available = runtimes.filter(
     (runtime) => runtime.availability === "available",
   );
   return (
+    available.find((runtime) => runtime.id === preferredRuntimeId) ??
     available.find((runtime) => runtime.id === "buzz-agent") ??
     available.find((runtime) => runtime.id === "goose") ??
     available[0] ??

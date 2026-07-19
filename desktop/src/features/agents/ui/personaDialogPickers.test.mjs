@@ -75,6 +75,23 @@ test("getPersonaProviderOptions appends (current) tail for an unknown saved prov
 
 // ── getDefaultPersonaRuntime — buzz-agent first ───────────────────────────────
 
+test("getDefaultPersonaRuntime honors an available global preference", () => {
+  const runtimes = [
+    makeRuntime("buzz-agent"),
+    makeRuntime("goose"),
+    makeRuntime("claude"),
+  ];
+  assert.equal(getDefaultPersonaRuntime(runtimes, "claude")?.id, "claude");
+});
+
+test("getDefaultPersonaRuntime ignores an unavailable global preference", () => {
+  const runtimes = [
+    makeRuntime("buzz-agent"),
+    makeRuntime("claude", "not_installed"),
+  ];
+  assert.equal(getDefaultPersonaRuntime(runtimes, "claude")?.id, "buzz-agent");
+});
+
 test("getDefaultPersonaRuntime returns buzz-agent over goose when both are available", () => {
   const runtimes = [
     makeRuntime("goose"),

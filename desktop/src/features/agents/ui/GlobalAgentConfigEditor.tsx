@@ -159,7 +159,7 @@ export function GlobalAgentConfigEditor({
       }
     } catch (err) {
       setSaveState("error");
-      setSaveError(typeof err === "string" ? err : "Failed to save.");
+      setSaveError(typeof err === "string" ? err : "Couldn't save.");
     } finally {
       onSavingChange?.(false);
     }
@@ -175,12 +175,12 @@ export function GlobalAgentConfigEditor({
       ) : loadError ? (
         <div className="flex items-center gap-2 py-4 text-sm text-destructive">
           <AlertCircle className="size-4" />
-          Failed to load agent defaults. Restart the app to try again.
+          Couldn't load agent defaults. Restart the app to try again.
         </div>
       ) : (
         <GlobalAgentConfigFields
           bakedEnv={bakedEnv}
-          buzzAgentRuntime={buzzAgentRuntime}
+          selectedRuntime={buzzAgentRuntime}
           config={config}
           isCustomModelEditing={isCustomModelEditing}
           isCustomProvider={isCustomProvider}
@@ -198,9 +198,9 @@ export function GlobalAgentConfigEditor({
             <span className="flex min-w-0 items-center gap-1 text-sm text-green-600 dark:text-green-400">
               <Check className="size-3.5 shrink-0" />
               {restartedCount > 0
-                ? `Saved. Restarted ${restartedCount} agent${restartedCount === 1 ? "" : "s"}.${failedRestartCount > 0 ? ` ${failedRestartCount} failed to restart — check the Agents tab.` : ""}`
+                ? `Saved. Restarted ${restartedCount} agent${restartedCount === 1 ? "" : "s"}.${failedRestartCount > 0 ? ` ${failedRestartCount} couldn't restart — check the Agents page.` : ""}`
                 : failedRestartCount > 0
-                  ? `Saved. ${failedRestartCount} agent${failedRestartCount === 1 ? "" : "s"} failed to restart — check the Agents tab.`
+                  ? `Saved. ${failedRestartCount} agent${failedRestartCount === 1 ? "" : "s"} couldn't restart — check the Agents page.`
                   : "Saved."}
             </span>
           )}
