@@ -420,6 +420,54 @@ pub(crate) fn valid_agent_runtime_receipt(
         && process_has_buzz_marker(receipt.pid, &receipt.desktop_instance_id)
 }
 
+fn terminate_runtime_receipt_with(
+    path: &std::path::Path,
+    receipt: &super::ManagedAgentRuntimeReceipt,
+    terminate: impl FnOnce(u32) -> Result<(), String>,
+    mut is_running: impl FnMut(u32) -> bool,
+    remove: impl FnOnce(&std::path::Path),
+) -> Result<(), String> {
+    terminate(receipt.pid)?;
+    for _ in 0..20 {
+        if !is_running(receipt.pid) {
+            remove(path);
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(format!(
+        "prior runtime {} for pair {} on {} did not exit",
+        receipt.pid, receipt.key.pubkey, receipt.key.relay_url
+    ))
+}
+
+/// Replace a valid prior-session process before registering a new child for
+/// the same pair. The caller must hold the runtime transition lock so receipt
+/// inspection, termination, spawn, and registration cannot race shutdown or
+/// another start.
+pub(crate) fn terminate_untracked_pair_runtime(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<(), String> {
+    let instance_id = current_instance_id(app);
+    let Some((path, receipt)) = super::read_all_agent_runtime_receipts(app)
+        .into_iter()
+        .find(|(path, receipt)| {
+            receipt.key == *key && valid_agent_runtime_receipt(path, receipt, &instance_id)
+        })
+    else {
+        return Ok(());
+    };
+
+    terminate_runtime_receipt_with(
+        &path,
+        &receipt,
+        terminate_process,
+        process_is_running,
+        super::remove_agent_runtime_receipt_path,
+    )
+}
+
 /// Kill orphaned agent processes using PID file receipts. Reads all files from
 /// `agent-pids/`, verifies each PID still belongs to a known agent binary,
 /// then resolves each candidate's actual PGID and signals the process group.

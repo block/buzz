@@ -263,7 +263,7 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
-    // ── Phase B (no locks): resolve commands and spawn processes in parallel ──
+    // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
     let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
         let owner_hex_ref = owner_hex.as_deref();
         let handles: Vec<_> = agents_to_start
@@ -281,6 +281,7 @@ pub async fn restore_managed_agents_on_launch(
                     let result =
                         super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
                             .and_then(|key| {
+                                super::terminate_untracked_pair_runtime(app, &key)?;
                                 spawn_agent_child(app, record, &key.relay_url, false, owner_hex_ref)
                                     .map(|process| (key, process))
                             });

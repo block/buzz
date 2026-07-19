@@ -6,9 +6,10 @@ use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
     process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, terminate_process, write_agent_runtime_receipt, AgentReadiness, BackendKind,
-    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
-    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
+    spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
+    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
+    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
+    ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -168,6 +169,7 @@ fn start_pair(
         return Ok(status);
     }
     runtimes.remove(&key);
+    terminate_untracked_pair_runtime(&app, &key)?;
 
     let owner = state
         .keys

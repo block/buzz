@@ -840,3 +840,59 @@ fn receipt_validation_rejects_wrong_pair_filename() {
         "test-instance"
     ));
 }
+
+#[test]
+fn replacement_removes_receipt_only_after_confirmed_exit() {
+    use std::cell::{Cell, RefCell};
+
+    let receipt = receipt_fixture(
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
+            .unwrap(),
+    );
+    let path = std::path::Path::new("pair.json");
+    let terminated = Cell::new(None);
+    let polls = Cell::new(0);
+    let removed = RefCell::new(None);
+
+    super::terminate_runtime_receipt_with(
+        path,
+        &receipt,
+        |pid| {
+            terminated.set(Some(pid));
+            Ok(())
+        },
+        |_| {
+            let poll = polls.get() + 1;
+            polls.set(poll);
+            poll < 2
+        },
+        |path| *removed.borrow_mut() = Some(path.to_path_buf()),
+    )
+    .unwrap();
+
+    assert_eq!(terminated.get(), Some(receipt.pid));
+    assert_eq!(polls.get(), 2);
+    assert_eq!(removed.into_inner().as_deref(), Some(path));
+}
+
+#[test]
+fn replacement_failure_keeps_receipt() {
+    use std::cell::Cell;
+
+    let receipt = receipt_fixture(
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
+            .unwrap(),
+    );
+    let removed = Cell::new(false);
+    let error = super::terminate_runtime_receipt_with(
+        std::path::Path::new("pair.json"),
+        &receipt,
+        |_| Err("signal failed".into()),
+        |_| false,
+        |_| removed.set(true),
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "signal failed");
+    assert!(!removed.get());
+}
