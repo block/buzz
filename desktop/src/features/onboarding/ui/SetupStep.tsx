@@ -15,6 +15,7 @@ import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
+import { Card } from "@/shared/ui/card";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -85,7 +86,7 @@ function RuntimeSelectionIndicator({
     <span
       aria-hidden="true"
       className={cn(
-        "pointer-events-none absolute right-3 top-3 flex h-8 w-8 scale-90 items-center justify-center rounded-full border border-[var(--buzz-welcome-chartreuse)] bg-white/75 opacity-0 transition-[background-color,opacity,transform] duration-200 ease-out group-hover:scale-100 group-hover:opacity-100 group-focus-visible:scale-100 group-focus-visible:opacity-100",
+        "pointer-events-none absolute right-8 top-8 flex h-8 w-8 scale-90 items-center justify-center rounded-full border border-[var(--buzz-welcome-chartreuse)] bg-white/75 opacity-0 transition-[background-color,opacity,transform] duration-200 ease-out group-hover:scale-100 group-hover:opacity-100 group-focus-visible:scale-100 group-focus-visible:opacity-100",
         selected &&
           "scale-100 bg-[var(--buzz-welcome-chartreuse)] opacity-100 group-hover:opacity-100",
       )}
@@ -541,14 +542,13 @@ function RuntimeCard({
   const canSelect = runtimeCanBeSelected(runtime);
 
   return (
-    // biome-ignore lint/a11y/useSemanticElements: Cannot use <input> because this card contains nested setup and details buttons, which require interactive content
-    <div
+    <Card
       aria-checked={selected}
       aria-disabled={!canSelect}
       className={cn(
-        "group relative flex aspect-[288/132] min-h-[96px] w-full max-w-[288px] select-none flex-col items-center justify-center rounded-2xl border-0 bg-white/75 px-3 py-1.5 text-center outline-none transition-colors duration-150 ease-out hover:bg-white/80 active:bg-white/90 focus-visible:ring-2 focus-visible:ring-foreground/40",
+        "group h-[224px] w-full max-w-[288px] select-none items-center px-3 py-1.5 text-center outline-none transition-[filter] duration-150 ease-out hover:brightness-[0.98] active:brightness-[0.96] focus-visible:ring-2 focus-visible:ring-foreground/40",
         installError && "ring-1 ring-destructive/40",
-        selected && "bg-white/90 hover:bg-white/90",
+        selected && "brightness-[0.98] hover:brightness-[0.98]",
         canSelect ? "cursor-pointer" : "cursor-default",
       )}
       data-testid={`onboarding-runtime-${runtime.id}`}
@@ -562,6 +562,7 @@ function RuntimeCard({
       }}
       role="checkbox"
       tabIndex={canSelect ? 0 : -1}
+      variant="textured"
     >
       <RuntimeSelectionIndicator runtime={runtime} selected={selected} />
 
@@ -604,7 +605,7 @@ function RuntimeCard({
       ) : (
         <RuntimeAuthError runtime={runtime} />
       )}
-    </div>
+    </Card>
   );
 }
 

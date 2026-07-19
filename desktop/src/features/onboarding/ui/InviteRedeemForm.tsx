@@ -13,11 +13,11 @@ import {
 } from "@/shared/api/invites";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Card } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { JoinPolicyNotice } from "./JoinPolicyNotice";
 import {
-  ONBOARDING_KEY_FRAME_CLASS,
   ONBOARDING_KEY_ROW_CLASS,
   ONBOARDING_KEY_TEXT_CLASS,
 } from "./NsecMaskedDisplay";
@@ -26,6 +26,13 @@ import { OnboardingFooter } from "./OnboardingFooter";
 
 const POLICY_DISCOVERY_DELAY_MS = 250;
 const POLICY_REVEAL_EASE = [0.23, 1, 0.32, 1] as const;
+const SPOTLIGHT_TEXTURE_CONTENT_CLASS = "mx-auto w-full max-w-[920px]";
+const SPOTLIGHT_OVERFLOW_FADE = {
+  WebkitMaskImage:
+    "linear-gradient(to right, transparent, black 2rem, black calc(100% - 2rem), transparent)",
+  maskImage:
+    "linear-gradient(to right, transparent, black 2rem, black calc(100% - 2rem), transparent)",
+};
 
 type InviteRedeemFormProps = {
   /**
@@ -255,38 +262,45 @@ export function InviteRedeemForm({
     <form
       className={cn(
         "flex w-full flex-col",
-        isOnboardingSpotlight ? "items-center gap-4" : "gap-3",
+        isOnboardingSpotlight ? "relative items-center" : "gap-3",
       )}
       id={formId}
       onSubmit={handleSubmit}
     >
       {isOnboardingSpotlight ? (
-        <label
-          className={cn("w-full max-w-4xl", ONBOARDING_KEY_FRAME_CLASS)}
+        <Card
+          className="w-[min(calc(100%+12rem),calc(100vw-2rem))] max-w-[1120px] translate-y-8 px-8 py-6"
           data-testid="invite-redeem-input-frame"
-          htmlFor="invite-input"
+          variant="textured"
         >
-          <span className="sr-only">Invite link or code</span>
-          <span className={ONBOARDING_KEY_ROW_CLASS}>
-            <input
-              autoCapitalize="none"
-              autoComplete="off"
-              autoCorrect="off"
-              className={cn(
-                ONBOARDING_KEY_TEXT_CLASS,
-                "block border-0 bg-transparent p-0 text-center shadow-none outline-none placeholder:text-[var(--buzz-onboarding-backup-ink)] placeholder:opacity-40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
-              )}
-              data-testid="invite-redeem-input"
-              disabled={isRedeeming}
-              id="invite-input"
-              onChange={handleInviteInputChange}
-              placeholder="https://relay.example.com/invite/abc123"
-              spellCheck={false}
-              type="text"
-              value={inviteInput}
-            />
-          </span>
-        </label>
+          <div
+            className={SPOTLIGHT_TEXTURE_CONTENT_CLASS}
+            style={SPOTLIGHT_OVERFLOW_FADE}
+          >
+            <label className="block w-full" htmlFor="invite-input">
+              <span className="sr-only">Invite link or code</span>
+              <span className={ONBOARDING_KEY_ROW_CLASS}>
+                <input
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  className={cn(
+                    ONBOARDING_KEY_TEXT_CLASS,
+                    "block border-0 bg-transparent p-0 text-center shadow-none outline-none placeholder:text-[var(--buzz-onboarding-backup-ink)] placeholder:opacity-40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
+                  )}
+                  data-testid="invite-redeem-input"
+                  disabled={isRedeeming}
+                  id="invite-input"
+                  onChange={handleInviteInputChange}
+                  placeholder="https://relay.example.com/invite/abc123"
+                  spellCheck={false}
+                  type="text"
+                  value={inviteInput}
+                />
+              </span>
+            </label>
+          </div>
+        </Card>
       ) : (
         <div className="space-y-1.5 text-left">
           <label
@@ -317,7 +331,7 @@ export function InviteRedeemForm({
           aria-hidden={!showInvalidInviteTip}
           aria-live="polite"
           className={cn(
-            "min-h-5 w-full max-w-4xl text-center text-sm text-[#717106] transition-opacity duration-150 ease-out",
+            "absolute top-[calc(100%+2rem)] mt-4 min-h-5 w-full max-w-4xl text-center text-sm text-[#717106] transition-opacity duration-150 ease-out",
             showInvalidInviteTip ? "opacity-100" : "opacity-0",
           )}
           data-testid="invalid-invite-tip"

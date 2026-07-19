@@ -179,7 +179,7 @@ export function MachineOnboardingFlow({
       ) : null}
       <OnboardingFooterProvider>
         <div
-          className={`relative flex w-full max-w-[920px] flex-col items-center text-center ${
+          className={`relative flex w-full max-w-[1040px] flex-col items-center text-center ${
             page === "identity" ? "my-auto" : "buzz-onboarding-step-frame"
           }`}
         >

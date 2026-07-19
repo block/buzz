@@ -5,7 +5,6 @@ import { useCommunityOnboarding } from "@/features/onboarding/communityOnboardin
 import { normalizeRelayUrl } from "@/features/communities/relayProbe";
 import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
 import {
-  ONBOARDING_KEY_FRAME_CLASS,
   ONBOARDING_KEY_ROW_CLASS,
   ONBOARDING_KEY_TEXT_CLASS,
 } from "@/features/onboarding/ui/NsecMaskedDisplay";
@@ -20,10 +19,14 @@ import {
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { pubkeyToNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
+import { Card } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
-import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
+import {
+  ONBOARDING_PRIMARY_CTA_CLASS,
+  OnboardingChrome,
+} from "@/features/onboarding/ui/OnboardingChrome";
 import { HostedCommunityOnboarding } from "@/features/communities/ui/HostedCommunityOnboarding";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
@@ -37,7 +40,16 @@ type WelcomeSetupProps = {
 };
 
 const COMMUNITY_OPTION_CARD_CLASS =
-  "flex min-h-24 w-full max-w-[352px] items-center justify-center rounded-xl bg-white/75 px-6 py-4 text-center text-sm font-normal leading-6 text-foreground transition-colors duration-150 ease-out hover:bg-white/85 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-foreground/35";
+  "w-full max-w-[320px] items-center px-6 py-4 text-center text-sm font-normal leading-6 text-foreground [--buzz-card-textured-min-height:88px] transition-[filter] duration-150 ease-out hover:brightness-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-foreground/35";
+const WIDE_TEXTURE_CARD_CLASS =
+  "relative left-1/2 w-[min(calc(100%+10rem),calc(100vw-2rem))] max-w-[1040px] -translate-x-1/2 px-8 py-6 [--buzz-card-textured-min-height:192px]";
+const WIDE_TEXTURE_CONTENT_CLASS = "mx-auto w-full max-w-[840px]";
+const HORIZONTAL_INPUT_OVERFLOW_FADE = {
+  WebkitMaskImage:
+    "linear-gradient(to right, transparent, black 2rem, black calc(100% - 2rem), transparent)",
+  maskImage:
+    "linear-gradient(to right, transparent, black 2rem, black calc(100% - 2rem), transparent)",
+};
 
 export function WelcomeSetup({
   initialPage = "welcome",
@@ -111,16 +123,17 @@ export function WelcomeSetup({
 
   return (
     <div
-      className="buzz-onboarding-neutral-theme buzz-startup-shell flex min-h-dvh items-start justify-center overflow-y-auto bg-background px-4 pb-36 pt-[106px] text-foreground"
+      className="buzz-onboarding-neutral-theme buzz-startup-shell flex h-dvh items-start justify-center overflow-y-auto bg-background px-4 pb-36 pt-[106px] text-foreground"
       data-system-color-scheme={systemColorScheme}
     >
       <StartupWindowDragRegion />
       <OnboardingChrome current={5} />
       <OnboardingFooterProvider>
-        <div className="relative flex w-full max-w-4xl flex-col items-center text-center">
+        <div className="relative flex min-h-0 w-full max-w-[920px] flex-1 flex-col items-center text-center">
           {page === "welcome" ? (
             <OnboardingSlideTransition
-              className="flex w-full flex-col items-center text-center"
+              className="flex h-full min-h-0 w-full flex-col items-center text-center"
+              containerClassName="h-full min-h-0 [&>.buzz-onboarding-transition-line]:h-full"
               direction={transitionDirection}
               effect={welcomeEffect}
               transitionKey={`welcome-${welcomeEffect}-${transitionDirection}`}
@@ -134,30 +147,36 @@ export function WelcomeSetup({
                   link, you can open it directly to continue setup.
                 </p>
               </div>
-              <div className="mt-28 flex w-full flex-col items-center gap-6">
-                <button
+              <div className="flex w-full flex-1 translate-y-16 flex-col items-center justify-center gap-20 py-8">
+                <Card
+                  asChild
                   className={COMMUNITY_OPTION_CARD_CLASS}
-                  onClick={() => showPage("join")}
-                  type="button"
+                  variant="textured"
                 >
-                  Add me to a community
-                </button>
-                <button
+                  <button onClick={() => showPage("join")} type="button">
+                    Add me to a community
+                  </button>
+                </Card>
+                <Card
+                  asChild
                   className={COMMUNITY_OPTION_CARD_CLASS}
-                  onClick={() => showPage("invite")}
-                  type="button"
+                  variant="textured"
                 >
-                  I have an invite link
-                </button>
-                <button
+                  <button onClick={() => showPage("invite")} type="button">
+                    I have an invite link
+                  </button>
+                </Card>
+                <Card
+                  asChild
                   className={COMMUNITY_OPTION_CARD_CLASS}
-                  onClick={() => showPage("owned")}
-                  type="button"
+                  variant="textured"
                 >
-                  <span className="max-w-52">
-                    Create or connect to my own community
-                  </span>
-                </button>
+                  <button onClick={() => showPage("owned")} type="button">
+                    <span className="max-w-52">
+                      Create or connect to my own community
+                    </span>
+                  </button>
+                </Card>
               </div>
               <OnboardingFooter>
                 <Button
@@ -192,58 +211,58 @@ export function WelcomeSetup({
                 >
                   Request access to a community
                 </h1>
-                <p className="mx-auto mt-3 max-w-[430px] text-sm leading-6">
-                  Ask the community host to send you an invite link or add you
-                  directly using your public key.
-                </p>
               </div>
-              <div className="flex w-full flex-1 items-center justify-center pb-2 pt-6">
-                <div className="w-full max-w-4xl space-y-16">
+              <div className="flex w-full flex-1 items-center justify-center">
+                <div className="w-full max-w-[920px] space-y-16">
                   <section aria-labelledby="welcome-join-key-step">
                     <h2
-                      className="mb-4 text-sm font-normal"
+                      className="relative z-10 mb-8 text-sm font-normal"
                       id="welcome-join-key-step"
                     >
-                      Step 1: Share your public key
+                      Step 1: Ask your community host to send you an invite link
+                      or add you using your public key
                     </h2>
-                    <div
-                      className={ONBOARDING_KEY_FRAME_CLASS}
+                    <Card
+                      className={WIDE_TEXTURE_CARD_CLASS}
                       data-testid="welcome-join-npub-frame"
+                      variant="textured"
                     >
-                      <div className={ONBOARDING_KEY_ROW_CLASS}>
-                        <div className="min-w-0 flex-1">
-                          <code
-                            className={`${ONBOARDING_KEY_TEXT_CLASS} block`}
-                            data-testid="welcome-join-npub"
+                      <div className={WIDE_TEXTURE_CONTENT_CLASS}>
+                        <div className={ONBOARDING_KEY_ROW_CLASS}>
+                          <div className="min-w-0 flex-1">
+                            <code
+                              className={`${ONBOARDING_KEY_TEXT_CLASS} block`}
+                              data-testid="welcome-join-npub"
+                            >
+                              {npub || "Loading…"}
+                            </code>
+                          </div>
+                          <Button
+                            aria-label="Copy npub"
+                            className="h-10 w-10 shrink-0 text-[var(--buzz-onboarding-backup-ink)] hover:bg-transparent hover:text-foreground"
+                            disabled={!npub}
+                            onClick={() => {
+                              void writeTextToClipboard(npub).then(() => {
+                                setCopied(true);
+                                window.setTimeout(() => setCopied(false), 1500);
+                              });
+                            }}
+                            size="icon"
+                            type="button"
+                            variant="ghost"
                           >
-                            {npub || "Loading…"}
-                          </code>
+                            {copied ? (
+                              <Check
+                                className="h-6 w-6 text-primary"
+                                aria-hidden="true"
+                              />
+                            ) : (
+                              <Copy className="h-6 w-6" aria-hidden="true" />
+                            )}
+                          </Button>
                         </div>
-                        <Button
-                          aria-label="Copy npub"
-                          className="h-10 w-10 shrink-0 text-[var(--buzz-onboarding-backup-ink)] hover:bg-transparent hover:text-foreground"
-                          disabled={!npub}
-                          onClick={() => {
-                            void writeTextToClipboard(npub).then(() => {
-                              setCopied(true);
-                              window.setTimeout(() => setCopied(false), 1500);
-                            });
-                          }}
-                          size="icon"
-                          type="button"
-                          variant="ghost"
-                        >
-                          {copied ? (
-                            <Check
-                              className="h-6 w-6 text-primary"
-                              aria-hidden="true"
-                            />
-                          ) : (
-                            <Copy className="h-6 w-6" aria-hidden="true" />
-                          )}
-                        </Button>
                       </div>
-                    </div>
+                    </Card>
                     {identityError ? (
                       <p className="mt-4 text-sm text-destructive">
                         {identityError}
@@ -257,27 +276,37 @@ export function WelcomeSetup({
                     onSubmit={handleJoin}
                   >
                     <h2
-                      className="mb-4 text-sm font-normal"
+                      className="relative z-10 mb-8 text-sm font-normal"
                       id="welcome-join-url-step"
                     >
                       Step 2: Paste in your community URL
                     </h2>
-                    <Input
-                      aria-label="Community URL"
-                      autoCapitalize="none"
-                      autoCorrect="off"
-                      className="h-auto rounded-xl border-0 bg-white/50 px-8 py-7 text-center font-mono !text-4xl text-[color:var(--buzz-onboarding-backup-ink)] shadow-none placeholder:text-[color:var(--buzz-onboarding-backup-ink)] placeholder:opacity-10 focus-visible:ring-1 focus-visible:ring-[rgb(113_113_6_/_0.5)]"
-                      data-testid="welcome-join-community-url"
-                      id="welcome-join-community-url"
-                      onChange={(event) => {
-                        setRelayUrl(event.target.value);
-                        setRelayUrlError(null);
-                      }}
-                      placeholder="Enter community URL"
-                      spellCheck={false}
-                      type="url"
-                      value={relayUrl}
-                    />
+                    <Card
+                      className={`${WIDE_TEXTURE_CARD_CLASS} [--buzz-card-textured-min-height:128px]`}
+                      variant="textured"
+                    >
+                      <div
+                        className={WIDE_TEXTURE_CONTENT_CLASS}
+                        style={HORIZONTAL_INPUT_OVERFLOW_FADE}
+                      >
+                        <Input
+                          aria-label="Community URL"
+                          autoCapitalize="none"
+                          autoCorrect="off"
+                          className="h-auto rounded-none border-0 bg-transparent p-0 text-center font-mono !text-4xl text-[color:var(--buzz-onboarding-backup-ink)] shadow-none placeholder:text-[color:var(--buzz-onboarding-backup-ink)] placeholder:opacity-10 focus-visible:ring-0"
+                          data-testid="welcome-join-community-url"
+                          id="welcome-join-community-url"
+                          onChange={(event) => {
+                            setRelayUrl(event.target.value);
+                            setRelayUrlError(null);
+                          }}
+                          placeholder="Enter community URL"
+                          spellCheck={false}
+                          type="url"
+                          value={relayUrl}
+                        />
+                      </div>
+                    </Card>
                     {relayUrlError ? (
                       <p className="mt-3 text-sm text-destructive">
                         {relayUrlError}
@@ -288,7 +317,7 @@ export function WelcomeSetup({
               </div>
               <OnboardingFooter>
                 <Button
-                  className="h-10 w-44 rounded-full"
+                  className={ONBOARDING_PRIMARY_CTA_CLASS}
                   disabled={!relayUrl.trim()}
                   form="welcome-join-form"
                   type="submit"
@@ -297,7 +326,7 @@ export function WelcomeSetup({
                   <span className="sr-only">Join community</span>
                 </Button>
                 <Button
-                  className="h-10 w-44 rounded-full bg-foreground/10 hover:bg-foreground/15"
+                  className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
                   onClick={() => showPage("welcome")}
                   type="button"
                   variant="ghost"
@@ -321,7 +350,7 @@ export function WelcomeSetup({
                   continue setup.
                 </p>
               </div>
-              <div className="flex w-full flex-1 items-center justify-center pb-4 pt-12">
+              <div className="flex w-full flex-1 items-center justify-center">
                 <InviteRedeemForm
                   error={null}
                   isRedeeming={false}
