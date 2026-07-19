@@ -10,7 +10,6 @@ import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
   collectHomeAlertItems,
   eligibleFeedNotificationItems,
-  enrichFeedItemChannel,
   type NotificationChannel,
   notificationBody,
   notificationTitle,
@@ -160,10 +159,14 @@ export function useFeedDesktopNotifications(
 
     const nextSeenItemIds = new Set(seenItemIdsRef.current);
     const newItems = settings.desktopEnabled
-      ? eligibleFeedNotificationItems(feed, {
-          mentions: settings.slotAlertsEnabled.mention,
-          needsAction: settings.slotAlertsEnabled.needs_action,
-        })
+      ? eligibleFeedNotificationItems(
+          feed,
+          {
+            mentions: settings.slotAlertsEnabled.mention,
+            needsAction: settings.slotAlertsEnabled.needs_action,
+          },
+          channels,
+        )
           .filter((item) => !nextSeenItemIds.has(item.id))
           .filter(
             (item) =>
@@ -195,8 +198,7 @@ export function useFeedDesktopNotifications(
       void autoRequestPermissionIfNeeded();
     }
 
-    for (const rawItem of newItems) {
-      const item = enrichFeedItemChannel(rawItem, channels);
+    for (const item of newItems) {
       const resolvedLabel = profiles
         ? resolveUserLabel({
             pubkey: item.pubkey,
