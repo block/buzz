@@ -2530,9 +2530,14 @@ test("home inbox manage affordance opens management without leaving home", async
   }
   expect(detailBox.x + detailBox.width).toBeLessThanOrEqual(sheetBox.x + 1);
   expect(sheetBox.width).toBeGreaterThanOrEqual(300);
-  await page
-    .getByTestId("home-inbox-list")
-    .click({ position: { x: 24, y: 80 } });
+  const inboxList = page.getByTestId("home-inbox-list");
+  const inboxListBox = await inboxList.boundingBox();
+  if (!inboxListBox) {
+    throw new Error("Expected the home inbox list box.");
+  }
+  await inboxList.click({
+    position: { x: 24, y: inboxListBox.height - 24 },
+  });
   await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("channel-management-sheet")).toBeVisible();

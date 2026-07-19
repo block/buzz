@@ -90,9 +90,11 @@ test.describe("home inbox chrome", () => {
       })
       .toBeLessThanOrEqual(1);
 
-    const overlayBackground = await composerOverlay.evaluate(
-      (element) => getComputedStyle(element).backgroundColor,
-    );
-    expect(overlayBackground).not.toBe("rgba(0, 0, 0, 0)");
+    const overlayMaskStyles = await composerOverlay.evaluate((element) => ({
+      gradient: getComputedStyle(element, "::before").backgroundImage,
+      solidBackground: getComputedStyle(element, "::after").backgroundColor,
+    }));
+    expect(overlayMaskStyles.gradient).not.toBe("none");
+    expect(overlayMaskStyles.solidBackground).not.toBe("rgba(0, 0, 0, 0)");
   });
 });
