@@ -617,29 +617,20 @@ test("first-community choices expose npub and invite input", async ({
     page.getByRole("button", { name: "I have an invite link" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "I want to create a community" }),
+    page.getByRole("button", {
+      name: "Create or connect to my own community",
+    }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: "I want to create a community" })
+    .getByRole("button", { name: "Create or connect to my own community" })
     .click();
-  await expect
-    .poll(() =>
-      page.evaluate(() => {
-        const log = (
-          window as Window & {
-            __BUZZ_E2E_COMMAND_LOG__?: Array<{
-              command: string;
-              payload: unknown;
-            }>;
-          }
-        ).__BUZZ_E2E_COMMAND_LOG__;
-        return log?.find((entry) => entry.command === "plugin:opener|open_url")
-          ?.payload;
-      }),
-    )
-    .toMatchObject({
-      url: "https://app.builderlab.xyz/signup?returnTo=/buzz",
-    });
+  await expect(
+    page.getByRole("heading", { name: "Your communities" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Continue with Builderlab" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Back" }).click();
 
   await page.getByRole("button", { name: "Add me to a community" }).click();
   await expect(page.getByTestId("welcome-join-npub")).toHaveText(
@@ -754,6 +745,113 @@ test("first-community choices expose npub and invite input", async ({
   await expect(invalidInviteTip).toHaveCSS("opacity", "0");
 });
 
+test("first-community owner can connect an existing hosted community", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
+      builderlabCommunities: [
+        {
+          id: "owned-community",
+          name: "North Star",
+          normalized_host: "north-star.communities.buzz.xyz",
+        },
+      ],
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page
+    .getByRole("button", { name: "Create or connect to my own community" })
+    .click();
+  await expect(page.getByText("North Star")).toBeVisible();
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
+      ),
+    )
+    .toContain('"source":"first-community"');
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
+      ),
+    )
+    .toContain("wss://north-star.communities.buzz.xyz");
+});
+
+test("first-community owner can create and connect a hosted community", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {},
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page
+    .getByRole("button", { name: "Create or connect to my own community" })
+    .click();
+  await page.getByRole("button", { name: "Continue with Builderlab" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Connect this Buzz identity" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Connect this Buzz identity" })
+    .click();
+  await expect(page.getByText("Signed in as owner@example.com")).toBeVisible();
+  await page
+    .getByRole("textbox", { name: "Community address" })
+    .fill("bee-lab");
+  await expect(page.getByText("That address is available.")).toBeVisible();
+  await page.getByRole("button", { name: "Create and connect" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
+      ),
+    )
+    .toContain("wss://bee-lab.communities.buzz.xyz");
+});
+
 test("first-community shows the scenario cards for localhost", async ({
   page,
 }) => {
@@ -781,7 +879,9 @@ test("first-community shows the scenario cards for localhost", async ({
     page.getByRole("button", { name: "I have an invite link" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "I want to create a community" }),
+    page.getByRole("button", {
+      name: "Create or connect to my own community",
+    }),
   ).toBeVisible();
 
   await page.getByTestId("welcome-setup-back").click();

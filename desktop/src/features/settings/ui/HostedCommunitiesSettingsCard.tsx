@@ -14,6 +14,20 @@ import {
 } from "lucide-react";
 
 import { useIdentityQuery } from "@/shared/api/hooks";
+import {
+  HOSTED_COMMUNITY_LIMIT as MAX_COMMUNITIES,
+  HOSTED_COMMUNITY_SUFFIX as HOST_SUFFIX,
+  hostedCommunityErrorMessage as errorMessage,
+  hostedCommunityRelayUrl as relayUrl,
+  type BuilderlabAuth,
+  type HostedCommunityAvailabilityResponse as AvailabilityResponse,
+  type HostedCommunitiesResponse as CommunitiesResponse,
+  type HostedCommunity,
+  type HostedCommunityMutationResponse as CommunityMutationResponse,
+  type HostedIdentityResponse as IdentityResponse,
+  type HostedNostrIdentity as NostrIdentity,
+  VALID_HOSTED_COMMUNITY_NAME as VALID_NAME,
+} from "@/features/communities/hostedCommunityApi";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import {
@@ -37,91 +51,6 @@ import {
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
-
-const HOST_SUFFIX = "communities.buzz.xyz";
-const VALID_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const MAX_COMMUNITIES = 3;
-
-type BuilderlabAuth = {
-  email?: string;
-  name?: string;
-  expiresAt: string;
-};
-
-type ApiError = {
-  code?: string;
-  message?: string;
-  setup_needed?: boolean;
-};
-
-type NostrIdentity = {
-  npub?: string;
-  pubkey_hex?: string;
-};
-
-type IdentityResponse = {
-  identity?: NostrIdentity;
-  error?: ApiError;
-  correlation_id?: string;
-};
-
-type HostedCommunity = {
-  id?: string;
-  name?: string;
-  slug?: string;
-  normalized_host?: string;
-  owner_pubkey?: string;
-  archived_at?: string | null;
-};
-
-type CommunitiesResponse = {
-  communities?: HostedCommunity[];
-  error?: ApiError;
-  correlation_id?: string;
-};
-
-type AvailabilityResponse = {
-  available?: boolean;
-  normalized_host?: string;
-  error?: ApiError;
-  correlation_id?: string;
-};
-
-type CommunityMutationResponse = {
-  community?: HostedCommunity;
-  error?: ApiError;
-  correlation_id?: string;
-};
-
-function errorMessage(
-  error: ApiError | undefined,
-  correlationId: string | undefined,
-  fallback: string,
-) {
-  const messages: Record<string, string> = {
-    missing_mapping: "Connect your Buzz identity before creating a community.",
-    invalid_name: "Use lowercase letters, numbers, and hyphens.",
-    taken: "That Buzz address is already taken.",
-    limit_reached: `You've reached the limit of ${MAX_COMMUNITIES} hosted communities.`,
-    relay_unavailable: "Community provisioning is temporarily unavailable.",
-    identity_already_bound:
-      "This Builderlab account is connected to another Buzz identity.",
-    pubkey_already_bound:
-      "This Buzz identity is connected to another Builderlab account.",
-    not_owner: "Only the community owner can do that.",
-    transferee_not_registered:
-      "That person needs a connected Buzz identity before you can transfer ownership to them.",
-  };
-  const message = messages[error?.code ?? ""] ?? error?.message ?? fallback;
-  return correlationId
-    ? `${message} Correlation ID: ${correlationId}`
-    : message;
-}
-
-function relayUrl(community: HostedCommunity) {
-  const host = community.normalized_host?.trim();
-  return host ? `wss://${host.replace(/^wss?:\/\//, "")}` : null;
-}
 
 export function HostedCommunitiesSettingsCard() {
   const onboarding = useCommunityOnboarding();

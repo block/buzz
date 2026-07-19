@@ -1,5 +1,4 @@
 import * as React from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, Copy } from "lucide-react";
 
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
@@ -25,9 +24,10 @@ import { Input } from "@/shared/ui/input";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
+import { HostedCommunityOnboarding } from "@/features/communities/ui/HostedCommunityOnboarding";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
-type WelcomeSetupPage = "welcome" | "join" | "invite";
+type WelcomeSetupPage = "welcome" | "join" | "invite" | "owned";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
@@ -36,7 +36,6 @@ type WelcomeSetupProps = {
   onBack: () => void;
 };
 
-const CREATE_COMMUNITY_URL = "https://app.builderlab.xyz/signup?returnTo=/buzz";
 const COMMUNITY_OPTION_CARD_CLASS =
   "flex min-h-24 w-full max-w-[352px] items-center justify-center rounded-xl bg-white/75 px-6 py-4 text-center text-sm font-normal leading-6 text-foreground transition-colors duration-150 ease-out hover:bg-white/85 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-foreground/35";
 
@@ -152,10 +151,12 @@ export function WelcomeSetup({
                 </button>
                 <button
                   className={COMMUNITY_OPTION_CARD_CLASS}
-                  onClick={() => void openUrl(CREATE_COMMUNITY_URL)}
+                  onClick={() => showPage("owned")}
                   type="button"
                 >
-                  <span className="max-w-44">I want to create a community</span>
+                  <span className="max-w-52">
+                    Create or connect to my own community
+                  </span>
                 </button>
               </div>
               <OnboardingFooter>
@@ -169,6 +170,14 @@ export function WelcomeSetup({
                   Back
                 </Button>
               </OnboardingFooter>
+            </OnboardingSlideTransition>
+          ) : page === "owned" ? (
+            <OnboardingSlideTransition
+              className="flex w-full flex-col items-center text-center"
+              direction={transitionDirection}
+              transitionKey={`owned-${transitionDirection}`}
+            >
+              <HostedCommunityOnboarding onBack={() => showPage("welcome")} />
             </OnboardingSlideTransition>
           ) : page === "join" ? (
             <OnboardingSlideTransition

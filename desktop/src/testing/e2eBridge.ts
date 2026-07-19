@@ -125,6 +125,22 @@ type MockSearchProfileSeed = {
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
+    /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
+    builderlabAuth?: {
+      email?: string;
+      name?: string;
+      expiresAt: string;
+    } | null;
+    /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
+    builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
+    /** Communities owned by the mocked Builderlab account. */
+    builderlabCommunities?: Array<{
+      id?: string;
+      name?: string;
+      slug?: string;
+      normalized_host?: string;
+      archived_at?: string | null;
+    }>;
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
     acpRuntimesDelayMs?: number;
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
@@ -8764,6 +8780,49 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
+      case "get_builderlab_auth":
+        return activeConfig?.mock?.builderlabAuth ?? null;
+      case "start_builderlab_login": {
+        const nextAuth = activeConfig?.mock?.builderlabAuth ?? {
+          email: "owner@example.com",
+          expiresAt: "2099-01-01T00:00:00Z",
+        };
+        if (activeConfig?.mock) activeConfig.mock.builderlabAuth = nextAuth;
+        return nextAuth;
+      }
+      case "get_builderlab_nostr_identity":
+        return activeConfig?.mock?.builderlabIdentity
+          ? { identity: activeConfig.mock.builderlabIdentity }
+          : { error: { code: "missing_mapping", setup_needed: true } };
+      case "bind_builderlab_nostr_identity": {
+        const activeIdentity = identity ?? DEFAULT_MOCK_IDENTITY;
+        const nextIdentity = {
+          pubkey_hex: activeIdentity.pubkey,
+          npub: `npub1${activeIdentity.pubkey}`,
+        };
+        if (activeConfig?.mock)
+          activeConfig.mock.builderlabIdentity = nextIdentity;
+        return { identity: nextIdentity };
+      }
+      case "list_builderlab_communities":
+        return {
+          communities: activeConfig?.mock?.builderlabCommunities ?? [],
+        };
+      case "check_builderlab_community_name":
+        return {
+          available: true,
+          normalized_host: `${(payload as { name?: string })?.name ?? "community"}.communities.buzz.xyz`,
+        };
+      case "create_builderlab_community": {
+        const name = (payload as { name?: string })?.name ?? "community";
+        return {
+          community: {
+            id: `hosted-${name}`,
+            name,
+            normalized_host: `${name}.communities.buzz.xyz`,
+          },
+        };
+      }
       case "mesh_installed_models":
         return mockMeshState.models;
       case "mesh_node_status":
