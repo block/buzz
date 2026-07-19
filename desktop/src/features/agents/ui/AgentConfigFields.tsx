@@ -597,7 +597,16 @@ export function AgentConfigFields({
           <EffortSelectField
             currentEffort={dependentFieldsDisabled ? "" : currentEffort}
             disabled={dependentFieldsDisabled}
-            emptyOptionLabel="Select effort level"
+            emptyOptionLabel={
+              // Semantic, not copy: onboarding-essential hides inheritance
+              // concepts (first-run users pick, they don't inherit), so the
+              // zero option is a plain placeholder. Full disclosure leaves
+              // this unset so EffortSelectField computes the inherit/default
+              // label ("Default (medium)", "Inherit (high)", …).
+              disclosure === "onboarding-essential"
+                ? "Select effort level"
+                : undefined
+            }
             effortDefault={effortDefault}
             effortValid={effortValid}
             fieldClassName={unstyled ? fieldClassName : undefined}
