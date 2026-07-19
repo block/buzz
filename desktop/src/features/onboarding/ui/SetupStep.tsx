@@ -197,12 +197,15 @@ function RuntimeStatus({
           SET UP
         </Button>
         {methodsQuery.error instanceof Error ? (
-          <span className="text-2xs text-destructive">
+          <span className="pointer-events-none absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
             Couldn’t load sign-in options.
           </span>
         ) : null}
         {connectMutation.error instanceof Error ? (
-          <span className="text-2xs text-destructive">
+          <span
+            className="pointer-events-none absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
+            title={connectMutation.error.message}
+          >
             {connectMutation.error.message}
           </span>
         ) : null}
@@ -224,11 +227,7 @@ function RuntimeStatus({
   }
 
   if (installError) {
-    return (
-      <div className="flex h-8 w-8 items-center justify-center">
-        <AlertTriangle className="h-4 w-4 text-destructive" />
-      </div>
-    );
+    return <div aria-hidden="true" className="h-5" />;
   }
 
   if (runtimeIsInstalled(runtime) || installSuccess) {
@@ -457,15 +456,18 @@ function RuntimeAuthActions({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 
   if (runtime.authStatus.status === "config_invalid") {
     return (
-      <p className="mt-2 text-2xs leading-4 text-destructive">
+      <p
+        className="pointer-events-none absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
+        title={runtime.authStatus.diagnostic}
+      >
         {runtime.authStatus.diagnostic}
       </p>
     );
   }
   if (runtime.authStatus.status === "unknown") {
     return (
-      <div className="mt-2 flex flex-col items-center gap-1.5">
-        <span className="text-2xs text-muted-foreground">
+      <div className="flex flex-col items-center gap-1.5">
+        <span className="pointer-events-none absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive">
           Couldn’t verify authentication.
         </span>
         <Button
@@ -552,18 +554,35 @@ function RuntimeCard({
           runtime={runtime}
           setupFlashToken={setupFlashToken}
         />
-        {!isAvailable && !installError ? (
-          <p className="max-w-[13rem] text-2xs leading-4 text-muted-foreground">
+        {!isAvailable ? (
+          <p
+            aria-hidden={installError ? "true" : undefined}
+            className={cn(
+              "max-w-[13rem] text-2xs leading-4 text-muted-foreground",
+              installError && "invisible",
+            )}
+          >
             {runtimeDetailText(runtime)}
           </p>
         ) : null}
         {installError ? (
-          <p className="max-w-[13rem] text-2xs leading-4 text-destructive">
-            {installError}
-          </p>
-        ) : null}
-        <RuntimeAuthActions runtime={runtime} />
+          <div aria-hidden="true" className="invisible">
+            <RuntimeAuthActions runtime={runtime} />
+          </div>
+        ) : (
+          <RuntimeAuthActions runtime={runtime} />
+        )}
       </div>
+      {installError ? (
+        <p
+          className="pointer-events-none absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
+          data-testid={`onboarding-runtime-error-${runtime.id}`}
+          title={installError}
+        >
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 truncate">{installError}</span>
+        </p>
+      ) : null}
     </div>
   );
 }

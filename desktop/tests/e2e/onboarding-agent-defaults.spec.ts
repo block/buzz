@@ -678,6 +678,59 @@ test("setup cards only show checks after user selection", async ({ page }) => {
   ).toHaveText("INSTALLED");
 });
 
+test("failed install pins a single-line 12px error without moving card content", async ({
+  page,
+}) => {
+  const installError = "Install already in progress with additional details";
+  await installMockBridge(
+    page,
+    {
+      installAcpRuntimeResult: {
+        success: false,
+        steps: [
+          {
+            step: "Install adapter",
+            command: "npm install adapter",
+            success: false,
+            stdout: "",
+            stderr: installError,
+            exit_code: 1,
+          },
+        ],
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const card = page.getByTestId("onboarding-runtime-claude");
+  const setupButton = page.getByTestId("onboarding-runtime-install-claude");
+  const heading = card.getByRole("heading", { name: "Claude" });
+  const headingTopBefore = await heading.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
+  const detail = card.getByText("CLI detected; ACP adapter missing.");
+  const detailTopBefore = await detail.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
+
+  await setupButton.click();
+
+  const error = page.getByTestId("onboarding-runtime-error-claude");
+  await expect(error).toBeVisible();
+  await expect(error).toHaveCSS("font-size", "12px");
+  await expect(error).toHaveCSS("position", "absolute");
+  await expect(error).toHaveCSS("white-space", "nowrap");
+  await expect(error.locator("span")).toHaveCSS("text-overflow", "ellipsis");
+  expect(
+    await heading.evaluate((element) => element.getBoundingClientRect().top),
+  ).toBe(headingTopBefore);
+  expect(
+    await detail.evaluate((element) => element.getBoundingClientRect().top),
+  ).toBe(detailTopBefore);
+});
+
 test("successful install still waits for refreshed runtime readiness", async ({
   page,
 }) => {
