@@ -135,7 +135,7 @@ class ComposeBar extends HookConsumerWidget {
         false;
 
     // Preload profiles for channel members, mentionable agents, and their
-    // owners so @mention suggestions show names ("owned by …" included).
+    // owners so @mention suggestions show names ("managed by …" included).
     final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
     final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
     useEffect(
@@ -240,7 +240,7 @@ class ComposeBar extends HookConsumerWidget {
               .take(_mentionSuggestionLimit)
               .toList();
 
-    // Resolve owner names for the visible "owned by …" subtitles.
+    // Resolve owner names for the visible "managed by …" subtitles.
     useEffect(() {
       final ownerPubkeys = [for (final s in suggestions) ?s.ownerPubkey];
       if (ownerPubkeys.isNotEmpty) {

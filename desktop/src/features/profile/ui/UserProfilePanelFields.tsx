@@ -47,7 +47,7 @@ export type ProfileField = {
 
 const AGENT_INFO_LABELS = new Set([
   "Public key",
-  "Owned by",
+  "Managed by",
   "NIP-05",
   "Agent type",
   "Capabilities",
@@ -277,12 +277,12 @@ export function buildOwnerFields({
         </span>
       ),
       icon: UserRound,
-      label: "Owned by",
+      label: "Managed by",
       onClick:
         ownerClickable && ownerProfilePubkey
           ? () => onOpenProfile?.(ownerProfilePubkey)
           : undefined,
-      testId: "user-profile-owned-by",
+      testId: "user-profile-managed-by",
     });
   }
 
@@ -407,17 +407,17 @@ export function buildOwnerFields({
 function orderProfileFields(fields: ProfileField[]) {
   const visibilityLabel = "Visibility";
   const publicKeyLabel = "Public key";
-  const ownedByLabel = "Owned by";
+  const managedByLabel = "Managed by";
   const statusLabel = "Status";
   return [
     ...fields.filter((field) => field.label === visibilityLabel),
     ...fields.filter((field) => field.label === publicKeyLabel),
-    ...fields.filter((field) => field.label === ownedByLabel),
+    ...fields.filter((field) => field.label === managedByLabel),
     ...fields.filter(
       (field) =>
         field.label !== visibilityLabel &&
         field.label !== publicKeyLabel &&
-        field.label !== ownedByLabel &&
+        field.label !== managedByLabel &&
         field.copyValue,
     ),
     ...fields.filter((field) => field.label === statusLabel),
@@ -425,7 +425,7 @@ function orderProfileFields(fields: ProfileField[]) {
       if (
         field.label === visibilityLabel ||
         field.label === publicKeyLabel ||
-        field.label === ownedByLabel ||
+        field.label === managedByLabel ||
         field.label === statusLabel
       ) {
         return false;

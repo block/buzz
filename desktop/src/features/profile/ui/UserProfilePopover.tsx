@@ -534,7 +534,7 @@ export function UserProfilePopover({
             className="mt-0.5 truncate text-xs leading-4 text-muted-foreground"
             data-testid={`user-profile-popover-owner-${pubkey}`}
           >
-            owned by {ownerLabel}
+            managed by {ownerLabel}
           </p>
         ) : null}
         {profileSubheader ? (

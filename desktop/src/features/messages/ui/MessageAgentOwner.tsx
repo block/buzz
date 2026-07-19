@@ -15,7 +15,7 @@ export function MessageAgentOwner({
       data-testid="message-agent-owner"
     >
       <span className="sr-only">
-        {ownerLabel ? "Agent owned by" : "Agent; owner unavailable"}
+        {ownerLabel ? "Agent managed by" : "Agent; owner unavailable"}
       </span>
       {ownerPubkey && ownerLabel ? (
         <>
@@ -24,7 +24,7 @@ export function MessageAgentOwner({
             className="inline-flex shrink-0 items-baseline gap-1 leading-4"
           >
             <Bot className="relative -top-px h-3.5 w-3.5 self-center" />
-            <span>owned by</span>
+            <span>managed by</span>
           </span>
           <UserProfilePopover
             pubkey={ownerPubkey}
