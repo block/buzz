@@ -87,6 +87,16 @@ fn api_url(path: &str) -> Result<Url, String> {
         .map_err(|error| format!("invalid Builderlab API URL: {error}"))
 }
 
+fn login_url(return_to: &str) -> Result<Url, String> {
+    let mut login_url = api_url("/v1/auth/login")?;
+    login_url
+        .query_pairs_mut()
+        .append_pair("type", "cli")
+        .append_pair("product", "buzz")
+        .append_pair("returnTo", return_to);
+    Ok(login_url)
+}
+
 async fn authenticated_user(
     client: &reqwest::Client,
     credential: &str,
@@ -137,13 +147,7 @@ pub(crate) async fn start_builderlab_login(
         let _ = axum::serve(listener, router).await;
     });
 
-    let mut login_url = api_url("/v1/auth/login")?;
-    login_url
-        .query_pairs_mut()
-        .append_pair("type", "cli")
-        .append_pair("product", "buzz")
-        .append_pair("screen_hint", "signup")
-        .append_pair("returnTo", &return_to);
+    let login_url = login_url(&return_to)?;
     if let Err(error) = app.opener().open_url(login_url.as_str(), None::<&str>) {
         server.abort();
         return Err(format!("could not open Builderlab authentication: {error}"));
@@ -397,5 +401,19 @@ mod tests {
             "https://app.builderlab.xyz"
         );
         assert_eq!(login.path(), "/api/goose/v1/auth/login");
+    }
+
+    #[test]
+    fn login_defaults_to_auth0_login() {
+        let login = login_url("http://127.0.0.1:1234/callback/nonce").unwrap();
+        let query: HashMap<_, _> = login.query_pairs().into_owned().collect();
+
+        assert_eq!(query.get("type").map(String::as_str), Some("cli"));
+        assert_eq!(query.get("product").map(String::as_str), Some("buzz"));
+        assert_eq!(
+            query.get("returnTo").map(String::as_str),
+            Some("http://127.0.0.1:1234/callback/nonce")
+        );
+        assert!(!query.contains_key("screen_hint"));
     }
 }
