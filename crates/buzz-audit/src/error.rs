@@ -35,9 +35,45 @@ pub enum AuditError {
     #[error("unknown audit action in database")]
     UnknownAction,
 
+    /// A batch append was given entries that do not all belong to the same
+    /// chain. Batches are single-community by contract (the caller partitions
+    /// before appending); this is a caller bug, never a data-dependent state.
+    #[error("audit batch entries do not share a single chain")]
+    MixedBatch,
+
     /// A JSON serialization error occurred (e.g. while canonicalising `detail`).
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+}
+
+impl AuditError {
+    /// True when retrying the **same input** cannot succeed — the failure is a
+    /// deterministic function of the entry (or batch), not of infrastructure
+    /// state. Callers use this to separate poison isolation (bisection) from
+    /// retry/backpressure: an outage must never classify healthy entries as
+    /// poison, and a poisoned entry must never be retried forever.
+    ///
+    /// Database errors are deterministic only for SQLSTATE classes `22` (data
+    /// exception) and `23` (integrity constraint violation) — entry-dependent
+    /// by construction. Everything else (pool, io, connection, unknown) is
+    /// treated as infrastructure: retry may succeed, so fail toward retrying.
+    pub fn is_deterministic(&self) -> bool {
+        match self {
+            AuditError::Serialization(_) | AuditError::MixedBatch => true,
+            // Read-side verification outcomes; not raised by appends, but if
+            // ever surfaced to a retry loop they cannot be fixed by retrying.
+            AuditError::ChainViolation { .. }
+            | AuditError::HashMismatch { .. }
+            | AuditError::UnknownAction => true,
+            AuditError::Database(e) => match e {
+                sqlx::Error::Database(db) => db
+                    .code()
+                    .map(|c| c.starts_with("22") || c.starts_with("23"))
+                    .unwrap_or(false),
+                _ => false,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -69,6 +105,7 @@ mod tests {
             AuditError::ChainViolation { seq: 7 },
             AuditError::HashMismatch { seq: 42 },
             AuditError::UnknownAction,
+            AuditError::MixedBatch,
         ];
 
         for err in &domain_errors {

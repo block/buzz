@@ -588,29 +588,65 @@ impl AppState {
         let audit_for_worker = Arc::clone(&audit_arc);
         let audit_cancel = CancellationToken::new();
         let audit_cancel_worker = audit_cancel.clone();
+        let audit_batch_max = config.audit_batch_max.max(1);
+        let audit_batch_interval = config.audit_batch_interval;
         let audit_worker_handle = tokio::spawn(async move {
-            // Normal operation: process entries as they arrive.
-            loop {
+            // Normal operation: batch entries as they arrive. A batch opens
+            // when the first entry is received and flushes when it reaches
+            // `audit_batch_max` entries or `audit_batch_interval` elapses,
+            // whichever comes first — so a lone entry still lands within one
+            // interval and a burst amortizes to one txn per community per batch.
+            let mut batch: Vec<buzz_audit::NewAuditEntry> = Vec::with_capacity(audit_batch_max);
+            'run: loop {
+                // Wait (unbounded) for the batch-opening entry.
                 tokio::select! {
                     entry = audit_rx.recv() => {
                         match entry {
-                            Some(entry) => log_audit_entry(&audit_for_worker, entry).await,
-                            None => break, // channel closed
+                            Some(entry) => batch.push(entry),
+                            None => break 'run, // channel closed
                         }
                     }
                     _ = audit_cancel_worker.cancelled() => {
                         // Close the receiver: rejects future sends and lets us
                         // drain everything already buffered without a race.
                         audit_rx.close();
-                        break;
+                        break 'run;
                     }
                 }
+                // Fill window: bounded by size and elapsed time.
+                let deadline = tokio::time::Instant::now() + audit_batch_interval;
+                while batch.len() < audit_batch_max {
+                    tokio::select! {
+                        entry = audit_rx.recv() => {
+                            match entry {
+                                Some(entry) => batch.push(entry),
+                                None => break, // closed: flush, then exit via outer recv
+                            }
+                        }
+                        _ = tokio::time::sleep_until(deadline) => break,
+                        _ = audit_cancel_worker.cancelled() => {
+                            audit_rx.close();
+                            break;
+                        }
+                    }
+                }
+                flush_audit_batch(&audit_for_worker, std::mem::take(&mut batch)).await;
             }
             // Drain: recv() returns buffered entries, then None once empty.
+            // Batched like the normal path so shutdown flushes are fast.
             let mut drained = 0u32;
-            while let Some(entry) = audit_rx.recv().await {
-                log_audit_entry(&audit_for_worker, entry).await;
-                drained += 1;
+            loop {
+                while batch.len() < audit_batch_max {
+                    match audit_rx.recv().await {
+                        Some(entry) => batch.push(entry),
+                        None => break,
+                    }
+                }
+                if batch.is_empty() {
+                    break;
+                }
+                drained += batch.len() as u32;
+                flush_audit_batch(&audit_for_worker, std::mem::take(&mut batch)).await;
             }
             if drained > 0 {
                 tracing::info!(drained, "audit worker flushed remaining entries");
@@ -1104,16 +1140,111 @@ impl AuditShutdownHandle {
     }
 }
 
-/// Log a single audit entry with metrics. Extracted so the normal loop
-/// and the post-cancel drain share the same logic.
-async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::NewAuditEntry) {
-    let t = std::time::Instant::now();
-    if let Err(e) = audit.log(entry).await {
-        metrics::counter!("buzz_audit_log_errors_total").increment(1);
-        tracing::error!("Audit log failed: {e}");
-    } else {
-        metrics::histogram!("buzz_audit_log_seconds").record(t.elapsed().as_secs_f64());
+/// Flush a drained batch: partition FIFO-per-community, then append each
+/// community's run atomically via `AuditService::log_batch`. Extracted so the
+/// normal loop and the post-cancel drain share the same logic.
+///
+/// Partitioning preserves arrival order **within** each community (the only
+/// order the hash chain observes); cross-community order carries no chain
+/// meaning and communities already interleave freely under the per-community
+/// advisory lock.
+async fn flush_audit_batch(
+    audit: &buzz_audit::AuditService,
+    batch: Vec<buzz_audit::NewAuditEntry>,
+) {
+    if batch.is_empty() {
+        return;
     }
+    metrics::histogram!("buzz_audit_batch_entries").record(batch.len() as f64);
+    // Linear-scan partition: batches hold at most a handful of distinct
+    // communities per drain window, so a Vec beats a HashMap here and keeps
+    // first-seen community order deterministic.
+    let mut per_community: Vec<(
+        buzz_core::tenant::CommunityId,
+        Vec<buzz_audit::NewAuditEntry>,
+    )> = Vec::new();
+    for entry in batch {
+        match per_community
+            .iter_mut()
+            .find(|(community, _)| *community == entry.community_id)
+        {
+            Some((_, entries)) => entries.push(entry),
+            None => per_community.push((entry.community_id, vec![entry])),
+        }
+    }
+    for (_, entries) in per_community {
+        append_isolating_poison(audit, entries).await;
+    }
+}
+
+/// How many times an infrastructure failure (pool exhaustion, connection
+/// drop, statement timeout) is retried before the slice is dropped with an
+/// error, matching the drop-on-error contract the unbatched worker had.
+const AUDIT_INFRA_ATTEMPTS: u32 = 3;
+const AUDIT_INFRA_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Append one community's entries, isolating poison to single entries.
+///
+/// - Infrastructure errors are retried `AUDIT_INFRA_ATTEMPTS` times with
+///   backoff: an outage must never classify healthy entries as poison.
+/// - Deterministic errors (`AuditError::is_deterministic`) bisect the slice:
+///   halves re-append independently (each `log_batch` re-reads the chain head
+///   under the community lock, so linkage survives splitting), converging on
+///   the poisoned entry, which alone is dropped. A batch of N with one bad
+///   entry loses exactly 1 — never the other N-1.
+async fn append_isolating_poison(
+    audit: &buzz_audit::AuditService,
+    entries: Vec<buzz_audit::NewAuditEntry>,
+) {
+    // Recursive async fn needs boxing; depth is log2(batch_max), trivial.
+    fn go<'a>(
+        audit: &'a buzz_audit::AuditService,
+        entries: Vec<buzz_audit::NewAuditEntry>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if entries.is_empty() {
+                return;
+            }
+            let mut attempt = 0u32;
+            loop {
+                attempt += 1;
+                let t = std::time::Instant::now();
+                match audit.log_batch(entries.clone()).await {
+                    Ok(_) => {
+                        metrics::histogram!("buzz_audit_log_seconds")
+                            .record(t.elapsed().as_secs_f64());
+                        return;
+                    }
+                    Err(e) if !e.is_deterministic() && attempt < AUDIT_INFRA_ATTEMPTS => {
+                        tracing::warn!(
+                            attempt,
+                            len = entries.len(),
+                            "audit batch append hit infra error, retrying: {e}"
+                        );
+                        tokio::time::sleep(AUDIT_INFRA_BACKOFF * attempt).await;
+                    }
+                    Err(e) if e.is_deterministic() && entries.len() > 1 => {
+                        tracing::warn!(
+                            len = entries.len(),
+                            "audit batch append failed deterministically, bisecting: {e}"
+                        );
+                        let mut left = entries;
+                        let right = left.split_off(left.len() / 2);
+                        go(audit, left).await;
+                        go(audit, right).await;
+                        return;
+                    }
+                    Err(e) => {
+                        metrics::counter!("buzz_audit_log_errors_total")
+                            .increment(entries.len() as u64);
+                        tracing::error!(dropped = entries.len(), "Audit log failed: {e}");
+                        return;
+                    }
+                }
+            }
+        })
+    }
+    go(audit, entries).await
 }
 
 impl std::fmt::Debug for AppState {
@@ -1699,6 +1830,115 @@ mod tests {
         assert!(
             !cancel_b.is_cancelled(),
             "community-B session stays live — ban does not cross the tenant fence"
+        );
+    }
+
+    async fn audit_test_pool() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+        sqlx::PgPool::connect(&url).await.ok()
+    }
+
+    async fn make_audit_community(pool: &sqlx::PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(format!("audit-batch-{id}.example"))
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        id
+    }
+
+    fn audit_entry(community: Uuid, marker: &str) -> buzz_audit::NewAuditEntry {
+        buzz_audit::NewAuditEntry {
+            community_id: buzz_core::tenant::CommunityId::from_uuid(community),
+            action: buzz_audit::AuditAction::EventCreated,
+            actor_pubkey: None,
+            object_id: Some(marker.to_string()),
+            detail: serde_json::json!({ "marker": marker }),
+        }
+    }
+
+    /// THE poison-isolation property: a batch of N with one Postgres-rejected
+    /// entry (jsonb NUL, SQLSTATE 22P05 — deterministic) commits exactly N-1
+    /// entries, in order, with an intact verifiable chain. Bisection converges
+    /// on the poison; healthy neighbors are never dropped.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn poison_batch_drops_exactly_the_poisoned_entry() {
+        let Some(pool) = audit_test_pool().await else {
+            return;
+        };
+        let svc = buzz_audit::AuditService::new(pool.clone());
+        let c = make_audit_community(&pool).await;
+
+        let mut batch: Vec<buzz_audit::NewAuditEntry> =
+            (0..7).map(|i| audit_entry(c, &format!("ok-{i}"))).collect();
+        let mut poison = audit_entry(c, "poison");
+        poison.detail = serde_json::json!({ "bad": "nul\u{0}byte" });
+        batch.insert(3, poison); // 8 entries, poison mid-batch
+
+        append_isolating_poison(&svc, batch).await;
+
+        let rows = svc
+            .get_entries(buzz_core::tenant::CommunityId::from_uuid(c), 1, 100)
+            .await
+            .unwrap();
+        let markers: Vec<_> = rows.iter().filter_map(|e| e.object_id.clone()).collect();
+        assert_eq!(
+            markers,
+            (0..7).map(|i| format!("ok-{i}")).collect::<Vec<_>>(),
+            "exactly the poisoned entry is dropped, order preserved"
+        );
+        assert!(
+            svc.verify_chain(buzz_core::tenant::CommunityId::from_uuid(c), 1, 7)
+                .await
+                .unwrap(),
+            "chain must verify after bisection re-linked around the poison"
+        );
+    }
+
+    /// Cross-tenant fence for the flush path: one community's poison drops
+    /// nothing from another community sharing the same drained batch.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn flush_partitions_poison_to_its_own_community() {
+        let Some(pool) = audit_test_pool().await else {
+            return;
+        };
+        let svc = buzz_audit::AuditService::new(pool.clone());
+        let a = make_audit_community(&pool).await;
+        let b = make_audit_community(&pool).await;
+
+        let mut a_poison = audit_entry(a, "a-poison");
+        a_poison.detail = serde_json::json!({ "bad": "nul\u{0}byte" });
+        // Interleaved arrival order across tenants.
+        let batch = vec![
+            audit_entry(a, "a-0"),
+            audit_entry(b, "b-0"),
+            a_poison,
+            audit_entry(b, "b-1"),
+            audit_entry(a, "a-1"),
+        ];
+
+        flush_audit_batch(&svc, batch).await;
+
+        let a_rows = svc
+            .get_entries(buzz_core::tenant::CommunityId::from_uuid(a), 1, 10)
+            .await
+            .unwrap();
+        let b_rows = svc
+            .get_entries(buzz_core::tenant::CommunityId::from_uuid(b), 1, 10)
+            .await
+            .unwrap();
+        let a_markers: Vec<_> = a_rows.iter().filter_map(|e| e.object_id.clone()).collect();
+        let b_markers: Vec<_> = b_rows.iter().filter_map(|e| e.object_id.clone()).collect();
+        assert_eq!(a_markers, vec!["a-0", "a-1"], "A loses only its poison");
+        assert_eq!(
+            b_markers,
+            vec!["b-0", "b-1"],
+            "B is untouched by A's poison"
         );
     }
 }

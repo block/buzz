@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt as _;
-use sqlx::{Acquire, PgPool, Row};
+use sqlx::{Acquire, PgPool, QueryBuilder, Row};
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
@@ -37,16 +37,52 @@ impl AuditService {
 
     /// Append a new entry to the calling community's chain.
     ///
-    /// Serialized per-community via `pg_advisory_lock`. Postgres advisory locks
-    /// are session-scoped, so we acquire before the transaction and release
-    /// after commit (or on any error path).
+    /// Delegates to [`Self::log_batch`] with a batch of one so there is exactly
+    /// one chain-append implementation (lock protocol, head read, hash linkage).
     #[instrument(skip(self, entry), fields(action = %entry.action))]
     pub async fn log(&self, entry: NewAuditEntry) -> Result<AuditEntry, AuditError> {
+        let mut logged = self.log_batch(vec![entry]).await?;
+        Ok(logged
+            .pop()
+            .expect("log_batch of one entry returns one entry"))
+    }
+
+    /// Append a batch of entries — all for the **same community** — to that
+    /// community's chain in one transaction.
+    ///
+    /// Contract:
+    /// - Every entry must share one `community_id`; a mixed batch is rejected
+    ///   with [`AuditError::MixedBatch`] before any lock is taken (callers
+    ///   partition per community — batches never span tenants, so one
+    ///   community's failure can never roll back another's rows).
+    /// - Input order is preserved: entries are chained and inserted in the
+    ///   order given.
+    /// - Atomic: either every entry in the batch commits or none does.
+    ///
+    /// Serialized per-community via `pg_advisory_lock` (the same key domain as
+    /// [`Self::log`]). Postgres advisory locks are session-scoped, so we
+    /// acquire before the transaction and release after commit (or on any
+    /// error path). The chain head is re-read from the DB inside the
+    /// transaction, under the lock — there is no in-memory head authority, so
+    /// this is safe across relay replicas.
+    #[instrument(skip(self, entries), fields(batch_len = entries.len()))]
+    pub async fn log_batch(
+        &self,
+        entries: Vec<NewAuditEntry>,
+    ) -> Result<Vec<AuditEntry>, AuditError> {
+        let Some(first) = entries.first() else {
+            return Ok(Vec::new());
+        };
+        let community = first.community_id;
+        if entries.iter().any(|e| e.community_id != community) {
+            return Err(AuditError::MixedBatch);
+        }
+
         let mut conn = self.pool.acquire().await?;
 
         // Per-community advisory lock: hash the namespaced community id to an
         // i64 lock key inside Postgres. Communities lock independently.
-        let lock_key = format!("{AUDIT_LOCK_NAMESPACE}{}", entry.community_id);
+        let lock_key = format!("{AUDIT_LOCK_NAMESPACE}{community}");
         sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
             .bind(&lock_key)
             .execute(&mut *conn)
@@ -55,7 +91,7 @@ impl AuditService {
         // Run the chain append and release the lock regardless of outcome.
         // catch_unwind so a panic still releases the lock before the connection
         // returns to the pool.
-        let result = std::panic::AssertUnwindSafe(self.log_inner(&mut conn, entry))
+        let result = std::panic::AssertUnwindSafe(self.log_batch_inner(&mut conn, entries))
             .catch_unwind()
             .await;
 
@@ -70,16 +106,17 @@ impl AuditService {
         }
     }
 
-    async fn log_inner(
+    async fn log_batch_inner(
         &self,
         conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
-        entry: NewAuditEntry,
-    ) -> Result<AuditEntry, AuditError> {
+        entries: Vec<NewAuditEntry>,
+    ) -> Result<Vec<AuditEntry>, AuditError> {
         let mut tx = conn.begin().await?;
 
-        // The stored row keys on the raw UUID; the typed `CommunityId` on the
+        // The stored rows key on the raw UUID; the typed `CommunityId` on the
         // input is the provenance fence, dereferenced here at the DB boundary.
-        let community_id = *entry.community_id.as_uuid();
+        // `log_batch` verified all entries share this community.
+        let community_id = *entries[0].community_id.as_uuid();
 
         // Head of THIS community's chain — scoped by community_id.
         let head = sqlx::query(
@@ -91,55 +128,67 @@ impl AuditService {
         .fetch_optional(&mut *tx)
         .await?;
 
-        let (prev_seq, prev_hash): (i64, Option<Vec<u8>>) = match head {
+        let (mut prev_seq, mut prev_hash): (i64, Option<Vec<u8>>) = match head {
             Some(row) => (
                 row.get::<i64, _>("seq"),
                 Some(row.get::<Vec<u8>, _>("hash")),
             ),
             None => (0, None), // community's first entry
         };
-        let seq = prev_seq + 1;
 
-        let created_at: DateTime<Utc> = Utc::now();
+        // Chain the batch in input order: each entry links to its predecessor
+        // (the last committed row for the first entry, the previous batch
+        // member thereafter).
+        let mut logged = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let seq = prev_seq + 1;
+            let created_at: DateTime<Utc> = Utc::now();
 
-        let mut audit_entry = AuditEntry {
-            community_id,
-            seq,
-            hash: Vec::new(),
-            prev_hash,
-            action: entry.action,
-            actor_pubkey: entry.actor_pubkey,
-            object_id: entry.object_id,
-            detail: entry.detail,
-            created_at,
-        };
+            let mut audit_entry = AuditEntry {
+                community_id,
+                seq,
+                hash: Vec::new(),
+                prev_hash,
+                action: entry.action,
+                actor_pubkey: entry.actor_pubkey,
+                object_id: entry.object_id,
+                detail: entry.detail,
+                created_at,
+            };
+            audit_entry.hash = compute_hash(&audit_entry)?.to_vec();
 
-        audit_entry.hash = compute_hash(&audit_entry)?.to_vec();
+            prev_seq = seq;
+            prev_hash = Some(audit_entry.hash.clone());
+            logged.push(audit_entry);
+        }
 
-        debug!(seq, "writing audit entry");
+        debug!(
+            first_seq = logged.first().map(|e| e.seq),
+            last_seq = logged.last().map(|e| e.seq),
+            "writing audit entries"
+        );
 
-        sqlx::query(
-            r#"
-            INSERT INTO audit_log
-                (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            "#,
-        )
-        .bind(audit_entry.community_id)
-        .bind(audit_entry.seq)
-        .bind(&audit_entry.hash)
-        .bind(audit_entry.prev_hash.as_deref())
-        .bind(audit_entry.action.as_str())
-        .bind(audit_entry.actor_pubkey.as_deref())
-        .bind(audit_entry.object_id.as_deref())
-        .bind(&audit_entry.detail)
-        .bind(audit_entry.created_at)
-        .execute(&mut *tx)
-        .await?;
+        // One multi-row INSERT for the whole batch.
+        let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "INSERT INTO audit_log
+                (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at) ",
+        );
+        qb.push_values(logged.iter(), |mut b, e| {
+            b.push_bind(e.community_id)
+                .push_bind(e.seq)
+                .push_bind(&e.hash)
+                .push_bind(e.prev_hash.as_deref())
+                .push_bind(e.action.as_str())
+                .push_bind(e.actor_pubkey.as_deref())
+                .push_bind(e.object_id.as_deref())
+                .push_bind(&e.detail)
+                .push_bind(e.created_at);
+        });
+        qb.build().execute(&mut *tx).await?;
 
         tx.commit().await?;
 
-        Ok(audit_entry)
+        Ok(logged)
     }
 
     /// Verify the hash chain for one community over `[from_seq, to_seq]`.
@@ -484,6 +533,149 @@ mod tests {
         // won't match A's stored hash → HashMismatch. The forge is rejected.
         let r = svc.verify_chain(CommunityId::from_uuid(b), 1, 1).await;
         assert!(matches!(r, Err(AuditError::HashMismatch { seq: 1 })));
+    }
+
+    /// Batched appends chain exactly like sequential singles: within the
+    /// batch each entry links to its predecessor, the first links to the
+    /// pre-batch head, and the whole chain verifies.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn batch_chains_in_order_and_links_to_prior_head() {
+        let _g = db_lock().lock().await;
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let svc = AuditService::new(pool.clone());
+        let c = make_community(&pool).await;
+
+        // Pre-batch head via the single-entry path.
+        let e1 = svc
+            .log(new_entry(c, AuditAction::EventCreated))
+            .await
+            .unwrap();
+
+        let logged = svc
+            .log_batch(vec![
+                new_entry(c, AuditAction::ChannelCreated),
+                new_entry(c, AuditAction::MemberAdded),
+                new_entry(c, AuditAction::EventDeleted),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(logged.len(), 3);
+        assert_eq!(logged[0].seq, 2);
+        assert_eq!(logged[1].seq, 3);
+        assert_eq!(logged[2].seq, 4);
+        assert_eq!(logged[0].prev_hash.as_deref(), Some(e1.hash.as_slice()));
+        assert_eq!(
+            logged[1].prev_hash.as_deref(),
+            Some(logged[0].hash.as_slice())
+        );
+        assert_eq!(
+            logged[2].prev_hash.as_deref(),
+            Some(logged[1].hash.as_slice())
+        );
+        assert!(svc
+            .verify_chain(CommunityId::from_uuid(c), 1, 4)
+            .await
+            .unwrap());
+
+        // And a single append after the batch links to the batch's tail.
+        let e5 = svc
+            .log(new_entry(c, AuditAction::ChannelDeleted))
+            .await
+            .unwrap();
+        assert_eq!(e5.seq, 5);
+        assert_eq!(e5.prev_hash.as_deref(), Some(logged[2].hash.as_slice()));
+    }
+
+    /// A mixed-community batch is rejected before any write; the error is
+    /// classified deterministic (retrying identical input cannot succeed).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mixed_batch_is_rejected_without_writing() {
+        let _g = db_lock().lock().await;
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let svc = AuditService::new(pool.clone());
+        let a = make_community(&pool).await;
+        let b = make_community(&pool).await;
+
+        let err = svc
+            .log_batch(vec![
+                new_entry(a, AuditAction::EventCreated),
+                new_entry(b, AuditAction::EventCreated),
+            ])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuditError::MixedBatch));
+        assert!(err.is_deterministic());
+
+        for community in [a, b] {
+            let rows = svc
+                .get_entries(CommunityId::from_uuid(community), 1, 10)
+                .await
+                .unwrap();
+            assert!(rows.is_empty(), "mixed batch must write nothing");
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_batch_is_a_noop() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let svc = AuditService::new(pool);
+        assert!(svc.log_batch(Vec::new()).await.unwrap().is_empty());
+    }
+
+    /// Atomicity: a batch containing one entry Postgres rejects (jsonb cannot
+    /// store \u0000 — SQLSTATE 22P05) commits nothing, and the error is
+    /// classified deterministic so the caller bisects instead of retrying.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn poisoned_batch_is_atomic_and_deterministic() {
+        let _g = db_lock().lock().await;
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let svc = AuditService::new(pool.clone());
+        let c = make_community(&pool).await;
+
+        let mut poison = new_entry(c, AuditAction::MemberAdded);
+        poison.detail = serde_json::json!({"bad": "nul\u{0}byte"});
+
+        let err = svc
+            .log_batch(vec![
+                new_entry(c, AuditAction::EventCreated),
+                poison,
+                new_entry(c, AuditAction::ChannelCreated),
+            ])
+            .await
+            .unwrap_err();
+        assert!(
+            err.is_deterministic(),
+            "jsonb NUL rejection must classify deterministic, got: {err}"
+        );
+
+        let rows = svc
+            .get_entries(CommunityId::from_uuid(c), 1, 10)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "failed batch must roll back atomically");
+    }
+
+    /// Classification unit checks that need no Postgres: infra-shaped sqlx
+    /// errors must NOT be deterministic (outages are retried, not bisected).
+    #[test]
+    fn infra_errors_are_not_deterministic() {
+        assert!(!AuditError::Database(sqlx::Error::PoolTimedOut).is_deterministic());
+        assert!(!AuditError::Database(sqlx::Error::WorkerCrashed).is_deterministic());
+        let ser = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        assert!(AuditError::Serialization(ser).is_deterministic());
+        assert!(AuditError::MixedBatch.is_deterministic());
     }
 
     #[tokio::test]

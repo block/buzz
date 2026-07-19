@@ -190,6 +190,15 @@ pub struct Config {
     /// serving media GET/HEAD. Default off for staged client rollout.
     pub require_media_get_auth: bool,
 
+    /// Maximum entries drained into one audit flush batch.
+    /// Set via `BUZZ_AUDIT_BATCH_MAX` (default 100, must be positive).
+    pub audit_batch_max: usize,
+    /// How long the audit worker waits to fill a batch after its first entry
+    /// arrives. Set via `BUZZ_AUDIT_BATCH_INTERVAL_MS` (default 50, must be
+    /// positive). A batch flushes when it reaches `audit_batch_max` entries or
+    /// this window elapses, whichever is first.
+    pub audit_batch_interval: Duration,
+
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
     /// of the client-provided one. Useful for testing ephemeral expiry quickly.
@@ -652,6 +661,10 @@ impl Config {
             })
             .unwrap_or(false);
 
+        let audit_batch_max = positive_u64_from_env("BUZZ_AUDIT_BATCH_MAX", 100)? as usize;
+        let audit_batch_interval =
+            Duration::from_millis(positive_u64_from_env("BUZZ_AUDIT_BATCH_INTERVAL_MS", 50)?);
+
         let ephemeral_ttl_override = std::env::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
@@ -849,6 +862,8 @@ impl Config {
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
             require_media_get_auth,
+            audit_batch_max,
+            audit_batch_interval,
             ephemeral_ttl_override,
             git_repo_path,
             git_max_pack_bytes,
