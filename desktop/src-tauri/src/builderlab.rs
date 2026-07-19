@@ -343,6 +343,21 @@ pub(crate) async fn bind_builderlab_nostr_identity(
 }
 
 #[tauri::command]
+pub(crate) async fn delete_builderlab_nostr_identity(
+    app_state: tauri::State<'_, crate::app_state::AppState>,
+    session: tauri::State<'_, BuilderlabSession>,
+) -> Result<serde_json::Value, String> {
+    authenticated_json(
+        &app_state.http_client,
+        &session,
+        reqwest::Method::POST,
+        "/v1/buzz/nostr-identities/delete",
+        serde_json::json!({}),
+    )
+    .await
+}
+
+#[tauri::command]
 pub(crate) async fn list_builderlab_communities(
     app_state: tauri::State<'_, crate::app_state::AppState>,
     session: tauri::State<'_, BuilderlabSession>,
@@ -385,6 +400,61 @@ pub(crate) async fn create_builderlab_community(
         reqwest::Method::POST,
         "/v1/buzz/communities",
         serde_json::json!({ "name": name }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn archive_builderlab_community(
+    community_id: String,
+    app_state: tauri::State<'_, crate::app_state::AppState>,
+    session: tauri::State<'_, BuilderlabSession>,
+) -> Result<serde_json::Value, String> {
+    authenticated_json(
+        &app_state.http_client,
+        &session,
+        reqwest::Method::POST,
+        "/v1/buzz/communities/archive",
+        serde_json::json!({ "community_id": community_id }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn unarchive_builderlab_community(
+    community_id: String,
+    app_state: tauri::State<'_, crate::app_state::AppState>,
+    session: tauri::State<'_, BuilderlabSession>,
+) -> Result<serde_json::Value, String> {
+    authenticated_json(
+        &app_state.http_client,
+        &session,
+        reqwest::Method::POST,
+        "/v1/buzz/communities/unarchive",
+        serde_json::json!({ "community_id": community_id }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn transfer_builderlab_community(
+    community_id: String,
+    transferee_npub: String,
+    app_state: tauri::State<'_, crate::app_state::AppState>,
+    session: tauri::State<'_, BuilderlabSession>,
+) -> Result<serde_json::Value, String> {
+    // The Builderlab transfer endpoint expects camelCase keys, unlike the
+    // archive/unarchive endpoints which take `community_id`; mirror the web
+    // client's payload exactly.
+    authenticated_json(
+        &app_state.http_client,
+        &session,
+        reqwest::Method::POST,
+        "/v1/buzz/communities/transfer",
+        serde_json::json!({
+            "communityId": community_id,
+            "transfereeNpub": transferee_npub,
+        }),
     )
     .await
 }
