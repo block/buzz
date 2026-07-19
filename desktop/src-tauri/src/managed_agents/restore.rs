@@ -10,7 +10,7 @@ use crate::util;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 
-type SpawnResult = Result<ManagedAgentProcess, String>;
+type SpawnResult = Result<(super::ManagedAgentRuntimeKey, ManagedAgentProcess), String>;
 type AgentSpawnResult = (String, SpawnResult);
 
 /// Backfill the pinned persona snapshot for pre-existing agents created before
@@ -150,7 +150,11 @@ pub async fn restore_managed_agents_on_launch(
 
         let mut to_start = Vec::new();
         for pubkey in &candidates {
-            if let Some(runtime) = runtimes.get_mut(pubkey) {
+            if let Some(runtime) = runtimes
+                .iter_mut()
+                .find(|(key, _)| key.pubkey == *pubkey)
+                .map(|(_, runtime)| runtime)
+            {
                 if runtime.child.try_wait().ok().flatten().is_none() {
                     continue;
                 }
@@ -241,7 +245,7 @@ pub async fn restore_managed_agents_on_launch(
     // prevents this transition or waits until every child is tracked and can
     // be terminated.
     let restore_transition = state
-        .managed_agent_restore_transition
+        .managed_agent_runtime_transition
         .lock()
         .map_err(|error| error.to_string())?;
     if shutdown_started.load(Ordering::SeqCst) {
@@ -257,7 +261,18 @@ pub async fn restore_managed_agents_on_launch(
             .map(|record| {
                 let pubkey = record.pubkey.clone();
                 let handle = scope.spawn(move || {
-                    let result = spawn_agent_child(app, record, owner_hex_ref);
+                    let workspace_relay =
+                        crate::relay::relay_ws_url_with_override(&app.state::<AppState>());
+                    let relay_url = crate::relay::effective_agent_relay_url(
+                        &record.relay_url,
+                        &workspace_relay,
+                    );
+                    let result =
+                        super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
+                            .and_then(|key| {
+                                spawn_agent_child(app, record, &key.relay_url, false, owner_hex_ref)
+                                    .map(|process| (key, process))
+                            });
                     (pubkey, result)
                 });
                 handle
@@ -290,15 +305,28 @@ pub async fn restore_managed_agents_on_launch(
             Err(_) => continue,
         };
         match result {
-            Ok(process) => {
+            Ok((key, mut process)) => {
                 let now = util::now_iso();
+                let receipt = super::ManagedAgentRuntimeReceipt {
+                    key: key.clone(),
+                    pid: process.child.id(),
+                    desktop_instance_id: super::current_instance_id(app),
+                    started_at: now.clone(),
+                };
+                if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
+                    let _ = super::terminate_process(process.child.id());
+                    let _ = process.child.wait();
+                    record.updated_at = now;
+                    record.last_error = Some(error);
+                    continue;
+                }
                 record.updated_at = now.clone();
-                record.runtime_pid = Some(process.child.id());
+                record.runtime_pid = None;
                 record.last_started_at = Some(now);
                 record.last_stopped_at = None;
                 record.last_exit_code = None;
                 record.last_error = None;
-                runtimes.insert(pubkey.clone(), process);
+                runtimes.insert(key, super::ManagedAgentPairRuntime::starting(process));
                 successfully_spawned.push(pubkey);
             }
             Err(error) => {

@@ -331,8 +331,9 @@ async fn restart_setup_mode_agents_after_install(
                 let runtime_matches =
                     known_acp_runtime(&effective_cmd).is_some_and(|r| r.id == runtime_id_owned);
                 let setup_mode = runtimes
-                    .get(&record.pubkey)
-                    .map(|p| p.setup_mode)
+                    .iter()
+                    .find(|(key, _)| key.pubkey == record.pubkey)
+                    .map(|(_, p)| p.setup_mode)
                     .unwrap_or(false);
                 let effective = resolve_effective_agent_env(
                     record,
@@ -458,8 +459,9 @@ async fn restart_single_agent_after_install(
         }
 
         let setup_mode = runtimes
-            .get(&pubkey_owned)
-            .map(|p| p.setup_mode)
+            .iter()
+            .find(|(key, _)| key.pubkey == pubkey_owned)
+            .map(|(_, p)| p.setup_mode)
             .unwrap_or(false);
         if !setup_mode {
             return Err(format!(

@@ -25,6 +25,7 @@ mod repos;
 mod restore;
 pub mod retention;
 mod runtime;
+mod runtime_types;
 pub(crate) mod spawn_hash;
 pub(crate) mod storage;
 pub(crate) mod team_events;
@@ -66,6 +67,7 @@ pub use repos::{
 };
 pub use restore::*;
 pub use runtime::*;
+pub use runtime_types::*;
 pub use storage::*;
 pub use teams::*;
 pub use types::*;

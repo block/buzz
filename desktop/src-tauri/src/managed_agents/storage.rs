@@ -8,7 +8,9 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 use crate::app_state::keyring_service;
-use crate::managed_agents::ManagedAgentRecord;
+use crate::managed_agents::{
+    ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
+};
 use crate::secret_store::{KeyringProbe, SecretStore};
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
@@ -52,6 +54,15 @@ fn managed_agents_logs_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 pub fn managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, String> {
     Ok(managed_agents_logs_dir(app)?.join(format!("{pubkey}.log")))
+}
+
+/// Pair-scoped log path for a managed runtime. The relay URL never appears in
+/// the filename; the suffix is a hash of the canonical URL.
+pub fn managed_agent_runtime_log_path(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<PathBuf, String> {
+    Ok(managed_agents_logs_dir(app)?.join(format!("{}.log", key.runtime_id())))
 }
 
 /// The keyring operations the migration chokepoint needs. Abstracted so the
@@ -598,8 +609,41 @@ fn agent_pids_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Write a PID file for a spawned agent. The PID equals the PGID since we
-/// spawn with `process_group(0)`.
+/// Persist a pair-scoped runtime receipt atomically. Callers must register the
+/// process in memory in the same runtime transition; on write failure they must
+/// terminate the child before releasing that transition.
+pub fn write_agent_runtime_receipt(
+    app: &AppHandle,
+    receipt: &ManagedAgentRuntimeReceipt,
+) -> Result<(), String> {
+    let path = agent_pids_dir(app)?.join(format!("{}.json", receipt.key.runtime_id()));
+    let payload = serde_json::to_vec(receipt)
+        .map_err(|error| format!("failed to serialize runtime receipt: {error}"))?;
+    atomic_write_json_restricted(&path, &payload)
+}
+
+pub fn remove_agent_runtime_receipt(app: &AppHandle, key: &ManagedAgentRuntimeKey) {
+    if let Ok(dir) = agent_pids_dir(app) {
+        let _ = fs::remove_file(dir.join(format!("{}.json", key.runtime_id())));
+    }
+}
+
+pub fn read_all_agent_runtime_receipts(app: &AppHandle) -> Vec<ManagedAgentRuntimeReceipt> {
+    let Ok(dir) = agent_pids_dir(app) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice(&bytes).ok())
+        .collect()
+}
+
+/// Write a legacy PID file for a spawned agent. Retained only for migration.
 pub fn write_agent_pid_file(app: &AppHandle, pubkey: &str, pid: u32) -> Result<(), String> {
     let path = agent_pids_dir(app)?.join(format!("{pubkey}.pid"));
     fs::write(&path, pid.to_string())
