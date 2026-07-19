@@ -26,7 +26,10 @@ import { safeNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { OnboardingFooter } from "@/features/onboarding/ui/OnboardingFooter";
-import { ONBOARDING_PRIMARY_CTA_CLASS } from "@/features/onboarding/ui/OnboardingChrome";
+import {
+  ONBOARDING_INK_ICON_CLASS,
+  ONBOARDING_PRIMARY_CTA_CLASS,
+} from "@/features/onboarding/ui/OnboardingChrome";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import {
   Dialog,
@@ -42,15 +45,6 @@ import {
  * black-on-white form.
  */
 const BRAND_SECTION_CLASS = "rounded-xl bg-white/55 p-6 text-left";
-
-/**
- * The sign-in and identity-linking steps live in a modal that opens over the
- * "Your communities" page (which blurs behind the Radix overlay). It composes
- * its own panel (`surface="none"`) so it can re-establish the always-light
- * onboarding theme inside the portal, matching the shell behind it.
- */
-const MODAL_PANEL_CLASS =
-  "buzz-onboarding-neutral-theme buzz-startup-shell relative w-full max-w-md rounded-2xl !bg-none bg-white p-8 text-center text-foreground shadow-2xl";
 
 export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
   const onboarding = useCommunityOnboarding();
@@ -466,24 +460,26 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
         }}
       >
         <DialogContent
-          className="max-w-md"
+          className="buzz-onboarding-neutral-theme max-w-md"
+          closeButtonClassName={ONBOARDING_INK_ICON_CLASS}
           onOpenAutoFocus={(event) => event.preventDefault()}
-          showCloseButton={false}
-          surface="none"
+          surface="textured"
         >
-          <div className={MODAL_PANEL_CLASS}>
-            <BuzzMark className="mx-auto mb-6 h-auto w-10" />
+          <div className="mx-auto flex w-full max-w-xs flex-col items-center py-2 text-center">
+            <BuzzMark className="mb-5 h-auto w-9" />
 
             {!auth ? (
               <>
-                <DialogTitle className="text-lg font-medium tracking-normal">
+                <DialogTitle className="text-xl font-normal text-foreground">
                   Sign in to Buzz
                 </DialogTitle>
-                <DialogDescription className="mx-auto mt-2 max-w-xs text-sm text-foreground/70">
-                  Sign in to connect a community you already own, or create a
-                  new one. Sign-in opens in your browser and returns here.
+                <DialogDescription className="mt-3 text-sm leading-6 text-[color:var(--buzz-onboarding-backup-ink)]">
+                  Connect a community you already own, or create a new one.
+                  Sign-in opens in your browser and returns here.
                 </DialogDescription>
-                {errorBox ? <div className="mt-5">{errorBox}</div> : null}
+                {errorBox ? (
+                  <div className="mt-5 w-full">{errorBox}</div>
+                ) : null}
                 {action === "Signing in…" ? (
                   <div className="mt-6 flex flex-col items-center gap-3">
                     <div className="flex items-center gap-2 text-sm text-foreground/70">
@@ -505,16 +501,18 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
               </>
             ) : !identity ? (
               <>
-                <DialogTitle className="text-lg font-medium tracking-normal">
+                <DialogTitle className="text-xl font-normal text-foreground">
                   Connect this Buzz identity
                 </DialogTitle>
-                <DialogDescription className="mx-auto mt-2 max-w-xs text-sm text-foreground/70">
+                <DialogDescription className="mt-3 text-sm leading-6 text-[color:var(--buzz-onboarding-backup-ink)]">
                   Link this device’s Buzz key to{" "}
                   {auth.email ?? auth.name ?? "your account"}. Buzz signs a
                   one-time challenge locally — your private key never leaves
                   Desktop.
                 </DialogDescription>
-                {errorBox ? <div className="mt-5">{errorBox}</div> : null}
+                {errorBox ? (
+                  <div className="mt-5 w-full">{errorBox}</div>
+                ) : null}
                 <Button
                   className={`mt-6 ${ONBOARDING_PRIMARY_CTA_CLASS}`}
                   disabled={busy}
@@ -528,21 +526,22 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
               </>
             ) : (
               <>
-                <DialogTitle className="text-lg font-medium tracking-normal">
+                <DialogTitle className="text-xl font-normal text-foreground">
                   This account uses a different Buzz identity
                 </DialogTitle>
-                <DialogDescription className="mx-auto mt-2 max-w-sm text-sm text-foreground/70">
-                  This account is connected to another Buzz identity. You can
-                  disconnect that identity and reconnect this device, or sign
-                  out to use a different email.
+                <DialogDescription className="mt-3 text-sm leading-6 text-[color:var(--buzz-onboarding-backup-ink)]">
+                  This account is connected to another Buzz identity. Reconnect
+                  this device, or sign out to use a different email.
                 </DialogDescription>
-                <p className="mx-auto mt-3 max-w-sm break-all text-left font-mono text-xs text-foreground/60">
+                <p className="mt-4 w-full break-all rounded-xl bg-white/50 px-4 py-3 text-left font-mono text-xs text-[color:var(--buzz-onboarding-backup-ink)]">
                   Account: {identity.npub ?? boundPubkey}
                   <br />
                   This device: {localNpub ?? localPubkey}
                 </p>
-                {errorBox ? <div className="mt-5">{errorBox}</div> : null}
-                <div className="mt-6 flex flex-wrap justify-center gap-2">
+                {errorBox ? (
+                  <div className="mt-5 w-full">{errorBox}</div>
+                ) : null}
+                <div className="mt-6 flex flex-col items-stretch gap-2">
                   <Button
                     className={ONBOARDING_PRIMARY_CTA_CLASS}
                     disabled={busy}
@@ -561,17 +560,6 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
                 </div>
               </>
             )}
-
-            <div className="mt-6">
-              <button
-                className="text-sm text-foreground/60 underline-offset-4 hover:text-foreground hover:underline disabled:opacity-50"
-                disabled={busy}
-                onClick={goBack}
-                type="button"
-              >
-                Back
-              </button>
-            </div>
           </div>
         </DialogContent>
       </Dialog>

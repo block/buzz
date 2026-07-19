@@ -629,7 +629,8 @@ test("first-community choices expose npub and invite input", async ({
     page.getByRole("heading", { name: "Sign in to Buzz" }),
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
-  await page.getByRole("button", { name: "Back" }).click();
+  // The modal's close (X) dismisses back to the community picker.
+  await page.getByRole("button", { name: "Close" }).click();
 
   await page.getByRole("button", { name: "Add me to a community" }).click();
   await expect(page.getByTestId("welcome-join-npub")).toHaveText(
