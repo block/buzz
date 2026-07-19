@@ -729,6 +729,37 @@ mod flush_barrier {
         .expect("retain test event");
     }
 
+    #[test]
+    fn archive_request_resign_refreshes_timestamp_and_preserves_payload() {
+        use nostr::JsonUtil;
+
+        let keys = nostr::Keys::generate();
+        let target = nostr::Keys::generate().public_key().to_hex();
+        let stale = crate::events::build_archive_identity_request(
+            &target,
+            "agent deleted",
+            Some("retired"),
+            None,
+            None,
+        )
+        .unwrap()
+        .custom_created_at(nostr::Timestamp::from(1))
+        .sign_with_keys(&keys)
+        .unwrap();
+        let state = build_app_state();
+        *state.keys.lock().unwrap() = keys;
+
+        let fresh = resign_with_fresh_timestamp(&stale, &state).unwrap();
+
+        assert!(fresh.created_at.as_secs() > stale.created_at.as_secs());
+        assert_eq!(fresh.kind, stale.kind);
+        assert_eq!(fresh.content, stale.content);
+        assert_eq!(fresh.tags, stale.tags);
+        assert!(fresh.verify_id());
+        assert!(fresh.verify_signature());
+        assert_ne!(fresh.as_json(), stale.as_json());
+    }
+
     /// The mid-sweep barrier: a tombstone the relay rejects must defer its
     /// own replacement to the next sweep (still pending, not counted as
     /// flushed) while unrelated rows in the same sweep publish normally.
