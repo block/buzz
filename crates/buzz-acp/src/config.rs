@@ -50,6 +50,10 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
 pub enum SubscribeMode {
     Mentions,
+    /// Follow a conversation after an explicit mention, without subscribing the
+    /// agent to unrelated channel traffic at the prompt boundary.
+    #[value(name = "thread-follow")]
+    ThreadFollow,
     All,
     Config,
 }
@@ -1172,6 +1176,26 @@ pub fn resolve_channel_filters(
                 );
             }
         }
+        SubscribeMode::ThreadFollow => {
+            let kinds = config.kinds_override.clone().unwrap_or_else(|| {
+                vec![
+                    KIND_STREAM_MESSAGE,
+                    KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    KIND_STREAM_REMINDER,
+                ]
+            });
+            for ch in &target_channels {
+                result.insert(
+                    *ch,
+                    ChannelFilter {
+                        kinds: Some(kinds.clone()),
+                        // Thread membership is dynamic, so this broad relay
+                        // filter is paired with ThreadFollowState's local gate.
+                        require_mention: false,
+                    },
+                );
+            }
+        }
         SubscribeMode::All => {
             for ch in &target_channels {
                 result.insert(
@@ -1267,6 +1291,16 @@ pub fn resolve_dynamic_channel_filter(
                 ]
             })),
             require_mention: !config.no_mention_filter,
+        }),
+        SubscribeMode::ThreadFollow => Some(ChannelFilter {
+            kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
+                vec![
+                    KIND_STREAM_MESSAGE,
+                    KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    KIND_STREAM_REMINDER,
+                ]
+            })),
+            require_mention: false,
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
@@ -1623,6 +1657,26 @@ mod tests {
     fn codex_network_env_schemeless_string_returns_none() {
         // A bare string with no scheme fails Url::parse — graceful None return.
         assert!(codex_network_env("codex-acp", "not-a-url").is_none());
+    }
+
+    #[test]
+    fn test_thread_follow_mode_subscribes_to_default_kinds_without_mention_filter() {
+        let config = test_config(SubscribeMode::ThreadFollow);
+        let channels = vec![Uuid::new_v4()];
+        let result = resolve_channel_filters(&config, &channels, &[]);
+        let filter = result.get(&channels[0]).expect("channel should be present");
+        assert!(!filter.require_mention);
+        assert_eq!(
+            filter
+                .kinds
+                .as_ref()
+                .expect("thread-follow has bounded kinds"),
+            &vec![
+                buzz_core::kind::KIND_STREAM_MESSAGE,
+                buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
+                buzz_core::kind::KIND_STREAM_REMINDER,
+            ]
+        );
     }
 
     #[test]

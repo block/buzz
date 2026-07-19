@@ -9,6 +9,7 @@ mod pool;
 mod queue;
 mod relay;
 mod setup_mode;
+mod thread_follow;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -41,6 +42,9 @@ use pool::{
 };
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
+use thread_follow::{
+    ThreadFollowAdmission, ThreadFollowState, DEFAULT_FOLLOW_TTL, DEFAULT_MAX_FOLLOWED_THREADS,
+};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -1383,6 +1387,26 @@ async fn tokio_main() -> Result<()> {
                 prompt_tag: Some("@mention".into()),
             }]
         }
+        SubscribeMode::ThreadFollow => {
+            vec![SubscriptionRule {
+                name: "thread-follow".into(),
+                channels: filter::ChannelScope::All("all".into()),
+                kinds: config.kinds_override.clone().unwrap_or_else(|| {
+                    vec![
+                        KIND_STREAM_MESSAGE,
+                        KIND_WORKFLOW_APPROVAL_REQUESTED,
+                        KIND_STREAM_REMINDER,
+                    ]
+                }),
+                // The relay must deliver non-mentioned replies; ThreadFollowState
+                // restores the stricter local admission policy below.
+                require_mention: false,
+                filter: None,
+                compiled_filter: None,
+                consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                prompt_tag: Some("thread-follow".into()),
+            }]
+        }
         SubscribeMode::All => {
             vec![SubscriptionRule {
                 name: "all".into(),
@@ -1441,6 +1465,8 @@ async fn tokio_main() -> Result<()> {
     let dedup_mode = config.dedup_mode;
     let mut queue =
         EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+    let mut thread_follow = (config.subscribe_mode == SubscribeMode::ThreadFollow)
+        .then(|| ThreadFollowState::new(DEFAULT_FOLLOW_TTL, DEFAULT_MAX_FOLLOWED_THREADS));
 
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
@@ -1833,6 +1859,7 @@ async fn tokio_main() -> Result<()> {
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
+                                    thread_follow.as_mut().map(|state| state.remove_channel(ch));
                                     typing_channels.remove(&ch);
                                     // Best-effort: clean up 👀 on drained events.
                                     // Note: the relay revokes membership before
@@ -2009,6 +2036,18 @@ async fn tokio_main() -> Result<()> {
                                     continue;
                                 }
                             };
+                            let thread_follow_admission = thread_follow.as_mut().map(|state| {
+                                state.classify(
+                                    buzz_event.channel_id,
+                                    &buzz_event.event,
+                                    &pubkey_hex,
+                                    std::time::Instant::now(),
+                                )
+                            });
+                            if matches!(thread_follow_admission, Some(ThreadFollowAdmission::Reject)) {
+                                tracing::debug!(channel_id = %buzz_event.channel_id, "thread-follow admission — dropping unrelated event");
+                                continue;
+                            }
                             // Capture author pubkey before queue.push() moves
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
@@ -2037,6 +2076,11 @@ async fn tokio_main() -> Result<()> {
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
                             if accepted {
+                                if let (Some(state), Some(admission)) =
+                                    (thread_follow.as_mut(), thread_follow_admission.as_ref())
+                                {
+                                    state.record(buzz_event.channel_id, admission, std::time::Instant::now());
+                                }
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
