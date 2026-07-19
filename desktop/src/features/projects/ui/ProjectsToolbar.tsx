@@ -63,8 +63,6 @@ export function ProjectsToolbar({
     { label: "Repositories", value: "repositories" },
     { label: "Pull Requests", value: "prs" },
     { label: "Issues", value: "issues" },
-    { label: "My Repositories", value: "mine" },
-    { label: "Local", value: "local" },
   ];
 
   return (
@@ -80,7 +78,7 @@ export function ProjectsToolbar({
               aria-label={option.label}
               aria-pressed={filter === option.value}
               className={cn(
-                "relative h-full shrink-0 gap-1.5 rounded-none px-2.5 text-sm leading-5 tracking-tight text-muted-foreground after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:bg-current after:opacity-0 after:transition-opacity after:content-[''] hover:bg-transparent hover:text-foreground hover:after:opacity-100",
+                "relative h-full shrink-0 gap-1.5 rounded-none px-2.5 text-base leading-5 tracking-tight text-muted-foreground after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:bg-current after:opacity-0 after:transition-opacity after:content-[''] hover:bg-transparent hover:text-foreground hover:after:opacity-100",
                 option.value === "all" && "pl-0 after:left-0",
                 filter === option.value && SELECTED_MENU_ITEM_CLASSES,
               )}

@@ -22,11 +22,20 @@ function pullRequestEvent(overrides = {}) {
       ["a", REPO_ADDRESS],
       ["subject", "Add feature"],
       ["c", "1111111111111111111111111111111111111111"],
+      ["branch-name", "feature/demo"],
+      ["target-branch", "release"],
       ["clone", `https://relay.example/git/${OWNER}/demo`],
     ],
     ...overrides,
   };
 }
+
+test("reads source and target branches from the pull request", () => {
+  const pullRequest = eventToProjectPullRequest(pullRequestEvent());
+
+  assert.equal(pullRequest.branchName, "feature/demo");
+  assert.equal(pullRequest.targetBranch, "release");
+});
 
 function updateEvent({ pubkey, createdAt, commit, cloneUrl }) {
   return {

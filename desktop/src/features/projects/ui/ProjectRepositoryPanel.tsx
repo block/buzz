@@ -575,7 +575,7 @@ function FileContentPanel({
 
   return (
     <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-      <div className="flex min-h-10 items-center gap-1 border-border/50 border-b bg-muted/20 px-3">
+      <div className="flex min-h-14 items-center gap-1 border-border/50 border-b bg-muted/20 px-3 py-3">
         <BreadcrumbButton onClick={() => onOpenPath("")}>
           Files
         </BreadcrumbButton>
@@ -718,7 +718,7 @@ export function RepositoryFilesPanel({
     }
     return (
       <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-        <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
+        <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
           <RepoSourceDropdown controls={sourceControls} />
           <RepositoryBranchDropdown
             branch={sourceControls.branch}
@@ -749,7 +749,7 @@ export function RepositoryFilesPanel({
 
   return (
     <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-      <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
+      <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
         {sourceControls ? (
           <>
             <RepoSourceDropdown controls={sourceControls} />

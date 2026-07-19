@@ -45,6 +45,7 @@ export type ProjectPullRequest = {
   statusEventId: string | null;
   statusCreatedAt: number | null;
   branchName: string | null;
+  targetBranch: string | null;
   initialCommit: string | null;
   commit: string | null;
   cloneUrls: string[];

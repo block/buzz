@@ -40,7 +40,7 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   await installMockBridge(page);
   await openBuzzProject(page);
 
-  await page.getByRole("tab", { name: "PRs" }).click();
+  await page.getByRole("tab", { name: "Pull Request" }).click();
   const prRows = page.getByTestId("project-pull-request-row");
   await expect(prRows.first()).toBeVisible({ timeout: 10_000 });
 
@@ -195,7 +195,7 @@ test("managed agent repository owner can merge", async ({ page }) => {
   });
   await openBuzzProject(page);
 
-  await page.getByRole("tab", { name: "PRs" }).click();
+  await page.getByRole("tab", { name: "Pull Request" }).click();
   const agentRow = page
     .getByTestId("project-pull-request-row")
     .filter({ hasText: "Brain" })
@@ -279,9 +279,17 @@ test("pushed local branch can open a pull request", async ({ page }) => {
   await page
     .getByRole("menuitemradio", { name: "feature/projects-workflow" })
     .click();
-  await page
-    .getByRole("button", { name: "New pull request", exact: true })
-    .click();
+  await page.getByRole("tab", { name: "Pull Request", exact: true }).click();
+  await page.getByRole("button", { name: "Pull Request", exact: true }).click();
+  await expect(page.getByTestId("create-pull-request-repository")).toHaveValue(
+    /:buzz$/,
+  );
+  await expect(page.getByTestId("create-pull-request-base-branch")).toHaveValue(
+    "main",
+  );
+  await expect(
+    page.getByTestId("create-pull-request-compare-branch"),
+  ).toHaveValue("feature/projects-workflow");
   await page
     .getByTestId("create-pull-request-title")
     .fill("Complete the Projects git workflow");
@@ -298,6 +306,7 @@ test("pushed local branch can open a pull request", async ({ page }) => {
     "branch-name",
     "feature/projects-workflow",
   ]);
+  expect(createdEvent?.tags).toContainEqual(["target-branch", "main"]);
   expect(createdEvent?.tags).toContainEqual([
     "subject",
     "Complete the Projects git workflow",
@@ -316,7 +325,7 @@ test("pushed local branch can open a pull request", async ({ page }) => {
       queryKey: ["project"],
     });
   });
-  await page.getByRole("button", { name: "Push 1", exact: true }).click();
+  await page.getByRole("button", { name: "Push", exact: true }).click();
   await expect(page.getByText("mock project event rejection")).toBeVisible();
   await expect
     .poll(() =>
@@ -357,4 +366,31 @@ test("pushed local branch can open a pull request", async ({ page }) => {
     "abcdef0123456789abcdef0123456789abcdef01",
   ]);
   expect(updateEvent?.tags.some((tag) => tag[0] === "E")).toBe(true);
+});
+
+test("project issue can be created from the issues header", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "Issues", exact: true }).click();
+  await page.getByRole("button", { name: "Issues", exact: true }).click();
+  await page
+    .getByTestId("create-issue-title")
+    .fill("Document the broken workflow");
+  await page
+    .getByTestId("create-issue-body")
+    .fill("The project workflow needs a clear repair path.");
+  await page.getByTestId("create-issue-submit").click();
+  await expect(page.getByText("Issue created.")).toBeVisible();
+
+  const createdEvent = await page.evaluate(() =>
+    window.__BUZZ_E2E_SIGNED_EVENTS__?.find((event) => event.kind === 1621),
+  );
+  expect(createdEvent?.tags).toContainEqual([
+    "subject",
+    "Document the broken workflow",
+  ]);
 });

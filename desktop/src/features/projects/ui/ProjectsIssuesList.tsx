@@ -16,6 +16,7 @@ import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 import {
+  PROJECT_LIST_CONTAINER_CLASS,
   PROJECT_LIST_ROW_CLASS,
   PROJECT_LIST_ROW_CONTENT_CLASS,
   PROJECT_LIST_ROW_DATE_CLASS,
@@ -126,7 +127,7 @@ function IssueGridCard({
       </button>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex min-w-0 items-start gap-3">
-          <ProjectEventTypeIcon kind="issue" />
+          <ProjectEventTypeIcon className="h-5 w-5" kind="issue" />
           <IssueHeader issue={issue} profiles={profiles} project={project} />
           <Button
             className="relative z-10 h-7 shrink-0 px-2.5"
@@ -190,7 +191,7 @@ function IssueListRow({
         <span className="sr-only">View {issue.title}</span>
       </button>
       <div className={PROJECT_LIST_ROW_CONTENT_CLASS}>
-        <ProjectEventTypeIcon kind="issue" />
+        <ProjectEventTypeIcon className="h-5 w-5" kind="issue" />
         <IssueHeader
           includeDate={false}
           issue={issue}
@@ -266,7 +267,7 @@ export function ProjectsIssuesList({
   }
 
   return (
-    <div className="-mx-4 divide-y divide-border/60 border-y border-border/60 bg-card">
+    <div className={PROJECT_LIST_CONTAINER_CLASS}>
       {issues.map(({ project, issue }) => (
         <IssueListRow
           issue={issue}

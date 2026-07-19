@@ -19,8 +19,10 @@ export function useProjectRepoSyncStatusQuery(
   project: Project | null | undefined,
   reposDir?: string | null,
   branchName?: string | null,
+  baseBranch?: string | null,
 ) {
   const selectedBranch = branchName ?? project?.defaultBranch ?? null;
+  const selectedBaseBranch = baseBranch ?? project?.defaultBranch ?? null;
 
   return useQuery({
     enabled: Boolean(project?.cloneUrls[0]),
@@ -30,6 +32,7 @@ export function useProjectRepoSyncStatusQuery(
       "repo-sync-status",
       reposDir ?? "default",
       selectedBranch ?? "default",
+      selectedBaseBranch ?? "default",
     ],
     queryFn: () => {
       if (!project?.cloneUrls[0]) throw new Error("No project selected.");
@@ -38,7 +41,7 @@ export function useProjectRepoSyncStatusQuery(
         projectDtag: project.dtag,
         cloneUrl: project.cloneUrls[0],
         branchName: selectedBranch,
-        baseBranch: project.defaultBranch,
+        baseBranch: selectedBaseBranch,
       });
     },
     staleTime: 10_000,

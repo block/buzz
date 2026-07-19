@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildGitIssueTags,
   eventToProjectIssue,
   getAllTags,
   getTag,
@@ -96,4 +97,19 @@ test("tag helpers drop malformed value-less tags", () => {
   assert.deepEqual(issue.labels, ["bug"]);
   assert.equal(issue.status, PROJECT_ISSUE_STATUS.BACKLOG);
   assert.equal(issue.title, "Something is broken");
+});
+
+test("builds repository-scoped issue creation tags", () => {
+  assert.deepEqual(
+    buildGitIssueTags({
+      repoAddress: REPO_ADDRESS,
+      repoOwner: OWNER,
+      title: "  Fix the broken workflow  ",
+    }),
+    [
+      ["a", REPO_ADDRESS],
+      ["p", OWNER],
+      ["subject", "Fix the broken workflow"],
+    ],
+  );
 });

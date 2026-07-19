@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useOpenDmMutation } from "@/features/channels/hooks";
 import {
+  type Project,
   useProjectQuery,
   useProjectIssuesQuery,
   useProjectLocalRepoDiffQuery,
@@ -18,6 +19,7 @@ import {
   useProjectRepoDiffQuery,
   useProjectPullRequestsQuery,
   useProjectRepoSnapshotQuery,
+  useProjectsQuery,
   useRepoStateQuery,
 } from "@/features/projects/hooks";
 import {
@@ -26,10 +28,8 @@ import {
   usePullProjectLocalRepositoryMutation,
   usePushProjectLocalRepositoryMutation,
 } from "@/features/projects/repoSyncHooks";
-import {
-  useCreateProjectPullRequestMutation,
-  useUpdateProjectPullRequestMutation,
-} from "@/features/projects/pullRequestMutations";
+import { useUpdateProjectPullRequestMutation } from "@/features/projects/pullRequestMutations";
+import { useCreateProjectIssueMutation } from "@/features/projects/issueMutations";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import {
@@ -55,7 +55,6 @@ import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { Button } from "@/shared/ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useProjectCommitDiffQuery } from "@/features/projects/useProjectCommitDiff";
 import { useGitIdentityQuery } from "@/features/projects/useGitIdentity";
@@ -67,10 +66,8 @@ import {
   projectTerminalLabel,
   useOpenProjectTerminal,
 } from "./useOpenProjectTerminal";
-import { CopyTextButton } from "./ProjectCommitCopyButton";
-import type { CreatePullRequestDialogInput } from "./CreatePullRequestDialog";
+import type { CreateIssueDialogInput } from "./CreateIssueDialog";
 import {
-  createPullRequestAvailability,
   projectPeople,
   pushPullTitle,
   snapshotHasContent,
@@ -91,7 +88,7 @@ const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
 
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const { commitHash, projectId, pullRequestId, issueId } = props;
-  const { goChannel, goProjects } = useAppNavigation();
+  const { goChannel, goProject, goProjects } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const mainInsetRef = useMainInsetRef();
   const projectDetailHeaderChromeRef = useMeasuredCssVariable({
@@ -100,6 +97,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     ...channelContentTopPaddingMeasurement,
   });
   const projectQuery = useProjectQuery(projectId);
+  const projectsQuery = useProjectsQuery();
   const project = projectQuery.data;
   const repoStateQuery = useRepoStateQuery(project);
   const pullRequestsQuery = useProjectPullRequestsQuery(project);
@@ -244,8 +242,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     project,
     activeCommunity?.reposDir,
   );
-  const createPullRequestMutation =
-    useCreateProjectPullRequestMutation(project);
+  const createIssueMutation = useCreateProjectIssueMutation(project);
   const updatePullRequestMutation = useUpdateProjectPullRequestMutation(
     project,
     openBranchPullRequest,
@@ -495,32 +492,25 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       );
     }
   }, [cloneRepoMutation]);
-  const handleCreatePullRequest = React.useCallback(
-    async ({ body, title }: CreatePullRequestDialogInput) => {
-      const branch = activeBranch;
-      const commit = repoSyncStatusQuery.data?.localHead;
-      if (!branch || !commit) {
-        throw new Error("No local branch commit is available.");
+  const handlePullRequestCreated = React.useCallback(
+    async (createdProject: Project, pullRequestId: string) => {
+      if (createdProject.id !== projectId) {
+        await goProject(createdProject.id, { pullRequestId });
+        return;
       }
-      const pullRequestId = await createPullRequestMutation.mutateAsync({
-        title,
-        body,
-        branch,
-        commit,
-        mergeBase: repoSyncStatusQuery.data?.mergeBase ?? null,
-        reviewers: [],
-      });
-      toast.success("Pull request created.");
       await pullRequestsQuery.refetch();
       setSelectedPullRequestId(pullRequestId);
     },
-    [
-      activeBranch,
-      createPullRequestMutation,
-      pullRequestsQuery,
-      repoSyncStatusQuery.data?.localHead,
-      repoSyncStatusQuery.data?.mergeBase,
-    ],
+    [goProject, projectId, pullRequestsQuery],
+  );
+  const handleCreateIssue = React.useCallback(
+    async ({ body, title }: CreateIssueDialogInput) => {
+      const issueId = await createIssueMutation.mutateAsync({ body, title });
+      toast.success("Issue created.");
+      await issuesQuery.refetch();
+      setSelectedIssueId(issueId);
+    },
+    [createIssueMutation, issuesQuery],
   );
   const handleUpdatePullRequest = React.useCallback(async () => {
     const commit = repoSyncStatusQuery.data?.remoteHead;
@@ -633,15 +623,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const repoContributors = repoSnapshotQuery.data?.contributors ?? [];
   const safeWebUrl =
     project.webUrl && isSafeUrl(project.webUrl) ? project.webUrl : null;
-  const createPullRequest = createPullRequestAvailability({
-    activeBranch,
-    defaultBranch: project.defaultBranch,
-    hasLocalCheckout,
-    hasOpenPullRequest: Boolean(openBranchPullRequest),
-    localBranch: repoSyncStatusQuery.data?.localBranch,
-    localHead: repoSyncStatusQuery.data?.localHead,
-    remoteHead: repoSyncStatusQuery.data?.remoteHead,
-  });
   const selectedPullRequest =
     pullRequestsQuery.data?.find((item) => item.id === selectedPullRequestId) ??
     null;
@@ -662,7 +643,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   // match the workspace tab labels.
   const activeWorkItemCrumb = selectedPullRequest
     ? {
-        category: "PRs",
+        category: "Pull Request",
         title: selectedPullRequest.title,
         clear: () => setSelectedPullRequestId(null),
       }
@@ -684,7 +665,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     files: "Files",
     activity: "Commits",
     issues: "Issues",
-    prs: "PRs",
+    prs: "Pull Request",
     contributors: "Contributors",
   };
   const activeTabCrumb = activeWorkItemCrumb
@@ -800,7 +781,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
           </div>
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
-            <div className="w-full space-y-5 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
+            <div className="w-full space-y-3 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
               <section className="space-y-3">
                 <div className="flex min-w-0 items-start justify-between gap-3">
                   <div className="min-w-0 flex-1 space-y-0.5">
@@ -827,18 +808,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                       ) : null}
                     </div>
                   </div>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="inline-flex shrink-0">
-                        <CopyTextButton
-                          ariaLabel="Copy repo address"
-                          className="h-6 w-6"
-                          text={project.repoAddress}
-                        />
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent>Copy repo address</TooltipContent>
-                  </Tooltip>
                 </div>
               </section>
 
@@ -857,17 +826,15 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 commitDiff={commitDiffQuery.data}
                 commitDiffError={commitDiffQuery.error}
                 commitDiffLoading={commitDiffQuery.isLoading}
-                createPullRequestAction={
-                  activeBranch && activeBranch !== project.defaultBranch
-                    ? {
-                        commit: repoSyncStatusQuery.data?.localHead ?? "",
-                        enabled: createPullRequest.enabled,
-                        onCreate: handleCreatePullRequest,
-                        pending: createPullRequestMutation.isPending,
-                        title: createPullRequest.reason,
-                      }
-                    : undefined
-                }
+                createIssueAction={{
+                  onCreate: handleCreateIssue,
+                  pending: createIssueMutation.isPending,
+                }}
+                createPullRequestAction={{
+                  onCreated: handlePullRequestCreated,
+                  projects: projectsQuery.data ?? [project],
+                  reposDir: activeCommunity?.reposDir,
+                }}
                 updatePullRequestAction={
                   openBranchPullRequest &&
                   repoSyncStatusQuery.data?.remoteHead &&

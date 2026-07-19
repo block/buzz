@@ -1,4 +1,7 @@
 /** Inbox-aligned spacing and typography for top-level Projects list rows. */
+export const PROJECT_LIST_CONTAINER_CLASS =
+  "divide-y divide-border/60 overflow-hidden rounded-xl border border-border/60 bg-card";
+
 export const PROJECT_LIST_ROW_CLASS =
   "group relative px-3 py-3 transition-colors duration-150 hover:bg-muted/20";
 

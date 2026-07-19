@@ -19,6 +19,7 @@ type CreateProjectPullRequestInput = {
   title: string;
   body: string;
   branch: string;
+  targetBranch: string;
   commit: string;
   mergeBase: string | null;
   reviewers: string[];
@@ -42,6 +43,7 @@ export function projectPullRequestTags(
     ["c", input.commit],
     ["clone", ...project.cloneUrls],
     ["branch-name", input.branch],
+    ["target-branch", input.targetBranch],
   ];
   if (input.mergeBase) tags.push(["merge-base", input.mergeBase]);
   return tags;
@@ -102,8 +104,8 @@ async function publishProjectPullRequest(
   if (project.cloneUrls.length === 0) {
     throw new Error("This project has no clone URL.");
   }
-  if (input.branch === project.defaultBranch) {
-    throw new Error("Choose a branch other than the default branch.");
+  if (input.branch === input.targetBranch) {
+    throw new Error("The base and compare branches must be different.");
   }
 
   const event = await signRelayEvent({
@@ -223,7 +225,7 @@ export function useMergeProjectPullRequestMutation(
           pullRequest,
           Math.floor(Date.now() / 1_000),
         ),
-        targetBranch: project.defaultBranch,
+        targetBranch: pullRequest.targetBranch ?? project.defaultBranch,
         sourceBranch: pullRequest.branchName,
         expectedCommit: pullRequest.commit,
       });

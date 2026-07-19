@@ -40,6 +40,12 @@ test("top-level project lists align dates and overflow actions", async ({
   }
 
   await page.getByRole("button", { name: "Repositories", exact: true }).click();
+  await page.getByRole("button", { name: "Filter repositories" }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "My Repositories" }),
+  ).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Local" })).toBeVisible();
+  await page.keyboard.press("Escape");
   const repositoryPositions = await trailingPositions(
     page.locator('[data-testid^="project-row-"]').first(),
   );
@@ -47,6 +53,28 @@ test("top-level project lists align dates and overflow actions", async ({
   await page
     .getByRole("button", { name: "Pull Requests", exact: true })
     .click();
+  await page.getByRole("button", { name: "Filter pull requests" }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "My Pull Requests" }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.getByTestId("projects-create-menu").hover();
+  await expect(
+    page.getByRole("menuitem", { name: "Repository" }),
+  ).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Issue" })).toBeVisible();
+  await page
+    .getByRole("menuitem", { name: "Pull Request", exact: true })
+    .click();
+  await expect(page.getByTestId("create-pull-request-dialog")).toBeVisible();
+  await expect(
+    page.getByTestId("create-pull-request-repository"),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.getByTestId("projects-create-menu").hover();
+  await page.getByRole("menuitem", { name: "Issue" }).click();
+  await expect(page.getByTestId("create-issue-repository")).toBeVisible();
+  await page.keyboard.press("Escape");
   const pullRequestRow = page
     .locator('[data-testid^="projects-pr-row-"]')
     .first();
@@ -60,6 +88,9 @@ test("top-level project lists align dates and overflow actions", async ({
   await page.keyboard.press("Escape");
 
   await page.getByRole("button", { name: "Issues", exact: true }).click();
+  await page.getByRole("button", { name: "Filter issues" }).click();
+  await expect(page.getByRole("menuitem", { name: "My Issues" })).toBeVisible();
+  await page.keyboard.press("Escape");
   const issueRow = page.locator('[data-testid^="projects-issue-row-"]').first();
   const issuePositions = await trailingPositions(issueRow);
 
@@ -119,8 +150,10 @@ test("commit detail opens from the commits feed with a diff", async ({
   const commitRows = page.getByTestId("project-activity-feed-item");
   await expect(commitRows.first()).toBeVisible({ timeout: 10_000 });
 
-  // GitHub-style feed: commits grouped under a date header with a hash cell.
-  await expect(page.getByText(/^Commits on /).first()).toBeVisible();
+  // Commits share the rounded list structure used by issues and pull requests.
+  await expect(
+    page.getByRole("heading", { name: "Commits", exact: true }),
+  ).toBeVisible();
   await waitForAnimations(page);
   await page.screenshot({
     fullPage: false,
@@ -212,7 +245,7 @@ test("pull request and issue feeds share the commit row structure", async ({
   await projectEntry.click();
 
   // PR rows use the shared feed row: title button + #id cluster cell.
-  await page.getByRole("tab", { name: "PRs" }).click();
+  await page.getByRole("tab", { name: "Pull Request" }).click();
   const prRows = page.getByTestId("project-pull-request-row");
   await expect(prRows.first()).toBeVisible({ timeout: 10_000 });
   await expect(
@@ -230,7 +263,7 @@ test("pull request and issue feeds share the commit row structure", async ({
   // Step back to the feed so the community tabs are available again.
   await page
     .getByRole("navigation", { name: "Project breadcrumb" })
-    .getByRole("button", { name: "PRs", exact: true })
+    .getByRole("button", { name: "Pull Request", exact: true })
     .click();
   await expect(prRows.first()).toBeVisible();
 

@@ -25,6 +25,7 @@ test("projectPullRequestTags builds a NIP-34 kind 1618 tag set", () => {
     title: "Add Projects workflow",
     body: "",
     branch: "projects-workflow",
+    targetBranch: "main",
     commit: COMMIT,
     mergeBase: MERGE_BASE,
     reviewers: [REVIEWER, REVIEWER.toUpperCase()],
@@ -38,6 +39,7 @@ test("projectPullRequestTags builds a NIP-34 kind 1618 tag set", () => {
     ["c", COMMIT],
     ["clone", project.cloneUrls[0]],
     ["branch-name", "projects-workflow"],
+    ["target-branch", "main"],
     ["merge-base", MERGE_BASE],
   ]);
 });

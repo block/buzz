@@ -180,6 +180,7 @@ export function eventToProjectPullRequest(
     statusEventId: latestStatus?.id ?? null,
     statusCreatedAt: latestStatus?.created_at ?? null,
     branchName: getTag(pullRequest, "branch-name") ?? null,
+    targetBranch: getTag(pullRequest, "target-branch") ?? null,
     initialCommit,
     commit: latestCommit,
     cloneUrls: getCloneUrls(latestUpdate ?? pullRequest),

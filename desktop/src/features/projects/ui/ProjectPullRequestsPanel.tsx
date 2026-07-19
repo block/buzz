@@ -1,5 +1,7 @@
 import {
   Check,
+  GitBranch,
+  GitCommitHorizontal,
   GitMerge,
   GitPullRequest,
   GitPullRequestDraft,
@@ -21,6 +23,7 @@ import {
   useApproveProjectPullRequestMutation,
   useUpdateProjectPullRequestStatusMutation,
 } from "@/features/projects/pullRequestReviews";
+import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
@@ -32,8 +35,12 @@ import {
   ProjectFeedRowCluster,
   ProjectFeedRowMonoCell,
 } from "./ProjectFeedRow";
+import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
-import { ProfileIdentityButton } from "./ProjectProfileIdentity";
+import {
+  ProfileAuthorName,
+  ProfileIdentityButton,
+} from "./ProjectProfileIdentity";
 import { MergePullRequestButton } from "./MergePullRequestButton";
 import { PullRequestReviewersRow } from "./PullRequestReviewersRow";
 
@@ -172,6 +179,72 @@ function CommitHashChip({
   );
 }
 
+function PullRequestCommitRow({
+  author,
+  branch,
+  createdAt,
+  hash,
+  message,
+  onOpenCommit,
+  profiles,
+}: {
+  author: string;
+  branch: string | null;
+  createdAt: number;
+  hash: string | null;
+  message: string;
+  onOpenCommit?: (commitHash: string) => void;
+  profiles?: UserProfileLookup;
+}) {
+  const authorProfile = profileForPubkey(author, profiles);
+  const authorLabel = labelForPubkey(author, profiles);
+  const openCommit =
+    hash && onOpenCommit ? () => onOpenCommit(hash) : undefined;
+
+  return (
+    <ProjectFeedRow
+      meta={
+        <>
+          <ProfileIdentityButton
+            avatarClassName="shrink-0"
+            avatarSize="xs"
+            avatarUrl={authorProfile?.avatarUrl ?? null}
+            isAgent={authorProfile?.isAgent === true}
+            label={authorLabel}
+            pubkey={author}
+            showLabel={false}
+          />
+          <span className="truncate">
+            <ProfileAuthorName pubkey={author}>{authorLabel}</ProfileAuthorName>{" "}
+            authored {relativeTime(createdAt)}
+          </span>
+          {branch ? (
+            <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border/60 px-1.5 py-0.5 font-mono text-2xs">
+              <GitBranch className="h-3 w-3 shrink-0" />
+              <span className="truncate">{branch}</span>
+            </span>
+          ) : null}
+        </>
+      }
+      onOpen={openCommit}
+      testId="project-pull-request-commit-row"
+      title={message}
+      trailing={
+        hash ? (
+          <ProjectFeedRowCluster>
+            <ProjectFeedRowMonoCell
+              label={hash.slice(0, 7)}
+              onClick={openCommit}
+              title={`View commit ${hash.slice(0, 7)}`}
+            />
+            <CopyCommitHashButton hash={hash} />
+          </ProjectFeedRowCluster>
+        ) : undefined
+      }
+    />
+  );
+}
+
 function PullRequestRow({
   onOpen,
   profiles,
@@ -202,15 +275,23 @@ function PullRequestRow({
             pubkey={pullRequest.author}
             showLabel={false}
           />
-          <span className="truncate font-medium text-foreground/80">
-            {authorLabel}
+          <span className="truncate">
+            <ProfileAuthorName pubkey={pullRequest.author}>
+              {authorLabel}
+            </ProfileAuthorName>{" "}
+            created this pull request {relativeCreatedAt(pullRequest.createdAt)}
           </span>
-          <span>created {relativeCreatedAt(pullRequest.createdAt)}</span>
-          <span className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs">
-            Member
+          {pullRequest.branchName ? (
+            <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border/60 px-1.5 py-0.5 font-mono text-2xs">
+              <GitBranch className="h-3 w-3 shrink-0" />
+              <span className="truncate">{pullRequest.branchName}</span>
+            </span>
+          ) : null}
+          <span
+            className={`rounded-full border border-border/60 px-1.5 py-0.5 text-2xs font-medium ${statusClassName}`}
+          >
+            {pullRequest.status}
           </span>
-          <span>·</span>
-          <span>{pullRequest.status}</span>
         </>
       }
       onOpen={onOpen}
@@ -222,10 +303,15 @@ function PullRequestRow({
       trailing={
         <>
           {pullRequest.comments.length > 0 ? (
-            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+            <button
+              aria-label={`View ${pullRequest.comments.length} comments`}
+              className="flex items-center gap-1 rounded-md text-xs text-muted-foreground hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={onOpen}
+              type="button"
+            >
               <MessageSquare className="h-3.5 w-3.5" />
               {pullRequest.comments.length}
-            </span>
+            </button>
           ) : null}
           <ProjectFeedRowCluster>
             <ProjectFeedRowMonoCell
@@ -309,62 +395,46 @@ function PullRequestReviewCard({
   const isDraft = pullRequest.status === "Draft";
   const reviewState = isDraft
     ? "This pull request is still a work in progress."
-    : approvalCount > 0
-      ? `Approved by ${pluralize(approvalCount, "reviewer")}.`
-      : pullRequest.reviewers.length > 0
-        ? "Review requested — no approvals yet."
-        : "No reviews yet.";
+    : pullRequest.reviewers.length > 0
+      ? "Review requested — no approvals yet."
+      : "No reviews yet.";
   const reviewStateDetail = isDraft
     ? "Draft pull requests cannot be merged."
     : approvalCount === 0
       ? "Approvals from reviewers will show up here."
       : null;
+  const showActions =
+    hasApproved || canApprove || canMerge || (canChangeStatus && isDraft);
+  const showDraftControl = canChangeStatus && pullRequest.status === "Open";
+
+  if (approvalCount > 0 && !showActions && !showDraftControl) return null;
 
   return (
     <div className="space-y-2.5 pt-3">
-      <div
-        className={`min-w-0 space-y-2.5 rounded-xl px-3 py-2.5 ${
-          isDraft
-            ? "bg-muted/40"
-            : approvalCount > 0
-              ? "bg-green-600/10 dark:bg-green-500/10"
-              : "bg-muted/40"
-        }`}
-      >
-        <div className="flex min-w-0 items-start gap-2">
-          {isDraft ? (
-            <GitPullRequestDraft className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-          ) : approvalCount > 0 ? (
-            <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-green-600 text-white">
-              <Check className="h-3 w-3" />
-            </span>
-          ) : (
-            <GitPullRequest className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-          )}
-          <div className="min-w-0 flex-1">
-            <p
-              className={`text-sm font-medium ${
-                approvalCount > 0
-                  ? "text-green-700 dark:text-green-400"
-                  : "text-foreground"
-              }`}
-            >
-              {reviewState}
-            </p>
-            {reviewStateDetail ? (
-              <p className="text-xs text-muted-foreground">
-                {reviewStateDetail}
+      <div className="min-w-0 space-y-2.5 rounded-xl bg-muted/40 px-3 py-2.5">
+        {approvalCount === 0 ? (
+          <div className="flex min-w-0 items-start gap-2">
+            {isDraft ? (
+              <GitPullRequestDraft className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            ) : (
+              <GitPullRequest className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-foreground">
+                {reviewState}
               </p>
-            ) : null}
+              {reviewStateDetail ? (
+                <p className="text-xs text-muted-foreground">
+                  {reviewStateDetail}
+                </p>
+              ) : null}
+            </div>
           </div>
-        </div>
-        {hasApproved ||
-        canApprove ||
-        canMerge ||
-        (canChangeStatus && isDraft) ? (
+        ) : null}
+        {showActions ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             {hasApproved ? (
-              <span className="inline-flex items-center gap-1.5 rounded-md border border-green-600/40 px-2.5 py-1 text-xs font-medium text-green-600 dark:text-green-500">
+              <span className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-green-600/40 px-3.5 text-xs font-medium text-green-600 dark:text-green-500">
                 <Check className="h-3.5 w-3.5" />
                 Approved
               </span>
@@ -407,7 +477,7 @@ function PullRequestReviewCard({
           </div>
         ) : null}
       </div>
-      {canChangeStatus && pullRequest.status === "Open" ? (
+      {showDraftControl ? (
         <p className="px-1 text-xs text-muted-foreground">
           Still in progress?{" "}
           <button
@@ -466,7 +536,8 @@ export function PullRequestMetaRail({
   const identityQuery = useIdentityQuery();
   const authorProfile = profileForPubkey(pullRequest.author, profiles);
   const authorLabel = labelForPubkey(pullRequest.author, profiles);
-  const targetBranch = project.defaultBranch || "default branch";
+  const targetBranch =
+    pullRequest.targetBranch || project.defaultBranch || "default branch";
   const sourceBranch = pullRequest.branchName || "unknown branch";
   const commitCount = Math.max(1, pullRequest.updateCount + 1);
   const viewerPubkey = identityQuery.data?.pubkey;
@@ -589,50 +660,40 @@ function PullRequestDetail({
   );
 
   if (mode === "commits") {
+    const commitCount = Math.max(1, pullRequest.updates.length + 1);
     return (
-      <div className="divide-y divide-border/50">
-        <section className="space-y-3 p-4">
-          <h4 className="text-sm font-semibold text-foreground">Commits</h4>
-          <article className="space-y-1">
-            <div className="flex min-w-0 items-center justify-between gap-3">
-              <AuthorIdentity
-                profiles={profiles}
-                pubkey={pullRequest.author}
-                role={compactDate(pullRequest.createdAt)}
-              />
-              {pullRequest.commit ? (
-                <CommitHashChip
-                  hash={pullRequest.commit}
-                  onOpenCommit={onOpenCommit}
-                />
-              ) : null}
-            </div>
-            <p className="text-sm text-muted-foreground">{pullRequest.title}</p>
-          </article>
+      <section>
+        <header className="flex min-h-10 items-center gap-2 border-b border-border/50 bg-muted/20 px-4">
+          <GitCommitHorizontal className="h-4 w-4 text-muted-foreground" />
+          <h4 className="text-sm font-medium text-foreground">Commits</h4>
+          <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs text-muted-foreground">
+            {commitCount}
+          </span>
+        </header>
+        <div className="divide-y divide-border/50">
+          <PullRequestCommitRow
+            author={pullRequest.author}
+            branch={pullRequest.branchName}
+            createdAt={pullRequest.createdAt}
+            hash={pullRequest.commit}
+            message={pullRequest.title}
+            onOpenCommit={onOpenCommit}
+            profiles={profiles}
+          />
           {pullRequest.updates.map((update) => (
-            <article className="space-y-1" key={update.id}>
-              <div className="flex min-w-0 items-center justify-between gap-3">
-                <AuthorIdentity
-                  profiles={profiles}
-                  pubkey={update.author}
-                  role={compactDate(update.createdAt)}
-                />
-                {update.commit ? (
-                  <CommitHashChip
-                    hash={update.commit}
-                    onOpenCommit={onOpenCommit}
-                  />
-                ) : null}
-              </div>
-              {update.content ? (
-                <p className="text-sm text-muted-foreground">
-                  {update.content}
-                </p>
-              ) : null}
-            </article>
+            <PullRequestCommitRow
+              author={update.author}
+              branch={pullRequest.branchName}
+              createdAt={update.createdAt}
+              hash={update.commit}
+              key={update.id}
+              message={update.content.trim() || "Updated pull request branch"}
+              onOpenCommit={onOpenCommit}
+              profiles={profiles}
+            />
           ))}
-        </section>
-      </div>
+        </div>
+      </section>
     );
   }
 
@@ -685,19 +746,15 @@ function PullRequestDetail({
       ) : null}
 
       <section className="space-y-3 p-4">
-        <h4 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
-          <MessageSquare className="h-3.5 w-3.5" />
-          Add Your Comment
-        </h4>
         {pullRequest.comments.length > 0 ? (
-          <div className="space-y-3">
+          <div className="-mt-4">
             {pullRequest.comments.map((item) => {
               // Approvals and review requests render as compact timeline
               // rows (GitHub-style) rather than full comment cards.
               if (item.isApproval || item.isReviewRequest) {
                 return (
                   <div
-                    className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground"
+                    className="-mx-4 flex min-h-10 min-w-0 items-center gap-2 border-b border-border/50 px-4 text-sm text-muted-foreground"
                     key={item.id}
                   >
                     {item.isApproval ? (
@@ -705,20 +762,24 @@ function PullRequestDetail({
                     ) : (
                       <UserPlus className="h-3.5 w-3.5 shrink-0" />
                     )}
-                    <span className="font-medium text-foreground">
-                      {labelForPubkey(item.author, profiles)}
+                    <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                      <span className="shrink-0 font-medium text-foreground">
+                        {labelForPubkey(item.author, profiles)}
+                      </span>
+                      <span className="min-w-0 truncate">
+                        {item.isApproval
+                          ? "approved these changes"
+                          : item.content.trim() || "requested a review"}
+                      </span>
                     </span>
-                    <span className="min-w-0 truncate">
-                      {item.isApproval
-                        ? "approved these changes"
-                        : item.content.trim() || "requested a review"}
+                    <span className="w-20 shrink-0 text-right text-xs text-muted-foreground/70">
+                      {compactDate(item.createdAt)}
                     </span>
-                    <span>· {compactDate(item.createdAt)}</span>
                   </div>
                 );
               }
               return (
-                <article key={item.id}>
+                <article className="py-3" key={item.id}>
                   <div className="mb-2">
                     <AuthorIdentity
                       profiles={profiles}
@@ -735,10 +796,12 @@ function PullRequestDetail({
               );
             })}
           </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">No comments yet.</p>
-        )}
+        ) : null}
         <PullRequestReviewCard project={project} pullRequest={pullRequest} />
+        <h4 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
+          <MessageSquare className="h-3.5 w-3.5" />
+          Add Your Comment
+        </h4>
         <ForumComposer
           className="border border-border/60 bg-background/45"
           disabled={commentMutation.isPending}

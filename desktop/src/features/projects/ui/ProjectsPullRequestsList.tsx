@@ -16,6 +16,7 @@ import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 import {
+  PROJECT_LIST_CONTAINER_CLASS,
   PROJECT_LIST_ROW_CLASS,
   PROJECT_LIST_ROW_CONTENT_CLASS,
   PROJECT_LIST_ROW_DATE_CLASS,
@@ -106,7 +107,7 @@ function PullRequestGridCard({
       </button>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex min-w-0 items-start gap-3">
-          <ProjectEventTypeIcon kind="pull-request" />
+          <ProjectEventTypeIcon className="h-5 w-5" kind="pull-request" />
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex min-w-0 items-center gap-1.5">
               <p className="truncate text-sm font-semibold text-foreground">
@@ -195,7 +196,7 @@ function PullRequestListRow({
         <span className="sr-only">View {pullRequest.title}</span>
       </button>
       <div className={PROJECT_LIST_ROW_CONTENT_CLASS}>
-        <ProjectEventTypeIcon kind="pull-request" />
+        <ProjectEventTypeIcon className="h-5 w-5" kind="pull-request" />
         <div className="-mt-0.5 min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1.5">
             <p className={PROJECT_LIST_ROW_TITLE_CLASS}>{pullRequest.title}</p>
@@ -290,7 +291,7 @@ export function ProjectsPullRequestsList({
   }
 
   return (
-    <div className="-mx-4 divide-y divide-border/60 border-y border-border/60 bg-card">
+    <div className={PROJECT_LIST_CONTAINER_CLASS}>
       {pullRequests.map(({ project, pullRequest }) => (
         <PullRequestListRow
           key={pullRequest.id}
