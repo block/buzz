@@ -303,7 +303,7 @@ test("Welcome failure retries once before allowing starter channel setup to be s
   await expect(
     page.getByRole("heading", { name: "Build your profile" }),
   ).toBeVisible();
-  await page.getByLabel("Community display name").fill("Tyler");
+  await page.getByLabel("Community username").fill("Tyler");
   await page.getByTestId("community-profile-next").click();
 
   await enterButton.click();
