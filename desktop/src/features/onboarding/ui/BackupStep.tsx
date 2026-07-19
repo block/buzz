@@ -85,7 +85,7 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
     >
       <div className="w-full max-w-[500px] text-center">
         <h1 className="text-title font-normal text-foreground">
-          Your unique identity has been created
+          Your unique identity key has been created
         </h1>
         <p className="mt-5 text-sm leading-6 text-foreground/80">
           This key is stored in your system keychain, but save it some place
@@ -139,8 +139,8 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
           <p className="mx-auto mt-6 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
             <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
-              Never share your private key. Anyone can impersonate you and
-              access everything in your account.
+              Never share your private key. Anyone with this key can impersonate
+              you and access everything in your account.
             </span>
           </p>
         ) : null}
