@@ -10,7 +10,7 @@ use std::io::{self, BufRead, Write};
 use base64::Engine as _;
 use nostr::nips::nip98::{HttpData, HttpMethod};
 use nostr::types::Url;
-use nostr::{EventBuilder, Keys};
+use nostr::{EventBuilder, Keys, Tag};
 use zeroize::Zeroize;
 
 fn git_config(key: &str) -> Option<String> {
@@ -69,6 +69,30 @@ fn load_key() -> Result<String, String> {
     let raw =
         std::fs::read_to_string(&path).map_err(|e| format!("cannot read keyfile {path}: {e}"))?;
     Ok(raw.trim().to_string())
+}
+
+/// Load the NIP-OA owner attestation injected by Buzz Desktop/ACP.
+///
+/// The tag must be part of the signed NIP-98 event: Git's credential protocol
+/// can return an Authorization value, but it cannot add a separate HTTP header.
+fn load_auth_tag() -> Result<Option<Tag>, String> {
+    let raw = std::env::var("BUZZ_AUTH_TAG")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| git_config("nostr.authtag"));
+
+    raw.map(|value| {
+        let parts: Vec<String> =
+            serde_json::from_str(&value).map_err(|e| format!("invalid NIP-OA auth tag: {e}"))?;
+        if parts.len() != 4 || parts.first().map(String::as_str) != Some("auth") {
+            return Err(
+                "invalid NIP-OA auth tag: expected [auth, owner, conditions, signature]"
+                    .to_string(),
+            );
+        }
+        Tag::parse(parts).map_err(|e| format!("invalid NIP-OA auth tag: {e}"))
+    })
+    .transpose()
 }
 
 #[derive(Default)]
@@ -201,7 +225,19 @@ pub fn run() -> i32 {
 
     let parsed_url = Url::parse(&url).unwrap_or_else(|e| panic!("invalid URL {url:?}: {e}"));
     let http_data = HttpData::new(parsed_url, method);
-    let event = match EventBuilder::http_auth(http_data).sign_with_keys(&keys) {
+    let auth_tag = match load_auth_tag() {
+        Ok(tag) => tag,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let builder = EventBuilder::http_auth(http_data);
+    let builder = match auth_tag {
+        Some(tag) => builder.tag(tag),
+        None => builder,
+    };
+    let event = match builder.sign_with_keys(&keys) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("error: failed to sign NIP-98 event: {e}");

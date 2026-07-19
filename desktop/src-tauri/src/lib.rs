@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 mod app_state;
 mod archive;
+mod builderlab;
 mod commands;
 mod deep_link;
 mod event_sync;
@@ -11,6 +12,8 @@ mod managed_agents;
 mod media_proxy;
 #[cfg(feature = "mesh-llm")]
 mod mesh_llm;
+#[cfg(not(feature = "mesh-llm"))]
+mod mesh_llm_stubs;
 mod migration;
 #[cfg(test)]
 mod model_tests;
@@ -26,13 +29,8 @@ mod secret_store;
 mod shutdown;
 mod templates;
 mod util;
-
-#[cfg(not(feature = "mesh-llm"))]
-mod mesh_llm_stubs;
-#[cfg(not(feature = "mesh-llm"))]
-use mesh_llm_stubs::*;
-
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
+use builderlab::*;
 use commands::*;
 use deep_link::{
     acknowledge_pending_community_deep_link, handle_deep_link_url,
@@ -49,6 +47,8 @@ use huddle::{
     set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{backfill_persona_snapshots, ensure_nest, try_regenerate_nest};
+#[cfg(not(feature = "mesh-llm"))]
+use mesh_llm_stubs::*;
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
 use shutdown::{hard_exit_after_mesh_shutdown, relaunch_after_mesh_shutdown};
 use shutdown::{is_restart_request, shut_down_app};
@@ -450,6 +450,7 @@ pub fn run() {
         .manage(build_app_state())
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
+        .manage(BuilderlabSession::default())
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -742,6 +743,18 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
+            start_builderlab_login,
+            get_builderlab_auth,
+            clear_builderlab_auth,
+            get_builderlab_nostr_identity,
+            bind_builderlab_nostr_identity,
+            delete_builderlab_nostr_identity,
+            list_builderlab_communities,
+            check_builderlab_community_name,
+            create_builderlab_community,
+            archive_builderlab_community,
+            unarchive_builderlab_community,
+            transfer_builderlab_community,
             title_bar_double_click,
             get_identity,
             get_nsec,
