@@ -190,7 +190,8 @@ pub struct Config {
     /// serving media GET/HEAD. Default off for staged client rollout.
     pub require_media_get_auth: bool,
 
-    /// Whether tamper-evident audit logging is enabled. Defaults to true.
+    /// Whether tamper-evident event/media audit logging is enabled. Defaults to true.
+    /// This does not control the separate `moderation_actions` audit trail.
     /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
     pub audit_enabled: bool,
 

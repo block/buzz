@@ -128,12 +128,14 @@ async fn main() -> anyhow::Result<()> {
         health_port = config.health_port,
         metrics_port = config.metrics_port,
         max_frame_bytes = config.max_frame_bytes,
+        audit_enabled = config.audit_enabled,
         "Config loaded"
     );
 
     let usage_interval_secs = usage_metrics_interval_secs();
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
     relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
+    metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
     info!(
         port = config.metrics_port,
         idle_timeout_secs = usage_idle_timeout_secs,
