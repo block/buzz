@@ -5,7 +5,7 @@
  * instead of duplicating the picker logic.
  */
 import * as React from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Search } from "lucide-react";
 
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -47,6 +47,7 @@ export function AgentDropdownSelect({
   placeholder = "Select",
   placeholderClassName,
   placeholderValue,
+  searchable = false,
   selectedLabel,
   testId,
   value,
@@ -60,11 +61,14 @@ export function AgentDropdownSelect({
   placeholder?: string;
   placeholderClassName?: string;
   placeholderValue?: string;
+  /** Show a filter input above the options when the list is long. */
+  searchable?: boolean;
   selectedLabel?: React.ReactNode;
   testId?: string;
   value: string;
 }) {
   const [open, setOpen] = React.useState(false);
+  const [query, setQuery] = React.useState("");
   const selectedOption = options.find((option) => option.value === value);
   const isPlaceholderSelection =
     selectedLabel === undefined &&
@@ -72,8 +76,24 @@ export function AgentDropdownSelect({
       (placeholderValue !== undefined &&
         selectedOption.value === placeholderValue));
 
+  const showSearch = searchable && options.length > 1;
+  const filteredOptions = React.useMemo(() => {
+    const trimmed = query.trim().toLowerCase();
+    if (!showSearch || trimmed === "") return options;
+    return options.filter((option) =>
+      (typeof option.label === "string" ? option.label : option.value)
+        .toLowerCase()
+        .includes(trimmed),
+    );
+  }, [options, query, showSearch]);
+
+  function handleOpenChange(next: boolean) {
+    setOpen(next);
+    if (!next) setQuery("");
+  }
+
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <button
           aria-controls={`${id}-listbox`}
@@ -125,7 +145,27 @@ export function AgentDropdownSelect({
           id={`${id}-listbox`}
           role="listbox"
         >
-          {options.map((option) => {
+          {showSearch ? (
+            <div className="relative">
+              <Search
+                aria-hidden="true"
+                className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground/45"
+              />
+              <Input
+                aria-label="Search models"
+                autoFocus
+                className="h-9 rounded-xl border-foreground/10 bg-white pl-9 text-sm"
+                data-testid={testId ? `${testId}-search` : undefined}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search models…"
+                value={query}
+              />
+            </div>
+          ) : null}
+          {showSearch && filteredOptions.length === 0 ? (
+            <p className="px-3 py-2 text-sm text-foreground/55">No matches</p>
+          ) : null}
+          {filteredOptions.map((option) => {
             const selected = option.value === value;
             return (
               <button
@@ -373,6 +413,7 @@ export function AgentModelField({
       options={modelOptions}
       placeholder={placeholder}
       placeholderClassName={placeholderClassName}
+      searchable
       selectedLabel={stableSelectedModelLabel}
       testId={testId ?? id}
       value={modelSelectValue}

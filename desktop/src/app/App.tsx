@@ -39,7 +39,6 @@ import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
-import { getMyRelayMembershipLookup } from "@/shared/api/relayMembers";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import {
   type AddCommunityDeepLinkPayload,
@@ -61,16 +60,6 @@ const LOADING_TEXT = "Setting up your community...";
 const BOOT_SPLASH_MIN_VISIBLE_MS = 1_200;
 const BOOT_SPLASH_FADE_MS = 200;
 const INITIAL_RENDER_READY_EVENT = "initial-render-ready";
-
-function isRelayMembershipDeniedError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return [
-    "You must be a relay member",
-    "relay_membership_required",
-    "restricted: not a relay member",
-    "invalid: you are not a relay member",
-  ].some((message) => error.message.includes(message));
-}
 
 type BootSplashPhase = "holding" | "fading" | "done";
 
@@ -275,13 +264,19 @@ function CommunityApp({
 }) {
   const {
     activeCommunity,
+    communities,
     reinitKey,
     addCommunity,
+    clearCommunities,
+    removeCommunity,
     switchCommunity,
     reconnectCommunity,
   } = useCommunities();
   const communityOnboarding = useCommunityOnboarding();
+  const connectingTransactionRef = useRef<string | null>(null);
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
+  const [resumeFirstCommunityJoin, setResumeFirstCommunityJoin] =
+    useState(false);
 
   // Surface nest-related backend events (repos-dir errors, legacy migration)
   // as toasts. Mounted before useCommunityInit so the listeners are registered
@@ -311,10 +306,16 @@ function CommunityApp({
   const handleCommunityOnboardingConnect = useCallback(() => {
     const transaction = communityOnboarding.transaction;
     if (transaction?.stage !== "connecting") return;
+    if (connectingTransactionRef.current === transaction.id) return;
+    connectingTransactionRef.current = transaction.id;
     if (transaction.communityId) {
       switchCommunity(transaction.communityId);
       return;
     }
+    const previousCommunityId = activeCommunity?.id;
+    const relayAlreadyExists = communities.some(
+      (community) => community.relayUrl === transaction.relayUrl,
+    );
     const id = addCommunity({
       id: crypto.randomUUID(),
       name: transaction.communityName,
@@ -323,58 +324,70 @@ function CommunityApp({
       reposDir: transaction.reposDir,
       addedAt: new Date().toISOString(),
     });
-    communityOnboarding.update({ communityId: id, error: undefined });
+    communityOnboarding.update({
+      communityId: id,
+      previousCommunityId,
+      addedCommunity: !relayAlreadyExists,
+      error: undefined,
+    });
     switchCommunity(id);
     reconnectCommunity();
-  }, [addCommunity, communityOnboarding, reconnectCommunity, switchCommunity]);
+  }, [
+    activeCommunity?.id,
+    addCommunity,
+    communities,
+    communityOnboarding,
+    reconnectCommunity,
+    switchCommunity,
+  ]);
+
+  const handleCommunityOnboardingCancel = useCallback(() => {
+    const transaction = communityOnboarding.transaction;
+    communityOnboarding.clear();
+
+    if (!transaction?.communityId) return;
+    if (!transaction.addedCommunity) {
+      if (transaction.previousCommunityId) {
+        switchCommunity(transaction.previousCommunityId);
+      }
+      return;
+    }
+    if (communities.length === 1) {
+      if (transaction.source === "first-community") {
+        setResumeFirstCommunityJoin(true);
+      }
+      clearCommunities();
+      return;
+    }
+    removeCommunity(transaction.communityId);
+    if (transaction.previousCommunityId) {
+      switchCommunity(transaction.previousCommunityId);
+    }
+  }, [
+    clearCommunities,
+    communities.length,
+    communityOnboarding,
+    removeCommunity,
+    switchCommunity,
+  ]);
 
   const bootSplashPhase = useBootSplashHold();
 
   const transaction = communityOnboarding.transaction;
+  useEffect(() => {
+    if (transaction?.stage !== "connecting") {
+      connectingTransactionRef.current = null;
+    }
+  }, [transaction?.stage]);
   const targetIsReady =
     transaction?.communityId === activeCommunity?.id &&
     community.isReady &&
     community.appliedKey === communityKey;
   useEffect(() => {
-    if (
-      transaction?.stage !== "connecting" ||
-      transaction.error ||
-      !targetIsReady
-    ) {
-      return;
+    if (transaction?.stage === "connecting" && targetIsReady) {
+      communityOnboarding.update({ stage: "profile", error: undefined });
     }
-
-    let cancelled = false;
-    void getMyRelayMembershipLookup()
-      .then(({ membership, snapshotFound }) => {
-        if (cancelled) return;
-        if (snapshotFound && membership === null) {
-          communityOnboarding.update({
-            error:
-              "You have not been added to this community yet. Ask the host to add your public key, then try again.",
-          });
-          return;
-        }
-        communityOnboarding.update({ stage: "profile", error: undefined });
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        communityOnboarding.update({
-          error: isRelayMembershipDeniedError(error)
-            ? "You have not been added to this community yet. Ask the host to add your public key, then try again."
-            : "Could not check community access. Check the URL and try again.",
-        });
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    communityOnboarding.update,
-    targetIsReady,
-    transaction?.error,
-    transaction?.stage,
-  ]);
+  }, [communityOnboarding.update, targetIsReady, transaction?.stage]);
   // During "entering" the transaction stays alive as a curtain: the app mounts
   // underneath (already pointed at the Welcome channel route) while the
   // onboarding screen covers it, then fades once Welcome reports ready.
@@ -398,6 +411,7 @@ function CommunityApp({
       appContent = (
         <WelcomeSetup
           defaultRelayUrl={community.defaultRelayUrl}
+          initialPage={resumeFirstCommunityJoin ? "join" : undefined}
           onBack={onBackToMachineConfig}
         />
       );
@@ -465,6 +479,7 @@ function CommunityApp({
           }
         >
           <CommunityOnboardingFlow
+            onCancel={handleCommunityOnboardingCancel}
             onConnect={handleCommunityOnboardingConnect}
           />
         </div>

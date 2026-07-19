@@ -14,6 +14,14 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(pool).await?;
     MIGRATOR.run(pool).await?;
+    // The replica-fence proof (see `replica_fence`) requires the commit-time
+    // `created_at` floor trigger from migration 0021 — correctly shaped — on
+    // the `events` parent and every partition. `CREATE TABLE .. PARTITION OF`
+    // clones parent triggers, but a partition attached with `ATTACH
+    // PARTITION` or created by an older code path would silently escape the
+    // guard, so migration fails closed if any is missing. (The fence probe
+    // re-runs this same check at startup on non-migrating relays.)
+    crate::replica_fence::verify_floor_guard_catalog(pool).await?;
     Ok(())
 }
 
@@ -549,7 +557,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 20);
+        assert_eq!(migrations.len(), 21);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -820,6 +828,13 @@ mod tests {
             .sql
             .as_str()
             .contains("CREATE TABLE join_policy_acceptances"));
+
+        // Replica-fence commit-time floor guard on channel-bearing events.
+        assert_eq!(migrations[20].version, 21);
+        assert!(migrations[20]
+            .sql
+            .as_str()
+            .contains("events_created_at_floor_guard"));
         assert!(!migrations[0]
             .sql
             .as_str()
@@ -1066,7 +1081,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(20));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(21));
     }
 
     #[tokio::test]

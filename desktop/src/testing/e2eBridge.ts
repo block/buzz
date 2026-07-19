@@ -9850,6 +9850,25 @@ export function maybeInstallE2eTauriMocks() {
         return connectMockSocket(
           payload as Parameters<typeof connectMockSocket>[0],
         );
+      case "plugin:websocket|disconnect": {
+        const { id } = payload as { id: number };
+        if (isRelayMode(activeConfig)) {
+          realSockets.get(id)?.close();
+          realSockets.delete(id);
+        } else {
+          const socket = mockSockets.get(id);
+          mockSockets.delete(id);
+          if (socket) sendWsClose(socket.handler);
+        }
+        return null;
+      }
+      case "plugin:websocket|disconnect_all":
+        for (const socket of realSockets.values()) socket.close();
+        realSockets.clear();
+        for (const socket of mockSockets.values()) sendWsClose(socket.handler);
+        mockSockets.clear();
+        mockWebsocketSendMutexWedged = false;
+        return null;
       case "plugin:websocket|send":
         if (isRelayMode(activeConfig)) {
           return sendToRealSocket(

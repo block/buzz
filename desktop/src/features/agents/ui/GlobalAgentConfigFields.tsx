@@ -24,7 +24,6 @@ import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
-  PERSONA_LLM_PROVIDER_OPTIONS,
   getPersonaProviderOptions,
   getProviderApiKeyEnvVar,
   requiredCredentialEnvKeys,
@@ -76,7 +75,6 @@ export type GlobalAgentConfigFieldsProps = {
   disableModelSelectDuringDiscovery?: boolean;
   effortPlaceholderLabel?: string;
   effortLabel?: string;
-  hideUnconfiguredCredentialProviders?: boolean;
   keepSelectedModelValueLabel?: boolean;
   modelPlaceholderLabel?: string;
   placeholderClassName?: string;
@@ -112,7 +110,6 @@ export function GlobalAgentConfigFields({
   disableModelSelectDuringDiscovery = true,
   effortPlaceholderLabel,
   effortLabel = "Thinking/effort",
-  hideUnconfiguredCredentialProviders = false,
   keepSelectedModelValueLabel = false,
   modelPlaceholderLabel = "Select model",
   placeholderClassName,
@@ -191,13 +188,6 @@ export function GlobalAgentConfigFields({
     () => bakedEnv.map((entry) => entry.key),
     [bakedEnv],
   );
-  const configuredCredentialKeys = React.useMemo(() => {
-    const keys = new Set(bakedEnvKeys);
-    for (const [key, value] of Object.entries(config.env_vars)) {
-      if (value.trim().length > 0) keys.add(key);
-    }
-    return keys;
-  }, [bakedEnvKeys, config.env_vars]);
   const apiKeyInherited =
     apiKeyEnvVar !== null &&
     apiKeyValue.length === 0 &&
@@ -355,28 +345,11 @@ export function GlobalAgentConfigFields({
         hidden.add(providerId);
       }
     }
-    if (hideUnconfiguredCredentialProviders) {
-      for (const option of PERSONA_LLM_PROVIDER_OPTIONS) {
-        const requiredKeys = requiredCredentialEnvKeys(
-          credentialRuntimeId,
-          option.id,
-        );
-        if (requiredKeys.some((key) => !configuredCredentialKeys.has(key))) {
-          hidden.add(option.id);
-        }
-      }
-    }
     if (selectedRuntimeId !== "buzz-agent") {
       hidden.add("relay-mesh");
     }
     return hidden;
-  }, [
-    bakedEnvKeys,
-    configuredCredentialKeys,
-    credentialRuntimeId,
-    hideUnconfiguredCredentialProviders,
-    selectedRuntimeId,
-  ]);
+  }, [bakedEnvKeys, selectedRuntimeId]);
   const providerOptions = getPersonaProviderOptions(
     providerValue,
     credentialRuntimeId,
@@ -510,7 +483,7 @@ export function GlobalAgentConfigFields({
         </div>
       ) : null}
 
-      {showAdvancedFields && providerFieldVisible && apiKeyEnvVar ? (
+      {providerFieldVisible && apiKeyEnvVar ? (
         <div className={blockClassName}>
           <PersonaProviderApiKeyField
             disabled={false}

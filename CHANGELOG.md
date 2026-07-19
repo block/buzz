@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.4.18
+
+- fix(desktop): recover first community joins ([#2087](https://github.com/block/buzz/pull/2087)) ([`775cf672d`](https://github.com/block/buzz/commit/775cf672d11d43b07b27941a41bd2e52a9111466))
+- fix: recover community access visibility ([#2074](https://github.com/block/buzz/pull/2074)) ([`ca384d082`](https://github.com/block/buzz/commit/ca384d082d9804ec53a3fd12ccbf4a0846b21d92))
+
+
+## v0.4.17
+
+- fix(desktop): onboarding defaults — API key field and model search ([#2081](https://github.com/block/buzz/pull/2081)) ([`741610f13`](https://github.com/block/buzz/commit/741610f138f9e0f31c7a0b78ef4a498b7df02688))
+- feat(desktop): show agent owners in messages ([#2080](https://github.com/block/buzz/pull/2080)) ([`463db6de3`](https://github.com/block/buzz/commit/463db6de3ea8406b0825012fae08027414062b3d))
+- fix(desktop): restore onboarding provider choices ([#2079](https://github.com/block/buzz/pull/2079)) ([`b18a79476`](https://github.com/block/buzz/commit/b18a79476b8afa3d99c8f0247582466d88a37d0f))
+- Fix Claude onboarding terminal popup ([#2078](https://github.com/block/buzz/pull/2078)) ([`f125f0868`](https://github.com/block/buzz/commit/f125f0868473b2c047130f5f903e2dbf31225705))
+- fix(desktop): complete request access flow ([#2073](https://github.com/block/buzz/pull/2073)) ([`426497a18`](https://github.com/block/buzz/commit/426497a18e59863326ddc534f9b357d506e5751c))
+- fix(desktop): preserve profile descriptions across communities ([#2068](https://github.com/block/buzz/pull/2068)) ([`0dda0ad2f`](https://github.com/block/buzz/commit/0dda0ad2f682b13d12237061c24e3385e941c551))
+- Fix membership-denied community onboarding recovery ([#2072](https://github.com/block/buzz/pull/2072)) ([`f347dcac2`](https://github.com/block/buzz/commit/f347dcac25c589bf8c01160239fa24b97bfe5649))
+- feat(desktop): add channel archive and delete actions ([#2067](https://github.com/block/buzz/pull/2067)) ([`929d3aa12`](https://github.com/block/buzz/commit/929d3aa12f64013bbe25ab9762c7777523f5a606))
+- fix(desktop): restore channel browsing and add recent sorting ([#2065](https://github.com/block/buzz/pull/2065)) ([`2cb7753fa`](https://github.com/block/buzz/commit/2cb7753fa27d7aa2e53737404d34818d53047c65))
+- feat(desktop): polish onboarding harness ([#2039](https://github.com/block/buzz/pull/2039)) ([`66a0f7bcb`](https://github.com/block/buzz/commit/66a0f7bcb905bc81bbf97e794a25e7ec7241d40d))
+- Expose model selection for provider-locked runtimes ([#2071](https://github.com/block/buzz/pull/2071)) ([`3ad180a60`](https://github.com/block/buzz/commit/3ad180a60fb200b27bea2adfeb7fda5a60410c54))
+- Speed up the Welcome kickoff and show the team arriving ([#2066](https://github.com/block/buzz/pull/2066)) ([`1fdb73e17`](https://github.com/block/buzz/commit/1fdb73e17b3f741fac3eb14f71a78aa24869f107))
+- Add identity key help and reveal toggle to machine onboarding ([#2064](https://github.com/block/buzz/pull/2064)) ([`1bdd93849`](https://github.com/block/buzz/commit/1bdd93849145e22e4d58555644c4783c2a1a2a16))
+- fix(desktop): keep Private toggle when picking a channel template ([#2070](https://github.com/block/buzz/pull/2070)) ([`89bcbd826`](https://github.com/block/buzz/commit/89bcbd826b11623179d703a986511ca912d6a7f6))
+- fix(agents): explain why Create/Save is disabled and fix Codex/Claude gate ([#2050](https://github.com/block/buzz/pull/2050)) ([`87dc4dccb`](https://github.com/block/buzz/commit/87dc4dccba94fe380ddc67b5441e367b7ec69009))
+- fix(desktop): recover relay-closed subscriptions ([#2060](https://github.com/block/buzz/pull/2060)) ([`79598bdb3`](https://github.com/block/buzz/commit/79598bdb3fce1b0955caf3a903387ee1c8f64186))
+
+
 ## v0.4.16
 
 - Polish private key onboarding texture ([#2051](https://github.com/block/buzz/pull/2051)) ([`7873135a0`](https://github.com/block/buzz/commit/7873135a0bf843116102796a1671bb4141c4ed23))

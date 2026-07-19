@@ -74,6 +74,7 @@ type MessageTimelineProps = {
   /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
+  ownerProfiles?: UserProfileLookup;
   followThreadById?: (rootId: string) => void;
   isFollowingThreadById?: (rootId: string) => boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
@@ -170,6 +171,7 @@ const MessageTimelineBase = React.forwardRef<
     messageFooters,
     personaLookup,
     profiles,
+    ownerProfiles,
     onDelete,
     onEdit,
     onMarkUnread,
@@ -636,6 +638,7 @@ const MessageTimelineBase = React.forwardRef<
       onAtBottomStateChange={handleVirtualizerAtBottomStateChange}
       personaLookup={personaLookup}
       profiles={profiles}
+      ownerProfiles={ownerProfiles}
       searchActiveMessageId={searchActiveMessageId}
       searchMatchingMessageIds={searchMatchingMessageIds}
       searchQuery={searchQuery}

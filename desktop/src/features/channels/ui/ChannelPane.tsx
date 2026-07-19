@@ -138,6 +138,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   unfollowThreadById,
   personaLookup,
   profiles,
+  ownerProfiles,
   openThreadHeadId,
   shouldShowThreadSkeleton,
   openAgentSessionChannelId,
@@ -655,6 +656,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             isMessageUnreadById={isMessageUnreadById}
             personaLookup={personaLookup}
             profiles={profiles}
+            ownerProfiles={ownerProfiles}
             unfollowThreadById={unfollowThreadById}
             emptyDescription={
               activeChannel?.channelType === "forum"

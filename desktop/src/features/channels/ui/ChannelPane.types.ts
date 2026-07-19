@@ -134,6 +134,7 @@ export type ChannelPaneProps = {
   ) => void;
   personaLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
+  ownerProfiles?: UserProfileLookup;
   openThreadHeadId: string | null;
   shouldShowThreadSkeleton: boolean;
   openAgentSessionChannelId: string | null;

@@ -32,6 +32,7 @@ type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
   defaultRelayUrl: string;
+  initialPage?: WelcomeSetupPage;
   initialTransitionMode?: WelcomeTransitionMode;
   onBack: () => void;
 };
@@ -50,10 +51,11 @@ function isLocalDevRelayUrl(relayUrl: string) {
 
 export function WelcomeSetup({
   defaultRelayUrl,
+  initialPage = "welcome",
   initialTransitionMode = "initial",
   onBack,
 }: WelcomeSetupProps) {
-  const [page, setPage] = React.useState<WelcomeSetupPage>("welcome");
+  const [page, setPage] = React.useState<WelcomeSetupPage>(initialPage);
   const [transitionMode, setTransitionMode] =
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
   const [npub, setNpub] = React.useState("");

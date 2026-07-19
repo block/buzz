@@ -837,6 +837,48 @@ CREATE TRIGGER events_enqueue_push_match
 AFTER INSERT ON events
 FOR EACH ROW EXECUTE FUNCTION enqueue_push_match_job();
 
+-- Replica-fence floor guard (keep in sync with migrations/0021). A deferred
+-- constraint trigger re-checks, inside COMMIT processing, that channel-bearing
+-- event rows are no older than `buzz.created_at_floor` seconds before commit
+-- time (clock_timestamp(), NOT the transaction-frozen now()). This turns the
+-- relay's ingest-time created_at envelope into a commit-time storage
+-- invariant, which is what lets keyset-cursor pages below the replica fence
+-- be served by a read replica without holes. Enforcement is armed per session
+-- via the GUC (set by the relay's writer pool on connect); sessions without
+-- the GUC (pg_restore, manual backfills) bypass it and must hold the replica
+-- fence closed for their duration. The only structural exemption is
+-- channel_id IS NULL: those rows never appear in keyset-paged windows.
+CREATE FUNCTION events_created_at_floor_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    floor_secs numeric := nullif(current_setting('buzz.created_at_floor', true), '')::numeric;
+BEGIN
+    IF floor_secs IS NOT NULL
+       AND floor_secs > 0
+       AND NEW.channel_id IS NOT NULL
+       AND NEW.created_at < clock_timestamp() - make_interval(secs => floor_secs)
+    THEN
+        RAISE EXCEPTION
+            'events.created_at % is more than % s before commit time %; below the replica-fence floor',
+            NEW.created_at, floor_secs, clock_timestamp()
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+-- INSERT OR UPDATE OF: an UPDATE can move a previously exempt row into the
+-- guarded set (channel_id NULL -> NOT NULL) or move a channel row's
+-- created_at below the fence, so both mutation paths re-run the guard on the
+-- NEW row. A created_at rewrite that crosses partition bounds runs as
+-- DELETE + INSERT and hits the cloned AFTER INSERT guard on the destination
+-- partition; an in-partition rewrite fires the UPDATE OF arm.
+CREATE CONSTRAINT TRIGGER events_created_at_floor
+    AFTER INSERT OR UPDATE OF created_at, channel_id ON events
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION events_created_at_floor_guard();
+
 -- Durable, deployment-global authority for the public NIP-PL push gateway.
 -- This state is intentionally outside relay community tenancy: installations
 -- delegate to relay signing keys and may authorize multiple relay deployments.
