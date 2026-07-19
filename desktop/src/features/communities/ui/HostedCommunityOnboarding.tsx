@@ -3,6 +3,7 @@ import { AlertCircle, CheckCircle2, LoaderCircle } from "lucide-react";
 
 import {
   bindBuilderlabIdentity,
+  cancelBuilderlabLogin,
   checkHostedCommunityName,
   clearBuilderlabAuth,
   createHostedCommunity,
@@ -40,6 +41,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = React.useState(true);
   const [action, setAction] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const loginAttempt = React.useRef(0);
 
   const loadAccount = React.useCallback(async () => {
     const account = await loadHostedCommunityAccount();
@@ -79,12 +81,33 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const signIn = () =>
-    run("Signing in…", async () => {
-      const nextAuth = await startBuilderlabLogin();
-      setAuth(nextAuth);
-      await loadAccount();
+  const signIn = () => {
+    const attempt = ++loginAttempt.current;
+    setAction("Signing in…");
+    setError(null);
+    void startBuilderlabLogin()
+      .then(async (nextAuth) => {
+        if (loginAttempt.current !== attempt) return;
+        setAuth(nextAuth);
+        await loadAccount();
+      })
+      .catch((cause) => {
+        if (loginAttempt.current !== attempt) return;
+        setError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => {
+        if (loginAttempt.current === attempt) setAction(null);
+      });
+  };
+
+  const cancelSignIn = () => {
+    loginAttempt.current += 1;
+    setAction(null);
+    setError(null);
+    void cancelBuilderlabLogin().catch((cause) => {
+      setError(cause instanceof Error ? cause.message : String(cause));
     });
+  };
 
   const signOut = () =>
     run("Signing out…", async () => {
@@ -97,10 +120,6 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
     });
 
   const goBack = () => {
-    if (!auth) {
-      onBack();
-      return;
-    }
     void run("Signing out…", async () => {
       await clearBuilderlabAuth();
       onBack();
@@ -198,14 +217,25 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
     };
   }, [identity, identityMismatch, normalizedName, validName]);
 
-  const connect = (community: HostedCommunity) => {
+  const connect = (community: HostedCommunity, created = false) => {
     const relayUrl = hostedCommunityRelayUrl(community);
-    if (!relayUrl) return;
-    onboarding.start({
-      source: "first-community",
-      relayUrl,
-      communityName: community.name ?? community.slug,
-    });
+    const retryPrefix = created ? "The community was created, but " : "";
+    if (!relayUrl) {
+      throw new Error(
+        `${retryPrefix}Builderlab did not return its relay address. Try connecting it again, or contact support if it does not appear in your communities.`,
+      );
+    }
+    if (
+      !onboarding.start({
+        source: "first-community",
+        relayUrl,
+        communityName: community.name ?? community.slug,
+      })
+    ) {
+      throw new Error(
+        `${retryPrefix}onboarding is already in progress for another community. Go back and finish or restart that connection, then connect this community from your owned communities list.`,
+      );
+    }
   };
 
   const create = (event: React.FormEvent) => {
@@ -233,7 +263,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
           ),
         );
       }
-      connect(response.community);
+      connect(response.community, true);
     });
   };
 
@@ -249,7 +279,10 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
 
       <div className="mt-10 w-full space-y-5 text-left">
         {error ? (
-          <div className="flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
+          <div
+            className="flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive"
+            role="alert"
+          >
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>{error}</span>
           </div>
@@ -267,14 +300,21 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
               Builderlab provides Block-hosted Buzz communities. Authentication
               opens in your browser and returns here.
             </p>
-            <Button
-              className="mt-5 rounded-full px-6"
-              disabled={busy}
-              onClick={() => void signIn()}
-            >
-              {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
-              {action ?? "Continue with Builderlab"}
-            </Button>
+            {action === "Signing in…" ? (
+              <div className="mt-5 flex flex-col items-center gap-3">
+                <div className="flex items-center gap-2 text-sm text-foreground/70">
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                  Waiting for your browser…
+                </div>
+                <Button onClick={cancelSignIn} variant="outline">
+                  Cancel sign-in
+                </Button>
+              </div>
+            ) : (
+              <Button className="mt-5 rounded-full px-6" onClick={signIn}>
+                Continue with Builderlab
+              </Button>
+            )}
           </section>
         ) : !identity ? (
           <section className="rounded-xl bg-white/75 p-6 text-center">
@@ -360,7 +400,11 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
                       <Button
                         className="rounded-full"
                         disabled={busy}
-                        onClick={() => connect(community)}
+                        onClick={() =>
+                          void run("Connecting community…", async () => {
+                            connect(community);
+                          })
+                        }
                         size="sm"
                         variant="outline"
                       >

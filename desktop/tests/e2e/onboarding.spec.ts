@@ -852,6 +852,97 @@ test("first-community owner can create and connect a hosted community", async ({
     .toContain("wss://bee-lab.communities.buzz.xyz");
 });
 
+test("first-community reports a created community without a relay address", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
+      builderlabCreatedCommunity: {
+        id: "hosted-bee-lab",
+        name: "bee-lab",
+      },
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page
+    .getByRole("button", { name: "Create or connect to my own community" })
+    .click();
+  await page
+    .getByRole("textbox", { name: "Community address" })
+    .fill("bee-lab");
+  await expect(page.getByText("That address is available.")).toBeVisible();
+  await page.getByRole("button", { name: "Create and connect" }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "The community was created, but Builderlab did not return its relay address.",
+  );
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toHaveCount(0);
+});
+
+test("first-community can cancel a closed-browser sign-in and retry", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    { builderlabLoginDelayMs: 5_000 },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page
+    .getByRole("button", { name: "Create or connect to my own community" })
+    .click();
+  await page.getByRole("button", { name: "Continue with Builderlab" }).click();
+  await expect(page.getByText("Waiting for your browser…")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel sign-in" }).click();
+  await expect(
+    page.getByRole("button", { name: "Continue with Builderlab" }),
+  ).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
+    .toEqual(expect.arrayContaining(["cancel_builderlab_login"]));
+
+  await page.evaluate(() => {
+    if (window.__BUZZ_E2E_CONFIG__?.mock)
+      window.__BUZZ_E2E_CONFIG__.mock.builderlabLoginDelayMs = 0;
+  });
+  await page.getByRole("button", { name: "Continue with Builderlab" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Connect this Buzz identity" }),
+  ).toBeVisible();
+});
+
 test("first-community owner can replace a mismatched account identity", async ({
   page,
 }) => {

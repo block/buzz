@@ -451,6 +451,7 @@ pub fn run() {
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
         .manage(BuilderlabSession::default())
+        .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -744,6 +745,7 @@ pub fn run() {
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
             start_builderlab_login,
+            cancel_builderlab_login,
             get_builderlab_auth,
             clear_builderlab_auth,
             get_builderlab_nostr_identity,

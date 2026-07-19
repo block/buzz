@@ -94,6 +94,10 @@ export function getBuilderlabAuth() {
   return invoke<BuilderlabAuth | null>("get_builderlab_auth");
 }
 
+export function cancelBuilderlabLogin() {
+  return invoke<void>("cancel_builderlab_login");
+}
+
 export function clearBuilderlabAuth() {
   return invoke<void>("clear_builderlab_auth");
 }

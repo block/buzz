@@ -131,6 +131,8 @@ type E2eConfig = {
       name?: string;
       expiresAt: string;
     } | null;
+    /** Delay Builderlab login completion so cancellation/retry UI can be tested. */
+    builderlabLoginDelayMs?: number;
     /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
     builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
     /** Structured error returned when onboarding tries to bind the local identity. */
@@ -143,6 +145,14 @@ type E2eConfig = {
       normalized_host?: string;
       archived_at?: string | null;
     }>;
+    /** Override the community returned after hosted creation. */
+    builderlabCreatedCommunity?: {
+      id?: string;
+      name?: string;
+      slug?: string;
+      normalized_host?: string;
+      archived_at?: string | null;
+    };
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
     acpRuntimesDelayMs?: number;
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
@@ -8785,6 +8795,9 @@ export function maybeInstallE2eTauriMocks() {
       case "get_builderlab_auth":
         return activeConfig?.mock?.builderlabAuth ?? null;
       case "start_builderlab_login": {
+        const delayMs = activeConfig?.mock?.builderlabLoginDelayMs ?? 0;
+        if (delayMs > 0)
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
         const nextAuth = activeConfig?.mock?.builderlabAuth ?? {
           email: "owner@example.com",
           expiresAt: "2099-01-01T00:00:00Z",
@@ -8792,6 +8805,8 @@ export function maybeInstallE2eTauriMocks() {
         if (activeConfig?.mock) activeConfig.mock.builderlabAuth = nextAuth;
         return nextAuth;
       }
+      case "cancel_builderlab_login":
+        return null;
       case "clear_builderlab_auth":
         if (activeConfig?.mock) activeConfig.mock.builderlabAuth = null;
         return null;
@@ -8826,7 +8841,7 @@ export function maybeInstallE2eTauriMocks() {
       case "create_builderlab_community": {
         const name = (payload as { name?: string })?.name ?? "community";
         return {
-          community: {
+          community: activeConfig?.mock?.builderlabCreatedCommunity ?? {
             id: `hosted-${name}`,
             name,
             normalized_host: `${name}.communities.buzz.xyz`,

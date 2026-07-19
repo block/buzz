@@ -24,6 +24,14 @@ const BUILDERLAB_ORIGIN: &str = "https://app.builderlab.xyz";
 #[derive(Default)]
 pub(crate) struct BuilderlabSession(Mutex<Option<StoredSession>>);
 
+#[derive(Default)]
+pub(crate) struct BuilderlabLogin(Mutex<Option<PendingLogin>>);
+
+struct PendingLogin {
+    id: uuid::Uuid,
+    cancel: oneshot::Sender<()>,
+}
+
 struct StoredSession {
     credential: String,
 }
@@ -130,6 +138,7 @@ pub(crate) async fn start_builderlab_login(
     app: tauri::AppHandle,
     app_state: tauri::State<'_, crate::app_state::AppState>,
     session: tauri::State<'_, BuilderlabSession>,
+    login: tauri::State<'_, BuilderlabLogin>,
 ) -> Result<BuilderlabAuthInfo, String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -158,19 +167,38 @@ pub(crate) async fn start_builderlab_login(
         return Err(format!("could not open Builderlab authentication: {error}"));
     }
 
-    let exchange_code = match tokio::time::timeout(LOGIN_TIMEOUT, receiver).await {
-        Ok(Ok(Ok(code))) => code,
-        Ok(Ok(Err(error))) => {
-            server.abort();
-            return Err(error);
+    let login_id = uuid::Uuid::new_v4();
+    let (cancel_sender, mut cancel_receiver) = oneshot::channel();
+    {
+        let mut pending = login.0.lock().map_err(|error| error.to_string())?;
+        if let Some(previous) = pending.take() {
+            let _ = previous.cancel.send(());
         }
-        Ok(Err(_)) => {
+        *pending = Some(PendingLogin {
+            id: login_id,
+            cancel: cancel_sender,
+        });
+    }
+
+    let exchange_code = tokio::select! {
+        result = tokio::time::timeout(LOGIN_TIMEOUT, receiver) => match result {
+            Ok(Ok(Ok(code))) => code,
+            Ok(Ok(Err(error))) => {
+                server.abort();
+                return Err(error);
+            }
+            Ok(Err(_)) => {
+                server.abort();
+                return Err("local authentication callback stopped unexpectedly".to_owned());
+            }
+            Err(_) => {
+                server.abort();
+                return Err("Builderlab authentication timed out".to_owned());
+            }
+        },
+        _ = &mut cancel_receiver => {
             server.abort();
-            return Err("local authentication callback stopped unexpectedly".to_owned());
-        }
-        Err(_) => {
-            server.abort();
-            return Err("Builderlab authentication timed out".to_owned());
+            return Err("Builderlab authentication canceled".to_owned());
         }
     };
     server.abort();
@@ -206,6 +234,16 @@ pub(crate) async fn start_builderlab_login(
         email: me.email,
         name: me.name,
     };
+    {
+        let mut pending = login.0.lock().map_err(|error| error.to_string())?;
+        if pending
+            .as_ref()
+            .is_none_or(|pending| pending.id != login_id)
+        {
+            return Err("Builderlab authentication canceled".to_owned());
+        }
+        *pending = None;
+    }
     *session.0.lock().map_err(|error| error.to_string())? = Some(StoredSession {
         credential: exchanged.session_credential,
     });
@@ -240,6 +278,16 @@ pub(crate) async fn get_builderlab_auth(
             Err(error)
         }
     }
+}
+
+#[tauri::command]
+pub(crate) fn cancel_builderlab_login(
+    login: tauri::State<'_, BuilderlabLogin>,
+) -> Result<(), String> {
+    if let Some(pending) = login.0.lock().map_err(|error| error.to_string())?.take() {
+        let _ = pending.cancel.send(());
+    }
+    Ok(())
 }
 
 #[tauri::command]
