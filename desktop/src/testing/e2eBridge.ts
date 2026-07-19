@@ -484,7 +484,9 @@ type RawFeedItem = {
   created_at: number;
   channel_id: string | null;
   channel_name: string;
-  channel_type?: string;
+  // Mirrors native FeedItemInfo.channel_type (Option<String>): the Tauri
+  // backend always emits the key, as `null` when unknown.
+  channel_type?: string | null;
   tags: string[][];
   category: "mention" | "needs_action" | "activity" | "agent_activity";
 };
@@ -6565,6 +6567,11 @@ async function handleGetFeed(
       tags: (ev.tags ?? []) as string[][],
       channel_id: chId,
       channel_name: chId ? (channelNameMap.get(chId) ?? "") : "",
+      // Native-shaped: get_feed emits channel_type: null (Option<String>),
+      // never omits the key. Keeping the bridge faithful here is what lets
+      // the DM dedupe e2e catch null-vs-undefined regressions at the API
+      // conversion seam.
+      channel_type: null,
       category: "mention" as const,
     };
   });
