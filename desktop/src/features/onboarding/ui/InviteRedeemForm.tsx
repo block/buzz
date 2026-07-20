@@ -11,6 +11,7 @@ import {
   isJoinPolicyDiscoveryCandidate,
   type JoinPolicy,
 } from "@/shared/api/invites";
+import { normalizeRelayUrl } from "@/features/communities/relayProbe";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
@@ -45,7 +46,9 @@ type InviteRedeemFormProps = {
   error: string | null;
   isRedeeming: boolean;
   onCancel: () => void;
+  onConnect?: (relayWsUrl: string) => void;
   onRedeem: (relayWsUrl: string, code: string, policyReceipt?: string) => void;
+  placeholder?: string;
   variant?: "default" | "onboarding-spotlight";
 };
 
@@ -54,7 +57,9 @@ export function InviteRedeemForm({
   error,
   isRedeeming,
   onCancel,
+  onConnect,
   onRedeem,
+  placeholder,
   variant = "default",
 }: InviteRedeemFormProps) {
   const formId = React.useId();
@@ -77,14 +82,22 @@ export function InviteRedeemForm({
     () => parseInviteInput(inviteInput),
     [inviteInput],
   );
-  const isBareCode = parsed !== null && !("relayWsUrl" in parsed);
+  const normalizedRelayUrl = React.useMemo(
+    () => (onConnect && !parsed ? normalizeRelayUrl(inviteInput) : null),
+    [inviteInput, onConnect, parsed],
+  );
+  const parsedInvite = parsed;
+  const isBareCode = parsedInvite !== null && !("relayWsUrl" in parsedInvite);
   const needsRelayField = isBareCode && defaultRelayUrl !== undefined;
 
   React.useEffect(() => {
-    if (!parsed) return;
+    if (!parsedInvite) return;
 
     const relayWsUrl =
-      "relayWsUrl" in parsed ? parsed.relayWsUrl : bareCodeRelayUrl.trim();
+      "relayWsUrl" in parsedInvite &&
+      typeof parsedInvite.relayWsUrl === "string"
+        ? parsedInvite.relayWsUrl
+        : bareCodeRelayUrl.trim();
     if (!relayWsUrl || !isJoinPolicyDiscoveryCandidate(relayWsUrl)) return;
 
     let cancelled = false;
@@ -93,7 +106,7 @@ export function InviteRedeemForm({
         .then((policy) => {
           if (cancelled || !policy) return;
           setJoinPolicy(policy);
-          setPolicyInvite({ relayWsUrl, code: parsed.code });
+          setPolicyInvite({ relayWsUrl, code: parsedInvite.code });
           setAgeConfirmed(false);
           setAgreementConfirmed(false);
           setPolicyError(null);
@@ -108,12 +121,13 @@ export function InviteRedeemForm({
       cancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [bareCodeRelayUrl, parsed]);
+  }, [bareCodeRelayUrl, parsedInvite]);
 
   const canSubmit =
-    parsed !== null &&
-    ("relayWsUrl" in parsed ||
-      (isBareCode && bareCodeRelayUrl.trim().length > 0));
+    (parsedInvite !== null &&
+      ("relayWsUrl" in parsedInvite ||
+        (isBareCode && bareCodeRelayUrl.trim().length > 0))) ||
+    normalizedRelayUrl !== null;
   const isOnboardingSpotlight = variant === "onboarding-spotlight";
   const showInvalidInviteTip =
     isOnboardingSpotlight && inviteInput.trim().length > 0 && !canSubmit;
@@ -121,10 +135,16 @@ export function InviteRedeemForm({
   const handleSubmit = React.useCallback(
     async (event: React.FormEvent) => {
       event.preventDefault();
-      if (!parsed) return;
+      if (normalizedRelayUrl) {
+        onConnect?.(normalizedRelayUrl);
+        return;
+      }
+      if (!parsedInvite) return;
 
       const relayWsUrl =
-        "relayWsUrl" in parsed ? parsed.relayWsUrl : bareCodeRelayUrl.trim();
+        "relayWsUrl" in parsedInvite
+          ? parsedInvite.relayWsUrl
+          : bareCodeRelayUrl.trim();
       if (!relayWsUrl) return;
 
       setPolicyError(null);
@@ -132,7 +152,7 @@ export function InviteRedeemForm({
       try {
         const policy = await getJoinPolicy(relayWsUrl);
         if (!policy) {
-          onRedeem(relayWsUrl, parsed.code);
+          onRedeem(relayWsUrl, parsedInvite.code);
           return;
         }
 
@@ -140,10 +160,10 @@ export function InviteRedeemForm({
           !joinPolicy ||
           joinPolicy.version !== policy.version ||
           policyInvite?.relayWsUrl !== relayWsUrl ||
-          policyInvite.code !== parsed.code
+          policyInvite.code !== parsedInvite.code
         ) {
           setJoinPolicy(policy);
-          setPolicyInvite({ relayWsUrl, code: parsed.code });
+          setPolicyInvite({ relayWsUrl, code: parsedInvite.code });
           setAgeConfirmed(false);
           setAgreementConfirmed(false);
           return;
@@ -163,11 +183,11 @@ export function InviteRedeemForm({
 
         const receipt = await acceptJoinPolicy(
           relayWsUrl,
-          parsed.code,
+          parsedInvite.code,
           policy.version,
           ageConfirmed,
         );
-        onRedeem(relayWsUrl, parsed.code, receipt);
+        onRedeem(relayWsUrl, parsedInvite.code, receipt);
       } catch (policyFetchError) {
         setPolicyError(inviteErrorMessage(policyFetchError));
       } finally {
@@ -180,7 +200,9 @@ export function InviteRedeemForm({
       bareCodeRelayUrl,
       joinPolicy,
       onRedeem,
-      parsed,
+      normalizedRelayUrl,
+      onConnect,
+      parsedInvite,
       policyInvite,
     ],
   );
@@ -292,7 +314,9 @@ export function InviteRedeemForm({
                   disabled={isRedeeming}
                   id="invite-input"
                   onChange={handleInviteInputChange}
-                  placeholder="https://relay.example.com/invite/abc123"
+                  placeholder={
+                    placeholder ?? "https://relay.example.com/invite/abc123"
+                  }
                   spellCheck={false}
                   type="text"
                   value={inviteInput}
@@ -336,7 +360,7 @@ export function InviteRedeemForm({
           )}
           data-testid="invalid-invite-tip"
         >
-          Please enter a valid invite link
+          Please enter a valid invite link or community URL
         </p>
       ) : null}
 

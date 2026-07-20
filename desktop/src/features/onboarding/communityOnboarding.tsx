@@ -26,7 +26,7 @@ export type CommunityOnboardingStage =
    */
   | "entering";
 
-export type FirstCommunityPage = "join" | "owned";
+export type FirstCommunityPage = "join" | "member" | "owned";
 
 export type CommunityOnboardingTransaction = {
   id: string;

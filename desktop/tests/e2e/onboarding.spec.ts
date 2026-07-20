@@ -1,6 +1,6 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import { expect, test, type Locator, type Page } from "@playwright/test";
-import { npubEncode, nsecEncode } from "nostr-tools/nip19";
+import { expect, test, type Page } from "@playwright/test";
+import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { installFakeCamera } from "../helpers/fakeCamera";
@@ -99,21 +99,6 @@ async function readHomeSeenStorageKeys(page: Page) {
 
 async function expectNoHomeSeenEntries(page: Page) {
   await expect.poll(async () => readHomeSeenStorageKeys(page)).toEqual([]);
-}
-
-async function expectCommunityBranchFramePosition(page: Page, frame: Locator) {
-  const box = await frame.boundingBox();
-  const viewport = page.viewportSize();
-  if (!box || !viewport) {
-    throw new Error("Could not measure community branch frame position");
-  }
-  const chromeOffset = 106;
-  const footerOffset = 144;
-  const frameCenterY = box.y + box.height / 2;
-  const usableLaneCenterY =
-    chromeOffset + (viewport.height - chromeOffset - footerOffset) / 2;
-  expect(frameCenterY).toBeGreaterThan(usableLaneCenterY);
-  expect(box.y + box.height).toBeLessThan(viewport.height - footerOffset);
 }
 
 async function selectFirstEmojiFromPicker(page: Page) {
@@ -575,7 +560,7 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
 });
 
-test("first-community choices expose npub and invite input", async ({
+test("first-community choices route join, create, owner, and member intents", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -590,155 +575,44 @@ test("first-community choices expose npub and invite input", async ({
     skipOnboardingSeed: true,
     skipCommunitySeed: true,
   });
-  await page.route(
-    "https://default.example.com/api/join-policy",
-    async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: "{}",
-      });
-    },
-  );
   await page.goto("/");
 
   await expect(
-    page.getByRole("button", { name: "Add me to a community" }),
+    page.getByRole("button", { name: /Join a community/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "I have an invite link" }),
+    page.getByRole("button", { name: /Create a community/ }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", {
-      name: "Create or connect to my own community",
-    }),
-  ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Create or connect to my own community" })
-    .click();
-  // Sign-in opens as a modal over the blurred hosted-community preview.
-  await expect(
-    page.getByRole("heading", { name: "Set up your community" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Sign in to continue" }),
-  ).toBeVisible();
-  // The modal's close (X) dismisses back to the community picker.
-  await page.getByRole("button", { name: "Close" }).click();
-
-  await page.getByRole("button", { name: "Add me to a community" }).click();
-  await expect(page.getByTestId("welcome-join-npub")).toHaveText(
-    npubEncode(BLANK_TYLER_IDENTITY.pubkey),
-  );
-  const joinKeyFrame = page.getByTestId("welcome-join-npub-frame");
-  const joinNpub = page.getByTestId("welcome-join-npub");
-  await expect(joinKeyFrame).toBeVisible();
-  await expect(joinNpub).toBeVisible();
-  await expectCommunityBranchFramePosition(page, joinKeyFrame);
-  const joinKeyFrameBox = await joinKeyFrame.boundingBox();
-  expect(joinKeyFrameBox?.width).toBeGreaterThan(700);
-  await expect(joinKeyFrame).toHaveClass(/buzz-card-textured/);
-  const joinKeyFrameStyles = await joinKeyFrame.evaluate((element) => {
-    const styles = window.getComputedStyle(element);
-    return {
-      backgroundColor: styles.backgroundColor,
-      borderRadius: styles.borderRadius,
-    };
+  const existing = page.getByRole("button", {
+    name: /I already have a community/,
   });
-  expect(joinKeyFrameStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
-  expect(joinKeyFrameStyles.borderRadius).toBe("0px");
-  await expect
-    .poll(() =>
-      joinNpub.evaluate((element) => {
-        const styles = window.getComputedStyle(element);
-        return {
-          color: styles.color,
-          fontFamily: styles.fontFamily,
-          fontSize: styles.fontSize,
-        };
-      }),
-    )
-    .toMatchObject({
-      color: "rgb(113, 113, 6)",
-      fontSize: "36px",
-    });
-  expect(
-    (
-      await joinNpub.evaluate((element) =>
-        window.getComputedStyle(element).fontFamily.toLowerCase(),
-      )
-    ).includes("mono"),
-  ).toBe(true);
+  await expect(existing).toBeVisible();
+  await existing.click();
+  await expect(page.getByTestId("existing-community-choices")).toBeVisible();
+  await expect(page.getByRole("button", { name: "I own it" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "I’m a member or admin" }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "I’m a member or admin" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Reconnect to your community" }),
+  ).toBeVisible();
+  const accessInput = page.getByTestId("invite-redeem-input");
+  await expect(accessInput).toHaveAttribute(
+    "placeholder",
+    "Invite link or community URL",
+  );
+  await accessInput.fill("https://default.example.com");
+  await expect(page.getByTestId("invite-redeem-submit")).toBeEnabled();
   await page.getByRole("button", { name: "Back" }).click();
 
-  await page.getByRole("button", { name: "I have an invite link" }).click();
+  await page.getByRole("button", { name: /Join a community/ }).click();
   await expect(
-    page.getByRole("heading", { name: "Enter your invite link" }),
+    page.getByRole("heading", { name: "Join a community" }),
   ).toBeVisible();
-  const inviteInputFrame = page.getByTestId("invite-redeem-input-frame");
-  const inviteInput = page.getByTestId("invite-redeem-input");
-  await expect(inviteInputFrame).toBeVisible();
-  await expect(inviteInput).toBeVisible();
-  await expectCommunityBranchFramePosition(page, inviteInputFrame);
-  const inviteInputFrameBox = await inviteInputFrame.boundingBox();
-  expect(inviteInputFrameBox?.width).toBeGreaterThan(700);
-  await expect(inviteInputFrame).toHaveClass(/buzz-card-textured/);
-  const inviteInputFrameStyles = await inviteInputFrame.evaluate((element) => {
-    const styles = window.getComputedStyle(element);
-    return {
-      backgroundColor: styles.backgroundColor,
-      borderRadius: styles.borderRadius,
-    };
-  });
-  expect(inviteInputFrameStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
-  expect(inviteInputFrameStyles.borderRadius).toBe("0px");
-  await expect
-    .poll(() =>
-      inviteInput.evaluate((element) => {
-        const styles = window.getComputedStyle(element);
-        return {
-          color: styles.color,
-          fontFamily: styles.fontFamily,
-          fontSize: styles.fontSize,
-        };
-      }),
-    )
-    .toMatchObject({
-      color: "rgb(113, 113, 6)",
-      fontSize: "36px",
-    });
-  expect(
-    (
-      await inviteInput.evaluate((element) =>
-        window.getComputedStyle(element).fontFamily.toLowerCase(),
-      )
-    ).includes("mono"),
-  ).toBe(true);
-  await expect(page.getByTestId("invite-redeem-submit")).toHaveText("Next");
-  await expect(page.getByTestId("invite-redeem-submit")).toBeDisabled();
-  const inviteFrame = page.getByTestId("invite-redeem-input-frame");
-  const initialInviteFrameBox = await inviteFrame.boundingBox();
-  expect(initialInviteFrameBox).not.toBeNull();
-  const invalidInviteTip = page.getByTestId("invalid-invite-tip");
-  await expect(invalidInviteTip).toHaveAttribute("aria-hidden", "true");
-  await expect(invalidInviteTip).toHaveCSS("opacity", "0");
-
-  await inviteInput.fill("awefi");
-  await expect(page.getByLabel("Relay URL")).toHaveCount(0);
-  await expect(page.getByTestId("invite-redeem-submit")).toBeDisabled();
-  await expect(invalidInviteTip).toBeVisible();
-  await expect(invalidInviteTip).toHaveAttribute("aria-hidden", "false");
-  await expect(invalidInviteTip).toHaveCSS("opacity", "1");
-  await expect(invalidInviteTip).toHaveCSS("color", "rgb(113, 113, 6)");
-  await expect(invalidInviteTip).toHaveCSS("text-align", "center");
-  const invalidInviteFrameBox = await inviteFrame.boundingBox();
-  expect(invalidInviteFrameBox?.y).toBe(initialInviteFrameBox?.y);
-
-  await inviteInput.fill("https://default.example.com/invite/abc123");
-  await expect(page.getByLabel("Relay URL")).toHaveCount(0);
+  await accessInput.fill("https://default.example.com/invite/abc123");
   await expect(page.getByTestId("invite-redeem-submit")).toBeEnabled();
-  await expect(invalidInviteTip).toHaveAttribute("aria-hidden", "true");
-  await expect(invalidInviteTip).toHaveCSS("opacity", "0");
 });
 
 test("first-community owner can connect an existing hosted community", async ({
@@ -775,9 +649,7 @@ test("first-community owner can connect an existing hosted community", async ({
   );
   await page.goto("/");
 
-  await page
-    .getByRole("button", { name: "Create or connect to my own community" })
-    .click();
+  await page.getByTestId("community-choice-create").click();
   await expect(page.getByText("North Star")).toBeVisible();
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   await expect(
@@ -835,9 +707,7 @@ test("first-community owner can create and connect a hosted community", async ({
   );
   await page.goto("/");
 
-  await page
-    .getByRole("button", { name: "Create or connect to my own community" })
-    .click();
+  await page.getByTestId("community-choice-create").click();
   await page.getByRole("button", { name: "Sign in to continue" }).click();
   await expect(
     page.getByRole("heading", { name: "Finish connecting Buzz" }),
@@ -913,9 +783,7 @@ test("hosted community address line stays within the card for a long name", asyn
   await page.setViewportSize({ width: 800, height: 720 });
   await page.goto("/");
 
-  await page
-    .getByRole("button", { name: "Create or connect to my own community" })
-    .click();
+  await page.getByTestId("community-choice-create").click();
   await page.getByRole("button", { name: "Sign in to continue" }).click();
   await expect(
     page.getByRole("heading", { name: "Finish connecting Buzz" }),
@@ -984,9 +852,7 @@ test("first-community reports a created community without a relay address", asyn
   );
   await page.goto("/");
 
-  await page
-    .getByRole("button", { name: "Create or connect to my own community" })
-    .click();
+  await page.getByTestId("community-choice-create").click();
   await page.getByRole("textbox", { name: "Community name" }).fill("bee-lab");
   await expect(page.getByText("That address is available.")).toBeVisible();
   await page.getByRole("button", { name: "Next" }).click();
@@ -1017,9 +883,7 @@ test("first-community X cancels a pending sign-in", async ({ page }) => {
   );
   await page.goto("/");
 
-  await page
-    .getByRole("button", { name: "Create or connect to my own community" })
-    .click();
+  await page.getByTestId("community-choice-create").click();
   await page.getByRole("button", { name: "Sign in to continue" }).click();
   await expect(page.getByText("Waiting for your browser…")).toBeVisible();
   await expect(
@@ -1027,7 +891,7 @@ test("first-community X cancels a pending sign-in", async ({ page }) => {
   ).toHaveCount(0);
   await page.getByRole("button", { name: "Close" }).click();
   await expect(
-    page.getByRole("button", { name: "Create or connect to my own community" }),
+    page.getByRole("button", { name: /Create a community/ }),
   ).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
@@ -1061,9 +925,7 @@ test("first-community owner can replace a mismatched account identity", async ({
   );
   await page.goto("/");
 
-  await page
-    .getByRole("button", { name: "Create or connect to my own community" })
-    .click();
+  await page.getByTestId("community-choice-create").click();
   await expect(
     page.getByRole("heading", {
       name: "This account uses a different Buzz identity",
@@ -1113,9 +975,7 @@ test("first-community explains when the local identity belongs to another accoun
   );
   await page.goto("/");
 
-  await page
-    .getByRole("button", { name: "Create or connect to my own community" })
-    .click();
+  await page.getByTestId("community-choice-create").click();
   await page
     .getByRole("button", { name: "Use this device's identity" })
     .click();
@@ -1156,13 +1016,9 @@ test("back clears Builderlab auth before returning to first-community choices", 
   );
   await page.goto("/");
 
-  await page
-    .getByRole("button", { name: "Create or connect to my own community" })
-    .click();
+  await page.getByTestId("community-choice-create").click();
   await page.getByRole("button", { name: "Back" }).click();
-  await page
-    .getByRole("button", { name: "Create or connect to my own community" })
-    .click();
+  await page.getByTestId("community-choice-create").click();
   await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
 });
 
@@ -1187,14 +1043,14 @@ test("first-community shows the scenario cards for localhost", async ({
     page.getByRole("button", { name: "Join default community" }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Add me to a community" }),
+    page.getByRole("button", { name: /Join a community/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "I have an invite link" }),
+    page.getByRole("button", { name: /Join a community/ }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", {
-      name: "Create or connect to my own community",
+      name: /Create a community/,
     }),
   ).toBeVisible();
 
@@ -1222,7 +1078,7 @@ test("first-community direct join reaches profile", async ({ page }) => {
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Add me to a community" }).click();
+  await page.getByRole("button", { name: /Join a community/ }).click();
   await page
     .getByTestId("welcome-join-community-url")
     .fill("wss://onboarding.communities.buzz.xyz");
@@ -1278,7 +1134,7 @@ test("first-community direct join cancel returns to request access", async ({
   );
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Add me to a community" }).click();
+  await page.getByRole("button", { name: /Join a community/ }).click();
   await page
     .getByTestId("welcome-join-community-url")
     .fill("wss://onboarding.communities.buzz.xyz");
