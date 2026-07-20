@@ -69,6 +69,8 @@ function providerModelEnvKey(provider: string): string | null {
     case "openai":
     case "openai-compat":
       return "OPENAI_COMPAT_MODEL";
+    case "gemini":
+      return "GEMINI_MODEL";
     default:
       return null;
   }

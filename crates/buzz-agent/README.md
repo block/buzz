@@ -55,6 +55,12 @@ BUZZ_AGENT_PROVIDER=databricks \
 DATABRICKS_HOST=https://dbc-...cloud.databricks.com \
 DATABRICKS_MODEL=goose-claude-4-6-sonnet \
   ./target/release/buzz-agent
+
+# Or Gemini via Google's OpenAI-compatible surface
+BUZZ_AGENT_PROVIDER=gemini \
+GEMINI_API_KEY=AIza... \
+GEMINI_MODEL=gemini-2.5-pro \
+  ./target/release/buzz-agent
 ```
 
 That's the whole setup. The agent reads JSON-RPC frames from stdin, writes them to stdout, and logs to stderr.
@@ -129,7 +135,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
+| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `gemini`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
 | `ANTHROPIC_API_KEY` | — | Required when provider=anthropic. |
 | `ANTHROPIC_MODEL` | — | Required when provider=anthropic. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | |
@@ -138,6 +144,9 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, OpenRouter, Ollama, etc. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
+| `GEMINI_API_KEY` | — | Required when provider=gemini. |
+| `GEMINI_MODEL` | — | Required when provider=gemini (unless `BUZZ_AGENT_MODEL` is set, which overrides it). |
+| `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai` | Google's OpenAI-compatible surface. Chat Completions is always used; native `generateContent` is not. |
 | `DATABRICKS_HOST` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_MODEL` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_TOKEN` | — | Optional static bearer escape hatch. If unset, Databricks uses browser OAuth + refresh cache. |
@@ -169,10 +178,13 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | Ollama | `openai` | `POST {base}/chat/completions` | llama3.1, qwen2.5-coder |
 | OpenRouter | `openai` | `POST {base}/chat/completions` | anything they route |
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
+| Gemini | `gemini` | `POST {base}/chat/completions` | gemini-2.5-pro, gemini-2.5-flash |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
 
-If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, or `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
+If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, `BUZZ_AGENT_PROVIDER=openai` without `OPENAI_COMPAT_API_KEY`, or `BUZZ_AGENT_PROVIDER=gemini` without `GEMINI_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
+
+`provider=gemini` targets Google's OpenAI-compatible surface (`GEMINI_BASE_URL`, default `https://generativelanguage.googleapis.com/v1beta/openai`) and always speaks **Chat Completions** (`POST {base}/chat/completions`) with a static `GEMINI_API_KEY` bearer — it never routes to `/responses`, and native `generateContent` is not used.
 
 `provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
 

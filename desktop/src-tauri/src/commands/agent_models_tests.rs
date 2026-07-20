@@ -100,8 +100,57 @@ fn openai_compat_model_normalization_preserves_provider_specific_ids() {
 #[test]
 fn openai_models_url_uses_openai_default_base_url() {
     assert_eq!(
-        openai_compatible_models_url(&BTreeMap::new()),
+        openai_compatible_models_url(&BTreeMap::new(), Some("openai")),
         "https://api.openai.com/v1/models"
+    );
+}
+
+#[test]
+fn gemini_models_url_uses_google_openai_compatible_default_base_url() {
+    assert_eq!(
+        openai_compatible_models_url(&BTreeMap::new(), Some("gemini")),
+        "https://generativelanguage.googleapis.com/v1beta/openai/models"
+    );
+}
+
+#[test]
+fn gemini_models_url_honors_gemini_base_url_override() {
+    let env = BTreeMap::from([(
+        "GEMINI_BASE_URL".to_string(),
+        "https://proxy.example/v1beta/openai/".to_string(),
+    )]);
+    assert_eq!(
+        openai_compatible_models_url(&env, Some("gemini")),
+        "https://proxy.example/v1beta/openai/models"
+    );
+}
+
+#[test]
+fn gemini_is_openai_compatible_but_not_filtered_like_openai() {
+    // Routed through the OpenAI-compatible discovery path...
+    assert!(is_openai_compatible_provider(Some("gemini")));
+    assert!(is_gemini_provider(Some("gemini")));
+    // ...but Gemini model IDs must pass through unfiltered (only pure "openai"
+    // applies the GPT text-model filter).
+    let models = normalize_openai_compatible_models(
+        OpenAiModelListResponse {
+            data: vec![
+                OpenAiModelListItem {
+                    id: "gemini-2.5-flash".to_string(),
+                    created: Some(2),
+                },
+                OpenAiModelListItem {
+                    id: "gemini-2.5-pro".to_string(),
+                    created: Some(1),
+                },
+            ],
+        },
+        Some("gemini"),
+    );
+    let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec!["gemini-2.5-flash".to_string(), "gemini-2.5-pro".to_string()]
     );
 }
 

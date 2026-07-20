@@ -236,7 +236,9 @@ test("create agent supports parallelism and system prompt overrides", async ({
     .getByRole("button", { name: "Custom model...", exact: true })
     .click();
   await page.getByLabel("Custom model ID").fill("claude-opus-4-5");
-  await page.getByLabel("Anthropic API Key").fill("sk-test-api-key-for-e2e");
+  await page
+    .getByTestId("persona-provider-api-key")
+    .fill("sk-test-api-key-for-e2e");
 
   const advancedToggle = page.getByRole("button", {
     name: "Advanced",

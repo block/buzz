@@ -319,20 +319,54 @@ fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
             .map(str::trim)
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("openai" | "openai-compat")
+        Some("openai" | "openai-compat" | "gemini")
     )
 }
 
+fn is_gemini_provider(provider: Option<&str>) -> bool {
+    provider
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+        == Some("gemini")
+}
+
+/// Base-URL env var + default for an OpenAI-compatible provider. Gemini reuses
+/// the discovery path but reads `GEMINI_BASE_URL`, defaulting to Google's
+/// OpenAI-compatible surface.
+fn openai_compatible_base_url_env(provider: Option<&str>) -> (&'static str, &'static str) {
+    if is_gemini_provider(provider) {
+        (
+            "GEMINI_BASE_URL",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        )
+    } else {
+        ("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1")
+    }
+}
+
+/// API-key env var for an OpenAI-compatible provider (Gemini uses `GEMINI_API_KEY`).
+fn openai_compatible_api_key_env(provider: Option<&str>) -> &'static str {
+    if is_gemini_provider(provider) {
+        "GEMINI_API_KEY"
+    } else {
+        "OPENAI_COMPAT_API_KEY"
+    }
+}
+
 #[cfg(test)]
-fn openai_compatible_models_url(env: &BTreeMap<String, String>) -> String {
-    let base_url = env_value(env, "OPENAI_COMPAT_BASE_URL")
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+fn openai_compatible_models_url(env: &BTreeMap<String, String>, provider: Option<&str>) -> String {
+    let (key, default) = openai_compatible_base_url_env(provider);
+    let base_url = env_value(env, key).unwrap_or_else(|| default.to_string());
     format!("{}/models", base_url.trim_end_matches('/'))
 }
 
-fn openai_compatible_models_url_for_discovery(env: &BTreeMap<String, String>) -> String {
-    let base_url = env_or_process_value(env, "OPENAI_COMPAT_BASE_URL")
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+fn openai_compatible_models_url_for_discovery(
+    env: &BTreeMap<String, String>,
+    provider: Option<&str>,
+) -> String {
+    let (key, default) = openai_compatible_base_url_env(provider);
+    let base_url = env_or_process_value(env, key).unwrap_or_else(|| default.to_string());
     format!("{}/models", base_url.trim_end_matches('/'))
 }
 
@@ -490,17 +524,18 @@ async fn discover_openai_compatible_models(
         return Ok(None);
     }
 
+    let api_key_env = openai_compatible_api_key_env(provider);
     let api_key = if relay_mesh {
         crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER.to_string()
     } else {
-        env_or_process_value(env, "OPENAI_COMPAT_API_KEY")
-            .ok_or_else(|| "config: OPENAI_COMPAT_API_KEY required".to_string())?
+        env_or_process_value(env, api_key_env)
+            .ok_or_else(|| format!("config: {api_key_env} required"))?
     };
-    let redaction_env = redaction_env_with_value(env, "OPENAI_COMPAT_API_KEY", &api_key);
+    let redaction_env = redaction_env_with_value(env, api_key_env, &api_key);
     let url = if relay_mesh {
         format!("{}/models", crate::managed_agents::RELAY_MESH_API_BASE_URL)
     } else {
-        openai_compatible_models_url_for_discovery(env)
+        openai_compatible_models_url_for_discovery(env, provider)
     };
     let response = client
         .get(&url)

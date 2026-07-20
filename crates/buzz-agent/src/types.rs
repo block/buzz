@@ -108,6 +108,14 @@ pub struct ToolCall {
     pub provider_id: String,
     pub name: String,
     pub arguments: Value,
+    /// Opaque provider round-trip payload from the OpenAI-compat `extra_content`
+    /// field on a tool call. Gemini 3.x returns a `thought_signature` here and
+    /// *requires* it to be echoed back with the same tool call on the following
+    /// turn — otherwise the request is rejected with HTTP 400
+    /// ("Function call is missing a thought_signature"). Preserved verbatim and
+    /// re-attached when replaying assistant history. `None` for providers that
+    /// don't emit it (Anthropic, standard OpenAI).
+    pub extra_content: Option<Value>,
 }
 
 #[derive(Debug, Clone)]

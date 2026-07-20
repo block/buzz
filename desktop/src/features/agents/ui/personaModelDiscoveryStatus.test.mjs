@@ -25,6 +25,27 @@ test("model discovery status names missing OpenAI-compatible credentials", () =>
   assert.match(status?.message ?? "", /OpenAI models/);
 });
 
+test("model discovery status names missing Gemini credentials", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("config: GEMINI_API_KEY required"),
+    "gemini",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /Gemini API key/);
+  assert.match(status?.message ?? "", /Gemini models/);
+});
+
+test("model discovery status labels Gemini in the generic fallback", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("gemini discovery hit an unexpected transport error"),
+    "gemini",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /Gemini/);
+});
+
 test("Buzz shared compute names the empty state and next action", () => {
   const status = formatModelDiscoveryErrorStatus(
     new Error("no Buzz shared compute serving members are available"),

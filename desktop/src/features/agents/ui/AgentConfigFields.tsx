@@ -556,11 +556,7 @@ export function AgentConfigFields({
             inheritedLabel="Provided by this build"
             isInherited={apiKeyInherited}
             isRequired={!apiKeyInherited && apiKeyValue.length === 0}
-            label={
-              effectiveProvider === "anthropic"
-                ? "Anthropic API Key"
-                : "OpenAI API Key"
-            }
+            label="API Key"
             onValueChange={(value) =>
               onConfigChange({
                 ...config,

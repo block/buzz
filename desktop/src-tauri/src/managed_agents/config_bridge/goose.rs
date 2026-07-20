@@ -200,6 +200,27 @@ providers:
     }
 
     #[test]
+    fn parse_nested_google_provider() {
+        // Persisted `active_provider: google` with `providers.google.model` —
+        // Goose's native Gemini provider. The bridge surfaces provider + model
+        // but must NOT parse or infer the GOOGLE_API_KEY secret (Goose keeps it
+        // in its own secret store, not config.yaml).
+        let yaml = r#"
+active_provider: google
+providers:
+  google:
+    model: gemini-2.5-pro
+"#;
+        let cfg = parse_goose_config(yaml).unwrap();
+        assert_eq!(cfg.provider.as_deref(), Some("google"));
+        assert_eq!(cfg.model.as_deref(), Some("gemini-2.5-pro"));
+        assert!(
+            !cfg.extra.contains_key("GOOGLE_API_KEY"),
+            "the file bridge must never surface GOOGLE_API_KEY from config.yaml"
+        );
+    }
+
+    #[test]
     fn non_databricks_provider_uses_provider_host_key() {
         let yaml = r#"
 active_provider: anthropic

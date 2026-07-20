@@ -1407,6 +1407,25 @@ test("global model fallback resolves the selected provider model env", () => {
   );
 });
 
+test("global model fallback resolves the Gemini provider model env", () => {
+  const bakedEnv = [
+    { key: "GEMINI_MODEL", value: "gemini-2.5-pro", masked: false },
+  ];
+  assert.equal(getGlobalModelFallback(bakedEnv, "gemini"), "gemini-2.5-pro");
+});
+
+test("global model fallback gives saved Gemini env precedence over build env", () => {
+  const bakedEnv = [
+    { key: "GEMINI_MODEL", value: "gemini-2.5-flash", masked: false },
+  ];
+  assert.equal(
+    getGlobalModelFallback(bakedEnv, "gemini", {
+      GEMINI_MODEL: "gemini-2.5-pro",
+    }),
+    "gemini-2.5-pro",
+  );
+});
+
 test("global model fallback gives saved provider env precedence over build env", () => {
   const bakedEnv = [
     { key: "ANTHROPIC_MODEL", value: "build-model", masked: false },

@@ -39,7 +39,7 @@ export function PersonaProviderApiKeyField({
   inheritedLabel: string;
   /** True when the key is required and not satisfied anywhere. */
   isRequired: boolean;
-  /** Display label, e.g. "Anthropic API Key". */
+  /** Display label, e.g. "API Key". */
   label: string;
   onValueChange: (next: string) => void;
   /** Current agent-local value of the secret env var. */

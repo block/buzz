@@ -658,10 +658,20 @@ pub const HANDOFF_MAX_TOOL_NAMES: usize = 20;
 const DEFAULT_SYSTEM_PROMPT: &str =
     "You are buzz-agent. Use the provided tools to act. Tool calls are your only output.";
 
+/// Default base URL for `Provider::Gemini`: Google's OpenAI-compatible surface.
+/// Chat Completions and `/models` live under this prefix. Overridable via
+/// `GEMINI_BASE_URL`. Native `generateContent` is intentionally not used.
+pub(crate) const GEMINI_DEFAULT_BASE_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/openai";
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Provider {
     Anthropic,
     OpenAi,
+    /// Google Gemini via its OpenAI-compatible surface. Reuses the OpenAI Chat
+    /// Completions body builder/parser and a static `GEMINI_API_KEY` bearer;
+    /// only the env var names and default base URL differ from `OpenAi`.
+    Gemini,
     /// Databricks model serving. Routes to `{base_url}/serving-endpoints/{model}/invocations`
     /// with a dynamically-acquired bearer (OAuth 2.0 PKCE, or static `DATABRICKS_TOKEN`).
     /// Wire format is OpenAI-chat-compatible — reuses the same body builder and parser.
@@ -740,6 +750,7 @@ impl Config {
             env("BUZZ_AGENT_PROVIDER").as_deref(),
             env("ANTHROPIC_API_KEY").as_deref(),
             env("OPENAI_COMPAT_API_KEY").as_deref(),
+            env("GEMINI_API_KEY").as_deref(),
         )?;
 
         // Universal model override — takes priority over provider-specific model
@@ -774,6 +785,16 @@ impl Config {
                 .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
                 env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
                 parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
+            ),
+            // Gemini's OpenAI-compatible surface is Chat Completions only, so the
+            // API shape is pinned to Chat rather than Auto (there is no /responses
+            // endpoint to upgrade to on generativelanguage.googleapis.com).
+            Provider::Gemini => (
+                req("GEMINI_API_KEY")?,
+                resolve_model(buzz_agent_model.as_deref(), env("GEMINI_MODEL").as_deref())
+                    .ok_or_else(|| "config: GEMINI_MODEL required".to_string())?,
+                env_or("GEMINI_BASE_URL", GEMINI_DEFAULT_BASE_URL),
+                OpenAiApi::Chat,
             ),
             Provider::Databricks | Provider::DatabricksV2 => (
                 env("DATABRICKS_TOKEN").unwrap_or_default(),
@@ -983,6 +1004,7 @@ fn resolve_provider(
     requested: Option<&str>,
     anthropic_key: Option<&str>,
     openai_key: Option<&str>,
+    gemini_key: Option<&str>,
 ) -> Result<Provider, String> {
     match requested.map(str::trim).filter(|s| !s.is_empty()) {
         Some(raw) => {
@@ -996,6 +1018,10 @@ fn resolve_provider(
                 "openai" | "openai-compat" => Err(
                     "config: OPENAI_COMPAT_API_KEY required".into(),
                 ),
+                "gemini" if present_nonempty(gemini_key) => Ok(Provider::Gemini),
+                "gemini" => Err(
+                    "config: GEMINI_API_KEY required".into(),
+                ),
                 "databricks" => Ok(Provider::Databricks),
                 "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
                 _ => Err(format!(
@@ -1004,7 +1030,7 @@ fn resolve_provider(
             }
         }
         None => Err(
-            "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, databricks)".into(),
+            "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, gemini, databricks)".into(),
         ),
     }
 }
@@ -1215,29 +1241,42 @@ mod tests {
     #[test]
     fn resolve_provider_keeps_requested_provider_when_token_present() {
         assert_eq!(
-            resolve_provider(Some("anthropic"), Some("sk-ant"), None,).unwrap(),
+            resolve_provider(Some("anthropic"), Some("sk-ant"), None, None).unwrap(),
             Provider::Anthropic
         );
         assert_eq!(
-            resolve_provider(Some("openai"), None, Some("sk-openai"),).unwrap(),
+            resolve_provider(Some("openai"), None, Some("sk-openai"), None).unwrap(),
             Provider::OpenAi
+        );
+        assert_eq!(
+            resolve_provider(Some("gemini"), None, None, Some("AIza-key")).unwrap(),
+            Provider::Gemini
+        );
+        // Case-insensitive, like the other providers.
+        assert_eq!(
+            resolve_provider(Some("Gemini"), None, None, Some("AIza-key")).unwrap(),
+            Provider::Gemini
         );
     }
 
     #[test]
     fn resolve_provider_errors_when_requested_provider_key_missing() {
         // No fallback — missing key returns an error regardless of Databricks availability.
-        let err = resolve_provider(Some("anthropic"), None, None).unwrap_err();
+        let err = resolve_provider(Some("anthropic"), None, None, None).unwrap_err();
         assert!(err.contains("ANTHROPIC_API_KEY required"), "{err}");
 
-        let err = resolve_provider(Some("openai-compat"), None, Some("   ")).unwrap_err();
+        let err = resolve_provider(Some("openai-compat"), None, Some("   "), None).unwrap_err();
         assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
+
+        // Whitespace-only Gemini key is treated as absent.
+        let err = resolve_provider(Some("gemini"), None, None, Some("   ")).unwrap_err();
+        assert!(err.contains("GEMINI_API_KEY required"), "{err}");
     }
 
     #[test]
     fn resolve_provider_errors_when_provider_env_absent() {
         // No implicit inference — absent BUZZ_AGENT_PROVIDER is an error.
-        let err = resolve_provider(None, None, None).unwrap_err();
+        let err = resolve_provider(None, None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER is required"), "{err}");
     }
 
@@ -1247,19 +1286,19 @@ mod tests {
         // When BUZZ_AGENT_PROVIDER=databricks, resolve_provider succeeds regardless
         // of DATABRICKS_HOST/MODEL (those are validated later in from_env()).
         assert_eq!(
-            resolve_provider(Some("databricks"), None, None).unwrap(),
+            resolve_provider(Some("databricks"), None, None, None).unwrap(),
             Provider::Databricks
         );
         // Missing key for other providers still errors — no Databricks fallback.
-        let err = resolve_provider(Some("openai"), None, None).unwrap_err();
+        let err = resolve_provider(Some("openai"), None, None, None).unwrap_err();
         assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
-        let err = resolve_provider(None, None, None).unwrap_err();
+        let err = resolve_provider(None, None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER is required"), "{err}");
     }
 
     #[test]
     fn resolve_provider_unsupported_error_preserves_user_casing() {
-        let err = resolve_provider(Some("OpenAIish"), None, None).unwrap_err();
+        let err = resolve_provider(Some("OpenAIish"), None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER=OpenAIish"));
     }
 
@@ -1297,6 +1336,37 @@ mod tests {
     fn resolve_model_returns_none_when_both_absent() {
         let result = resolve_model(None, None);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn gemini_default_base_url_is_openai_compat_surface() {
+        // The default base must point at Google's OpenAI-compatible surface
+        // (v1beta/openai), not the native generateContent API. from_env() feeds
+        // this const to env_or("GEMINI_BASE_URL", …).
+        assert_eq!(
+            GEMINI_DEFAULT_BASE_URL,
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+        // Sanity: the compat surface must not be treated as a first-party OpenAI
+        // host, or Auto-mode dispatch would try to upgrade it to /responses.
+        assert!(!is_openai_host(GEMINI_DEFAULT_BASE_URL));
+    }
+
+    #[test]
+    fn gemini_model_resolution_prefers_buzz_agent_model_override() {
+        // from_env() resolves Gemini's model as
+        // resolve_model(BUZZ_AGENT_MODEL, GEMINI_MODEL): the universal override wins.
+        assert_eq!(
+            resolve_model(Some("gemini-2.5-pro"), Some("gemini-1.5-flash")).as_deref(),
+            Some("gemini-2.5-pro"),
+            "BUZZ_AGENT_MODEL must override GEMINI_MODEL"
+        );
+        // Falls back to GEMINI_MODEL when no universal override is set.
+        assert_eq!(
+            resolve_model(None, Some("gemini-1.5-flash")).as_deref(),
+            Some("gemini-1.5-flash"),
+            "GEMINI_MODEL must be used when BUZZ_AGENT_MODEL is unset"
+        );
     }
 
     #[test]
@@ -1918,6 +1988,29 @@ mod tests {
             assert!(
                 cfg.validate().is_ok(),
                 "OpenAI must accept {effort:?} at startup (route-aware normalization at request build)"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_all_efforts_for_gemini() {
+        // Gemini rides the OpenAI-shaped Chat path, so effort validation must
+        // behave exactly like OpenAI: none/minimal are NOT rejected at startup
+        // (only pure Anthropic rejects them); availability is normalized at
+        // request-build time via normalize_effort_for_openai_route.
+        for effort in [
+            ThinkingEffort::None,
+            ThinkingEffort::Minimal,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            let cfg = make_config_for_validation(Provider::Gemini, Some(effort));
+            assert!(
+                cfg.validate().is_ok(),
+                "Gemini must accept {effort:?} at startup, consistent with the OpenAI Chat path"
             );
         }
     }

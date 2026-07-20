@@ -212,7 +212,7 @@ test.describe("global agent config screenshots", () => {
     await openCreateDialog(page);
     await customizeAgentAi(page);
 
-    await expect(page.getByLabel("Anthropic API Key")).toBeVisible({
+    await expect(page.getByTestId("persona-provider-api-key")).toBeVisible({
       timeout: 10_000,
     });
     await expect(
@@ -233,7 +233,7 @@ test.describe("global agent config screenshots", () => {
     await openCreateDialog(page);
     await customizeAgentAi(page);
 
-    await expect(page.getByLabel("Anthropic API Key")).toHaveAttribute(
+    await expect(page.getByTestId("persona-provider-api-key")).toHaveAttribute(
       "placeholder",
       "Inherited from global config",
     );

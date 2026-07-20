@@ -916,11 +916,7 @@ export function AgentDefinitionDialog({
                 isInherited={apiKeyIsInherited}
                 inheritedLabel={apiKeyInheritedLabel}
                 isRequired={apiKeyIsRequired}
-                label={
-                  effectiveProvider === "anthropic"
-                    ? "Anthropic API key"
-                    : "OpenAI API key"
-                }
+                label="API Key"
                 onValueChange={(next) => {
                   setEnvVars((prev) => ({
                     ...prev,

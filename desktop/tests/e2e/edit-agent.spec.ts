@@ -134,7 +134,9 @@ test.describe("edit agent dialog", () => {
     await pickDropdownOption(page, "edit-agent-model", "Custom model...");
     await page.locator("#edit-agent-custom-model").fill("claude-opus-4-5");
     // Anthropic requires a credential before save unlocks.
-    await page.getByLabel("Anthropic API Key").fill("sk-test-edit-agent-e2e");
+    await page
+      .getByTestId("persona-provider-api-key")
+      .fill("sk-test-edit-agent-e2e");
 
     const submit = page.getByTestId("edit-agent-dialog-submit");
     await expect(submit).toBeEnabled({ timeout: 10_000 });

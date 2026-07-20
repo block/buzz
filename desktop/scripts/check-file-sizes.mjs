@@ -173,7 +173,12 @@ const overrides = new Map([
   // Windows Doctor install fix: cli_install_commands_windows field added to test stubs.
   // team-instructions-first-class: ManagedAgentRecord fixture gains the new
   // team_id field (+1 line).
-  ["src-tauri/src/managed_agents/readiness.rs", 1765],
+  // gemini-goose-provider: the accumulated `mod tests` module was extracted to
+  // readiness_tests.rs (following the agent_models_tests.rs precedent) so the
+  // production file (readiness.rs) is back under the default ceiling. The
+  // historical test debt — plus the goose `google` (native Gemini) provider
+  // readiness coverage — now lives in that test-only file.
+  ["src-tauri/src/managed_agents/readiness_tests.rs", 1125],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -442,7 +447,11 @@ const overrides = new Map([
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   // +8: harness_override thread-through in update_managed_agent so a deliberate
   // Custom pin routes to update_time_agent_command_override (comment + call).
-  ["src-tauri/src/commands/agent_models.rs", 1079],
+  // +15: gemini provider — is_gemini_provider + provider-aware base-URL/api-key
+  // resolution (openai_compatible_base_url_env / _api_key_env) so Gemini reuses
+  // the OpenAI-compatible /models discovery path with GEMINI_BASE_URL/GEMINI_API_KEY.
+  // Load-bearing feature growth; queued to split with the rest of this list.
+  ["src-tauri/src/commands/agent_models.rs", 1095],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.

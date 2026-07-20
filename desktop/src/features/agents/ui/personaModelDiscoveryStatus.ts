@@ -25,6 +25,8 @@ function providerObjectLabel(provider: string): string {
       return "OpenAI";
     case "openai-compat":
       return "OpenAI-compatible";
+    case "gemini":
+      return "Gemini";
     default:
       return provider.trim() || "this provider";
   }
@@ -97,6 +99,13 @@ export function formatModelDiscoveryErrorStatus(
   if (message.includes("OPENAI_COMPAT_API_KEY required")) {
     return {
       message: "Enter an OpenAI API key to load OpenAI models.",
+      tone: "warning",
+    };
+  }
+
+  if (message.includes("GEMINI_API_KEY required")) {
+    return {
+      message: "Enter a Gemini API key to load Gemini models.",
       tone: "warning",
     };
   }

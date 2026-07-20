@@ -679,6 +679,7 @@ pub(crate) fn push_hook_outputs_as_tool_results(
                 provider_id: provider_id.clone(),
                 name: tool_name,
                 arguments: serde_json::json!({}),
+                extra_content: None,
             }],
         });
         history.push(HistoryItem::ToolResult(ToolResult {
