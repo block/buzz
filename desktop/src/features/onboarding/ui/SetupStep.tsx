@@ -673,7 +673,7 @@ function RuntimeProvidersLoadingState() {
       data-testid="onboarding-runtime-loading"
       role="status"
     >
-      <div className="flex flex-col items-center text-foreground/35">
+      <div className="flex flex-col items-center text-foreground opacity-35">
         <FlappingBee className="h-auto w-16" />
         <p className="mt-5 text-2xl font-normal leading-8">
           Finding your providers...
