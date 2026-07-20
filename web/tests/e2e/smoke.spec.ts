@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
-test("home page loads with Buzz heading", async ({ page }) => {
+test("home page loads with Buzz branding", async ({ page }) => {
   await page.goto("/");
-  await expect(page.locator("header")).toContainText("Buzz");
+  await expect(
+    page.getByRole("main").getByRole("img", { name: "Buzz" }),
+  ).toBeVisible();
 });
 
 test("home page shows repositories section", async ({ page }) => {
@@ -115,6 +118,87 @@ test("invite requires age and legal consent before opening Buzz", async ({
   const acceptButtonBox = await acceptInvite.boundingBox();
   expect(consentBox?.y).toBeLessThan(acceptButtonBox?.y ?? 0);
   expect(consentBox?.width).toBe(acceptButtonBox?.width);
+});
+
+test("invite can enroll a NIP-07 identity for browser access", async ({
+  page,
+}) => {
+  const pubkey = "ab".repeat(32);
+  await page.addInitScript((extensionPubkey) => {
+    (
+      window as Window & {
+        nostr?: {
+          getPublicKey(): Promise<string>;
+          signEvent(
+            event: Record<string, unknown>,
+          ): Promise<Record<string, unknown>>;
+        };
+      }
+    ).nostr = {
+      async getPublicKey() {
+        return extensionPubkey;
+      },
+      async signEvent(event) {
+        return {
+          ...event,
+          id: "cd".repeat(32),
+          pubkey: extensionPubkey,
+          sig: "ef".repeat(64),
+        };
+      },
+    };
+  }, pubkey);
+  await page.route("**/api/join-policy", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ policy: null }),
+    });
+  });
+
+  let claimObserved = false;
+  await page.route("**/api/invites/claim", async (route) => {
+    claimObserved = true;
+    const request = route.request();
+    const body = request.postData() ?? "";
+    expect(JSON.parse(body)).toEqual({
+      code: "browser-code",
+    });
+
+    const authorization = request.headers().authorization;
+    expect(authorization).toMatch(/^Nostr /);
+    const event = JSON.parse(
+      Buffer.from(authorization.slice("Nostr ".length), "base64").toString(
+        "utf8",
+      ),
+    ) as {
+      pubkey: string;
+      tags: string[][];
+    };
+    expect(event.pubkey).toBe(pubkey);
+    expect(event.tags).toContainEqual(["u", request.url()]);
+    expect(event.tags).toContainEqual(["method", "POST"]);
+    expect(event.tags).toContainEqual([
+      "payload",
+      createHash("sha256").update(body).digest("hex"),
+    ]);
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: "joined",
+        community_id: "community-id",
+        host: "127.0.0.1",
+        role: "member",
+      }),
+    });
+  });
+
+  await page.goto("/invite/browser-code");
+  await page.getByRole("button", { name: "Join in browser" }).click();
+  await expect(page).toHaveURL("/");
+  expect(claimObserved).toBe(true);
 });
 
 test("invite asks Safari users to choose their Mac download", async ({

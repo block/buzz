@@ -1,10 +1,12 @@
 import buzzAppIcon from "@/assets/app-icon@3x.png";
+import { claimInviteInBrowser } from "@/features/invite/invite-api";
 import {
   BUZZ_RELEASES_URL,
   type BuzzDownloadPlatform,
   detectBuzzDownloadPlatform,
   resolveBuzzDownloadUrlForPlatform,
 } from "@/shared/lib/buzz-download";
+import { hasNip07Provider } from "@/shared/lib/nostr-signer";
 import { relayWsUrl } from "@/shared/lib/relay-url";
 import { Button } from "@/shared/ui/button";
 import * as React from "react";
@@ -33,6 +35,10 @@ export function InvitePage({ code }: { code: string }) {
   const [ageConfirmed, setAgeConfirmed] = React.useState(false);
   const [agreementConfirmed, setAgreementConfirmed] = React.useState(false);
   const [opening, setOpening] = React.useState(false);
+  const [joiningBrowser, setJoiningBrowser] = React.useState(false);
+  const [browserJoinError, setBrowserJoinError] = React.useState<string | null>(
+    null,
+  );
   const [downloadUrl, setDownloadUrl] = React.useState(BUZZ_RELEASES_URL);
   const [needsMacChoice, setNeedsMacChoice] = React.useState(false);
   const [showMacChoice, setShowMacChoice] = React.useState(false);
@@ -69,23 +75,25 @@ export function InvitePage({ code }: { code: string }) {
       .catch(() => setPolicy(undefined));
   }, []);
 
+  const acceptPolicy = async (): Promise<string | undefined> => {
+    if (!policy) return undefined;
+    const response = await fetch("/api/invites/accept-policy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code,
+        policy_version: policy.version,
+        age_confirmed: ageConfirmed,
+      }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return ((await response.json()) as { receipt: string }).receipt;
+  };
+
   const openInvite = async () => {
     setOpening(true);
     try {
-      let receipt: string | undefined;
-      if (policy) {
-        const response = await fetch("/api/invites/accept-policy", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            code,
-            policy_version: policy.version,
-            age_confirmed: ageConfirmed,
-          }),
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        receipt = ((await response.json()) as { receipt: string }).receipt;
-      }
+      const receipt = await acceptPolicy();
       const query = new URLSearchParams({ relay, code });
       if (receipt) query.set("policy_receipt", receipt);
       window.location.href = `buzz://join?${query.toString()}`;
@@ -94,9 +102,27 @@ export function InvitePage({ code }: { code: string }) {
     }
   };
 
+  const joinInBrowser = async () => {
+    setBrowserJoinError(null);
+    setJoiningBrowser(true);
+    try {
+      const receipt = await acceptPolicy();
+      await claimInviteInBrowser(code, receipt);
+      window.location.assign("/");
+    } catch (error) {
+      setBrowserJoinError(
+        error instanceof Error ? error.message : "Could not claim this invite.",
+      );
+    } finally {
+      setJoiningBrowser(false);
+    }
+  };
+
+  const browserSigningAvailable = hasNip07Provider();
   const disabled =
     policy === undefined ||
     opening ||
+    joiningBrowser ||
     Boolean(policy?.age_attestation_required && !ageConfirmed) ||
     Boolean(
       policy &&
@@ -185,11 +211,24 @@ export function InvitePage({ code }: { code: string }) {
             </div>
           </div>
 
-          <div className="mt-9 w-full max-w-md">
+          <div className="mt-9 w-full max-w-md space-y-2">
+            {browserSigningAvailable ? (
+              <Button
+                className="h-10 w-full bg-black text-white hover:bg-black/90 focus-visible:ring-black disabled:cursor-not-allowed disabled:bg-black/30 disabled:text-white/70"
+                disabled={disabled}
+                onClick={joinInBrowser}
+              >
+                {joiningBrowser ? "Joining…" : "Join in browser"}
+              </Button>
+            ) : null}
             {policy === null ? (
               <Button
                 asChild
-                className="h-10 w-full bg-black text-white hover:bg-black/90 focus-visible:ring-black"
+                className={`h-10 w-full ${
+                  browserSigningAvailable
+                    ? "border border-black bg-white text-black hover:bg-black/5"
+                    : "bg-black text-white hover:bg-black/90 focus-visible:ring-black"
+                }`}
               >
                 <a
                   href={`buzz://join?relay=${encodeURIComponent(relay)}&code=${encodeURIComponent(code)}`}
@@ -199,13 +238,22 @@ export function InvitePage({ code }: { code: string }) {
               </Button>
             ) : (
               <Button
-                className="h-10 w-full bg-black text-white hover:bg-black/90 focus-visible:ring-black disabled:cursor-not-allowed disabled:bg-black/30 disabled:text-white/70"
+                className={`h-10 w-full disabled:cursor-not-allowed disabled:bg-black/30 disabled:text-white/70 ${
+                  browserSigningAvailable
+                    ? "border border-black bg-white text-black hover:bg-black/5"
+                    : "bg-black text-white hover:bg-black/90 focus-visible:ring-black"
+                }`}
                 disabled={disabled}
                 onClick={openInvite}
               >
                 Accept invite in Buzz
               </Button>
             )}
+            {browserJoinError ? (
+              <p className="text-sm text-red-700" role="alert">
+                {browserJoinError}
+              </p>
+            ) : null}
           </div>
         </div>
         <p className="flex h-[3.125rem] items-center justify-center rounded-2xl bg-white text-sm text-black/60">

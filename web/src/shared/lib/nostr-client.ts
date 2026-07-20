@@ -1,12 +1,15 @@
 /**
  * Minimal Nostr client with NIP-01 queries and NIP-42 AUTH.
  *
- * Generates an ephemeral keypair per session to authenticate with the relay.
- * This is sufficient for read-only public queries (e.g. repo listings).
+ * Uses NIP-07 when a browser extension is available, with an ephemeral
+ * page-lifetime identity as the fallback for read-only queries on open relays.
  */
 
-import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
 import { makeAuthEvent } from "nostr-tools/nip42";
+import {
+  type SignedNostrEvent,
+  signNostrEvent,
+} from "@/shared/lib/nostr-signer";
 
 export interface NostrFilter {
   ids?: string[];
@@ -18,26 +21,9 @@ export interface NostrFilter {
   [tag: `#${string}`]: string[] | undefined;
 }
 
-export interface NostrEvent {
-  id: string;
-  pubkey: string;
-  kind: number;
-  tags: string[][];
-  content: string;
-  created_at: number;
-  sig: string;
-}
+export type NostrEvent = SignedNostrEvent;
 
 const QUERY_TIMEOUT_MS = 10_000;
-
-/** Lazily-generated ephemeral keypair for NIP-42 AUTH. */
-let _secretKey: Uint8Array | null = null;
-export function getEphemeralKey(): Uint8Array {
-  if (!_secretKey) {
-    _secretKey = generateSecretKey();
-  }
-  return _secretKey;
-}
 
 /**
  * Open a WebSocket to `wsUrl`, authenticate via NIP-42 if challenged,
@@ -53,6 +39,8 @@ export function queryEvents(
     const subId = `q-${Date.now().toString(36)}`;
     let settled = false;
     let reqSent = false;
+    let authEventId: string | null = null;
+    let unauthenticatedReqTimer: ReturnType<typeof setTimeout> | null = null;
 
     const ws = new WebSocket(wsUrl);
 
@@ -66,6 +54,9 @@ export function queryEvents(
 
     const cleanup = () => {
       clearTimeout(timeout);
+      if (unauthenticatedReqTimer) {
+        clearTimeout(unauthenticatedReqTimer);
+      }
       try {
         ws.close();
       } catch {
@@ -83,10 +74,10 @@ export function queryEvents(
     ws.addEventListener("open", () => {
       // Wait briefly for an AUTH challenge before sending REQ.
       // Buzz relays always send AUTH, but other relays may not.
-      setTimeout(() => sendReq(), 100);
+      unauthenticatedReqTimer = setTimeout(() => sendReq(), 100);
     });
 
-    ws.addEventListener("message", (msg) => {
+    ws.addEventListener("message", async (msg) => {
       let data: unknown;
       try {
         data = JSON.parse(String(msg.data));
@@ -99,19 +90,45 @@ export function queryEvents(
 
       if (type === "AUTH" && typeof data[1] === "string") {
         // NIP-42: relay sent an AUTH challenge — sign and respond.
+        if (unauthenticatedReqTimer) {
+          clearTimeout(unauthenticatedReqTimer);
+          unauthenticatedReqTimer = null;
+        }
         const challenge = data[1];
-        const sk = getEphemeralKey();
         const template = makeAuthEvent(wsUrl, challenge);
-        const signed = finalizeEvent(template, sk);
-        ws.send(JSON.stringify(["AUTH", signed]));
-        // After AUTH, send our REQ.
-        sendReq();
+        try {
+          const signed = await signNostrEvent(template);
+          if (settled) return;
+          authEventId = signed.id;
+          ws.send(JSON.stringify(["AUTH", signed]));
+        } catch (error) {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(
+              error instanceof Error
+                ? error
+                : new Error("Failed to sign relay authentication."),
+            );
+          }
+        }
         return;
       }
 
-      if (type === "OK") {
-        // AUTH response accepted (or rejected). If we haven't sent REQ yet, do so now.
-        sendReq();
+      if (type === "OK" && data[1] === authEventId) {
+        if (data[2] === true) {
+          sendReq();
+        } else if (!settled) {
+          settled = true;
+          cleanup();
+          reject(
+            new Error(
+              typeof data[3] === "string"
+                ? data[3]
+                : "Relay authentication failed.",
+            ),
+          );
+        }
         return;
       }
 
