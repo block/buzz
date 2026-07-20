@@ -241,13 +241,24 @@ type RawSetCanvasResult = {
   event_id: string;
 };
 
+/** Error normalized from a rejected Tauri invocation with its wire payload. */
+export class TauriInvokeError extends Error {
+  readonly payload: unknown;
+
+  constructor(message: string, payload: unknown) {
+    super(message);
+    this.name = "TauriInvokeError";
+    this.payload = payload;
+  }
+}
+
 function toTauriError(error: unknown): Error {
   if (error instanceof Error) {
     return error;
   }
 
   if (typeof error === "string") {
-    return new Error(error);
+    return new TauriInvokeError(error, error);
   }
 
   if (
@@ -256,13 +267,13 @@ function toTauriError(error: unknown): Error {
     "message" in error &&
     typeof error.message === "string"
   ) {
-    return new Error(error.message);
+    return new TauriInvokeError(error.message, error);
   }
 
   try {
-    return new Error(JSON.stringify(error));
+    return new TauriInvokeError(JSON.stringify(error), error);
   } catch {
-    return new Error("Unknown Tauri error");
+    return new TauriInvokeError("Unknown Tauri error", error);
   }
 }
 

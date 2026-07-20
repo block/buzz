@@ -29,6 +29,7 @@ import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 import { ProjectCommitDetailPanel } from "./ProjectCommitDetailPanel";
 import { ActivityPanel, ContributorsPanel } from "./ProjectDetailFeedPanels";
 import { ProjectIssuesPanel } from "./ProjectIssuesPanel";
+import type { OpenMergeRecoveryTerminal } from "./MergePullRequestButton";
 import { ProjectOverviewPanel } from "./ProjectOverviewPanel";
 import {
   PullRequestDetailHeader,
@@ -124,6 +125,7 @@ export function WorkspaceTabs({
   onSelectedPullRequestIdChange,
   onSelectedTabChange,
   onBranchChange,
+  onOpenMergeRecoveryTerminal,
   onOpenTerminal,
   snapshot,
   snapshotError,
@@ -160,6 +162,7 @@ export function WorkspaceTabs({
   /** Reports the active tab so the screen breadcrumb can mirror it. */
   onSelectedTabChange?: (tab: string) => void;
   onBranchChange: (branch: string | null) => void;
+  onOpenMergeRecoveryTerminal?: OpenMergeRecoveryTerminal;
   onOpenTerminal?: () => void;
   snapshot: ProjectRepoSnapshot | null | undefined;
   snapshotError: unknown;
@@ -260,7 +263,7 @@ export function WorkspaceTabs({
           <Button
             aria-label="Open terminal"
             className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
-            onClick={onOpenTerminal}
+            onClick={() => onOpenTerminal()}
             size="icon"
             title={terminalTitle ?? "Open terminal"}
             variant="ghost"
@@ -305,6 +308,7 @@ export function WorkspaceTabs({
                     isLoading={pullRequestsLoading}
                     mode={mode}
                     onOpenCommit={onSelectedCommitHashChange}
+                    onOpenTerminal={onOpenMergeRecoveryTerminal}
                     onSelectedPullRequestIdChange={
                       onSelectedPullRequestIdChange
                     }
@@ -399,6 +403,7 @@ export function WorkspaceTabs({
           error={pullRequestsError}
           isLoading={pullRequestsLoading}
           onOpenCommit={onSelectedCommitHashChange}
+          onOpenTerminal={onOpenMergeRecoveryTerminal}
           onSelectedPullRequestIdChange={onSelectedPullRequestIdChange}
           profiles={profiles}
           project={project}

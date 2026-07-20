@@ -32,6 +32,7 @@ import {
   ProjectFeedRowMonoCell,
 } from "./ProjectFeedRow";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
+import type { OpenMergeRecoveryTerminal } from "./MergePullRequestButton";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
 import {
   ProfileAuthorName,
@@ -448,12 +449,14 @@ export function PullRequestMetaRail({
 function PullRequestDetail({
   mode,
   onOpenCommit,
+  onOpenTerminal,
   profiles,
   project,
   pullRequest,
 }: {
   mode: PullRequestPanelMode;
   onOpenCommit?: (commitHash: string) => void;
+  onOpenTerminal?: OpenMergeRecoveryTerminal;
   profiles?: UserProfileLookup;
   project: Project;
   pullRequest: ProjectPullRequest;
@@ -663,7 +666,11 @@ function PullRequestDetail({
             })}
           </div>
         ) : null}
-        <PullRequestReviewCard project={project} pullRequest={pullRequest} />
+        <PullRequestReviewCard
+          onOpenTerminal={onOpenTerminal}
+          project={project}
+          pullRequest={pullRequest}
+        />
         <h4 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
           <MessageSquare className="h-3.5 w-3.5" />
           Add Your Comment
@@ -687,6 +694,7 @@ export function PullRequestsPanel({
   isLoading,
   mode = "conversation",
   onOpenCommit,
+  onOpenTerminal,
   onSelectedPullRequestIdChange,
   profiles,
   project,
@@ -697,6 +705,7 @@ export function PullRequestsPanel({
   isLoading: boolean;
   mode?: PullRequestPanelMode;
   onOpenCommit?: (commitHash: string) => void;
+  onOpenTerminal?: OpenMergeRecoveryTerminal;
   onSelectedPullRequestIdChange: (id: string | null) => void;
   profiles?: UserProfileLookup;
   project: Project;
@@ -738,6 +747,7 @@ export function PullRequestsPanel({
       <PullRequestDetail
         mode={mode}
         onOpenCommit={onOpenCommit}
+        onOpenTerminal={onOpenTerminal}
         profiles={profiles}
         project={project}
         pullRequest={selectedPullRequest}

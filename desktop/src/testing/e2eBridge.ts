@@ -940,6 +940,16 @@ declare global {
     }>;
     /** Project event kinds rejected once, in order, to exercise retry flows. */
     __BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?: number[];
+    /** Structured merge error returned by the mock native merge command. */
+    __BUZZ_E2E_PROJECT_MERGE_ERROR__?: {
+      code: string;
+      message: string;
+      recovery: {
+        action: "open_terminal";
+        sourceBranch: string;
+        targetBranch: string;
+      } | null;
+    };
     /** Overrides the first mock repository owner for delegated-owner tests. */
     __BUZZ_E2E_PROJECT_OWNER_OVERRIDE__?: string;
     /** Project history kinds rejected with CLOSED for aggregate-query tests. */
@@ -9390,6 +9400,9 @@ export function maybeInstallE2eTauriMocks() {
             "Only the repository owner or the owner of its managed agent can merge pull requests.",
           );
         }
+        if (window.__BUZZ_E2E_PROJECT_MERGE_ERROR__) {
+          throw window.__BUZZ_E2E_PROJECT_MERGE_ERROR__;
+        }
         const mergeCommit = "abcdef0123456789abcdef0123456789abcdef01";
         const statusEvent = createMockEvent(
           KIND_GIT_STATUS_MERGED,
@@ -9431,6 +9444,22 @@ export function maybeInstallE2eTauriMocks() {
           status_publication_error: statusPublicationError,
         };
       }
+      case "open_project_merge_recovery_terminal": {
+        const { input } = payload as {
+          input: { expectedCommit: string };
+        };
+        return {
+          path: "/tmp/buzz/REPOS/buzz",
+          cloned: false,
+          recoveryRef: `refs/buzz/merge-recovery/${input.expectedCommit}`,
+          targetRef: `refs/buzz/merge-recovery-target/${"f".repeat(40)}`,
+        };
+      }
+      case "open_project_terminal":
+        return {
+          path: "/tmp/buzz/REPOS/buzz",
+          cloned: false,
+        };
       case "get_relay_ws_url":
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":

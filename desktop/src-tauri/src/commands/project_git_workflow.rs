@@ -32,6 +32,68 @@ pub struct ProjectRepoMergeResult {
     pub status_publication_error: Option<String>,
 }
 
+/// Machine-readable recovery metadata for a failed pull-request merge.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPullRequestMergeRecovery {
+    action: String,
+    target_branch: String,
+    source_branch: String,
+}
+
+/// Structured pull-request merge failure returned across the Tauri boundary.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPullRequestMergeError {
+    code: String,
+    message: String,
+    recovery: Option<ProjectPullRequestMergeRecovery>,
+}
+
+impl ProjectPullRequestMergeError {
+    fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+            recovery: None,
+        }
+    }
+
+    fn conflict(target_branch: String, source_branch: String) -> Self {
+        Self {
+            code: "merge_conflict".to_string(),
+            message: "Pull request has merge conflicts.".to_string(),
+            recovery: Some(ProjectPullRequestMergeRecovery {
+                action: "open_terminal".to_string(),
+                target_branch,
+                source_branch,
+            }),
+        }
+    }
+}
+
+impl From<String> for ProjectPullRequestMergeError {
+    fn from(message: String) -> Self {
+        Self::new("merge_failed", message)
+    }
+}
+
+fn classify_merge_error(
+    message: String,
+    has_conflicts: bool,
+    target_branch: &str,
+    source_branch: &str,
+) -> ProjectPullRequestMergeError {
+    if has_conflicts {
+        ProjectPullRequestMergeError::conflict(target_branch.to_string(), source_branch.to_string())
+    } else {
+        ProjectPullRequestMergeError::new(
+            "merge_failed",
+            format!("Pull request merge failed: {message}"),
+        )
+    }
+}
+
 struct ProjectRepoMergeGitResult {
     message: String,
     merge_commit: String,
@@ -403,7 +465,7 @@ pub async fn merge_project_pull_request(
     input: ProjectPullRequestMergeInput,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<ProjectRepoMergeResult, String> {
+) -> Result<ProjectRepoMergeResult, ProjectPullRequestMergeError> {
     let ProjectPullRequestMergeInput {
         target_clone_url,
         source_clone_url,
@@ -420,10 +482,12 @@ pub async fn merge_project_pull_request(
     validate_workspace_clone_url(&source_clone_url, &state)?;
     let target_owner = target_owner.trim().to_ascii_lowercase();
     if target_owner.len() != 64 || !target_owner.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("Invalid target repository owner.".to_string());
+        return Err("Invalid target repository owner.".to_string().into());
     }
     if clone_url_owner(&target_clone_url).as_deref() != Some(target_owner.as_str()) {
-        return Err("Target clone URL does not match the repository owner.".to_string());
+        return Err("Target clone URL does not match the repository owner."
+            .to_string()
+            .into());
     }
     let owner_identity = project_owner_identity(&app, &state, &target_owner)?;
     let merger_pubkey = owner_identity.keys.public_key().to_hex();
@@ -432,7 +496,9 @@ pub async fn merge_project_pull_request(
     let source_branch = normalize_branch_option(Some(&source_branch))
         .ok_or_else(|| "Invalid source branch.".to_string())?;
     if target_branch == source_branch && same_repository(&target_clone_url, &source_clone_url) {
-        return Err("Source and target branches must be different.".to_string());
+        return Err("Source and target branches must be different."
+            .to_string()
+            .into());
     }
     let expected_commit = normalize_commit(&expected_commit)
         .ok_or_else(|| "Invalid pull request commit.".to_string())?;
@@ -444,87 +510,109 @@ pub async fn merge_project_pull_request(
     )?;
     let auth = build_git_auth_config_for_keys(&owner_identity.keys)?;
 
-    let git_result = tauri::async_runtime::spawn_blocking(move || {
-        let temp_dir = tempfile::tempdir().map_err(|error| format!("create temp dir: {error}"))?;
-        let repo_dir = temp_dir.path().join("repo");
-        let repo_path = repo_dir
-            .to_str()
-            .ok_or_else(|| "temporary repository path is not UTF-8".to_string())?;
-        run_git(
-            &[
-                "clone",
-                "--filter=blob:none",
-                "--no-tags",
-                "--branch",
-                target_branch.as_str(),
-                "--single-branch",
-                "--end-of-options",
-                target_clone_url.as_str(),
-                repo_path,
-            ],
-            None,
-            &auth,
-        )?;
-        run_git(
-            &[
-                "fetch",
-                "--quiet",
-                "--end-of-options",
-                source_clone_url.as_str(),
-                source_branch.as_str(),
-            ],
-            Some(&repo_dir),
-            &auth,
-        )?;
-        let source_head = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &auth)
-            .ok()
-            .and_then(|output| first_output_line(&output))
-            .ok_or_else(|| "Could not resolve the pull request branch.".to_string())?;
-        if source_head.to_ascii_lowercase() != expected_commit {
-            return Err(
-                "The pull request branch changed. Refresh the pull request before merging."
-                    .to_string(),
+    let git_result = tauri::async_runtime::spawn_blocking(
+        move || -> Result<ProjectRepoMergeGitResult, ProjectPullRequestMergeError> {
+            let temp_dir =
+                tempfile::tempdir().map_err(|error| format!("create temp dir: {error}"))?;
+            let repo_dir = temp_dir.path().join("repo");
+            let repo_path = repo_dir
+                .to_str()
+                .ok_or_else(|| "temporary repository path is not UTF-8".to_string())?;
+            run_git(
+                &[
+                    "clone",
+                    "--filter=blob:none",
+                    "--no-tags",
+                    "--branch",
+                    target_branch.as_str(),
+                    "--single-branch",
+                    "--end-of-options",
+                    target_clone_url.as_str(),
+                    repo_path,
+                ],
+                None,
+                &auth,
+            )?;
+            run_git(
+                &[
+                    "fetch",
+                    "--quiet",
+                    "--end-of-options",
+                    source_clone_url.as_str(),
+                    source_branch.as_str(),
+                ],
+                Some(&repo_dir),
+                &auth,
+            )?;
+            let source_head = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &auth)
+                .ok()
+                .and_then(|output| first_output_line(&output))
+                .ok_or_else(|| "Could not resolve the pull request branch.".to_string())?;
+            if source_head.to_ascii_lowercase() != expected_commit {
+                return Err(ProjectPullRequestMergeError::new(
+                    "branch_changed",
+                    "The pull request branch changed. Refresh the pull request before merging."
+                        .to_string(),
+                ));
+            }
+
+            let merge_email = format!("{merger_pubkey}@users.noreply.buzz");
+            let merge_result = run_git(
+                &[
+                    "-c",
+                    "user.name=Buzz User",
+                    "-c",
+                    format!("user.email={merge_email}").as_str(),
+                    "merge",
+                    "--no-edit",
+                    "--end-of-options",
+                    expected_commit.as_str(),
+                ],
+                Some(&repo_dir),
+                &auth,
             );
-        }
+            if let Err(error) = merge_result {
+                let has_conflicts = run_git(
+                    &["diff", "--name-only", "--diff-filter=U"],
+                    Some(&repo_dir),
+                    &auth,
+                )
+                .is_ok_and(|output| !output.trim().is_empty());
+                return Err(classify_merge_error(
+                    error,
+                    has_conflicts,
+                    &target_branch,
+                    &source_branch,
+                ));
+            }
+            let merge_commit = run_git(&["rev-parse", "HEAD"], Some(&repo_dir), &auth)
+                .ok()
+                .and_then(|output| first_output_line(&output))
+                .ok_or_else(|| "Could not resolve the merge commit.".to_string())?;
+            run_git(
+                &[
+                    "push",
+                    "--end-of-options",
+                    "origin",
+                    format!("HEAD:{target_branch}").as_str(),
+                ],
+                Some(&repo_dir),
+                &auth,
+            )?;
 
-        let merge_email = format!("{merger_pubkey}@users.noreply.buzz");
-        run_git(
-            &[
-                "-c",
-                "user.name=Buzz User",
-                "-c",
-                format!("user.email={merge_email}").as_str(),
-                "merge",
-                "--no-edit",
-                "--end-of-options",
-                expected_commit.as_str(),
-            ],
-            Some(&repo_dir),
-            &auth,
-        )
-        .map_err(|error| format!("Pull request cannot be merged cleanly: {error}"))?;
-        let merge_commit = run_git(&["rev-parse", "HEAD"], Some(&repo_dir), &auth)
-            .ok()
-            .and_then(|output| first_output_line(&output))
-            .ok_or_else(|| "Could not resolve the merge commit.".to_string())?;
-        run_git(
-            &[
-                "push",
-                "--end-of-options",
-                "origin",
-                format!("HEAD:{target_branch}").as_str(),
-            ],
-            Some(&repo_dir),
-            &auth,
-        )?;
-
-        Ok(ProjectRepoMergeGitResult {
-            message: format!("Merged {source_branch} into {target_branch}."),
-            merge_commit,
-        })
-    })
+            Ok(ProjectRepoMergeGitResult {
+                message: format!("Merged {source_branch} into {target_branch}."),
+                merge_commit,
+            })
+        },
+    )
     .await
-    .map_err(|error| format!("pull request merge task failed: {error}"))??;
+    .map_err(|error| {
+        ProjectPullRequestMergeError::new(
+            "merge_task_failed",
+            format!("pull request merge task failed: {error}"),
+        )
+    })??;
     let status_event = build_merged_status_event(
         &owner_identity.keys,
         &repo_address,
@@ -554,8 +642,9 @@ pub async fn merge_project_pull_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_merged_status_event, build_review_request_event, normalize_commit, same_repository,
-        validate_merge_status_metadata,
+        build_merged_status_event, build_review_request_event, classify_merge_error,
+        normalize_commit, same_repository, validate_merge_status_metadata,
+        ProjectPullRequestMergeError,
     };
     use nostr::{Event, JsonUtil, Keys, Timestamp};
 
@@ -581,6 +670,51 @@ mod tests {
             "https://relay.example/git/owner/repo",
             "https://relay.example/git/fork/repo"
         ));
+    }
+
+    #[test]
+    fn merge_conflict_error_has_stable_recovery_metadata() {
+        let error =
+            ProjectPullRequestMergeError::conflict("main".to_string(), "feature/demo".to_string());
+
+        assert_eq!(error.code, "merge_conflict");
+        assert_eq!(error.message, "Pull request has merge conflicts.");
+        let recovery = error.recovery.expect("conflict recovery");
+        assert_eq!(recovery.action, "open_terminal");
+        assert_eq!(recovery.target_branch, "main");
+        assert_eq!(recovery.source_branch, "feature/demo");
+    }
+
+    #[test]
+    fn merge_conflict_error_serializes_for_tauri_clients() {
+        let error =
+            ProjectPullRequestMergeError::conflict("main".to_string(), "feature/demo".to_string());
+        let value = serde_json::to_value(error).expect("serialize merge conflict");
+
+        assert_eq!(value["code"], "merge_conflict");
+        assert_eq!(value["recovery"]["targetBranch"], "main");
+        assert_eq!(value["recovery"]["sourceBranch"], "feature/demo");
+    }
+
+    #[test]
+    fn merge_error_classification_only_recovers_conflicts() {
+        let conflict = classify_merge_error(
+            "CONFLICT (content): Merge conflict in src/main.rs".to_string(),
+            true,
+            "main",
+            "feature/demo",
+        );
+        assert_eq!(conflict.code, "merge_conflict");
+        assert!(conflict.recovery.is_some());
+
+        let other = classify_merge_error(
+            "fatal: refusing to merge unrelated histories".to_string(),
+            false,
+            "main",
+            "feature/demo",
+        );
+        assert_eq!(other.code, "merge_failed");
+        assert!(other.recovery.is_none());
     }
 
     #[test]

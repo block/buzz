@@ -42,6 +42,7 @@ import {
   profilePanelViewFromSearch,
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { openProjectMergeRecoveryTerminal } from "@/shared/api/projectGit";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
   channelChrome,
@@ -576,6 +577,26 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       hasLocalCheckout,
     });
   }, [activeBranch, hasLocalCheckout, openTerminal, project]);
+  const handleOpenMergeRecoveryTerminal = React.useCallback(
+    async (input: {
+      expectedCommit: string;
+      sourceBranch: string;
+      sourceCloneUrl: string;
+      targetBranch: string;
+    }) => {
+      const targetCloneUrl = project?.cloneUrls[0];
+      if (!project || !targetCloneUrl) {
+        throw new Error("No project selected.");
+      }
+      return openProjectMergeRecoveryTerminal({
+        ...input,
+        projectDtag: project.dtag,
+        reposDir: activeCommunity?.reposDir,
+        targetCloneUrl,
+      });
+    },
+    [activeCommunity?.reposDir, project],
+  );
 
   if (projectQuery.isLoading) {
     return null;
@@ -850,6 +871,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 localSnapshotError={localRepoSnapshotQuery.error}
                 localSnapshotLoading={localRepoSnapshotQuery.isLoading}
                 onBranchChange={setSelectedBranch}
+                onOpenMergeRecoveryTerminal={handleOpenMergeRecoveryTerminal}
                 onOpenTerminal={() => {
                   void handleOpenTerminal();
                 }}

@@ -16,13 +16,18 @@ import {
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
-import { MergePullRequestButton } from "./MergePullRequestButton";
+import {
+  MergePullRequestButton,
+  type OpenMergeRecoveryTerminal,
+} from "./MergePullRequestButton";
 
 /** GitHub-style review state and actions rendered in the conversation flow. */
 export function PullRequestReviewCard({
+  onOpenTerminal,
   project,
   pullRequest,
 }: {
+  onOpenTerminal?: OpenMergeRecoveryTerminal;
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
@@ -236,6 +241,7 @@ export function PullRequestReviewCard({
             ) : null}
             {canMerge ? (
               <MergePullRequestButton
+                onOpenTerminal={onOpenTerminal}
                 project={project}
                 pullRequest={pullRequest}
               />

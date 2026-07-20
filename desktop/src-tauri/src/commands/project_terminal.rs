@@ -1,13 +1,15 @@
 //! Opens an OS terminal window at a project's local git checkout, cloning
 //! the repository from the relay first when no local checkout exists.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 use tauri::State;
 
 use crate::app_state::AppState;
 
-use super::project_git_exec::{build_git_auth_config, validate_workspace_clone_url};
+use super::project_git::{first_output_line, normalize_branch_option};
+use super::project_git_diff::clean_commit;
+use super::project_git_exec::{build_git_auth_config, run_git, validate_workspace_clone_url};
 use super::project_git_workflow::clone_project_repository_blocking;
 use super::project_repo_paths::find_local_repo_dir;
 
@@ -17,6 +19,37 @@ use super::project_repo_paths::find_local_repo_dir;
 pub struct ProjectTerminalResult {
     pub path: String,
     pub cloned: bool,
+}
+
+/// Inputs for preparing an authenticated local merge-conflict recovery.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMergeRecoveryTerminalInput {
+    repos_dir: Option<String>,
+    project_dtag: String,
+    target_clone_url: String,
+    source_clone_url: String,
+    target_branch: String,
+    source_branch: String,
+    expected_commit: String,
+}
+
+/// Local checkout and ref prepared for terminal-based conflict resolution.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMergeRecoveryTerminalResult {
+    path: String,
+    cloned: bool,
+    recovery_ref: String,
+    target_ref: String,
+}
+
+fn merge_recovery_ref(expected_commit: &str) -> String {
+    format!("refs/buzz/merge-recovery/{expected_commit}")
+}
+
+fn merge_recovery_target_ref(target_commit: &str) -> String {
+    format!("refs/buzz/merge-recovery-target/{target_commit}")
 }
 
 #[cfg(target_os = "macos")]
@@ -121,4 +154,124 @@ pub async fn open_project_terminal(
     })
     .await
     .map_err(|error| format!("open terminal task failed: {error}"))?
+}
+
+/// Authenticates and fetches the exact pull-request commit before opening a
+/// terminal. The user's worktree is not switched or modified.
+#[tauri::command]
+pub async fn open_project_merge_recovery_terminal(
+    input: ProjectMergeRecoveryTerminalInput,
+    state: State<'_, AppState>,
+) -> Result<ProjectMergeRecoveryTerminalResult, String> {
+    validate_workspace_clone_url(&input.target_clone_url, &state)?;
+    validate_workspace_clone_url(&input.source_clone_url, &state)?;
+    let target_branch = normalize_branch_option(Some(&input.target_branch))
+        .ok_or_else(|| "Invalid target branch.".to_string())?;
+    let source_branch = normalize_branch_option(Some(&input.source_branch))
+        .ok_or_else(|| "Invalid source branch.".to_string())?;
+    let expected_commit = clean_commit(Some(input.expected_commit.trim().to_ascii_lowercase()))
+        .ok_or_else(|| "Invalid pull request commit.".to_string())?;
+    let auth = build_git_auth_config(&state)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let existing_dir = find_local_repo_dir(
+            input.repos_dir.as_deref(),
+            &input.project_dtag,
+            Some(&input.target_clone_url),
+        )
+        .ok()
+        .flatten();
+        let (repo_dir, cloned) = if let Some(repo_dir) = existing_dir {
+            (repo_dir, false)
+        } else {
+            let clone_result = clone_project_repository_blocking(
+                input.repos_dir.as_deref(),
+                &input.project_dtag,
+                &input.target_clone_url,
+                Some(&target_branch),
+                &auth,
+            )?;
+            (std::path::PathBuf::from(clone_result.path), true)
+        };
+
+        run_git(
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--end-of-options",
+                input.target_clone_url.as_str(),
+                target_branch.as_str(),
+            ],
+            Some(&repo_dir),
+            &auth,
+        )?;
+        let target_head = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &auth)
+            .ok()
+            .and_then(|output| first_output_line(&output))
+            .ok_or_else(|| "Could not resolve the target branch.".to_string())?;
+        let target_ref = merge_recovery_target_ref(&target_head);
+        run_git(
+            &["update-ref", target_ref.as_str(), target_head.as_str()],
+            Some(&repo_dir),
+            &auth,
+        )?;
+
+        run_git(
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--end-of-options",
+                input.source_clone_url.as_str(),
+                source_branch.as_str(),
+            ],
+            Some(&repo_dir),
+            &auth,
+        )?;
+        let source_head = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &auth)
+            .ok()
+            .and_then(|output| first_output_line(&output))
+            .ok_or_else(|| "Could not resolve the pull request branch.".to_string())?;
+        if source_head.to_ascii_lowercase() != expected_commit {
+            return Err(
+                "The pull request branch changed. Refresh the pull request before resolving conflicts."
+                    .to_string(),
+            );
+        }
+
+        let recovery_ref = merge_recovery_ref(&expected_commit);
+        run_git(
+            &["update-ref", recovery_ref.as_str(), expected_commit.as_str()],
+            Some(&repo_dir),
+            &auth,
+        )?;
+        launch_terminal_at(&repo_dir)?;
+        Ok(ProjectMergeRecoveryTerminalResult {
+            path: repo_dir.display().to_string(),
+            cloned,
+            recovery_ref,
+            target_ref,
+        })
+    })
+    .await
+    .map_err(|error| format!("open merge recovery terminal task failed: {error}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_recovery_ref, merge_recovery_target_ref};
+
+    #[test]
+    fn recovery_ref_is_namespaced_by_verified_commit() {
+        let commit = "a".repeat(40);
+        assert_eq!(
+            merge_recovery_ref(&commit),
+            format!("refs/buzz/merge-recovery/{commit}"),
+        );
+        assert_eq!(
+            merge_recovery_target_ref(&commit),
+            format!("refs/buzz/merge-recovery-target/{commit}"),
+        );
+    }
 }
