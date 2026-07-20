@@ -5,8 +5,7 @@ import {
   AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/AgentConfigFields";
-import { BUZZ_AGENT_THINKING_EFFORT } from "@/features/agents/ui/buzzAgentConfig";
-import { runtimeSupportsLlmProviderSelection } from "@/features/agents/ui/agentConfigOptions";
+import { resetConfigForHarnessChange } from "@/features/agents/ui/agentConfigOptions";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
 import { createSaveCoalescer } from "./saveCoalescer";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
@@ -26,6 +25,7 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
+import { ONBOARDING_RUNTIME_ORDER } from "./onboardingRuntimeSelection";
 import type { DefaultConfigStepActions } from "./types";
 
 type DefaultConfigStepProps = {
@@ -33,8 +33,6 @@ type DefaultConfigStepProps = {
   direction: OnboardingTransitionDirection;
   selectedRuntimeIds: readonly string[];
 };
-
-const RUNTIME_ORDER = ["claude", "codex", "goose", "buzz-agent"];
 
 function formatHarnessLabel(runtime: AcpRuntimeCatalogEntry | undefined) {
   if (!runtime) return "Select a harness";
@@ -49,11 +47,11 @@ function sortSelectedRuntimes(
   return runtimes
     .filter((runtime) => selectedRuntimeIdSet.has(runtime.id))
     .sort((left, right) => {
-      const leftIndex = RUNTIME_ORDER.indexOf(left.id);
-      const rightIndex = RUNTIME_ORDER.indexOf(right.id);
+      const leftIndex = ONBOARDING_RUNTIME_ORDER.indexOf(left.id);
+      const rightIndex = ONBOARDING_RUNTIME_ORDER.indexOf(right.id);
       return (
-        (leftIndex === -1 ? RUNTIME_ORDER.length : leftIndex) -
-        (rightIndex === -1 ? RUNTIME_ORDER.length : rightIndex)
+        (leftIndex === -1 ? ONBOARDING_RUNTIME_ORDER.length : leftIndex) -
+        (rightIndex === -1 ? ONBOARDING_RUNTIME_ORDER.length : rightIndex)
       );
     });
 }
@@ -146,20 +144,7 @@ function AgentDefaultsSection({
 
   const handleHarnessChange = React.useCallback(
     (runtimeId: string) => {
-      const nextEnvVars = { ...config.env_vars };
-      delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
-      const nextProvider =
-        runtimeSupportsLlmProviderSelection(runtimeId) &&
-        config.provider !== "relay-mesh"
-          ? config.provider
-          : null;
-      const next = {
-        ...config,
-        env_vars: nextEnvVars,
-        model: null,
-        preferred_runtime: runtimeId || null,
-        provider: nextProvider,
-      };
+      const next = resetConfigForHarnessChange(config, runtimeId);
       setIsCustomModelEditing(false);
       setIsCustomProvider(false);
       setConfig(next);

@@ -5,6 +5,7 @@ import {
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  resetConfigForHarnessChange,
   runtimeSupportsLlmProviderSelection,
 } from "./agentConfigOptions.tsx";
 import { formatModelDiscoveryErrorStatus } from "./personaModelDiscoveryStatus.ts";
@@ -143,6 +144,49 @@ test("runtimeSupportsLlmProviderSelection is true for buzz-agent and goose", () 
 test("runtimeSupportsLlmProviderSelection is false for codex and claude", () => {
   assert.equal(runtimeSupportsLlmProviderSelection("codex"), false);
   assert.equal(runtimeSupportsLlmProviderSelection("claude"), false);
+});
+
+test("resetConfigForHarnessChange clears harness-specific values", () => {
+  const config = {
+    env_vars: { BUZZ_AGENT_THINKING_EFFORT: "high", KEEP_ME: "yes" },
+    model: "claude-opus",
+    preferred_runtime: "buzz-agent",
+    provider: "anthropic",
+  };
+
+  assert.deepEqual(resetConfigForHarnessChange(config, "claude"), {
+    env_vars: { KEEP_ME: "yes" },
+    model: null,
+    preferred_runtime: "claude",
+    provider: null,
+  });
+});
+
+test("resetConfigForHarnessChange preserves compatible provider selection", () => {
+  const config = {
+    env_vars: { KEEP_ME: "yes" },
+    model: "old-model",
+    preferred_runtime: "claude",
+    provider: "anthropic",
+  };
+
+  assert.deepEqual(resetConfigForHarnessChange(config, "goose"), {
+    env_vars: { KEEP_ME: "yes" },
+    model: null,
+    preferred_runtime: "goose",
+    provider: "anthropic",
+  });
+});
+
+test("resetConfigForHarnessChange does not carry relay mesh to Goose", () => {
+  const config = {
+    env_vars: {},
+    model: "auto",
+    preferred_runtime: "buzz-agent",
+    provider: "relay-mesh",
+  };
+
+  assert.equal(resetConfigForHarnessChange(config, "goose").provider, null);
 });
 
 // ── getPersonaModelOptions — codex/claude do not use global provider ──────────

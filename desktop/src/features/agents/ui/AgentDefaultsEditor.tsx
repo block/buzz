@@ -23,11 +23,10 @@ import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import {
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
-  runtimeSupportsLlmProviderSelection,
+  resetConfigForHarnessChange,
   sortPersonaRuntimes,
 } from "@/features/agents/ui/agentConfigOptions";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
-import { BUZZ_AGENT_THINKING_EFFORT } from "@/features/agents/ui/buzzAgentConfig";
 import {
   AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
@@ -118,6 +117,9 @@ export function AgentDefaultsEditor({
     () => sortPersonaRuntimes(runtimesQuery.data ?? []),
     [runtimesQuery.data],
   );
+  // A missing/stale preference displays the same effective fallback the backend
+  // would use; it is persisted only after the user edits and saves this form.
+  // Keep persona ordering here so this shared editor matches agent dialogs.
   const selectedRuntime = React.useMemo(
     () =>
       sortedRuntimes.find(
@@ -150,19 +152,7 @@ export function AgentDefaultsEditor({
   }
 
   function handleHarnessChange(runtimeId: string) {
-    const nextEnvVars = { ...config.env_vars };
-    delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
-    handleConfigChange({
-      ...config,
-      env_vars: nextEnvVars,
-      model: null,
-      preferred_runtime: runtimeId || null,
-      provider:
-        runtimeSupportsLlmProviderSelection(runtimeId) &&
-        config.provider !== "relay-mesh"
-          ? config.provider
-          : null,
-    });
+    handleConfigChange(resetConfigForHarnessChange(config, runtimeId));
     setIsCustomModelEditing(false);
     setIsCustomProvider(false);
   }

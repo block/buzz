@@ -1,4 +1,8 @@
-import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import type {
+  AcpRuntimeCatalogEntry,
+  GlobalAgentConfig,
+} from "@/shared/api/types";
+import { BUZZ_AGENT_THINKING_EFFORT } from "./buzzAgentConfig";
 import type { RuntimeFileConfigSubset } from "@/shared/api/tauri";
 // Dialogs import getDefaultPersonaRuntime via this re-export; lib code imports
 // directly from lib/resolvePersonaRuntime.
@@ -171,6 +175,27 @@ export function isMissingRequiredDropdownField(
 
 export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
   return runtimeId === "buzz-agent" || runtimeId === "goose";
+}
+
+/** Clears values whose meaning or support changes with the selected harness. */
+export function resetConfigForHarnessChange(
+  config: GlobalAgentConfig,
+  runtimeId: string,
+): GlobalAgentConfig {
+  const nextEnvVars = { ...config.env_vars };
+  delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+
+  return {
+    ...config,
+    env_vars: nextEnvVars,
+    model: null,
+    preferred_runtime: runtimeId || null,
+    provider:
+      runtimeSupportsLlmProviderSelection(runtimeId) &&
+      config.provider !== "relay-mesh"
+        ? config.provider
+        : null,
+  };
 }
 
 function effectiveModelProviderForOptions(
