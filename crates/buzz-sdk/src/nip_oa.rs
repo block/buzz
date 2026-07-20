@@ -235,6 +235,55 @@ pub fn verify_auth_tag(
     Ok(owner_pubkey)
 }
 
+/// Verify a NIP-OA credential for relay admission at a signed auth event.
+///
+/// This performs the normal signature and syntax checks, then evaluates every
+/// `created_at<` and `created_at>` clause against the signed NIP-42, NIP-98, or
+/// equivalent authentication event's `created_at`. Both operators are strict:
+/// equality does not satisfy either clause. `kind=` clauses are deliberately
+/// not evaluated at connection admission, matching NIP-AA's connection-wide
+/// credential semantics.
+///
+/// # Errors
+///
+/// Returns [`SdkError::InvalidInput`] when the credential is invalid or the
+/// signed authentication event does not satisfy a time condition.
+pub fn verify_auth_tag_for_auth_event(
+    auth_tag_json: &str,
+    agent_pubkey: &PublicKey,
+    auth_event_created_at: u64,
+) -> Result<PublicKey, SdkError> {
+    let owner_pubkey = verify_auth_tag(auth_tag_json, agent_pubkey)?;
+    let arr = parse_json_array(auth_tag_json)?;
+    let conditions = arr[2]
+        .as_str()
+        .ok_or_else(|| SdkError::InvalidInput("element 2 (conditions) must be a string".into()))?;
+
+    for clause in conditions.split('&') {
+        let (bound, satisfied) = if let Some(value) = clause.strip_prefix("created_at<") {
+            let bound = value
+                .parse::<u64>()
+                .map_err(|e| SdkError::InvalidInput(format!("invalid created_at< bound: {e}")))?;
+            (bound, auth_event_created_at < bound)
+        } else if let Some(value) = clause.strip_prefix("created_at>") {
+            let bound = value
+                .parse::<u64>()
+                .map_err(|e| SdkError::InvalidInput(format!("invalid created_at> bound: {e}")))?;
+            (bound, auth_event_created_at > bound)
+        } else {
+            continue;
+        };
+
+        if !satisfied {
+            return Err(SdkError::InvalidInput(format!(
+                "auth event created_at {auth_event_created_at} does not satisfy {clause} (bound {bound})"
+            )));
+        }
+    }
+
+    Ok(owner_pubkey)
+}
+
 /// Parse a NIP-OA `auth` tag JSON string into a [`Tag`] without verifying the
 /// signature.
 ///
@@ -584,6 +633,32 @@ mod tests {
         let err = verify_auth_tag(&bad_conditions, &agent_pubkey)
             .expect_err("leading zero must be rejected at verify");
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn auth_event_time_conditions_are_enforced_strictly() {
+        let owner_keys = Keys::generate();
+        let agent_pubkey = Keys::generate().public_key();
+
+        let expired = compute_auth_tag(&owner_keys, &agent_pubkey, "created_at<200")
+            .expect("sign expired credential");
+        assert!(verify_auth_tag_for_auth_event(&expired, &agent_pubkey, 200).is_err());
+
+        let not_yet_valid = compute_auth_tag(&owner_keys, &agent_pubkey, "created_at>200")
+            .expect("sign future credential");
+        assert!(verify_auth_tag_for_auth_event(&not_yet_valid, &agent_pubkey, 200).is_err());
+
+        let in_window = compute_auth_tag(
+            &owner_keys,
+            &agent_pubkey,
+            "kind=9&created_at>199&created_at<201",
+        )
+        .expect("sign in-window credential");
+        assert_eq!(
+            verify_auth_tag_for_auth_event(&in_window, &agent_pubkey, 200)
+                .expect("in-window credential passes"),
+            owner_keys.public_key()
+        );
     }
 
     #[test]

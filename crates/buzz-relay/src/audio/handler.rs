@@ -215,6 +215,7 @@ async fn handle_active_audio_connection(
 
     // Extract NIP-OA auth tag before verify_auth_event consumes the event.
     let auth_tag_json = crate::handlers::auth::extract_auth_tag_json(&auth_msg.event);
+    let signed_auth_created_at = auth_msg.event.created_at.as_secs();
 
     let relay_url = crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant);
     let auth_ctx = match state
@@ -246,6 +247,7 @@ async fn handle_active_audio_connection(
         tenant.community(),
         pubkey.as_bytes(),
         auth_tag_json.as_deref(),
+        Some(signed_auth_created_at),
     )
     .await
     .is_err()

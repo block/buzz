@@ -2521,9 +2521,8 @@ fn collect_prompt_pubkeys(
 ///
 /// Agents carry a NIP-OA `["auth", owner_pk, conditions, sig]` tag in their
 /// profile; humans do not. This checks for the tag's presence/shape only — a
-/// cheap routing heuristic for reply anchoring, not a verified security gate
-/// (the signing path in `lib.rs::check_sibling_via_profile` does full
-/// verification where it matters).
+/// cheap routing heuristic for reply anchoring, never an author-authorization
+/// decision.
 fn profile_event_is_agent(ev: &serde_json::Value) -> bool {
     ev.get("tags")
         .and_then(|t| t.as_array())

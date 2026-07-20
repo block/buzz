@@ -381,7 +381,6 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     }
 
     let publisher = relay.event_publisher();
-    let rest_client = relay.rest_client();
 
     // Deduplicate by event-id so reconnect replay cannot double-nudge.
     let mut nudged_event_ids: HashSet<EventId> = HashSet::new();
@@ -431,9 +430,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             &config.respond_to_allowlist,
             &author_hex,
             &owner_cache,
-            &rest_client,
-        )
-        .await;
+        );
 
         // Apply channel/kind filter rules.
         let filter_matched = filter::match_event(

@@ -118,173 +118,43 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
 
 /// Cache for the agent's owner pubkey.
 ///
-/// Owner is now provided via `--agent-owner` config flag (no REST lookup).
-/// Cache for the agent's owner pubkey + sibling lookups.
-///
-/// Siblings are other agents whose NIP-OA auth tag proves the same owner.
-/// Lookup results are cached for the process lifetime (attestations are immutable).
+/// Owner is provided via `--agent-owner` config or the harness's own verified
+/// NIP-OA credential. Other agents are never inferred from profile metadata;
+/// they must be named explicitly in `respond-to-allowlist`.
 struct OwnerCache {
     pubkey: Option<String>,
-    /// author_hex → is_sibling (true = same owner, false = not)
-    siblings: std::sync::Mutex<HashMap<String, bool>>,
 }
 
 impl OwnerCache {
     fn new(initial: Option<String>) -> Self {
-        Self {
-            pubkey: initial,
-            siblings: std::sync::Mutex::new(HashMap::new()),
-        }
+        Self { pubkey: initial }
     }
 
     /// Return the cached owner pubkey.
     fn get(&self) -> Option<&str> {
         self.pubkey.as_deref()
     }
-
-    /// Check if author is a known sibling (cached result).
-    fn is_known_sibling(&self, author: &str) -> Option<bool> {
-        self.siblings.lock().ok()?.get(author).copied()
-    }
-
-    /// Cache a sibling lookup result.
-    fn cache_sibling(&self, author: String, is_sibling: bool) {
-        if let Ok(mut map) = self.siblings.lock() {
-            // Cap at 256 entries to prevent unbounded growth.
-            if map.len() >= 256 {
-                map.clear();
-            }
-            map.insert(author, is_sibling);
-        }
-    }
-}
-
-/// Check if `author` is the owner OR a sibling (same owner via NIP-OA).
-///
-/// For unknown authors, queries their kind:0 profile to extract the NIP-OA
-/// auth tag and verify the owner matches. Result is cached.
-async fn is_owner_or_sibling(
-    author: &str,
-    owner_cache: &OwnerCache,
-    rest_client: &relay::RestClient,
-) -> bool {
-    let my_owner = match owner_cache.get() {
-        Some(o) => o,
-        None => return false, // no owner configured — fail closed
-    };
-
-    // Direct owner check.
-    if author == my_owner {
-        return true;
-    }
-
-    // Check sibling cache.
-    if let Some(cached) = owner_cache.is_known_sibling(author) {
-        return cached;
-    }
-
-    // Query the author's kind:0 profile to check for NIP-OA auth tag.
-    let is_sibling = check_sibling_via_profile(author, my_owner, rest_client).await;
-    owner_cache.cache_sibling(author.to_string(), is_sibling);
-    is_sibling
 }
 
 /// Inbound author gate decision: does this author's event fire a turn?
 ///
-/// Coarse security policy applied before subscription rules. Both `OwnerOnly`
-/// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
-/// additionally accepts the explicit external pubkey list.
-async fn author_allowed(
+/// Coarse security policy applied before subscription rules. `OwnerOnly` is a
+/// literal pubkey equality check. `Allowlist` accepts the owner plus explicitly
+/// configured pubkeys; it does not infer authority from NIP-OA profile tags.
+fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
     author: &str,
     owner_cache: &OwnerCache,
-    rest_client: &relay::RestClient,
 ) -> bool {
     match respond_to {
         RespondTo::Anyone => true,
         RespondTo::Nobody => false,
-        RespondTo::OwnerOnly => is_owner_or_sibling(author, owner_cache, rest_client).await,
+        RespondTo::OwnerOnly => owner_cache.get().is_some_and(|owner| author == owner),
         RespondTo::Allowlist => {
-            allowlist.contains(author)
-                || is_owner_or_sibling(author, owner_cache, rest_client).await
+            allowlist.contains(author) || owner_cache.get().is_some_and(|owner| author == owner)
         }
     }
-}
-
-/// Query an author's kind:0 profile and check if their NIP-OA auth tag
-/// proves the same owner as us.
-async fn check_sibling_via_profile(
-    author: &str,
-    expected_owner: &str,
-    rest_client: &relay::RestClient,
-) -> bool {
-    let filter = nostr::Filter::new()
-        .kind(nostr::Kind::Metadata)
-        .author(match nostr::PublicKey::from_hex(author) {
-            Ok(pk) => pk,
-            Err(_) => return false,
-        })
-        .limit(1);
-
-    let resp = match tokio::time::timeout(Duration::from_millis(2000), rest_client.query(&[filter]))
-        .await
-    {
-        Ok(Ok(v)) => v,
-        _ => return false, // timeout or error — fail closed
-    };
-
-    // Look for an "auth" tag in the profile event.
-    let events = match resp.as_array() {
-        Some(arr) => arr,
-        None => return false,
-    };
-    let event = match events.first() {
-        Some(e) => e,
-        None => return false,
-    };
-    let tags = match event.get("tags").and_then(|t| t.as_array()) {
-        Some(t) => t,
-        None => return false,
-    };
-
-    // Find ["auth", owner_pk, conditions, sig] and verify the Schnorr signature.
-    // Don't trust the relay — verify ourselves.
-    let agent_pk = match nostr::PublicKey::from_hex(author) {
-        Ok(pk) => pk,
-        Err(_) => return false,
-    };
-
-    for tag in tags {
-        let parts = match tag.as_array() {
-            Some(p) if p.len() >= 4 => p,
-            _ => continue,
-        };
-        if parts[0].as_str() != Some("auth") {
-            continue;
-        }
-        let tag_owner = match parts[1].as_str() {
-            Some(o) => o,
-            None => continue,
-        };
-        // Only verify if the owner field matches ours.
-        if !tag_owner.eq_ignore_ascii_case(expected_owner) {
-            continue;
-        }
-        // Cryptographically verify the NIP-OA attestation signature.
-        let tag_json = serde_json::to_string(tag).unwrap_or_default();
-        match buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent_pk) {
-            Ok(_) => {
-                tracing::debug!(author, expected_owner, "sibling verified via NIP-OA");
-                return true;
-            }
-            Err(e) => {
-                tracing::debug!(author, "NIP-OA auth tag verification failed: {e}");
-            }
-        }
-    }
-
-    false
 }
 
 fn spawn_relay_observer_publisher(
@@ -1974,12 +1844,9 @@ async fn tokio_main() -> Result<()> {
                             // agent. Must be AFTER !shutdown (owner can always
                             // shut down regardless of gate mode).
                             //
-                            // Both OwnerOnly and Allowlist accept events from
-                            // "siblings" — pubkeys whose agent_owner_pubkey
-                            // matches this agent's owner (e.g. other bots
-                            // launched by the same human). Allowlist adds the
-                            // explicit pubkey list on top, for external people;
-                            // it never revokes same-owner team bots.
+                            // OwnerOnly is literal: only the configured owner
+                            // pubkey passes. Allowlist adds only explicit
+                            // pubkeys; profile metadata never grants authority.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
                                 let allowed = author_allowed(
@@ -1987,9 +1854,7 @@ async fn tokio_main() -> Result<()> {
                                     &config.respond_to_allowlist,
                                     &author,
                                     &owner_cache,
-                                    &ctx.rest_client,
-                                )
-                                .await;
+                                );
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
@@ -2047,10 +1912,10 @@ async fn tokio_main() -> Result<()> {
                             // the channel has an in-flight task, fire cancel —
                             // OR take the non-cancelling (ACP steer) fork for Steer signals.
                             if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
-                                // Author eligibility (owner ∪ allowlist ∪ siblings)
-                                // is already enforced by the inbound author gate
-                                // above, so the mid-turn signal fires for every
-                                // event that reaches here.
+                                // Author eligibility for the configured mode is
+                                // already enforced by the inbound author gate,
+                                // so the mid-turn signal fires for every event
+                                // that reaches here.
                                 let signal = mode_gate_signal(
                                     config.multiple_event_handling,
                                     &author_hex,
@@ -2490,10 +2355,10 @@ fn is_owner_control_command(
 /// new, already-author-gated event arrives for that channel.
 ///
 /// Returns `None` to leave the in-flight turn untouched (the event waits in the
-/// queue and is delivered when the turn completes). Author eligibility — owner
-/// ∪ allowlist ∪ siblings — is enforced upstream by the inbound author gate, so
+/// queue and is delivered when the turn completes). Author eligibility for the
+/// configured mode is enforced upstream by the inbound author gate, so
 /// `Steer`/`Interrupt` apply to every event that reaches this point; only
-/// `OwnerInterrupt` re-checks authorship (owner-only) here.
+/// `OwnerInterrupt` re-checks literal owner authorship here.
 ///
 /// `owner` is the resolved owner pubkey hex, if known.
 fn mode_gate_signal(
@@ -3905,95 +3770,51 @@ mod owner_cache_tests {
 mod author_gate_tests {
     use super::*;
 
-    /// A `RestClient` for tests. The author-gate decisions exercised here all
-    /// resolve from the owner pubkey or sibling cache before any HTTP call, so
-    /// this client is never actually used to make a request.
-    fn dummy_rest_client() -> relay::RestClient {
-        relay::RestClient {
-            http: reqwest::Client::new(),
-            base_url: "http://localhost:0".into(),
-            keys: nostr::Keys::generate(),
-            auth_tag_json: None,
-        }
-    }
-
     const OWNER: &str = "00";
     const SIBLING: &str = "11";
     const EXTERNAL: &str = "22";
     const STRANGER: &str = "33";
 
-    /// Owner + a known sibling, none of them on the explicit allowlist.
-    fn cache_with_sibling() -> OwnerCache {
-        let cache = OwnerCache::new(Some(OWNER.into()));
-        cache.cache_sibling(SIBLING.into(), true);
-        cache.cache_sibling(STRANGER.into(), false);
-        cache
+    fn owner_cache() -> OwnerCache {
+        OwnerCache::new(Some(OWNER.into()))
     }
 
-    #[tokio::test]
-    async fn test_allowlist_accepts_sibling_not_in_allowlist() {
-        let cache = cache_with_sibling();
+    #[test]
+    fn test_allowlist_rejects_unlisted_sibling() {
+        let cache = owner_cache();
         let allowlist = HashSet::from([EXTERNAL.to_string()]);
         assert!(
-            author_allowed(
-                &RespondTo::Allowlist,
-                &allowlist,
-                SIBLING,
-                &cache,
-                &dummy_rest_client()
-            )
-            .await,
-            "a same-owner sibling must fire a turn under Allowlist even when not listed"
+            !author_allowed(&RespondTo::Allowlist, &allowlist, SIBLING, &cache),
+            "a sibling must be named explicitly in the allowlist"
         );
     }
 
-    #[tokio::test]
-    async fn test_allowlist_accepts_explicit_external_pubkey() {
-        let cache = cache_with_sibling();
+    #[test]
+    fn test_allowlist_accepts_explicit_external_pubkey() {
+        let cache = owner_cache();
         let allowlist = HashSet::from([EXTERNAL.to_string()]);
         assert!(
-            author_allowed(
-                &RespondTo::Allowlist,
-                &allowlist,
-                EXTERNAL,
-                &cache,
-                &dummy_rest_client()
-            )
-            .await,
+            author_allowed(&RespondTo::Allowlist, &allowlist, EXTERNAL, &cache),
             "an explicitly allowlisted external pubkey must still be accepted"
         );
     }
 
-    #[tokio::test]
-    async fn test_allowlist_rejects_non_sibling_not_in_allowlist() {
-        let cache = cache_with_sibling();
+    #[test]
+    fn test_allowlist_rejects_unlisted_stranger() {
+        let cache = owner_cache();
         let allowlist = HashSet::from([EXTERNAL.to_string()]);
         assert!(
-            !author_allowed(
-                &RespondTo::Allowlist,
-                &allowlist,
-                STRANGER,
-                &cache,
-                &dummy_rest_client()
-            )
-            .await,
-            "a non-sibling absent from the allowlist must be dropped"
+            !author_allowed(&RespondTo::Allowlist, &allowlist, STRANGER, &cache),
+            "an absent pubkey must be dropped"
         );
     }
 
-    #[tokio::test]
-    async fn test_allowlist_accepts_owner() {
-        let cache = cache_with_sibling();
+    #[test]
+    fn test_allowlist_accepts_owner() {
+        let cache = owner_cache();
         let allowlist = HashSet::new();
         assert!(
-            author_allowed(
-                &RespondTo::Allowlist,
-                &allowlist,
-                OWNER,
-                &cache,
-                &dummy_rest_client()
-            )
-            .await,
+            author_allowed(&RespondTo::Allowlist, &allowlist, OWNER, &cache),
             "the owner must always be accepted under Allowlist"
         );
     }
@@ -4002,38 +3823,26 @@ mod author_gate_tests {
     // author must NOT steer" is enforced *here* — author_allowed drops the
     // event before it reaches the mode gate — not in the gate itself. These
     // pin that invariant against the default mode.
-    #[tokio::test]
-    async fn test_owner_only_rejects_stranger_so_no_steer() {
-        let cache = cache_with_sibling();
+    #[test]
+    fn test_owner_only_rejects_stranger_so_no_steer() {
+        let cache = owner_cache();
         assert!(
-            !author_allowed(
-                &RespondTo::OwnerOnly,
-                &HashSet::new(),
-                STRANGER,
-                &cache,
-                &dummy_rest_client()
-            )
-            .await,
+            !author_allowed(&RespondTo::OwnerOnly, &HashSet::new(), STRANGER, &cache),
             "under the default OwnerOnly, a stranger must be dropped — so it can never reach the mode gate to steer"
         );
     }
 
-    #[tokio::test]
-    async fn test_owner_only_admits_owner_and_sibling_to_steer() {
-        let cache = cache_with_sibling();
-        for (who, label) in [(OWNER, "owner"), (SIBLING, "sibling")] {
-            assert!(
-                author_allowed(
-                    &RespondTo::OwnerOnly,
-                    &HashSet::new(),
-                    who,
-                    &cache,
-                    &dummy_rest_client()
-                )
-                .await,
-                "under default OwnerOnly, the {label} must be admitted so steering can fire"
-            );
-        }
+    #[test]
+    fn test_owner_only_admits_owner_but_rejects_sibling() {
+        let cache = owner_cache();
+        assert!(
+            author_allowed(&RespondTo::OwnerOnly, &HashSet::new(), OWNER, &cache),
+            "the literal owner must pass OwnerOnly"
+        );
+        assert!(
+            !author_allowed(&RespondTo::OwnerOnly, &HashSet::new(), SIBLING, &cache),
+            "a same-owner sibling must not pass OwnerOnly"
+        );
     }
 }
 
