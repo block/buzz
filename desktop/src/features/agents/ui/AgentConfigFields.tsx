@@ -248,9 +248,24 @@ export function AgentConfigFields({
     selectedRuntime,
   });
 
+  // Mount-time healing policy: onboarding page 4 edits the root config during
+  // first-run (no higher layers to inherit from), so acting on open is safe
+  // and intentional there — it heals stale state and picks a valid model.
+  // Evergreen surfaces (Settings, dialogs) edit saved data that may pair with
+  // higher layers (see PR #2148 review thread), so they only act after the
+  // user explicitly edits the provider in this session.
+  const healOnMount = disclosure === "onboarding-essential";
+  const userEditedProviderRef = React.useRef(false);
+  // Read inside effects via ref so biome's exhaustive-deps stays honest:
+  // refs are stable, and healOnMount is captured at declaration.
+  const mayMutateDependentFieldsRef = React.useRef(false);
+  mayMutateDependentFieldsRef.current =
+    healOnMount || userEditedProviderRef.current;
+
   const autoSelectedModelScopeRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!autoSelectModelOnProviderChange) return;
+    if (!mayMutateDependentFieldsRef.current) return;
     const trimmedProvider = providerForDiscovery.trim();
     if (trimmedProvider.length === 0 || isCustomProvider) {
       autoSelectedModelScopeRef.current = null;
@@ -282,16 +297,16 @@ export function AgentConfigFields({
 
   const currentEffortForAutoClear =
     config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
-  // Orphan-model clearing must never fire on mount: the backend resolves
-  // provider and model independently across layers (agent → definition →
-  // global), so a saved global model WITHOUT a global provider can be a
-  // deliberate, working pattern (provider supplied by a higher layer).
-  // Clearing it on page-open silently breaks that agent on its next
-  // restart. Only clear after the user explicitly edits the provider in
-  // this session — see PR #2148 review thread.
-  const userEditedProviderRef = React.useRef(false);
+  // Orphan-model clearing follows the mount-time healing policy above: the
+  // backend resolves provider and model independently across layers
+  // (agent → definition → global), so a saved global model WITHOUT a global
+  // provider can be a deliberate, working pattern (provider supplied by a
+  // higher layer). Clearing it on page-open in evergreen surfaces silently
+  // breaks that agent on its next restart — see PR #2148 review thread.
+  // Onboarding heals on open by design (discriminating spec: "gates stale
+  // saved model and effort until provider selection").
   React.useEffect(() => {
-    if (!userEditedProviderRef.current) return;
+    if (!mayMutateDependentFieldsRef.current) return;
     if (!dependentFieldsDisabled) return;
     if (
       (config.model ?? "").trim().length === 0 &&
