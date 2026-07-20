@@ -187,11 +187,18 @@ async function expectAgentProfileActionsHidden(
   ).toHaveCount(0);
 }
 
-test("@ trigger prioritizes channel members before runnable personas and other agents", async ({
+test("@ trigger prioritizes channel members before runnable personas and other managed agents", async ({
   page,
 }) => {
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -202,7 +209,7 @@ test("@ trigger prioritizes channel members before runnable personas and other a
 
   const dropdown = autocomplete(page);
   await expect(dropdown).toBeVisible();
-  await expect(dropdown.getByText("alice")).toBeVisible();
+  await expect(dropdown.getByText("alice")).toHaveCount(0);
   await expect(dropdown.getByText("bob")).toBeVisible();
   await expect(dropdown.getByText("Fizz")).toBeVisible();
   await expect(dropdown.getByText("charlie")).toBeVisible();
@@ -219,7 +226,6 @@ test("@ trigger prioritizes channel members before runnable personas and other a
   const suggestions = dropdown.locator("button");
   const suggestionText = await suggestions.allInnerTexts();
   const fizzIndex = suggestionText.findIndex((text) => text.includes("Fizz"));
-  const aliceIndex = suggestionText.findIndex((text) => text.includes("alice"));
   const bobIndex = suggestionText.findIndex((text) => text.includes("bob"));
   const charlieIndex = suggestionText.findIndex((text) =>
     text.includes("charlie"),
@@ -228,11 +234,9 @@ test("@ trigger prioritizes channel members before runnable personas and other a
     text.includes("outsider"),
   );
   expect(fizzIndex).toBeGreaterThanOrEqual(0);
-  expect(aliceIndex).toBeGreaterThanOrEqual(0);
   expect(bobIndex).toBeGreaterThanOrEqual(0);
   expect(charlieIndex).toBeGreaterThanOrEqual(0);
   expect(outsiderIndex).toEqual(-1);
-  expect(aliceIndex).toBeLessThan(fizzIndex);
   expect(bobIndex).toBeLessThan(fizzIndex);
   expect(fizzIndex).toBeLessThan(charlieIndex);
 });
@@ -759,10 +763,17 @@ test("own profile-only agents are hidden from channel mentions", async ({
   await expect(autocomplete(page)).toHaveCount(0);
 });
 
-test("allowlisted relay agents are visible in channel mentions", async ({
+test("managed relay agents are visible in channel mentions regardless of relay policy", async ({
   page,
 }) => {
   await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        status: "stopped",
+      },
+    ],
     relayAgents: [
       {
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
@@ -784,7 +795,7 @@ test("allowlisted relay agents are visible in channel mentions", async ({
   await expect(dropdown.getByText("agent")).toBeVisible();
 });
 
-test("non-allowlisted relay agents stay hidden from channel mentions", async ({
+test("relay-only agents stay hidden from channel mentions even when allowlisted", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -793,7 +804,7 @@ test("non-allowlisted relay agents stay hidden from channel mentions", async ({
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
         name: "quinn",
         respondTo: "allowlist",
-        respondToAllowlist: [TEST_IDENTITIES.outsider.pubkey],
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
       },
     ],
   });
@@ -1364,9 +1375,18 @@ test("system member-joined rows render the joined person as a plain profile name
   await expect(joinedPersonName).not.toHaveAttribute("data-mention");
 });
 
-test("selecting a non-member agent from a DM inserts @Name into input", async ({
+test("selecting a managed non-member agent from a DM inserts @Name into input", async ({
   page,
 }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
   await page.getByTestId("channel-bob-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
@@ -1450,9 +1470,18 @@ test("sent non-member person mention uses the normal mention style", async ({
   await expect(mentionChip.locator("svg")).toHaveCount(0);
 });
 
-test("sent non-member agent mention uses the agent mention style", async ({
+test("sent managed non-member agent mention uses the agent mention style", async ({
   page,
 }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
   await page.getByTestId("channel-bob-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
