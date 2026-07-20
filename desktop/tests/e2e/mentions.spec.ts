@@ -429,7 +429,18 @@ test("defers agent mentions until DM members finish loading", async ({
   await expect(threadPanel).toContainText("before members resolve");
 });
 
-test("autocomplete filters suggestions as user types", async ({ page }) => {
+test("autocomplete filters managed-agent suggestions as user types", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        name: "alice",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -466,7 +477,7 @@ test("autocomplete searches global non-member people from the first typed charac
   await expect(tessaRow.getByText("not in channel")).toBeVisible();
 });
 
-test("mention autocomplete pages global people search beyond the first 50 results", async ({
+test("mention autocomplete caps global people search at 50 results", async ({
   page,
 }) => {
   const searchProfiles = Array.from({ length: 55 }, (_, index) => ({
@@ -483,10 +494,8 @@ test("mention autocomplete pages global people search beyond the first 50 result
 
   const dropdown = autocomplete(page);
   await expect(dropdown.locator("button")).toHaveCount(50);
-  await dropdown.evaluate((node) => node.scrollTo(0, node.scrollHeight));
-
-  await expect(dropdown.locator("button")).toHaveCount(55);
-  await expect(dropdown.getByText("Alex 55")).toBeVisible();
+  await expect(dropdown.getByText("Alex 50")).toBeVisible();
+  await expect(dropdown.getByText("Alex 55")).toHaveCount(0);
   await expect(dropdown.getByText("not in channel").last()).toBeVisible();
 
   const searchCalls = (await readCommandPayloadLog(page)).filter(
@@ -497,6 +506,10 @@ test("mention autocomplete pages global people search beyond the first 50 result
       expect.objectContaining({
         payload: expect.objectContaining({ cursor: null, limit: 50 }),
       }),
+    ]),
+  );
+  expect(searchCalls).not.toEqual(
+    expect.arrayContaining([
       expect.objectContaining({
         payload: expect.objectContaining({ cursor: "2", limit: 50 }),
       }),
@@ -525,9 +538,18 @@ test("selecting a person mention inserts @Name into input", async ({
   await expect(mentionChip).not.toHaveClass(/agent-mention-highlight/);
 });
 
-test("selecting an agent mention inserts @Name into input", async ({
+test("selecting a managed agent mention inserts @Name into input", async ({
   page,
 }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        name: "alice",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -695,9 +717,18 @@ test("selecting a persona mention reuses an existing persona agent", async ({
   await expect(mentionChip).toHaveText("Fizz");
 });
 
-test("relay-profile agents with member roles use the agent composer style", async ({
+test("managed relay-profile agents with member roles use the agent composer style", async ({
   page,
 }) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
 
   await openChannelBrowser(page);

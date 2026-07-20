@@ -110,7 +110,16 @@ test.describe("list virtualization", () => {
   test("03 — members search shows both sticky titles under content-visibility", async ({
     page,
   }) => {
-    await installMockBridge(page);
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey:
+            "554cef57437abac34522ac2c9f0490d685b72c80478cf9f7ed6f9570ee8624ea",
+          name: "charlie",
+          status: "stopped",
+        },
+      ],
+    });
     await page.goto("/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");

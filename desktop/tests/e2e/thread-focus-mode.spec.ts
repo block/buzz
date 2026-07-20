@@ -143,7 +143,16 @@ test("focus and split preserve reading context and interaction ownership", async
   await page.addInitScript(() => {
     localStorage.setItem("buzz.channels.threadViewMode", "focus");
   });
-  await installMockBridge(page);
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey:
+          "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f",
+        name: "alice",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
   const rootId = await seedLongThread(page);
 
