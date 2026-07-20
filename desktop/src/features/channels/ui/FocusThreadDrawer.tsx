@@ -143,6 +143,20 @@ export function FocusThreadDrawer({
   const drawerRef = React.useRef<HTMLDivElement>(null);
   const previousFocusRef = React.useRef<HTMLElement | null>(null);
 
+  React.useEffect(() => {
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      onClose();
+    }
+
+    window.addEventListener("keydown", handleEscape, { capture: true });
+    return () => {
+      window.removeEventListener("keydown", handleEscape, { capture: true });
+    };
+  }, [onClose]);
+
   React.useLayoutEffect(() => {
     previousFocusRef.current =
       document.activeElement instanceof HTMLElement
