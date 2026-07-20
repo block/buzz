@@ -850,9 +850,7 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(
-          find.text(
-            "We couldn't prepare this image for upload. Try another image.",
-          ),
+          find.text("We couldn't prepare this image for upload."),
           findsOneWidget,
         );
         expect(find.textContaining('media contains metadata'), findsNothing);

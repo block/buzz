@@ -464,7 +464,7 @@ void main() {
               isA<MediaPolicyUploadException>().having(
                 (error) => error.toString(),
                 'message',
-                "We couldn't prepare this image for upload. Try another image.",
+                "We couldn't prepare this image for upload.",
               ),
             ),
           );

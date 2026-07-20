@@ -47,8 +47,7 @@ const _unsupportedAnimatedPngUploadMessage =
     'Animated PNG uploads are not supported on mobile yet';
 const _unsupportedAnimatedWebpUploadMessage =
     'Animated WebP uploads are not supported on mobile yet';
-const _mediaPolicyUploadMessage =
-    "We couldn't prepare this image for upload. Try another image.";
+const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
 typedef PickGalleryVideo = Future<XFile?> Function();
