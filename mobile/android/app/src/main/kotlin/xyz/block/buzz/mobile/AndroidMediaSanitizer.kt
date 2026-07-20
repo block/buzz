@@ -42,12 +42,16 @@ internal object AndroidMediaSanitizer {
     }
 
     fun scrubJpeg(bytes: ByteArray): ByteArray {
-        require(bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == JPEG_SOI) {
+        require(
+            bytes.size >= 2 &&
+                bytes[0] == 0xFF.toByte() &&
+                (bytes[1].toInt() and 0xFF) == JPEG_SOI,
+        ) {
             "Invalid JPEG signature"
         }
 
         val output = ByteArrayOutputStream(bytes.size)
-        output.write(byteArrayOf(0xFF.toByte(), JPEG_SOI))
+        output.write(byteArrayOf(0xFF.toByte(), JPEG_SOI.toByte()))
         var offset = 2
         var inScan = false
         while (offset < bytes.size) {
@@ -79,7 +83,7 @@ internal object AndroidMediaSanitizer {
                 output.write(bytes, markerStart, offset - markerStart)
                 return output.toByteArray()
             }
-            require(marker != JPEG_SOI.toInt() && bytes.size - offset >= 2) { "Invalid JPEG segment" }
+            require(marker != JPEG_SOI && bytes.size - offset >= 2) { "Invalid JPEG segment" }
 
             val segmentLength = readUnsignedShortBigEndian(bytes, offset)
             require(segmentLength >= 2 && segmentLength <= bytes.size - offset) { "Invalid JPEG segment length" }
@@ -143,7 +147,7 @@ internal object AndroidMediaSanitizer {
     }
 
     private const val PNG_CHUNK_OVERHEAD = 12
-    private const val JPEG_SOI: Byte = 0xD8.toByte()
+    private const val JPEG_SOI = 0xD8
     private const val JPEG_EOI = 0xD9
     private const val JPEG_SOS = 0xDA
     private const val JPEG_TEMP = 0x01

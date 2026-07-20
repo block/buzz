@@ -46,6 +46,20 @@ class AndroidMediaSanitizerTest {
         assertFailsWith<IllegalArgumentException> {
             AndroidMediaSanitizer.scrubJpeg(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte()))
         }
+        assertFailsWith<IllegalArgumentException> {
+            AndroidMediaSanitizer.scrubJpeg(
+                byteArrayOf(
+                    0xFF.toByte(),
+                    0xD8.toByte(),
+                    0xFF.toByte(),
+                    0xD8.toByte(),
+                    0x00,
+                    0x02,
+                    0xFF.toByte(),
+                    0xD9.toByte(),
+                ),
+            )
+        }
     }
 
     private fun fixtureBytes(name: String): ByteArray {
