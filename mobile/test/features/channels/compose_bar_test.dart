@@ -810,6 +810,56 @@ void main() {
       expect(find.textContaining('upload failed'), findsOneWidget);
     });
 
+    for (final statusCode in [
+      HttpStatus.unsupportedMediaType,
+      HttpStatus.unprocessableEntity,
+    ]) {
+      testWidgets('shows friendly copy for a $statusCode upload response', (
+        tester,
+      ) async {
+        final keychain = nostr.Keys.generate();
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: keychain.nsec,
+          httpClient: http_testing.MockClient(
+            (request) async => http.Response(
+              '{"error":"media contains metadata or a non-canonical metadata channel"}',
+              statusCode,
+            ),
+          ),
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async =>
+              XFile.fromData(_pngBytes, name: 'tiny.png'),
+        );
+
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await tester.tap(find.byIcon(LucideIcons.paperclip));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Photo'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(
+            "We couldn't prepare this image for upload. Try another image.",
+          ),
+          findsOneWidget,
+        );
+        expect(find.textContaining('media contains metadata'), findsNothing);
+        expect(find.textContaining('$statusCode'), findsNothing);
+      });
+    }
+
     testWidgets('shows a clean error when a GIF is picked', (tester) async {
       final keychain = nostr.Keys.generate();
       final nsec = keychain.nsec;

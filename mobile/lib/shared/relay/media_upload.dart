@@ -47,6 +47,8 @@ const _unsupportedAnimatedPngUploadMessage =
     'Animated PNG uploads are not supported on mobile yet';
 const _unsupportedAnimatedWebpUploadMessage =
     'Animated WebP uploads are not supported on mobile yet';
+const _mediaPolicyUploadMessage =
+    "We couldn't prepare this image for upload. Try another image.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
 typedef PickGalleryVideo = Future<XFile?> Function();
@@ -55,6 +57,13 @@ typedef SanitizeImageBytes =
 typedef TranscodeImageToJpeg = Future<Uint8List> Function(Uint8List bytes);
 typedef TranscodeVideoToMp4 = Future<String> Function(String filePath);
 typedef ReadClipboardImage = Future<Uint8List?> Function();
+
+class MediaPolicyUploadException implements Exception {
+  const MediaPolicyUploadException();
+
+  @override
+  String toString() => _mediaPolicyUploadMessage;
+}
 
 @immutable
 class _PreparedUploadImage {
@@ -256,6 +265,10 @@ class MediaUploadService {
       response = await http.Response.fromStream(streamed);
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (response.statusCode == HttpStatus.unsupportedMediaType ||
+          response.statusCode == HttpStatus.unprocessableEntity) {
+        throw const MediaPolicyUploadException();
+      }
       throw Exception(
         'upload failed (${response.statusCode}): ${response.body}',
       );

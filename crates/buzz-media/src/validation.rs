@@ -1088,6 +1088,51 @@ mod tests {
     }
 
     #[test]
+    fn test_ios_uikit_sanitizer_outputs_match_relay_contract() {
+        let config = test_config();
+        for (name, bytes, expected_mime) in [
+            (
+                "PNG",
+                include_bytes!("../tests/fixtures/ios/uikit-sanitized.png").as_slice(),
+                "image/png",
+            ),
+            (
+                "JPEG",
+                include_bytes!("../tests/fixtures/ios/uikit-sanitized.jpg").as_slice(),
+                "image/jpeg",
+            ),
+        ] {
+            let actual = validate_content(bytes, &config).unwrap_or_else(|error| {
+                panic!("rejected iOS UIKit-sanitized {name} fixture: {error}")
+            });
+            assert_eq!(actual, expected_mime);
+        }
+    }
+
+    #[test]
+    fn test_ios_uikit_encoder_outputs_require_sanitization() {
+        let config = test_config();
+        for (name, bytes) in [
+            (
+                "PNG",
+                include_bytes!("../tests/fixtures/ios/uikit-encoded.png").as_slice(),
+            ),
+            (
+                "JPEG",
+                include_bytes!("../tests/fixtures/ios/uikit-encoded.jpg").as_slice(),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    validate_content(bytes, &config),
+                    Err(MediaError::MetadataForbidden)
+                ),
+                "accepted unsanitized iOS UIKit {name} fixture"
+            );
+        }
+    }
+
+    #[test]
     fn test_rejects_png_metadata_and_trailing_payload() {
         let config = test_config();
         for kind in [
