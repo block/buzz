@@ -3,7 +3,11 @@ import test from "node:test";
 
 import {
   eventToProjectPullRequest,
+  nextProjectPullRequestReviewCreatedAt,
   nextProjectPullRequestStatusCreatedAt,
+  projectPullRequestCommentTimelineKind,
+  projectPullRequestEffectiveReviewDecision,
+  projectPullRequestReviewSummary,
 } from "./projectPullRequests.mjs";
 
 const OWNER = "a".repeat(64);
@@ -168,14 +172,16 @@ test("honors status events from the PR author and repo owner", () => {
 });
 
 function commentEvent({
+  id,
   pubkey,
   createdAt,
   content = "",
   labels = [],
   reviewers = [],
+  commit,
 }) {
   return {
-    id: `comment-${pubkey.slice(0, 8)}-${createdAt}`,
+    id: id ?? `comment-${pubkey.slice(0, 8)}-${createdAt}`,
     kind: 1,
     pubkey,
     created_at: createdAt,
@@ -185,6 +191,7 @@ function commentEvent({
       ["a", REPO_ADDRESS],
       ...reviewers.map((reviewer) => ["p", reviewer]),
       ...labels.map((label) => ["t", label]),
+      ...(commit ? [["c", commit]] : []),
     ],
   };
 }
@@ -252,6 +259,16 @@ test("reviewers come from root p tags plus trusted review requests", () => {
 
   // The author never reviews their own PR; untrusted requests are ignored.
   assert.deepEqual(pullRequest.reviewers.sort(), [reviewer, requested].sort());
+  assert.equal(
+    pullRequest.comments.find((comment) => comment.author === AUTHOR)
+      ?.isTrustedReviewRequest,
+    true,
+  );
+  assert.equal(
+    pullRequest.comments.find((comment) => comment.author === ATTACKER)
+      ?.isTrustedReviewRequest,
+    false,
+  );
 });
 
 test("approvals keep the latest per author and flag comments", () => {
@@ -295,6 +312,292 @@ test("approvals keep the latest per author and flag comments", () => {
   );
 });
 
+test("review decisions only apply to the current pull request commit", () => {
+  const reviewer = "d".repeat(64);
+  const initialCommit = "1111111111111111111111111111111111111111";
+  const currentCommit = "2222222222222222222222222222222222222222";
+  const event = pullRequestEvent();
+  event.tags.push(["p", reviewer]);
+  const update = updateEvent({
+    pubkey: AUTHOR,
+    createdAt: 300,
+    commit: currentCommit,
+  });
+  const staleApproval = commentEvent({
+    pubkey: reviewer,
+    createdAt: 200,
+    labels: ["approval"],
+    commit: initialCommit,
+  });
+  const currentChangeRequest = commentEvent({
+    pubkey: reviewer,
+    createdAt: 400,
+    labels: ["changes-requested"],
+    commit: currentCommit,
+  });
+
+  const pullRequest = eventToProjectPullRequest(
+    event,
+    [update],
+    [staleApproval, currentChangeRequest],
+  );
+
+  assert.deepEqual(pullRequest.approvals, []);
+  assert.equal(pullRequest.changeRequests.length, 1);
+  assert.equal(pullRequest.changeRequests[0].author, reviewer);
+  assert.equal(pullRequest.changeRequests[0].commit, currentCommit);
+  assert.equal(
+    pullRequest.comments.find((comment) => comment.id === staleApproval.id)
+      ?.reviewDecisionStatus,
+    "historical",
+  );
+  assert.equal(
+    pullRequest.comments.find(
+      (comment) => comment.id === currentChangeRequest.id,
+    )?.reviewDecisionStatus,
+    "current",
+  );
+});
+
+test("the latest current-commit review decision replaces the previous state", () => {
+  const reviewer = "d".repeat(64);
+  const commit = "1111111111111111111111111111111111111111";
+  const event = pullRequestEvent();
+  event.tags.push(["p", reviewer]);
+  const changeRequest = commentEvent({
+    pubkey: reviewer,
+    createdAt: 200,
+    labels: ["changes-requested"],
+    commit,
+  });
+  const approval = commentEvent({
+    pubkey: reviewer,
+    createdAt: 300,
+    labels: ["approval"],
+    commit,
+  });
+
+  const pullRequest = eventToProjectPullRequest(
+    event,
+    [],
+    [changeRequest, approval],
+  );
+
+  assert.equal(pullRequest.approvals.length, 1);
+  assert.equal(pullRequest.approvals[0].author, reviewer);
+  assert.deepEqual(pullRequest.changeRequests, []);
+  assert.equal(
+    pullRequest.comments.filter((comment) => comment.isChangeRequest).length,
+    1,
+  );
+  assert.equal(nextProjectPullRequestReviewCreatedAt(pullRequest, 300), 301);
+  assert.equal(nextProjectPullRequestReviewCreatedAt(pullRequest, 400), 400);
+});
+
+test("effective review decisions exclude superseded and untrusted labels", () => {
+  const reviewer = "d".repeat(64);
+  const event = pullRequestEvent();
+  event.tags.push(["p", reviewer]);
+  const supersededApproval = commentEvent({
+    pubkey: reviewer,
+    createdAt: 200,
+    labels: ["approval"],
+  });
+  const effectiveChangeRequest = commentEvent({
+    pubkey: reviewer,
+    createdAt: 300,
+    labels: ["changes-requested"],
+  });
+  const effectiveApproval = commentEvent({
+    pubkey: OWNER,
+    createdAt: 350,
+    labels: ["approval"],
+  });
+  const untrustedApproval = commentEvent({
+    pubkey: ATTACKER,
+    createdAt: 400,
+    labels: ["approval"],
+  });
+  const pullRequest = eventToProjectPullRequest(
+    event,
+    [],
+    [
+      supersededApproval,
+      effectiveChangeRequest,
+      effectiveApproval,
+      untrustedApproval,
+    ],
+  );
+  const commentById = new Map(
+    pullRequest.comments.map((comment) => [comment.id, comment]),
+  );
+
+  assert.equal(
+    projectPullRequestEffectiveReviewDecision(
+      pullRequest,
+      commentById.get(effectiveChangeRequest.id),
+    ),
+    "changes-requested",
+  );
+  assert.equal(
+    projectPullRequestEffectiveReviewDecision(
+      pullRequest,
+      commentById.get(effectiveApproval.id),
+    ),
+    "approved",
+  );
+  assert.equal(
+    projectPullRequestEffectiveReviewDecision(
+      pullRequest,
+      commentById.get(supersededApproval.id),
+    ),
+    null,
+  );
+  assert.equal(
+    projectPullRequestEffectiveReviewDecision(
+      pullRequest,
+      commentById.get(untrustedApproval.id),
+    ),
+    null,
+  );
+});
+
+test("mixed effective decisions keep requested changes visible", () => {
+  const reviewerOne = "d".repeat(64);
+  const reviewerTwo = "e".repeat(64);
+  const event = pullRequestEvent();
+  event.tags.push(["p", reviewerOne], ["p", reviewerTwo]);
+  const pullRequest = eventToProjectPullRequest(
+    event,
+    [],
+    [
+      commentEvent({
+        pubkey: reviewerOne,
+        createdAt: 200,
+        labels: ["approval"],
+      }),
+      commentEvent({
+        pubkey: reviewerTwo,
+        createdAt: 300,
+        labels: ["changes-requested"],
+      }),
+    ],
+  );
+
+  const summary = projectPullRequestReviewSummary(pullRequest);
+
+  assert.equal(summary.approvalCount, 1);
+  assert.equal(summary.changeRequestCount, 1);
+  assert.equal(summary.showState, true);
+  assert.equal(summary.state, "1 reviewer requested changes.");
+});
+
+test("trusted review requests cannot borrow decision timeline visuals", () => {
+  const reviewer = "d".repeat(64);
+  const request = commentEvent({
+    pubkey: AUTHOR,
+    createdAt: 200,
+    labels: ["review-request", "approval"],
+    reviewers: [reviewer],
+  });
+  const pullRequest = eventToProjectPullRequest(
+    pullRequestEvent(),
+    [],
+    [request],
+  );
+  const comment = pullRequest.comments[0];
+
+  assert.equal(comment.isTrustedReviewRequest, true);
+  assert.equal(comment.isTrustedReviewDecision, false);
+  assert.equal(
+    projectPullRequestCommentTimelineKind(comment),
+    "review-request",
+  );
+});
+
+test("equal-timestamp decisions use event ID ordering in both input orders", () => {
+  const reviewer = "d".repeat(64);
+  const commit = "1111111111111111111111111111111111111111";
+  const event = pullRequestEvent();
+  event.tags.push(["p", reviewer]);
+  const approval = commentEvent({
+    id: "a".repeat(64),
+    pubkey: reviewer,
+    createdAt: 300,
+    labels: ["approval"],
+    commit,
+  });
+  const changeRequest = commentEvent({
+    id: "b".repeat(64),
+    pubkey: reviewer,
+    createdAt: 300,
+    labels: ["changes-requested"],
+    commit,
+  });
+
+  for (const comments of [
+    [approval, changeRequest],
+    [changeRequest, approval],
+  ]) {
+    const pullRequest = eventToProjectPullRequest(event, [], comments);
+
+    assert.deepEqual(pullRequest.approvals, []);
+    assert.equal(pullRequest.changeRequests.length, 1);
+    assert.equal(pullRequest.changeRequests[0].id, changeRequest.id);
+  }
+});
+
+test("legacy unscoped review decisions are invalidated by later PR updates", () => {
+  const reviewer = "d".repeat(64);
+  const event = pullRequestEvent();
+  event.tags.push(["p", reviewer]);
+  const approval = commentEvent({
+    pubkey: reviewer,
+    createdAt: 200,
+    labels: ["approval"],
+  });
+  const update = updateEvent({
+    pubkey: AUTHOR,
+    createdAt: 300,
+    commit: "2222222222222222222222222222222222222222",
+  });
+
+  const pullRequest = eventToProjectPullRequest(event, [update], [approval]);
+
+  assert.deepEqual(pullRequest.approvals, []);
+  assert.deepEqual(pullRequest.changeRequests, []);
+  assert.equal(
+    pullRequest.comments.find((comment) => comment.id === approval.id)
+      ?.reviewDecisionStatus,
+    "historical",
+  );
+});
+
+test("legacy decisions stay bound to the initial commit after a backdated update", () => {
+  const reviewer = "d".repeat(64);
+  const event = pullRequestEvent();
+  event.tags.push(["p", reviewer]);
+  const update = updateEvent({
+    pubkey: AUTHOR,
+    createdAt: 200,
+    commit: "2222222222222222222222222222222222222222",
+  });
+  const approval = commentEvent({
+    pubkey: reviewer,
+    createdAt: 300,
+    labels: ["approval"],
+  });
+
+  const pullRequest = eventToProjectPullRequest(event, [update], [approval]);
+
+  assert.deepEqual(pullRequest.approvals, []);
+  assert.equal(
+    pullRequest.comments.find((comment) => comment.id === approval.id)
+      ?.reviewDecisionStatus,
+    "historical",
+  );
+});
+
 test("approvals only count requested reviewers and the repository owner", () => {
   const reviewer = "d".repeat(64);
   const event = pullRequestEvent();
@@ -327,6 +630,26 @@ test("approvals only count requested reviewers and the repository owner", () => 
   assert.deepEqual(
     pullRequest.approvals.map((approval) => approval.author),
     [reviewer, OWNER],
+  );
+  assert.equal(
+    pullRequest.comments.find((comment) => comment.author === reviewer)
+      ?.isTrustedReviewDecision,
+    true,
+  );
+  assert.equal(
+    pullRequest.comments.find((comment) => comment.author === reviewer)
+      ?.reviewDecisionStatus,
+    "current",
+  );
+  assert.equal(
+    pullRequest.comments.find((comment) => comment.author === ATTACKER)
+      ?.isTrustedReviewDecision,
+    false,
+  );
+  assert.equal(
+    pullRequest.comments.find((comment) => comment.author === ATTACKER)
+      ?.reviewDecisionStatus,
+    null,
   );
 });
 

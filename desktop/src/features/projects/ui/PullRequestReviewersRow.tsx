@@ -1,4 +1,4 @@
-import { Check, Search, UserPlus } from "lucide-react";
+import { Check, Search, UserPlus, X } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -87,6 +87,11 @@ export function PullRequestReviewersRow({
   const approvedBy = new Set(
     pullRequest.approvals.map((approval) => normalizePubkey(approval.author)),
   );
+  const changesRequestedBy = new Set(
+    pullRequest.changeRequests.map((request) =>
+      normalizePubkey(request.author),
+    ),
+  );
 
   const handleRequest = React.useCallback(
     async (pubkey: string, reviewerLabel: string) => {
@@ -127,6 +132,9 @@ export function PullRequestReviewersRow({
         const profile = profileForPubkey(pubkey, profiles);
         const label = labelForPubkey(pubkey, profiles);
         const hasApproved = approvedBy.has(normalizePubkey(pubkey));
+        const hasRequestedChanges = changesRequestedBy.has(
+          normalizePubkey(pubkey),
+        );
         return (
           <Tooltip key={pubkey}>
             <TooltipTrigger asChild>
@@ -141,12 +149,20 @@ export function PullRequestReviewersRow({
                   <span className="-right-1 -bottom-1 absolute flex h-3.5 w-3.5 items-center justify-center rounded-full bg-green-600 text-white ring-2 ring-background">
                     <Check className="h-2.5 w-2.5" />
                   </span>
+                ) : hasRequestedChanges ? (
+                  <span className="-right-1 -bottom-1 absolute flex h-3.5 w-3.5 items-center justify-center rounded-full bg-destructive text-destructive-foreground ring-2 ring-background">
+                    <X className="h-2.5 w-2.5" />
+                  </span>
                 ) : null}
               </span>
             </TooltipTrigger>
             <TooltipContent>
               {label}
-              {hasApproved ? " — approved" : " — review requested"}
+              {hasApproved
+                ? " — approved"
+                : hasRequestedChanges
+                  ? " — requested changes"
+                  : " — review requested"}
             </TooltipContent>
           </Tooltip>
         );

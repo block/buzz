@@ -16,6 +16,10 @@ import {
   markdownToPlainText,
   relativeTime,
 } from "@/features/projects/lib/projectsViewHelpers";
+import {
+  projectPullRequestCommentTimelineKind,
+  projectPullRequestEffectiveReviewDecision,
+} from "@/features/projects/projectPullRequests.mjs";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -154,25 +158,41 @@ function buildActivityItems({
       });
     }
     for (const comment of pullRequest.comments) {
-      const kind = comment.isApproval
-        ? "approval"
-        : comment.isReviewRequest
-          ? "review-request"
-          : "comment";
+      const reviewDecision = projectPullRequestEffectiveReviewDecision(
+        pullRequest,
+        comment,
+      );
+      const timelineKind = projectPullRequestCommentTimelineKind(comment);
+      const kind =
+        reviewDecision === "approved"
+          ? "approval"
+          : reviewDecision === "changes-requested"
+            ? "changes-requested"
+            : timelineKind === "review-request"
+              ? "review-request"
+              : "comment";
       items.push({
         id: `pr-comment:${comment.id}`,
         kind,
         createdAt: comment.createdAt,
         actorPubkey: comment.author,
         actorName: null,
-        action: comment.isApproval
-          ? "approved a pull request in"
-          : comment.isReviewRequest
-            ? "requested review in"
-            : "commented on a pull request in",
+        action:
+          kind === "approval"
+            ? "approved a pull request in"
+            : kind === "changes-requested"
+              ? "requested changes to a pull request in"
+              : kind === "review-request"
+                ? "requested review in"
+                : "commented on a pull request in",
         title: pullRequest.title,
         body: contentPreview(comment.content),
-        detail: null,
+        detail:
+          kind === "approval"
+            ? "Approved"
+            : kind === "changes-requested"
+              ? "Changes requested"
+              : null,
         target,
       });
     }

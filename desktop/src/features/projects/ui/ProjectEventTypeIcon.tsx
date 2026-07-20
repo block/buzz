@@ -6,6 +6,7 @@ import {
   GitPullRequest,
   MessageSquare,
   UserPlus,
+  X,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -18,6 +19,7 @@ export type ProjectEventKind =
   | "issue"
   | "comment"
   | "approval"
+  | "changes-requested"
   | "review-request";
 
 export const PROJECT_EVENT_VISUALS: Record<
@@ -69,6 +71,12 @@ export const PROJECT_EVENT_VISUALS: Record<
       "bg-green-600/10 text-green-700 dark:bg-green-500/10 dark:text-green-400",
     detailClassName:
       "border-green-600/30 text-green-700 dark:border-green-500/30 dark:text-green-400",
+  },
+  "changes-requested": {
+    icon: X,
+    iconClassName: "text-destructive",
+    badgeClassName: "bg-destructive/10 text-destructive",
+    detailClassName: "border-destructive/40 text-destructive",
   },
   "review-request": {
     icon: UserPlus,

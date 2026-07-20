@@ -4,7 +4,6 @@ import {
   GitCommitHorizontal,
   GitMerge,
   GitPullRequest,
-  GitPullRequestDraft,
   MessageSquare,
   UserPlus,
   X,
@@ -19,16 +18,12 @@ import {
   type ProjectPullRequest,
   useCreateProjectPullRequestCommentMutation,
 } from "@/features/projects/hooks";
-import {
-  useApproveProjectPullRequestMutation,
-  useUpdateProjectPullRequestStatusMutation,
-} from "@/features/projects/pullRequestReviews";
+import { projectPullRequestCommentTimelineKind } from "@/features/projects/projectPullRequests.mjs";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import {
   ProjectFeedRow,
@@ -41,8 +36,8 @@ import {
   ProfileAuthorName,
   ProfileIdentityButton,
 } from "./ProjectProfileIdentity";
-import { MergePullRequestButton } from "./MergePullRequestButton";
 import { PullRequestReviewersRow } from "./PullRequestReviewersRow";
+import { PullRequestReviewCard } from "./PullRequestReviewCard";
 
 function compactDate(createdAt: number) {
   return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
@@ -328,174 +323,6 @@ function PullRequestRow({
 
 export type PullRequestPanelMode = "conversation" | "commits" | "checks";
 
-/** GitHub-style review state and actions rendered in the conversation flow. */
-function PullRequestReviewCard({
-  project,
-  pullRequest,
-}: {
-  project: Project;
-  pullRequest: ProjectPullRequest;
-}) {
-  const identityQuery = useIdentityQuery();
-  const statusMutation = useUpdateProjectPullRequestStatusMutation(project);
-  const approveMutation = useApproveProjectPullRequestMutation(project);
-
-  const viewerPubkey = identityQuery.data?.pubkey ?? null;
-  const viewer = viewerPubkey ? normalizePubkey(viewerPubkey) : null;
-  const isAuthor = viewer === normalizePubkey(pullRequest.author);
-  const isOwner = viewer === normalizePubkey(project.owner);
-  const isManagedAgentOwner = useIsManagedAgent(project.owner) === true;
-  const canChangeStatus = Boolean(viewer) && (isAuthor || isOwner);
-  const hasApproved = Boolean(
-    viewer &&
-      pullRequest.approvals.some(
-        (approval) => normalizePubkey(approval.author) === viewer,
-      ),
-  );
-  const canApprove =
-    Boolean(viewer) &&
-    !isAuthor &&
-    !hasApproved &&
-    (pullRequest.status === "Open" || pullRequest.status === "Draft");
-  const canMerge =
-    (isOwner || isManagedAgentOwner) &&
-    pullRequest.status === "Open" &&
-    Boolean(pullRequest.branchName && pullRequest.commit);
-
-  const handleStatusChange = React.useCallback(
-    async (status: "open" | "draft") => {
-      try {
-        await statusMutation.mutateAsync({ pullRequest, status });
-        toast.success(
-          status === "draft"
-            ? "Converted to draft."
-            : "Marked as ready for review.",
-        );
-      } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to update status.",
-        );
-      }
-    },
-    [pullRequest, statusMutation],
-  );
-
-  const handleApprove = React.useCallback(async () => {
-    try {
-      await approveMutation.mutateAsync({ pullRequest });
-      toast.success("Pull request approved.");
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to approve.",
-      );
-    }
-  }, [approveMutation, pullRequest]);
-
-  const approvalCount = pullRequest.approvals.length;
-  const isDraft = pullRequest.status === "Draft";
-  const reviewState = isDraft
-    ? "This pull request is still a work in progress."
-    : pullRequest.reviewers.length > 0
-      ? "Review requested — no approvals yet."
-      : "No reviews yet.";
-  const reviewStateDetail = isDraft
-    ? "Draft pull requests cannot be merged."
-    : approvalCount === 0
-      ? "Approvals from reviewers will show up here."
-      : null;
-  const showActions =
-    hasApproved || canApprove || canMerge || (canChangeStatus && isDraft);
-  const showDraftControl = canChangeStatus && pullRequest.status === "Open";
-
-  if (approvalCount > 0 && !showActions && !showDraftControl) return null;
-
-  return (
-    <div className="space-y-2.5 pt-3">
-      <div className="min-w-0 space-y-2.5 rounded-xl bg-muted/40 px-3 py-2.5">
-        {approvalCount === 0 ? (
-          <div className="flex min-w-0 items-start gap-2">
-            {isDraft ? (
-              <GitPullRequestDraft className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-            ) : (
-              <GitPullRequest className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-            )}
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium text-foreground">
-                {reviewState}
-              </p>
-              {reviewStateDetail ? (
-                <p className="text-xs text-muted-foreground">
-                  {reviewStateDetail}
-                </p>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-        {showActions ? (
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            {hasApproved ? (
-              <span className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-green-600/40 px-3.5 text-xs font-medium text-green-600 dark:text-green-500">
-                <Check className="h-3.5 w-3.5" />
-                Approved
-              </span>
-            ) : null}
-            {canApprove ? (
-              <Button
-                className="h-8 gap-1.5 bg-green-600 px-3.5 text-white shadow-sm hover:bg-green-700"
-                disabled={approveMutation.isPending}
-                onClick={() => {
-                  void handleApprove();
-                }}
-                size="xs"
-                type="button"
-              >
-                <Check className="h-3.5 w-3.5" />
-                Approve
-              </Button>
-            ) : null}
-            {canMerge ? (
-              <MergePullRequestButton
-                project={project}
-                pullRequest={pullRequest}
-              />
-            ) : null}
-            {canChangeStatus && isDraft ? (
-              <Button
-                className="h-7 gap-1.5 px-3"
-                disabled={statusMutation.isPending}
-                onClick={() => {
-                  void handleStatusChange("open");
-                }}
-                size="xs"
-                type="button"
-                variant="secondary"
-              >
-                <GitPullRequest className="h-3.5 w-3.5" />
-                Ready for review
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
-      {showDraftControl ? (
-        <p className="px-1 text-xs text-muted-foreground">
-          Still in progress?{" "}
-          <button
-            className="font-medium underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
-            disabled={statusMutation.isPending}
-            onClick={() => {
-              void handleStatusChange("draft");
-            }}
-            type="button"
-          >
-            Convert to draft
-          </button>
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 /** GitHub-style PR title line, rendered as the top section of the PR detail
  * card. Status, branches, and dates live in the right-hand meta rail. */
 export function PullRequestDetailHeader({
@@ -749,16 +576,33 @@ function PullRequestDetail({
         {pullRequest.comments.length > 0 ? (
           <div className="-mt-4">
             {pullRequest.comments.map((item) => {
-              // Approvals and review requests render as compact timeline
+              // Review decisions and requests render as compact timeline
               // rows (GitHub-style) rather than full comment cards.
-              if (item.isApproval || item.isReviewRequest) {
+              const timelineKind = projectPullRequestCommentTimelineKind(item);
+              if (timelineKind) {
+                const isHistoricalDecision =
+                  item.reviewDecisionStatus === "historical";
                 return (
                   <div
                     className="-mx-4 flex min-h-10 min-w-0 items-center gap-2 border-b border-border/50 px-4 text-sm text-muted-foreground"
                     key={item.id}
                   >
-                    {item.isApproval ? (
-                      <Check className="h-3.5 w-3.5 shrink-0 text-green-600 dark:text-green-500" />
+                    {timelineKind === "approved" ? (
+                      <Check
+                        className={`h-3.5 w-3.5 shrink-0 ${
+                          isHistoricalDecision
+                            ? "text-muted-foreground"
+                            : "text-green-600 dark:text-green-500"
+                        }`}
+                      />
+                    ) : timelineKind === "changes-requested" ? (
+                      <X
+                        className={`h-3.5 w-3.5 shrink-0 ${
+                          isHistoricalDecision
+                            ? "text-muted-foreground"
+                            : "text-destructive"
+                        }`}
+                      />
                     ) : (
                       <UserPlus className="h-3.5 w-3.5 shrink-0" />
                     )}
@@ -767,9 +611,15 @@ function PullRequestDetail({
                         {labelForPubkey(item.author, profiles)}
                       </span>
                       <span className="min-w-0 truncate">
-                        {item.isApproval
-                          ? "approved these changes"
-                          : item.content.trim() || "requested a review"}
+                        {timelineKind === "approved"
+                          ? isHistoricalDecision
+                            ? "approved an earlier commit"
+                            : "approved these changes"
+                          : timelineKind === "changes-requested"
+                            ? isHistoricalDecision
+                              ? "requested changes on an earlier commit"
+                              : "requested changes"
+                            : item.content.trim() || "requested a review"}
                       </span>
                     </span>
                     <span className="w-20 shrink-0 text-right text-xs text-muted-foreground/70">

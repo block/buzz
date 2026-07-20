@@ -54,13 +54,18 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   const header = page.getByRole("heading", { level: 3 });
   await expect(header.first()).toBeVisible();
 
-  // Owner viewing an open PR: draft toggle + approve are both offered.
+  // Owner viewing an open PR: draft toggle and both review decisions are offered.
   const convertToDraft = page.getByRole("button", {
     name: "Convert to draft",
   });
   const approve = page.getByRole("button", { name: "Approve", exact: true });
+  const requestChanges = page.getByRole("button", {
+    name: "Request changes",
+    exact: true,
+  });
   await expect(convertToDraft).toBeVisible();
   await expect(approve).toBeVisible();
+  await expect(requestChanges).toBeVisible();
 
   // Request a review from bob via the reviewers dropdown.
   await page.getByRole("button", { name: "Request", exact: true }).click();
@@ -97,8 +102,50 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
     path: `${SHOTS}/01-review-requested.png`,
   });
 
-  // Approve the PR: header flips to the approved chip and the discussion
-  // gains a compact approval timeline row.
+  // Fire opposite decisions in the same event turn. The first choice wins;
+  // the shared synchronous guard must prevent the approval from publishing.
+  await requestChanges.evaluate((requestChangesButton) => {
+    const approveButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Approve",
+    );
+    requestChangesButton.click();
+    approveButton?.click();
+  });
+  await expect(page.getByText("Changes requested.")).toBeVisible();
+  await expect(
+    page.getByText("requested changes", { exact: true }),
+  ).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(requestChanges).toHaveCount(0);
+  const changeRequestEvent = await page.evaluate(() =>
+    window.__BUZZ_E2E_SIGNED_EVENTS__
+      ?.filter(
+        (event) =>
+          event.kind === 1 &&
+          event.tags.some(
+            (tag) => tag[0] === "t" && tag[1] === "changes-requested",
+          ),
+      )
+      .at(-1),
+  );
+  expect(changeRequestEvent?.tags).toContainEqual(["c", expect.any(String)]);
+  const rapidDecisionEvents = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_SIGNED_EVENTS__?.filter(
+        (event) =>
+          event.kind === 1 &&
+          event.tags.some(
+            (tag) =>
+              tag[0] === "t" &&
+              (tag[1] === "approval" || tag[1] === "changes-requested"),
+          ),
+      ) ?? [],
+  );
+  expect(rapidDecisionEvents).toHaveLength(1);
+
+  // Replace the completed change request with an approval. Both decisions
+  // remain tied to the current commit and their timestamps preserve order.
   await approve.click();
   await expect(page.getByText("Pull request approved.")).toBeVisible();
   await expect(page.getByText("approved these changes")).toBeVisible({
@@ -107,6 +154,19 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   await expect(
     page.getByRole("button", { name: "Approve", exact: true }),
   ).toHaveCount(0);
+  const approvalEvent = await page.evaluate(() =>
+    window.__BUZZ_E2E_SIGNED_EVENTS__
+      ?.filter(
+        (event) =>
+          event.kind === 1 &&
+          event.tags.some((tag) => tag[0] === "t" && tag[1] === "approval"),
+      )
+      .at(-1),
+  );
+  expect(approvalEvent?.tags).toContainEqual(["c", expect.any(String)]);
+  expect(approvalEvent?.createdAt).toBeGreaterThan(
+    changeRequestEvent?.createdAt ?? 0,
+  );
 
   await waitForAnimations(page);
   await page.screenshot({

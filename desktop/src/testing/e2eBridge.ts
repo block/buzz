@@ -934,6 +934,7 @@ declare global {
     ) => RawFeedItem;
     __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
       content: string;
+      createdAt?: number;
       kind: number;
       tags: string[][];
     }>;
@@ -10138,6 +10139,7 @@ export function maybeInstallE2eTauriMocks() {
       case "sign_event":
         window.__BUZZ_E2E_SIGNED_EVENTS__?.push({
           content: (payload as { content: string }).content,
+          createdAt: (payload as { createdAt?: number }).createdAt,
           kind: (payload as { kind: number }).kind,
           tags: (payload as { tags: string[][] }).tags,
         });
