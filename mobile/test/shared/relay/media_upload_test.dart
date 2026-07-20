@@ -472,6 +472,38 @@ void main() {
       );
     }
 
+    test('preserves video policy response details', () async {
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient(
+          (request) async => http.Response(
+            '{"error":"unsupported video codec"}',
+            HttpStatus.unprocessableEntity,
+          ),
+        ),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+      );
+
+      await expectLater(
+        service.uploadBytes(Uint8List(0), mimeType: 'video/mp4'),
+        throwsA(
+          isA<Exception>()
+              .having(
+                (error) => error,
+                'type',
+                isNot(isA<MediaPolicyUploadException>()),
+              )
+              .having(
+                (error) => error.toString(),
+                'message',
+                contains('unsupported video codec'),
+              ),
+        ),
+      );
+    });
+
     test(
       'checks clipboard image availability through the platform channel',
       () async {

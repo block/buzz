@@ -265,8 +265,9 @@ class MediaUploadService {
       response = await http.Response.fromStream(streamed);
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      if (response.statusCode == HttpStatus.unsupportedMediaType ||
-          response.statusCode == HttpStatus.unprocessableEntity) {
+      if (_allowedImageMimeTypes.contains(mimeType) &&
+          (response.statusCode == HttpStatus.unsupportedMediaType ||
+              response.statusCode == HttpStatus.unprocessableEntity)) {
         throw const MediaPolicyUploadException();
       }
       throw Exception(
