@@ -41,6 +41,7 @@ import type { ProjectIssue } from "./projectIssues.mjs";
 import { projectIssueEventsToIssues } from "./projectIssues.mjs";
 import type { ProjectPullRequest } from "./projectPullRequests.mjs";
 import { projectPullRequestEventsToPullRequests } from "./projectPullRequests.mjs";
+import { fetchProjectsWorkItems } from "./projectWorkItems";
 
 export type { ProjectIssue, ProjectPullRequest };
 
@@ -768,47 +769,12 @@ export function useProjectPullRequestsQuery(
   });
 }
 
-export function useProjectsIssuesQuery(projects: Project[]) {
+/** Loads cross-project issues and pull requests with partial-failure metadata. */
+export function useProjectsWorkItemsQuery(projects: Project[]) {
   return useQuery({
     enabled: projects.length > 0,
-    queryKey: ["projects", "issues", projects.map((project) => project.id)],
-    queryFn: async (): Promise<ProjectIssueListItem[]> => {
-      const results = await Promise.all(
-        projects.map(async (project) => {
-          const issues = await fetchProjectIssues(project);
-          return issues.map((issue) => ({ project, issue }));
-        }),
-      );
-      return results
-        .flat()
-        .sort((left, right) => right.issue.updatedAt - left.issue.updatedAt);
-    },
-    staleTime: 30_000,
-  });
-}
-
-export function useProjectsPullRequestsQuery(projects: Project[]) {
-  return useQuery({
-    enabled: projects.length > 0,
-    queryKey: [
-      "projects",
-      "pull-requests",
-      projects.map((project) => project.id),
-    ],
-    queryFn: async (): Promise<ProjectPullRequestListItem[]> => {
-      const results = await Promise.all(
-        projects.map(async (project) => {
-          const pullRequests = await fetchProjectPullRequests(project);
-          return pullRequests.map((pullRequest) => ({ project, pullRequest }));
-        }),
-      );
-      return results
-        .flat()
-        .sort(
-          (left, right) =>
-            right.pullRequest.updatedAt - left.pullRequest.updatedAt,
-        );
-    },
+    queryKey: ["projects", "work-items", projects.map((project) => project.id)],
+    queryFn: () => fetchProjectsWorkItems(projects),
     staleTime: 30_000,
   });
 }
@@ -843,7 +809,9 @@ export function useCreateProjectIssueCommentMutation(
       void queryClient.invalidateQueries({
         queryKey: ["project", project?.id ?? "none", "issues"],
       });
-      void queryClient.invalidateQueries({ queryKey: ["projects", "issues"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["projects", "work-items"],
+      });
       void queryClient.invalidateQueries({
         queryKey: ["projects", "activity-summaries"],
       });
@@ -882,7 +850,7 @@ export function useCreateProjectPullRequestCommentMutation(
         queryKey: ["project", project?.id ?? "none", "pull-requests"],
       });
       void queryClient.invalidateQueries({
-        queryKey: ["projects", "pull-requests"],
+        queryKey: ["projects", "work-items"],
       });
       void queryClient.invalidateQueries({
         queryKey: ["projects", "activity-summaries"],

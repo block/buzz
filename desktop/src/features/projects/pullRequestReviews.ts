@@ -160,7 +160,7 @@ export function useProjectPullRequestWriteInvalidation(
       queryKey: ["project", project?.id ?? "none", "pull-requests"],
     });
     void queryClient.invalidateQueries({
-      queryKey: ["projects", "pull-requests"],
+      queryKey: ["projects", "work-items"],
     });
     void queryClient.invalidateQueries({
       queryKey: ["projects", "activity-summaries"],

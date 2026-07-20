@@ -5,6 +5,7 @@ import type {
   ProjectIssue,
   ProjectIssueListItem,
 } from "@/features/projects/hooks";
+import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -15,6 +16,7 @@ import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
+import { ProjectsWorkItemsLoadNotice } from "./ProjectsWorkItemsLoadNotice";
 import {
   PROJECT_LIST_CONTAINER_CLASS,
   PROJECT_LIST_ROW_CLASS,
@@ -27,8 +29,12 @@ import {
 } from "./projectListRowStyles";
 
 type ProjectsIssuesListProps = {
+  error: unknown;
+  failedSections: ProjectWorkItemSection[];
   isLoading: boolean;
+  isRetrying: boolean;
   onOpen: (project: Project, issue: ProjectIssue) => void;
+  onRetry: () => void;
   profiles?: UserProfileLookup;
   issues: ProjectIssueListItem[];
   viewMode: "grid" | "list";
@@ -228,9 +234,13 @@ function IssueListRow({
 }
 
 export function ProjectsIssuesList({
+  error,
+  failedSections,
   isLoading,
+  isRetrying,
   issues,
   onOpen,
+  onRetry,
   profiles,
   viewMode,
 }: ProjectsIssuesListProps) {
@@ -242,19 +252,56 @@ export function ProjectsIssuesList({
     );
   }
 
+  const loadNotice = (
+    <ProjectsWorkItemsLoadNotice
+      error={error}
+      failedSections={failedSections}
+      isRetrying={isRetrying}
+      onRetry={onRetry}
+      subject="issues"
+    />
+  );
+
+  if (error && issues.length === 0) {
+    return loadNotice;
+  }
+
   if (issues.length === 0) {
     return (
-      <div className="border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
-        No issues yet.
+      <div className="space-y-3">
+        {loadNotice}
+        <div className="border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+          No issues yet.
+        </div>
       </div>
     );
   }
 
   if (viewMode === "grid") {
     return (
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      <div className="space-y-3">
+        {loadNotice}
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {issues.map(({ project, issue }) => (
+            <IssueGridCard
+              issue={issue}
+              key={issue.id}
+              onOpen={onOpen}
+              profiles={profiles}
+              project={project}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {loadNotice}
+      <div className={PROJECT_LIST_CONTAINER_CLASS}>
         {issues.map(({ project, issue }) => (
-          <IssueGridCard
+          <IssueListRow
             issue={issue}
             key={issue.id}
             onOpen={onOpen}
@@ -263,20 +310,6 @@ export function ProjectsIssuesList({
           />
         ))}
       </div>
-    );
-  }
-
-  return (
-    <div className={PROJECT_LIST_CONTAINER_CLASS}>
-      {issues.map(({ project, issue }) => (
-        <IssueListRow
-          issue={issue}
-          key={issue.id}
-          onOpen={onOpen}
-          profiles={profiles}
-          project={project}
-        />
-      ))}
     </div>
   );
 }

@@ -5,6 +5,7 @@ import type {
   ProjectPullRequest,
   ProjectPullRequestListItem,
 } from "@/features/projects/hooks";
+import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -15,6 +16,7 @@ import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
+import { ProjectsWorkItemsLoadNotice } from "./ProjectsWorkItemsLoadNotice";
 import {
   PROJECT_LIST_CONTAINER_CLASS,
   PROJECT_LIST_ROW_CLASS,
@@ -47,8 +49,12 @@ function AuthorNameButton({
 }
 
 type ProjectsPullRequestsListProps = {
+  error: unknown;
+  failedSections: ProjectWorkItemSection[];
   isLoading: boolean;
+  isRetrying: boolean;
   onOpen: (project: Project, pullRequest: ProjectPullRequest) => void;
+  onRetry: () => void;
   profiles?: UserProfileLookup;
   pullRequests: ProjectPullRequestListItem[];
   viewMode: "grid" | "list";
@@ -252,8 +258,12 @@ function PullRequestListRow({
 }
 
 export function ProjectsPullRequestsList({
+  error,
+  failedSections,
   isLoading,
+  isRetrying,
   onOpen,
+  onRetry,
   profiles,
   pullRequests,
   viewMode,
@@ -266,19 +276,56 @@ export function ProjectsPullRequestsList({
     );
   }
 
+  const loadNotice = (
+    <ProjectsWorkItemsLoadNotice
+      error={error}
+      failedSections={failedSections}
+      isRetrying={isRetrying}
+      onRetry={onRetry}
+      subject="pull requests"
+    />
+  );
+
+  if (error && pullRequests.length === 0) {
+    return loadNotice;
+  }
+
   if (pullRequests.length === 0) {
     return (
-      <div className="border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
-        No pull requests yet.
+      <div className="space-y-3">
+        {loadNotice}
+        <div className="border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+          No pull requests yet.
+        </div>
       </div>
     );
   }
 
   if (viewMode === "grid") {
     return (
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      <div className="space-y-3">
+        {loadNotice}
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {pullRequests.map(({ project, pullRequest }) => (
+            <PullRequestGridCard
+              key={pullRequest.id}
+              onOpen={onOpen}
+              profiles={profiles}
+              project={project}
+              pullRequest={pullRequest}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {loadNotice}
+      <div className={PROJECT_LIST_CONTAINER_CLASS}>
         {pullRequests.map(({ project, pullRequest }) => (
-          <PullRequestGridCard
+          <PullRequestListRow
             key={pullRequest.id}
             onOpen={onOpen}
             profiles={profiles}
@@ -287,20 +334,6 @@ export function ProjectsPullRequestsList({
           />
         ))}
       </div>
-    );
-  }
-
-  return (
-    <div className={PROJECT_LIST_CONTAINER_CLASS}>
-      {pullRequests.map(({ project, pullRequest }) => (
-        <PullRequestListRow
-          key={pullRequest.id}
-          onOpen={onOpen}
-          profiles={profiles}
-          project={project}
-          pullRequest={pullRequest}
-        />
-      ))}
     </div>
   );
 }

@@ -10,9 +10,8 @@ import {
   useDeleteProjectMutation,
   useProjectActivitySummariesQuery,
   useProjectLocalRepositoriesQuery,
-  useProjectsIssuesQuery,
-  useProjectsPullRequestsQuery,
   useProjectsQuery,
+  useProjectsWorkItemsQuery,
 } from "@/features/projects/hooks";
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
@@ -31,6 +30,7 @@ import { ProjectsIssuesList } from "@/features/projects/ui/ProjectsIssuesList";
 import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPanel";
 import { ProjectsOverviewRail } from "@/features/projects/ui/ProjectsOverviewRail";
 import { ProjectsPullRequestsList } from "@/features/projects/ui/ProjectsPullRequestsList";
+import { ProjectsWorkItemsLoadNotice } from "@/features/projects/ui/ProjectsWorkItemsLoadNotice";
 import { ProjectsListScopeDropdown } from "@/features/projects/ui/ProjectsListScopeDropdown";
 import { PROJECT_LIST_CONTAINER_CLASS } from "@/features/projects/ui/projectListRowStyles";
 import {
@@ -142,17 +142,18 @@ export function ProjectsView() {
   const projectsQuery = useProjectsQuery();
   const identityQuery = useIdentityQuery();
   const projects = projectsQuery.data ?? [];
-  const activitySummariesQuery = useProjectActivitySummariesQuery(projects);
   const localRepositoriesQuery = useProjectLocalRepositoriesQuery(
     activeCommunity?.reposDir,
   );
-  const projectPullRequestsQuery = useProjectsPullRequestsQuery(projects);
   const [filter, setFilter] = React.useState<ProjectsFilter>(() => {
     const storedFilter = readStoredFilter();
     return storedFilter === "mine" || storedFilter === "local"
       ? "repositories"
       : storedFilter;
   });
+  const activitySummariesQuery = useProjectActivitySummariesQuery(
+    filter === "prs" || filter === "issues" ? [] : projects,
+  );
   const [repositoryScope, setRepositoryScope] =
     React.useState<ProjectsRepositoryScope>(() => readStoredRepositoryScope());
   const [pullRequestScope, setPullRequestScope] =
@@ -160,8 +161,8 @@ export function ProjectsView() {
   const [issueScope, setIssueScope] = React.useState<ProjectsWorkItemScope>(
     () => readStoredIssueScope(),
   );
-  const projectIssuesQuery = useProjectsIssuesQuery(
-    filter === "issues" || filter === "all" ? projects : [],
+  const projectsWorkItemsQuery = useProjectsWorkItemsQuery(
+    filter === "all" || filter === "prs" || filter === "issues" ? projects : [],
   );
   // One blobless clone per unique repository — only scan while the overview
   // header (filter === "all") is actually visible.
@@ -195,15 +196,17 @@ export function ProjectsView() {
               activitySummariesQuery.data?.[project.repoAddress],
             ),
           ),
-          ...(projectPullRequestsQuery.data?.flatMap(({ pullRequest }) => [
-            pullRequest.author,
-            ...pullRequest.recipients,
-            ...pullRequest.reviewers,
-            ...pullRequest.approvals.map((approval) => approval.author),
-            ...pullRequest.updates.map((update) => update.author),
-            ...pullRequest.comments.map((comment) => comment.author),
-          ]) ?? []),
-          ...(projectIssuesQuery.data?.flatMap(({ issue }) => [
+          ...(projectsWorkItemsQuery.data?.pullRequests.items.flatMap(
+            ({ pullRequest }) => [
+              pullRequest.author,
+              ...pullRequest.recipients,
+              ...pullRequest.reviewers,
+              ...pullRequest.approvals.map((approval) => approval.author),
+              ...pullRequest.updates.map((update) => update.author),
+              ...pullRequest.comments.map((comment) => comment.author),
+            ],
+          ) ?? []),
+          ...(projectsWorkItemsQuery.data?.issues.items.flatMap(({ issue }) => [
             issue.author,
             ...issue.recipients,
             ...issue.comments.map((comment) => comment.author),
@@ -211,12 +214,7 @@ export function ProjectsView() {
         ].map(normalizePubkey),
       ),
     ],
-    [
-      activitySummariesQuery.data,
-      projectIssuesQuery.data,
-      projectPullRequestsQuery.data,
-      projects,
-    ],
+    [activitySummariesQuery.data, projects, projectsWorkItemsQuery.data],
   );
   const profilesQuery = useUsersBatchQuery(projectPubkeys, {
     enabled: projectPubkeys.length > 0,
@@ -337,7 +335,7 @@ export function ProjectsView() {
   ]);
 
   const visiblePullRequests = React.useMemo(() => {
-    const pullRequests = projectPullRequestsQuery.data ?? [];
+    const pullRequests = projectsWorkItemsQuery.data?.pullRequests.items ?? [];
     const scopedPullRequests =
       pullRequestScope === "mine" && currentPubkey
         ? pullRequests.filter(
@@ -355,10 +353,10 @@ export function ProjectsView() {
       }
       return right.pullRequest.updatedAt - left.pullRequest.updatedAt;
     });
-  }, [currentPubkey, projectPullRequestsQuery.data, pullRequestScope, sort]);
+  }, [currentPubkey, projectsWorkItemsQuery.data, pullRequestScope, sort]);
 
   const visibleIssues = React.useMemo(() => {
-    const issues = projectIssuesQuery.data ?? [];
+    const issues = projectsWorkItemsQuery.data?.issues.items ?? [];
     const scopedIssues =
       issueScope === "mine" && currentPubkey
         ? issues.filter(
@@ -375,7 +373,7 @@ export function ProjectsView() {
       }
       return right.issue.updatedAt - left.issue.updatedAt;
     });
-  }, [currentPubkey, issueScope, projectIssuesQuery.data, sort]);
+  }, [currentPubkey, issueScope, projectsWorkItemsQuery.data, sort]);
 
   // Route by the canonical `owner:dtag` project ID — a bare dtag is
   // ambiguous across owners (forks can share the same dtag).
@@ -528,23 +526,38 @@ export function ProjectsView() {
     </div>
   );
 
+  const workItemFailedSections = [
+    ...new Set([
+      ...(projectsWorkItemsQuery.data?.issues.failedSections ?? []),
+      ...(projectsWorkItemsQuery.data?.pullRequests.failedSections ?? []),
+    ]),
+  ];
   const activityFeed = (
-    <ProjectsActivityFeed
-      isLoading={
-        repoSnapshotsQuery.isLoading ||
-        projectPullRequestsQuery.isLoading ||
-        projectIssuesQuery.isLoading
-      }
-      issues={projectIssuesQuery.data ?? []}
-      onOpenCommit={handleOpenCommit}
-      onOpenIssue={handleOpenIssue}
-      onOpenProject={handleOpenProject}
-      onOpenPullRequest={handleOpenPullRequest}
-      profiles={profiles}
-      projects={projects}
-      pullRequests={projectPullRequestsQuery.data ?? []}
-      snapshots={repoSnapshotsQuery.data}
-    />
+    <>
+      <ProjectsWorkItemsLoadNotice
+        error={projectsWorkItemsQuery.error}
+        failedSections={workItemFailedSections}
+        isRetrying={
+          projectsWorkItemsQuery.isFetching && !projectsWorkItemsQuery.isLoading
+        }
+        onRetry={() => void projectsWorkItemsQuery.refetch()}
+        subject="project activity"
+      />
+      <ProjectsActivityFeed
+        isLoading={
+          repoSnapshotsQuery.isLoading || projectsWorkItemsQuery.isLoading
+        }
+        issues={projectsWorkItemsQuery.data?.issues.items ?? []}
+        onOpenCommit={handleOpenCommit}
+        onOpenIssue={handleOpenIssue}
+        onOpenProject={handleOpenProject}
+        onOpenPullRequest={handleOpenPullRequest}
+        profiles={profiles}
+        projects={projects}
+        pullRequests={projectsWorkItemsQuery.data?.pullRequests.items ?? []}
+        snapshots={repoSnapshotsQuery.data}
+      />
+    </>
   );
 
   const createMenu = (
@@ -685,17 +698,36 @@ export function ProjectsView() {
                   </div>
                   {filter === "prs" ? (
                     <ProjectsPullRequestsList
-                      isLoading={projectPullRequestsQuery.isLoading}
+                      error={projectsWorkItemsQuery.error}
+                      failedSections={
+                        projectsWorkItemsQuery.data?.pullRequests
+                          .failedSections ?? []
+                      }
+                      isLoading={projectsWorkItemsQuery.isLoading}
+                      isRetrying={
+                        projectsWorkItemsQuery.isFetching &&
+                        !projectsWorkItemsQuery.isLoading
+                      }
                       onOpen={handleOpenPullRequest}
+                      onRetry={() => void projectsWorkItemsQuery.refetch()}
                       profiles={profiles}
                       pullRequests={visiblePullRequests}
                       viewMode={viewMode}
                     />
                   ) : filter === "issues" ? (
                     <ProjectsIssuesList
-                      isLoading={projectIssuesQuery.isLoading}
+                      error={projectsWorkItemsQuery.error}
+                      failedSections={
+                        projectsWorkItemsQuery.data?.issues.failedSections ?? []
+                      }
+                      isLoading={projectsWorkItemsQuery.isLoading}
+                      isRetrying={
+                        projectsWorkItemsQuery.isFetching &&
+                        !projectsWorkItemsQuery.isLoading
+                      }
                       issues={visibleIssues}
                       onOpen={handleOpenIssue}
+                      onRetry={() => void projectsWorkItemsQuery.refetch()}
                       profiles={profiles}
                       viewMode={viewMode}
                     />

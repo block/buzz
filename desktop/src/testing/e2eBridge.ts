@@ -941,6 +941,10 @@ declare global {
     __BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?: number[];
     /** Overrides the first mock repository owner for delegated-owner tests. */
     __BUZZ_E2E_PROJECT_OWNER_OVERRIDE__?: string;
+    /** Project history kinds rejected with CLOSED for aggregate-query tests. */
+    __BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__?: number[];
+    /** Captured aggregate project-history filters for request-count assertions. */
+    __BUZZ_E2E_PROJECT_QUERY_FILTERS__?: MockFilter[];
     __BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__?: {
       local_path: string | null;
       local_branch: string | null;
@@ -8411,6 +8415,18 @@ function sendToMockSocket(args: {
       filter.kinds?.some((kind) => MOCK_PROJECT_KINDS.has(kind)) ||
       (filter.kinds?.includes(1) && filter["#a"])
     ) {
+      window.__BUZZ_E2E_PROJECT_QUERY_FILTERS__ ??= [];
+      window.__BUZZ_E2E_PROJECT_QUERY_FILTERS__.push(filter);
+      const rejectedKinds =
+        window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ ?? [];
+      if (filter.kinds?.some((kind) => rejectedKinds.includes(kind))) {
+        sendWsText(socket.handler, [
+          "CLOSED",
+          subId,
+          "mock project query failure",
+        ]);
+        return;
+      }
       for (const event of filterMockProjectEvents(filter)) {
         sendWsText(socket.handler, ["EVENT", subId, event]);
       }

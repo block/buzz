@@ -47,7 +47,7 @@ export function useCreateProjectIssueMutation(
           queryKey: ["project", project?.id ?? "none", "issues"],
         }),
         queryClient.invalidateQueries({
-          queryKey: ["projects", "issues"],
+          queryKey: ["projects", "work-items"],
         }),
         queryClient.invalidateQueries({
           queryKey: ["projects", "activity-summaries"],

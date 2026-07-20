@@ -327,6 +327,147 @@ test("viewer without repository ownership cannot merge", async ({ page }) => {
   );
 });
 
+test("project pull requests preserve partial results from batched queries", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [1619];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page
+    .getByRole("button", { name: "Pull Requests", exact: true })
+    .click();
+
+  await expect(
+    page.getByRole("button", { name: /^View / }).first(),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/Some pull request details could not be loaded/),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+
+  const workItemFilters = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_PROJECT_QUERY_FILTERS__?.filter(
+        (filter) => filter.limit === 2_000,
+      ) ?? [],
+  );
+  expect(
+    workItemFilters
+      .map((filter) => JSON.stringify([...(filter.kinds ?? [])].sort()))
+      .sort(),
+  ).toEqual(
+    [[1], [1618, 1621], [1619], [1630, 1631, 1632, 1633]]
+      .map((kinds) => JSON.stringify(kinds))
+      .sort(),
+  );
+  expect(
+    workItemFilters.every((filter) => (filter["#a"]?.length ?? 0) > 1),
+  ).toBe(true);
+  const expectedRepoAddresses = [
+    `30617:${DEFAULT_MOCK_PUBKEY}:buzz`,
+    `30617:${TEST_IDENTITIES.alice.pubkey}:relay-tools`,
+    `30617:${TEST_IDENTITIES.bob.pubkey}:design-system`,
+  ].sort();
+  for (const filter of workItemFilters) {
+    expect([...(filter["#a"] ?? [])].sort()).toEqual(expectedRepoAddresses);
+  }
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [];
+  });
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(
+    page.getByText(/Some pull request details could not be loaded/),
+  ).toHaveCount(0);
+});
+
+test("project pull requests report aggregate root query failures", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [1618];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page
+    .getByRole("button", { name: "Pull Requests", exact: true })
+    .click();
+
+  await expect(page.getByText("Could not load pull requests.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(page.getByText("No pull requests yet.")).toHaveCount(0);
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [];
+  });
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByText("Could not load pull requests.")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /^View / }).first(),
+  ).toBeVisible();
+});
+
+test("project issues preserve partial results from aggregate queries", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [1];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByRole("button", { name: "Issues", exact: true }).click();
+
+  await expect(
+    page.getByRole("button", { name: /^View / }).first(),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Some issue details could not be loaded."),
+  ).toBeVisible();
+  await expect(page.getByText(/Missing comments\./)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [];
+  });
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(
+    page.getByText("Some issue details could not be loaded."),
+  ).toHaveCount(0);
+});
+
+test("project overview reports aggregate work-item failures", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [1618];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+
+  await expect(
+    page.getByText("Could not load project activity."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__ = [];
+  });
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByText("Could not load project activity.")).toHaveCount(
+    0,
+  );
+});
+
 test("project without a checkout can be cloned", async ({ page }) => {
   await enableProjectsFeature(page);
   await installMockBridge(page);
