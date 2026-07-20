@@ -853,7 +853,9 @@ test("first-community owner can create and connect a hosted community", async ({
   await page.getByRole("button", { name: "Connect and continue" }).click();
   const createSurface = page.getByTestId("hosted-community-create-surface");
   const surfaceBoxBeforeFeedback = await createSurface.boundingBox();
-  await page.getByRole("textbox", { name: "Community name" }).fill("bee-lab");
+  const communityNameInput = page.getByTestId("hosted-community-address-input");
+  await communityNameInput.fill("bee-lab");
+  await expect(communityNameInput).toHaveAttribute("style", "width: 7ch;");
   const availabilityFeedback = page.getByText("That address is available.");
   await expect(availabilityFeedback).toBeVisible();
   const [feedbackBox, surfaceBox, inputBox, suffixBox] = await Promise.all([

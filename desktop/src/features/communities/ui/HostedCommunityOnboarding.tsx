@@ -361,7 +361,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
       style={
         inline
           ? undefined
-          : { width: `${Math.max(name.length, "your-community".length)}ch` }
+          : { width: `${name ? name.length : "your-community".length}ch` }
       }
       value={name}
     />
