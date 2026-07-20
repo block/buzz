@@ -76,6 +76,18 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(scrubbedTrailingPayload, sanitized)
   }
 
+  func testSanitizePngSupportsDataSlices() throws {
+    let fixture = try fixtureData(named: "UIKitEncoded", extension: "png")
+    let padded = Data([0x00]) + fixture
+    let slice = padded.dropFirst()
+    XCTAssertNotEqual(slice.startIndex, 0)
+
+    let sanitized = try MediaSanitizer.scrubPng(slice)
+
+    try assertMatchesRelayImageMetadataPolicy(sanitized, mimeType: "image/png")
+    XCTAssertNotNil(UIImage(data: sanitized))
+  }
+
   func testSanitizeJpegRemovesUIKitMetadataSegments() throws {
     let fixture = try fixtureData(named: "UIKitEncoded", extension: "jpg")
     XCTAssertEqual(try jpegMetadataMarkers(fixture), [0xE0, 0xE1, 0xED])
@@ -90,6 +102,18 @@ class RunnerTests: XCTestCase {
     withTrailingPayload.append(Data("hidden location".utf8))
     let scrubbedTrailingPayload = try MediaSanitizer.scrubJpeg(withTrailingPayload)
     XCTAssertEqual(scrubbedTrailingPayload, sanitized)
+  }
+
+  func testSanitizeJpegSupportsDataSlices() throws {
+    let fixture = try fixtureData(named: "UIKitEncoded", extension: "jpg")
+    let padded = Data([0x00]) + fixture
+    let slice = padded.dropFirst()
+    XCTAssertNotEqual(slice.startIndex, 0)
+
+    let sanitized = try MediaSanitizer.scrubJpeg(slice)
+
+    try assertMatchesRelayImageMetadataPolicy(sanitized, mimeType: "image/jpeg")
+    XCTAssertNotNil(UIImage(data: sanitized))
   }
 
   func testEncodeJpegScrubsUIKitOutput() throws {

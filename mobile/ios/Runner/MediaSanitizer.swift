@@ -49,6 +49,7 @@ enum MediaSanitizer {
   }
 
   static func scrubPng(_ data: Data) throws -> Data {
+    let data = Data(data)
     guard data.count >= pngSignature.count, data.prefix(pngSignature.count) == pngSignature else {
       throw MediaSanitizationError.invalidPng
     }
@@ -90,6 +91,7 @@ enum MediaSanitizer {
   }
 
   static func scrubJpeg(_ data: Data) throws -> Data {
+    let data = Data(data)
     guard data.count >= 2, data[0] == 0xFF, data[1] == 0xD8 else {
       throw MediaSanitizationError.invalidJpeg
     }
