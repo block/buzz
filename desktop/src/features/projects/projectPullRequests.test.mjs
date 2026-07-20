@@ -179,6 +179,7 @@ function commentEvent({
   labels = [],
   reviewers = [],
   commit,
+  anchor,
 }) {
   return {
     id: id ?? `comment-${pubkey.slice(0, 8)}-${createdAt}`,
@@ -192,9 +193,88 @@ function commentEvent({
       ...reviewers.map((reviewer) => ["p", reviewer]),
       ...labels.map((label) => ["t", label]),
       ...(commit ? [["c", commit]] : []),
+      ...(anchor
+        ? [
+            ["t", "inline-comment"],
+            ["file", anchor.path],
+            ["side", anchor.side],
+            ["line", String(anchor.line)],
+          ]
+        : []),
     ],
   };
 }
+
+test("parses commit-scoped inline comment anchors", () => {
+  const commit = "1111111111111111111111111111111111111111";
+  const comment = commentEvent({
+    pubkey: ATTACKER,
+    createdAt: 150,
+    content: "Could this be clearer?",
+    commit,
+    anchor: {
+      path: "desktop/src/features/projects/hooks.ts",
+      side: "new",
+      line: 42,
+    },
+  });
+
+  const pullRequest = eventToProjectPullRequest(
+    pullRequestEvent(),
+    [],
+    [comment],
+  );
+
+  assert.deepEqual(pullRequest.comments[0].anchor, {
+    path: "desktop/src/features/projects/hooks.ts",
+    side: "new",
+    line: 42,
+  });
+  assert.equal(pullRequest.comments[0].inlineCommentStatus, "current");
+  assert.equal(pullRequest.comments[0].isInlineComment, true);
+});
+
+test("marks inline comments on earlier commits as outdated", () => {
+  const initialCommit = "1111111111111111111111111111111111111111";
+  const currentCommit = "2222222222222222222222222222222222222222";
+  const comment = commentEvent({
+    pubkey: ATTACKER,
+    createdAt: 150,
+    commit: initialCommit,
+    anchor: { path: "src/example.ts", side: "old", line: 7 },
+  });
+  const update = updateEvent({
+    pubkey: AUTHOR,
+    createdAt: 200,
+    commit: currentCommit,
+  });
+
+  const pullRequest = eventToProjectPullRequest(
+    pullRequestEvent(),
+    [update],
+    [comment],
+  );
+
+  assert.equal(pullRequest.comments[0].inlineCommentStatus, "outdated");
+});
+
+test("rejects malformed inline comment anchors", () => {
+  const comment = commentEvent({
+    pubkey: ATTACKER,
+    createdAt: 150,
+    commit: "1111111111111111111111111111111111111111",
+    anchor: { path: "../secrets", side: "new", line: 0 },
+  });
+
+  const pullRequest = eventToProjectPullRequest(
+    pullRequestEvent(),
+    [],
+    [comment],
+  );
+
+  assert.equal(pullRequest.comments[0].anchor, null);
+  assert.equal(pullRequest.comments[0].inlineCommentStatus, null);
+});
 
 test("draft/ready toggles via status kinds 1633 and 1630", () => {
   const draft = statusEvent({ kind: 1633, pubkey: AUTHOR, createdAt: 300 });

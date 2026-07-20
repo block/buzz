@@ -17,6 +17,7 @@ import {
   FileVideo,
   FolderGit2,
   GitCommitHorizontal,
+  MessageSquarePlus,
   Package,
   Search,
   Settings,
@@ -24,10 +25,19 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
-import type { ProjectPullRequest } from "@/features/projects/hooks";
+import {
+  type Project,
+  type ProjectPullRequest,
+  type ProjectPullRequestCommentAnchor,
+  useCreateProjectPullRequestCommentMutation,
+} from "@/features/projects/hooks";
+import type { ProjectPullRequestComment } from "@/features/projects/projectPullRequests.mjs";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
 import type { ProjectRepoDiff, ProjectRepoDiffFile } from "@/shared/api/types";
+import { ProjectPullRequestInlineCommentThread } from "./ProjectPullRequestInlineComments";
 
 function fileName(path: string) {
   return path.split("/").pop() || path;
@@ -45,6 +55,21 @@ type DiffRow = {
   newLine: number | null;
   oldLine: number | null;
   type: "add" | "context" | "delete" | "hunk";
+};
+
+type InlineCommentControls = {
+  activeAnchor: ProjectPullRequestCommentAnchor | null;
+  comments: ProjectPullRequestComment[];
+  isSending: boolean;
+  onCancel: () => void;
+  onStart: (anchor: ProjectPullRequestCommentAnchor) => void;
+  onSubmit: (
+    anchor: ProjectPullRequestCommentAnchor,
+    content: string,
+    mentionPubkeys: string[],
+    mediaTags?: string[][],
+  ) => Promise<unknown>;
+  profiles?: UserProfileLookup;
 };
 
 type FileTreeNode = {
@@ -366,6 +391,29 @@ function linePrefix(type: DiffRow["type"]) {
   return " ";
 }
 
+function commentAnchorForRow(
+  file: ProjectRepoDiffFile,
+  row: DiffRow,
+): ProjectPullRequestCommentAnchor | null {
+  if (row.type === "hunk") return null;
+  const side = row.type === "delete" ? "old" : "new";
+  const line = side === "old" ? row.oldLine : row.newLine;
+  return line ? { line, path: file.path, side } : null;
+}
+
+function anchorsEqual(
+  left: ProjectPullRequestCommentAnchor | null,
+  right: ProjectPullRequestCommentAnchor | null,
+) {
+  return Boolean(
+    left &&
+      right &&
+      left.line === right.line &&
+      left.path === right.path &&
+      left.side === right.side,
+  );
+}
+
 function fileAdditions(file: ProjectRepoDiffFile) {
   return file.additions;
 }
@@ -390,7 +438,13 @@ function errorMessage(error: unknown) {
   return message.replace(/(^|[\s'"`])(?:[A-Za-z]:)?[\\/][^\s'"`]+/g, "$1…");
 }
 
-function DiffPreview({ file }: { file: ProjectRepoDiffFile }) {
+function DiffPreview({
+  file,
+  inlineComments,
+}: {
+  file: ProjectRepoDiffFile;
+  inlineComments?: InlineCommentControls;
+}) {
   const rows = diffRows(file);
   if (rows.length === 0) {
     return (
@@ -408,34 +462,87 @@ function DiffPreview({ file }: { file: ProjectRepoDiffFile }) {
           local checkout to review the full change.
         </div>
       ) : null}
-      {rows.map((row) => (
-        <div
-          className={cn(
-            "grid min-h-5 grid-cols-[3rem_3rem_1.5rem_minmax(0,1fr)]",
-            diffLineClassName(row.type),
-          )}
-          key={row.key}
-        >
-          <span className="select-none border-border/40 border-r px-2 text-right text-muted-foreground/70">
-            {row.oldLine ?? " "}
-          </span>
-          <span className="select-none border-border/40 border-r px-2 text-right text-muted-foreground/70">
-            {row.newLine ?? " "}
-          </span>
-          <span
-            className={cn(
-              "select-none px-2",
-              row.type === "add" && "text-green-500",
-              row.type === "delete" && "text-destructive",
-            )}
-          >
-            {linePrefix(row.type)}
-          </span>
-          <code className="min-w-0 whitespace-pre pr-3 text-foreground">
-            {row.content || " "}
-          </code>
-        </div>
-      ))}
+      {rows.map((row) => {
+        const anchor = commentAnchorForRow(file, row);
+        const comments =
+          anchor && inlineComments
+            ? inlineComments.comments.filter(
+                (comment) =>
+                  comment.anchor && anchorsEqual(comment.anchor, anchor),
+              )
+            : [];
+        const isActive = anchorsEqual(
+          inlineComments?.activeAnchor ?? null,
+          anchor,
+        );
+        return (
+          <React.Fragment key={row.key}>
+            <div
+              className={cn(
+                "group grid min-h-5 grid-cols-[3rem_3rem_2rem_1.5rem_minmax(0,1fr)]",
+                diffLineClassName(row.type),
+              )}
+              data-line={anchor?.line}
+              data-path={anchor?.path}
+              data-side={anchor?.side}
+              data-testid={anchor ? "project-diff-line" : undefined}
+            >
+              <span className="select-none border-border/40 border-r px-2 text-right text-muted-foreground/70">
+                {row.oldLine ?? " "}
+              </span>
+              <span className="select-none border-border/40 border-r px-2 text-right text-muted-foreground/70">
+                {row.newLine ?? " "}
+              </span>
+              <span className="flex select-none items-center justify-center">
+                {anchor && inlineComments ? (
+                  <button
+                    aria-label={`Comment on ${anchor.path} ${anchor.side} line ${anchor.line}`}
+                    className={cn(
+                      "flex h-5 w-5 items-center justify-center rounded text-muted-foreground opacity-0 hover:bg-primary hover:text-primary-foreground focus-visible:opacity-100 focus-visible:outline-hidden group-hover:opacity-100",
+                      (comments.length > 0 || isActive) && "opacity-100",
+                    )}
+                    data-testid="project-diff-add-comment"
+                    onClick={() => inlineComments.onStart(anchor)}
+                    title="Add line comment"
+                    type="button"
+                  >
+                    <MessageSquarePlus className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+              </span>
+              <span
+                className={cn(
+                  "select-none px-2",
+                  row.type === "add" && "text-green-500",
+                  row.type === "delete" && "text-destructive",
+                )}
+              >
+                {linePrefix(row.type)}
+              </span>
+              <code className="min-w-0 whitespace-pre pr-3 text-foreground">
+                {row.content || " "}
+              </code>
+            </div>
+            {anchor && inlineComments ? (
+              <ProjectPullRequestInlineCommentThread
+                activeAnchor={isActive ? anchor : null}
+                comments={comments}
+                isSending={inlineComments.isSending}
+                onCancel={inlineComments.onCancel}
+                onSubmit={(content, mentionPubkeys, mediaTags) =>
+                  inlineComments.onSubmit(
+                    anchor,
+                    content,
+                    mentionPubkeys,
+                    mediaTags,
+                  )
+                }
+                profiles={inlineComments.profiles}
+              />
+            ) : null}
+          </React.Fragment>
+        );
+      })}
     </div>
   );
 }
@@ -494,13 +601,59 @@ export function ProjectPullRequestFilesChangedPanel({
   error,
   diff,
   isLoading,
+  profiles,
+  project,
   pullRequest,
 }: {
   error: unknown;
   diff: ProjectRepoDiff | null | undefined;
   isLoading: boolean;
+  profiles?: UserProfileLookup;
+  project: Project;
   pullRequest: ProjectPullRequest | null;
 }) {
+  const [activeAnchor, setActiveAnchor] =
+    React.useState<ProjectPullRequestCommentAnchor | null>(null);
+  const { isPending: isPostingComment, mutateAsync: postComment } =
+    useCreateProjectPullRequestCommentMutation(project);
+  const inlineComments = React.useMemo(
+    () =>
+      pullRequest?.comments.filter(
+        (comment) =>
+          comment.anchor && comment.inlineCommentStatus === "current",
+      ) ?? [],
+    [pullRequest],
+  );
+  const handleSubmit = React.useCallback(
+    async (
+      anchor: ProjectPullRequestCommentAnchor,
+      content: string,
+      mentionPubkeys: string[],
+      mediaTags?: string[][],
+    ) => {
+      if (!pullRequest) throw new Error("No pull request selected.");
+      try {
+        await postComment({
+          anchor,
+          content,
+          mediaTags,
+          mentionPubkeys,
+          pullRequest,
+        });
+        setActiveAnchor(null);
+        toast.success("Line comment posted.");
+      } catch (error) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : "Failed to post line comment.",
+        );
+        throw error;
+      }
+    },
+    [postComment, pullRequest],
+  );
+
   return (
     <ProjectDiffFilesPanel
       diff={pullRequest ? diff : null}
@@ -510,6 +663,19 @@ export function ProjectPullRequestFilesChangedPanel({
         pullRequest
           ? `${pullRequest.title} · ${pullRequest.commit?.slice(0, 7) ?? "PR"}`
           : ""
+      }
+      inlineComments={
+        pullRequest
+          ? {
+              activeAnchor,
+              comments: inlineComments,
+              isSending: isPostingComment,
+              onCancel: () => setActiveAnchor(null),
+              onStart: setActiveAnchor,
+              onSubmit: handleSubmit,
+              profiles,
+            }
+          : undefined
       }
       isLoading={isLoading}
       subjectLabel="pull request"
@@ -523,6 +689,7 @@ export function ProjectDiffFilesPanel({
   isLoading,
   embedded = false,
   headerLabel,
+  inlineComments,
   subjectLabel,
 }: {
   error: unknown;
@@ -531,6 +698,7 @@ export function ProjectDiffFilesPanel({
   /** Render without an outer border, for nesting inside an existing card. */
   embedded?: boolean;
   headerLabel: string;
+  inlineComments?: InlineCommentControls;
   subjectLabel: string;
 }) {
   const outerBorderClass = embedded
@@ -684,7 +852,10 @@ export function ProjectDiffFilesPanel({
                   </span>
                 </div>
               </header>
-              <DiffPreview file={selectedFile} />
+              <DiffPreview
+                file={selectedFile}
+                inlineComments={inlineComments}
+              />
             </article>
           ) : (
             <div className="border border-border/60 bg-background/45 p-4 text-sm text-muted-foreground">

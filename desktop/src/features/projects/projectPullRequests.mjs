@@ -148,18 +148,54 @@ function eventToPullRequestUpdate(event) {
 export const PR_REVIEW_REQUEST_LABEL = "review-request";
 export const PR_APPROVAL_LABEL = "approval";
 export const PR_CHANGES_REQUESTED_LABEL = "changes-requested";
+export const PR_INLINE_COMMENT_LABEL = "inline-comment";
+
+/** Validate an inline diff anchor without normalizing attacker-controlled paths. */
+export function normalizeProjectPullRequestCommentAnchor(anchor) {
+  if (!anchor || typeof anchor.path !== "string") return null;
+  const path = anchor.path;
+  if (
+    path.length === 0 ||
+    path.length > 4_096 ||
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    path.includes("\0") ||
+    path
+      .split("/")
+      .some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    return null;
+  }
+  if (anchor.side !== "old" && anchor.side !== "new") return null;
+  if (!Number.isSafeInteger(anchor.line) || anchor.line < 1) return null;
+  return { line: anchor.line, path, side: anchor.side };
+}
 
 function eventToPullRequestComment(event) {
   const labels = getAllTags(event, "t").map((label) => label.toLowerCase());
   const isReviewRequest = labels.includes(PR_REVIEW_REQUEST_LABEL);
   const isApproval = labels.includes(PR_APPROVAL_LABEL);
   const isChangeRequest = labels.includes(PR_CHANGES_REQUESTED_LABEL);
+  const lineTag = getTag(event, "line");
+  const parsedLine =
+    lineTag && /^[1-9]\d*$/.test(lineTag) ? Number(lineTag) : Number.NaN;
+  const anchor =
+    isReviewRequest || isApproval || isChangeRequest
+      ? null
+      : normalizeProjectPullRequestCommentAnchor({
+          line: parsedLine,
+          path: getTag(event, "file"),
+          side: getTag(event, "side"),
+        });
   return {
     id: event.id,
     content: event.content,
     author: event.pubkey,
     createdAt: event.created_at,
     commit: getTag(event, "c") ?? null,
+    anchor,
+    isInlineComment:
+      Boolean(anchor) || labels.includes(PR_INLINE_COMMENT_LABEL),
     isApproval,
     isChangeRequest,
     isReviewRequest,
@@ -281,6 +317,12 @@ export function eventToProjectPullRequest(
   const initialCommit = getTag(pullRequest, "c") ?? null;
   const comments = parsedComments.map((comment) => ({
     ...comment,
+    inlineCommentStatus: comment.anchor
+      ? latestCommit &&
+        reviewDecisionCommit(comment, initialCommit) === latestCommit
+        ? "current"
+        : "outdated"
+      : null,
     isTrustedReviewDecision:
       Boolean(comment.reviewDecision) &&
       trustedActors.has(comment.author.toLowerCase()),

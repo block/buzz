@@ -15,6 +15,9 @@ export type ProjectPullRequestComment = {
   author: string;
   createdAt: number;
   commit: string | null;
+  anchor: ProjectPullRequestCommentAnchor | null;
+  inlineCommentStatus: "current" | "outdated" | null;
+  isInlineComment: boolean;
   isApproval: boolean;
   isChangeRequest: boolean;
   isReviewRequest: boolean;
@@ -23,6 +26,12 @@ export type ProjectPullRequestComment = {
   reviewDecision: "approved" | "changes-requested" | null;
   reviewDecisionStatus: "current" | "historical" | null;
   reviewerPubkeys: string[];
+};
+
+export type ProjectPullRequestCommentAnchor = {
+  line: number;
+  path: string;
+  side: "old" | "new";
 };
 
 export type ProjectPullRequestApproval = {
@@ -44,6 +53,18 @@ export type ProjectPullRequestChangeRequest = {
 export const PR_REVIEW_REQUEST_LABEL: string;
 export const PR_APPROVAL_LABEL: string;
 export const PR_CHANGES_REQUESTED_LABEL: string;
+export const PR_INLINE_COMMENT_LABEL: string;
+
+export function normalizeProjectPullRequestCommentAnchor(
+  anchor:
+    | {
+        line?: unknown;
+        path?: unknown;
+        side?: unknown;
+      }
+    | null
+    | undefined,
+): ProjectPullRequestCommentAnchor | null;
 
 export type ProjectPullRequest = {
   id: string;

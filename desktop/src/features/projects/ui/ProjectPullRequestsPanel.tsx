@@ -1,5 +1,6 @@
 import {
   Check,
+  FileCode2,
   GitBranch,
   GitCommitHorizontal,
   GitMerge,
@@ -630,6 +631,21 @@ function PullRequestDetail({
               }
               return (
                 <article className="py-3" key={item.id}>
+                  {item.anchor ? (
+                    <div className="mb-2 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                      <FileCode2 className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{item.anchor.path}</span>
+                      <span className="shrink-0 font-mono">
+                        {item.anchor.side === "new" ? "+" : "-"}
+                        {item.anchor.line}
+                      </span>
+                      {item.inlineCommentStatus === "outdated" ? (
+                        <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-2xs">
+                          Outdated
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="mb-2">
                     <AuthorIdentity
                       profiles={profiles}

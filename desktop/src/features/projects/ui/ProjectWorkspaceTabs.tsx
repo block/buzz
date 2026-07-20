@@ -320,6 +320,8 @@ export function WorkspaceTabs({
                   diff={repoDiff}
                   error={repoDiffError}
                   isLoading={repoDiffLoading}
+                  profiles={profiles}
+                  project={project}
                   pullRequest={selectedPullRequest}
                 />
               </TabsContent>

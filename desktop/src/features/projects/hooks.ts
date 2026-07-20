@@ -39,11 +39,22 @@ import type {
 import { summarizeProjectActivityEvents } from "./projectActivity.mjs";
 import type { ProjectIssue } from "./projectIssues.mjs";
 import { projectIssueEventsToIssues } from "./projectIssues.mjs";
-import type { ProjectPullRequest } from "./projectPullRequests.mjs";
-import { projectPullRequestEventsToPullRequests } from "./projectPullRequests.mjs";
+import type {
+  ProjectPullRequest,
+  ProjectPullRequestCommentAnchor,
+} from "./projectPullRequests.mjs";
+import {
+  normalizeProjectPullRequestCommentAnchor,
+  PR_INLINE_COMMENT_LABEL,
+  projectPullRequestEventsToPullRequests,
+} from "./projectPullRequests.mjs";
 import { fetchProjectsWorkItems } from "./projectWorkItems";
 
-export type { ProjectIssue, ProjectPullRequest };
+export type {
+  ProjectIssue,
+  ProjectPullRequest,
+  ProjectPullRequestCommentAnchor,
+};
 
 const HIDDEN_PROJECT_CARDS_KEY = "buzz.projects.hidden-cards.v1";
 
@@ -391,12 +402,14 @@ async function fetchProjectPullRequests(
 // features/pulse/lib/projectComments.ts). If the relay ever allowlists
 // 1111, migrate these to NIP-22 comments and drop that filter.
 async function createProjectPullRequestComment({
+  anchor,
   content,
   mediaTags,
   mentionPubkeys = [],
   project,
   pullRequest,
 }: {
+  anchor?: ProjectPullRequestCommentAnchor;
   content: string;
   mediaTags?: string[][];
   mentionPubkeys?: string[];
@@ -406,6 +419,15 @@ async function createProjectPullRequestComment({
   const body = content.trim();
   if (!body) {
     throw new Error("Comment cannot be empty.");
+  }
+  const normalizedAnchor = anchor
+    ? normalizeProjectPullRequestCommentAnchor(anchor)
+    : null;
+  if (anchor && !normalizedAnchor) {
+    throw new Error("Comment location is invalid.");
+  }
+  if (normalizedAnchor && !pullRequest.commit) {
+    throw new Error("Pull request commit is required for inline comments.");
   }
 
   const recipients = new Set([
@@ -418,6 +440,15 @@ async function createProjectPullRequestComment({
     ["e", pullRequest.id, "", "root"],
     ["a", project.repoAddress],
     ...[...recipients].map((recipient) => ["p", recipient]),
+    ...(normalizedAnchor
+      ? [
+          ["t", PR_INLINE_COMMENT_LABEL],
+          ["c", pullRequest.commit as string],
+          ["file", normalizedAnchor.path],
+          ["side", normalizedAnchor.side],
+          ["line", String(normalizedAnchor.line)],
+        ]
+      : []),
     ...(mediaTags ?? []),
   ];
 
@@ -826,11 +857,13 @@ export function useCreateProjectPullRequestCommentMutation(
 
   return useMutation({
     mutationFn: ({
+      anchor,
       content,
       mediaTags,
       mentionPubkeys,
       pullRequest,
     }: {
+      anchor?: ProjectPullRequestCommentAnchor;
       content: string;
       mediaTags?: string[][];
       mentionPubkeys?: string[];
@@ -838,6 +871,7 @@ export function useCreateProjectPullRequestCommentMutation(
     }) => {
       if (!project) throw new Error("No project selected.");
       return createProjectPullRequestComment({
+        anchor,
         content,
         mediaTags,
         mentionPubkeys,

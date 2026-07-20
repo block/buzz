@@ -267,6 +267,70 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   });
 });
 
+test("reviewer can leave a commit-scoped inline diff comment", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "Pull Request" }).click();
+  const aliceRow = page
+    .getByTestId("project-pull-request-row")
+    .filter({ hasText: "alice" })
+    .first();
+  await aliceRow.getByRole("button", { name: /^#/ }).click();
+  await page.getByRole("tab", { name: /Files changed/ }).click();
+
+  const diffLine = page
+    .getByTestId("project-diff-line")
+    .filter({ hasText: "function CommunityTabs({ selectedCommitHash })" });
+  await expect(diffLine).toBeVisible({ timeout: 10_000 });
+  await diffLine.hover();
+  await diffLine.getByTestId("project-diff-add-comment").click();
+
+  const composer = page.getByTestId("project-inline-comment-thread");
+  await composer
+    .locator("[contenteditable='true']")
+    .fill("Please add a type for this parameter.");
+  await composer.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByText("Line comment posted.")).toBeVisible();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__BUZZ_E2E_SIGNED_EVENTS__?.find(
+          (event) => event.content === "Please add a type for this parameter.",
+        ),
+      ),
+    )
+    .not.toBeUndefined();
+  const inlineCommentEvent = await page.evaluate(() =>
+    window.__BUZZ_E2E_SIGNED_EVENTS__?.find(
+      (event) => event.content === "Please add a type for this parameter.",
+    ),
+  );
+  expect(inlineCommentEvent?.tags).toContainEqual(["t", "inline-comment"]);
+  expect(inlineCommentEvent?.tags).toContainEqual(["c", expect.any(String)]);
+  expect(inlineCommentEvent?.tags).toContainEqual([
+    "file",
+    "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
+  ]);
+  expect(inlineCommentEvent?.tags).toContainEqual(["side", "new"]);
+  expect(inlineCommentEvent?.tags).toContainEqual(["line", "3"]);
+  await expect(page.getByTestId("project-inline-comment")).toContainText(
+    "Please add a type for this parameter.",
+  );
+
+  await page.getByRole("tab", { name: "Conversation" }).click();
+  await expect(
+    page.getByText("Please add a type for this parameter."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("desktop/src/features/projects/ui/ProjectDetailScreen.tsx"),
+  ).toBeVisible();
+});
+
 test("managed agent repository owner can merge", async ({ page }) => {
   await enableProjectsFeature(page);
   await page.addInitScript((owner) => {
