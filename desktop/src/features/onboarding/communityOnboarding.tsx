@@ -26,9 +26,13 @@ export type CommunityOnboardingStage =
    */
   | "entering";
 
+export type FirstCommunityPage = "join" | "owned";
+
 export type CommunityOnboardingTransaction = {
   id: string;
   source: CommunityOnboardingSource;
+  /** First-run screen that launched this transaction, restored on cancel. */
+  firstCommunityPage?: FirstCommunityPage;
   stage: CommunityOnboardingStage;
   relayUrl: string;
   inviteCode?: string;
@@ -68,6 +72,7 @@ export type CommunityOnboardingTransactionPatch = Partial<
 
 export type StartCommunityOnboardingInput = {
   source: CommunityOnboardingSource;
+  firstCommunityPage?: FirstCommunityPage;
   relayUrl: string;
   inviteCode?: string;
   communityName?: string;
@@ -150,6 +155,8 @@ export function startCommunityOnboarding(
   if (existing?.relayUrl === relayUrl) {
     const updated = {
       ...existing,
+      firstCommunityPage:
+        input.firstCommunityPage ?? existing.firstCommunityPage,
       inviteCode: input.inviteCode?.trim() || existing.inviteCode,
       communityName: input.communityName?.trim() || existing.communityName,
       token: input.token?.trim() || existing.token,
@@ -169,6 +176,7 @@ export function startCommunityOnboarding(
   const transaction: CommunityOnboardingTransaction = {
     id: crypto.randomUUID(),
     source: input.source,
+    firstCommunityPage: input.firstCommunityPage,
     stage: input.inviteCode?.trim() ? "claiming" : "connecting",
     relayUrl,
     inviteCode: input.inviteCode?.trim() || undefined,

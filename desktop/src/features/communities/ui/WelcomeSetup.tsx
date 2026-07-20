@@ -98,6 +98,7 @@ export function WelcomeSetup({
       setRelayUrlError(null);
       communityOnboarding.start({
         source: "first-community",
+        firstCommunityPage: "join",
         relayUrl: normalizedRelayUrl,
       });
     },
@@ -108,6 +109,7 @@ export function WelcomeSetup({
     (relayWsUrl: string, code: string, policyReceipt?: string) => {
       communityOnboarding.start({
         source: "first-community",
+        firstCommunityPage: "join",
         relayUrl: relayWsUrl,
         inviteCode: code,
         policyReceipt,

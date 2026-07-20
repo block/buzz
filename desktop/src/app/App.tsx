@@ -17,7 +17,10 @@ import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
-import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
+import {
+  type FirstCommunityPage,
+  useCommunityOnboarding,
+} from "@/features/onboarding/communityOnboarding";
 import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboardingFlow";
 import {
   MachineOnboardingFlow,
@@ -275,8 +278,8 @@ function CommunityApp({
   const communityOnboarding = useCommunityOnboarding();
   const connectingTransactionRef = useRef<string | null>(null);
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
-  const [resumeFirstCommunityJoin, setResumeFirstCommunityJoin] =
-    useState(false);
+  const [resumeFirstCommunityPage, setResumeFirstCommunityPage] =
+    useState<FirstCommunityPage | null>(null);
 
   // Surface nest-related backend events (repos-dir errors, legacy migration)
   // as toasts. Mounted before useCommunityInit so the listeners are registered
@@ -354,7 +357,7 @@ function CommunityApp({
     }
     if (communities.length === 1) {
       if (transaction.source === "first-community") {
-        setResumeFirstCommunityJoin(true);
+        setResumeFirstCommunityPage(transaction.firstCommunityPage ?? "join");
       }
       clearCommunities();
       return;
@@ -410,7 +413,7 @@ function CommunityApp({
       // Show welcome setup for first-run users with no communities
       appContent = (
         <WelcomeSetup
-          initialPage={resumeFirstCommunityJoin ? "join" : undefined}
+          initialPage={resumeFirstCommunityPage ?? undefined}
           onBack={onBackToMachineConfig}
         />
       );
