@@ -54,7 +54,12 @@ async function makeGlobalDefaultsDirty(
   page: import("@playwright/test").Page,
   effort = "high",
 ) {
-  await page.locator("#global-agent-thinking-effort").selectOption(effort);
+  // The defaults editor renders the app's styled dropdown (not a native
+  // <select>): open the trigger, then click the option row.
+  await page.getByTestId("global-agent-thinking-effort-select").click();
+  await page
+    .getByTestId(`global-agent-thinking-effort-select-option-${effort}`)
+    .click();
 }
 
 test.describe("agent lifecycle feedback screenshots", () => {
@@ -369,7 +374,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
     await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
-    const effort = page.locator("#global-agent-thinking-effort");
+    const effort = page.getByTestId("global-agent-thinking-effort-select");
     const saveButton = page.getByRole("button", { name: "Save defaults" });
 
     await makeGlobalDefaultsDirty(page, "high");
@@ -377,14 +382,14 @@ test.describe("agent lifecycle feedback screenshots", () => {
     await saveButton.click();
 
     // While the save is held open by the mock delay, make a newer edit.
-    await effort.selectOption("low");
+    await makeGlobalDefaultsDirty(page, "low");
 
     // The save resolves with the OLD submitted config; the newer edit must
     // survive and the card must stay dirty so it can be saved again.
     await expect(card.getByText("Saved.", { exact: true })).toBeVisible({
       timeout: 10_000,
     });
-    await expect(effort).toHaveValue("low");
+    await expect(effort).toHaveAttribute("data-value", "low");
     await expect(saveButton).toBeEnabled();
   });
 });

@@ -64,15 +64,22 @@ test.describe("agent provider dropdown screenshots", () => {
     await installMockBridge(page);
     await openAiDefaultsSettings(page);
 
-    const providerSelect = page.locator("#global-agent-provider");
+    const providerSelect = page.getByTestId("global-agent-provider");
     await expect(providerSelect).toBeVisible({ timeout: 5_000 });
 
-    // Regression: both v1 and v2 must be present on OSS.
-    const optionTexts = await providerSelect.evaluate((el: HTMLSelectElement) =>
-      Array.from(el.options).map((o) => o.text.trim()),
-    );
-    expect(optionTexts).toContain("Databricks");
-    expect(optionTexts).toContain("Databricks v2");
+    // Regression: both v1 and v2 must be present on OSS. The defaults editor
+    // renders the app's styled dropdown, so open it and assert option rows.
+    await providerSelect.click();
+    await expect(
+      page.getByTestId("global-agent-provider-option-databricks"),
+    ).toHaveText("Databricks");
+    await expect(
+      page.getByTestId("global-agent-provider-option-databricks_v2"),
+    ).toHaveText("Databricks v2");
+    await page.keyboard.press("Escape");
+    await expect(
+      page.getByTestId("global-agent-provider-option-databricks"),
+    ).toHaveCount(0);
 
     await waitForAnimations(page);
 
@@ -104,18 +111,24 @@ test.describe("agent provider dropdown screenshots", () => {
     });
     await openAiDefaultsSettings(page);
 
-    const effortSelect = page.locator("#global-agent-thinking-effort");
+    const effortSelect = page.getByTestId(
+      "global-agent-thinking-effort-select",
+    );
     await expect(effortSelect).toBeVisible({ timeout: 5_000 });
 
     // Regression: the zero-value option must show the provider's default
-    // effort rather than a bare "Inherit".
-    const zeroOptionText = await effortSelect.evaluate(
-      (el: HTMLSelectElement) =>
-        Array.from(el.options)
-          .find((o) => o.value === "")
-          ?.text.trim() ?? "",
-    );
-    expect(zeroOptionText).toBe("Default (medium)");
+    // effort rather than a bare "Inherit". The styled dropdown renders the
+    // zero value as the closed trigger's label (nothing is persisted) and as
+    // the "empty" option row when opened.
+    await expect(effortSelect).toHaveText("Default (medium)");
+    await effortSelect.click();
+    await expect(
+      page.getByTestId("global-agent-thinking-effort-select-option-empty"),
+    ).toHaveText("Default (medium)");
+    await page.keyboard.press("Escape");
+    await expect(
+      page.getByTestId("global-agent-thinking-effort-select-option-empty"),
+    ).toHaveCount(0);
 
     await waitForAnimations(page);
 
