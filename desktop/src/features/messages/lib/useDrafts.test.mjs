@@ -630,7 +630,7 @@ function makeFullImeta(overrides = {}) {
   };
 }
 
-/** Read the raw persisted store blob for the current pubkey. */
+/** Read the raw persisted store blob for the current pubkey (legacy v1 key). */
 function readRawStore(pubkey) {
   const raw = localStorage.getItem(`buzz-drafts.v1:${pubkey}`);
   return raw ? JSON.parse(raw) : {};
@@ -984,4 +984,410 @@ test("invalid_mention_ref_rejects_corrupt_draft", () => {
 
   initDraftStore("corrupt-mention-owner");
   assert.equal(loadDraftEntry("chan-corrupt"), undefined);
+});
+
+// ── Relay-scoped draft store (v2 key) ─────────────────────────────────────────
+
+test("cross_relay_isolation_via_initDraftStore_without_clearAllDrafts", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-shared";
+
+  // Setup: write drafts in two relay scopes via direct initDraftStore calls
+  // with NO intervening clearAllDrafts — this pins the production invariant
+  // that initDraftStore resets _memCache when relayScope changes.
+  initDraftStore(pk, "wss://relay-a.example.com");
+  saveDraftEntry("chan-1", makeDraft({ content: "Draft on relay A" }));
+  assert.equal(loadDraftEntry("chan-1")?.content, "Draft on relay A");
+
+  // Switch to relay B directly — no clearAllDrafts.
+  initDraftStore(pk, "wss://relay-b.example.com");
+  assert.equal(
+    loadDraftEntry("chan-1"),
+    undefined,
+    "relay B must not see relay A drafts",
+  );
+
+  saveDraftEntry("chan-1", makeDraft({ content: "Draft on relay B" }));
+  assert.equal(loadDraftEntry("chan-1")?.content, "Draft on relay B");
+
+  // Switch back to relay A directly — no clearAllDrafts.
+  initDraftStore(pk, "wss://relay-a.example.com");
+  assert.equal(
+    loadDraftEntry("chan-1")?.content,
+    "Draft on relay A",
+    "relay A draft must survive relay B session",
+  );
+
+  // Verify localStorage has two distinct keys.
+  const v2a = storage.getItem(
+    "buzz-drafts.v2:wss://relay-a.example.com:pubkey-shared",
+  );
+  const v2b = storage.getItem(
+    "buzz-drafts.v2:wss://relay-b.example.com:pubkey-shared",
+  );
+  assert.ok(v2a, "v2 key for relay A must exist");
+  assert.ok(v2b, "v2 key for relay B must exist");
+  assert.notEqual(v2a, v2b, "buckets must differ");
+});
+
+test("legacy_migration_v1_entries_readable_after_scoped_init_v1_key_removed", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-migrating";
+  const now = new Date().toISOString();
+
+  // Seed a v1 bucket (pre-upgrade state).
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-old": {
+        content: "Legacy draft",
+        selectionStart: 12,
+        selectionEnd: 12,
+        channelId: "chan-old",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  // Init with a relay scope — should trigger migration.
+  initDraftStore(pk, "wss://relay.example.com");
+
+  // Legacy draft must be readable through the scoped store.
+  const loaded = loadDraftEntry("chan-old");
+  assert.ok(loaded, "migrated draft must be readable");
+  assert.equal(loaded.content, "Legacy draft");
+
+  // v1 key must be deleted after migration.
+  assert.equal(
+    storage.getItem(`buzz-drafts.v1:${pk}`),
+    null,
+    "v1 key must be removed after migration",
+  );
+
+  // v2 key must exist.
+  const v2 = storage.getItem(`buzz-drafts.v2:wss://relay.example.com:${pk}`);
+  assert.ok(v2, "v2 key must hold the migrated data");
+});
+
+test("legacy_migration_second_relay_init_does_not_reimport_deleted_v1", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-double-migrate";
+  const now = new Date().toISOString();
+
+  // Seed v1.
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-first": {
+        content: "First workspace draft",
+        selectionStart: 0,
+        selectionEnd: 0,
+        channelId: "chan-first",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  // First workspace loads — migrates v1 into relay-a's v2 bucket.
+  initDraftStore(pk, "wss://relay-a.example.com");
+  assert.ok(loadDraftEntry("chan-first"), "relay A got the legacy draft");
+
+  // v1 key is gone.
+  assert.equal(storage.getItem(`buzz-drafts.v1:${pk}`), null);
+
+  // Second workspace initializes — must NOT see the legacy draft.
+  clearAllDrafts();
+  initDraftStore(pk, "wss://relay-b.example.com");
+  assert.equal(
+    loadDraftEntry("chan-first"),
+    undefined,
+    "relay B must not inherit legacy drafts already migrated to relay A",
+  );
+});
+
+test("v2_already_exists_legacy_bucket_ignored", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-v2-exists";
+  const now = new Date().toISOString();
+  const relay = "wss://relay.example.com";
+
+  // Seed both v1 and v2 — simulates a user who already ran post-upgrade
+  // but still has a leftover v1 key.
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-legacy": {
+        content: "Should be ignored",
+        selectionStart: 0,
+        selectionEnd: 0,
+        channelId: "chan-legacy",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+  storage.setItem(
+    `buzz-drafts.v2:${relay}:${pk}`,
+    JSON.stringify({
+      "chan-v2": {
+        content: "V2 draft",
+        selectionStart: 8,
+        selectionEnd: 8,
+        channelId: "chan-v2",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  initDraftStore(pk, relay);
+
+  // v2 content wins.
+  assert.equal(loadDraftEntry("chan-v2")?.content, "V2 draft");
+  // Legacy content NOT merged.
+  assert.equal(
+    loadDraftEntry("chan-legacy"),
+    undefined,
+    "v1 entries must not leak when v2 key exists",
+  );
+  // v1 key is NOT deleted (no migration path ran).
+  assert.ok(
+    storage.getItem(`buzz-drafts.v1:${pk}`),
+    "v1 key preserved when v2 already existed (no migration)",
+  );
+});
+
+// ── F1: clearAllDrafts fail-closed teardown ──────────────────────────────────
+
+test("clearAllDrafts_without_reinit_blocks_reads_and_writes_to_previous_bucket", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-teardown";
+
+  // Init relay A, write a draft.
+  initDraftStore(pk, "wss://relay-a.example.com");
+  saveDraftEntry("chan-1", makeDraft({ content: "A's draft" }));
+  assert.equal(loadDraftEntry("chan-1")?.content, "A's draft");
+
+  // Snapshot A's bucket before teardown.
+  const bucketBefore = storage.getItem(
+    "buzz-drafts.v2:wss://relay-a.example.com:pubkey-teardown",
+  );
+
+  // Simulate community switch teardown — clearAllDrafts with NO re-init.
+  clearAllDrafts();
+
+  // Reads must return undefined (no active scope).
+  assert.equal(
+    loadDraftEntry("chan-1"),
+    undefined,
+    "reads must return undefined after clearAllDrafts without re-init",
+  );
+
+  // A write attempt must not modify A's stored bucket.
+  saveDraftEntry("chan-1", makeDraft({ content: "Rogue write" }));
+  assert.equal(
+    storage.getItem("buzz-drafts.v2:wss://relay-a.example.com:pubkey-teardown"),
+    bucketBefore,
+    "A's stored bucket must be byte-unchanged after unscoped write",
+  );
+
+  // Re-init with relay B — must see a clean bucket, not A's drafts.
+  initDraftStore(pk, "wss://relay-b.example.com");
+  assert.equal(
+    loadDraftEntry("chan-1"),
+    undefined,
+    "relay B must not see relay A drafts after teardown + re-init",
+  );
+});
+
+// ── F2: failed v2 flush preserves the only v1 copy ──────────────────────────
+
+test("failed_v2_flush_during_migration_preserves_v1_key", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-flush-fail";
+  const now = new Date().toISOString();
+
+  // Seed v1 bucket.
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-legacy": {
+        content: "Precious legacy",
+        selectionStart: 0,
+        selectionEnd: 0,
+        channelId: "chan-legacy",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  // Force setItem to throw persistently (quota full, no recovery possible).
+  const origSetItem = storage.setItem;
+  storage.setItem = () => {
+    throw new DOMException("QuotaExceededError");
+  };
+
+  // Init with relay scope — triggers migration attempt.
+  initDraftStore(pk, "wss://relay.example.com");
+
+  // Restore setItem so assertions can read storage.
+  storage.setItem = origSetItem;
+
+  // v1 key must still be present (flush failed, so legacy NOT deleted).
+  assert.ok(
+    storage.getItem(`buzz-drafts.v1:${pk}`),
+    "v1 key must be preserved when v2 flush fails",
+  );
+
+  // v2 key must NOT exist (flush failed).
+  assert.equal(
+    storage.getItem(`buzz-drafts.v2:wss://relay.example.com:${pk}`),
+    null,
+    "v2 key must not exist when flush failed",
+  );
+});
+
+test("successful_v2_flush_during_migration_deletes_v1_key", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-flush-ok";
+  const now = new Date().toISOString();
+
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-old": {
+        content: "Migrating",
+        selectionStart: 0,
+        selectionEnd: 0,
+        channelId: "chan-old",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  initDraftStore(pk, "wss://relay.example.com");
+
+  assert.equal(
+    storage.getItem(`buzz-drafts.v1:${pk}`),
+    null,
+    "v1 key deleted after successful migration",
+  );
+  assert.ok(
+    storage.getItem(`buzz-drafts.v2:wss://relay.example.com:${pk}`),
+    "v2 key created after successful migration",
+  );
+  assert.equal(loadDraftEntry("chan-old")?.content, "Migrating");
+});
+
+// ── F4: relay URL canonicalization ──────────────────────────────────────────
+
+test("relay_canonicalization_host_case_and_trailing_slash_coalesce", () => {
+  installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-canon";
+
+  // Write with mixed-case host.
+  initDraftStore(pk, "WSS://Relay.Example.COM/");
+  saveDraftEntry("chan-1", makeDraft({ content: "canonical draft" }));
+
+  // Re-init with lowercase + no trailing slash — must see same draft.
+  initDraftStore(pk, "wss://relay.example.com");
+  assert.equal(
+    loadDraftEntry("chan-1")?.content,
+    "canonical draft",
+    "host-case + trailing-slash variants must coalesce",
+  );
+});
+
+test("relay_canonicalization_path_case_stays_isolated", () => {
+  installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-path-case";
+
+  initDraftStore(pk, "wss://gateway.example.com/Team");
+  saveDraftEntry("chan-1", makeDraft({ content: "Team draft" }));
+
+  // Different path case — must NOT see the draft.
+  initDraftStore(pk, "wss://gateway.example.com/team");
+  assert.equal(
+    loadDraftEntry("chan-1"),
+    undefined,
+    "path-case variants must remain isolated",
+  );
+
+  // Original path case still intact.
+  initDraftStore(pk, "wss://gateway.example.com/Team");
+  assert.equal(
+    loadDraftEntry("chan-1")?.content,
+    "Team draft",
+    "original path-case draft must survive",
+  );
+});
+
+test("no_relay_legacy_caller_form_still_reads_writes_v1_key", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-no-relay";
+  const now = new Date().toISOString();
+
+  // Seed a v1 bucket.
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-legacy": {
+        content: "Legacy no-relay",
+        selectionStart: 0,
+        selectionEnd: 0,
+        channelId: "chan-legacy",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  // Init with no relay (legacy caller form).
+  initDraftStore(pk);
+
+  // Must read from v1 key.
+  assert.equal(loadDraftEntry("chan-legacy")?.content, "Legacy no-relay");
+
+  // Write a new draft.
+  saveDraftEntry("chan-new", makeDraft({ content: "New no-relay" }));
+
+  // Verify it lands in the v1 key.
+  const raw = JSON.parse(storage.getItem(`buzz-drafts.v1:${pk}`));
+  assert.ok(raw["chan-new"], "new draft must be in v1 key");
+  assert.equal(raw["chan-new"].content, "New no-relay");
 });

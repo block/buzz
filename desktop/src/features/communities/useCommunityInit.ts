@@ -6,7 +6,10 @@ import { getIdentity } from "@/shared/api/tauriIdentity";
 import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
-import { initDraftStore } from "@/features/messages/lib/useDrafts";
+import {
+  clearAllDrafts,
+  initDraftStore,
+} from "@/features/messages/lib/useDrafts";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import {
   resetActiveAgentTurnsStore,
@@ -31,6 +34,7 @@ import type { Community } from "./types";
  */
 function resetCommunityState(): void {
   relayClient.disconnect();
+  clearAllDrafts();
   resetAgentObserverStore();
   resetActiveAgentTurnsStore();
   resetAgentWorkingSignal();
@@ -193,10 +197,16 @@ export function useCommunityInit(
         // and bypass the localhost proxy.
         resetMediaCaches();
 
-        // Initialise the draft store for this identity so localStorage drafts
-        // are scoped to the correct pubkey before the app renders.
-        if (activeCommunity.pubkey) {
-          initDraftStore(activeCommunity.pubkey);
+        try {
+          const identity = await getIdentity();
+          if (cancelled) return;
+          initDraftStore(identity.pubkey, activeCommunity.relayUrl);
+        } catch (err) {
+          if (cancelled) return;
+          console.error(
+            "[useCommunityInit] getIdentity failed, draft store uninitialized:",
+            err,
+          );
         }
         // Restore any turn state saved for this community (a prior A→B round-
         // trip). This runs after applyCommunity succeeds and before the app
