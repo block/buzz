@@ -327,13 +327,43 @@ test("viewer without repository ownership cannot merge", async ({ page }) => {
   );
 });
 
-test("project without a checkout can be cloned", async ({ page }) => {
+test("project without a checkout offers fetch feedback and dropdown cloning", async ({
+  page,
+}) => {
   await enableProjectsFeature(page);
   await installMockBridge(page);
   await openBuzzProject(page);
 
-  await page.getByRole("button", { name: "Clone", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Remote", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Remote", exact: true }),
+  ).toHaveClass(/\bborder-input\/40\b/);
+  await expect(page.getByRole("button", { name: /main/ })).toHaveClass(
+    /\bborder-input\/40\b/,
+  );
+  await expect(
+    page.getByRole("button", { name: "Clone", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Fetch", exact: true }).click();
+  await expect(page.getByText("Remote state refreshed.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Remote", exact: true }).click();
+  const cloneItem = page.getByRole("menuitem", {
+    name: "Local missing Clone",
+  });
+  await expect(cloneItem.getByText("Local missing")).toHaveClass(
+    /text-muted-foreground/,
+  );
+  await expect(cloneItem.getByText("Clone", { exact: true })).toHaveClass(
+    /\bborder-input\/60\b/,
+  );
+  await cloneItem.click();
   await expect(page.getByText("Cloned repository.")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Local", exact: true }),
+  ).toBeVisible();
   const commands = await page.evaluate(
     () => window.__BUZZ_E2E_COMMANDS__ ?? [],
   );

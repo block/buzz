@@ -13,6 +13,7 @@ import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
@@ -47,12 +48,12 @@ export function RepositoryBranchDropdown({
         <Button
           className={
             compact
-              ? "h-7 max-w-full gap-1.5 rounded-md bg-muted px-3 font-mono text-sm font-medium hover:bg-muted/80"
-              : "h-6 max-w-full gap-1.5 px-2 font-mono text-sm font-semibold"
+              ? "h-7 max-w-full gap-1.5 rounded-md px-3 font-mono text-sm font-medium hover:border-input"
+              : "h-6 max-w-full gap-1.5 px-2 font-mono text-sm font-semibold hover:border-input"
           }
           size="sm"
           type="button"
-          variant="ghost"
+          variant="outline"
         >
           <GitBranch className="h-4 w-4 shrink-0 text-muted-foreground" />
           <span className="truncate">{branch}</span>
@@ -82,6 +83,9 @@ export type RepoSourceHeaderControls = {
   localDisabled: boolean;
   localLabel: string;
   remoteLabel: string;
+  /** Clones the repository when no local checkout is available. */
+  onCloneLocal?: () => void;
+  clonePending?: boolean;
   /** Push of local commits, available when the local checkout is ahead. */
   canPush?: boolean;
   onPush?: () => void;
@@ -110,15 +114,16 @@ export function RepoSourceDropdown({
   controls: RepoSourceHeaderControls;
 }) {
   const isLocal = controls.source === "local";
+  const cloneLocal = controls.localDisabled && controls.onCloneLocal;
   const SourceIcon = isLocal ? HardDrive : Cloud;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          className="h-7 max-w-full shrink-0 gap-1.5 rounded-md bg-muted px-3 text-sm font-medium hover:bg-muted/80"
+          className="h-7 max-w-full shrink-0 gap-1.5 rounded-md px-3 text-sm font-medium hover:border-input"
           size="sm"
           type="button"
-          variant="ghost"
+          variant="outline"
         >
           <SourceIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
           <span className="truncate">
@@ -138,14 +143,33 @@ export function RepoSourceDropdown({
             <Cloud className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
             {controls.remoteLabel}
           </DropdownMenuRadioItem>
-          <DropdownMenuRadioItem
-            disabled={controls.localDisabled}
-            value="local"
-          >
-            <HardDrive className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
-            {controls.localLabel}
-          </DropdownMenuRadioItem>
+          {!cloneLocal ? (
+            <DropdownMenuRadioItem
+              disabled={controls.localDisabled}
+              value="local"
+            >
+              <HardDrive className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
+              {controls.localLabel}
+            </DropdownMenuRadioItem>
+          ) : null}
         </DropdownMenuRadioGroup>
+        {cloneLocal ? (
+          <DropdownMenuItem
+            className="group"
+            disabled={controls.clonePending}
+            onSelect={controls.onCloneLocal}
+          >
+            {controls.clonePending ? (
+              <Loader2 className="animate-spin text-muted-foreground" />
+            ) : (
+              <DownloadCloud className="text-muted-foreground" />
+            )}
+            <span className="text-muted-foreground">{controls.localLabel}</span>
+            <span className="ml-auto rounded-md border border-input/60 bg-background px-2 py-0.5 text-xs font-medium text-foreground shadow-xs group-focus:border-input">
+              {controls.clonePending ? "Cloning…" : "Clone"}
+            </span>
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );
