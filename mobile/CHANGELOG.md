@@ -1,5 +1,11 @@
 # Changelog
 
+## mobile-v0.4.8
+
+- fix(mobile): image upload fails due to unstripped metadata ([#2185](https://github.com/block/buzz/pull/2185)) ([`37f15b200`](https://github.com/block/buzz/commit/37f15b20019169363b697aee41c99573b7bc3f24))
+- chore(deps): update all non-major dependencies ([#2152](https://github.com/block/buzz/pull/2152)) ([`6da407742`](https://github.com/block/buzz/commit/6da407742a09ee531c53a99ca5d2d314f0b38aef))
+
+
 ## mobile-v0.4.7
 
 - fix(ui): relabel agent owner attribution from "owned by" to "managed by" ([#2133](https://github.com/block/buzz/pull/2133)) ([`a1e977cd1`](https://github.com/block/buzz/commit/a1e977cd1bda3f5421533b47f12c38f4a336224e))
