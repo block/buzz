@@ -13,7 +13,7 @@ name: Auto-tag on Release PR Merge
 #   mobile-release/<v> → tag mobile-v<v> → (manual sprout_ref for buzz-releases build — see below)
 #
 # Release tags are created with a short-lived token from the dedicated
-# buzz-release-tagger GitHub App. GitHub attributes the ref creation to that
+# buzz-release-bot GitHub App. GitHub attributes the ref creation to that
 # App, so the consumer's `on.push.tags` trigger runs normally. The workflow's
 # default GITHUB_TOKEN remains read-only and is never used to create a tag.
 #

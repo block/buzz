@@ -60,7 +60,7 @@ All three lanes share one engine; they differ only in which version manifest
 they bump, which branch prefix they use, and what the merge triggers.
 
 The merge workflow creates tags with a short-lived installation token from the
-dedicated `buzz-release-tagger` GitHub App. Release-tag rules allow that App to
+dedicated `buzz-release-bot` GitHub App. Release-tag rules allow that App to
 create matching tags and prevent other actors from creating, moving, or
 deleting them. The workflow's default `GITHUB_TOKEN` is read-only.
 
