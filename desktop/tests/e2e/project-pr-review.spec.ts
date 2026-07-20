@@ -297,15 +297,26 @@ test("merge conflicts offer persistent terminal recovery", async ({ page }) => {
   await expect(
     recovery.getByRole("button", { name: "Copy commands" }),
   ).toBeDisabled();
+  await waitForAnimations(page);
+  await recovery.screenshot({
+    path: `${SHOTS}/04-merge-conflict.png`,
+  });
   await recovery.getByRole("button", { name: "Resolve in Terminal" }).click();
   await expect(
     page.getByText("Recovery commit fetched and terminal opened."),
   ).toBeVisible();
+  await expect(
+    page.getByText("Recovery commit fetched and terminal opened."),
+  ).toBeHidden({ timeout: 10_000 });
   await expect(recovery).toContainText("git switch 'main'");
   await expect(recovery).toContainText("git merge 'refs/buzz/merge-recovery/");
   await expect(
     recovery.getByRole("button", { name: "Copy commands" }),
   ).toBeEnabled();
+  await waitForAnimations(page);
+  await recovery.screenshot({
+    path: `${SHOTS}/05-merge-conflict-prepared.png`,
+  });
 
   await expect
     .poll(() =>
