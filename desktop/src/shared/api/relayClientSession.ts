@@ -29,10 +29,10 @@ import {
 } from "@/shared/api/relayChannelFilters";
 import { collectWithConcurrency } from "@/shared/api/concurrency";
 import {
-  clearClosedRetry,
   handleRelayClosed,
   handleSubscriptionEose,
   prepareSubscriptionEvent,
+  releaseLiveSubscription,
 } from "@/shared/api/relayClosedRecovery";
 import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import {
@@ -42,6 +42,7 @@ import {
 } from "@/shared/api/relayRateLimitGate";
 import { requestHistoryGated } from "@/shared/api/relayGateBoundary";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
+import { deliverBufferedSubscriptionEvents } from "@/shared/api/relayEventBuffer";
 import {
   shouldRefuseConnect,
   shouldScheduleReconnect,
@@ -178,7 +179,7 @@ export class RelayClient {
         window.clearTimeout(sub.timeout);
         sub.reject(error);
       } else {
-        clearClosedRetry(sub);
+        releaseLiveSubscription(sub);
       }
       this.subscriptions.delete(subId);
     }
@@ -449,12 +450,12 @@ export class RelayClient {
   async subscribeToAllStreamMessages(onEvent: (event: RelayEvent) => void) {
     return this.subscribe(buildGlobalStreamFilter(50), onEvent);
   }
-
   async subscribeLive(
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
+    onClosedRecoveryStateChange?: (recovering: boolean) => void,
   ) {
-    return this.subscribe(filter, onEvent);
+    return this.subscribe(filter, onEvent, onClosedRecoveryStateChange);
   }
 
   async subscribeToChannelMentionEvents(
@@ -469,8 +470,7 @@ export class RelayClient {
   }
 
   async preconnect() {
-    // Explicit re-engagement. If the session went terminal (auth rejection)
-    // the caller is asking us to try again, so clear the latch.
+    // Explicit re-engagement after a terminal session clears the latch.
     this.terminal = false;
     this.keepAliveRequested = true;
     await this.ensureConnected();
@@ -587,6 +587,9 @@ export class RelayClient {
     }, BACKOFF_RESET_STABLE_MS);
 
     await this.replayLiveSubscriptions();
+    if (generation !== this.connectionGeneration) {
+      throw new Error("Relay changed during subscription replay.");
+    }
     this.connectionStateEmitter.set("connected");
     this.stallWatchdog.start();
     this.emitReconnectIfNeeded();
@@ -595,6 +598,7 @@ export class RelayClient {
   private async subscribe(
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
+    onClosedRecoveryStateChange?: (recovering: boolean) => void,
   ) {
     await this.ensureConnected();
 
@@ -616,6 +620,8 @@ export class RelayClient {
       mode: "live",
       filter,
       onEvent,
+      onClosedRecoveryStateChange,
+      onClosedRecoveryTimeout: (error) => this.resetConnection(error),
       resolveReady,
     });
 
@@ -638,7 +644,7 @@ export class RelayClient {
       }
 
       this.subscriptions.delete(subId);
-      clearClosedRetry(active);
+      releaseLiveSubscription(active);
       await this.closeSubscription(subId);
     };
   }
@@ -875,17 +881,11 @@ export class RelayClient {
   }
 
   private flushEventBuffer() {
+    window.clearTimeout(this.flushTimeout ?? undefined);
     this.flushTimeout = null;
     const buffer = this.eventBuffer;
     this.eventBuffer = [];
-
-    // Re-lookup: subscriptions removed during batch window are intentionally skipped.
-    for (const { subId, event } of buffer) {
-      const subscription = this.subscriptions.get(subId);
-      if (subscription?.mode === "live") {
-        subscription.onEvent(event);
-      }
-    }
+    deliverBufferedSubscriptionEvents(buffer, this.subscriptions);
   }
 
   private handleEose(subId: string) {
@@ -893,6 +893,7 @@ export class RelayClient {
       subscriptions: this.subscriptions,
       subId,
       closeSubscription: (id) => this.closeSubscription(id),
+      beforeLiveRecoveryComplete: () => this.flushEventBuffer(),
     });
   }
 
@@ -948,6 +949,7 @@ export class RelayClient {
         visibleChannelId: this.visibleChannelId,
         isActive: () => this.connectionGeneration === generation,
       });
+      this.flushEventBuffer();
     } catch (error) {
       const reconnectError =
         error instanceof Error
@@ -1064,9 +1066,7 @@ export class RelayClient {
         continue;
       }
 
-      subscription.resolveReady?.();
-      subscription.resolveReady = undefined;
-      clearClosedRetry(subscription);
+      releaseLiveSubscription(subscription);
     }
 
     for (const [eventId, pendingEvent] of this.pendingEvents) {

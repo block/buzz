@@ -50,8 +50,13 @@ type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
   onEvent: (event: RelayEvent) => void;
+  onClosedRecoveryStateChange?: (recovering: boolean) => void;
+  onClosedRecoveryTimeout?: (error: Error) => void;
   resolveReady?: () => void;
+  resolveReconnectEose?: () => void;
   lastSeenCreatedAt?: number;
+  closedRecoveryInProgress?: boolean;
+  closedRecoveryTimeout?: number;
   closedRetryAttempt?: number;
   closedRetryTimeout?: number;
 };

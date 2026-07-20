@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { handleRelayClosed } from "./relayClosedRecovery.ts";
+import {
+  handleRelayClosed,
+  handleSubscriptionEose,
+  releaseLiveSubscription,
+} from "./relayClosedRecovery.ts";
 import { requestHistoryGated } from "./relayGateBoundary.ts";
+import { replayLiveSubscriptions } from "./relayReconnectReplay.ts";
 
 // ── Fake-timer setup ──────────────────────────────────────────────────────────
 // The rate-limit gate and closed-retry logic use window.setTimeout/clearTimeout.
@@ -229,6 +234,7 @@ test("gate armed by rate-limited history CLOSED defers the next REQ until expiry
 
 test("production CLOSED handler removes terminal live subscriptions", () => {
   let readyCalls = 0;
+  let reconnectEoseCalls = 0;
   const subscriptions = new Map([
     [
       "live-1",
@@ -238,6 +244,9 @@ test("production CLOSED handler removes terminal live subscriptions", () => {
         onEvent: () => {},
         resolveReady: () => {
           readyCalls += 1;
+        },
+        resolveReconnectEose: () => {
+          reconnectEoseCalls += 1;
         },
       },
     ],
@@ -250,6 +259,333 @@ test("production CLOSED handler removes terminal live subscriptions", () => {
   });
   assert.equal(subscriptions.has("live-1"), false);
   assert.equal(readyCalls, 1);
+  assert.equal(reconnectEoseCalls, 1);
+});
+
+test("retryable CLOSED preserves the original long-lived filter", async () => {
+  const originalWindow = globalThis.window;
+  const scheduled = [];
+  globalThis.window = {
+    clearTimeout: () => {},
+    setTimeout: (callback, delay) => {
+      scheduled.push({ callback, delay });
+      return 42;
+    },
+  };
+  try {
+    const sentFilters = [];
+    const subscriptions = new Map([
+      [
+        "live-1",
+        {
+          mode: "live",
+          filter: {
+            kinds: [9],
+            "#h": ["channel-1"],
+            limit: 1_000,
+            since: 900,
+          },
+          onEvent: () => {},
+          lastSeenCreatedAt: 1_000,
+        },
+      ],
+    ]);
+
+    handleRelayClosed({
+      subscriptions,
+      subId: "live-1",
+      message: "error: database unavailable",
+      sendReq: async (_subId, filter) => {
+        sentFilters.push(filter);
+      },
+    });
+
+    assert.deepEqual(
+      scheduled.map(({ delay }) => delay),
+      [8_000, 1_000],
+    );
+    scheduled.find(({ delay }) => delay === 1_000).callback();
+    await Promise.resolve();
+    assert.deepEqual(sentFilters, [
+      {
+        kinds: [9],
+        "#h": ["channel-1"],
+        limit: 1_000,
+        since: 900,
+      },
+    ]);
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("retryable CLOSED recovery drains buffered events before completing", () => {
+  const originalWindow = globalThis.window;
+  const scheduled = [];
+  globalThis.window = {
+    clearTimeout: () => {},
+    setTimeout: (callback, delay) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length;
+    },
+  };
+  try {
+    const lifecycle = [];
+    const subscription = {
+      mode: "live",
+      filter: { kinds: [9], limit: 50 },
+      onEvent: () => {},
+      onClosedRecoveryStateChange: (recovering) =>
+        lifecycle.push(recovering ? "recovering" : "live"),
+    };
+    const subscriptions = new Map([["live-1", subscription]]);
+    const closedInput = {
+      subscriptions,
+      subId: "live-1",
+      message: "error: database unavailable",
+      sendReq: async () => {},
+    };
+
+    handleRelayClosed(closedInput);
+    handleRelayClosed(closedInput);
+    assert.deepEqual(lifecycle, ["recovering"]);
+    assert.deepEqual(
+      scheduled.map(({ delay }) => delay),
+      [8_000, 1_000],
+    );
+
+    handleSubscriptionEose({
+      subscriptions,
+      subId: "live-1",
+      closeSubscription: async () => {},
+      beforeLiveRecoveryComplete: () => lifecycle.push("drained"),
+    });
+    assert.deepEqual(lifecycle, ["recovering", "drained", "live"]);
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("repeated retryable CLOSED cannot extend the reconnect EOSE deadline", async () => {
+  const originalWindow = globalThis.window;
+  const scheduled = [];
+  globalThis.window = {
+    clearTimeout: () => {},
+    setTimeout: (callback, delay) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length;
+    },
+  };
+  try {
+    const subscription = {
+      mode: "live",
+      filter: {
+        kinds: [9],
+        "#h": ["channel-1"],
+        limit: 1_000,
+        since: 900,
+      },
+      onEvent: () => {},
+      lastSeenCreatedAt: 1_000,
+    };
+    const subscriptions = new Map([["live-1", subscription]]);
+    const sentFilters = [];
+    const replayOutcome = replayLiveSubscriptions({
+      subscriptions,
+      now: 2_000,
+      eoseTimeoutMs: 10,
+      sendRaw: async () => {},
+      requestHistory: async () => [],
+    }).then(
+      () => "resolved",
+      (error) => error,
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      handleRelayClosed({
+        subscriptions,
+        subId: "live-1",
+        message: "error: database unavailable",
+        sendReq: async (_subId, filter) => {
+          sentFilters.push(filter);
+        },
+      });
+      assert.equal(scheduled.filter(({ delay }) => delay === 8_000).length, 1);
+      scheduled.find(({ delay }) => delay === 1_000 * 2 ** attempt).callback();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    const outcome = await replayOutcome;
+    assert.equal(outcome instanceof Error, true);
+    assert.match(outcome.message, /EOSE/);
+    assert.equal(subscription.resolveReconnectEose, undefined);
+    assert.deepEqual(
+      sentFilters.map((filter) => filter.since),
+      [900, 900, 900],
+    );
+    releaseLiveSubscription(subscription);
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("standalone CLOSED recovery has a bounded EOSE deadline", async () => {
+  const originalWindow = globalThis.window;
+  const scheduled = [];
+  const clearedTimeouts = [];
+  globalThis.window = {
+    clearTimeout: (timeout) => clearedTimeouts.push(timeout),
+    setTimeout: (callback, delay) => {
+      scheduled.push({ callback, delay, id: scheduled.length + 1 });
+      return scheduled.length;
+    },
+  };
+  try {
+    const lifecycle = [];
+    let timeoutError;
+    const subscription = {
+      mode: "live",
+      filter: { kinds: [9], limit: 50 },
+      onEvent: () => {},
+      onClosedRecoveryStateChange: (recovering) => lifecycle.push(recovering),
+      onClosedRecoveryTimeout: (error) => {
+        assert.equal(subscription.closedRecoveryInProgress, true);
+        timeoutError = error;
+        releaseLiveSubscription(subscription);
+      },
+    };
+    const subscriptions = new Map([["live-1", subscription]]);
+
+    handleRelayClosed({
+      subscriptions,
+      subId: "live-1",
+      message: "error: database unavailable",
+      sendReq: async () => {},
+    });
+    scheduled.find(({ delay }) => delay === 1_000).callback();
+    await Promise.resolve();
+    assert.deepEqual(lifecycle, [true]);
+
+    scheduled.find(({ delay }) => delay === 8_000).callback();
+    assert.match(timeoutError.message, /EOSE/);
+    assert.deepEqual(lifecycle, [true, false]);
+    assert.equal(subscription.closedRecoveryTimeout, undefined);
+    assert.equal(clearedTimeouts.includes(1), false);
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("socket reset starts CLOSED retry backoff from the base delay", () => {
+  const originalWindow = globalThis.window;
+  const scheduled = [];
+  globalThis.window = {
+    clearTimeout: () => {},
+    setTimeout: (callback, delay) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length;
+    },
+  };
+  try {
+    const subscription = {
+      mode: "live",
+      filter: { kinds: [9], limit: 50 },
+      onEvent: () => {},
+      closedRetryAttempt: 4,
+      onClosedRecoveryTimeout: () => releaseLiveSubscription(subscription),
+    };
+    const subscriptions = new Map([["live-1", subscription]]);
+    const closedInput = {
+      subscriptions,
+      subId: "live-1",
+      message: "error: database unavailable",
+      sendReq: async () => {},
+    };
+
+    handleRelayClosed(closedInput);
+    assert.deepEqual(
+      scheduled.map(({ delay }) => delay),
+      [8_000, 16_000],
+    );
+    scheduled.find(({ delay }) => delay === 8_000).callback();
+    assert.equal(subscription.closedRetryAttempt, 0);
+
+    handleRelayClosed(closedInput);
+    assert.deepEqual(
+      scheduled.slice(2).map(({ delay }) => delay),
+      [8_000, 1_000],
+    );
+    assert.equal(subscription.closedRetryAttempt, 1);
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("live EOSE releases the reconnect replay barrier", () => {
+  let reconnectEoseCalls = 0;
+  const subscriptions = new Map([
+    [
+      "live-1",
+      {
+        mode: "live",
+        filter: { kinds: [9], limit: 50 },
+        onEvent: () => {},
+        resolveReconnectEose: () => {
+          reconnectEoseCalls += 1;
+        },
+      },
+    ],
+  ]);
+
+  handleSubscriptionEose({
+    subscriptions,
+    subId: "live-1",
+    closeSubscription: () => Promise.resolve(),
+  });
+
+  assert.equal(reconnectEoseCalls, 1);
+  assert.equal(subscriptions.get("live-1").resolveReconnectEose, undefined);
+});
+
+test("live subscription cleanup releases every reconnect waiter", () => {
+  const originalWindow = globalThis.window;
+  const clearedTimeouts = [];
+  globalThis.window = {
+    clearTimeout: (timeout) => clearedTimeouts.push(timeout),
+  };
+  try {
+    let readyCalls = 0;
+    let reconnectEoseCalls = 0;
+    const subscription = {
+      mode: "live",
+      filter: { kinds: [9], limit: 50 },
+      onEvent: () => {},
+      resolveReady: () => {
+        readyCalls += 1;
+      },
+      resolveReconnectEose: () => {
+        reconnectEoseCalls += 1;
+      },
+      closedRetryTimeout: 42,
+      closedRetryAttempt: 4,
+      closedRecoveryInProgress: true,
+      closedRecoveryTimeout: 43,
+    };
+
+    releaseLiveSubscription(subscription);
+
+    assert.equal(readyCalls, 1);
+    assert.equal(reconnectEoseCalls, 1);
+    assert.equal(subscription.resolveReady, undefined);
+    assert.equal(subscription.resolveReconnectEose, undefined);
+    assert.equal(subscription.closedRetryTimeout, undefined);
+    assert.equal(subscription.closedRetryAttempt, 0);
+    assert.equal(subscription.closedRecoveryTimeout, undefined);
+    assert.deepEqual(clearedTimeouts, [42, 43]);
+  } finally {
+    globalThis.window = originalWindow;
+  }
 });
 
 // ── Rate-limited CLOSED core behaviour (F5) ───────────────────────────────────
@@ -309,24 +645,27 @@ test("rate-limited CLOSED activates the rate-limit gate with the parsed hint", (
   assert.equal(isRateLimited(), false);
 });
 
-test("rate-limited CLOSED retry delay is max(backoff, gate remaining), not just hint", () => {
+test("rate-limit delay stays gate-aware until the recovery deadline resets it", () => {
   resetAll(0);
   // Activate a long gate first (20s), then send a shorter-hint CLOSED (5s).
-  // The retry delay must use the gate remaining time (20s), not the hint (5s).
+  // The retry is initially scheduled for the gate's remaining time (20s), but
+  // the bounded 8s recovery deadline must release it first so a fresh socket
+  // does not inherit a retry attempt that outlives its own replay deadline.
   activateRateLimit(20); // gate expires at 20_000 ms
 
   const firedAt = [];
-  const subscriptions = new Map([
-    [
-      "live-1",
-      {
-        mode: "live",
-        filter: { kinds: [9], "#h": ["ch-1"], limit: 50 },
-        onEvent: () => {},
-        resolveReady: () => {},
-      },
-    ],
-  ]);
+  let recoveryTimeouts = 0;
+  const subscription = {
+    mode: "live",
+    filter: { kinds: [9], "#h": ["ch-1"], limit: 50 },
+    onEvent: () => {},
+    resolveReady: () => {},
+    onClosedRecoveryTimeout: () => {
+      recoveryTimeouts += 1;
+      releaseLiveSubscription(subscription);
+    },
+  };
+  const subscriptions = new Map([["live-1", subscription]]);
   handleRelayClosed({
     subscriptions,
     subId: "live-1",
@@ -344,10 +683,20 @@ test("rate-limited CLOSED retry delay is max(backoff, gate remaining), not just 
     0,
     "retry must not fire before gate remaining time",
   );
+  assert.equal(
+    [...pendingTimers.values()].filter(({ fireAt }) => fireAt === 20_000)
+      .length,
+    2,
+    "gate expiry and retry must both be scheduled at the longer gate boundary",
+  );
 
-  // Should fire at 20s.
+  tickTo(8_001);
+  assert.equal(recoveryTimeouts, 1, "recovery deadline must fire first");
+  assert.equal(subscription.closedRetryAttempt, 0);
+
+  // The old generation's retry was cleared by release and must not fire later.
   tickTo(20_001);
-  assert.equal(firedAt.length, 1, "retry must fire after gate remaining time");
+  assert.equal(firedAt.length, 0);
 });
 
 test("non-rate-limited retryable CLOSED still schedules a retry", () => {

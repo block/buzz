@@ -22,6 +22,10 @@ import {
 
 import { isDmNotifiableKind } from "./isDmNotifiableKind";
 import { refreshChannelsWhenIdle } from "./refreshChannelsWhenIdle";
+import {
+  shouldDeliverThreadReplyDesktopNotification,
+  ThreadReplyNotificationDedupe,
+} from "./threadReplyNotificationDedupe";
 
 export type UseLiveChannelUpdatesOptions = {
   currentPubkey?: string;
@@ -70,6 +74,45 @@ export type UseLiveChannelUpdatesOptions = {
 
 const LIVE_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
 const LIVE_SUBSCRIPTION_RETRY_MAX_MS = 30_000;
+
+type LiveChannelSubscription = {
+  dispose: () => Promise<void>;
+  replayFloor: number;
+  dedupe: ThreadReplyNotificationDedupe;
+};
+
+export function disposeStaleLiveChannelSubscriptions({
+  activeSubs,
+  targetIds,
+  dedupe,
+}: {
+  activeSubs: Map<string, LiveChannelSubscription>;
+  targetIds: ReadonlySet<string>;
+  dedupe: ThreadReplyNotificationDedupe;
+}) {
+  for (const [channelId, active] of activeSubs) {
+    if (targetIds.has(channelId) && active.dedupe === dedupe) continue;
+    activeSubs.delete(channelId);
+    void active.dispose().catch(() => {});
+  }
+}
+
+export async function reconcileAfterLiveSubscriptionAdditions({
+  additions,
+  isCurrentSync,
+  reconcile,
+}: {
+  additions: Promise<unknown>[];
+  isCurrentSync: () => boolean;
+  reconcile: () => void;
+}) {
+  await Promise.allSettled(additions);
+  if (!isCurrentSync()) {
+    return false;
+  }
+  reconcile();
+  return true;
+}
 
 // get_channels is an expensive O(channels) relay fan-out. Incoming traffic for
 // non-active channels arrives in bursts, so coalesce the refetch into a single
@@ -159,6 +202,21 @@ export function useLiveChannelUpdates(
   );
   const seenDmEventIdsRef = React.useRef(new Set<string>());
   const dmSubscriptionStartedAtRef = React.useRef(0);
+  const threadReplyDedupeRef = React.useRef<{
+    pubkey: string;
+    value: ThreadReplyNotificationDedupe;
+  } | null>(null);
+  if (threadReplyDedupeRef.current?.pubkey !== normalizedCurrentPubkey) {
+    threadReplyDedupeRef.current = {
+      pubkey: normalizedCurrentPubkey,
+      value: new ThreadReplyNotificationDedupe(normalizedCurrentPubkey),
+    };
+  }
+  const threadReplyDedupe = threadReplyDedupeRef.current.value;
+  const pendingThreadReplyDedupeFlushRef = React.useRef<{
+    dedupe: ThreadReplyNotificationDedupe;
+    timeout: number;
+  } | null>(null);
 
   // Reset subscription timestamp when identity changes.
   React.useEffect(() => {
@@ -259,6 +317,12 @@ export function useLiveChannelUpdates(
     const isThreadedReply = isThreadReply(event.tags);
 
     if (isExternalTriggerEvent) {
+      // Eligibility can change after delivery (mute, follow, participation),
+      // so record first sight before consulting that mutable state.
+      const isFirstSeenThreadReply =
+        isThreadedReply && !isDmChannel
+          ? threadReplyDedupe.record(channelId, event.id, event.created_at)
+          : false;
       const shouldNotify = shouldNotifyForEvent(
         event,
         normalizedCurrentPubkey,
@@ -283,11 +347,15 @@ export function useLiveChannelUpdates(
         }
       }
 
-      if (shouldNotify && isThreadedReply) {
-        if (
-          !dmChannelMap.has(channelId) &&
-          (channelId !== activeChannelId || options.notifyForActiveChannel)
-        ) {
+      if (isThreadedReply) {
+        const shouldDeliverDesktopNotification =
+          shouldDeliverThreadReplyDesktopNotification({
+            isFirstSeen: isFirstSeenThreadReply,
+            isEligible: shouldNotify,
+            isActiveChannel: channelId === activeChannelId,
+            notifyForActiveChannel: options.notifyForActiveChannel ?? false,
+          });
+        if (shouldDeliverDesktopNotification) {
           options.onThreadReplyDesktopNotification?.(channelId, event);
         }
       }
@@ -309,6 +377,12 @@ export function useLiveChannelUpdates(
     );
   });
 
+  const handleLiveChannelEvent = React.useEffectEvent(
+    (channelId: string, event: RelayEvent) => {
+      handleIncomingMessage(withChannelTagFallback(event, channelId));
+    },
+  );
+
   const handleMentionEvent = React.useEffectEvent((event: RelayEvent) => {
     if (!isExternalMentionEvent(event, normalizedCurrentPubkey)) {
       return;
@@ -323,6 +397,32 @@ export function useLiveChannelUpdates(
   });
 
   React.useEffect(() => {
+    const pendingFlush = pendingThreadReplyDedupeFlushRef.current;
+    if (pendingFlush?.dedupe === threadReplyDedupe) {
+      window.clearTimeout(pendingFlush.timeout);
+      pendingThreadReplyDedupeFlushRef.current = null;
+    }
+    const unsubscribe = relayClient.subscribeToConnectionState((state) => {
+      threadReplyDedupe.handleConnectionState(state);
+    });
+    return () => {
+      unsubscribe();
+      // Delay handoff flushing by one task so React StrictMode's immediate
+      // effect cleanup/setup cycle can cancel it for the same live instance.
+      const timeout = window.setTimeout(() => {
+        threadReplyDedupe.flush();
+        if (pendingThreadReplyDedupeFlushRef.current?.timeout === timeout) {
+          pendingThreadReplyDedupeFlushRef.current = null;
+        }
+      }, 0);
+      pendingThreadReplyDedupeFlushRef.current = {
+        dedupe: threadReplyDedupe,
+        timeout,
+      };
+    };
+  }, [threadReplyDedupe]);
+
+  React.useEffect(() => {
     return relayClient.subscribeToReconnects(() => {
       void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
 
@@ -332,23 +432,36 @@ export function useLiveChannelUpdates(
     });
   }, [queryClient]);
 
-  const liveSubsRef = React.useRef(new Map<string, () => Promise<void>>());
+  const liveSubsRef = React.useRef(new Map<string, LiveChannelSubscription>());
+  const liveSyncGenerationRef = React.useRef(0);
 
   React.useEffect(() => {
     let isCancelled = false;
     let retryTimeout: number | undefined;
     let retryAttempt = 0;
+    const syncGeneration = liveSyncGenerationRef.current + 1;
+    liveSyncGenerationRef.current = syncGeneration;
+    const isCurrentSync = () =>
+      !isCancelled && liveSyncGenerationRef.current === syncGeneration;
 
     const syncSubs = async (): Promise<boolean> => {
+      if (!isCurrentSync()) {
+        return true;
+      }
       const activeSubs = liveSubsRef.current;
       const targetIds = new Set(channelIdsKey ? channelIdsKey.split(",") : []);
 
-      for (const [channelId, dispose] of activeSubs) {
-        if (!targetIds.has(channelId)) {
-          activeSubs.delete(channelId);
-          void dispose().catch(() => {});
-        }
+      disposeStaleLiveChannelSubscriptions({
+        activeSubs,
+        targetIds,
+        dedupe: threadReplyDedupe,
+      });
+      for (const [channelId, active] of activeSubs) {
+        threadReplyDedupe.setChannelReplayFloor(channelId, active.replayFloor);
       }
+      // Keep target channels provisionally active while their subscriptions
+      // settle so same-second replay cannot lose persisted boundary IDs.
+      threadReplyDedupe.reconcileActiveChannels(targetIds);
 
       if (targetIds.size > 0) {
         // Record the subscription start time so handleDmEvent can distinguish
@@ -361,21 +474,31 @@ export function useLiveChannelUpdates(
         .filter((channelId) => !activeSubs.has(channelId))
         .map(async (channelId) => {
           try {
+            const subscriptionSince = Math.floor(Date.now() / 1_000);
+            threadReplyDedupe.setChannelReplayFloor(
+              channelId,
+              subscriptionSince,
+            );
             const dispose = await relayClient.subscribeLive(
               {
                 kinds: [...CHANNEL_EVENT_KINDS],
                 "#h": [channelId],
                 limit: 1000,
-                since: Math.floor(Date.now() / 1_000),
+                since: subscriptionSince,
               },
-              (event) =>
-                handleIncomingMessage(withChannelTagFallback(event, channelId)),
+              (event) => handleLiveChannelEvent(channelId, event),
+              (recovering) =>
+                threadReplyDedupe.handleSubscriptionRecoveryState(recovering),
             );
-            if (isCancelled) {
+            if (!isCurrentSync()) {
               void dispose().catch(() => {});
               return;
             }
-            activeSubs.set(channelId, dispose);
+            activeSubs.set(channelId, {
+              dispose,
+              replayFloor: subscriptionSince,
+              dedupe: threadReplyDedupe,
+            });
           } catch (err) {
             anyFailed = true;
             console.error(
@@ -385,7 +508,15 @@ export function useLiveChannelUpdates(
             );
           }
         });
-      await Promise.allSettled(additions);
+      const didReconcile = await reconcileAfterLiveSubscriptionAdditions({
+        additions,
+        isCurrentSync,
+        reconcile: () =>
+          threadReplyDedupe.reconcileActiveChannels(activeSubs.keys()),
+      });
+      if (!didReconcile) {
+        return true;
+      }
       return !anyFailed;
     };
 
@@ -415,7 +546,7 @@ export function useLiveChannelUpdates(
         window.clearTimeout(retryTimeout);
       }
     };
-  }, [channelIdsKey]);
+  }, [channelIdsKey, threadReplyDedupe]);
 
   // Subscribe to mention events per channel with a diff-based manager: only
   // subscribe newly-added channels and unsubscribe removed ones on each sync.
@@ -520,7 +651,7 @@ export function useLiveChannelUpdates(
     return () => {
       channelsInvalidateRef.current?.cancel();
 
-      for (const dispose of liveSubsRef.current.values()) {
+      for (const { dispose } of liveSubsRef.current.values()) {
         void dispose().catch(() => {});
       }
       liveSubsRef.current.clear();
