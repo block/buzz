@@ -1274,6 +1274,15 @@ impl Db {
         push::enqueue_wake(&self.pool, community, author, installation_id, wake).await
     }
 
+    /// Set-wise [`Self::enqueue_push_wake`]: one transaction per batch.
+    pub async fn enqueue_push_wakes(
+        &self,
+        community: CommunityId,
+        requests: &[push::WakeRequest],
+    ) -> Result<Vec<push::EnqueueWakeOutcome>> {
+        push::enqueue_wakes(&self.pool, community, requests).await
+    }
+
     /// Exclusively claim due wake jobs for one community.
     pub async fn claim_due_push_wakes(
         &self,
@@ -4642,9 +4651,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn test_usage_metrics_lock_has_single_owner_and_releases_on_drop() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
         let pool = PgPoolOptions::new()
             .max_connections(2)
-            .connect(TEST_DB_URL)
+            .connect(&database_url)
             .await
             .expect("connect to test DB");
         let first = Db::from_pool(pool.clone());

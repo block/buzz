@@ -51,8 +51,9 @@ enum DeliveryResponse {
 
 /// Continuously claim accepted events in per-community batches and match
 /// them against active leases (T2b). One batch costs one claim statement,
-/// one event load, one lease scan, and one membership scan — plus one
-/// complete/retry statement each — regardless of batch size.
+/// one event load, one lease scan, one membership scan, and one wake-enqueue
+/// transaction — plus one complete/retry statement each — regardless of
+/// batch size or how many (event, lease) pairs match.
 pub async fn run_matcher(state: Arc<AppState>) {
     let mut idle_delay = IDLE_POLL_FLOOR;
     let mut last_reap = tokio::time::Instant::now();
@@ -152,15 +153,40 @@ async fn process_match_batch(state: &AppState, batch: buzz_db::push::ClaimedMatc
     };
     let mut completed = Vec::new();
     let mut retry = Vec::new();
+    // Jobs whose wakes are pending the set-wise enqueue below: their
+    // completion is decided by the flush, not by match evaluation.
+    let mut pending = Vec::new();
+    let mut wakes: Vec<buzz_db::push::WakeRequest> = Vec::new();
     for job in &batch.jobs {
         let event_id = job.event.event.id.as_bytes().to_vec();
-        match process_match(state, community, job, &context).await {
-            Ok(()) => completed.push(event_id),
+        match match_job(job, &context) {
+            Ok(job_wakes) if job_wakes.is_empty() => completed.push(event_id),
+            Ok(job_wakes) => {
+                pending.push((event_id, job.attempt));
+                wakes.extend(job_wakes);
+            }
             Err(e) => {
                 warn!(event_id=%job.event.event.id, attempt=job.attempt, "push match failed: {e}");
                 if job.attempt >= buzz_db::push::MAX_MATCH_ATTEMPTS {
                     // A poison event/lease must not retry forever or pin
                     // delivered outbox retention through the rematch guard.
+                    completed.push(event_id);
+                } else {
+                    retry.push(event_id);
+                }
+            }
+        }
+    }
+    // One transaction for every wake in the batch (T2b). InactiveLease and
+    // Duplicate outcomes are per-request non-errors; only a failed enqueue
+    // transaction sends the contributing jobs back for an idempotent rematch
+    // (the outbox dedup key absorbs any wakes that did commit elsewhere).
+    match state.db.enqueue_push_wakes(community, &wakes).await {
+        Ok(_) => completed.extend(pending.into_iter().map(|(event_id, _)| event_id)),
+        Err(e) => {
+            warn!(%community, "push wake batch enqueue failed: {e}");
+            for (event_id, attempt) in pending {
+                if attempt >= buzz_db::push::MAX_MATCH_ATTEMPTS {
                     completed.push(event_id);
                 } else {
                     retry.push(event_id);
@@ -189,12 +215,13 @@ async fn process_match_batch(state: &AppState, batch: buzz_db::push::ClaimedMatc
     }
 }
 
-async fn process_match(
-    state: &AppState,
-    community: buzz_core::CommunityId,
+/// Pure match evaluation: no DB access. Returns the wake requests this job
+/// owes, which the caller flushes set-wise for the whole batch.
+fn match_job(
     job: &buzz_db::push::BatchedMatch,
     context: &MatchContext,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<buzz_db::push::WakeRequest>> {
+    let mut wakes = Vec::new();
     for lease in &context.leases {
         let author_hex = hex::encode(&lease.author);
         if !reader_authorized_for_event(&job.event.event, &author_hex) {
@@ -247,22 +274,16 @@ async fn process_match(
         if expires_at <= Utc::now().timestamp() {
             continue;
         }
-        let _ = state
-            .db
-            .enqueue_push_wake(
-                community,
-                &lease.author,
-                &lease.installation_id,
-                buzz_db::push::NewWake {
-                    lease_generation: lease.generation,
-                    event_id: job.event.event.id.as_bytes(),
-                    class,
-                    expires_at,
-                },
-            )
-            .await?;
+        wakes.push(buzz_db::push::WakeRequest {
+            author: lease.author.clone(),
+            installation_id: lease.installation_id.clone(),
+            lease_generation: lease.generation,
+            event_id: job.event.event.id.as_bytes().to_vec(),
+            class: class.to_string(),
+            expires_at,
+        });
     }
-    Ok(())
+    Ok(wakes)
 }
 
 /// Match-time counterpart of REQ's filter-level `#p` authorization gate.

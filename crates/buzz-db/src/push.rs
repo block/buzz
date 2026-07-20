@@ -557,11 +557,26 @@ async fn replace_lease(
     }
 }
 
+/// One matcher-produced wake request inside a set-wise enqueue.
+#[derive(Debug, Clone)]
+pub struct WakeRequest {
+    /// Lease owner's raw public key.
+    pub author: Vec<u8>,
+    /// Installation address within the tenant.
+    pub installation_id: String,
+    /// Generation observed by the matcher.
+    pub lease_generation: i64,
+    /// Accepted event id that caused the wake (32 bytes).
+    pub event_id: Vec<u8>,
+    /// Effective wake class.
+    pub class: String,
+    /// Delivery deadline, in Unix seconds.
+    pub expires_at: i64,
+}
+
 /// Atomically enqueue at most one job per community, endpoint, and event.
 ///
-/// Endpoint identity and the endpoint grant are copied from the current lease;
-/// callers cannot redirect a wake by supplying either value. A generation that
-/// lost a replacement race is ineligible in the same statement that inserts.
+/// Batch-of-one shape of [`enqueue_wakes`]; see there for the protocol.
 pub async fn enqueue_wake(
     pool: &PgPool,
     community: CommunityId,
@@ -569,74 +584,207 @@ pub async fn enqueue_wake(
     installation_id: &str,
     wake: NewWake<'_>,
 ) -> Result<EnqueueWakeOutcome> {
+    let outcomes = enqueue_wakes(
+        pool,
+        community,
+        &[WakeRequest {
+            author: author.to_vec(),
+            installation_id: installation_id.to_string(),
+            lease_generation: wake.lease_generation,
+            event_id: wake.event_id.to_vec(),
+            class: wake.class.to_string(),
+            expires_at: wake.expires_at,
+        }],
+    )
+    .await?;
+    Ok(outcomes
+        .into_iter()
+        .next()
+        .expect("one outcome per request"))
+}
+
+/// Set-wise counterpart of [`enqueue_wake`]: one transaction and a constant
+/// number of statements for any number of matched (lease, event) pairs (T2b).
+///
+/// Endpoint identity and the endpoint grant are copied from each current
+/// lease; callers cannot redirect a wake by supplying either value.
+/// Revalidation locks the distinct lease rows `FOR UPDATE` in one statement,
+/// ordered by (author, installation_id) so concurrent batches and
+/// `replace_active_lease` (single-row lock) acquire in a consistent order. If
+/// enqueue wins a lock race, a later replacement can leave a durable job
+/// queued, but worker revalidation suppresses it; if replacement wins, the
+/// generation comparison fails and that request reports `InactiveLease`.
+///
+/// Returns one outcome per request, index-aligned with `requests`.
+pub async fn enqueue_wakes(
+    pool: &PgPool,
+    community: CommunityId,
+    requests: &[WakeRequest],
+) -> Result<Vec<EnqueueWakeOutcome>> {
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut tx = pool.begin().await?;
-    // Serialize against lease replacement. If enqueue wins the lock, a later
-    // replacement can leave this durable job queued, but worker revalidation
-    // will suppress it; if replacement wins, the generation predicate fails.
-    let endpoint_hash = sqlx::query(
+
+    // 1. Lock and read the current lease row for every distinct requested
+    //    (author, installation), in deterministic order.
+    let mut pairs: Vec<(&[u8], &str)> = requests
+        .iter()
+        .map(|r| (r.author.as_slice(), r.installation_id.as_str()))
+        .collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    let lock_authors: Vec<&[u8]> = pairs.iter().map(|(a, _)| *a).collect();
+    let lock_installs: Vec<&str> = pairs.iter().map(|(_, i)| *i).collect();
+    let lease_rows = sqlx::query(
         r#"
-        SELECT endpoint_hash
+        SELECT author, installation_id, generation, endpoint_hash
         FROM push_leases
         WHERE community_id = $1
-          AND author = $2
-          AND installation_id = $3
-          AND generation = $4
+          AND (author, installation_id) IN
+              (SELECT a, i FROM UNNEST($2::bytea[], $3::text[]) AS t(a, i))
           AND active
           AND endpoint_enabled
           AND expires_at > EXTRACT(EPOCH FROM now())::bigint
+        ORDER BY author, installation_id
         FOR UPDATE
         "#,
     )
     .bind(community.as_uuid())
-    .bind(author)
-    .bind(installation_id)
-    .bind(wake.lease_generation)
-    .fetch_optional(&mut *tx)
+    .bind(&lock_authors)
+    .bind(&lock_installs)
+    .fetch_all(&mut *tx)
     .await?;
-    let Some(endpoint_hash) = endpoint_hash else {
-        return Ok(EnqueueWakeOutcome::InactiveLease);
-    };
-    let endpoint_hash: Vec<u8> = endpoint_hash.try_get("endpoint_hash")?;
+    let mut leases: std::collections::HashMap<(Vec<u8>, String), (i64, Vec<u8>)> =
+        std::collections::HashMap::with_capacity(lease_rows.len());
+    for row in lease_rows {
+        leases.insert(
+            (row.try_get("author")?, row.try_get("installation_id")?),
+            (row.try_get("generation")?, row.try_get("endpoint_hash")?),
+        );
+    }
 
-    let inserted = sqlx::query(
-        r#"
-        INSERT INTO push_wake_outbox (
-            community_id, author, installation_id, lease_generation,
-            endpoint_hash, event_id, class, expires_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT (community_id, endpoint_hash, event_id) DO NOTHING
-        RETURNING id
-        "#,
-    )
-    .bind(community.as_uuid())
-    .bind(author)
-    .bind(installation_id)
-    .bind(wake.lease_generation)
-    .bind(&endpoint_hash)
-    .bind(wake.event_id)
-    .bind(wake.class)
-    .bind(wake.expires_at)
-    .fetch_optional(&mut *tx)
-    .await?;
+    // 2. Resolve per-request eligibility; collect the insert arrays.
+    // `None` marks InactiveLease; `Some(endpoint_hash)` carries the key half
+    // that maps insert/duplicate rows back to their requests.
+    let resolved: Vec<Option<Vec<u8>>> = requests
+        .iter()
+        .map(|r| {
+            leases
+                .get(&(r.author.clone(), r.installation_id.clone()))
+                .filter(|(generation, _)| *generation == r.lease_generation)
+                .map(|(_, endpoint_hash)| endpoint_hash.clone())
+        })
+        .collect();
+    let mut ins_authors: Vec<&[u8]> = Vec::new();
+    let mut ins_installs: Vec<&str> = Vec::new();
+    let mut ins_generations: Vec<i64> = Vec::new();
+    let mut ins_endpoints: Vec<&[u8]> = Vec::new();
+    let mut ins_events: Vec<&[u8]> = Vec::new();
+    let mut ins_classes: Vec<&str> = Vec::new();
+    let mut ins_expires: Vec<i64> = Vec::new();
+    for (request, endpoint_hash) in requests.iter().zip(&resolved) {
+        let Some(endpoint_hash) = endpoint_hash else {
+            continue;
+        };
+        ins_authors.push(&request.author);
+        ins_installs.push(&request.installation_id);
+        ins_generations.push(request.lease_generation);
+        ins_endpoints.push(endpoint_hash);
+        ins_events.push(&request.event_id);
+        ins_classes.push(&request.class);
+        ins_expires.push(request.expires_at);
+    }
 
-    let outcome = if let Some(row) = inserted {
-        EnqueueWakeOutcome::Enqueued(row.try_get("id")?)
-    } else {
-        // This is a separate statement so READ COMMITTED observes a competing
-        // transaction whose unique-key insert completed while ours waited.
-        let row = sqlx::query(
-            "SELECT id FROM push_wake_outbox \
-             WHERE community_id = $1 AND endpoint_hash = $2 AND event_id = $3",
+    // 3. One multi-row insert. ON CONFLICT covers both pre-existing jobs and
+    //    dedup-key collisions between rows of this same statement.
+    let mut job_ids: std::collections::HashMap<(Vec<u8>, Vec<u8>), Uuid> =
+        std::collections::HashMap::new();
+    let mut inserted_keys: std::collections::HashSet<(Vec<u8>, Vec<u8>)> =
+        std::collections::HashSet::new();
+    if !ins_events.is_empty() {
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO push_wake_outbox (
+                community_id, author, installation_id, lease_generation,
+                endpoint_hash, event_id, class, expires_at
+            )
+            SELECT $1, a, i, g, eh, ev, c, ex
+            FROM UNNEST(
+                $2::bytea[], $3::text[], $4::bigint[], $5::bytea[],
+                $6::bytea[], $7::text[], $8::bigint[]
+            ) AS t(a, i, g, eh, ev, c, ex)
+            ON CONFLICT (community_id, endpoint_hash, event_id) DO NOTHING
+            RETURNING endpoint_hash, event_id, id
+            "#,
         )
         .bind(community.as_uuid())
-        .bind(&endpoint_hash)
-        .bind(wake.event_id)
-        .fetch_one(&mut *tx)
+        .bind(&ins_authors)
+        .bind(&ins_installs)
+        .bind(&ins_generations)
+        .bind(&ins_endpoints)
+        .bind(&ins_events)
+        .bind(&ins_classes)
+        .bind(&ins_expires)
+        .fetch_all(&mut *tx)
         .await?;
-        EnqueueWakeOutcome::Duplicate(row.try_get("id")?)
-    };
+        for row in inserted {
+            let key: (Vec<u8>, Vec<u8>) = (row.try_get("endpoint_hash")?, row.try_get("event_id")?);
+            job_ids.insert(key.clone(), row.try_get("id")?);
+            inserted_keys.insert(key);
+        }
+        // 4. Set-wise duplicate lookup for eligible requests the insert
+        //    skipped. A separate statement so READ COMMITTED observes a
+        //    competing transaction whose unique-key insert completed while
+        //    ours waited.
+        if inserted_keys.len() < ins_events.len() {
+            let dup_rows = sqlx::query(
+                r#"
+                SELECT endpoint_hash, event_id, id FROM push_wake_outbox
+                WHERE community_id = $1
+                  AND (endpoint_hash, event_id) IN
+                      (SELECT eh, ev FROM UNNEST($2::bytea[], $3::bytea[]) AS t(eh, ev))
+                "#,
+            )
+            .bind(community.as_uuid())
+            .bind(&ins_endpoints)
+            .bind(&ins_events)
+            .fetch_all(&mut *tx)
+            .await?;
+            for row in dup_rows {
+                let key: (Vec<u8>, Vec<u8>) =
+                    (row.try_get("endpoint_hash")?, row.try_get("event_id")?);
+                job_ids.entry(key).or_insert(row.try_get("id")?);
+            }
+        }
+    }
     tx.commit().await?;
-    Ok(outcome)
+
+    // First request to claim an inserted key reports Enqueued; later
+    // same-key requests in this batch report Duplicate, matching what
+    // sequential single-request calls would have returned.
+    let mut reported: std::collections::HashSet<(Vec<u8>, Vec<u8>)> =
+        std::collections::HashSet::new();
+    requests
+        .iter()
+        .zip(&resolved)
+        .map(|(request, endpoint_hash)| {
+            let Some(endpoint_hash) = endpoint_hash else {
+                return Ok(EnqueueWakeOutcome::InactiveLease);
+            };
+            let key = (endpoint_hash.clone(), request.event_id.clone());
+            let id = *job_ids.get(&key).ok_or_else(|| {
+                crate::error::DbError::InvalidData(
+                    "wake enqueue resolved neither insert nor duplicate".into(),
+                )
+            })?;
+            Ok(if inserted_keys.contains(&key) && reported.insert(key) {
+                EnqueueWakeOutcome::Enqueued(id)
+            } else {
+                EnqueueWakeOutcome::Duplicate(id)
+            })
+        })
+        .collect()
 }
 
 /// One batch of matcher jobs claimed from a single community.
@@ -1432,6 +1580,90 @@ mod tests {
         .await
         .expect("count all jobs");
         assert_eq!(total, 2, "same dedup key is independent per community");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn setwise_enqueue_maps_outcomes_per_request() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let alice = [21; 32];
+        let bob = [22; 32];
+        let alice_endpoint = [23; 32];
+        let bob_endpoint = [24; 32];
+        let event_x = [25; 32];
+        let event_y = [26; 32];
+        activate(&pool, community, &alice, "install", &alice_endpoint, 1).await;
+        activate(&pool, community, &bob, "install", &bob_endpoint, 2).await;
+
+        // Pre-existing durable job for (alice, event_x): the batch's matching
+        // request must come back Duplicate with the same id.
+        let existing = enqueue_one(&pool, community, &alice, &event_x, 1).await;
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+             VALUES ($1, $2, $3, to_timestamp(1), 9, '[]', '', $4)",
+        )
+        .bind(community.as_uuid())
+        .bind(event_y)
+        .bind([42_u8; 32])
+        .bind([43_u8; 64])
+        .execute(&pool)
+        .await
+        .expect("insert second wake source event");
+
+        let request = |author: [u8; 32], event: [u8; 32], generation: i64| WakeRequest {
+            author: author.to_vec(),
+            installation_id: "install".into(),
+            lease_generation: generation,
+            event_id: event.to_vec(),
+            class: "default".into(),
+            expires_at: i64::MAX / 2,
+        };
+        let outcomes = enqueue_wakes(
+            &pool,
+            community,
+            &[
+                // Duplicate of the pre-existing job.
+                request(alice, event_x, 1),
+                // Fresh insert.
+                request(alice, event_y, 1),
+                // Same dedup key within this same batch.
+                request(alice, event_y, 1),
+                // Stale generation: lease revalidation must reject it.
+                request(bob, event_x, 7),
+                // Unknown lease entirely.
+                request([99; 32], event_x, 1),
+                // Fresh insert for the second lease.
+                request(bob, event_y, 2),
+            ],
+        )
+        .await
+        .expect("set-wise enqueue");
+
+        assert_eq!(outcomes.len(), 6, "index-aligned outcomes");
+        assert_eq!(outcomes[0], EnqueueWakeOutcome::Duplicate(existing));
+        let EnqueueWakeOutcome::Enqueued(alice_y) = outcomes[1] else {
+            panic!(
+                "expected fresh insert for (alice, event_y), got {:?}",
+                outcomes[1]
+            );
+        };
+        assert_eq!(
+            outcomes[2],
+            EnqueueWakeOutcome::Duplicate(alice_y),
+            "same-batch dedup collision resolves to the row the batch inserted"
+        );
+        assert_eq!(outcomes[3], EnqueueWakeOutcome::InactiveLease);
+        assert_eq!(outcomes[4], EnqueueWakeOutcome::InactiveLease);
+        assert!(matches!(outcomes[5], EnqueueWakeOutcome::Enqueued(id) if id != alice_y));
+
+        let total: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM push_wake_outbox WHERE community_id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .expect("count outbox rows");
+        assert_eq!(total, 3, "one row per distinct (endpoint, event) key");
     }
 
     async fn enqueue_one(
