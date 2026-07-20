@@ -200,8 +200,11 @@ export function AgentConfigFields({
     () => getGlobalModelFallback(bakedEnv, effectiveProvider, config.env_vars),
     [bakedEnv, config.env_vars, effectiveProvider],
   );
+  const modelFieldVisible = hasRenderableAgentConfigField(fieldModel, "model");
   const modelIsValid =
-    (config.model?.trim().length ?? 0) > 0 || fallbackModel !== null;
+    !modelFieldVisible ||
+    (config.model?.trim().length ?? 0) > 0 ||
+    fallbackModel !== null;
   React.useEffect(() => {
     onValidityChange?.(modelIsValid);
   }, [modelIsValid, onValidityChange]);

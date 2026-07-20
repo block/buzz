@@ -6696,6 +6696,9 @@ function withMockRuntimeConfigMetadata(
 ): RawAcpRuntimeCatalogEntry {
   return {
     ...runtime,
+    node_required: runtime.node_required ?? false,
+    auth_status: runtime.auth_status ?? { status: "unknown" },
+    login_hint: runtime.login_hint,
     model_env_var:
       "model_env_var" in runtime
         ? runtime.model_env_var

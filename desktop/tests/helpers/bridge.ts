@@ -369,6 +369,7 @@ type MockBridgeOptions = {
     env_vars: Record<string, string>;
     provider: string | null;
     model: string | null;
+    preferred_runtime?: string | null;
   };
   bakedBuildEnv?: Array<{
     key: string;
