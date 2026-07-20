@@ -855,7 +855,7 @@ test("first-community owner can create and connect a hosted community", async ({
   const surfaceBoxBeforeFeedback = await createSurface.boundingBox();
   const communityNameInput = page.getByTestId("hosted-community-address-input");
   await communityNameInput.fill("bee-lab");
-  await expect(communityNameInput).toHaveAttribute("style", "width: 7ch;");
+  await expect(communityNameInput).toHaveAttribute("style", /width: 7ch;/);
   const availabilityFeedback = page.getByText("That address is available.");
   await expect(availabilityFeedback).toBeVisible();
   const [feedbackBox, surfaceBox, inputBox, suffixBox] = await Promise.all([
@@ -896,6 +896,69 @@ test("first-community owner can create and connect a hosted community", async ({
       ),
     )
     .toContain("wss://bee-lab.communities.buzz.xyz");
+});
+
+test("hosted community address line stays within the card for a long name", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {},
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  // The 800px app minimum is the worst case for the full-width address line.
+  await page.setViewportSize({ width: 800, height: 720 });
+  await page.goto("/");
+
+  await page
+    .getByRole("button", { name: "Create or connect to my own community" })
+    .click();
+  await page.getByRole("button", { name: "Sign in to continue" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Finish connecting Buzz" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Connect and continue" }).click();
+
+  const createSurface = page.getByTestId("hosted-community-create-surface");
+  const communityNameInput = page.getByTestId("hosted-community-address-input");
+  // A maximum-length (63 char) valid name — the overflow case Wes flagged; the
+  // 7-char check above cannot catch it.
+  const longName = "a".repeat(63);
+  await communityNameInput.fill(longName);
+  await expect(communityNameInput).toHaveValue(longName);
+
+  const [surfaceBox, inputBox, suffixBox] = await Promise.all([
+    createSurface.boundingBox(),
+    communityNameInput.boundingBox(),
+    page.locator("#hosted-community-suffix").boundingBox(),
+  ]);
+  if (!surfaceBox || !inputBox || !suffixBox) {
+    throw new Error("Could not measure hosted community creation layout");
+  }
+  const addressLeft = inputBox.x;
+  const addressRight = suffixBox.x + suffixBox.width;
+  // The composed `<name>.<suffix>` line must stay within the card — no
+  // horizontal overflow past the surface or the 800px window.
+  expect(addressLeft).toBeGreaterThanOrEqual(surfaceBox.x);
+  expect(addressRight).toBeLessThanOrEqual(surfaceBox.x + surfaceBox.width);
+  expect(addressRight).toBeLessThanOrEqual(800);
+  // …and it stays centered within the card.
+  expect(
+    Math.abs(
+      (addressLeft + addressRight) / 2 - (surfaceBox.x + surfaceBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(2);
 });
 
 test("first-community reports a created community without a relay address", async ({

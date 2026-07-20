@@ -336,6 +336,22 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
             ? "That address is available."
             : null;
 
+  // The composed `<name>.<suffix>` line renders at text-4xl, but a valid name
+  // can be up to 63 chars and the suffix adds another 21 — far wider than the
+  // card at the 800px app minimum. Scale the font down to fit the container
+  // (container-query width) while capping at text-4xl (2.25rem) so short names
+  // keep the full-size treatment and long names stay fully visible instead of
+  // overflowing the surface.
+  const composedAddressLength =
+    (name ? name.length : "your-community".length) +
+    HOSTED_COMMUNITY_SUFFIX.length +
+    1; // leading dot before the suffix
+  // ~0.62em is the monospace glyph advance; 90cqw leaves a safety margin so the
+  // glyphs never touch the card edge.
+  const addressFontSize = `min(2.25rem, calc(90cqw / ${(
+    composedAddressLength * 0.62
+  ).toFixed(2)}))`;
+
   const creationInput = (inline: boolean) => (
     <Input
       aria-describedby={
@@ -346,7 +362,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
       className={
         inline
           ? "h-[2.375rem] w-[16.5rem] rounded-full border border-[color:var(--buzz-onboarding-backup-ink)]/25 bg-[rgb(var(--buzz-hosted-community-input-bg)/0.6)] px-6 text-center text-sm shadow-none placeholder:text-foreground/30 focus-visible:ring-1 focus-visible:ring-[color:var(--buzz-onboarding-backup-ink)]/40"
-          : "h-auto min-w-0 flex-none rounded-none border-0 bg-transparent p-0 text-right font-mono !text-4xl !text-[rgb(var(--buzz-hosted-community-surface-fg))] shadow-none placeholder:!text-[rgb(var(--buzz-hosted-community-surface-fg))] placeholder:opacity-20 focus-visible:ring-0"
+          : "h-auto min-w-0 flex-none rounded-none border-0 bg-transparent p-0 text-right font-mono !text-[rgb(var(--buzz-hosted-community-surface-fg))] shadow-none placeholder:!text-[rgb(var(--buzz-hosted-community-surface-fg))] placeholder:opacity-20 focus-visible:ring-0"
       }
       disabled={busy || atCommunityLimit}
       id="hosted-community-address"
@@ -361,7 +377,10 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
       style={
         inline
           ? undefined
-          : { width: `${name ? name.length : "your-community".length}ch` }
+          : {
+              width: `${name ? name.length : "your-community".length}ch`,
+              fontSize: addressFontSize,
+            }
       }
       value={name}
     />
@@ -392,11 +411,13 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
           <div
             className="mx-auto flex w-full max-w-[900px] items-center justify-center whitespace-nowrap"
             data-testid="hosted-community-address-line"
+            style={{ containerType: "inline-size" }}
           >
             {creationInput(false)}
             <span
-              className="shrink-0 font-mono text-4xl !text-[rgb(var(--buzz-hosted-community-surface-fg))]"
+              className="shrink-0 font-mono !text-[rgb(var(--buzz-hosted-community-surface-fg))]"
               id="hosted-community-suffix"
+              style={{ fontSize: addressFontSize }}
             >
               .{HOSTED_COMMUNITY_SUFFIX}
             </span>
