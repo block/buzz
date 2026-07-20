@@ -323,6 +323,10 @@ minio:
 # ── Git server config ────────────────────────────────────────────────────────
 git:
   maxPackBytes: 524288000        # 500 MiB
+  packCachePath: /var/cache/buzz/git-packs
+  packCacheMaxBytes: 5368709120  # 5 GiB
+  packCacheMaxConcurrentPopulations: 2
+  packCacheVolumeSize: 7Gi       # per-pod emptyDir; includes cold-population staging
   maxReposPerPubkey: 100
   maxConcurrentOps: 20
 

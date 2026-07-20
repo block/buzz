@@ -202,13 +202,16 @@ pub struct Config {
     /// 60 seconds after the last message.
     pub ephemeral_ttl_override: Option<i32>,
 
-    /// Root directory for the relay's local git scratch. No per-repo bare repos
-    /// or persistent git state live here — runtime reads/writes hydrate
-    /// ephemeral repos from object storage per request, and all temporary Git
-    /// workspaces and buffered subprocess output are created beneath this path.
+    /// Root directory for the relay's local git scratch. No authoritative
+    /// repository state lives here — runtime reads/writes hydrate ephemeral
+    /// repos from object storage per request. Temporary workspaces, buffered
+    /// subprocess output, and the disposable immutable pack cache live below
+    /// this path.
     /// Repo-name uniqueness lives in Postgres (`git_repo_names`), not on disk,
     /// so this directory need not be persistent or shared across replicas.
     pub git_repo_path: std::path::PathBuf,
+    /// Parent directory for process-isolated immutable pack cache sessions.
+    pub git_pack_cache_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
     pub git_max_pack_bytes: u64,
     /// Maximum total bytes materialized for one git repo request. Default: 1 GB.
@@ -216,6 +219,11 @@ pub struct Config {
     /// This bounds clone/fetch hydration work across a repo's historical pack
     /// set rather than only bounding one incoming push body.
     pub git_max_repo_bytes: u64,
+    /// Maximum bytes retained in the process-local immutable pack/index cache.
+    /// Zero disables retention while preserving request-local hydration.
+    pub git_pack_cache_max_bytes: u64,
+    /// Maximum pack digests populated concurrently in one relay process.
+    pub git_pack_cache_max_concurrent_populations: usize,
     /// Maximum number of repos per pubkey. Default: 100.
     pub git_max_repos_per_pubkey: u32,
     /// Maximum concurrent git subprocess operations. Default: 20.
@@ -369,10 +377,17 @@ fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
 fn ensure_git_repo_path(
     raw: impl Into<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, ConfigError> {
+    ensure_git_path("BUZZ_GIT_REPO_PATH", raw)
+}
+
+fn ensure_git_path(
+    setting: &str,
+    raw: impl Into<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, ConfigError> {
     let git_repo_path = raw.into();
     if let Err(e) = std::fs::create_dir_all(&git_repo_path) {
         return Err(ConfigError::InvalidValue(format!(
-            "BUZZ_GIT_REPO_PATH={} could not be created: {e}",
+            "{setting}={} could not be created: {e}",
             git_repo_path.display()
         )));
     }
@@ -677,6 +692,12 @@ impl Config {
         let git_repo_path = ensure_git_repo_path(
             std::env::var("BUZZ_GIT_REPO_PATH").unwrap_or_else(|_| "./repos".to_string()),
         )?;
+        let git_pack_cache_path = ensure_git_path(
+            "BUZZ_GIT_PACK_CACHE_PATH",
+            std::env::var("BUZZ_GIT_PACK_CACHE_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| git_repo_path.join(".pack-cache")),
+        )?;
         let git_max_pack_bytes: u64 = std::env::var("BUZZ_GIT_MAX_PACK_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -685,6 +706,16 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| git_max_pack_bytes.saturating_mul(2)); // 1 GB at defaults
+        let git_pack_cache_max_bytes: u64 = std::env::var("BUZZ_GIT_PACK_CACHE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| git_max_repo_bytes.saturating_mul(5)); // 5 GB at defaults
+        let git_pack_cache_max_concurrent_populations: usize =
+            std::env::var("BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(2);
         let git_max_repos_per_pubkey: u32 = std::env::var("BUZZ_GIT_MAX_REPOS_PER_PUBKEY")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -862,8 +893,11 @@ impl Config {
             audit_enabled,
             ephemeral_ttl_override,
             git_repo_path,
+            git_pack_cache_path,
             git_max_pack_bytes,
             git_max_repo_bytes,
+            git_pack_cache_max_bytes,
+            git_pack_cache_max_concurrent_populations,
             git_max_repos_per_pubkey,
             git_max_concurrent_ops,
             git_hook_hmac_secret,

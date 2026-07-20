@@ -505,6 +505,10 @@ pub struct AppState {
     /// CAS-guarded manifest pointer). This is the durable git source of truth;
     /// see `api::git::store` and `docs/git-on-object-storage.md`.
     pub git_store: crate::api::git::store::GitStore,
+    /// Process-local, byte-bounded cache of immutable Git pack/index pairs.
+    /// Object storage remains authoritative; this only avoids repeated reads
+    /// and index generation for content-addressed packs.
+    pub git_pack_cache: Arc<crate::api::git::pack_cache::GitPackCache>,
     /// Audio relay room manager — tracks active huddle audio rooms.
     pub audio_rooms: Arc<AudioRoomManager>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
@@ -631,6 +635,14 @@ impl AppState {
             &config.media.s3_region,
         )
         .expect("media storage was already constructed with this S3 config");
+        let git_pack_cache = Arc::new(
+            crate::api::git::pack_cache::GitPackCache::new(
+                &config.git_pack_cache_path,
+                config.git_pack_cache_max_bytes,
+                config.git_pack_cache_max_concurrent_populations,
+            )
+            .expect("git pack cache path must be available"),
+        );
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
@@ -685,6 +697,7 @@ impl AppState {
             audit_tx: audit_enabled.then_some(audit_tx),
             media_storage: Arc::new(media_storage),
             git_store,
+            git_pack_cache,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),

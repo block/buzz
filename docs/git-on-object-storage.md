@@ -51,13 +51,19 @@ to three stated axioms, each empirically gated per backend" does.
 
 ### v1 deployment architecture
 
-The implementation has *no per-repo persistent filesystem state*. Every request
-hydrates an ephemeral working tree from the published manifest, runs the
-appropriate git subprocess against it, and drops the tree on scope exit:
+The implementation has *no authoritative per-repo filesystem state*. Every
+request hydrates an ephemeral working tree from the published manifest, runs
+the appropriate git subprocess against it, and drops the tree on scope exit:
 read paths (`info/refs`, `upload-pack`) via `hydrate_for_read`, the write path
 (`receive-pack`) via `hydrate_for_write`, which also returns the `ParentState`
 the CAS at §Push step 7 predicates on. The relay is multi-instance-ready by
 construction: nothing on local disk needs to be coordinated between instances.
+Each process may retain a byte-bounded, process-lifetime cache of immutable
+pack/index pairs keyed by verified digest. Deployment mounts that cache on a
+per-pod ephemeral volume, so accounting and single-flight coordination stay
+local. Cache misses, restarts, and evictions only affect performance; object
+storage remains the source of truth, and per-request refs/HEAD are still
+materialized from the current manifest.
 
 The accepted v1 tradeoff: under concurrent same-repo pushes, every contender
 hydrates and runs receive-pack, and the CAS losers' subprocess work is
@@ -475,6 +481,7 @@ symbol search, not line counts.)
 | `GitStore::{put_pack, put_manifest, put_pointer}` (create-only + CAS) | `store.rs` |
 | `run_conformance_probe` (A1/A3 fail-closed startup gate) | `store.rs` + `main.rs` |
 | `hydrate_for_read` / `hydrate_for_write` | `hydrate.rs` |
+| Bounded digest-keyed pack/index cache and single-flight population | `pack_cache.rs` |
 | `ParentState { if_match, parent_digest, parent }` + `from_loaded`/`fresh` | `cas_publish.rs:154` |
 | `cas_publish(.., &parent_state) -> Result<CasSuccess, CasError>` | `cas_publish.rs:410` |
 | `CasError::Conflict { winner_manifest, winner_manifest_key }` (typed 412) | `cas_publish.rs:92` |

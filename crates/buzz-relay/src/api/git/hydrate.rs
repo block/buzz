@@ -6,11 +6,11 @@
 //!
 //! 1. GET pointer → manifest digest.
 //! 2. GET manifest (digest-verified) → parsed [`Manifest`].
-//! 3. GET every pack the manifest names (digest-verified, in parallel).
-//! 4. **Phase 1** — for each pack: write `pack-<hex>.pack`; install and
-//!    validate a cached `idx/<hex>` sidecar when present, otherwise run
-//!    `git index-pack` to materialize `.idx`. Failure here tears down the
-//!    tempdir with no refs/HEAD ever written.
+//! 3. Resolve every pack through the bounded local content-addressed cache.
+//! 4. **Phase 1** — hard-link or copy each verified pack/index pair into the
+//!    ephemeral repo. A cache miss reads object storage and validates or
+//!    generates the index once per digest. Failure here tears down the tempdir
+//!    with no refs/HEAD ever written.
 //! 5. **Phase 2** — only after all packs are indexed: write loose refs and
 //!    HEAD from the manifest.
 //!
@@ -19,8 +19,8 @@
 //! mid-stream. Sami/Max named this explicitly.
 //!
 //! The returned [`HydratedRepo`] owns a [`tempfile::TempDir`]; dropping it
-//! cleans up. Every read currently re-hydrates from scratch — naive but
-//! correct; caching is named follow-up work.
+//! cleans up. Cached pack/index pairs are immutable performance state; object
+//! storage remains authoritative.
 
 // Public surface is consumed by `transport.rs` after Eva's `AppState::git_store`
 // wires in; the items below are intentionally `pub` to keep the consumer-side
@@ -35,6 +35,7 @@ use tokio::process::Command;
 
 use super::cas_publish::ParentState;
 use super::manifest::{is_hex_oid, is_safe_refname, pointer_key, Manifest, ManifestError};
+use super::pack_cache::GitPackCache;
 use super::store::{ETag, GitStore, StoreError};
 use buzz_core::TenantContext;
 
@@ -75,6 +76,19 @@ impl HydratedRepo {
     }
 }
 
+/// Process-local resources and limits used to materialize one repository.
+#[derive(Clone, Copy)]
+pub struct HydrationOptions<'a> {
+    /// Immutable pack/index cache shared by Git operations in this process.
+    pub pack_cache: &'a GitPackCache,
+    /// Parent directory for ephemeral bare repositories.
+    pub scratch_dir: &'a Path,
+    /// Maximum bytes accepted for one pack object.
+    pub max_pack_bytes: u64,
+    /// Maximum aggregate pack bytes accepted for one repository.
+    pub max_repo_bytes: u64,
+}
+
 /// Hydration errors.
 ///
 /// "Repo doesn't exist" is signalled by `Ok(None)` from `hydrate_for_read`,
@@ -112,21 +126,10 @@ pub async fn hydrate_for_read(
     ctx: &TenantContext,
     owner: &str,
     repo: &str,
-    scratch_dir: &Path,
-    max_pack_bytes: u64,
-    max_repo_bytes: u64,
+    options: HydrationOptions<'_>,
 ) -> Result<Option<HydratedRepo>, HydrateError> {
     let started_at = std::time::Instant::now();
-    let result = hydrate_for_read_inner(
-        store,
-        ctx,
-        owner,
-        repo,
-        scratch_dir,
-        max_pack_bytes,
-        max_repo_bytes,
-    )
-    .await;
+    let result = hydrate_for_read_inner(store, ctx, owner, repo, options).await;
     let outcome = match &result {
         Ok(Some(repo)) => {
             metrics::histogram!("buzz_git_hydrate_bytes").record(repo.hydrated_bytes() as f64);
@@ -151,23 +154,12 @@ async fn hydrate_for_read_inner(
     ctx: &TenantContext,
     owner: &str,
     repo: &str,
-    scratch_dir: &Path,
-    max_pack_bytes: u64,
-    max_repo_bytes: u64,
+    options: HydrationOptions<'_>,
 ) -> Result<Option<HydratedRepo>, HydrateError> {
     let Some((_etag, _digest, manifest)) = load_pointer(store, ctx, owner, repo).await? else {
         return Ok(None);
     };
-    Ok(Some(
-        materialize_manifest(
-            store,
-            &manifest,
-            scratch_dir,
-            max_pack_bytes,
-            max_repo_bytes,
-        )
-        .await?,
-    ))
+    Ok(Some(materialize_manifest(store, &manifest, options).await?))
 }
 
 /// Load the current manifest for a read path without materializing pack objects.
@@ -212,20 +204,11 @@ pub async fn hydrate_for_write(
     ctx: &TenantContext,
     owner: &str,
     repo: &str,
-    scratch_dir: &Path,
-    max_pack_bytes: u64,
-    max_repo_bytes: u64,
+    options: HydrationOptions<'_>,
 ) -> Result<(HydratedRepo, ParentState), HydrateError> {
     match load_pointer(store, ctx, owner, repo).await? {
         Some((etag, digest, manifest)) => {
-            let repo = materialize_manifest(
-                store,
-                &manifest,
-                scratch_dir,
-                max_pack_bytes,
-                max_repo_bytes,
-            )
-            .await?;
+            let repo = materialize_manifest(store, &manifest, options).await?;
             let parent = ParentState::from_loaded(etag, digest, manifest);
             Ok((repo, parent))
         }
@@ -233,8 +216,9 @@ pub async fn hydrate_for_write(
             // First push: empty bare repo. No packs to fetch, no refs to
             // install. `receive-pack` will accept whatever the client
             // sends; `cas_publish` will use `If-None-Match: *`.
-            let tempdir = TempDir::new_in(scratch_dir)
-                .map_err(|e| HydrateError::Hydrate(format!("tempdir in {scratch_dir:?}: {e}")))?;
+            let tempdir = TempDir::new_in(options.scratch_dir).map_err(|e| {
+                HydrateError::Hydrate(format!("tempdir in {:?}: {e}", options.scratch_dir))
+            })?;
             let path = tempdir.path().to_path_buf();
             run_git(&path, &["init", "--bare", "--quiet"]).await?;
             Ok((
@@ -280,7 +264,7 @@ async fn load_pointer(
     Ok(Some((etag, digest, manifest)))
 }
 
-async fn get_verified_limited(
+pub(super) async fn get_verified_limited(
     store: &GitStore,
     key: &str,
     digest: &str,
@@ -304,13 +288,11 @@ async fn get_verified_limited(
 async fn materialize_manifest(
     store: &GitStore,
     manifest: &Manifest,
-    scratch_dir: &Path,
-    max_pack_bytes: u64,
-    max_repo_bytes: u64,
+    options: HydrationOptions<'_>,
 ) -> Result<HydratedRepo, HydrateError> {
     // Init bare repo.
-    let tempdir = TempDir::new_in(scratch_dir)
-        .map_err(|e| HydrateError::Hydrate(format!("tempdir in {scratch_dir:?}: {e}")))?;
+    let tempdir = TempDir::new_in(options.scratch_dir)
+        .map_err(|e| HydrateError::Hydrate(format!("tempdir in {:?}: {e}", options.scratch_dir)))?;
     let path = tempdir.path().to_path_buf();
     run_git(&path, &["init", "--bare", "--quiet"]).await?;
 
@@ -324,27 +306,25 @@ async fn materialize_manifest(
         let digest = key
             .strip_prefix("packs/")
             .ok_or_else(|| HydrateError::Hydrate(format!("malformed pack key {key:?}")))?;
-        let bytes = get_verified_limited(store, key, digest, max_pack_bytes).await?;
-        let pack_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if pack_bytes > max_pack_bytes {
+        let pack_bytes = options
+            .pack_cache
+            .materialize_pack(store, key, digest, &pack_dir, options.max_pack_bytes)
+            .await?;
+        if pack_bytes > options.max_pack_bytes {
             return Err(HydrateError::ResourceLimit(format!(
-                "pack {digest} is {pack_bytes} bytes (max {max_pack_bytes})"
+                "pack {digest} is {pack_bytes} bytes (max {})",
+                options.max_pack_bytes
             )));
         }
         hydrated_bytes = hydrated_bytes.checked_add(pack_bytes).ok_or_else(|| {
             HydrateError::ResourceLimit("repo byte count overflowed u64".to_string())
         })?;
-        if hydrated_bytes > max_repo_bytes {
+        if hydrated_bytes > options.max_repo_bytes {
             return Err(HydrateError::ResourceLimit(format!(
-                "repo needs {hydrated_bytes} hydrated bytes (max {max_repo_bytes})"
+                "repo needs {hydrated_bytes} hydrated bytes (max {})",
+                options.max_repo_bytes
             )));
         }
-
-        let pack_path = pack_dir.join(format!("pack-{digest}.pack"));
-        tokio::fs::write(&pack_path, &bytes)
-            .await
-            .map_err(|e| HydrateError::Hydrate(format!("write pack {digest}: {e}")))?;
-        install_or_generate_idx(store, &path, digest, &pack_path).await?;
     }
 
     // Phase 2: install refs and HEAD. After this point, the repo advertises.
@@ -393,14 +373,15 @@ async fn materialize_manifest(
     })
 }
 
-async fn install_or_generate_idx(
+pub(super) async fn install_or_generate_idx(
     store: &GitStore,
     repo_path: &Path,
     pack_digest: &str,
     pack_path: &Path,
+    max_idx_bytes: u64,
 ) -> Result<(), HydrateError> {
     let idx_path = pack_path.with_extension("idx");
-    match store.get_idx(pack_digest).await {
+    match store.get_idx(pack_digest, max_idx_bytes).await {
         Ok(Some(idx_bytes)) => {
             tokio::fs::write(&idx_path, &idx_bytes)
                 .await
@@ -438,7 +419,27 @@ async fn install_or_generate_idx(
     let pack_path_str = pack_path
         .to_str()
         .ok_or_else(|| HydrateError::Hydrate("pack path is not valid utf-8".to_string()))?;
-    run_git(repo_path, &["index-pack", pack_path_str]).await
+    run_git(repo_path, &["index-pack", pack_path_str]).await?;
+    enforce_idx_size(&idx_path, pack_digest, max_idx_bytes).await
+}
+
+async fn enforce_idx_size(
+    idx_path: &Path,
+    pack_digest: &str,
+    max_idx_bytes: u64,
+) -> Result<(), HydrateError> {
+    let idx_bytes = tokio::fs::metadata(&idx_path)
+        .await
+        .map_err(|error| {
+            HydrateError::Hydrate(format!("stat generated idx {pack_digest}: {error}"))
+        })?
+        .len();
+    if idx_bytes > max_idx_bytes {
+        return Err(HydrateError::ResourceLimit(format!(
+            "generated idx {pack_digest} is {idx_bytes} bytes (max {max_idx_bytes})"
+        )));
+    }
+    Ok(())
 }
 
 /// Run `git <args>` in `cwd`, fail on non-zero exit.
@@ -499,6 +500,17 @@ mod tests {
         assert!(!is_hex_oid(""));
     }
 
+    #[tokio::test]
+    async fn generated_idx_size_is_bounded() {
+        let scratch = TempDir::new().expect("scratch");
+        let idx_path = scratch.path().join("pack-test.idx");
+        tokio::fs::write(&idx_path, [0u8; 2]).await.expect("idx");
+
+        let result = enforce_idx_size(&idx_path, "test", 1).await;
+
+        assert!(matches!(result, Err(HydrateError::ResourceLimit(_))));
+    }
+
     // `pointer_key` is tested in `super::manifest::tests` — single source.
 
     fn tenant() -> TenantContext {
@@ -520,10 +532,20 @@ mod tests {
             packs: Vec::new(),
             parent: None,
         };
+        let cache = GitPackCache::new(scratch.path(), u64::MAX, 2).expect("cache");
 
-        let hydrated = materialize_manifest(&store, &manifest, scratch.path(), u64::MAX, u64::MAX)
-            .await
-            .expect("materialize empty repo");
+        let hydrated = materialize_manifest(
+            &store,
+            &manifest,
+            HydrationOptions {
+                pack_cache: &cache,
+                scratch_dir: scratch.path(),
+                max_pack_bytes: u64::MAX,
+                max_repo_bytes: u64::MAX,
+            },
+        )
+        .await
+        .expect("materialize empty repo");
 
         assert!(hydrated.path().starts_with(scratch.path()));
     }
@@ -643,11 +665,22 @@ mod tests {
 
         // Hydrate.
         let scratch = TempDir::new().unwrap();
-        let hydrated =
-            hydrate_for_read(&st, &ctx, &owner, repo, scratch.path(), u64::MAX, u64::MAX)
-                .await
-                .expect("hydrate")
-                .expect("hydrate Some");
+        let cache = GitPackCache::new(scratch.path(), u64::MAX, 2).expect("cache");
+        let hydrated = hydrate_for_read(
+            &st,
+            &ctx,
+            &owner,
+            repo,
+            HydrationOptions {
+                pack_cache: &cache,
+                scratch_dir: scratch.path(),
+                max_pack_bytes: u64::MAX,
+                max_repo_bytes: u64::MAX,
+            },
+        )
+        .await
+        .expect("hydrate")
+        .expect("hydrate Some");
         eprintln!("hydrated to {}", hydrated.path().display());
 
         // The hydrated repo must list the same ref with the same oid.
@@ -718,14 +751,18 @@ mod tests {
         let owner = format!("nope-{}", uuid::Uuid::new_v4());
         let ctx = tenant();
         let scratch = TempDir::new().unwrap();
+        let cache = GitPackCache::new(scratch.path(), u64::MAX, 2).expect("cache");
         let result = hydrate_for_read(
             &st,
             &ctx,
             &owner,
             "ghost",
-            scratch.path(),
-            u64::MAX,
-            u64::MAX,
+            HydrationOptions {
+                pack_cache: &cache,
+                scratch_dir: scratch.path(),
+                max_pack_bytes: u64::MAX,
+                max_repo_bytes: u64::MAX,
+            },
         )
         .await
         .expect("ok");
@@ -774,14 +811,18 @@ mod tests {
         }
 
         let scratch = TempDir::new().unwrap();
+        let cache = GitPackCache::new(scratch.path(), u64::MAX, 2).expect("cache");
         let hydrated = hydrate_for_read(
             &st,
             &ctx,
             &owner,
             "void",
-            scratch.path(),
-            u64::MAX,
-            u64::MAX,
+            HydrationOptions {
+                pack_cache: &cache,
+                scratch_dir: scratch.path(),
+                max_pack_bytes: u64::MAX,
+                max_repo_bytes: u64::MAX,
+            },
         )
         .await
         .expect("hydrate")

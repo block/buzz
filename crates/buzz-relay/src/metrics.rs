@@ -88,6 +88,16 @@ pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
         )
         .expect("valid git stream duration bucket boundaries")
         .set_buckets_for_metric(
+            Matcher::Full("buzz_git_pack_cache_populate_seconds".to_owned()),
+            &GIT_DURATION_BUCKETS_S,
+        )
+        .expect("valid git cache population duration bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_pack_cache_population_wait_seconds".to_owned()),
+            &GIT_DURATION_BUCKETS_S,
+        )
+        .expect("valid git cache population wait bucket boundaries")
+        .set_buckets_for_metric(
             Matcher::Full("buzz_git_hydrate_bytes".to_owned()),
             &GIT_BYTES_BUCKETS,
         )

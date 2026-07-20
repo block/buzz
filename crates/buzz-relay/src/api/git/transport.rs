@@ -32,6 +32,7 @@ use super::cas_publish::{cas_publish, CasError, ParentState, PublishLimits};
 use super::hook::install_hook;
 use super::hydrate::{
     hydrate_for_read, hydrate_for_write, load_manifest_for_read, HydrateError, HydratedRepo,
+    HydrationOptions,
 };
 use super::manifest_event::{build_ref_state_event, RefStateInputs};
 use crate::state::AppState;
@@ -598,9 +599,12 @@ async fn info_refs_subprocess(
         tenant,
         &params.owner,
         &params.repo,
-        &state.config.git_repo_path,
-        state.config.git_max_pack_bytes,
-        state.config.git_max_repo_bytes,
+        HydrationOptions {
+            pack_cache: &state.git_pack_cache,
+            scratch_dir: &state.config.git_repo_path,
+            max_pack_bytes: state.config.git_max_pack_bytes,
+            max_repo_bytes: state.config.git_max_repo_bytes,
+        },
     )
     .await
     {
@@ -730,9 +734,12 @@ pub async fn upload_pack(
         &auth.tenant,
         &params.owner,
         &params.repo,
-        &state.config.git_repo_path,
-        state.config.git_max_pack_bytes,
-        state.config.git_max_repo_bytes,
+        HydrationOptions {
+            pack_cache: &state.git_pack_cache,
+            scratch_dir: &state.config.git_repo_path,
+            max_pack_bytes: state.config.git_max_pack_bytes,
+            max_repo_bytes: state.config.git_max_repo_bytes,
+        },
     )
     .await
     {
@@ -816,9 +823,12 @@ pub async fn receive_pack(
         &auth.tenant,
         &params.owner,
         &params.repo,
-        &state.config.git_repo_path,
-        state.config.git_max_pack_bytes,
-        state.config.git_max_repo_bytes,
+        HydrationOptions {
+            pack_cache: &state.git_pack_cache,
+            scratch_dir: &state.config.git_repo_path,
+            max_pack_bytes: state.config.git_max_pack_bytes,
+            max_repo_bytes: state.config.git_max_repo_bytes,
+        },
     )
     .await
     .map_err(|e| hydrate_error_to_response(&params.owner, &params.repo, e))?;
