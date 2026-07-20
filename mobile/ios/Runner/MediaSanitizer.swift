@@ -15,12 +15,12 @@ enum MediaSanitizer {
   static func sanitizeImage(_ image: UIImage, mimeType: String) throws -> Data? {
     switch mimeType {
     case "image/png":
-      guard let encoded = image.pngData() else { return nil }
+      guard let image = renderInSRGB(image), let encoded = image.pngData() else { return nil }
       return try scrubPng(encoded)
     case "image/jpeg":
       return try encodeJpeg(image)
     case "image/webp":
-      guard let encoded = image.pngData() else { return nil }
+      guard let image = renderInSRGB(image), let encoded = image.pngData() else { return nil }
       return try scrubPng(encoded)
     default:
       return nil
@@ -28,8 +28,24 @@ enum MediaSanitizer {
   }
 
   static func encodeJpeg(_ image: UIImage) throws -> Data? {
-    guard let encoded = image.jpegData(compressionQuality: 1.0) else { return nil }
+    guard
+      let image = renderInSRGB(image),
+      let encoded = image.jpegData(compressionQuality: 1.0)
+    else {
+      return nil
+    }
     return try scrubJpeg(encoded)
+  }
+
+  private static func renderInSRGB(_ image: UIImage) -> UIImage? {
+    guard image.size.width > 0, image.size.height > 0 else { return nil }
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = image.scale
+    format.opaque = false
+    format.preferredRange = .standard
+    return UIGraphicsImageRenderer(size: image.size, format: format).image { _ in
+      image.draw(in: CGRect(origin: .zero, size: image.size))
+    }
   }
 
   static func scrubPng(_ data: Data) throws -> Data {

@@ -102,6 +102,79 @@ class RunnerTests: XCTestCase {
     XCTAssertNotNil(UIImage(data: encoded))
   }
 
+  func testSanitizeDisplayP3ImagePreservesRenderedColorInSRGB() throws {
+    let image = try displayP3Image(red: 0.9, green: 0.2, blue: 0.1)
+    let expectedColor = try sRGBPixel(from: image)
+    let mimeTypesAndAccuracy: [(mimeType: String, accuracy: UInt8)] = [
+      ("image/png", 0), ("image/jpeg", 1),
+    ]
+
+    for (mimeType, accuracy) in mimeTypesAndAccuracy {
+      let sanitized = try XCTUnwrap(
+        MediaSanitizer.sanitizeImage(image, mimeType: mimeType),
+        "Failed to sanitize Display-P3 image as \(mimeType)"
+      )
+
+      try assertMatchesRelayImageMetadataPolicy(sanitized, mimeType: mimeType)
+      let decoded = try XCTUnwrap(UIImage(data: sanitized))
+      XCTAssertEqual(
+        decoded.cgImage?.colorSpace?.name,
+        CGColorSpace(name: CGColorSpace.sRGB)?.name
+      )
+      let actualColor = try sRGBPixel(from: decoded)
+      XCTAssertEqual(actualColor.count, expectedColor.count)
+      for (actual, expected) in zip(actualColor, expectedColor) {
+        XCTAssertLessThanOrEqual(
+          actual > expected ? actual - expected : expected - actual,
+          accuracy
+        )
+      }
+    }
+  }
+
+  private func displayP3Image(red: CGFloat, green: CGFloat, blue: CGFloat) throws -> UIImage {
+    let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
+    let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+    let context = try XCTUnwrap(
+      CGContext(
+        data: nil,
+        width: 1,
+        height: 1,
+        bitsPerComponent: 8,
+        bytesPerRow: 4,
+        space: colorSpace,
+        bitmapInfo: bitmapInfo.rawValue
+      )
+    )
+    context.setFillColor(
+      try XCTUnwrap(CGColor(colorSpace: colorSpace, components: [red, green, blue, 1]))
+    )
+    context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+    return UIImage(cgImage: try XCTUnwrap(context.makeImage()))
+  }
+
+  private func sRGBPixel(from image: UIImage) throws -> [UInt8] {
+    let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+    var bytes = [UInt8](repeating: 0, count: 4)
+    let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+    let context = try bytes.withUnsafeMutableBytes { bytes in
+      try XCTUnwrap(
+        CGContext(
+          data: bytes.baseAddress,
+          width: 1,
+          height: 1,
+          bitsPerComponent: 8,
+          bytesPerRow: 4,
+          space: colorSpace,
+          bitmapInfo: bitmapInfo.rawValue
+        )
+      )
+    }
+    context.interpolationQuality = .none
+    context.draw(try XCTUnwrap(image.cgImage), in: CGRect(x: 0, y: 0, width: 1, height: 1))
+    return bytes
+  }
+
   private func fixtureData(named name: String, extension fileExtension: String) throws -> Data {
     let url = try XCTUnwrap(
       Bundle(for: RunnerTests.self).url(forResource: name, withExtension: fileExtension))
