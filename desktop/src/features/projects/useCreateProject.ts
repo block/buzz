@@ -7,6 +7,7 @@ import {
   projectsQueryKey,
 } from "@/features/projects/hooks";
 import { relayClient } from "@/shared/api/relayClient";
+import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { KIND_REPO_ANNOUNCEMENT } from "@/shared/constants/kinds";
@@ -77,7 +78,7 @@ async function createProject(input: CreateProjectInput): Promise<Project> {
     "Failed to create project.",
   );
 
-  return eventToProject(event);
+  return eventToProject(event, getCachedRelayOrigin());
 }
 
 /** Mutation that creates a project and inserts it into the projects cache. */

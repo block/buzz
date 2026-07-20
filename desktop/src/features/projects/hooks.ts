@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import {
@@ -37,6 +38,7 @@ import type {
   RelayEvent,
 } from "@/shared/api/types";
 import { summarizeProjectActivityEvents } from "./projectActivity.mjs";
+import { effectiveCloneUrls } from "./lib/projectCloneUrl";
 import type { ProjectIssue } from "./projectIssues.mjs";
 import { projectIssueEventsToIssues } from "./projectIssues.mjs";
 import type {
@@ -172,11 +174,27 @@ function isDeletedByA(project: Project, deletionEvents: RelayEvent[]): boolean {
   );
 }
 
-export function eventToProject(event: RelayEvent): Project {
+/**
+ * Converts a kind:30617 repo announcement into a `Project`.
+ *
+ * `relayOrigin` is the resolved relay HTTP origin (from `getCachedRelayOrigin`)
+ * used to synthesize a canonical clone URL when the announcement omits an
+ * explicit `clone` tag. Callers outside the relay-connected app (e.g. unit
+ * tests) may omit it, in which case no default is derived.
+ */
+export function eventToProject(
+  event: RelayEvent,
+  relayOrigin?: string | null,
+): Project {
   const d = getTag(event, "d") ?? event.id;
   const name = getTag(event, "name") || d;
   const description = getTag(event, "description") || event.content || "";
-  const cloneUrls = getCloneUrls(event);
+  const cloneUrls = effectiveCloneUrls(
+    getCloneUrls(event),
+    relayOrigin,
+    event.pubkey,
+    d,
+  );
   const webUrl = getTag(event, "web") ?? null;
   const setupUsers = getAllTags(event, "auth");
   const contributors = [...new Set([...getAllTags(event, "p"), ...setupUsers])];
@@ -235,7 +253,7 @@ export async function fetchProjects(): Promise<Project[]> {
   ]);
 
   return dedup(events)
-    .map(eventToProject)
+    .map((event) => eventToProject(event, getCachedRelayOrigin()))
     .filter(
       (project) =>
         !isHiddenLocally(project) && !isDeletedByA(project, deletionEvents),
@@ -273,7 +291,10 @@ async function fetchProject(projectId: string): Promise<Project | null> {
   const deduped = dedup(events).filter(
     (event) => !owner || event.pubkey.toLowerCase() === owner,
   );
-  const project = deduped.length > 0 ? eventToProject(deduped[0]) : null;
+  const project =
+    deduped.length > 0
+      ? eventToProject(deduped[0], getCachedRelayOrigin())
+      : null;
   if (!project) {
     return null;
   }
