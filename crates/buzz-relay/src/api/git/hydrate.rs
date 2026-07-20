@@ -54,6 +54,8 @@ pub struct HydratedRepo {
     path: PathBuf,
     /// Total bytes of parent packs materialized into this workspace.
     hydrated_bytes: u64,
+    /// Number of parent packs materialized into this workspace.
+    hydrated_packs: usize,
 }
 
 impl HydratedRepo {
@@ -65,6 +67,11 @@ impl HydratedRepo {
     /// Total bytes of parent packs materialized into this workspace.
     pub fn hydrated_bytes(&self) -> u64 {
         self.hydrated_bytes
+    }
+
+    /// Number of parent packs materialized into this workspace.
+    pub fn hydrated_packs(&self) -> usize {
+        self.hydrated_packs
     }
 }
 
@@ -101,6 +108,45 @@ pub enum HydrateError {
 /// caller should respond 404. `Ok(Some(_))` is a usable bare repo. Any other
 /// failure is a backend/data error.
 pub async fn hydrate_for_read(
+    store: &GitStore,
+    ctx: &TenantContext,
+    owner: &str,
+    repo: &str,
+    scratch_dir: &Path,
+    max_pack_bytes: u64,
+    max_repo_bytes: u64,
+) -> Result<Option<HydratedRepo>, HydrateError> {
+    let started_at = std::time::Instant::now();
+    let result = hydrate_for_read_inner(
+        store,
+        ctx,
+        owner,
+        repo,
+        scratch_dir,
+        max_pack_bytes,
+        max_repo_bytes,
+    )
+    .await;
+    let outcome = match &result {
+        Ok(Some(repo)) => {
+            metrics::histogram!("buzz_git_hydrate_bytes").record(repo.hydrated_bytes() as f64);
+            metrics::histogram!("buzz_git_hydrate_packs").record(repo.hydrated_packs() as f64);
+            "success"
+        }
+        Ok(None) => "missing",
+        Err(HydrateError::InvalidPointer) => "invalid_pointer",
+        Err(HydrateError::Manifest(_)) => "manifest_error",
+        Err(HydrateError::Store(_)) => "store_error",
+        Err(HydrateError::Hydrate(_)) => "hydrate_error",
+        Err(HydrateError::ResourceLimit(_)) => "resource_limit",
+    };
+    metrics::counter!("buzz_git_hydrations_total", "outcome" => outcome).increment(1);
+    metrics::histogram!("buzz_git_hydrate_seconds", "outcome" => outcome)
+        .record(started_at.elapsed().as_secs_f64());
+    result
+}
+
+async fn hydrate_for_read_inner(
     store: &GitStore,
     ctx: &TenantContext,
     owner: &str,
@@ -196,6 +242,7 @@ pub async fn hydrate_for_write(
                     _tempdir: tempdir,
                     path,
                     hydrated_bytes: 0,
+                    hydrated_packs: 0,
                 },
                 ParentState::fresh(),
             ))
@@ -342,6 +389,7 @@ async fn materialize_manifest(
         _tempdir: tempdir,
         path,
         hydrated_bytes,
+        hydrated_packs: manifest.packs.len(),
     })
 }
 

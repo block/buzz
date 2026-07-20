@@ -8,8 +8,10 @@
 //! Auth: NIP-98 on all routes (clone + push). No public repos for v1.
 //! Transport: shells out to `git --stateless-rpc` with `env_clear()`.
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
@@ -307,10 +309,16 @@ pub(crate) fn harden_git_env(cmd: &mut Command) {
 #[allow(clippy::result_large_err)]
 fn acquire_git_permit(
     state: &Arc<AppState>,
+    operation: &'static str,
 ) -> Result<tokio::sync::OwnedSemaphorePermit, Response> {
     Arc::clone(&state.git_semaphore)
         .try_acquire_owned()
         .map_err(|_| {
+            metrics::counter!(
+                "buzz_git_semaphore_rejections_total",
+                "operation" => operation
+            )
+            .increment(1);
             Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .header("Retry-After", "5")
@@ -583,7 +591,7 @@ async fn info_refs_subprocess(
     service: &str,
     params: &GitRepoParams,
 ) -> Result<Response, Response> {
-    let _permit = acquire_git_permit(state)?;
+    let _permit = acquire_git_permit(state, "info_refs")?;
 
     let repo = match hydrate_for_read(
         &state.git_store,
@@ -715,7 +723,7 @@ pub async fn upload_pack(
     body: Body,
 ) -> Result<Response, Response> {
     let _ = validate_repo_id(&params.owner, &params.repo)?;
-    let permit = acquire_git_permit(&state)?;
+    let permit = acquire_git_permit(&state, "upload_pack")?;
 
     let repo = match hydrate_for_read(
         &state.git_store,
@@ -783,7 +791,7 @@ pub async fn receive_pack(
 ) -> Result<Response, Response> {
     let repo_name = validate_repo_id(&params.owner, &params.repo)?;
     let pusher_hex = hex::encode(auth.pubkey.to_bytes());
-    let _permit = acquire_git_permit(&state)?;
+    let _permit = acquire_git_permit(&state, "receive_pack")?;
 
     // **No per-repo advisory lock — by design.** Writer serialization is
     // the pointer CAS at `cas_publish` step 7 (`Inv_NoFork` proves this
@@ -1167,15 +1175,31 @@ impl<'a> Iterator for PktLineIter<'a> {
 /// `receive_pack`, which must buffer into [`PackOutput`] so [`finalize_push`]
 /// can sequence the pointer CAS *before* any 2xx byte exists.
 struct StreamingGit {
-    inner: tokio_util::io::ReaderStream<tokio::process::ChildStdout>,
+    inner: TimedByteStream<tokio_util::io::ReaderStream<tokio::process::ChildStdout>>,
     /// Held purely to extend lifetime. `kill_on_drop(true)` means dropping
     /// this after the stream completes reaps any lingering process; on the
     /// happy path the child has already exited by then.
-    _child: tokio::process::Child,
+    child: tokio::process::Child,
     /// The ephemeral bare repo the subprocess reads objects from. Must not be
     /// removed from disk until the subprocess is done — i.e. until the stream
     /// ends.
     _repo: HydratedRepo,
+    /// Pumping the request body is detached from response polling. Abort it
+    /// when the response is dropped or the subprocess times out.
+    stdin_task: tokio::task::JoinHandle<()>,
+}
+
+/// Adds a hard deadline and lifecycle metrics to upload-pack stdout.
+///
+/// The response status is already committed when this stream is polled, so a
+/// timeout is surfaced as an in-band body error. [`StreamingGit`] observes
+/// that error and kills the subprocess.
+struct TimedByteStream<S> {
+    inner: std::pin::Pin<Box<S>>,
+    deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+    started_at: Instant,
+    streamed_bytes: u64,
+    finished: bool,
 }
 
 /// Keeps a git concurrency permit alive for the lifetime of a response-body
@@ -1207,7 +1231,82 @@ impl futures_util::Stream for StreamingGit {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+        let poll = std::pin::Pin::new(&mut self.inner).poll_next(cx);
+        if matches!(
+            &poll,
+            std::task::Poll::Ready(Some(Err(error)))
+                if error.kind() == std::io::ErrorKind::TimedOut
+        ) {
+            self.stdin_task.abort();
+            if let Err(error) = self.child.start_kill() {
+                warn!(error = %error, "timed-out git upload-pack could not be killed");
+            }
+        }
+        poll
+    }
+}
+
+impl<S> TimedByteStream<S> {
+    fn new(inner: S, timeout: Duration) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            deadline: Box::pin(tokio::time::sleep(timeout)),
+            started_at: Instant::now(),
+            streamed_bytes: 0,
+            finished: false,
+        }
+    }
+}
+
+impl<S> futures_util::Stream for TimedByteStream<S>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>>,
+{
+    type Item = Result<bytes::Bytes, std::io::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        if self.finished {
+            return std::task::Poll::Ready(None);
+        }
+        if self.deadline.as_mut().poll(cx).is_ready() {
+            self.finished = true;
+            metrics::counter!("buzz_git_upload_pack_timeouts_total").increment(1);
+            warn!("git upload-pack stream timed out");
+            return std::task::Poll::Ready(Some(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "git upload-pack timed out",
+            ))));
+        }
+        match self.inner.as_mut().poll_next(cx) {
+            std::task::Poll::Ready(Some(Ok(bytes))) => {
+                self.streamed_bytes = self
+                    .streamed_bytes
+                    .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                std::task::Poll::Ready(Some(Ok(bytes)))
+            }
+            std::task::Poll::Ready(None) => {
+                self.finished = true;
+                std::task::Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
+
+impl<S> Drop for TimedByteStream<S> {
+    fn drop(&mut self) {
+        metrics::histogram!("buzz_git_upload_pack_stream_seconds")
+            .record(self.started_at.elapsed().as_secs_f64());
+        metrics::histogram!("buzz_git_upload_pack_stream_bytes").record(self.streamed_bytes as f64);
+    }
+}
+
+impl Drop for StreamingGit {
+    fn drop(&mut self) {
+        self.stdin_task.abort();
     }
 }
 
@@ -1256,7 +1355,7 @@ fn stream_git_read(
     // Pump the request body into git's stdin, then close it (EOF). Detached:
     // the task ends on its own when the body ends or the write fails.
     let mut stdin = child.stdin.take().expect("stdin piped");
-    tokio::spawn(async move {
+    let stdin_task = tokio::spawn(async move {
         use futures_util::StreamExt;
         let mut stream = body.into_data_stream();
         while let Some(chunk) = stream.next().await {
@@ -1277,9 +1376,10 @@ fn stream_git_read(
 
     let stdout = child.stdout.take().expect("stdout piped");
     let git_stream = StreamingGit {
-        inner: tokio_util::io::ReaderStream::new(stdout),
-        _child: child,
+        inner: TimedByteStream::new(tokio_util::io::ReaderStream::new(stdout), PACK_OPS_TIMEOUT),
+        child,
         _repo: repo,
+        stdin_task,
     };
 
     // Prepend any protocol header (info/refs) ahead of git's stdout. The
@@ -1636,6 +1736,40 @@ mod track_c_tests {
         assert_eq!(semaphore.available_permits(), 0);
         drop(body);
         assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn upload_pack_stream_returns_timeout_error_at_deadline() {
+        use futures_util::StreamExt;
+
+        let mut stream = TimedByteStream::new(
+            futures_util::stream::pending::<Result<bytes::Bytes, std::io::Error>>(),
+            Duration::from_millis(10),
+        );
+
+        let error = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream deadline")
+            .expect("timeout item")
+            .expect_err("timeout error");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn upload_pack_stream_counts_response_bytes() {
+        use futures_util::StreamExt;
+
+        let chunks = vec![
+            Ok(bytes::Bytes::from_static(b"abc")),
+            Ok(bytes::Bytes::from_static(b"de")),
+        ];
+        let mut stream =
+            TimedByteStream::new(futures_util::stream::iter(chunks), Duration::from_secs(1));
+
+        while stream.next().await.is_some() {}
+
+        assert_eq!(stream.streamed_bytes, 5);
     }
 
     /// Wrap inner status pkt-lines in one side-band-64k band-1 (data) outer
