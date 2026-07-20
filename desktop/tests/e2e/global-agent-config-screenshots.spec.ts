@@ -226,8 +226,8 @@ test.describe("global agent config screenshots", () => {
     await page
       .getByTestId("global-agent-default-harness-option-claude")
       .click();
-    await expect(page.locator("#global-agent-model")).toHaveValue(
-      "__auto_model__",
+    await expect(page.getByTestId("global-agent-model")).toHaveText(
+      /Default model/,
     );
     await expect(
       page.getByRole("button", { name: "Save defaults" }),
@@ -235,9 +235,9 @@ test.describe("global agent config screenshots", () => {
 
     await harness.press("Enter");
     await page.getByTestId("global-agent-default-harness-option-codex").click();
-    const model = page.locator("#global-agent-model");
-    await expect(model).toBeVisible();
-    await model.selectOption("gpt-5.5[high]");
+    const model = page.getByTestId("global-agent-model");
+    await model.click();
+    await page.getByTestId("global-agent-model-option-gpt-5.5[high]").click();
     await page.getByRole("button", { name: "Save defaults" }).click();
 
     const saved = await page.evaluate(async () =>
