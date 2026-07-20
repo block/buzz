@@ -532,11 +532,18 @@ fn openai_body(
                     let calls: Vec<Value> = tool_calls
                         .iter()
                         .map(|c| {
-                            json!({
+                            let mut call = json!({
                         "id": c.provider_id, "type": "function",
                         "function": { "name": c.name,
                             "arguments": serde_json::to_string(&c.arguments)
-                                .unwrap_or_else(|_| "{}".into()) } })
+                                .unwrap_or_else(|_| "{}".into()) } });
+                            // Echo back the provider's opaque `extra_content`
+                            // (Gemini 3.x requires the `thought_signature` here
+                            // or it rejects the follow-up turn with HTTP 400).
+                            if let Some(extra) = &c.extra_content {
+                                call["extra_content"] = extra.clone();
+                            }
+                            call
                         })
                         .collect();
                     msg.insert("tool_calls".into(), Value::Array(calls));
@@ -962,11 +969,12 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
             let raw = f.get("arguments").and_then(Value::as_str).unwrap_or("{}");
             let args: Value = serde_json::from_str(raw)
                 .map_err(|e| AgentError::Llm(format!("tool_call.arguments not valid JSON: {e}")))?;
-            tool_calls.push(make_tool_call(
-                str_field(tc, "id"),
-                str_field(f, "name"),
-                args,
-            )?);
+            let mut call = make_tool_call(str_field(tc, "id"), str_field(f, "name"), args)?;
+            // Preserve the opaque `extra_content` (Gemini 3.x `thought_signature`)
+            // so it can be echoed back on the next turn. Absent for providers
+            // that don't emit it.
+            call.extra_content = tc.get("extra_content").cloned();
+            tool_calls.push(call);
         }
     }
     let input_tokens = openai_chat_input_tokens(&v);
@@ -998,6 +1006,7 @@ fn make_tool_call(id: String, name: String, args: Value) -> Result<ToolCall, Age
         provider_id: id,
         name,
         arguments,
+        extra_content: None,
     })
 }
 
@@ -1287,6 +1296,7 @@ mod tests {
                     provider_id: "toolu_1".into(),
                     name: "dev__view_image".into(),
                     arguments: serde_json::json!({"source":"x.png"}),
+                    extra_content: None,
                 }],
             },
             HistoryItem::ToolResult(ToolResult {
@@ -1336,6 +1346,7 @@ mod tests {
                     provider_id: "call_abc".into(),
                     name: "dev__shell".into(),
                     arguments: serde_json::json!({"command": "ls"}),
+                    extra_content: None,
                 }],
             },
             HistoryItem::ToolResult(ToolResult {
@@ -1434,6 +1445,7 @@ mod tests {
                     provider_id: "call_x".into(),
                     name: "t".into(),
                     arguments: serde_json::json!({}),
+                    extra_content: None,
                 }],
             },
         ];
@@ -1627,11 +1639,13 @@ mod tests {
                         provider_id: "toolu_a".into(),
                         name: "dev__view_image".into(),
                         arguments: serde_json::json!({"source": "a.png"}),
+                        extra_content: None,
                     },
                     ToolCall {
                         provider_id: "toolu_b".into(),
                         name: "dev__view_image".into(),
                         arguments: serde_json::json!({"source": "b.png"}),
+                        extra_content: None,
                     },
                 ],
             },
@@ -1881,6 +1895,124 @@ mod tests {
             Some(ThinkingEffort::Medium),
         );
         assert_eq!(body["reasoning_effort"], "medium");
+    }
+
+    #[test]
+    fn parse_openai_captures_tool_call_extra_content() {
+        // Gemini 3.x returns a `thought_signature` on the tool call's
+        // `extra_content`. It must be captured verbatim so it can round-trip.
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "dev__shell", "arguments": "{\"command\":\"ls\"}" },
+                        "extra_content": { "google": { "thought_signature": "SIG123" } }
+                    }]
+                }
+            }]
+        });
+        let resp = parse_openai(v).unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(
+            resp.tool_calls[0].extra_content,
+            Some(serde_json::json!({ "google": { "thought_signature": "SIG123" } }))
+        );
+    }
+
+    #[test]
+    fn parse_openai_tool_call_without_extra_content_is_none() {
+        // Standard OpenAI / Anthropic-compat hosts omit `extra_content`.
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "dev__shell", "arguments": "{}" }
+                    }]
+                }
+            }]
+        });
+        let resp = parse_openai(v).unwrap();
+        assert_eq!(resp.tool_calls[0].extra_content, None);
+    }
+
+    #[test]
+    fn openai_body_roundtrips_tool_call_extra_content() {
+        // The captured `extra_content` must be echoed back on the replayed
+        // assistant turn, or Gemini rejects the follow-up with HTTP 400.
+        let sig = serde_json::json!({ "google": { "thought_signature": "SIG123" } });
+        let history = vec![
+            HistoryItem::User("call the tool".into()),
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call_1".into(),
+                    name: "dev__shell".into(),
+                    arguments: serde_json::json!({ "command": "ls" }),
+                    extra_content: Some(sig.clone()),
+                }],
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call_1".into(),
+                content: vec![ToolResultContent::Text("file.txt".into())],
+                is_error: false,
+            }),
+        ];
+        let body = openai_body(
+            &cfg(Provider::Gemini),
+            "system",
+            &history,
+            &[],
+            "model",
+            None,
+        );
+        // Assistant message is messages[2] (system, user, assistant, tool).
+        let assistant = &body["messages"][2];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["tool_calls"][0]["extra_content"], sig);
+    }
+
+    #[test]
+    fn openai_body_omits_extra_content_when_absent() {
+        // A tool call with no `extra_content` must not emit the key at all.
+        let history = vec![
+            HistoryItem::User("call the tool".into()),
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call_1".into(),
+                    name: "dev__shell".into(),
+                    arguments: serde_json::json!({ "command": "ls" }),
+                    extra_content: None,
+                }],
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call_1".into(),
+                content: vec![ToolResultContent::Text("file.txt".into())],
+                is_error: false,
+            }),
+        ];
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &history,
+            &[],
+            "model",
+            None,
+        );
+        assert!(
+            body["messages"][2]["tool_calls"][0]
+                .get("extra_content")
+                .is_none(),
+            "extra_content must be omitted when the tool call has none"
+        );
     }
 
     #[test]
