@@ -42,7 +42,7 @@ export function CommunityIconSettingsCard() {
 
   async function handleFile(file: File) {
     if (!ICON_IMAGE_TYPES.includes(file.type)) {
-      toast.error("Choose a PNG, JPG, GIF, or WebP image.");
+      toast.error("Choose a PNG, JPG, GIF, or WebP image");
       return;
     }
     try {
@@ -53,7 +53,7 @@ export function CommunityIconSettingsCard() {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Failed to update the community icon.",
+          : "Couldn't update the community icon",
       );
     }
   }
@@ -66,7 +66,7 @@ export function CommunityIconSettingsCard() {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Failed to remove the community icon.",
+          : "Couldn't remove the community icon",
       );
     }
   }

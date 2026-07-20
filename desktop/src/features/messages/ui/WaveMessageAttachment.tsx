@@ -46,7 +46,7 @@ export function WaveMessageAttachment({
         await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to start huddle.",
+          error instanceof Error ? error.message : "Couldn't start the huddle",
         );
       }
     },

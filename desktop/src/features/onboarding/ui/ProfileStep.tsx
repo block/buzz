@@ -123,7 +123,7 @@ function OnboardingRelayConnectionErrorCard({
         .catch((error) => {
           hadActiveReconnectRef.current = false;
           const detail = error instanceof Error ? error.message : String(error);
-          toast.error(`Could not reconnect to the relay. ${detail}`);
+          toast.error(`Couldn't reconnect to the relay. ${detail}`);
         })
         .finally(() => {
           reconnectActionPendingRef.current = false;

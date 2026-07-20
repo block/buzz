@@ -334,9 +334,7 @@ export function UserProfilePopover({
       }
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : "Failed to open direct message.",
+        error instanceof Error ? error.message : "Couldn't open direct message",
       );
     } finally {
       if (isMountedRef.current) {
@@ -375,7 +373,7 @@ export function UserProfilePopover({
       }
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to start huddle.",
+        error instanceof Error ? error.message : "Couldn't start huddle",
       );
     } finally {
       if (isMountedRef.current) {
@@ -472,7 +470,7 @@ export function UserProfilePopover({
       }
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to send wave.",
+        error instanceof Error ? error.message : "Couldn't send wave",
       );
     } finally {
       if (isMountedRef.current) {

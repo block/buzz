@@ -55,7 +55,9 @@ export function useMembersSidebarModeration(open: boolean) {
         toast.success(success);
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Moderation action failed",
+          error instanceof Error
+            ? error.message
+            : "Couldn't complete that action",
         );
       }
     },
@@ -81,14 +83,14 @@ export function useMembersSidebarModeration(open: boolean) {
   );
 
   const onTimeout = React.useCallback(
-    (member: ChannelMember, expiresAtSecs: number) =>
+    (member: ChannelMember, expiresAtSecs: number, durationLabel: string) =>
       void runModerationAction(
         () =>
           timeoutMutation.mutateAsync({
             pubkey: member.pubkey,
             expiresAt: expiresAtSecs,
           }),
-        "Member timed out",
+        `Member timed out for ${durationLabel}`,
       ),
     [timeoutMutation, runModerationAction],
   );

@@ -603,7 +603,7 @@ export function ProjectsView() {
         isCreating={createProjectMutation.isPending}
         onCreate={async (input) => {
           const project = await createProjectMutation.mutateAsync(input);
-          toast.success(`Project "${project.name}" created.`);
+          toast.success(`Project "${project.name}" created`);
           // Land on the list that actually shows the new project — the
           // Overview only surfaces the top few most-active repositories.
           handleRepositoryScopeChange("all");

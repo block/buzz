@@ -87,7 +87,7 @@ export function MarkdownCodeBlock({
         toast.success("Copied code to clipboard");
       } catch (error) {
         console.error("Failed to copy code block", error);
-        toast.error("Failed to copy code");
+        toast.error("Couldn't copy code");
       } finally {
         setIsCopying(false);
       }

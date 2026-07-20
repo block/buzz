@@ -222,7 +222,7 @@ export function HuddleAttachment({
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Failed to join huddle";
+        error instanceof Error ? error.message : "Couldn't join the huddle";
       toast.error(message);
     } finally {
       setIsJoining(false);

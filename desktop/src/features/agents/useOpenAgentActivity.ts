@@ -10,7 +10,7 @@ import { getAgentWorkingState } from "./agentWorkingSignal";
 import { useRelayAgentsQuery } from "./hooks";
 
 const INACCESSIBLE_ACTIVITY_MESSAGE =
-  "This agent is active in a channel you haven't joined, so its activity can't be opened from here.";
+  "Can't open activity. It's in a channel you haven't joined.";
 
 /**
  * Can the viewer actually open this channel? Joined channels always;

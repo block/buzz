@@ -86,12 +86,12 @@ export function PullRequestReviewCard({
         await updatePullRequestStatus({ pullRequest, status });
         toast.success(
           status === "draft"
-            ? "Converted to draft."
-            : "Marked as ready for review.",
+            ? "Converted to draft"
+            : "Marked as ready for review",
         );
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to update status.",
+          error instanceof Error ? error.message : "Failed to update status",
         );
       }
     },
@@ -135,16 +135,16 @@ export function PullRequestReviewCard({
   const handleApprove = React.useCallback(async () => {
     await runReviewDecision(
       approvePullRequest,
-      "Pull request approved.",
-      "Failed to approve.",
+      "Pull request approved",
+      "Failed to approve",
     );
   }, [approvePullRequest, runReviewDecision]);
 
   const handleRequestChanges = React.useCallback(async () => {
     await runReviewDecision(
       requestPullRequestChanges,
-      "Changes requested.",
-      "Failed to request changes.",
+      "Changes requested",
+      "Failed to request changes",
     );
   }, [requestPullRequestChanges, runReviewDecision]);
 

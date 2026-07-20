@@ -654,7 +654,7 @@ function ProfilePrimaryActions({
     followToggleMutation.mutate(pubkey, {
       onError: (error) =>
         toast.error(
-          `${isFollowing ? "Unfollow" : "Follow"} failed: ${error.message}`,
+          `Couldn't ${isFollowing ? "unfollow" : "follow"}: ${error.message}`,
         ),
     });
   };

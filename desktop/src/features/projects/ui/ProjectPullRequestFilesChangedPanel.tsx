@@ -641,12 +641,12 @@ export function ProjectPullRequestFilesChangedPanel({
           pullRequest,
         });
         setActiveAnchor(null);
-        toast.success("Line comment posted.");
+        toast.success("Line comment posted");
       } catch (error) {
         toast.error(
           error instanceof Error
             ? error.message
-            : "Failed to post line comment.",
+            : "Failed to post line comment",
         );
         throw error;
       }

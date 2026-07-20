@@ -1013,7 +1013,7 @@ export function ProfileSettingsCard({
                     setIsSignOutPending(false);
                     setIsSignOutOpen(false);
                     toast.error(
-                      err instanceof Error ? err.message : "Sign out failed.",
+                      err instanceof Error ? err.message : "Couldn't sign out",
                     );
                   });
                 }}

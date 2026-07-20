@@ -106,10 +106,10 @@ export function PullRequestReviewersRow({
         });
         setPickerOpen(false);
         setReviewerQuery("");
-        toast.success("Review requested.");
+        toast.success("Review requested");
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to request review.",
+          error instanceof Error ? error.message : "Failed to request review",
         );
       } finally {
         requestInFlightRef.current = false;

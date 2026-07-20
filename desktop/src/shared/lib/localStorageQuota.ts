@@ -38,9 +38,9 @@ function notifyStorageFull(): void {
   // Dynamic import keeps this module usable from node unit tests.
   import("sonner")
     .then(({ toast }) => {
-      toast.error("Local storage is full", {
+      toast.error("Storage is full", {
         description:
-          "Buzz could not save some local data — read positions may not persist across restarts.",
+          "Buzz couldn't save some data. Recent changes may be lost when you restart.",
       });
     })
     .catch(() => {});

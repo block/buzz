@@ -522,7 +522,7 @@ function describeSystemEvent(
         title: membershipTitle,
         action: (
           <>
-            was added by{" "}
+            added by{" "}
             <ProfileName pubkey={payload.actor} underlineOnHover>
               {resolveDisplayLabel(payload.actor, currentPubkey, profiles)}
             </ProfileName>
@@ -566,7 +566,7 @@ function describeSystemEvent(
         title: membershipTitle,
         action: (
           <>
-            was added by{" "}
+            added by{" "}
             <ProfileName pubkey={payload.actor} underlineOnHover>
               {resolveDisplayLabel(payload.actor, currentPubkey, profiles)}
             </ProfileName>

@@ -17,6 +17,18 @@ import { setCanvas } from "@/shared/api/tauri";
 import type { ChannelTemplate } from "@/shared/api/types";
 
 /**
+ * Format a list of failed agent names for a warning toast: up to three names
+ * are listed in full, then it falls back to "and N others" to keep the toast
+ * short. Mirrors the typing-indicator convention in TypingIndicatorRow.
+ */
+function formatFailedAgentNames(names: readonly string[]): string {
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  if (names.length === 3) return `${names[0]}, ${names[1]}, and ${names[2]}`;
+  return `${names[0]}, ${names[1]}, and ${names.length - 2} others`;
+}
+
+/**
  * TemplateBackend omits `config` — supply an empty object for provider backends.
  */
 function toManagedBackend(
@@ -135,10 +147,9 @@ export function useApplyTemplate() {
       const result = await createChannelManagedAgents(channelId, inputs);
       if (result.failures.length > 0) {
         const { toast } = await import("sonner");
+        const failedNames = result.failures.map((failure) => failure.name);
         toast.warning(
-          result.failures.length === 1
-            ? "1 agent from the template could not be created"
-            : `${result.failures.length} agents from the template could not be created`,
+          `Couldn't add ${formatFailedAgentNames(failedNames)} from the template`,
         );
       }
       await Promise.all([

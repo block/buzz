@@ -33,7 +33,7 @@ export function UserProfileSnapshotExportDialog({
           {
             onSuccess: (saved) => {
               if (saved) {
-                toast.success(`Exported ${persona.displayName}.`);
+                toast.success(`Exported ${persona.displayName}`);
                 onOpenChange(false);
               }
             },
@@ -41,7 +41,7 @@ export function UserProfileSnapshotExportDialog({
               toast.error(
                 error instanceof Error
                   ? error.message
-                  : "Failed to export agent snapshot.",
+                  : "Couldn't export agent snapshot",
               );
             },
           },

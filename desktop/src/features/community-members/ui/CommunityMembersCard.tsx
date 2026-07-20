@@ -205,7 +205,7 @@ export function CommunityMembersCard({
         },
         onError: (error) => {
           toast.error(
-            error instanceof Error ? error.message : "Failed to change role",
+            error instanceof Error ? error.message : "Couldn't change role",
           );
         },
       },

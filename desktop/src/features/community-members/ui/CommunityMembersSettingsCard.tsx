@@ -146,9 +146,7 @@ function RelayMemberRow({
       toast.success(success);
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : "Community membership update failed",
+        error instanceof Error ? error.message : "Couldn't update membership",
       );
     }
   }
@@ -196,7 +194,7 @@ function RelayMemberRow({
                     pubkey: member.pubkey,
                     role: "admin",
                   }),
-                "Promoted relay admin",
+                `Promoted ${displayName} to admin`,
               )
             }
             size="icon"
@@ -218,7 +216,7 @@ function RelayMemberRow({
                     pubkey: member.pubkey,
                     role: "member",
                   }),
-                "Demoted to relay member",
+                `Demoted ${displayName} to member`,
               )
             }
             size="icon"
@@ -237,7 +235,7 @@ function RelayMemberRow({
             onClick={() =>
               void mutateWithToast(
                 () => removeMutation.mutateAsync(member.pubkey),
-                "Removed relay member",
+                `Removed ${displayName} from the community`,
               )
             }
             size="icon"
@@ -339,14 +337,12 @@ export function CommunityMembersSettingsCard({
     if (!canAdd) return;
     try {
       await addMutation.mutateAsync({ pubkey: normalizedInput, role });
-      toast.success(
-        role === "admin" ? "Added relay admin" : "Added relay member",
-      );
+      toast.success(role === "admin" ? "Added as admin" : "Added as member");
       setPubkeyInput("");
       setRole("member");
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to add relay member",
+        error instanceof Error ? error.message : "Couldn't add member",
       );
     }
   }

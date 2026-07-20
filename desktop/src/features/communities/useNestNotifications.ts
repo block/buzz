@@ -23,7 +23,7 @@ const MIGRATION_TOAST_KEY = "buzz-legacy-nest-migrated-notified";
 export function useNestNotifications(): void {
   useEffect(() => {
     const unlistenReposError = listen<string>("repos-dir-error", (event) => {
-      toast.error("Repos directory not applied", {
+      toast.error("Couldn't apply the repos directory", {
         description: event.payload,
       });
     });

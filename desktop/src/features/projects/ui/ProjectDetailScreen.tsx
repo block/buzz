@@ -278,13 +278,13 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     ]);
     const error = results.find((result) => result.error)?.error;
     if (error) {
-      toast.error("Could not fetch repository.", {
+      toast.error("Couldn't fetch repository", {
         description:
           error instanceof Error ? error.message : "The Git fetch failed.",
       });
       return;
     }
-    toast.success("Remote state refreshed.");
+    toast.success("Remote state refreshed");
   }, [repoSnapshotQuery, repoStateQuery, repoSyncStatusQuery]);
   // Compact branch + remote/local controls shared by the readme and Files
   // tab headers.
@@ -515,7 +515,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const handleCreateIssue = React.useCallback(
     async ({ body, title }: CreateIssueDialogInput) => {
       const issueId = await createIssueMutation.mutateAsync({ body, title });
-      toast.success("Issue created.");
+      toast.success("Issue created");
       await issuesQuery.refetch();
       setSelectedIssueId(issueId);
     },
@@ -530,7 +530,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         mergeBase: repoSyncStatusQuery.data?.mergeBase ?? null,
       });
       toast.success(
-        updated ? "Pull request updated." : "Pull request is already current.",
+        updated ? "Pull request updated" : "Pull request is already current",
       );
       await pullRequestsQuery.refetch();
     } catch (error) {

@@ -17,6 +17,6 @@ export function copyTextToClipboard(
       toast.success(successMessage);
     })
     .catch(() => {
-      toast.error("Failed to copy to clipboard");
+      toast.error("Couldn't copy to clipboard");
     });
 }
