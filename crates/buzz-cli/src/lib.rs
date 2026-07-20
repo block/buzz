@@ -280,6 +280,56 @@ pub enum AgentsCmd {
         #[arg(long, value_enum)]
         respond_to: Option<RespondToArg>,
     },
+    /// Submit a NIP-IA archive request for an identity (kind 9035)
+    #[command(
+        after_help = "The relay chooses the consent path (self / admin / owner) from the \
+submitted request; this command does not retry with a different shape.\n\n\
+Suggested --reason codes (unknown values are allowed): rotated, retired, \
+bot-rebuilt, left-organization, spam\n\n\
+Archiving a third-party identity is a human owner/admin action: an agent \
+running under BUZZ_AUTH_TAG signs as itself, so it can only ever satisfy \
+the self path (target == signer) — not the owner-of-agent path for another \
+identity.\n\n\
+Examples:\n  \
+buzz agents archive <PUBKEY> --reason retired\n  \
+buzz agents archive <PUBKEY> --reason bot-rebuilt --replaced-by <NEW_PUBKEY>"
+    )]
+    Archive {
+        /// Target identity pubkey (hex)
+        target_pubkey: String,
+        /// Machine-readable reason code, max 64 UTF-8 bytes
+        #[arg(long)]
+        reason: Option<String>,
+        /// Rotation pointer pubkey (hex); must differ from the target
+        #[arg(long)]
+        replaced_by: Option<String>,
+        /// Optional human-readable note (not parsed for authorization)
+        #[arg(long, default_value = "")]
+        content: String,
+    },
+    /// Submit a NIP-IA unarchive request for an identity (kind 9036)
+    #[command(after_help = "Examples:\n  \
+buzz agents unarchive <PUBKEY> --reason returned")]
+    Unarchive {
+        /// Target identity pubkey (hex)
+        target_pubkey: String,
+        /// Machine-readable reason code, max 64 UTF-8 bytes
+        #[arg(long)]
+        reason: Option<String>,
+        /// Optional human-readable note (not parsed for authorization)
+        #[arg(long, default_value = "")]
+        content: String,
+    },
+    /// Read the relay's current NIP-IA archive snapshot (kind 13535)
+    #[command(
+        after_help = "Verifies the snapshot's NIP-11 `self` authorship, event id, signature, \
+and NIP-70 `-` protection tag before trusting it. Any trust failure is a \
+nonzero-exit error, never a false-empty success — this command's whole \
+purpose is verification.\n\n\
+Examples:\n  \
+buzz agents archived"
+    )]
+    Archived,
 }
 
 #[derive(Subcommand)]
@@ -1748,7 +1798,16 @@ mod tests {
         }
 
         let cmd = Cli::command();
-        assert_eq!(names(&cmd, "agents"), vec!["draft-create", "draft-update"]);
+        assert_eq!(
+            names(&cmd, "agents"),
+            vec![
+                "archive",
+                "archived",
+                "draft-create",
+                "draft-update",
+                "unarchive"
+            ]
+        );
         assert_eq!(
             names(&cmd, "messages"),
             vec![
@@ -1848,7 +1907,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 2),
+            ("agents", 5),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

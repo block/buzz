@@ -499,6 +499,39 @@ impl BuzzClient {
         self.query_pages(filter, None).await
     }
 
+    /// Sign an event builder verbatim: no NIP-OA auth-tag injection, and none
+    /// of [`sign_event`]'s "callers must not add auth tags" enforcement.
+    ///
+    /// Used only for NIP-IA identity archive/unarchive requests (kind
+    /// 9035/9036), whose optional `auth` tag is a *content-level*
+    /// owner-of-agent attestation about the *target* identity — unrelated to
+    /// this client's own NIP-OA membership delegation (`self.auth_tag`,
+    /// which [`sign_event`] injects into every other event and which
+    /// `submit_event` separately attaches via the `x-auth-tag` HTTP header).
+    /// Routing an identity archive request through `sign_event` would either
+    /// silently drop the caller's owner attestation or double up an
+    /// unrelated tag.
+    pub fn sign_event_unchecked(&self, builder: EventBuilder) -> Result<nostr::Event, CliError> {
+        builder
+            .sign_with_keys(&self.keys)
+            .map_err(|e| CliError::Other(format!("signing failed: {e}")))
+    }
+
+    /// GET a public, unauthenticated relay endpoint (e.g. the NIP-11 `/info`
+    /// document), returning the raw JSON body. No NIP-98 Authorization and no
+    /// `x-auth-tag` header — the endpoint is public relay metadata, not a
+    /// membership-scoped resource.
+    pub async fn get_public(&self, path: &str) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let resp = self
+            .http
+            .get(&url)
+            .header("Accept", "application/nostr+json")
+            .send()
+            .await?;
+        self.handle_response(resp).await
+    }
+
     /// Execute a one-shot query via the HTTP bridge.
     /// `filter` is a Nostr filter object (will be wrapped in an array).
     /// Returns the raw JSON response (array of events).
@@ -920,7 +953,10 @@ pub fn normalize_write_response(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{advance_query_cursor, create_response_with_id, extract_relay_response_field};
+    use super::{
+        advance_query_cursor, create_response_with_id, extract_relay_response_field, BuzzClient,
+    };
+    use nostr::{EventBuilder, Keys, Kind, Tag};
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {
@@ -973,5 +1009,126 @@ mod tests {
         assert_eq!(v["workflow_id"].as_str(), Some("relay-id"));
         assert_eq!(v["event_id"].as_str(), Some("abc"));
         assert_eq!(v["accepted"].as_bool(), Some(true));
+    }
+
+    // --- (a) auth-suppression regression pair ---
+
+    fn make_auth_tag() -> (Tag, String) {
+        let owner_hex = "a".repeat(64);
+        let sig_hex = "b".repeat(128);
+        let tag_vec = vec![
+            "auth".to_string(),
+            owner_hex,
+            "conditions".to_string(),
+            sig_hex,
+        ];
+        let json = serde_json::to_string(&tag_vec).unwrap();
+        let tag = Tag::parse(tag_vec).unwrap();
+        (tag, json)
+    }
+
+    #[test]
+    fn sign_event_unchecked_does_not_inject_ambient_auth_tag() {
+        let keys = Keys::generate();
+        let (auth_tag, auth_json) = make_auth_tag();
+        let client = BuzzClient::new(
+            "https://test.relay".into(),
+            keys,
+            Some(auth_tag),
+            Some(auth_json),
+        )
+        .unwrap();
+
+        let builder =
+            EventBuilder::new(Kind::Custom(9035), "archive").tags([Tag::parse(["-"]).unwrap()]);
+        let event = client.sign_event_unchecked(builder).unwrap();
+
+        let auth_tags: Vec<_> = event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("auth"))
+            .collect();
+        assert!(
+            auth_tags.is_empty(),
+            "sign_event_unchecked must not inject the ambient NIP-OA auth tag \
+             into identity archive events; found {auth_tags:?}"
+        );
+    }
+
+    #[test]
+    fn sign_event_unchecked_preserves_callers_content_auth_tag() {
+        let keys = Keys::generate();
+        let (auth_tag, auth_json) = make_auth_tag();
+        let client = BuzzClient::new(
+            "https://test.relay".into(),
+            keys,
+            Some(auth_tag),
+            Some(auth_json),
+        )
+        .unwrap();
+
+        let content_auth = Tag::parse([
+            "auth",
+            &"c".repeat(64),
+            "owner-attestation",
+            &"d".repeat(128),
+        ])
+        .unwrap();
+
+        let builder = EventBuilder::new(Kind::Custom(9035), "archive")
+            .tags([Tag::parse(["-"]).unwrap(), content_auth]);
+        let event = client.sign_event_unchecked(builder).unwrap();
+
+        let auth_tags: Vec<_> = event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("auth"))
+            .collect();
+        assert_eq!(
+            auth_tags.len(),
+            1,
+            "content-level auth tag must survive sign_event_unchecked; found {auth_tags:?}"
+        );
+        assert_eq!(auth_tags[0].as_slice()[1], "c".repeat(64));
+    }
+
+    #[test]
+    fn with_auth_tag_sets_header_when_configured() {
+        let keys = Keys::generate();
+        let (auth_tag, auth_json) = make_auth_tag();
+        let client = BuzzClient::new(
+            "https://test.relay".into(),
+            keys,
+            Some(auth_tag),
+            Some(auth_json.clone()),
+        )
+        .unwrap();
+
+        let req = client.http.post("https://test.relay/events");
+        let req = client.with_auth_tag(req);
+        let built = req.build().unwrap();
+        let header = built
+            .headers()
+            .get("x-auth-tag")
+            .expect("x-auth-tag header must be present");
+        assert_eq!(
+            header.to_str().unwrap(),
+            &auth_json,
+            "x-auth-tag header must carry the raw auth tag JSON"
+        );
+    }
+
+    #[test]
+    fn with_auth_tag_omits_header_when_not_configured() {
+        let keys = Keys::generate();
+        let client = BuzzClient::new("https://test.relay".into(), keys, None, None).unwrap();
+
+        let req = client.http.post("https://test.relay/events");
+        let req = client.with_auth_tag(req);
+        let built = req.build().unwrap();
+        assert!(
+            built.headers().get("x-auth-tag").is_none(),
+            "x-auth-tag header must not be present when no auth tag is configured"
+        );
     }
 }
