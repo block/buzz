@@ -4,7 +4,9 @@ import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
 test.beforeEach(async ({ page }) => {
-  await installMockBridge(page);
+  await installMockBridge(page, {
+    relayRequiresMembership: true,
+  });
   await page.route("**/api/invites", async (route) => {
     await route.fulfill({
       contentType: "application/json",
