@@ -10150,6 +10150,7 @@ export function maybeInstallE2eTauriMocks() {
         return buf;
       }
       case "download_image":
+      case "save_png_data_url":
       case "download_file":
         // The save dialog can't run headlessly; report a successful save so the
         // FileCard / image-menu click handlers resolve. Specs assert the
