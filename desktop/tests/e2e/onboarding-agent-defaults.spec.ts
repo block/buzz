@@ -119,7 +119,7 @@ test("requires a runtime selection and routes Buzz Agent to config", async ({
   expect(await readSavedRuntime(page)).toBe("buzz-agent");
 });
 
-test("rapid harness toggles serialize the persisted preferred runtime", async ({
+test("rapid harness toggles serialize the prioritized preferred runtime", async ({
   page,
 }) => {
   await installMockBridge(
@@ -143,7 +143,7 @@ test("rapid harness toggles serialize the persisted preferred runtime", async ({
   await page.waitForTimeout(300);
   await expect(next).toBeDisabled();
   await expect(next).toBeEnabled({ timeout: 700 });
-  expect(await readSavedRuntime(page)).toBe("buzz-agent");
+  expect(await readSavedRuntime(page)).toBe("goose");
 });
 
 test("authenticated Claude saves the selected runtime and routes to defaults", async ({
@@ -557,7 +557,7 @@ test("changing setup-page harness clears an incompatible saved model", async ({
   await expect.poll(() => readSavedRuntime(page)).toBe("claude");
 });
 
-test("selecting all harnesses routes defaults through Buzz Agent", async ({
+test("selecting all harnesses prioritizes Claude for defaults", async ({
   page,
 }) => {
   await installMockBridge(
@@ -592,10 +592,10 @@ test("selecting all harnesses routes defaults through Buzz Agent", async ({
   await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
   await page.getByTestId("onboarding-setup-next").click();
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
-  expect(await readSavedRuntime(page)).toBe("buzz-agent");
+  expect(await readSavedRuntime(page)).toBe("claude");
 
   const harnessSelect = page.getByTestId("global-agent-default-harness");
-  await expect(harnessSelect).toHaveText("Buzz");
+  await expect(harnessSelect).toHaveText("Claude");
   await harnessSelect.click();
   await expect(
     page.getByTestId("global-agent-default-harness-option-claude"),
