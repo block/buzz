@@ -4,6 +4,7 @@ import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/project-pr-review";
+const RECOVERY_SHOTS = "test-results/project-pr-conflict-recovery";
 const REVIEWER_AGENT_PUBKEY = "a".repeat(64);
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 
@@ -299,7 +300,7 @@ test("merge conflicts offer persistent terminal recovery", async ({ page }) => {
   ).toBeDisabled();
   await waitForAnimations(page);
   await recovery.screenshot({
-    path: `${SHOTS}/04-merge-conflict.png`,
+    path: `${RECOVERY_SHOTS}/01-merge-conflict.png`,
   });
   await recovery.getByRole("button", { name: "Resolve in Terminal" }).click();
   await expect(
@@ -315,7 +316,7 @@ test("merge conflicts offer persistent terminal recovery", async ({ page }) => {
   ).toBeEnabled();
   await waitForAnimations(page);
   await recovery.screenshot({
-    path: `${SHOTS}/05-merge-conflict-prepared.png`,
+    path: `${RECOVERY_SHOTS}/02-merge-conflict-prepared.png`,
   });
 
   await expect
