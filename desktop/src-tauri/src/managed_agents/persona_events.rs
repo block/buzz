@@ -256,6 +256,20 @@ pub async fn flush_pending_events(
         let event = nostr::Event::from_json(&current.raw_event)
             .map_err(|e| format!("failed to parse retained event '{}': {e}", current.d_tag))?;
 
+        // NIP-IA requests are freshness-checked by the relay (±120s on
+        // `created_at`), so a request retained while the relay was
+        // unreachable would be permanently stale. Re-sign with a fresh
+        // timestamp at publish time; kind, tags, and content are preserved,
+        // and `mark_synced` below still compares against the retained row's
+        // original `created_at`/`content`, which are untouched.
+        let is_archive_request =
+            buzz_core_pkg::kind::is_identity_archive_request_kind(current.kind);
+        let event = if is_archive_request {
+            resign_with_fresh_timestamp(&event, state)?
+        } else {
+            event
+        };
+
         if crate::relay::submit_signed_event(&event, state)
             .await
             .is_err()
@@ -279,6 +293,29 @@ pub async fn flush_pending_events(
     }
 
     Ok(flushed)
+}
+
+/// Re-sign a retained event with the current owner keys and a fresh
+/// `created_at`, preserving kind, tags, and content.
+///
+/// Used for relay-freshness-checked kinds (NIP-IA 9035/9036) that would
+/// otherwise go permanently stale sitting in the retention store while the
+/// relay is unreachable. `.allow_self_tagging()` mirrors
+/// `events::build_archive_identity_request` — nostr strips `p` tags matching
+/// the signer by default, which would corrupt a self-targeted request.
+///
+/// Synchronous; the `state.keys` guard is dropped on return, so callers may
+/// `.await` afterwards.
+fn resign_with_fresh_timestamp(
+    event: &nostr::Event,
+    state: &AppState,
+) -> Result<nostr::Event, String> {
+    let keys = state.signing_keys()?;
+    nostr::EventBuilder::new(event.kind, event.content.clone())
+        .tags(event.tags.iter().cloned())
+        .allow_self_tagging()
+        .sign_with_keys(&keys)
+        .map_err(|e| format!("failed to re-sign retained event: {e}"))
 }
 
 /// SHA-256 (lowercase hex) of a persona's canonical content JSON.

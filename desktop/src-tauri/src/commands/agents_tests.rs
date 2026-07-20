@@ -86,6 +86,46 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
     }
 }
 
+/// Auto-archive uses the same NIP-IA wire builder as the explicit GUI action,
+/// attaches owner consent, and marks a deliberate delete as `retired`.
+#[test]
+fn build_agent_archive_request_attaches_owner_auth_and_retired_reason() {
+    use nostr::JsonUtil;
+
+    let owner = nostr::Keys::generate();
+    let agent = nostr::Keys::generate();
+    let event = build_agent_archive_request(&owner, &agent.public_key().to_hex())
+        .expect("build archive request");
+    let json: serde_json::Value = serde_json::from_str(&event.as_json()).unwrap();
+    let tags = json["tags"].as_array().unwrap();
+
+    assert_eq!(event.kind.as_u16(), 9035);
+    assert_eq!(event.pubkey, owner.public_key());
+    assert!(event.verify_id());
+    assert!(event.verify_signature());
+    assert!(tags.iter().any(|tag| {
+        tag.as_array().is_some_and(|parts| {
+            parts.first().and_then(serde_json::Value::as_str) == Some("p")
+                && parts.get(1).and_then(serde_json::Value::as_str)
+                    == Some(agent.public_key().to_hex().as_str())
+        })
+    }));
+    assert!(tags.iter().any(|tag| {
+        tag.as_array().is_some_and(|parts| {
+            parts.first().and_then(serde_json::Value::as_str) == Some("reason")
+                && parts.get(1).and_then(serde_json::Value::as_str) == Some("retired")
+        })
+    }));
+    assert!(tags.iter().any(|tag| {
+        tag.as_array().is_some_and(|parts| {
+            parts.first().and_then(serde_json::Value::as_str) == Some("auth")
+                && parts.get(1).and_then(serde_json::Value::as_str)
+                    == Some(owner.public_key().to_hex().as_str())
+                && parts.len() == 4
+        })
+    }));
+}
+
 /// Deploy-path regression for Fix 1 of Thufir pass-2: a persona-linked
 /// provider agent with a stale record snapshot must use the live persona
 /// model/provider in the deploy payload, not the stale record values.

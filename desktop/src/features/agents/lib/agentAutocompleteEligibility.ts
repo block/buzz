@@ -54,6 +54,16 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
+export function isAgentIdentityInManagedList(
+  candidate: { isAgent?: boolean; pubkey: string },
+  managedAgentPubkeys: ReadonlySet<string>,
+) {
+  return (
+    candidate.isAgent !== true ||
+    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+  );
+}
+
 export function shouldHideAgentFromMentions({
   isAgent,
   isMember,

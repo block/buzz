@@ -495,6 +495,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 // Remove nsec from keyring after the record is gone.
                 delete_agent_key(pk);
                 super::agents::tombstone_managed_agent_pending(&app, &state, pk);
+                super::agents::archive_managed_agent_pending(&app, &state, pk);
             }
             tombstone_persona_pending(&app, &state, &d_tag);
 

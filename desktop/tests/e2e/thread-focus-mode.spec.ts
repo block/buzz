@@ -143,7 +143,16 @@ test("focus and split preserve reading context and interaction ownership", async
   await page.addInitScript(() => {
     localStorage.setItem("buzz.channels.threadViewMode", "focus");
   });
-  await installMockBridge(page);
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey:
+          "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f",
+        name: "alice",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
   const rootId = await seedLongThread(page);
 
@@ -200,29 +209,18 @@ test("focus and split preserve reading context and interaction ownership", async
     body.locator(`[data-message-id="${anchorId}"]`),
   ).toBeInViewport();
 
-  // Escape layering: a nested control inside the drawer claims Escape first.
-  // With mention autocomplete open, Escape closes only the autocomplete — the
-  // drawer must stay.
+  // Focus mode owns Escape even while the rich-text composer and one of its
+  // nested controls has focus: one press exits the focused thread.
   const threadInput = page
     .getByTestId("message-thread-panel")
     .getByTestId("message-input");
   await threadInput.click();
   await threadInput.pressSequentially("@al");
-  const mentionDropdown = page
-    .getByTestId("message-thread-panel")
-    .getByTestId("mention-autocomplete");
-  await expect(mentionDropdown).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(mentionDropdown).toHaveCount(0);
-  await expect(drawer).toBeVisible();
-
-  // Known gap (pre-existing, tracked as a follow-up): while the composer's
-  // rich-text editor holds focus it claims Escape internally even with no
-  // autocomplete open, so Escape-from-composer never reaches the drawer's
-  // close listener. Move focus to the drawer itself before asserting
-  // Escape-to-close. When the editor is taught to release an idle Escape,
-  // this focus hop can be removed.
-  await drawer.focus();
+  await expect(
+    page
+      .getByTestId("message-thread-panel")
+      .getByTestId("mention-autocomplete"),
+  ).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("focus-thread-drawer-overlay")).toHaveCount(0);
   await expect(channel).not.toHaveAttribute("inert", "");

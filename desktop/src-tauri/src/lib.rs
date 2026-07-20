@@ -1,5 +1,4 @@
-// Deep async call chains under Tauri command futures exceed the default query depth when computing layouts.
-#![recursion_limit = "256"]
+#![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
 mod app_state;
 mod archive;
 mod builderlab;
@@ -745,11 +744,13 @@ pub fn run() {
             pick_and_upload_image,
             upload_media_bytes,
             download_image,
+            save_png_data_url,
             download_file,
             fetch_media_bytes,
             copy_image_to_clipboard,
             copy_text_to_clipboard,
             fetch_snapshot_bytes,
+            relay_requires_membership,
             list_relay_members,
             get_my_relay_membership,
             add_relay_member,

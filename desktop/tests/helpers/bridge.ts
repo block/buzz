@@ -271,6 +271,8 @@ type MockBridgeOptions = {
    * (owner-path branch of the gate).
    */
   oaOwnerIsMe?: boolean;
+  /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
+  relayRequiresMembership?: boolean;
   /**
    * Active identity's role in the seeded `mockRelayMembers`. `null` removes
    * the active identity from the membership list entirely (admin-path branch
