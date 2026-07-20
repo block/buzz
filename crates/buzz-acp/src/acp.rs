@@ -89,8 +89,8 @@ pub enum AcpError {
     #[error("Idle timeout — no agent activity for {0:?}")]
     IdleTimeout(std::time::Duration),
 
-    #[error("Hard turn timeout exceeded")]
-    HardTimeout,
+    #[error("Hard turn timeout exceeded (silence {silence:?})")]
+    HardTimeout { silence: std::time::Duration },
 
     #[error("Agent did not stop within {0:?} after cancellation")]
     CancelDrainTimeout(std::time::Duration),
@@ -704,7 +704,13 @@ impl AcpClient {
         }
 
         let result = self
-            .read_until_response_with_idle_timeout(session_id, id, idle_timeout, hard_deadline)
+            .read_until_response_with_idle_timeout(
+                session_id,
+                id,
+                idle_timeout,
+                hard_deadline,
+                max_duration,
+            )
             .await;
 
         // On timeout errors, leave current_hard_deadline set so cancel_with_cleanup
@@ -714,7 +720,7 @@ impl AcpClient {
                 self.last_prompt_id = None;
                 self.current_hard_deadline = None;
             }
-            Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout) => {
+            Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout { .. }) => {
                 // Leave last_prompt_id and current_hard_deadline set —
                 // caller will invoke cancel_with_cleanup.
             }
@@ -879,7 +885,7 @@ impl AcpClient {
             .cancel_with_cleanup_until(session_id, hard_deadline)
             .await
         {
-            Err(AcpError::HardTimeout) => Err(AcpError::CancelDrainTimeout(grace)),
+            Err(AcpError::HardTimeout { .. }) => Err(AcpError::CancelDrainTimeout(grace)),
             other => other,
         }
     }
@@ -919,12 +925,16 @@ impl AcpClient {
         // The separate hard_deadline bounds agents that keep producing output
         // but ignore cancellation.
         let cleanup_idle = std::time::Duration::from_secs(30);
+        let remaining = hard_deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or_default();
         let result = self
             .read_until_response_with_idle_timeout(
                 session_id,
                 prompt_id,
                 cleanup_idle,
                 hard_deadline,
+                remaining,
             )
             .await?;
         self.parse_stop_reason(&result)
@@ -1187,6 +1197,7 @@ impl AcpClient {
         expected_id: u64,
         idle_timeout: std::time::Duration,
         hard_deadline: tokio::time::Instant,
+        max_duration: std::time::Duration,
     ) -> Result<serde_json::Value, AcpError> {
         use tokio::time::Instant;
 
@@ -1205,7 +1216,10 @@ impl AcpClient {
         let mut pending_steer: Option<(u64, tokio::sync::oneshot::Sender<crate::pool::SteerAck>)> =
             None;
 
-        let mut idle_deadline = Instant::now() + idle_timeout;
+        let now = Instant::now();
+        let mut idle_deadline = now + idle_timeout;
+        let mut hard_deadline = hard_deadline;
+        let mut last_activity_at = now;
 
         loop {
             // Determine which deadline fires first BEFORE sleeping — this is
@@ -1236,8 +1250,9 @@ impl AcpClient {
                     tracing::warn!("idle timeout ({idle_timeout:?}) — no agent activity");
                     return Err(AcpError::IdleTimeout(idle_timeout));
                 } else {
-                    tracing::warn!("hard turn timeout exceeded");
-                    return Err(AcpError::HardTimeout);
+                    let silence = Instant::now().saturating_duration_since(last_activity_at);
+                    tracing::warn!("hard turn timeout exceeded (silence {silence:?})");
+                    return Err(AcpError::HardTimeout { silence });
                 }
             }
 
@@ -1331,8 +1346,9 @@ impl AcpClient {
                         tracing::warn!("idle timeout ({idle_timeout:?}) — no agent activity");
                         return Err(AcpError::IdleTimeout(idle_timeout));
                     } else {
-                        tracing::warn!("hard turn timeout exceeded");
-                        return Err(AcpError::HardTimeout);
+                        let silence = Instant::now().saturating_duration_since(last_activity_at);
+                        tracing::warn!("hard turn timeout exceeded (silence {silence:?})");
+                        return Err(AcpError::HardTimeout { silence });
                     }
                 }
             };
@@ -1393,9 +1409,9 @@ impl AcpClient {
                     };
                     self.observe("acp_read", msg.clone());
 
-                    // Only reset the idle clock on lines that parse as valid JSON.
-                    // Malformed lines (skipped above) don't count as real agent activity.
-                    idle_deadline = Instant::now() + idle_timeout;
+                    let activity_now = Instant::now();
+                    idle_deadline = activity_now + idle_timeout;
+                    last_activity_at = activity_now;
 
                     // Steer response routing must come BEFORE the prompt
                     // response check: a steer response is a regular
@@ -1421,6 +1437,15 @@ impl AcpClient {
                                             crate::pool::SteerError::AgentError { code, message },
                                         )
                                     } else {
+                                        let renew_now = Instant::now();
+                                        let new_deadline = renew_now + max_duration;
+                                        if new_deadline > hard_deadline {
+                                            hard_deadline = new_deadline;
+                                            self.current_hard_deadline = Some(new_deadline);
+                                            tracing::info!(
+                                                "steer success: renewed hard deadline ({max_duration:?} from now)"
+                                            );
+                                        }
                                         crate::pool::SteerAck::Success
                                     };
                                     let _ = ack_tx.send(ack);
@@ -1449,11 +1474,10 @@ impl AcpClient {
                         match method {
                             "session/update" => {
                                 if self.handle_session_update(&msg) {
-                                    // Belt-and-suspenders — general reset already fired
-                                    // above, this is defense-in-depth in case the general
-                                    // reset is later narrowed.
+                                    let activity_now = Instant::now();
+                                    idle_deadline = activity_now + idle_timeout;
+                                    last_activity_at = activity_now;
                                     tracing::debug!("idle clock reset: tool call started");
-                                    idle_deadline = Instant::now() + idle_timeout;
                                 }
                             }
                             "_goose/unstable/session/update" => {
@@ -2550,7 +2574,9 @@ mod tests {
 
     #[test]
     fn hard_timeout_error_display() {
-        let err = AcpError::HardTimeout;
+        let err = AcpError::HardTimeout {
+            silence: std::time::Duration::from_secs(120),
+        };
         let msg = err.to_string();
         assert!(
             msg.contains("Hard turn timeout"),
@@ -2567,13 +2593,15 @@ mod tests {
     #[tokio::test]
     async fn idle_timeout_fires_on_silent_process() {
         let mut client = spawn_script("sleep 10").await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let max_dur = std::time::Duration::from_secs(30);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let result = client
             .read_until_response_with_idle_timeout(
                 "test",
                 999,
                 std::time::Duration::from_millis(100),
                 hard_deadline,
+                max_dur,
             )
             .await;
         assert!(
@@ -2585,7 +2613,8 @@ mod tests {
     #[tokio::test]
     async fn hard_timeout_fires_when_deadline_is_immediate() {
         let mut client = spawn_script("while true; do echo 'noise'; sleep 0.01; done").await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1);
+        let max_dur = std::time::Duration::from_millis(1);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let result = client
             .read_until_response_with_idle_timeout(
@@ -2593,10 +2622,11 @@ mod tests {
                 999,
                 std::time::Duration::from_secs(60),
                 hard_deadline,
+                max_dur,
             )
             .await;
         assert!(
-            matches!(result, Err(AcpError::HardTimeout)),
+            matches!(result, Err(AcpError::HardTimeout { .. })),
             "expected HardTimeout, got {result:?}"
         );
     }
@@ -2630,7 +2660,8 @@ mod tests {
             r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
         )
         .await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let start = std::time::Instant::now();
         let result = client
             .read_until_response_with_idle_timeout(
@@ -2638,6 +2669,7 @@ mod tests {
                 999,
                 std::time::Duration::from_millis(200),
                 hard_deadline,
+                max_dur,
             )
             .await;
         let elapsed = start.elapsed();
@@ -2652,13 +2684,15 @@ mod tests {
         let mut client =
             spawn_script(r#"echo '{"jsonrpc":"2.0","id":42,"result":{"stopReason":"end_turn"}}'"#)
                 .await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let max_dur = std::time::Duration::from_secs(5);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let result = client
             .read_until_response_with_idle_timeout(
                 "test",
                 42,
                 std::time::Duration::from_secs(2),
                 hard_deadline,
+                max_dur,
             )
             .await;
         assert!(result.is_ok());
@@ -2669,13 +2703,15 @@ mod tests {
     async fn agent_exit_detected_as_eof() {
         let mut client = spawn_script("exit 0").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let max_dur = std::time::Duration::from_secs(5);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let result = client
             .read_until_response_with_idle_timeout(
                 "test",
                 999,
                 std::time::Duration::from_secs(2),
                 hard_deadline,
+                max_dur,
             )
             .await;
         assert!(matches!(result, Err(AcpError::AgentExited)));
@@ -2697,13 +2733,15 @@ mod tests {
             sleep 1
         "#;
         let mut client = spawn_script(script).await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let max_dur = std::time::Duration::from_secs(5);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let result = client
             .read_until_response_with_idle_timeout(
                 "test",
                 0,
                 std::time::Duration::from_secs(3),
                 hard_deadline,
+                max_dur,
             )
             .await;
         assert!(result.is_ok(), "expected Ok response, got {result:?}");
@@ -2714,9 +2752,10 @@ mod tests {
     async fn idle_fires_before_hard_when_idle_is_shorter() {
         let mut client = spawn_script("sleep 10").await;
         let idle = std::time::Duration::from_millis(100);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let result = client
-            .read_until_response_with_idle_timeout("test", 999, idle, hard_deadline)
+            .read_until_response_with_idle_timeout("test", 999, idle, hard_deadline, max_dur)
             .await;
         assert!(
             matches!(result, Err(AcpError::IdleTimeout(_))),
@@ -2763,11 +2802,11 @@ mod tests {
         let idle = std::time::Duration::from_secs(60); // idle ≫ hard
         let start = std::time::Instant::now();
         let result = client
-            .read_until_response_with_idle_timeout("test", 999, idle, hard_deadline)
+            .read_until_response_with_idle_timeout("test", 999, idle, hard_deadline, hard)
             .await;
         let elapsed = start.elapsed();
         assert!(
-            matches!(result, Err(AcpError::HardTimeout)),
+            matches!(result, Err(AcpError::HardTimeout { .. })),
             "expected HardTimeout under gapless valid-JSON stream, got {result:?} (elapsed {elapsed:?})"
         );
         // Must fire close to the hard deadline, not late. Without the
@@ -2818,7 +2857,8 @@ mod tests {
             r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
         )
         .await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let start = std::time::Instant::now();
         let result = client
             .read_until_response_with_idle_timeout(
@@ -2826,6 +2866,7 @@ mod tests {
                 999,
                 std::time::Duration::from_millis(100),
                 hard_deadline,
+                max_dur,
             )
             .await;
         let elapsed = start.elapsed();
@@ -2852,7 +2893,8 @@ mod tests {
             r#"echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call","title":"long_running","kind":"shell"}}}'; sleep 0.08; sleep 10"#,
         )
         .await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let start = std::time::Instant::now();
         let result = client
             .read_until_response_with_idle_timeout(
@@ -2860,6 +2902,7 @@ mod tests {
                 999,
                 std::time::Duration::from_millis(200),
                 hard_deadline,
+                max_dur,
             )
             .await;
         let elapsed = start.elapsed();
@@ -3145,9 +3188,10 @@ mod tests {
         // be matched (the script writes nothing); the read loop will
         // exit via IdleTimeout shortly after the steer arm fires.
         let idle = std::time::Duration::from_millis(500);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let max_dur = std::time::Duration::from_secs(5);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let read_result = client
-            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline)
+            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
         send_task.await.expect("send_task should complete");
 
@@ -3212,9 +3256,10 @@ mod tests {
         // the script so the read loop exits via idle timeout after the
         // steer response is routed to ack.
         let idle = std::time::Duration::from_secs(2);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let read_result = client
-            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline)
+            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
         send_task.await.expect("send_task should complete");
 
@@ -3232,6 +3277,67 @@ mod tests {
 
         // Ack must be Success: the steer response (id=0) was routed to
         // pending_steer.ack_tx.
+        let ack = ack_rx
+            .await
+            .expect("ack oneshot must have received a SteerAck");
+        match ack {
+            crate::pool::SteerAck::Success => {}
+            other => panic!("expected SteerAck::Success, got {other:?}"),
+        }
+    }
+
+    /// Steer-success renewal keeps the turn alive past the original hard
+    /// deadline. This is the red-on-old/green-on-new test for the core bug
+    /// fix (acp.rs:1440-1444): without renewal, the read loop returns
+    /// `HardTimeout` before the prompt response arrives.
+    ///
+    /// Timeline:
+    ///   t≈0:    read loop starts, `hard_deadline = now + 1s`
+    ///   t≈0.5s: script emits steer response (id=0) → Success renewal
+    ///           moves `hard_deadline` to `now + 3s` (≈3.5s from start)
+    ///   t≈1.5s: script emits prompt response (id=999) → `Ok`
+    ///
+    /// Old code: `HardTimeout` at t≈1s (before prompt response).
+    /// New code: deadline renewed at t≈0.5s → prompt response at t≈1.5s → `Ok`.
+    #[tokio::test]
+    async fn steer_success_renews_hard_deadline_and_survives_past_original() {
+        let script = "sleep 0.5; \
+                      echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"stopReason\":\"end_turn\"}}'; \
+                      sleep 1; \
+                      echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
+        let mut client = spawn_script(script).await;
+
+        let update = session_info_update_msg(Some(serde_json::json!("run-99")));
+        let _ = client.handle_session_update(&update);
+
+        let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
+        client.install_steer_rx(steer_rx);
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<crate::pool::SteerAck>();
+        let send_task = tokio::spawn(async move {
+            steer_tx
+                .send(crate::pool::SteerRequest {
+                    prompt_blocks: vec!["steer body".into()],
+                    ack_tx,
+                })
+                .await
+                .expect("steer_tx send should succeed");
+        });
+
+        let idle = std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(3);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let result = client
+            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
+            .await;
+        send_task.await.expect("send_task should complete");
+
+        assert!(
+            result.is_ok(),
+            "expected Ok (prompt response after renewed deadline), got {result:?}"
+        );
+        assert_eq!(result.unwrap()["done"], serde_json::json!(true));
+
         let ack = ack_rx
             .await
             .expect("ack oneshot must have received a SteerAck");

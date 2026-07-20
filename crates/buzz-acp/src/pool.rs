@@ -40,6 +40,10 @@ use crate::queue::{
 };
 use crate::relay::{ChannelInfo, RestClient};
 
+/// Window within which agent activity before a hard-cap death qualifies
+/// the turn as "recently active" (eligible for requeue instead of dead-letter).
+const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
+
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
 
@@ -392,7 +396,9 @@ pub enum TimeoutKind {
     /// No ACP wire activity for `idle_timeout` seconds.
     Idle,
     /// Turn ran for `max_turn_duration` seconds of wall-clock time.
-    Hard,
+    /// `recently_active` is true when the agent produced output within
+    /// `RECENT_ACTIVITY_WINDOW` of the hard-cap firing.
+    Hard { recently_active: bool },
 }
 
 /// Outcome of a prompt task.
@@ -1617,10 +1623,11 @@ pub async fn run_prompt_task(
                     );
                     return;
                 }
-                Err(AcpError::HardTimeout) => {
+                Err(AcpError::HardTimeout { silence }) => {
+                    let recently_active = silence < RECENT_ACTIVITY_WINDOW;
                     tracing::error!(
                         target: "pool::session",
-                        "hard timeout ({}s cap) during initial_message for channel {cid} — agent process is unrecoverable",
+                        "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message for channel {cid} — agent process is unrecoverable",
                         ctx.max_turn_duration.as_secs()
                     );
                     agent.state.invalidate_all();
@@ -1629,7 +1636,7 @@ pub async fn run_prompt_task(
                         &turn_id,
                         agent,
                         source,
-                        PromptOutcome::Timeout(TimeoutKind::Hard),
+                        PromptOutcome::Timeout(TimeoutKind::Hard { recently_active }),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                     return;
@@ -2094,10 +2101,11 @@ pub async fn run_prompt_task(
                 }
             }
         }
-        Err(AcpError::HardTimeout) => {
+        Err(AcpError::HardTimeout { silence }) => {
+            let recently_active = silence < RECENT_ACTIVITY_WINDOW;
             tracing::error!(
                 target: "pool::prompt",
-                "hard timeout ({}s cap) — agent process is unrecoverable, invalidating all sessions",
+                "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) — agent process is unrecoverable, invalidating all sessions",
                 ctx.max_turn_duration.as_secs()
             );
             agent.state.invalidate_all();
@@ -2116,7 +2124,7 @@ pub async fn run_prompt_task(
                 &turn_id,
                 agent,
                 source,
-                PromptOutcome::Timeout(TimeoutKind::Hard),
+                PromptOutcome::Timeout(TimeoutKind::Hard { recently_active }),
                 requeue_batch_if_queue(&ctx, batch),
             );
         }
@@ -2989,7 +2997,7 @@ fn classify_control_cancel_failure(
         // should be unreachable in practice. If it ever fires anyway, still
         // report the truthful non-hard outcome rather than the real hard-cap
         // (which would dead-letter the batch and claim the configured cap).
-        AcpError::HardTimeout => (
+        AcpError::HardTimeout { .. } => (
             PromptOutcome::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
             false,
         ),
@@ -4455,7 +4463,7 @@ mod tests {
         let label = match outcome {
             PromptOutcome::AgentExited => "AgentExited",
             PromptOutcome::Timeout(TimeoutKind::Idle) => "Timeout(Idle)",
-            PromptOutcome::Timeout(TimeoutKind::Hard) => "Timeout(Hard)",
+            PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "Timeout(Hard)",
             PromptOutcome::CancelDrainTimeout(_) => "CancelDrainTimeout",
             PromptOutcome::Error(_) => "Error",
             PromptOutcome::Cancelled => "Cancelled",
@@ -4533,7 +4541,9 @@ mod tests {
             },
             Case {
                 name: "unexpected HardTimeout cannot become Timeout(Hard)",
-                error: || AcpError::HardTimeout,
+                error: || AcpError::HardTimeout {
+                    silence: Duration::from_secs(300),
+                },
                 signal: ControlSignal::Steer,
                 expected_outcome: "CancelDrainTimeout",
                 batch_preserved: true,

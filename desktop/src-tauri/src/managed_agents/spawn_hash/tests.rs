@@ -257,14 +257,11 @@ fn allowlist_content_edit_still_changes_hash() {
 }
 
 #[test]
-fn explicit_default_max_turn_duration_does_not_change_hash() {
-    // Spawn writes BUZZ_ACP_MAX_TURN_DURATION with the default filled in, so
-    // None → Some(default) is the same spawned value and must not badge.
+fn explicit_max_turn_duration_changes_hash_from_none() {
     let rec = record();
     let mut edited = record();
-    edited.max_turn_duration_seconds =
-        Some(crate::managed_agents::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS);
-    assert_eq!(
+    edited.max_turn_duration_seconds = Some(7200);
+    assert_ne!(
         spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
         spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );

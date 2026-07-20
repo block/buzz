@@ -21,6 +21,7 @@ const DATABRICKS_OAUTH_SCOPES: &[&str] = &["all-apis", "offline_access"];
 
 const MAX_LLM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LLM_ERROR_BODY_BYTES: usize = 4 * 1024;
+const STALL_NOTICE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Parser for an OpenAI-family JSON response. Per-endpoint pair lives
 /// alongside its `_body` serializer.
@@ -52,7 +53,7 @@ impl Llm {
     pub fn new(cfg: &Config) -> Result<Self, AgentError> {
         let http = Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(cfg.llm_timeout)
+            .read_timeout(cfg.llm_timeout)
             .build()
             .map_err(|e| AgentError::Llm(format!("http: {e}")))?;
         let auth = build_token_source(cfg)?;
@@ -1032,6 +1033,7 @@ where
 {
     let body_bytes =
         serde_json::to_vec(body).map_err(|e| AgentError::Llm(format!("serialize: {e}")))?;
+    let call_start = std::time::Instant::now();
     for attempt in 0..MAX_RETRIES {
         let resp = match apply(
             http.post(url)
@@ -1053,6 +1055,13 @@ where
                     backoff_with_jitter(attempt).await;
                     continue;
                 }
+                let elapsed = call_start.elapsed();
+                if elapsed >= STALL_NOTICE_THRESHOLD {
+                    tracing::warn!(
+                        cumulative_stall = ?elapsed,
+                        "llm: cumulative stall {elapsed:?} across {attempt} retries (transport failure)"
+                    );
+                }
                 return Err(AgentError::Llm(format!("transport: {e}")));
             }
         };
@@ -1065,7 +1074,9 @@ where
         if status == 401 || status == 403 {
             return Err(AgentError::LlmAuth(read_error_body(resp).await));
         }
-        if (status.is_server_error() || status == 429) && attempt + 1 < MAX_RETRIES {
+        if (status.is_server_error() || status == 429 || status.as_u16() == 499)
+            && attempt + 1 < MAX_RETRIES
+        {
             tracing::warn!(
                 attempt = attempt + 1,
                 max_attempts = MAX_RETRIES,
@@ -1112,7 +1123,16 @@ where
         }
         return serde_json::from_slice(&buf).map_err(|e| AgentError::Llm(format!("json: {e}")));
     }
-    Err(AgentError::Llm("exhausted retries".into()))
+    let elapsed = call_start.elapsed();
+    if elapsed >= STALL_NOTICE_THRESHOLD {
+        tracing::warn!(
+            cumulative_stall = ?elapsed,
+            "llm: cumulative stall {elapsed:?} across {MAX_RETRIES} retries (exhausted)"
+        );
+    }
+    Err(AgentError::Llm(format!(
+        "exhausted retries (cumulative {elapsed:?})"
+    )))
 }
 
 /// Build the `TokenSource` for the configured provider.
@@ -2186,6 +2206,124 @@ mod tests {
             accepts.load(Ordering::SeqCst) >= 2,
             "server should have seen at least 2 connection attempts, saw {}",
             accepts.load(Ordering::SeqCst)
+        );
+    }
+
+    /// A 499 response is retried and the call succeeds on the second attempt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_retries_499_and_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+                // Read the full request headers before responding.
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                if n == 0 {
+                    // First attempt: respond with 499.
+                    let resp = "HTTP/1.1 499 Client Closed Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                    continue;
+                }
+                // Subsequent attempts: 200 OK with a tiny JSON body.
+                let body = "{\"ok\":true}";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = post(&client, &url, &serde_json::json!({}), |b| b)
+            .await
+            .expect("post should succeed after 499 retry");
+        assert_eq!(out, serde_json::json!({ "ok": true }));
+        assert!(
+            accepts.load(Ordering::SeqCst) >= 2,
+            "server must see at least 2 attempts (got {})",
+            accepts.load(Ordering::SeqCst)
+        );
+    }
+
+    /// When all MAX_RETRIES attempts return 499 the error includes "exhausted retries".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_exhausts_retries_on_persistent_499() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                accepts_srv.fetch_add(1, Ordering::SeqCst);
+                // Read the full request headers before responding.
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                // Always 499.
+                let resp = "HTTP/1.1 499 Client Closed Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = post(&client, &url, &serde_json::json!({}), |b| b)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::Llm(msg) if msg.contains("499")),
+            "expected AgentError::Llm mentioning 499, got: {err:?}"
+        );
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            MAX_RETRIES,
+            "server must see exactly MAX_RETRIES attempts — 499 must be retried"
         );
     }
 

@@ -200,6 +200,27 @@ impl EventQueue {
         self
     }
 
+    /// Monotonically extend an existing in-flight deadline for `channel_id`.
+    ///
+    /// Called when a successful steer grants a fresh turn budget. The new
+    /// deadline is `max(current, now + max_turn_secs + buffer)` — it never
+    /// moves backward. If the channel is not in-flight (already completed
+    /// via `mark_complete`), this is a no-op: a late ack never resurrects
+    /// a deadline.
+    pub fn extend_in_flight_deadline(&mut self, channel_id: Uuid, max_turn_secs: u64) {
+        if let Some(current) = self.in_flight_deadlines.get_mut(&channel_id) {
+            let extended = Instant::now()
+                + Duration::from_secs(max_turn_secs + IN_FLIGHT_DEADLINE_BUFFER_SECS);
+            if extended > *current {
+                tracing::info!(
+                    %channel_id,
+                    "extending in-flight deadline by {max_turn_secs}s + {IN_FLIGHT_DEADLINE_BUFFER_SECS}s buffer"
+                );
+                *current = extended;
+            }
+        }
+    }
+
     /// Push an event into the queue for its channel.
     ///
     /// In [`DedupMode::Drop`], events for any currently in-flight channel are
@@ -4520,6 +4541,209 @@ mod tests {
         assert!(
             q.in_flight_deadline > Duration::from_secs(max_turn),
             "in_flight_deadline must be strictly greater than max_turn_duration"
+        );
+    }
+
+    #[test]
+    fn extend_in_flight_deadline_advances_existing_entry() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let old_deadline = Instant::now() + Duration::from_secs(100);
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines.insert(ch, old_deadline);
+
+        q.extend_in_flight_deadline(ch, 7200);
+        let new = *q.in_flight_deadlines.get(&ch).unwrap();
+        assert!(
+            new > old_deadline,
+            "extended deadline must be past the original"
+        );
+    }
+
+    #[test]
+    fn extend_in_flight_deadline_is_monotonic() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let far_future = Instant::now() + Duration::from_secs(999_999);
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines.insert(ch, far_future);
+
+        q.extend_in_flight_deadline(ch, 7200);
+        let after = *q.in_flight_deadlines.get(&ch).unwrap();
+        assert_eq!(after, far_future, "deadline must never move backward");
+    }
+
+    #[test]
+    fn extend_in_flight_deadline_noop_after_mark_complete() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() + Duration::from_secs(100));
+        q.in_flight_batch_sizes.insert(ch, 1);
+
+        q.mark_complete(ch);
+        assert!(!q.in_flight_deadlines.contains_key(&ch));
+
+        q.extend_in_flight_deadline(ch, 7200);
+        assert!(
+            !q.in_flight_deadlines.contains_key(&ch),
+            "extend after mark_complete must not resurrect a deadline"
+        );
+    }
+
+    #[test]
+    fn compact_expired_state_preserves_extended_in_flight_deadline() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let extended = Instant::now() + Duration::from_secs(9999);
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines.insert(ch, extended);
+
+        q.compact_expired_state();
+
+        assert!(
+            q.in_flight_deadlines.contains_key(&ch),
+            "compaction must not touch in-flight deadlines"
+        );
+        assert_eq!(
+            *q.in_flight_deadlines.get(&ch).unwrap(),
+            extended,
+            "compaction must leave extended deadline intact"
+        );
+    }
+
+    // ── F2 case 2.2: extend_in_flight_deadline prevents flush_next expiry ────
+
+    /// A channel in-flight with a past deadline is auto-expired by
+    /// `flush_next` and the "BUG: in-flight channel expired" path fires.
+    /// Verify this baseline — we need the expiry to actually happen for the
+    /// next test's "extended deadline prevents it" assertion to be meaningful.
+    #[test]
+    fn expired_in_flight_deadline_is_auto_released_by_flush_next() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Insert the channel as in-flight with a deadline already in the past
+        // (Instant::now() — by the time flush_next runs, now >= deadline).
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines.insert(ch, Instant::now());
+        q.in_flight_batch_sizes.insert(ch, 1);
+
+        // Also push an event so flush_next has something to do after expiry.
+        q.push(make_queued(ch, "after-expiry"));
+
+        // flush_next auto-expires the stuck entry and then dispatches the
+        // pending event for the now-freed channel.
+        let batch = q
+            .flush_next()
+            .expect("channel should be dispatchable after auto-expiry");
+        assert_eq!(batch.channel_id, ch);
+        assert_eq!(batch.events[0].event.content, "after-expiry");
+    }
+
+    /// F2 case 2.2 — `flush_next` path.
+    ///
+    /// A channel whose in-flight deadline was extended far into the future
+    /// must NOT be auto-expired by `flush_next`.  No "BUG: in-flight channel
+    /// expired" logic fires; the channel stays in-flight; the pending event
+    /// for it is not dispatched a second time.
+    #[test]
+    fn extended_deadline_prevents_flush_next_expiry() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Put the channel in-flight with an extended deadline far in the future.
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() + Duration::from_secs(9999));
+        q.in_flight_batch_sizes.insert(ch, 1);
+
+        // Push an event for another channel so flush_next has work to do.
+        let ch2 = Uuid::new_v4();
+        q.push(make_queued(ch2, "other-channel"));
+
+        let batch = q.flush_next().expect("other channel should flush");
+        assert_eq!(
+            batch.channel_id, ch2,
+            "only ch2 should be flushed; ch is still in-flight with extended deadline"
+        );
+
+        // ch must still be in-flight — the extended deadline did not expire.
+        assert!(
+            q.in_flight_channels.contains(&ch),
+            "ch must remain in-flight after flush_next with an extended deadline"
+        );
+        assert!(
+            q.in_flight_deadlines.contains_key(&ch),
+            "in-flight deadline for ch must not be removed by flush_next"
+        );
+    }
+
+    /// F2 case 2.2 — `has_flushable_work` path.
+    ///
+    /// Same guarantee as above but exercising `has_flushable_work` instead of
+    /// `flush_next`.  A channel with an extended deadline far in the future
+    /// must not be auto-expired, and the method must return the correct answer
+    /// based on the other pending channel only.
+    #[test]
+    fn extended_deadline_prevents_has_flushable_work_expiry() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // In-flight channel with extended (far-future) deadline.
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() + Duration::from_secs(9999));
+        q.in_flight_batch_sizes.insert(ch, 1);
+
+        // No other channels — nothing flushable.
+        assert!(
+            !q.has_flushable_work(),
+            "has_flushable_work must return false when the only channel is in-flight with extended deadline"
+        );
+        assert!(
+            q.in_flight_channels.contains(&ch),
+            "ch must remain in-flight after has_flushable_work with extended deadline"
+        );
+
+        // Add a pending event for a different channel.
+        let ch2 = Uuid::new_v4();
+        q.push(make_queued(ch2, "pending"));
+        assert!(
+            q.has_flushable_work(),
+            "has_flushable_work must return true for the pending ch2 event"
+        );
+        // ch still in-flight and not expired.
+        assert!(
+            q.in_flight_channels.contains(&ch),
+            "ch must still be in-flight after has_flushable_work finds ch2 work"
+        );
+    }
+
+    // ── F2 case 2.5: steer renewal is monotonic across repeated steers ───────
+
+    /// Calling `extend_in_flight_deadline` twice with the same `max_turn_secs`
+    /// must only move the deadline forward; the second call must produce a
+    /// deadline >= the first (monotonic guarantee, tested at queue-unit level).
+    #[test]
+    fn repeated_extend_in_flight_deadline_is_monotonic() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() + Duration::from_secs(100));
+
+        q.extend_in_flight_deadline(ch, 7200);
+        let after_first = *q.in_flight_deadlines.get(&ch).unwrap();
+
+        q.extend_in_flight_deadline(ch, 7200);
+        let after_second = *q.in_flight_deadlines.get(&ch).unwrap();
+
+        assert!(
+            after_second >= after_first,
+            "second extend must not move deadline backward (monotonic)"
         );
     }
 }

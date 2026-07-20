@@ -128,11 +128,7 @@ pub(crate) fn spawn_config_hash(
             .hash(&mut hasher);
     }
     record.idle_timeout_seconds.hash(&mut hasher);
-    // Spawn writes BUZZ_ACP_MAX_TURN_DURATION with a default.
-    record
-        .max_turn_duration_seconds
-        .unwrap_or(super::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS)
-        .hash(&mut hasher);
+    record.max_turn_duration_seconds.hash(&mut hasher);
     record.parallelism.hash(&mut hasher);
 
     hasher.finish()
