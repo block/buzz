@@ -63,8 +63,9 @@ pub struct EventQuery {
     /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
     /// Uses JSONB containment (`tags @> ...`) against the `tags` column.
     pub e_tags: Option<Vec<String>>,
-    /// Restrict results to events in any of these channels (multi-channel `IN` pushdown).
-    /// Used by NIP-45 COUNT to enforce channel access without fetching all rows.
+    /// Restrict results to events in any of these channels, while retaining
+    /// channel-less global events. Applied before SQL `LIMIT` so access-filtered
+    /// historical pages have exact exhaustion semantics.
     pub channel_ids: Option<Vec<uuid::Uuid>>,
     /// Override the default limit clamp (1000). Used by COUNT fallback path
     /// which needs to fetch all matching events for post-filter counting.
@@ -1758,6 +1759,60 @@ mod tests {
             .tags(tags)
             .sign_with_keys(&keys)
             .expect("sign")
+    }
+
+    fn make_event_at(kind: u16, content: &str, created_at: u64) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(kind), content)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign timestamped event")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn access_scope_is_applied_before_historical_page_limit() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let accessible = make_test_channel(&pool, community_uuid, None).await;
+        let inaccessible = make_test_channel(&pool, community_uuid, None).await;
+        let base = 1_800_000_000;
+
+        // This is the bridge underfetch shape: newer inaccessible candidates
+        // outnumber the requested page, while the visible match is older.
+        for offset in 10..13 {
+            let event = make_event_at(39_000, "newer inaccessible", base + offset);
+            insert_event(&pool, community, &event, Some(inaccessible))
+                .await
+                .expect("insert inaccessible candidate");
+        }
+        let global = make_event_at(39_000, "newer global", base + 2);
+        insert_event(&pool, community, &global, None)
+            .await
+            .expect("insert global candidate");
+        let older_accessible = make_event_at(39_000, "older accessible", base + 1);
+        insert_event(&pool, community, &older_accessible, Some(accessible))
+            .await
+            .expect("insert accessible candidate");
+
+        let events = query_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![39_000]),
+                channel_ids: Some(vec![accessible]),
+                limit: Some(2),
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("query access-scoped page");
+
+        assert_eq!(events.len(), 2, "visible page must be filled before EOF");
+        assert_eq!(events[0].event.id, global.id, "global rows remain visible");
+        assert_eq!(
+            events[1].event.id, older_accessible.id,
+            "older accessible row must not be hidden behind newer inaccessible rows"
+        );
     }
 
     fn make_text_event(content: &str) -> nostr::Event {

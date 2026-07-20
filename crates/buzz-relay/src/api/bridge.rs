@@ -955,6 +955,11 @@ pub async fn query_events(
             tenant.community(),
         )
         .await;
+        crate::handlers::req::apply_access_scope_to_query(
+            &mut query,
+            extract_channel_from_filter(filter),
+            &accessible_channels,
+        );
 
         match extract_before_id(raw) {
             BeforeId::Malformed => {

@@ -289,8 +289,9 @@ pub async fn handle_req(
                     })
                     .or(channel_id)
             };
-            let params =
+            let mut params =
                 filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
+            apply_access_scope_to_query(&mut params, per_filter_channel, &accessible_channels);
             (idx, per_filter_channel, params)
         })
         .collect();
@@ -985,6 +986,20 @@ fn filter_to_query_params(
     }
 }
 
+/// Push the caller's authorized channel set into logically global historical
+/// queries so SQL `LIMIT` counts visible rows. Channel-less events remain in
+/// scope by `EventQuery::channel_ids` contract; an explicit single-channel
+/// filter keeps its narrower `channel_id` predicate.
+pub(crate) fn apply_access_scope_to_query(
+    query: &mut EventQuery,
+    channel_id: Option<uuid::Uuid>,
+    accessible_channels: &[uuid::Uuid],
+) {
+    if channel_id.is_none() {
+        query.channel_ids = Some(accessible_channels.to_vec());
+    }
+}
+
 /// Extract a single channel UUID from filter generic tags, or `None` if the
 /// subscription is logically global.
 ///
@@ -1218,6 +1233,33 @@ fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
 mod tests {
     use super::*;
     use nostr::{Alphabet, Filter, SingleLetterTag};
+
+    #[test]
+    fn global_queries_push_access_scope_before_limit() {
+        let accessible = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+        let mut query = EventQuery::for_community(buzz_core::tenant::CommunityId::from_uuid(
+            uuid::Uuid::new_v4(),
+        ));
+
+        apply_access_scope_to_query(&mut query, None, &accessible);
+
+        assert_eq!(query.channel_ids.as_deref(), Some(accessible.as_slice()));
+    }
+
+    #[test]
+    fn channel_scoped_queries_keep_exact_channel_predicate() {
+        let channel = uuid::Uuid::new_v4();
+        let accessible = vec![channel, uuid::Uuid::new_v4()];
+        let mut query = EventQuery::for_community(buzz_core::tenant::CommunityId::from_uuid(
+            uuid::Uuid::new_v4(),
+        ));
+        query.channel_id = Some(channel);
+
+        apply_access_scope_to_query(&mut query, Some(channel), &accessible);
+
+        assert!(query.channel_ids.is_none());
+        assert_eq!(query.channel_id, Some(channel));
+    }
 
     /// S2 invariant: the bounded-concurrency pipeline (phase 2) must yield
     /// per-filter results in original filter order even when an earlier
