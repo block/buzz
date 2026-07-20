@@ -135,10 +135,42 @@ fn file_mime_to_ext(mime: &str) -> Option<&'static str> {
         // Data / text
         "application/json" => "json",
         "text/csv" => "csv",
+        "text/markdown" => "md",
         "text/plain" => "txt",
         _ => return None,
     };
     Some(ext)
+}
+
+/// Text-family MIME types the generic-file path will accept as a hint from the
+/// caller's `Content-Type` when magic-byte sniffing produces no signature.
+///
+/// These are formats that legitimately lack magic bytes (plain text, markdown,
+/// CSV, JSON) but that we still want to preserve as their declared MIME rather
+/// than flatten to `application/octet-stream`. All are safe to store under this
+/// path because:
+///   1. `X-Content-Type-Options: nosniff` prevents browsers from re-sniffing
+///      them into active content on serve.
+///   2. `Content-Disposition: attachment` forces a download.
+///   3. `Content-Security-Policy: default-src 'none'` neutralises any residual
+///      execution surface.
+///
+/// The list is intentionally small. `text/html`, `image/svg+xml`, and
+/// `application/xhtml+xml` are the classic stored-XSS carriers and are already
+/// on the deny list; we do not admit them here even if the caller hints them.
+///
+/// Callers pass the raw header value; this fn strips any `; charset=...`
+/// parameter and lower-cases the type/subtype before matching.
+fn hinted_text_family_mime(hint: &str) -> Option<&'static str> {
+    // Strip parameters like `; charset=utf-8`, trim, lower-case.
+    let base = hint.split(';').next()?.trim().to_ascii_lowercase();
+    match base.as_str() {
+        "text/markdown" => Some("text/markdown"),
+        "text/plain" => Some("text/plain"),
+        "text/csv" => Some("text/csv"),
+        "application/json" => Some("application/json"),
+        _ => None,
+    }
 }
 
 /// Validate uploaded bytes for the **generic file** upload path.
@@ -151,14 +183,22 @@ fn file_mime_to_ext(mime: &str) -> Option<&'static str> {
 ///   3. Magic-byte sniffing where possible.
 ///
 /// Files with no detectable signature (plain text, CSV, source code, JSON —
-/// none of which have magic bytes) are accepted as `application/octet-stream`.
-/// They are always served as downloads, so an un-sniffable file can never
-/// execute in the app.
+/// none of which have magic bytes) fall back to the caller's `content_type_hint`
+/// when it names a safe text-family MIME (see [`hinted_text_family_mime`]).
+/// Anything else lands as `application/octet-stream`. Either way the served
+/// blob carries `Content-Disposition: attachment`, `nosniff`, and
+/// `CSP: default-src 'none'`, so an un-sniffable file cannot execute in the app.
+///
+/// `content_type_hint` is the caller's raw `Content-Type` header (or the
+/// equivalent). It is only consulted when magic-byte sniffing yields nothing;
+/// it never overrides a positive sniff and it never admits a MIME outside the
+/// small text-family allowlist.
 ///
 /// Returns `(mime, ext)`.
 pub fn validate_file_content(
     bytes: &[u8],
     config: &MediaConfig,
+    content_type_hint: Option<&str>,
 ) -> Result<(String, String), MediaError> {
     // 1. Size cap.
     if bytes.len() as u64 > config.max_file_bytes {
@@ -179,7 +219,8 @@ pub fn validate_file_content(
     }
 
     // 2. Sniff. `None` means no magic signature (text/csv/json/source) — that's
-    //    fine for the generic path; treat as opaque binary served as a download.
+    //    fine for the generic path; treat as opaque binary served as a download,
+    //    unless the caller hinted a safe text-family MIME.
     match infer::get(bytes) {
         Some(kind) => {
             let mime = kind.mime_type().to_string();
@@ -202,7 +243,17 @@ pub fn validate_file_content(
                 .unwrap_or_else(|| kind.extension().to_string());
             Ok((mime, ext))
         }
-        None => Ok(("application/octet-stream".to_string(), "bin".to_string())),
+        None => match content_type_hint.and_then(hinted_text_family_mime) {
+            Some(hinted) => {
+                // Safe by construction — hinted_text_family_mime only returns
+                // MIMEs whose `file_mime_to_ext` mapping is defined.
+                let ext = file_mime_to_ext(hinted)
+                    .expect("hinted_text_family_mime returned an unmapped MIME")
+                    .to_string();
+                Ok((hinted.to_string(), ext))
+            }
+            None => Ok(("application/octet-stream".to_string(), "bin".to_string())),
+        },
     }
 }
 
@@ -1333,10 +1384,10 @@ mod tests {
     fn test_generic_file_path_cannot_bypass_media_validation() {
         let config = test_config();
         assert!(
-            matches!(validate_file_content(TINY_JPEG, &config), Err(MediaError::DisallowedContentType(m)) if m == "image/jpeg")
+            matches!(validate_file_content(TINY_JPEG, &config, None), Err(MediaError::DisallowedContentType(m)) if m == "image/jpeg")
         );
         assert!(
-            matches!(validate_file_content(MP4_FTYP_MAGIC, &config), Err(MediaError::DisallowedContentType(m)) if m == "video/mp4")
+            matches!(validate_file_content(MP4_FTYP_MAGIC, &config, None), Err(MediaError::DisallowedContentType(m)) if m == "video/mp4")
         );
 
         let proprietary_major = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
@@ -1344,7 +1395,7 @@ mod tests {
         assert!(looks_like_iso_bmff(proprietary_major));
         assert!(looks_like_mp4_iso_bmff(proprietary_major));
         assert!(
-            matches!(validate_file_content(proprietary_major, &config), Err(MediaError::DisallowedContentType(m)) if m == "application/iso-bmff")
+            matches!(validate_file_content(proprietary_major, &config, None), Err(MediaError::DisallowedContentType(m)) if m == "application/iso-bmff")
         );
     }
 
@@ -1370,7 +1421,7 @@ mod tests {
             );
             assert!(
                 matches!(
-                    validate_file_content(bytes, &config),
+                    validate_file_content(bytes, &config, None),
                     Err(MediaError::DisallowedContentType(mime)) if mime.starts_with("audio/")
                 ),
                 "generic path accepted {name}"
@@ -2360,7 +2411,7 @@ mod tests {
     #[test]
     fn test_validate_file_pdf_accepted() {
         let config = test_config();
-        let (mime, ext) = validate_file_content(TINY_PDF, &config).unwrap();
+        let (mime, ext) = validate_file_content(TINY_PDF, &config, None).unwrap();
         assert_eq!(mime, "application/pdf");
         assert_eq!(ext, "pdf");
     }
@@ -2368,7 +2419,7 @@ mod tests {
     #[test]
     fn test_validate_file_zip_accepted() {
         let config = test_config();
-        let (mime, ext) = validate_file_content(TINY_ZIP, &config).unwrap();
+        let (mime, ext) = validate_file_content(TINY_ZIP, &config, None).unwrap();
         assert_eq!(mime, "application/zip");
         assert_eq!(ext, "zip");
     }
@@ -2379,7 +2430,8 @@ mod tests {
         // accepts it as opaque binary served as a download (the common Slack
         // case: .txt, .csv, .md, source code).
         let config = test_config();
-        let (mime, ext) = validate_file_content(b"hello, this is a text file\n", &config).unwrap();
+        let (mime, ext) =
+            validate_file_content(b"hello, this is a text file\n", &config, None).unwrap();
         assert_eq!(mime, "application/octet-stream");
         assert_eq!(ext, "bin");
     }
@@ -2389,7 +2441,7 @@ mod tests {
         // HTML is a stored-XSS carrier — blocked even though headers neutralise it.
         let config = test_config();
         let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
-        let result = validate_file_content(html, &config);
+        let result = validate_file_content(html, &config, None);
         assert!(
             matches!(result, Err(MediaError::DisallowedContentType(ref m)) if m == "text/html"),
             "expected DisallowedContentType(text/html), got {result:?}"
@@ -2400,7 +2452,7 @@ mod tests {
     fn test_validate_file_too_large_rejected() {
         let mut config = test_config();
         config.max_file_bytes = 10;
-        let result = validate_file_content(TINY_PDF, &config);
+        let result = validate_file_content(TINY_PDF, &config, None);
         assert!(matches!(result, Err(MediaError::FileTooLarge { .. })));
     }
 
@@ -2415,5 +2467,95 @@ mod tests {
         assert!(!serve_inline("application/octet-stream"));
         assert!(!serve_inline("audio/mpeg"));
         assert!(!serve_inline("text/plain"));
+    }
+
+    #[test]
+    fn test_validate_file_markdown_hint_accepted() {
+        // .md files have no magic bytes — infer returns None. With a
+        // Content-Type hint of `text/markdown`, the generic path should
+        // preserve the declared MIME (and the `md` extension) instead of
+        // flattening to application/octet-stream.
+        let config = test_config();
+        let md = b"# Design Doc\n\nHello, world.\n";
+        assert!(infer::get(md).is_none(), "sanity: markdown has no magic");
+        let (mime, ext) = validate_file_content(md, &config, Some("text/markdown")).unwrap();
+        assert_eq!(mime, "text/markdown");
+        assert_eq!(ext, "md");
+    }
+
+    #[test]
+    fn test_validate_file_text_family_hints_accepted() {
+        let config = test_config();
+        let body = b"col1,col2\n1,2\n";
+        for (hint, expected_mime, expected_ext) in [
+            ("text/plain", "text/plain", "txt"),
+            ("text/markdown", "text/markdown", "md"),
+            ("text/csv", "text/csv", "csv"),
+            ("application/json", "application/json", "json"),
+        ] {
+            let (mime, ext) = validate_file_content(body, &config, Some(hint)).unwrap();
+            assert_eq!(mime, expected_mime, "for hint {hint}");
+            assert_eq!(ext, expected_ext, "for hint {hint}");
+        }
+    }
+
+    #[test]
+    fn test_validate_file_hint_tolerates_charset_parameter() {
+        // RFC 7231 permits a `charset=...` parameter — accept it.
+        let config = test_config();
+        let (mime, ext) =
+            validate_file_content(b"hello\n", &config, Some("text/markdown; charset=utf-8"))
+                .unwrap();
+        assert_eq!(mime, "text/markdown");
+        assert_eq!(ext, "md");
+    }
+
+    #[test]
+    fn test_validate_file_hint_case_insensitive() {
+        let config = test_config();
+        let (mime, ext) =
+            validate_file_content(b"hello\n", &config, Some("TEXT/Markdown")).unwrap();
+        assert_eq!(mime, "text/markdown");
+        assert_eq!(ext, "md");
+    }
+
+    #[test]
+    fn test_validate_file_hint_ignored_when_sniff_succeeds() {
+        // A caller lying about a PDF being markdown must not change what we
+        // store — the hint is consulted only when sniffing yields nothing.
+        let config = test_config();
+        let (mime, ext) = validate_file_content(TINY_PDF, &config, Some("text/markdown")).unwrap();
+        assert_eq!(mime, "application/pdf");
+        assert_eq!(ext, "pdf");
+    }
+
+    #[test]
+    fn test_validate_file_unrecognised_hint_falls_back_to_octet_stream() {
+        // A hint that isn't in the text-family allowlist is silently ignored.
+        // The file lands as application/octet-stream — no way to smuggle
+        // text/html, image/svg+xml, etc. onto the generic path via the hint.
+        let config = test_config();
+        let (mime, ext) = validate_file_content(b"anything\n", &config, Some("text/html")).unwrap();
+        assert_eq!(mime, "application/octet-stream");
+        assert_eq!(ext, "bin");
+
+        let (mime, ext) =
+            validate_file_content(b"anything\n", &config, Some("image/svg+xml")).unwrap();
+        assert_eq!(mime, "application/octet-stream");
+        assert_eq!(ext, "bin");
+    }
+
+    #[test]
+    fn test_validate_file_hint_does_not_bypass_deny_list_for_sniffed_types() {
+        // Even a plausible text hint cannot rescue a file whose magic bytes
+        // sniff as denied active-content (defence in depth for sniff-based
+        // rejection).
+        let config = test_config();
+        let html = b"<!DOCTYPE html><html><body></body></html>";
+        let result = validate_file_content(html, &config, Some("text/markdown"));
+        assert!(
+            matches!(result, Err(MediaError::DisallowedContentType(ref m)) if m == "text/html"),
+            "expected DisallowedContentType(text/html), got {result:?}"
+        );
     }
 }

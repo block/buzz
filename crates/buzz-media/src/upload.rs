@@ -240,6 +240,13 @@ pub async fn process_upload(
 /// transport layer), validated against the deny-list + size cap, stored, and
 /// recorded in a minimal sidecar. No thumbnail, dimensions, or duration.
 ///
+/// `content_type_hint` is the caller's declared `Content-Type` header. It is
+/// consulted only when magic-byte sniffing produces no signature, and only
+/// against a small text-family allowlist (see `hinted_text_family_mime`). It
+/// exists so text formats without magic bytes — `.md`, `.txt`, `.json`, `.csv`
+/// — round-trip as their real MIME instead of being flattened to
+/// `application/octet-stream`.
+///
 /// The resulting blob is served with `Content-Disposition: attachment`, so the
 /// client always downloads it rather than rendering it inline.
 pub async fn process_file_upload(
@@ -249,6 +256,7 @@ pub async fn process_file_upload(
     auth_event: &nostr::Event,
     body: Bytes,
     attribution: Option<UploadAttribution>,
+    content_type_hint: Option<String>,
 ) -> Result<BlobDescriptor, MediaError> {
     process_buffered_upload(
         BufferedUploadInput {
@@ -259,7 +267,7 @@ pub async fn process_file_upload(
             body,
             attribution,
         },
-        |bytes, cfg| validate_file_content(bytes, cfg),
+        move |bytes, cfg| validate_file_content(bytes, cfg, content_type_hint.as_deref()),
         |input| async move {
             // Minimal sidecar — no thumbnail/dim/blurhash/duration for generic files.
             let meta = BlobMeta {
