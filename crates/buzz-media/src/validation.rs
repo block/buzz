@@ -1088,6 +1088,79 @@ mod tests {
     }
 
     #[test]
+    fn test_android_image_processor_outputs_match_relay_contract() {
+        let config = test_config();
+        for (name, bytes, expected_mime) in [
+            (
+                "sRGB PNG",
+                include_bytes!("../tests/fixtures/android/sanitized/bitmap-srgb-sanitized.png")
+                    .as_slice(),
+                "image/png",
+            ),
+            (
+                "sRGB JPEG",
+                include_bytes!("../tests/fixtures/android/sanitized/bitmap-srgb-sanitized.jpg")
+                    .as_slice(),
+                "image/jpeg",
+            ),
+            (
+                "Display-P3 PNG",
+                include_bytes!(
+                    "../tests/fixtures/android/sanitized/bitmap-display-p3-sanitized.png"
+                )
+                .as_slice(),
+                "image/png",
+            ),
+            (
+                "Display-P3 JPEG",
+                include_bytes!(
+                    "../tests/fixtures/android/sanitized/bitmap-display-p3-sanitized.jpg"
+                )
+                .as_slice(),
+                "image/jpeg",
+            ),
+        ] {
+            let actual = validate_content(bytes, &config).unwrap_or_else(|error| {
+                panic!("rejected Android-sanitized {name} fixture: {error}")
+            });
+            assert_eq!(actual, expected_mime);
+        }
+    }
+
+    #[test]
+    fn test_android_bitmap_encoder_outputs_require_sanitization() {
+        let config = test_config();
+        let srgb_png = include_bytes!("../tests/fixtures/android/bitmap-srgb.png").as_slice();
+        assert_eq!(
+            validate_content(srgb_png, &config).expect("rejected Android sRGB PNG fixture"),
+            "image/png"
+        );
+
+        for (name, bytes) in [
+            (
+                "sRGB JPEG",
+                include_bytes!("../tests/fixtures/android/bitmap-srgb.jpg").as_slice(),
+            ),
+            (
+                "Display-P3 PNG",
+                include_bytes!("../tests/fixtures/android/bitmap-display-p3.png").as_slice(),
+            ),
+            (
+                "Display-P3 JPEG",
+                include_bytes!("../tests/fixtures/android/bitmap-display-p3.jpg").as_slice(),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    validate_content(bytes, &config),
+                    Err(MediaError::MetadataForbidden)
+                ),
+                "accepted unsanitized Android Bitmap.compress {name} fixture"
+            );
+        }
+    }
+
+    #[test]
     fn test_ios_uikit_sanitizer_outputs_match_relay_contract() {
         let config = test_config();
         for (name, bytes, expected_mime) in [
