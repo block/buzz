@@ -105,8 +105,9 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          EXISTING_REF="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .ref 2>/dev/null || true)"
-          if [ -n "$EXISTING_REF" ]; then
+          # Check gh's exit status, not its output. A missing ref returns a 404
+          # JSON body on stdout, which must not be mistaken for an existing tag.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then
             EXISTING_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
             if [ "$EXISTING_SHA" = "$GITHUB_SHA" ]; then
               echo "Tag $TAG already exists at $GITHUB_SHA — skipping tag creation"

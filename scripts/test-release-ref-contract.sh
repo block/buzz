@@ -60,6 +60,11 @@ grep -q 'private-key:.*secrets\.BUZZ_RELEASE_TAGGER_PRIVATE_KEY' "$auto_tag"
 grep -q 'permission-contents: write' "$auto_tag"
 grep -q 'GH_TOKEN:.*steps\.release-tagger\.outputs\.token' "$auto_tag"
 grep -Fq 'git/refs' "$auto_tag"
+grep -Fq 'if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then' "$auto_tag"
+if grep -F 'git/ref/tags/$TAG' "$auto_tag" | grep -Fq '|| true'; then
+  echo "auto-tag ignores a failed tag lookup, so a 404 body can look like an existing tag" >&2
+  exit 1
+fi
 if grep -q 'gh workflow run' "$auto_tag"; then
   echo "auto-tag still dispatches a publisher instead of using the tag push" >&2
   exit 1
