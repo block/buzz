@@ -4,12 +4,10 @@ import { Bot, UserRoundPlus, X } from "lucide-react";
 import {
   useAddChannelMembersMutation,
   useChannelMembersQuery,
-  useChannelsQuery,
 } from "@/features/channels/hooks";
 import {
   coalesceAgentAutocompleteCandidates,
-  getMentionableAgentPubkeys,
-  getSharedChannelIds,
+  isAgentIdentityInManagedList,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
@@ -146,7 +144,6 @@ export function MembersSidebar({
   const identityQuery = useIdentityQuery();
   const membersQuery = useChannelMembersQuery(channelId, open);
   const addMembersMutation = useAddChannelMembersMutation(channelId);
-  const channelsQuery = useChannelsQuery({ enabled: open });
   const changeRoleMutation = useMutation({
     mutationFn: async ({ pubkey, role }: { pubkey: string; role: string }) => {
       if (!channelId) throw new Error("No channel selected.");
@@ -262,15 +259,7 @@ export function MembersSidebar({
         .map((member) => member.displayName?.trim().toLowerCase())
         .filter((label): label is string => Boolean(label)),
     );
-    const sharedChannelIds = getSharedChannelIds(channelsQuery.data);
-    const eligibleAgentPubkeys = getMentionableAgentPubkeys({
-      currentPubkey,
-      managedAgentPubkeys: (managedAgentsQuery.data ?? []).map(
-        (agent) => agent.pubkey,
-      ),
-      relayAgents: relayAgentsQuery.data,
-      sharedChannelIds,
-    });
+    const managedAgentPubkeys = new Set(managedAgentsByPubkey.keys());
 
     const addCandidate = (candidate: AddMemberSearchCandidate) => {
       const pubkey = normalizePubkey(candidate.pubkey);
@@ -281,7 +270,7 @@ export function MembersSidebar({
           )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
-        (candidate.isAgent && !eligibleAgentPubkeys.has(pubkey))
+        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
       ) {
         return;
       }
@@ -320,10 +309,6 @@ export function MembersSidebar({
     }
 
     for (const agent of relayAgentsQuery.data ?? []) {
-      if (!eligibleAgentPubkeys.has(normalizePubkey(agent.pubkey))) {
-        continue;
-      }
-
       addCandidate({
         pubkey: agent.pubkey,
         displayName: agent.name,
@@ -365,7 +350,6 @@ export function MembersSidebar({
   }, [
     canAddMembers,
     isArchivedDiscovery,
-    channelsQuery.data,
     currentPubkey,
     managedAgentsQuery.data,
     memberPubkeys,
@@ -377,8 +361,7 @@ export function MembersSidebar({
   const isAddSearchLoading =
     userSearchQuery.isLoading ||
     managedAgentsQuery.isLoading ||
-    relayAgentsQuery.isLoading ||
-    channelsQuery.isLoading;
+    relayAgentsQuery.isLoading;
   const handlePeopleSearchScroll = useUserSearchFetchMoreOnScroll(
     userSearchQuery,
     canAddMembers && normalizedDeferredSearchQuery.length > 0,
