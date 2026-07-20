@@ -179,6 +179,10 @@ pub struct ModelsArgs {
     #[command(flatten)]
     pub agent: AuthAgentArgs,
 
+    /// Select this model before returning model-specific config options.
+    #[arg(long)]
+    pub model: Option<String>,
+
     /// Output structured JSON instead of human-readable text.
     #[arg(long)]
     pub json: bool,
@@ -423,6 +427,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MODEL")]
     pub model: Option<String>,
 
+    /// Desired native effort value. Applied to each new ACP session through
+    /// the harness's `thought_level` config option.
+    #[arg(long, env = "BUZZ_ACP_EFFORT")]
+    pub effort: Option<String>,
+
     /// Permission mode for agents that support `session/set_config_option`
     /// with `configId: "mode"` (e.g. `claude-agent-acp`).
     ///
@@ -518,6 +527,8 @@ pub struct Config {
     pub memory_enabled: bool,
     /// Desired LLM model ID. Applied after every `session_new_full()`.
     pub model: Option<String>,
+    /// Desired harness-native effort value. Applied after session creation.
+    pub effort: Option<String>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
     /// Inbound author gate mode.
@@ -989,6 +1000,7 @@ impl Config {
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
             model,
+            effort: args.effort,
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
             respond_to_allowlist,
@@ -1361,6 +1373,7 @@ mod tests {
             typing_enabled: true,
             memory_enabled: true,
             model: None,
+            effort: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),

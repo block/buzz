@@ -41,6 +41,8 @@ export function EffortSelectField({
   emptyOptionLabel,
   effortDefault,
   effortValid,
+  optionLabels,
+  optionValues = BUZZ_AGENT_THINKING_EFFORT_VALUES,
   fieldClassName,
   htmlFor,
   inheritedEffort,
@@ -64,6 +66,10 @@ export function EffortSelectField({
   effortDefault: string | null;
   /** Valid effort values for this provider/model. */
   effortValid: ReadonlyArray<string>;
+  /** Harness-native labels keyed by effort value. */
+  optionLabels?: Readonly<Record<string, string>>;
+  /** Ordered values to render; defaults to Buzz Agent's complete set. */
+  optionValues?: ReadonlyArray<string>;
   /** Optional class override for the field wrapper. */
   fieldClassName?: string;
   /** `htmlFor` attribute for the label element. */
@@ -108,14 +114,16 @@ export function EffortSelectField({
       : (inheritFallbackLabel ?? "Inherit");
   const effortOptions: AgentDropdownOption[] = [
     { label: emptyOptionLabel ?? inheritLabel, value: "" },
-    ...BUZZ_AGENT_THINKING_EFFORT_VALUES.flatMap((v) => {
+    ...optionValues.flatMap((v) => {
       const isValid = (effortValid as readonly string[]).includes(v);
       if (!showUnavailableOptions && !isValid) return [];
       const isDefault = v === effortDefault;
       return [
         {
           disabled: !isValid,
-          label: isDefault ? `${v} (default)` : v,
+          label: isDefault
+            ? `${optionLabels?.[v] ?? v} (default)`
+            : (optionLabels?.[v] ?? v),
           value: v,
         },
       ];

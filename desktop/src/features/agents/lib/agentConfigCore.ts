@@ -4,6 +4,8 @@ import type {
 } from "@/shared/api/types";
 import { BUZZ_AGENT_THINKING_EFFORT } from "../ui/buzzAgentConfig";
 
+export const BUZZ_ACP_EFFORT = "BUZZ_ACP_EFFORT";
+
 export type AgentConfigScope =
   | "onboarding"
   | "global"
@@ -86,6 +88,26 @@ function valueFromEnv(config: GlobalAgentConfig, key: string) {
   return config.env_vars[key]?.trim() || null;
 }
 
+export function migrateLegacyEffortPersistence(
+  config: GlobalAgentConfig,
+  nativeThinkingKey: string | null | undefined,
+): GlobalAgentConfig {
+  const legacyEffort = config.env_vars[BUZZ_AGENT_THINKING_EFFORT];
+  if (
+    !nativeThinkingKey ||
+    nativeThinkingKey === BUZZ_AGENT_THINKING_EFFORT ||
+    legacyEffort === undefined
+  ) {
+    return config;
+  }
+  const envVars = { ...config.env_vars };
+  if (envVars[nativeThinkingKey] === undefined) {
+    envVars[nativeThinkingKey] = legacyEffort;
+  }
+  delete envVars[BUZZ_AGENT_THINKING_EFFORT];
+  return { ...config, env_vars: envVars };
+}
+
 /**
  * Derives the harness-scoped field model consumed by agent config renderers.
  *
@@ -128,32 +150,34 @@ export function deriveAgentConfigFieldModel({
   });
 
   if (runtime?.thinkingEnvVar) {
+    const isBuzzAgent = runtime.thinkingEnvVar === BUZZ_AGENT_THINKING_EFFORT;
+    const currentValue = valueFromEnv(config, runtime.thinkingEnvVar);
+    const legacyGooseValue = isBuzzAgent
+      ? null
+      : valueFromEnv(config, BUZZ_AGENT_THINKING_EFFORT);
     fields.push({
       kind: "effort",
-      optionSource:
-        runtime.id === "buzz-agent"
-          ? "buzzAgentCatalog"
-          : "legacyProviderModelCatalog",
+      optionSource: isBuzzAgent ? "buzzAgentCatalog" : "harnessNative",
       currentPersistence: {
         kind: "envVar",
-        key: BUZZ_AGENT_THINKING_EFFORT,
+        key: runtime.thinkingEnvVar,
       },
       targetApplication: { kind: "envVar", key: runtime.thinkingEnvVar },
       render: "control",
-      value: valueFromEnv(config, BUZZ_AGENT_THINKING_EFFORT),
+      value: currentValue ?? legacyGooseValue,
     });
   } else if (runtime?.id === "claude") {
     fields.push({
       kind: "effort",
       optionSource: "harnessNative",
-      currentPersistence: { kind: "unavailable" },
+      currentPersistence: { kind: "envVar", key: BUZZ_ACP_EFFORT },
       targetApplication: {
         kind: "acpConfigOption",
         id: "effort",
         category: "thought_level",
       },
-      render: "deferredUntilNativeOptionsAvailable",
-      value: null,
+      render: "control",
+      value: valueFromEnv(config, BUZZ_ACP_EFFORT),
     });
   } else {
     omissions.push({

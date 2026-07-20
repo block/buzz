@@ -18,6 +18,7 @@ pub(super) async fn run_agent_models_command(
     // into the spawn_blocking closure and we still need the values to
     // scrub any user-supplied secrets that the child surfaces in stderr.
     let env_for_redaction = merged_env.clone();
+    let model_for_probe = persisted_model.clone();
 
     // Use spawn_blocking because the desktop Tauri crate doesn't enable
     // tokio's `process` feature. std::process::Command is synchronous
@@ -34,6 +35,9 @@ pub(super) async fn run_agent_models_command(
             .arg("--json")
             .env("BUZZ_ACP_AGENT_COMMAND", &agent_command)
             .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+        if let Some(model) = model_for_probe.as_deref() {
+            cmd.arg("--model").arg(model);
+        }
         if let Some(meta) = known_acp_runtime(&agent_command) {
             for (key, value) in meta.default_env {
                 if std::env::var(key).is_err() {

@@ -1841,8 +1841,19 @@ pub fn spawn_agent_child(
         &global.env_vars,
         &super::env_vars::live_persona_env(&personas, record.persona_id.as_deref()),
     );
-    for (key, value) in super::env_vars::merged_user_env(&persona_over_global, &record.env_vars) {
+    let effective_user_env =
+        super::env_vars::merged_user_env(&persona_over_global, &record.env_vars);
+    for (key, value) in &effective_user_env {
         command.env(key, value);
+    }
+    // Legacy Goose configs stored effort under Buzz Agent's key. Honor that
+    // choice at launch without rewriting storage; the next user save swaps it
+    // to the runtime's native key.
+    if let Some((thinking_key, effort)) = legacy_effort_spawn_bridge(
+        runtime_meta.and_then(|meta| meta.thinking_env_var),
+        &effective_user_env,
+    ) {
+        command.env(thinking_key, effort);
     }
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
@@ -2062,6 +2073,19 @@ pub fn stop_managed_agent_process(
     )?;
 
     Ok(())
+}
+
+pub(crate) fn legacy_effort_spawn_bridge<'a>(
+    thinking_env_var: Option<&'a str>,
+    effective_env: &'a std::collections::BTreeMap<String, String>,
+) -> Option<(&'a str, &'a str)> {
+    let thinking_key = thinking_env_var?;
+    if thinking_key == "BUZZ_AGENT_THINKING_EFFORT" || effective_env.contains_key(thinking_key) {
+        return None;
+    }
+    effective_env
+        .get("BUZZ_AGENT_THINKING_EFFORT")
+        .map(|effort| (thinking_key, effort.as_str()))
 }
 
 /// Returns the (key, value) env var pairs that should be forwarded to the

@@ -9919,6 +9919,18 @@ export function maybeInstallE2eTauriMocks() {
             : null,
           selectedModel: null,
           supportsSwitching: true,
+          effortOptions:
+            agentCommand.includes("goose") || agentCommand.includes("claude")
+              ? [
+                  { value: "low", label: "Low" },
+                  { value: "medium", label: "Medium" },
+                  { value: "high", label: "High" },
+                ]
+              : [],
+          effortCurrentValue:
+            agentCommand.includes("goose") || agentCommand.includes("claude")
+              ? "medium"
+              : null,
         };
       }
       case "get_agent_config_surface": {

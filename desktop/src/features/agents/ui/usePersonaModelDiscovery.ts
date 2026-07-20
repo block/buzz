@@ -88,6 +88,7 @@ export function usePersonaModelDiscovery({
   modelFieldVisible,
   open,
   provider,
+  model = "",
   selectedRuntime,
 }: {
   envVars: EnvVarsValue;
@@ -95,6 +96,7 @@ export function usePersonaModelDiscovery({
   modelFieldVisible: boolean;
   open: boolean;
   provider: string;
+  model?: string;
   selectedRuntime: AcpRuntimeCatalogEntry | undefined;
 }) {
   const [modelDiscoveryData, setModelDiscoveryData] =
@@ -115,6 +117,7 @@ export function usePersonaModelDiscovery({
   const modelDiscoveryRequestRef = React.useRef(0);
 
   const trimmedProvider = provider.trim();
+  const trimmedModel = model.trim();
   const shouldDebounceModelDiscovery =
     providerRequiresExplicitModel(trimmedProvider);
   const discoveryAgentCommand = selectedRuntime?.command?.trim()
@@ -147,12 +150,14 @@ export function usePersonaModelDiscovery({
       agentCommand: discoveryAgentCommand,
       agentArgs: modelDiscoveryArgsKey,
       provider: trimmedProvider,
+      model: trimmedModel,
       envVars: modelDiscoveryEnvKey,
     });
   }, [
     canDiscoverModelOptions,
     discoveryAgentCommand,
     modelDiscoveryArgsKey,
+    trimmedModel,
     modelDiscoveryEnvKey,
     trimmedProvider,
   ]);
@@ -207,6 +212,7 @@ export function usePersonaModelDiscovery({
         agentCommand: activeAgentCommand,
         agentArgs: selectedRuntimeDefaultArgs ?? [],
         provider: trimmedProvider || undefined,
+        model: trimmedModel || undefined,
         envVars,
       })
         .then((response) => {
@@ -261,6 +267,7 @@ export function usePersonaModelDiscovery({
     selectedRuntimeAvailability,
     selectedRuntimeDefaultArgs,
     shouldDebounceModelDiscovery,
+    trimmedModel,
     trimmedProvider,
   ]);
 
@@ -290,6 +297,8 @@ export function usePersonaModelDiscovery({
 
   return {
     discoveredModelOptions,
+    effortOptions: activeModelDiscoveryData?.effortOptions ?? [],
+    effortCurrentValue: activeModelDiscoveryData?.effortCurrentValue ?? null,
     modelDiscoveryLoading: modelDiscoveryPending,
     modelDiscoveryStatus:
       modelDiscoveryPending || discoveredModelOptions !== null

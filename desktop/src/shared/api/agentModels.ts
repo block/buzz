@@ -6,6 +6,7 @@ export type DiscoverAgentModelsInput = {
   agentCommand: string;
   agentArgs?: string[];
   provider?: string;
+  model?: string;
   envVars?: Record<string, string>;
 };
 

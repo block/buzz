@@ -1468,6 +1468,7 @@ async fn tokio_main() -> Result<()> {
         channel_info: channel_info_map,
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
+        effort: config.effort.clone(),
         permission_mode: config.permission_mode,
         agent_keys: config.keys.clone(),
         agent_owner_pubkey: startup_owner
@@ -3538,7 +3539,7 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
 /// Flow: spawn → initialize → session/new → print models → shutdown.
 /// No relay connection, no MCP servers, no subscriptions. ~2-5s total.
 async fn run_models(args: ModelsArgs) -> Result<()> {
-    use acp::{extract_model_config_options, extract_model_state};
+    use acp::{extract_agent_config_options, extract_model_state};
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
     let cwd = std::env::current_dir()
@@ -3566,7 +3567,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     })
     .await;
 
-    let (init_result, session_resp) = match protocol_result {
+    let (init_result, mut session_resp) = match protocol_result {
         Ok(Ok(tuple)) => tuple,
         Ok(Err(e)) => {
             client.shutdown().await;
@@ -3594,8 +3595,36 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    // Extract model info from session/new response.
-    let config_options = extract_model_config_options(&session_resp.raw);
+    // Select the requested model first so the returned thought-level choices
+    // belong to that model. Goose returns the refreshed configOptions in the
+    // set_config_option response; other harnesses may return an empty object.
+    if let Some(model) = args.model.as_deref() {
+        if let Some(acp::ModelSwitchMethod::ConfigOption { config_id, .. }) =
+            acp::resolve_model_switch_method(&session_resp.raw, model)
+        {
+            let response = tokio::time::timeout(
+                MODELS_TIMEOUT,
+                client.session_set_config_option(&session_resp.session_id, &config_id, model),
+            )
+            .await;
+            match response {
+                Ok(Ok(response)) => {
+                    if response.get("configOptions").is_some() {
+                        session_resp.raw = response;
+                    }
+                }
+                Ok(Err(error)) => eprintln!(
+                    "warning: model-specific option discovery failed: {error}; using default options"
+                ),
+                Err(_) => eprintln!(
+                    "warning: model-specific option discovery timed out; using default options"
+                ),
+            }
+        }
+    }
+
+    // Extract model and effort info from the authoritative session response.
+    let config_options = extract_agent_config_options(&session_resp.raw);
     let model_state = extract_model_state(&session_resp.raw);
 
     if args.json {
@@ -4173,6 +4202,7 @@ mod build_mcp_servers_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            effort: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
@@ -4338,6 +4368,7 @@ mod error_outcome_emission_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            effort: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),

@@ -19,6 +19,7 @@ import type { InheritedEnvRow } from "@/features/agents/ui/EnvVarsEditor";
 import {
   deriveAgentConfigFieldModel,
   getRenderableEffortField,
+  migrateLegacyEffortPersistence,
   hasRenderableAgentConfigField,
 } from "@/features/agents/lib/agentConfigCore";
 import {
@@ -148,7 +149,7 @@ export function AgentConfigFields({
   config,
   isCustomModelEditing,
   isCustomProvider,
-  onConfigChange,
+  onConfigChange: onConfigChangeProp,
   onCustomModelEditingChange,
   onIsCustomProviderChange,
   onValidityChange,
@@ -180,10 +181,21 @@ export function AgentConfigFields({
     [config, disclosure, selectedRuntime],
   );
   const effortField = getRenderableEffortField(fieldModel);
+  const usesHarnessNativeEffort = effortField?.optionSource === "harnessNative";
   const effortPersistenceKey =
     effortField?.currentPersistence.kind === "envVar"
       ? effortField.currentPersistence.key
       : null;
+  const onConfigChange = React.useCallback(
+    (nextConfig: GlobalAgentConfig) =>
+      onConfigChangeProp(
+        migrateLegacyEffortPersistence(
+          nextConfig,
+          selectedRuntime?.thinkingEnvVar,
+        ),
+      ),
+    [onConfigChangeProp, selectedRuntime?.thinkingEnvVar],
+  );
   const bakedProvider = React.useMemo(
     () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
     [bakedEnv],
@@ -252,6 +264,8 @@ export function AgentConfigFields({
 
   const {
     discoveredModelOptions,
+    effortOptions,
+    effortCurrentValue,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
   } = usePersonaModelDiscovery({
@@ -260,6 +274,7 @@ export function AgentConfigFields({
     modelFieldVisible: !dependentFieldsDisabled,
     open: true,
     provider: providerForDiscovery,
+    model: config.model ?? "",
     selectedRuntime,
   });
 
@@ -311,9 +326,7 @@ export function AgentConfigFields({
     selectedRuntimeId,
   ]);
 
-  const currentEffortForAutoClear = effortPersistenceKey
-    ? (config.env_vars[effortPersistenceKey] ?? "")
-    : "";
+  const currentEffortForAutoClear = effortField?.value ?? "";
 
   // When the selected harness changes outside this component (Back → setup
   // page → choose a different harness → Next), the saved model can belong to
@@ -333,6 +346,9 @@ export function AgentConfigFields({
 
     const nextEnvVars = { ...config.env_vars };
     if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+    if (usesHarnessNativeEffort) {
+      delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+    }
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
@@ -343,6 +359,7 @@ export function AgentConfigFields({
     onCustomModelEditingChange,
     healOnMount,
     effortPersistenceKey,
+    usesHarnessNativeEffort,
   ]);
 
   // Orphan-model clearing follows the mount-time healing policy above: the
@@ -365,6 +382,9 @@ export function AgentConfigFields({
 
     const nextEnvVars = { ...config.env_vars };
     if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+    if (usesHarnessNativeEffort) {
+      delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+    }
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
@@ -374,17 +394,25 @@ export function AgentConfigFields({
     onConfigChange,
     onCustomModelEditingChange,
     effortPersistenceKey,
+    usesHarnessNativeEffort,
   ]);
-  const { validValues: effortValidForAutoClear } = getProviderEffortConfig(
-    config.provider ?? "",
-    config.model ?? "",
-  );
+  const effortValidForAutoClear = usesHarnessNativeEffort
+    ? effortOptions.length > 0
+      ? effortOptions.map((option) => option.value)
+      : currentEffortForAutoClear
+        ? [currentEffortForAutoClear]
+        : []
+    : getProviderEffortConfig(config.provider ?? "", config.model ?? "")
+        .validValues;
   useEffortAutoClear({
     currentEffort: currentEffortForAutoClear,
     effortValid: effortValidForAutoClear,
     onClear: () => {
       const nextEnvVars = { ...config.env_vars };
       if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+      if (usesHarnessNativeEffort) {
+        delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+      }
       onConfigChange({ ...config, env_vars: nextEnvVars });
     },
   });
@@ -435,8 +463,14 @@ export function AgentConfigFields({
   }
 
   function handleModelChange(value: string) {
+    const nextEnvVars = { ...config.env_vars };
+    if (usesHarnessNativeEffort) {
+      if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+      delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+    }
     onConfigChange({
       ...config,
+      env_vars: nextEnvVars,
       model: config.provider === "relay-mesh" ? value || "auto" : value || null,
     });
   }
@@ -491,20 +525,21 @@ export function AgentConfigFields({
     return "Select a provider";
   }, [bakedProvider, providerOptions]);
 
-  const implicitEffortProvider =
-    selectedRuntimeId === "claude"
-      ? "anthropic"
-      : selectedRuntimeId === "codex"
-        ? "openai"
-        : "";
-  const effortProvider = providerFieldVisible
-    ? (config.provider ?? "")
-    : implicitEffortProvider;
-  const { validValues: effortValid, defaultValue: effortDefault } =
-    getProviderEffortConfig(effortProvider, config.model ?? "");
-  const currentEffort = effortPersistenceKey
-    ? (config.env_vars[effortPersistenceKey] ?? "")
-    : "";
+  const effortProvider = providerFieldVisible ? (config.provider ?? "") : "";
+  const buzzEffortConfig = getProviderEffortConfig(
+    effortProvider,
+    config.model ?? "",
+  );
+  const effortValid = usesHarnessNativeEffort
+    ? effortOptions.map((option) => option.value)
+    : buzzEffortConfig.validValues;
+  const effortDefault = usesHarnessNativeEffort
+    ? effortCurrentValue
+    : buzzEffortConfig.defaultValue;
+  const effortOptionLabels = Object.fromEntries(
+    effortOptions.map((option) => [option.value, option.label]),
+  );
+  const currentEffort = effortField?.value ?? "";
   const effortFieldVisible = showEffortField && effortField !== undefined;
 
   const fieldClassName = unstyled ? "space-y-4" : "space-y-1.5 p-3";
@@ -688,6 +723,8 @@ export function AgentConfigFields({
             }
             effortDefault={effortDefault}
             effortValid={effortValid}
+            optionLabels={effortOptionLabels}
+            optionValues={usesHarnessNativeEffort ? effortValid : undefined}
             fieldClassName={unstyled ? fieldClassName : undefined}
             htmlFor="global-agent-thinking-effort"
             inheritFallbackLabel={
@@ -704,6 +741,11 @@ export function AgentConfigFields({
               } else {
                 if (effortPersistenceKey)
                   nextEnvVars[effortPersistenceKey] = value;
+              }
+              if (
+                selectedRuntime?.thinkingEnvVar !== BUZZ_AGENT_THINKING_EFFORT
+              ) {
+                delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
               }
               onConfigChange({ ...config, env_vars: nextEnvVars });
             }}

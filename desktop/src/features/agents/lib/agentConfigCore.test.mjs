@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deriveAgentConfigFieldModel } from "./agentConfigCore.ts";
+import {
+  deriveAgentConfigFieldModel,
+  migrateLegacyEffortPersistence,
+} from "./agentConfigCore.ts";
 
 const config = {
   env_vars: { BUZZ_AGENT_THINKING_EFFORT: "high" },
@@ -60,7 +63,7 @@ test("Buzz Agent exposes provider, model, and Buzz-owned effort", () => {
   });
 });
 
-test("Goose exposes provider, model, and its real effort application key", () => {
+test("Goose reads legacy effort but persists and applies its native key", () => {
   const model = deriveAgentConfigFieldModel({
     config,
     runtime: runtime("goose", {
@@ -71,21 +74,46 @@ test("Goose exposes provider, model, and its real effort application key", () =>
     scope: "global",
   });
 
-  assert.equal(
-    field(model, "effort").optionSource,
-    "legacyProviderModelCatalog",
-  );
+  assert.equal(field(model, "effort").optionSource, "harnessNative");
   assert.deepEqual(field(model, "effort").currentPersistence, {
     kind: "envVar",
-    key: "BUZZ_AGENT_THINKING_EFFORT",
+    key: "GOOSE_THINKING_EFFORT",
   });
+  assert.equal(field(model, "effort").value, "high");
   assert.deepEqual(field(model, "effort").targetApplication, {
     kind: "envVar",
     key: "GOOSE_THINKING_EFFORT",
   });
 });
 
-test("Claude models effort as a deferred native ACP option", () => {
+test("Goose legacy effort migrates once without overwriting its native value", () => {
+  const legacyOnly = migrateLegacyEffortPersistence(
+    config,
+    "GOOSE_THINKING_EFFORT",
+  );
+  assert.equal(legacyOnly.env_vars.GOOSE_THINKING_EFFORT, "high");
+  assert.equal(legacyOnly.env_vars.BUZZ_AGENT_THINKING_EFFORT, undefined);
+
+  const nativeWins = migrateLegacyEffortPersistence(
+    {
+      ...config,
+      env_vars: {
+        BUZZ_AGENT_THINKING_EFFORT: "high",
+        GOOSE_THINKING_EFFORT: "low",
+      },
+    },
+    "GOOSE_THINKING_EFFORT",
+  );
+  assert.equal(nativeWins.env_vars.GOOSE_THINKING_EFFORT, "low");
+  assert.equal(nativeWins.env_vars.BUZZ_AGENT_THINKING_EFFORT, undefined);
+
+  assert.equal(
+    migrateLegacyEffortPersistence(config, "BUZZ_AGENT_THINKING_EFFORT"),
+    config,
+  );
+});
+
+test("Claude renders and persists its native ACP effort option", () => {
   const model = deriveAgentConfigFieldModel({
     config,
     runtime: runtime("claude"),
@@ -96,12 +124,10 @@ test("Claude models effort as a deferred native ACP option", () => {
     model.fields.map((item) => item.kind),
     ["model", "effort"],
   );
-  assert.equal(
-    field(model, "effort").render,
-    "deferredUntilNativeOptionsAvailable",
-  );
+  assert.equal(field(model, "effort").render, "control");
   assert.deepEqual(field(model, "effort").currentPersistence, {
-    kind: "unavailable",
+    kind: "envVar",
+    key: "BUZZ_ACP_EFFORT",
   });
   assert.deepEqual(field(model, "effort").targetApplication, {
     kind: "acpConfigOption",

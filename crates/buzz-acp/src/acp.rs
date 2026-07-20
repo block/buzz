@@ -1816,20 +1816,87 @@ pub enum ModelSwitchMethod {
     SetModel { model_id: String },
 }
 
-/// Extract `configOptions` entries with `category == "model"` from a `session/new` result.
+/// Extract model and thought-level `configOptions` from a `session/new` result.
 ///
-/// Returns the raw JSON array entries. Each entry has `configId`, `displayName`,
-/// `options: [{ value, displayName }]`, etc.
-pub fn extract_model_config_options(result: &serde_json::Value) -> Vec<serde_json::Value> {
+/// These are the harness-native choices Buzz can render and apply. Other
+/// categories (appearance, permissions, etc.) remain owned by the harness.
+pub fn extract_agent_config_options(result: &serde_json::Value) -> Vec<serde_json::Value> {
     result["configOptions"]
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter(|opt| opt.get("category").and_then(|c| c.as_str()) == Some("model"))
+                .filter(|opt| {
+                    matches!(
+                        opt.get("category").and_then(|c| c.as_str()),
+                        Some("model" | "thought_level")
+                    )
+                })
                 .cloned()
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Return the harness-native thought-level config ID when the requested value
+/// is advertised for this session.
+pub fn resolve_effort_config_option<'a>(
+    result: &'a serde_json::Value,
+    desired: &str,
+) -> Option<&'a str> {
+    result
+        .get("configOptions")?
+        .as_array()?
+        .iter()
+        .find(|option| {
+            option.get("category").and_then(|value| value.as_str()) == Some("thought_level")
+                && option
+                    .get("options")
+                    .and_then(|values| values.as_array())
+                    .is_some_and(|values| {
+                        values.iter().any(|value| {
+                            value.get("value").and_then(|value| value.as_str()) == Some(desired)
+                        })
+                    })
+        })
+        .and_then(|option| option.get("id").or_else(|| option.get("configId")))
+        .and_then(|value| value.as_str())
+}
+
+/// Merge refreshed options into the session catalog without dropping options
+/// omitted from a partial `set_config_option` response.
+pub fn merge_config_options(session: &mut serde_json::Value, refreshed: &serde_json::Value) {
+    let Some(refreshed_options) = refreshed
+        .get("configOptions")
+        .and_then(|value| value.as_array())
+    else {
+        return;
+    };
+    let Some(session_options) = session
+        .get_mut("configOptions")
+        .and_then(|value| value.as_array_mut())
+    else {
+        session["configOptions"] = serde_json::Value::Array(refreshed_options.clone());
+        return;
+    };
+    for option in refreshed_options {
+        let id = option.get("id").or_else(|| option.get("configId"));
+        if let Some(existing) = session_options
+            .iter_mut()
+            .find(|existing| existing.get("id").or_else(|| existing.get("configId")) == id)
+        {
+            *existing = option.clone();
+        } else {
+            session_options.push(option.clone());
+        }
+    }
+}
+
+/// Extract only model-category `configOptions` from a `session/new` result.
+pub fn extract_model_config_options(result: &serde_json::Value) -> Vec<serde_json::Value> {
+    extract_agent_config_options(result)
+        .into_iter()
+        .filter(|opt| opt.get("category").and_then(|c| c.as_str()) == Some("model"))
+        .collect()
 }
 
 /// Extract `SessionModelState` (unstable path) from a `session/new` result.
@@ -1852,7 +1919,11 @@ pub fn resolve_model_switch_method(
     // 1. Search stable configOptions for a "model"-category entry whose
     //    options contain a value matching desired_model.
     for config_opt in extract_model_config_options(session_new_result) {
-        let config_id = match config_opt.get("configId").and_then(|v| v.as_str()) {
+        let config_id = match config_opt
+            .get("id")
+            .or_else(|| config_opt.get("configId"))
+            .and_then(|v| v.as_str())
+        {
             Some(id) => id,
             None => continue,
         };
@@ -2347,6 +2418,62 @@ mod tests {
         let opts = super::extract_model_config_options(&result);
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0]["configId"].as_str(), Some("model"));
+    }
+
+    #[test]
+    fn extract_agent_config_options_keeps_native_effort() {
+        let result = serde_json::json!({
+            "configOptions": [
+                { "id": "model", "category": "model" },
+                {
+                    "id": "thinking_effort",
+                    "category": "thought_level",
+                    "currentValue": "medium",
+                    "options": [{ "value": "low", "name": "Low" }]
+                },
+                { "id": "theme", "category": "appearance" }
+            ]
+        });
+        let opts = super::extract_agent_config_options(&result);
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[1]["id"].as_str(), Some("thinking_effort"));
+    }
+
+    #[test]
+    fn resolve_effort_config_option_requires_an_advertised_value() {
+        let result = serde_json::json!({
+            "configOptions": [{
+                "id": "thinking_effort",
+                "category": "thought_level",
+                "options": [{ "value": "low" }, { "value": "high" }]
+            }]
+        });
+        assert_eq!(
+            super::resolve_effort_config_option(&result, "high"),
+            Some("thinking_effort")
+        );
+        assert_eq!(super::resolve_effort_config_option(&result, "max"), None);
+    }
+
+    #[test]
+    fn merge_config_options_preserves_unmentioned_categories() {
+        let mut session = serde_json::json!({
+            "configOptions": [
+                { "id": "model", "category": "model", "currentValue": "old" },
+                { "id": "mode", "category": "mode", "currentValue": "auto" }
+            ]
+        });
+        let refreshed = serde_json::json!({
+            "configOptions": [
+                { "id": "model", "category": "model", "currentValue": "new" },
+                { "id": "thinking_effort", "category": "thought_level" }
+            ]
+        });
+        super::merge_config_options(&mut session, &refreshed);
+        let options = session["configOptions"].as_array().unwrap();
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0]["currentValue"], "new");
+        assert_eq!(options[1]["id"], "mode");
     }
 
     #[test]

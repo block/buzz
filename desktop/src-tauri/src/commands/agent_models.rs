@@ -69,10 +69,7 @@ pub async fn get_agent_models(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| effective_command.clone());
 
-        // ModelPicker can persist a selected model but not rewrite the saved
-        // provider/env snapshot, and runtime spawn reads that same snapshot.
-        // Discover models against the record snapshot so an out-of-date persona
-        // cannot offer models for a provider this agent will not launch with.
+        // Discover against the same saved snapshot runtime spawn uses.
         let discovery = saved_agent_model_discovery_config(record, &effective_command);
 
         (
@@ -171,6 +168,8 @@ pub struct DiscoverAgentModelsInput {
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
 }
 
@@ -219,9 +218,11 @@ pub async fn discover_agent_models(
     }
     let merged_env = crate::managed_agents::merged_user_env(&derived_env, &input.env_vars);
     let merged_env = discovery_env_with_baked_floor(merged_env);
+    // Native catalogs carry per-model options that provider APIs cannot.
+    let use_harness_catalog =
+        known_acp_runtime(agent_command).is_some_and(|runtime| runtime.supports_acp_native_config);
 
-    // Buzz shared compute discovery must not depend on the local OpenAI ingress: that
-    // client endpoint is started only after a live target is selected.
+    // Shared compute discovery cannot depend on the local OpenAI ingress.
     #[cfg(feature = "mesh-llm")]
     if input.provider.as_deref().map(str::trim)
         == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
@@ -256,6 +257,8 @@ pub async fn discover_agent_models(
             agent_default_model: None,
             selected_model: None,
             supports_switching: true,
+            effort_options: Vec::new(),
+            effort_current_value: None,
         });
     }
     #[cfg(not(feature = "mesh-llm"))]
@@ -265,54 +268,60 @@ pub async fn discover_agent_models(
         return Err("Buzz shared compute is not available in this build".to_string());
     }
 
-    if let Some(models) = discover_openai_compatible_models(
-        &state.http_client,
-        input.provider.as_deref(),
-        &merged_env,
-        None,
-    )
-    .await?
-    {
-        return Ok(models);
+    if !use_harness_catalog {
+        if let Some(models) = discover_openai_compatible_models(
+            &state.http_client,
+            input.provider.as_deref(),
+            &merged_env,
+            None,
+        )
+        .await?
+        {
+            return Ok(models);
+        }
+
+        if let Some(models) = discover_anthropic_models(
+            &state.http_client,
+            input.provider.as_deref(),
+            &merged_env,
+            None,
+        )
+        .await?
+        {
+            return Ok(models);
+        }
+
+        if let Some(models) = discover_databricks_models(
+            &state.http_client,
+            input.provider.as_deref(),
+            &merged_env,
+            None,
+        )
+        .await?
+        {
+            return Ok(models);
+        }
     }
 
-    if let Some(models) = discover_anthropic_models(
-        &state.http_client,
-        input.provider.as_deref(),
-        &merged_env,
-        None,
+    run_agent_models_command(
+        resolved_acp,
+        resolved_agent,
+        agent_args,
+        input.model,
+        merged_env,
     )
-    .await?
-    {
-        return Ok(models);
-    }
-
-    if let Some(models) = discover_databricks_models(
-        &state.http_client,
-        input.provider.as_deref(),
-        &merged_env,
-        None,
-    )
-    .await?
-    {
-        return Ok(models);
-    }
-
-    run_agent_models_command(resolved_acp, resolved_agent, agent_args, None, merged_env).await
+    .await
 }
-
 #[derive(Debug, Deserialize)]
 struct OpenAiModelListResponse {
     data: Vec<OpenAiModelListItem>,
 }
-
 #[derive(Debug, Deserialize)]
 struct OpenAiModelListItem {
     id: String,
     #[serde(default)]
     created: Option<i64>,
 }
-
 fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
     matches!(
         provider
@@ -322,7 +331,6 @@ fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
         Some("openai" | "openai-compat")
     )
 }
-
 #[cfg(test)]
 fn openai_compatible_models_url(env: &BTreeMap<String, String>) -> String {
     let base_url = env_value(env, "OPENAI_COMPAT_BASE_URL")
@@ -531,6 +539,8 @@ async fn discover_openai_compatible_models(
         agent_default_model: None,
         selected_model,
         supports_switching: true,
+        effort_options: Vec::new(),
+        effort_current_value: None,
     }))
 }
 
@@ -671,6 +681,8 @@ async fn discover_anthropic_models(
         agent_default_model: None,
         selected_model,
         supports_switching: true,
+        effort_options: Vec::new(),
+        effort_current_value: None,
     }))
 }
 
@@ -763,6 +775,8 @@ async fn discover_databricks_models(
         agent_default_model: None,
         selected_model,
         supports_switching: true,
+        effort_options: Vec::new(),
+        effort_current_value: None,
     }))
 }
 
@@ -1044,6 +1058,9 @@ pub(super) fn normalize_agent_models(
 
     let supports_switching = !models.is_empty();
 
+    let (effort_options, effort_current_value) =
+        super::agent_effort_options::normalize_effort_options(raw);
+
     AgentModelsResponse {
         agent_name,
         agent_version,
@@ -1051,6 +1068,8 @@ pub(super) fn normalize_agent_models(
         agent_default_model,
         selected_model: persisted_model,
         supports_switching,
+        effort_options,
+        effort_current_value,
     }
 }
 

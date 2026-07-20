@@ -28,17 +28,15 @@ with a TypeScript lookup table or an id comparison in a component.
    belongs in `deriveAgentConfigFieldModel` (once, with a named reason), never
    in a component. Components ask the field model what exists
    (`hasRenderableAgentConfigField`, `getRenderableEffortField`).
-2. **Effort reads/writes go through the descriptor.** Use the effort
-   descriptor's `currentPersistence` key — never a raw
-   `BUZZ_AGENT_THINKING_EFFORT` literal in UI code. `currentPersistence` is
-   where the value lives *today*; `targetApplication` is how the harness
-   *should* receive it. They intentionally differ until PR 2.7 migrates
-   Goose/Claude — do not "fix" one to match the other without doing the
-   migration work.
+2. **Effort reads/writes go through the descriptor.** Goose persists to
+   `GOOSE_THINKING_EFFORT`; legacy Buzz-key values are read until the next save
+   and bridged at spawn without double-writing. Claude persists through
+   `BUZZ_ACP_EFFORT` and applies through its native `thought_level` ACP option.
+   Harness-native option lists come from live ACP discovery, never Buzz Agent's
+   mirrored provider table.
 3. **Field absence has a named reason, not a boolean.** Codex effort is
-   `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
-   New absences get new named reasons in `AgentConfigOmission` /
-   `render` — never a `showX` prop.
+   `ownedByModelId`. New absences get new named reasons in
+   `AgentConfigOmission` / `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:
    "resetDependentValues"` (user changed harness/provider → dependent values
    reset everywhere) vs `onCatalogMismatch: "explainOnly" | "onboardingCleanup"`
