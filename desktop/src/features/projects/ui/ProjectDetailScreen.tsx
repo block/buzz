@@ -281,7 +281,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         description:
           error instanceof Error ? error.message : "The Git fetch failed.",
       });
+      return;
     }
+    toast.success("Remote state refreshed.");
   }, [repoSnapshotQuery, repoStateQuery, repoSyncStatusQuery]);
   // Compact branch + remote/local controls shared by the readme and Files
   // tab headers.
@@ -301,6 +303,12 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         ? "Local"
         : "Local missing",
     remoteLabel: repoSnapshotQuery.isLoading ? "Remote checking" : "Remote",
+    onCloneLocal: project?.cloneUrls[0]
+      ? () => {
+          void handleCloneRepo();
+        }
+      : undefined,
+    clonePending: cloneRepoMutation.isPending,
     canPush: repoSyncStatusQuery.data?.canPush ?? false,
     onPush: () => {
       void handlePushLocalRepo();
@@ -813,16 +821,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
 
               <WorkspaceTabs
                 key={`${project.id}:${tabsResetKey}`}
-                cloneAction={
-                  !hasLocalCheckout && project.cloneUrls[0]
-                    ? {
-                        onClone: () => {
-                          void handleCloneRepo();
-                        },
-                        pending: cloneRepoMutation.isPending,
-                      }
-                    : undefined
-                }
                 commitDiff={commitDiffQuery.data}
                 commitDiffError={commitDiffQuery.error}
                 commitDiffLoading={commitDiffQuery.isLoading}
