@@ -572,7 +572,7 @@ export function ProjectsView() {
     <PageHeader
       className="pointer-events-auto mb-8"
       description="Set up and manage your projects."
-      title={activeCommunity?.name || "Relay"}
+      title="Projects"
     />
   );
 

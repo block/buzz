@@ -9297,12 +9297,33 @@ export function maybeInstallE2eTauriMocks() {
           pulled: true,
           message: "Pulled main from remote.",
         };
-      case "clone_project_repository":
+      case "clone_project_repository": {
+        const path = "/tmp/buzz/REPOS/mock-project";
+        const commit = "0123456789abcdef0123456789abcdef01234567";
+        window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__ = {
+          local_path: path,
+          local_branch: "main",
+          local_head: commit,
+          local_short_head: commit.slice(0, 7),
+          remote_branch: "main",
+          remote_head: commit,
+          remote_short_head: commit.slice(0, 7),
+          merge_base: commit,
+          ahead_count: 0,
+          behind_count: 0,
+          has_uncommitted_changes: false,
+          has_untracked_files: false,
+          can_push: false,
+          push_block_reason: "Local branch is already pushed.",
+          can_pull: false,
+          pull_block_reason: "Local branch is up to date.",
+        };
         return {
-          path: "/tmp/buzz/REPOS/mock-project",
+          path,
           cloned: true,
           message: "Cloned repository.",
         };
+      }
       case "sign_project_pull_request_review_request": {
         const { input } = payload as {
           input: {

@@ -27,6 +27,9 @@ test("top-level project lists align dates and overflow actions", async ({
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Projects" }),
+  ).toBeVisible();
 
   async function trailingPositions(row: import("@playwright/test").Locator) {
     await waitForAnimations(page);

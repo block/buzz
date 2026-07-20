@@ -1,6 +1,5 @@
 import {
   CircleDot,
-  Download,
   GitPullRequest,
   Plus,
   RefreshCw,
@@ -47,11 +46,6 @@ import {
   type CreateIssueDialogInput,
 } from "./CreateIssueDialog";
 import { PROJECT_PANEL_ACTION_BUTTON_CLASS } from "./projectPanelStyles";
-
-type CloneRepositoryAction = {
-  onClone: () => void;
-  pending: boolean;
-};
 
 type CreatePullRequestAction = {
   projects: Project[];
@@ -106,7 +100,6 @@ function WorkItemListHeader({
 }
 
 export function WorkspaceTabs({
-  cloneAction,
   commitDiff,
   commitDiffError,
   commitDiffLoading,
@@ -142,7 +135,6 @@ export function WorkspaceTabs({
   terminalTitle,
   viewerGitIdentity,
 }: {
-  cloneAction?: CloneRepositoryAction;
   commitDiff: ProjectRepoDiff | null | undefined;
   commitDiffError: unknown;
   commitDiffLoading: boolean;
@@ -274,19 +266,6 @@ export function WorkspaceTabs({
             variant="ghost"
           >
             <SquareTerminal className="h-[1.125rem] w-[1.125rem]" />
-          </Button>
-        ) : null}
-        {cloneAction ? (
-          <Button
-            className="h-8 shrink-0 gap-1.5"
-            disabled={cloneAction.pending}
-            onClick={cloneAction.onClone}
-            size="sm"
-            title="Clone repository"
-            variant="outline"
-          >
-            <Download className="h-4 w-4" />
-            {cloneAction.pending ? "Cloning…" : "Clone"}
           </Button>
         ) : null}
         {updatePullRequestAction ? (
