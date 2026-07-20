@@ -193,6 +193,7 @@ export function AgentDefaultsEditor({
           onCustomModelEditingChange={setIsCustomModelEditing}
           onIsCustomProviderChange={setIsCustomProvider}
           onValidityChange={setConfigIsValid}
+          useCustomSelect
         />
       )}
 
