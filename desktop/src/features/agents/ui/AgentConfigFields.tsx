@@ -282,7 +282,16 @@ export function AgentConfigFields({
 
   const currentEffortForAutoClear =
     config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+  // Orphan-model clearing must never fire on mount: the backend resolves
+  // provider and model independently across layers (agent → definition →
+  // global), so a saved global model WITHOUT a global provider can be a
+  // deliberate, working pattern (provider supplied by a higher layer).
+  // Clearing it on page-open silently breaks that agent on its next
+  // restart. Only clear after the user explicitly edits the provider in
+  // this session — see PR #2148 review thread.
+  const userEditedProviderRef = React.useRef(false);
   React.useEffect(() => {
+    if (!userEditedProviderRef.current) return;
     if (!dependentFieldsDisabled) return;
     if (
       (config.model ?? "").trim().length === 0 &&
@@ -317,6 +326,7 @@ export function AgentConfigFields({
   });
 
   function handleProviderChange(value: string) {
+    userEditedProviderRef.current = true;
     const previousApiKey = getProviderApiKeyEnvVar(effectiveProvider);
     if (value === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
       const nextEnvVars = { ...config.env_vars };
