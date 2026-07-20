@@ -213,13 +213,22 @@ test("channel browser ranks the best match first", async ({ page }) => {
   );
 });
 
-test("sidebar add-channel button opens the browser", async ({ page }) => {
+test("sidebar add-channel button creates without treating the click as a callback", async ({
+  page,
+}) => {
   await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
   await page.getByTestId("section-actions-channels-quick-create").click();
 
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
+  const channelName = `sidebar-created-${Date.now()}`;
+  await page.getByTestId("channel-browser-search").fill(channelName);
+  await page.getByTestId("channel-browser-create-row").click();
+  await page.getByTestId("create-channel-submit").click();
+
+  await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  await expect(page.getByTestId("stream-list")).toContainText(channelName);
 });
 
 test("custom section add button creates directly into that section", async ({

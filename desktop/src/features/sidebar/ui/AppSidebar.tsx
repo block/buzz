@@ -729,7 +729,7 @@ export function AppSidebar({
                       actionsTestId="section-actions-channels"
                       listTestId="stream-list"
                       quickCreateLabel="Browse channels"
-                      onQuickCreateClick={onBrowseChannels}
+                      onQuickCreateClick={() => onBrowseChannels?.()}
                       showQuickCreate
                       onMarkAllRead={onMarkAllChannelsRead}
                       onMarkChannelRead={onMarkChannelRead}
