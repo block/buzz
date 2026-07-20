@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.4.20
+
+- fix(desktop): composite harness loader opacity ([#2180](https://github.com/block/buzz/pull/2180)) ([`77900e69`](https://github.com/block/buzz/commit/77900e69b3bc70a00010d826df2b55d2538ed4f2))
+- fix(desktop): modal sign-in + branded communities onboarding page ([#2147](https://github.com/block/buzz/pull/2147)) ([`8a65d81f`](https://github.com/block/buzz/commit/8a65d81fab4fee853887cad92f23b7cb581a3b53))
+- test(desktop): model membership relay in invite QR spec ([#2178](https://github.com/block/buzz/pull/2178)) ([`9ab52d4f`](https://github.com/block/buzz/commit/9ab52d4f847c21a98fd7ecf8f8ab6d9fa1e99768))
+- fix(desktop): prefer live agent mentions ([#2149](https://github.com/block/buzz/pull/2149)) ([`a4dfead2`](https://github.com/block/buzz/commit/a4dfead21aaa6d807444fd89aad49ebff43e69b5))
+- fix(desktop): close focused threads on Escape ([#2154](https://github.com/block/buzz/pull/2154)) ([`9fb1a90b`](https://github.com/block/buzz/commit/9fb1a90b66f4d0443a63768d8ec9a8bb18102bd8))
+- fix: skip membership lookup for open relays ([#2107](https://github.com/block/buzz/pull/2107)) ([`fc1db469`](https://github.com/block/buzz/commit/fc1db46937632b4126a65678336e623234a6d238))
+- fix(desktop): make invite QR downloadable ([#2168](https://github.com/block/buzz/pull/2168)) ([`144b4f6c`](https://github.com/block/buzz/commit/144b4f6c8d532a27645335a50d1574efeec8805a))
+- Archive managed agents when deleted ([#2135](https://github.com/block/buzz/pull/2135)) ([`4d58deaf`](https://github.com/block/buzz/commit/4d58deafaaad62699494904225aee1f5aded5e52))
+- chore(deps): update rust crate rustls to v0.23.42 ([#2151](https://github.com/block/buzz/pull/2151)) ([`984645ec`](https://github.com/block/buzz/commit/984645ecaa2b99bdeef1156c144c4b9b9b0afcfc))
+- Add Agent Config Core: harness capability model behind agent config surfaces ([#2158](https://github.com/block/buzz/pull/2158)) ([`6881a337`](https://github.com/block/buzz/commit/6881a3376fe5059434a97beebb6dc48dd0b65682))
+- fix(desktop): derive default clone URL for relay-hosted repos ([#2166](https://github.com/block/buzz/pull/2166)) ([`21dbd326`](https://github.com/block/buzz/commit/21dbd32645fcc65614540494792c04f5415ef494))
+- fix(desktop): mask composer rounded corners ([#2165](https://github.com/block/buzz/pull/2165)) ([`8024ce72`](https://github.com/block/buzz/commit/8024ce72efbd7ccd5332eaac048b96af954c947e))
+- feat(desktop): add PR merge conflict recovery ([#2164](https://github.com/block/buzz/pull/2164)) ([`4fe3835e`](https://github.com/block/buzz/commit/4fe3835e76ce0f2b92be4f05d0a82a3419760839))
+- fix(desktop): mask scrolled content behind channel and thread composers ([#2163](https://github.com/block/buzz/pull/2163)) ([`6ecc8946`](https://github.com/block/buzz/commit/6ecc89468db0af4adfd5588e60bada70625a29ef))
+- feat(desktop): add inline PR diff comments ([#2162](https://github.com/block/buzz/pull/2162)) ([`73ac59a0`](https://github.com/block/buzz/commit/73ac59a0337f1d1a80db002447202bcb8b356b0a))
+- feat(desktop): add commit-scoped PR review decisions ([#2161](https://github.com/block/buzz/pull/2161)) ([`de2220a7`](https://github.com/block/buzz/commit/de2220a70e29e1d90537c3f99470375e25ae84e1))
+- fix(desktop): batch project work item queries ([#2160](https://github.com/block/buzz/pull/2160)) ([`ba07de36`](https://github.com/block/buzz/commit/ba07de3670d670370ea68988c01c8405274a093d))
+- feat(desktop): make missing project checkouts actionable ([#2159](https://github.com/block/buzz/pull/2159)) ([`ac8c5261`](https://github.com/block/buzz/commit/ac8c5261225405afe9dfdf987fa6fcd902f5cf75))
+- Fix harness default model states in onboarding ([#2156](https://github.com/block/buzz/pull/2156)) ([`a6432ab1`](https://github.com/block/buzz/commit/a6432ab133bde1dd00b31b01769d9d85effe0ad1))
+- Reduce agent config flags to canonical behaviors + disclosure presets ([#2148](https://github.com/block/buzz/pull/2148)) ([`ad990b0d`](https://github.com/block/buzz/commit/ad990b0d47a26da72f466c7fe0c5cf499db937f9))
+- fix(desktop): align inbox layout and draft details ([#2143](https://github.com/block/buzz/pull/2143)) ([`7f769b24`](https://github.com/block/buzz/commit/7f769b2439550e841a19e69460f813664113c8b6))
+- fix(desktop): scope Emacs keys to lines ([#2127](https://github.com/block/buzz/pull/2127)) ([`9a251fbe`](https://github.com/block/buzz/commit/9a251fbef10d58e4da81fb135067a72a84208156))
+- feat(desktop): add fuzzy onboarding cards ([#2141](https://github.com/block/buzz/pull/2141)) ([`e84f3fe8`](https://github.com/block/buzz/commit/e84f3fe8edf2094870fed9c1196c00ef5a5213e0))
+- Add back action to community profile onboarding ([#2136](https://github.com/block/buzz/pull/2136)) ([`1342fc56`](https://github.com/block/buzz/commit/1342fc564ae9a03bed10b279c8b408ad43254c02))
+- fix(desktop): restore channel header hidden behind shared backdrop ([#2139](https://github.com/block/buzz/pull/2139)) ([`916c67d1`](https://github.com/block/buzz/commit/916c67d1d4d8dca0d5d2952e22d9ee34669cd6fa))
+- refactor(desktop): rename agent config files to agent-config family ([#2140](https://github.com/block/buzz/pull/2140)) ([`c5db0943`](https://github.com/block/buzz/commit/c5db0943508743f979746450776fd289a2303285))
+- feat(desktop): complete project git workflows ([#2119](https://github.com/block/buzz/pull/2119)) ([`ed432f91`](https://github.com/block/buzz/commit/ed432f91d91257d12386ef854adfa372f65a1384))
+- Add owned community onboarding ([#2123](https://github.com/block/buzz/pull/2123)) ([`cd0e7402`](https://github.com/block/buzz/commit/cd0e7402d7a793a174ce7ebb821ba9b50e74df86))
+- Improve agent runtime settings ([#2026](https://github.com/block/buzz/pull/2026)) ([`2b0f5e9f`](https://github.com/block/buzz/commit/2b0f5e9f8029c0baf01cd06bbca92080e8966c6c))
+- fix(desktop): refine onboarding copy ([#2130](https://github.com/block/buzz/pull/2130)) ([`d04a4c97`](https://github.com/block/buzz/commit/d04a4c978a1263d15167f943b7026e994ac3a156))
+- fix(ui): relabel agent owner attribution from "owned by" to "managed by" ([#2133](https://github.com/block/buzz/pull/2133)) ([`a1e977cd`](https://github.com/block/buzz/commit/a1e977cd1bda3f5421533b47f12c38f4a336224e))
+- remove relay field from invite link step ([#2131](https://github.com/block/buzz/pull/2131)) ([`3881bff6`](https://github.com/block/buzz/commit/3881bff6194a30d644f90269e84acf55d6430c4a))
+- Polish onboarding avatar capture ([#2118](https://github.com/block/buzz/pull/2118)) ([`46a63a86`](https://github.com/block/buzz/commit/46a63a864b6a08cc47b8ce6abced1c1794852f3f))
+
+
 ## v0.4.19
 
 - Polish onboarding runtime error states ([#2116](https://github.com/block/buzz/pull/2116)) ([`31090b186`](https://github.com/block/buzz/commit/31090b186f95f26e6a91107d7c40856ccfffe4f5))
