@@ -675,7 +675,7 @@ test("first-community owner can connect an existing hosted community", async ({
   ).toBeVisible();
   await expect(page.getByText("North Star")).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Request access to community" }),
+    page.getByRole("heading", { name: "Join a community" }),
   ).toHaveCount(0);
   await expect
     .poll(() =>
@@ -1046,9 +1046,6 @@ test("first-community shows the scenario cards for localhost", async ({
     page.getByRole("button", { name: /Join a community/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /Join a community/ }),
-  ).toBeVisible();
-  await expect(
     page.getByRole("button", {
       name: /Create a community/,
     }),
@@ -1080,9 +1077,9 @@ test("first-community direct join reaches profile", async ({ page }) => {
 
   await page.getByRole("button", { name: /Join a community/ }).click();
   await page
-    .getByTestId("welcome-join-community-url")
+    .getByTestId("invite-redeem-input")
     .fill("wss://onboarding.communities.buzz.xyz");
-  await page.getByRole("button", { name: "Join community" }).click();
+  await page.getByTestId("invite-redeem-submit").click();
 
   await expect(
     page.getByRole("heading", { name: "Build your profile" }),
@@ -1136,14 +1133,14 @@ test("first-community direct join cancel returns to request access", async ({
 
   await page.getByRole("button", { name: /Join a community/ }).click();
   await page
-    .getByTestId("welcome-join-community-url")
+    .getByTestId("invite-redeem-input")
     .fill("wss://onboarding.communities.buzz.xyz");
-  await page.getByRole("button", { name: "Join community" }).click();
+  await page.getByTestId("invite-redeem-submit").click();
   await expect(page.getByText("Connecting securely…")).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
 
   await expect(
-    page.getByRole("heading", { name: "Request access to community" }),
+    page.getByRole("heading", { name: "Join a community" }),
   ).toBeVisible();
   await expect(page.getByTestId("community-change-overlay")).toHaveCount(0);
   await expect(page.getByText("Create an identity key")).toHaveCount(0);
@@ -1514,7 +1511,7 @@ test("connected first-community profile step offers equal-width Next and Back co
 
   await backButton.click();
   await expect(
-    page.getByRole("heading", { name: "Request access to community" }),
+    page.getByRole("heading", { name: "Join a community" }),
   ).toBeVisible();
   await expect
     .poll(() =>
