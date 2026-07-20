@@ -930,6 +930,23 @@ pub fn build_repo_announcement(
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_REPO_ANNOUNCEMENT as u16), "").tags(tags))
 }
 
+/// Build a repository announcement while preserving caller-supplied metadata.
+///
+/// This is intended for read-modify-write updates to kind:30617 announcements.
+/// Every supplied tag is retained except `d`; all existing `d` tags are replaced
+/// with exactly one validated canonical repository identifier.
+pub fn build_repo_announcement_with_tags(
+    repo_id: &str,
+    content: &str,
+    mut tags: Vec<Tag>,
+) -> Result<EventBuilder, SdkError> {
+    check_repo_id(repo_id)?;
+    tags.retain(|tag| tag.as_slice().first().map(String::as_str) != Some("d"));
+    tags.insert(0, tag(&["d", repo_id])?);
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_GIT_REPO_ANNOUNCEMENT as u16), content).tags(tags))
+}
+
 /// Repository coordinate — owner pubkey + `d`-tag identifier.
 ///
 /// Renders as the `a`-tag value clients use to address a kind:30617
@@ -2611,6 +2628,34 @@ mod tests {
             .tags
             .iter()
             .any(|t| t.as_slice().first().map(|v| v.as_str()) == Some("clone")));
+    }
+
+    #[test]
+    fn repo_announcement_with_tags_preserves_metadata_and_canonicalizes_d() {
+        let tags = vec![
+            Tag::parse(["d", "wrong-repo"]).unwrap(),
+            Tag::parse(["name", "Protected Repo"]).unwrap(),
+            Tag::parse(["buzz-channel", "channel-id"]).unwrap(),
+            Tag::parse(["future-metadata", "preserve-me"]).unwrap(),
+        ];
+
+        let ev = sign(
+            build_repo_announcement_with_tags("protected-repo", "repository content", tags)
+                .unwrap(),
+        );
+
+        assert_eq!(ev.kind.as_u16(), 30617);
+        assert_eq!(ev.content, "repository content");
+        assert_eq!(
+            ev.tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("d"))
+                .count(),
+            1
+        );
+        assert!(has_tag(&ev, "d", "protected-repo"));
+        assert!(has_tag(&ev, "buzz-channel", "channel-id"));
+        assert!(has_tag(&ev, "future-metadata", "preserve-me"));
     }
 
     #[test]

@@ -1070,6 +1070,61 @@ pub enum ReposCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Manage branch and tag protection rules on one of your repositories.
+    #[command(subcommand)]
+    Protect(ReposProtectCmd),
+}
+
+/// Commands for inspecting and changing repository protection rules.
+#[derive(Subcommand)]
+pub enum ReposProtectCmd {
+    /// List the repository's protection rules.
+    List {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+    },
+    /// Create or replace the rule for an exact ref pattern.
+    Set {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Full ref pattern, such as refs/heads/main or refs/heads/*.
+        #[arg(long = "ref")]
+        ref_pattern: String,
+        /// Minimum role allowed to push.
+        #[arg(long)]
+        push: Option<RepoPushRole>,
+        /// Reject non-fast-forward updates.
+        #[arg(long, default_value_t = false)]
+        no_force_push: bool,
+        /// Reject deletion of matching refs.
+        #[arg(long, default_value_t = false)]
+        no_delete: bool,
+        /// Require the NIP-34 patch workflow instead of direct pushes.
+        #[arg(long, default_value_t = false)]
+        require_patch: bool,
+    },
+    /// Remove every protection rule for an exact ref pattern.
+    Remove {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Full ref pattern to remove.
+        #[arg(long = "ref")]
+        ref_pattern: String,
+    },
+}
+
+/// Minimum channel role accepted by a repository push rule.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum RepoPushRole {
+    /// Repository owner only.
+    Owner,
+    /// Repository owner or channel admin.
+    Admin,
+    /// Any channel member.
+    Member,
 }
 
 #[derive(Subcommand)]
@@ -1814,7 +1869,25 @@ mod tests {
                 "set-list"
             ]
         );
-        assert_eq!(names(&cmd, "repos"), vec!["create", "get", "list"]);
+        assert_eq!(
+            names(&cmd, "repos"),
+            vec!["create", "get", "list", "protect"]
+        );
+        let repos = cmd
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "repos")
+            .expect("repos command");
+        let protect = repos
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "protect")
+            .expect("repos protect command");
+        let mut protect_names: Vec<String> = protect
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name().to_string())
+            .filter(|name| name != "help")
+            .collect();
+        protect_names.sort();
+        assert_eq!(protect_names, vec!["list", "remove", "set"]);
         assert_eq!(
             names(&cmd, "pr"),
             vec!["get", "list", "open", "status", "update"]
@@ -1861,7 +1934,7 @@ mod tests {
             ("patches", 4),
             ("pr", 5),
             ("reactions", 3),
-            ("repos", 3),
+            ("repos", 4),
             ("social", 7),
             ("upload", 1),
             ("users", 4),
