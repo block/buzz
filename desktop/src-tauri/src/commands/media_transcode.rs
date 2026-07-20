@@ -173,85 +173,215 @@ pub(super) fn run_ffmpeg_with_timeout(
     }
 }
 
-/// Transcode any video file to H.264/AAC/MP4/fast-start via ffmpeg.
+/// Correlates ffmpeg progress with one renderer upload job.
+#[derive(Clone)]
+pub(super) struct TranscodeProgress {
+    pub app: tauri::AppHandle,
+    pub id: String,
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
+}
+
+fn probe_video_duration(source: &std::path::Path) -> Option<f64> {
+    let ffprobe = resolve_command("ffprobe")?;
+    let output = ffmpeg_command(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(source)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+}
+
+fn emit_transcode_progress(progress: &TranscodeProgress, processed_us: u64, total_us: u64) {
+    use tauri::Emitter;
+    let _ = progress.app.emit(
+        "media-upload-progress",
+        serde_json::json!({
+            "id": progress.id,
+            "phase": "processing",
+            "sent": processed_us.min(total_us),
+            "total": total_us,
+        }),
+    );
+}
+
+/// Transcode any video file to a web-compatible, size-efficient MP4.
 ///
-/// Always re-encodes — handles HEVC, VP9, ProRes, non-faststart MP4, 10-bit,
-/// wrong pixel format, MOV containers, etc. Output is guaranteed to pass the
-/// relay's `validate_video_file()`.
+/// Video is capped at 1920×1080 without upscaling, encoded as H.264 CRF 24
+/// with AAC audio, and stripped of source metadata. H.264/AAC is deliberately
+/// preferred over smaller but less interoperable HEVC/AV1 output because the
+/// result must play in every supported Buzz webview and browser.
 ///
 /// Returns the path to a temp file. Caller must clean up.
 pub(super) fn transcode_to_mp4(
     source: &std::path::Path,
     ffmpeg: &std::path::Path,
+    progress: Option<TranscodeProgress>,
 ) -> Result<std::path::PathBuf, String> {
-    // UUID-based temp path — unique across concurrent uploads.
     let output = std::env::temp_dir().join(format!("buzz-transcode-{}.mp4", uuid::Uuid::new_v4()));
+    let duration_us = probe_video_duration(source).map(|seconds| (seconds * 1_000_000.0) as u64);
 
-    let result = run_ffmpeg_with_timeout(
-        ffmpeg_command(ffmpeg)
-            .args([
-                "-y",
-                "-nostdin",
-                "-loglevel",
-                "error",
-                "-protocol_whitelist",
-                "file,pipe",
-            ]) // suppress progress spam — prevents stderr pipe deadlock
-            .arg("-i")
-            .arg(source) // OsStr — handles non-UTF-8 paths on Unix
-            .args([
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a:0?",
-                "-map_metadata",
-                "-1",
-                "-map_chapters",
-                "-1",
-                "-sn",
-                "-dn",
-                "-fflags",
-                "+bitexact",
-                "-flags:v",
-                "+bitexact",
-                "-flags:a",
-                "+bitexact",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "fast",
-                "-crf",
-                "23",
-                "-pix_fmt",
-                "yuv420p",
-                "-vf",
-                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-movflags",
-                "+faststart",
-                "-metadata",
-                "encoder=",
-            ])
-            .arg(&output)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped()),
-        FFMPEG_TIMEOUT,
-    )?;
+    let mut command = ffmpeg_command(ffmpeg);
+    command
+        .args([
+            "-y",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-nostats",
+            "-protocol_whitelist",
+            "file,pipe",
+        ])
+        .arg("-i")
+        .arg(source)
+        .args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-sn",
+            "-dn",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "24",
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            "scale=w=min(1920\\,iw):h=min(1080\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            "-movflags",
+            "+faststart",
+            "-metadata",
+            "encoder=",
+            "-progress",
+            "pipe:1",
+        ])
+        .arg(&output)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
 
-    if !result.status.success() {
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("failed to read ffmpeg progress")?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("failed to read ffmpeg diagnostics")?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if let Some(value) = line.strip_prefix("out_time_us=") {
+                if let Ok(value) = value.parse::<u64>() {
+                    let _ = tx.send(value);
+                }
+            }
+        }
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut pipe = stderr;
+        let _ = std::io::Read::read_to_end(&mut pipe, &mut bytes);
+        bytes
+    });
+
+    let deadline = std::time::Instant::now() + FFMPEG_TIMEOUT;
+    let mut last_percent = u64::MAX;
+    let status = loop {
+        while let Ok(processed_us) = rx.try_recv() {
+            if let (Some(progress), Some(total_us)) = (&progress, duration_us) {
+                let percent = processed_us.saturating_mul(100) / total_us.max(1);
+                if percent != last_percent {
+                    last_percent = percent;
+                    emit_transcode_progress(progress, processed_us, total_us);
+                }
+            }
+        }
+        if progress
+            .as_ref()
+            .and_then(|progress| progress.cancel.as_ref())
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            let _ = stderr_reader.join();
+            let _ = std::fs::remove_file(&output);
+            return Err("Video conversion canceled".to_string());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() <= deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                let _ = stderr_reader.join();
+                let _ = std::fs::remove_file(&output);
+                return Err(format!(
+                    "ffmpeg timed out after {}s",
+                    FFMPEG_TIMEOUT.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                let _ = stderr_reader.join();
+                let _ = std::fs::remove_file(&output);
+                return Err(format!("failed to wait on ffmpeg: {error}"));
+            }
+        }
+    };
+    let _ = reader.join();
+    let stderr = stderr_reader.join().unwrap_or_default();
+
+    if !status.success() {
         let _ = std::fs::remove_file(&output);
-        let stderr = String::from_utf8_lossy(&result.stderr);
+        let stderr = String::from_utf8_lossy(&stderr);
         let detail = stderr
             .lines()
             .rev()
-            .find(|l| !l.is_empty() && !l.starts_with("  "))
+            .find(|line| !line.is_empty() && !line.starts_with("  "))
             .unwrap_or("unknown error");
         return Err(format!("Video conversion failed: {detail}"));
     }
-
+    if let (Some(progress), Some(total_us)) = (&progress, duration_us) {
+        emit_transcode_progress(progress, total_us, total_us);
+    }
     Ok(output)
 }
 
@@ -417,9 +547,10 @@ pub(super) fn extract_poster_frame(
 /// best-effort because the video remains usable without a thumbnail.
 pub(super) fn transcode_and_extract_poster_path(
     source: &std::path::Path,
+    progress: Option<TranscodeProgress>,
 ) -> Result<(std::path::PathBuf, Option<Vec<u8>>), String> {
     let ffmpeg_path = find_ffmpeg()?;
-    let transcoded = transcode_to_mp4(source, &ffmpeg_path)?;
+    let transcoded = transcode_to_mp4(source, &ffmpeg_path, progress)?;
 
     let poster_bytes = match extract_poster_frame(&transcoded, &ffmpeg_path) {
         Ok(poster_path) => {
@@ -440,7 +571,7 @@ pub(super) fn transcode_and_extract_poster_path(
 pub(super) fn transcode_and_extract_poster(
     source: &std::path::Path,
 ) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
-    let (transcoded, poster_bytes) = transcode_and_extract_poster_path(source)?;
+    let (transcoded, poster_bytes) = transcode_and_extract_poster_path(source, None)?;
     let video_bytes =
         std::fs::read(&transcoded).map_err(|e| format!("failed to read transcoded file: {e}"));
     let _ = std::fs::remove_file(&transcoded);
@@ -577,6 +708,55 @@ mod tests {
     }
 
     #[test]
+    fn test_transcode_to_mp4_caps_at_1080p_without_upscaling() {
+        let Ok(ffmpeg) = find_ffmpeg() else {
+            eprintln!("skipping dimension round-trip: ffmpeg not found");
+            return;
+        };
+        let Some(ffprobe) = resolve_command("ffprobe") else {
+            eprintln!("skipping dimension round-trip: ffprobe not found");
+            return;
+        };
+        let source =
+            std::env::temp_dir().join(format!("buzz-dimension-test-{}.mp4", uuid::Uuid::new_v4()));
+        let generated = std::process::Command::new(&ffmpeg)
+            .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("color=c=blue:s=2560x1440:r=1:d=0.1")
+            .args(["-frames:v", "1", "-c:v", "libx264"])
+            .arg(&source)
+            .output()
+            .expect("generate oversized fixture");
+        if !generated.status.success() {
+            eprintln!("skipping dimension round-trip: ffmpeg cannot encode H.264");
+            let _ = std::fs::remove_file(&source);
+            return;
+        }
+
+        let output = transcode_to_mp4(&source, &ffmpeg, None).expect("transcode fixture");
+        let dimensions = std::process::Command::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=s=x:p=0",
+            ])
+            .arg(&output)
+            .output()
+            .expect("probe output dimensions");
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&output);
+        assert!(dimensions.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&dimensions.stdout).trim(),
+            "1920x1080"
+        );
+    }
+
+    #[test]
     fn test_transcode_to_mp4_drops_source_metadata() {
         let Ok(ffmpeg) = find_ffmpeg() else {
             eprintln!("skipping metadata round-trip: ffmpeg not found");
@@ -606,7 +786,7 @@ mod tests {
             return;
         }
 
-        let output = transcode_to_mp4(&source, &ffmpeg).expect("transcode fixture");
+        let output = transcode_to_mp4(&source, &ffmpeg, None).expect("transcode fixture");
         let bytes = std::fs::read(&output).expect("read transcoded video");
         let _ = std::fs::remove_file(&source);
         let _ = std::fs::remove_file(&output);

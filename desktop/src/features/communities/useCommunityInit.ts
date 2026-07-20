@@ -7,6 +7,7 @@ import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
 import { initDraftStore } from "@/features/messages/lib/useDrafts";
+import { resetUploadJobs } from "@/features/messages/lib/uploadJobsStore";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import {
   resetActiveAgentTurnsStore,
@@ -40,6 +41,7 @@ function resetCommunityState(): void {
   resetRenderScopedReactionHydration();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
+  resetUploadJobs();
 }
 
 type CommunityInitResult =

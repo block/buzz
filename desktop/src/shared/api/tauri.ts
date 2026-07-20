@@ -559,17 +559,68 @@ export async function pickAndUploadMedia(): Promise<BlobDescriptor[]> {
 
 const MEDIA_UPLOAD_CHUNK_BYTES = 1024 * 1024;
 
+/** Open a staged upload slot in the OS temp dir; returns its id. */
+export async function beginStagedMediaUpload(): Promise<string> {
+  return invokeTauri<string>("begin_staged_media_upload", {});
+}
+
+/**
+ * Append one chunk of a staged upload as **raw bytes**.
+ *
+ * The chunk is sent over Tauri's binary IPC (an `ArrayBuffer` body) rather
+ * than a JSON `number[]`. Serializing a ~1M-element array per megabyte on the
+ * render thread was what janked typing during large uploads; raw bytes skip
+ * that entirely. `uploadId` travels as a header so the body stays pure bytes.
+ */
+export async function appendStagedMediaChunk(
+  uploadId: string,
+  chunk: Uint8Array,
+): Promise<void> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  // `.slice()` yields a tight copy backed by its own ArrayBuffer — a subarray
+  // view would ship the entire underlying stream buffer.
+  await invoke("append_staged_media_chunk", chunk.slice(), {
+    headers: { "upload-id": uploadId },
+  });
+}
+
+/** Transcode + upload a completed staged file; returns its descriptor. */
+export async function finishStagedMediaUpload(
+  uploadId: string,
+  filename: string,
+  progressId?: string,
+): Promise<BlobDescriptor> {
+  return invokeTauri<BlobDescriptor>("finish_staged_media_upload", {
+    uploadId,
+    filename,
+    progressId,
+  });
+}
+
+/** Delete a staged upload's temp file (cancel / cleanup). Best-effort. */
+export async function cancelStagedMediaUpload(uploadId: string): Promise<void> {
+  await invokeTauri("cancel_staged_media_upload", { uploadId }).catch(
+    () => undefined,
+  );
+}
+
 /**
  * Stage a browser File in bounded chunks, then let Rust transcode and stream it.
  * This avoids materializing the entire file as a JS number array or Rust Vec.
+ *
+ * `onStaged` reports cumulative bytes handed to Rust so callers can render a
+ * real "reading" phase before the HTTP upload (and its byte-level progress
+ * events) begins.
  */
 export async function uploadMediaFile(
   file: File,
   progressId?: string,
+  onStaged?: (stagedBytes: number) => void,
 ): Promise<BlobDescriptor> {
-  const uploadId = await invokeTauri<string>("begin_staged_media_upload", {});
+  const uploadId = await beginStagedMediaUpload();
   try {
     const reader = file.stream().getReader();
+    let staged = 0;
     let pending = new Uint8Array(0);
     for (;;) {
       const { done, value } = await reader.read();
@@ -584,31 +635,22 @@ export async function uploadMediaFile(
       }
       let offset = 0;
       while (bytes.length - offset >= MEDIA_UPLOAD_CHUNK_BYTES) {
-        await invokeTauri("append_staged_media_chunk", {
-          uploadId,
-          data: Array.from(
-            bytes.subarray(offset, offset + MEDIA_UPLOAD_CHUNK_BYTES),
-          ),
-        });
+        const chunk = bytes.subarray(offset, offset + MEDIA_UPLOAD_CHUNK_BYTES);
+        await appendStagedMediaChunk(uploadId, chunk);
+        staged += chunk.length;
+        onStaged?.(staged);
         offset += MEDIA_UPLOAD_CHUNK_BYTES;
       }
       pending = bytes.slice(offset);
     }
     if (pending.length > 0) {
-      await invokeTauri("append_staged_media_chunk", {
-        uploadId,
-        data: Array.from(pending),
-      });
+      await appendStagedMediaChunk(uploadId, pending);
+      staged += pending.length;
+      onStaged?.(staged);
     }
-    return await invokeTauri<BlobDescriptor>("finish_staged_media_upload", {
-      uploadId,
-      filename: file.name,
-      progressId,
-    });
+    return await finishStagedMediaUpload(uploadId, file.name, progressId);
   } catch (error) {
-    await invokeTauri("cancel_staged_media_upload", { uploadId }).catch(
-      () => undefined,
-    );
+    await cancelStagedMediaUpload(uploadId);
     throw error;
   }
 }

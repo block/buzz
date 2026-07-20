@@ -12,7 +12,7 @@ use crate::relay::{
 
 use super::media_transcode::{
     has_heic_extension, is_heic_file, is_video_file, transcode_and_extract_poster,
-    transcode_and_extract_poster_path, transcode_heic_path_to_jpeg_bytes,
+    transcode_and_extract_poster_path, transcode_heic_path_to_jpeg_bytes, TranscodeProgress,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,7 +383,7 @@ async fn send_upload_attempt(
             sent += chunk.len() as u64;
             let _ = app.emit(
                 "media-upload-progress",
-                serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
+                serde_json::json!({ "id": progress_id, "phase": "uploading", "sent": sent, "total": total }),
             );
             Ok::<bytes::Bytes, std::io::Error>(chunk)
         }));
@@ -429,7 +429,7 @@ async fn send_upload_file_attempt(
             let sent = sent.fetch_add(bytes.len() as u64, Ordering::Relaxed) + bytes.len() as u64;
             let _ = app.emit(
                 "media-upload-progress",
-                serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
+                serde_json::json!({ "id": progress_id, "phase": "uploading", "sent": sent, "total": total }),
             );
         }
         chunk
@@ -632,6 +632,7 @@ pub(super) async fn process_picked_path(
     state: &State<'_, AppState>,
     images_only: bool,
     progress: Option<(tauri::AppHandle, String)>,
+    cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<BlobDescriptor, String> {
     // Pin the inode by opening the fd BEFORE spawn_blocking. This prevents a
     // local attacker from swapping the file between dialog return and read.
@@ -642,6 +643,12 @@ pub(super) async fn process_picked_path(
     // extension still tells us the webview can't render them. Computed before
     // the closure since `path` isn't moved in.
     let heic_by_ext = has_heic_extension(&path);
+
+    let transcode_progress = progress.as_ref().map(|(app, id)| TranscodeProgress {
+        app: app.clone(),
+        id: id.clone(),
+        cancel,
+    });
 
     // All sync I/O (sniff, transcode, read) runs off the async runtime to
     // avoid blocking Tokio worker threads during long ffmpeg transcodes.
@@ -657,7 +664,8 @@ pub(super) async fn process_picked_path(
                     return Err("Please choose an image file.".to_string());
                 }
                 let fd_path = fd_real_path(&file)?;
-                let (path, poster) = transcode_and_extract_poster_path(&fd_path)?;
+                let (path, poster) =
+                    transcode_and_extract_poster_path(&fd_path, transcode_progress)?;
                 drop(file);
                 Ok((
                     PreparedUpload::File {
@@ -761,7 +769,7 @@ pub async fn pick_and_upload_media(
     let mut descriptors = Vec::with_capacity(file_paths.len());
     for file_path in file_paths {
         let path = file_path.as_path().ok_or("invalid path")?.to_path_buf();
-        let descriptor = process_picked_path(path, &state, false, None).await?;
+        let descriptor = process_picked_path(path, &state, false, None, None).await?;
         descriptors.push(descriptor);
     }
 
@@ -802,7 +810,7 @@ pub async fn pick_and_upload_image(
     };
 
     let path = file_path.as_path().ok_or("invalid path")?.to_path_buf();
-    let descriptor = process_picked_path(path, &state, true, None).await?;
+    let descriptor = process_picked_path(path, &state, true, None, None).await?;
     Ok(Some(descriptor))
 }
 

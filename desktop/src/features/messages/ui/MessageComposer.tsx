@@ -233,9 +233,9 @@ function MessageComposerImpl({
     typingRootEventId,
   );
 
-  // We pass a custom setter that both updates React state AND inserts
-  // markdown into the Tiptap editor when media upload completes.
-  const internalMedia = useMediaUpload();
+  // When a parent supplies `mediaController`, its hook owns the channel jobs.
+  // Keep this unconditional fallback off that channel to avoid double-draining.
+  const internalMedia = useMediaUpload(mediaController ? null : channelId);
   const media = mediaController ?? internalMedia;
   const ownsDropZone = mediaController === undefined;
 

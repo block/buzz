@@ -4,8 +4,19 @@ import {
   type BlobDescriptor,
   pickAndUploadMedia,
   uploadMediaBytes,
-  uploadMediaFile,
 } from "@/shared/api/tauri";
+
+import { captureVideoPosterFrame } from "./videoPoster";
+import {
+  UPLOAD_JOB_ID_BASE,
+  cancelUploadJob,
+  getUploadJobsVersion,
+  startChannelUpload,
+  subscribeUploadJobs,
+  takeChannelCompletions,
+  takeChannelErrors,
+  useChannelUploadJobs,
+} from "./uploadJobsStore";
 
 /**
  * First 4 hex chars of the sha256 — used as a short display name.
@@ -44,97 +55,14 @@ function isFileDrag(event: React.DragEvent<HTMLElement>): boolean {
   return event.dataTransfer?.types.includes("Files") ?? false;
 }
 
-function waitForMediaEvent(
-  element: HTMLMediaElement,
-  eventName: string,
-  timeoutMs: number,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timeoutId = window.setTimeout(() => {
-      cleanup();
-      reject(new Error(`Timed out waiting for ${eventName}`));
-    }, timeoutMs);
-
-    function cleanup() {
-      window.clearTimeout(timeoutId);
-      element.removeEventListener(eventName, onEvent);
-      element.removeEventListener("error", onError);
-    }
-
-    function onEvent() {
-      cleanup();
-      resolve();
-    }
-
-    function onError() {
-      cleanup();
-      reject(new Error(`Could not load media for ${eventName}`));
-    }
-
-    element.addEventListener(eventName, onEvent, { once: true });
-    element.addEventListener("error", onError, { once: true });
-  });
-}
-
-type CapturedVideoPoster = {
-  dim: string;
-  posterUrl: string;
-};
-
-async function captureVideoPosterFrame(
-  file: File,
-): Promise<CapturedVideoPoster | null> {
-  if (!file.type.startsWith("video/")) return null;
-
-  const objectUrl = URL.createObjectURL(file);
-  const video = document.createElement("video");
-  video.muted = true;
-  video.playsInline = true;
-  video.preload = "metadata";
-
-  try {
-    video.src = objectUrl;
-    await waitForMediaEvent(video, "loadedmetadata", 3_000);
-
-    const duration = Number.isFinite(video.duration) ? video.duration : 0;
-    const seekTime = duration > 0.2 ? 0.1 : 0;
-    if (seekTime > 0) {
-      const seeked = waitForMediaEvent(video, "seeked", 2_000);
-      video.currentTime = seekTime;
-      await seeked.catch(() => undefined);
-    } else if (video.readyState < 2) {
-      await waitForMediaEvent(video, "loadeddata", 2_000).catch(
-        () => undefined,
-      );
-    }
-
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-
-    if (video.videoWidth === 0 || video.videoHeight === 0) return null;
-
-    const maxWidth = 640;
-    const scale = Math.min(1, maxWidth / video.videoWidth);
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-
-    const context = canvas.getContext("2d");
-    if (!context) return null;
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return {
-      dim: `${video.videoWidth}x${video.videoHeight}`,
-      posterUrl: canvas.toDataURL("image/jpeg", 0.82),
-    };
-  } catch {
-    return null;
-  } finally {
-    URL.revokeObjectURL(objectUrl);
-    video.removeAttribute("src");
-    video.load();
-  }
-}
-
-export function useMediaUpload() {
+/**
+ * @param channelId The channel this composer is attached to. Background upload
+ *   jobs are keyed by it so in-flight uploads stay with the entry field where
+ *   they began, survive navigating away and back, and never follow you to
+ *   another channel. Falls back to a shared key when absent.
+ */
+export function useMediaUpload(channelId?: string | null) {
+  const channelKey = channelId ?? "__composer__";
   const [uploadState, setUploadState] = React.useState<UploadState>({
     status: "idle",
   });
@@ -250,6 +178,40 @@ export function useMediaUpload() {
   const nextSlotRef = React.useRef(0);
   const nextUploadingPreviewIdRef = React.useRef(0);
 
+  // ── Background upload jobs (drag/drop, paste, editor paste) ──────────────
+  // These run in the workspace-scoped store, keyed by channel, so they survive
+  // navigation and feed the global indicator. This composer renders only its
+  // own channel's jobs and drains their finished descriptors into `imetaSlots`.
+  const storeJobs = useChannelUploadJobs(channelId ?? null);
+  const jobsVersion = React.useSyncExternalStore(
+    subscribeUploadJobs,
+    getUploadJobsVersion,
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: jobsVersion is the reactive trigger — it re-runs the drain whenever the store changes (mount, or a job finishing while this channel is open).
+  React.useEffect(() => {
+    const done = takeChannelCompletions(channelKey);
+    if (done.length > 0) {
+      nextSlotRef.current += done.length;
+      setImetaSlots((prev) => [...prev, ...done]);
+    }
+    const errors = takeChannelErrors(channelKey);
+    if (errors.length > 0) {
+      setUploadState({ status: "error", message: errors[errors.length - 1] });
+    }
+  }, [channelKey, jobsVersion]);
+
+  const storePreviews = React.useMemo<UploadingAttachmentPreview[]>(
+    () =>
+      storeJobs.map((job) => ({
+        id: job.id,
+        filename: job.filename,
+        type: job.mediaType,
+        posterUrl: job.posterUrl,
+        progress: job.pct,
+      })),
+    [storeJobs],
+  );
+
   const isUploadCanceled = React.useCallback(
     (previewId?: number) =>
       previewId !== undefined &&
@@ -301,6 +263,12 @@ export function useMediaUpload() {
 
   const cancelUpload = React.useCallback(
     (previewId: number) => {
+      // Store-driven jobs live in a high id range — hand them to the store,
+      // which aborts staging, deletes the temp file, and discards any result.
+      if (previewId >= UPLOAD_JOB_ID_BASE) {
+        cancelUploadJob(previewId);
+        return;
+      }
       canceledUploadingPreviewIdsRef.current.add(previewId);
       const slotIndex = uploadingPreviewsRef.current.find(
         (preview) => preview.id === previewId,
@@ -316,46 +284,6 @@ export function useMediaUpload() {
       finishUpload(previewId);
     },
     [finishUpload],
-  );
-
-  /** Reserve `count` null slots at the end; returns the starting index. */
-  const reserveSlots = React.useCallback((count: number): number => {
-    const startIndex = nextSlotRef.current;
-    nextSlotRef.current += count;
-    setImetaSlots((prev) => {
-      // Pad prev if needed (should already be the right length, but be safe)
-      const padded =
-        prev.length < startIndex
-          ? [...prev, ...new Array<null>(startIndex - prev.length).fill(null)]
-          : prev;
-      return [...padded, ...new Array<null>(count).fill(null)];
-    });
-    return startIndex;
-  }, []);
-
-  /** Fill a previously-reserved slot by index. */
-  const fillSlot = React.useCallback(
-    (index: number, descriptor: BlobDescriptor, previewId?: number) => {
-      if (isUploadCanceled(previewId)) return;
-      setImetaSlots((prev) => {
-        const next = [...prev];
-        next[index] = descriptor;
-        return next;
-      });
-      finishUpload(previewId);
-    },
-    [finishUpload, isUploadCanceled],
-  );
-
-  /** Append a single descriptor (no pre-reserved slot). */
-  const onUploaded = React.useCallback(
-    (descriptor: BlobDescriptor, previewId?: number) => {
-      if (isUploadCanceled(previewId)) return;
-      nextSlotRef.current += 1;
-      setImetaSlots((prev) => [...prev, descriptor]);
-      finishUpload(previewId);
-    },
-    [finishUpload, isUploadCanceled],
   );
 
   const onUploadError = React.useCallback(
@@ -389,7 +317,7 @@ export function useMediaUpload() {
   }, [finishUpload, isUploadCanceled, onUploadError, reserveUploadingPreview]);
 
   const handleDrop = React.useCallback(
-    async (event: React.DragEvent<HTMLElement>) => {
+    (event: React.DragEvent<HTMLElement>) => {
       event.preventDefault();
       dragDepthRef.current = 0;
       setIsDragOver(false);
@@ -398,30 +326,14 @@ export function useMediaUpload() {
 
       // Accept any file. The Tauri layer and the relay enforce the deny-list
       // (active-content + executables) and size caps; everything else uploads.
-      const validFiles = files;
-
-      setUploadingCount((c) => c + validFiles.length);
-      const baseIndex = reserveSlots(validFiles.length);
-
-      for (let i = 0; i < validFiles.length; i++) {
-        const file = validFiles[i];
-        const slotIndex = baseIndex + i;
-        const previewId = reserveUploadingPreview(file, slotIndex);
-        // Fire-and-forget each upload concurrently — slot preserves order
-        (async () => {
-          try {
-            const descriptor = await uploadMediaFile(
-              file,
-              uploadProgressId(previewId),
-            );
-            fillSlot(slotIndex, descriptor, previewId);
-          } catch (err) {
-            onUploadError(err, previewId);
-          }
-        })();
+      // Each upload becomes a background job attached to this channel — it runs
+      // independent of this component's lifetime and its descriptor is drained
+      // back into `imetaSlots` on completion.
+      for (const file of files) {
+        startChannelUpload(channelKey, file);
       }
     },
-    [reserveSlots, fillSlot, onUploadError, reserveUploadingPreview],
+    [channelKey],
   );
 
   const handleDragEnter = React.useCallback(
@@ -489,45 +401,19 @@ export function useMediaUpload() {
 
       event.preventDefault();
 
-      setUploadingCount((c) => c + mediaFiles.length);
-      const baseIndex = reserveSlots(mediaFiles.length);
-
-      for (let i = 0; i < mediaFiles.length; i++) {
-        const file = mediaFiles[i];
-        const slotIndex = baseIndex + i;
-        const previewId = reserveUploadingPreview(file, slotIndex);
-        (async () => {
-          try {
-            const descriptor = await uploadMediaFile(
-              file,
-              uploadProgressId(previewId),
-            );
-            fillSlot(slotIndex, descriptor, previewId);
-          } catch (err) {
-            onUploadError(err, previewId);
-          }
-        })();
+      for (const file of mediaFiles) {
+        startChannelUpload(channelKey, file);
       }
     },
-    [reserveSlots, fillSlot, onUploadError, reserveUploadingPreview],
+    [channelKey],
   );
 
   /** Upload a File directly — used by Tiptap's editorProps.handlePaste. */
   const uploadFile = React.useCallback(
-    async (file: File) => {
-      const previewId = reserveUploadingPreview(file);
-      setUploadingCount((c) => c + 1);
-      try {
-        const descriptor = await uploadMediaFile(
-          file,
-          uploadProgressId(previewId),
-        );
-        onUploaded(descriptor, previewId);
-      } catch (err) {
-        onUploadError(err, previewId);
-      }
+    (file: File) => {
+      startChannelUpload(channelKey, file);
     },
-    [onUploaded, onUploadError, reserveUploadingPreview],
+    [channelKey],
   );
 
   /**
@@ -621,7 +507,14 @@ export function useMediaUpload() {
     [],
   );
 
-  const isUploading = uploadingCount > 0;
+  // Local previews (annotation/paperclip) + background store jobs for this
+  // channel. Store jobs carry ids ≥ UPLOAD_JOB_ID_BASE so they never collide.
+  const allUploadingPreviews = React.useMemo(
+    () => [...uploadingPreviews, ...storePreviews],
+    [uploadingPreviews, storePreviews],
+  );
+  const totalUploadingCount = uploadingCount + storeJobs.length;
+  const isUploading = totalUploadingCount > 0;
 
   return React.useMemo(
     () => ({
@@ -643,8 +536,8 @@ export function useMediaUpload() {
       setUploadState,
       uploadEditedAttachment,
       uploadFile,
-      uploadingCount,
-      uploadingPreviews,
+      uploadingCount: totalUploadingCount,
+      uploadingPreviews: allUploadingPreviews,
       uploadState,
     }),
     [
@@ -664,8 +557,8 @@ export function useMediaUpload() {
       setPendingImeta,
       uploadEditedAttachment,
       uploadFile,
-      uploadingCount,
-      uploadingPreviews,
+      totalUploadingCount,
+      allUploadingPreviews,
       uploadState,
     ],
   );

@@ -29,6 +29,7 @@ import { msgContextKey } from "@/features/channels/readState/readStateFormat";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
+import { UploadIndicator } from "@/features/messages/ui/UploadIndicator";
 import {
   useHomeFeedNotifications,
   useHomeFeedNotificationState,
@@ -89,7 +90,6 @@ import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
-
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
   return { default: module.SettingsScreen };
@@ -153,7 +153,6 @@ export function AppShell() {
     () => deriveShellRoute(location.pathname),
     [location.pathname],
   );
-  // Settings lives in history so back returns to the previous app entry.
   const settingsOpen = location.pathname === "/settings";
   const locationSearchSection = (location.search as { section?: unknown })
     .section;
@@ -757,6 +756,7 @@ export function AppShell() {
                 className="buzz-huddle-shell relative h-dvh overflow-hidden overscroll-none"
                 data-huddle-open={isHuddleDrawerOpen}
               >
+                <UploadIndicator onOpenChannel={goChannel} />
                 <div
                   className={cn(
                     "buzz-huddle-app-surface z-10 flex min-h-0 flex-row overflow-hidden bg-background",
