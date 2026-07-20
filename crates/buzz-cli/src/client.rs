@@ -451,17 +451,17 @@ impl BuzzClient {
         }
     }
 
-    /// Query up to `limit` historical events, following the relay bridge's
-    /// composite `(until, before_id)` cursor across bounded result pages.
-    pub async fn query_paginated(
+    async fn query_pages(
         &self,
         mut filter: serde_json::Value,
-        limit: u32,
+        limit: Option<u32>,
     ) -> Result<Vec<serde_json::Value>, CliError> {
         let mut events = Vec::new();
 
-        while events.len() < limit as usize {
-            let page_limit = (limit as usize - events.len()).min(QUERY_PAGE_SIZE as usize);
+        while limit.is_none_or(|limit| events.len() < limit as usize) {
+            let page_limit = limit
+                .map(|limit| (limit as usize - events.len()).min(QUERY_PAGE_SIZE as usize))
+                .unwrap_or(QUERY_PAGE_SIZE as usize);
             filter["limit"] = serde_json::json!(page_limit);
 
             let raw = self.query(&filter).await?;
@@ -479,6 +479,24 @@ impl BuzzClient {
         }
 
         Ok(events)
+    }
+
+    /// Query up to `limit` historical events, following the relay bridge's
+    /// composite `(until, before_id)` cursor across bounded result pages.
+    pub async fn query_paginated(
+        &self,
+        filter: serde_json::Value,
+        limit: u32,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        self.query_pages(filter, Some(limit)).await
+    }
+
+    /// Query every historical event matching a filter across bounded pages.
+    pub async fn query_all(
+        &self,
+        filter: serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        self.query_pages(filter, None).await
     }
 
     /// Execute a one-shot query via the HTTP bridge.
