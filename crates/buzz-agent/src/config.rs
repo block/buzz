@@ -649,6 +649,12 @@ pub const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_TOOL_RESULT_TEXT_BYTES: usize = 50 * 1024;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 64;
 
+/// Default MCP server init timeout. Packaged toolchain shims (uv/npx via
+/// hermit bootstrap) can take up to a few minutes on first launch to
+/// download and initialize hermit plus the requested package — this must
+/// stay well above that. Set via `BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS`.
+pub const DEFAULT_MCP_INIT_TIMEOUT_SECS: u64 = 300;
+
 pub const HANDOFF_MAX_OUTPUT_TOKENS: u32 = 8192;
 
 pub const HANDOFF_ORIGINAL_TASK_MAX_BYTES: usize = 16 * 1024;
@@ -804,7 +810,7 @@ impl Config {
             tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 660)?),
             mcp_init_timeout: Duration::from_secs(parse_env(
                 "BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS",
-                30,
+                DEFAULT_MCP_INIT_TIMEOUT_SECS,
             )?),
             mcp_max_restart_attempts: parse_env("BUZZ_AGENT_MCP_RESTART_MAX_ATTEMPTS", 3u32)?,
             mcp_restart_base_ms: parse_env("BUZZ_AGENT_MCP_RESTART_BASE_MS", 500u64)?,
@@ -1106,6 +1112,16 @@ fn parse_hook_servers(raw: Option<&str>) -> HookServers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_init_timeout_default_is_300s() {
+        let val: u64 = parse_env(
+            "_BUZZ_TEST_NONEXISTENT_TIMEOUT_VAR_",
+            DEFAULT_MCP_INIT_TIMEOUT_SECS,
+        )
+        .unwrap();
+        assert_eq!(Duration::from_secs(val), Duration::from_secs(300));
+    }
 
     #[test]
     fn hook_servers_unset_is_none() {

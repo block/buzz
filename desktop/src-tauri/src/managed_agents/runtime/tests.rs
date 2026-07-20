@@ -760,3 +760,84 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
     unsafe { libc::kill(-(intermediate_pid as i32), libc::SIGKILL) };
     let _ = intermediate.wait();
 }
+
+// ── validate_shim_resources tests ───────────────────────────────────────
+
+#[cfg(unix)]
+mod shim_resource_validation {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::TempDir;
+
+    use super::super::{validate_shim_resources, SHIM_RESOURCE_FILES};
+
+    /// Writes a fully valid, executable shim resource dir — the happy path
+    /// every other test in this module diverges from by breaking exactly
+    /// one file.
+    fn make_valid_shim_dir() -> TempDir {
+        let dir = TempDir::new().expect("create temp dir");
+        for name in SHIM_RESOURCE_FILES {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "#!/bin/bash\n").expect("write shim file");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod shim file");
+        }
+        dir
+    }
+
+    #[test]
+    fn valid_executable_resources_pass() {
+        let dir = make_valid_shim_dir();
+        assert!(validate_shim_resources(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn missing_resource_file_fails_with_actionable_message() {
+        let dir = make_valid_shim_dir();
+        std::fs::remove_file(dir.path().join("node")).expect("remove node shim");
+        let error = validate_shim_resources(dir.path()).expect_err("missing file must fail");
+        assert!(
+            error.contains("node"),
+            "error must name the missing resource: {error}"
+        );
+    }
+
+    #[test]
+    fn non_executable_resource_is_fixed_up_by_chmod() {
+        let dir = make_valid_shim_dir();
+        let path = dir.path().join("uv");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("strip execute bit");
+        assert!(
+            validate_shim_resources(dir.path()).is_ok(),
+            "chmod fixup should recover a resource that merely lost its execute bit"
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_ne!(mode & 0o111, 0, "uv should be executable after fixup");
+    }
+
+    #[test]
+    fn directory_in_place_of_resource_file_fails() {
+        let dir = make_valid_shim_dir();
+        let path = dir.path().join("uvx");
+        std::fs::remove_file(&path).expect("remove uvx shim");
+        std::fs::create_dir(&path).expect("create dir named uvx");
+        let error =
+            validate_shim_resources(dir.path()).expect_err("a directory is not a regular file");
+        assert!(
+            error.contains("uvx") && error.contains("not a regular file"),
+            "error must identify the non-regular-file resource: {error}"
+        );
+    }
+
+    #[test]
+    fn missing_resource_directory_itself_fails() {
+        let dir = TempDir::new().expect("create temp dir");
+        let missing = dir.path().join("does-not-exist");
+        let error = validate_shim_resources(&missing).expect_err("missing dir must fail");
+        assert!(
+            error.contains("setup-common.sh"),
+            "error should name the first expected resource: {error}"
+        );
+    }
+}

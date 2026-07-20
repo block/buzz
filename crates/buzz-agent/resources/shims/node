@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/setup-common.sh" node
+export NPM_CONFIG_USERCONFIG="${BUZZ_MCP_HERMIT_DIR}/empty-user-npmrc"
+export NPM_CONFIG_GLOBALCONFIG="${BUZZ_MCP_HERMIT_DIR}/empty-global-npmrc"
+export NPM_CONFIG_LOCATION=global
+exec node "$@"

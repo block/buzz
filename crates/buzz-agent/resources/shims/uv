@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/setup-common.sh" uv
+export UV_NO_CONFIG=1
+exec uv "$@"
