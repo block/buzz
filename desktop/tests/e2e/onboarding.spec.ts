@@ -1018,7 +1018,7 @@ test("first-community owner can replace a mismatched account identity", async ({
     .getByRole("button", { name: "Use this device's identity" })
     .click();
   await expect(
-    page.getByText("Signed in as old-owner@example.com"),
+    page.getByRole("textbox", { name: "Community name" }),
   ).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
@@ -1070,7 +1070,7 @@ test("first-community explains when the local identity belongs to another accoun
     ),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Connect this Buzz identity" }),
+    page.getByRole("heading", { name: "Finish connecting Buzz" }),
   ).toBeVisible();
 });
 
