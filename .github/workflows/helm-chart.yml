@@ -9,14 +9,11 @@ name: helm chart
 # `chart-v*` tags publish — `main` pushes and PRs stay lint/render-only so we
 # never overwrite a released chart version from an in-progress `main`.
 #
-# Why workflow_dispatch carries version/ref inputs (same reason as docker.yml):
-#   auto-tag-on-release-pr-merge.yml pushes `chart-v*` with the default
-#   GITHUB_TOKEN, which GitHub's recursion guard blocks from firing any
-#   `on: push` trigger. So the `push.tags` trigger below is dead for
-#   auto-pushed tags — auto-tag instead dispatches this workflow with the bare
-#   version + tag ref, and the publish job checks out inputs.ref and packages at
-#   inputs.version. On a real manual `git push` of a `chart-v*` tag the
-#   push.tags trigger fires and inputs are empty.
+# Why workflow_dispatch carries version/ref inputs:
+#   Normal releases arrive through the `push.tags` trigger below. The inputs are
+#   retained only for an operator to rerun publication manually at an immutable
+#   chart tag; the publish job checks out inputs.ref and packages at
+#   inputs.version.
 
 on:
   workflow_dispatch:
@@ -153,7 +150,7 @@ jobs:
 
   publish:
     # Packages the chart and pushes it to GHCR as an OCI artifact. Fires only on
-    # a `chart-v*` tag push (manual) or the auto-tag rescue dispatch (which
+    # a `chart-v*` tag push or a manual rescue dispatch (which
     # carries inputs.version) — never on `main` pushes or PRs, so an in-progress
     # `main` can never overwrite a released chart version. Mirrors docker.yml's
     # GHCR publish (login with GITHUB_TOKEN, packages: write, fork override var).

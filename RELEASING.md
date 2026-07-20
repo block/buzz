@@ -59,6 +59,11 @@ with any new commits, and updates the PR in place.
 All three lanes share one engine; they differ only in which version manifest
 they bump, which branch prefix they use, and what the merge triggers.
 
+The merge workflow creates tags with a short-lived installation token from the
+dedicated `buzz-release-tagger` GitHub App. Release-tag rules allow that App to
+create matching tags and prevent other actors from creating, moving, or
+deleting them. The workflow's default `GITHUB_TOKEN` is read-only.
+
 ### Desktop
 
 1. **`just release-desktop`** runs locally on `main` — computes the next
@@ -79,15 +84,13 @@ they bump, which branch prefix they use, and what the merge triggers.
    opens (or updates) a PR.
 2. **Merge the PR** — the `auto-tag-on-release-pr-merge` workflow detects the
    `relay-release/*` branch merge and pushes a `relay-v<version>` tag.
-3. **Auto-tag dispatches `docker.yml`** — the same workflow then triggers
-   `docker.yml` with the version and tag ref, which builds the multi-arch relay
+3. **Tag triggers `docker.yml`** — the `relay-v<version>` push triggers
+   `docker.yml`, which builds the multi-arch relay
    image and publishes `ghcr.io/block/buzz:<version>` (plus `:<major>.<minor>`,
    `:<major>`, and `:latest` for stable releases). Prereleases
    (`relay-v<version>-rc.1`) publish only the prerelease tag and do **not**
-   move `:latest`. (The dispatch — rather than relying on `docker.yml`'s
-   `push: tags` trigger — is required because GitHub suppresses `on: push` for
-   tags pushed by the workflow's own `GITHUB_TOKEN`; the desktop lane dispatches
-   `release.yml` for the same reason.)
+   move `:latest`. GitHub runs the tag trigger because the tag is created by
+   the dedicated GitHub App rather than the workflow's `GITHUB_TOKEN`.
 
 Every push to `main` continues to build and publish `:main` + `:sha-<7>` tags
 (the rolling development image). The `:latest` tag tracks the latest **stable**

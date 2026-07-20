@@ -53,7 +53,16 @@ fi
 grep -q 'verify-release-ref\.sh' "$repo_root/.github/workflows/release.yml"
 grep -q 'verify-release-ref\.sh' "$repo_root/.github/workflows/docker.yml"
 grep -q 'test-release-ref-contract\.sh' "$repo_root/.github/workflows/ci.yml"
-grep -Fq -- "--ref \"\$TAG\"" \
-  "$repo_root/.github/workflows/auto-tag-on-release-pr-merge.yml"
+auto_tag="$repo_root/.github/workflows/auto-tag-on-release-pr-merge.yml"
+grep -q 'actions/create-github-app-token@' "$auto_tag"
+grep -q 'client-id:.*vars\.BUZZ_RELEASE_TAGGER_CLIENT_ID' "$auto_tag"
+grep -q 'private-key:.*secrets\.BUZZ_RELEASE_TAGGER_PRIVATE_KEY' "$auto_tag"
+grep -q 'permission-contents: write' "$auto_tag"
+grep -q 'GH_TOKEN:.*steps\.release-tagger\.outputs\.token' "$auto_tag"
+grep -Fq 'git/refs' "$auto_tag"
+if grep -q 'gh workflow run' "$auto_tag"; then
+  echo "auto-tag still dispatches a publisher instead of using the tag push" >&2
+  exit 1
+fi
 
 echo "release ref contract passed"
