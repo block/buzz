@@ -10,6 +10,8 @@ import {
   importIdentity,
   persistCurrentIdentity,
 } from "@/shared/api/tauriIdentity";
+import { runtimeSupportsLlmProviderSelection } from "@/features/agents/ui/agentConfigOptions";
+import { BUZZ_AGENT_THINKING_EFFORT } from "@/features/agents/ui/buzzAgentConfig";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
@@ -82,9 +84,29 @@ export function MachineOnboardingFlow({
 
       const save = runtimeSaveChain.current.then(async () => {
         const current = await getGlobalAgentConfig();
+        const selectedHarnessChanged =
+          current.preferred_runtime !== preferredRuntimeId;
+        if (!selectedHarnessChanged) {
+          await setGlobalAgentConfig({
+            ...current,
+            preferred_runtime: preferredRuntimeId,
+          });
+          return;
+        }
+
+        const nextEnvVars = { ...current.env_vars };
+        delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
         await setGlobalAgentConfig({
           ...current,
+          env_vars: nextEnvVars,
+          model: null,
           preferred_runtime: preferredRuntimeId,
+          provider:
+            preferredRuntimeId &&
+            runtimeSupportsLlmProviderSelection(preferredRuntimeId) &&
+            current.provider !== "relay-mesh"
+              ? current.provider
+              : null,
         });
       });
       runtimeSaveChain.current = save.then(

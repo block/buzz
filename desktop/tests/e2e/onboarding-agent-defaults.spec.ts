@@ -68,17 +68,24 @@ async function chooseConfigDropdownOption(
   await page.getByTestId(`${triggerTestId}-option-${value || "empty"}`).click();
 }
 
-async function readSavedRuntime(page: Parameters<typeof installMockBridge>[0]) {
-  const savedConfig = await page.evaluate(() =>
+async function readSavedConfig(page: Parameters<typeof installMockBridge>[0]) {
+  return await page.evaluate(() =>
     (
       window as Window & {
         __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
           command: string,
           payload: unknown,
-        ) => Promise<{ preferred_runtime?: string | null }>;
+        ) => Promise<{
+          model?: string | null;
+          preferred_runtime?: string | null;
+        }>;
       }
     ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
   );
+}
+
+async function readSavedRuntime(page: Parameters<typeof installMockBridge>[0]) {
+  const savedConfig = await readSavedConfig(page);
   return savedConfig?.preferred_runtime ?? null;
 }
 
@@ -159,6 +166,12 @@ test("authenticated Claude saves the selected runtime and routes to defaults", a
   await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
     "Claude",
   );
+  // Claude Code effort is real, but it is exposed as a Claude ACP-native
+  // config option, not Buzz Agent's generic effort env var. Hide the generic
+  // control until the config core can render that native option.
+  await expect(
+    page.getByTestId("global-agent-thinking-effort-select"),
+  ).toHaveCount(0);
   expect(await readSavedRuntime(page)).toBe("claude");
 });
 
@@ -484,15 +497,64 @@ test("multiple CLI harnesses route to default harness selection", async ({
   await expect.poll(() => readSavedRuntime(page)).toBe("codex");
   await expect(page.getByTestId("global-agent-provider")).toHaveCount(0);
   const modelSelect = page.getByTestId("global-agent-model");
-  const effortSelect = page.getByTestId("global-agent-thinking-effort-select");
   await expect(modelSelect).toBeVisible();
-  await expect(effortSelect).toBeVisible();
-  await expect(modelSelect).toHaveText("Select a model");
+  // Codex model ids can encode effort (for example, `gpt-5.5[low]`). Until the
+  // config core models Codex-native options directly, don't show Buzz Agent's
+  // generic effort field beside Codex's model catalog.
+  await expect(
+    page.getByTestId("global-agent-thinking-effort-select"),
+  ).toHaveCount(0);
+  await expect(modelSelect).toHaveText("Default model (gpt-5.5[high])");
   await modelSelect.click();
   await expect(
-    page.getByTestId("global-agent-model-option-codex-mini"),
+    page.getByTestId("global-agent-model-option-gpt-5.5[low]"),
   ).toBeVisible();
   await page.keyboard.press("Escape");
+});
+
+test("changing setup-page harness clears an incompatible saved model", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("claude", { status: "logged_in" }),
+        availableRuntime("codex", { status: "logged_in" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await page.getByTestId("onboarding-runtime-codex").click();
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+
+  await chooseConfigDropdownOption(page, "global-agent-model", "gpt-5.5[low]");
+  await expect(page.getByTestId("global-agent-model")).toHaveText(
+    "gpt-5.5[low]",
+  );
+
+  await page.getByTestId("onboarding-back").click();
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await page.getByTestId("onboarding-runtime-codex").click();
+  await page.getByTestId("onboarding-runtime-claude").click();
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Claude",
+  );
+  await expect(page.getByTestId("global-agent-model")).not.toHaveText(
+    "Custom model...",
+  );
+  await expect(page.getByLabel("Custom model ID")).toHaveCount(0);
+  await expect
+    .poll(async () => (await readSavedConfig(page))?.model)
+    .toBeNull();
+  await expect.poll(() => readSavedRuntime(page)).toBe("claude");
 });
 
 test("selecting all harnesses routes defaults through Buzz Agent", async ({
@@ -557,7 +619,7 @@ test("selecting all harnesses routes defaults through Buzz Agent", async ({
   await expect(page.getByTestId("global-agent-model")).toBeVisible();
   await expect(
     page.getByTestId("global-agent-thinking-effort-select"),
-  ).toBeVisible();
+  ).toHaveCount(0);
 
   await chooseConfigDropdownOption(
     page,

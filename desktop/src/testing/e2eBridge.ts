@@ -9775,8 +9775,14 @@ export function maybeInstallE2eTauriMocks() {
           },
         ];
         const codexRuntimeModels = [
-          { id: "codex-mini", name: "Codex mini", description: null },
-          { id: "codex-pro", name: "Codex pro", description: null },
+          { id: "gpt-5.5", name: "GPT-5.5", description: null },
+          { id: "gpt-5.5[low]", name: "GPT-5.5 (low)", description: null },
+          {
+            id: "gpt-5.5[medium]",
+            name: "GPT-5.5 (medium)",
+            description: null,
+          },
+          { id: "gpt-5.5[high]", name: "GPT-5.5 (high)", description: null },
         ];
         if (provider === "relay-mesh") {
           if (!mockMeshState.admitted) {
@@ -9808,7 +9814,9 @@ export function maybeInstallE2eTauriMocks() {
           agentName: "mock-agent",
           agentVersion: "0.0.0",
           models,
-          agentDefaultModel: null,
+          agentDefaultModel: agentCommand.includes("codex")
+            ? "gpt-5.5[high]"
+            : null,
           selectedModel: null,
           supportsSwitching: true,
         };

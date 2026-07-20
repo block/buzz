@@ -297,6 +297,36 @@ export function AgentConfigFields({
 
   const currentEffortForAutoClear =
     config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+
+  // When the selected harness changes outside this component (Back → setup
+  // page → choose a different harness → Next), the saved model can belong to
+  // the old harness. In onboarding, heal that stale value as soon as the new
+  // harness catalog proves it is unsupported; otherwise a Codex id like
+  // `gpt-5.5[low]` appears as a Claude Code custom model.
+  React.useEffect(() => {
+    if (!healOnMount) return;
+    const currentModel = (config.model ?? "").trim();
+    if (currentModel.length === 0) return;
+    if (modelDiscoveryLoading || discoveredModelOptions === null) return;
+    if (
+      discoveredModelOptions.some((option) => option.id.trim() === currentModel)
+    ) {
+      return;
+    }
+
+    const nextEnvVars = { ...config.env_vars };
+    delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+    onCustomModelEditingChange(false);
+    onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
+  }, [
+    config,
+    discoveredModelOptions,
+    modelDiscoveryLoading,
+    onConfigChange,
+    onCustomModelEditingChange,
+    healOnMount,
+  ]);
+
   // Orphan-model clearing follows the mount-time healing policy above: the
   // backend resolves provider and model independently across layers
   // (agent → definition → global), so a saved global model WITHOUT a global
@@ -452,6 +482,15 @@ export function AgentConfigFields({
   const { validValues: effortValid, defaultValue: effortDefault } =
     getProviderEffortConfig(effortProvider, config.model ?? "");
   const currentEffort = config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+  // Claude Code and Codex both have harness-native effort semantics that are
+  // not represented by Buzz Agent's generic BUZZ_AGENT_THINKING_EFFORT env var:
+  // Claude exposes ACP config option `effort`; Codex currently encodes effort
+  // into model ids (e.g. `gpt-5.5[low]`). Hide the generic control until the
+  // config core can render harness-native options honestly.
+  const effortFieldVisible =
+    showEffortField &&
+    selectedRuntimeId !== "claude" &&
+    selectedRuntimeId !== "codex";
 
   const fieldClassName = unstyled ? "space-y-4" : "space-y-1.5 p-3";
   const blockClassName = unstyled ? "" : "p-3";
@@ -617,7 +656,7 @@ export function AgentConfigFields({
       </div>
 
       {/* Thinking / Effort */}
-      {showEffortField ? (
+      {effortFieldVisible ? (
         <div className={blockClassName}>
           <EffortSelectField
             currentEffort={dependentFieldsDisabled ? "" : currentEffort}

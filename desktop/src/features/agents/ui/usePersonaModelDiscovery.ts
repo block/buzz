@@ -25,7 +25,18 @@ function stableModelDiscoveryEnvKey(envVars: EnvVarsValue): string {
   );
 }
 
-function getDiscoveredPersonaModelOptions(
+/**
+ * True when a harness catalog entry is the harness's own "use my default"
+ * row (e.g. Claude Code ships a literal `default` model id). Such entries
+ * mean the same thing as leaving the model unset, so the UI merges them
+ * into the single canonical default row instead of showing two rows for
+ * one idea.
+ */
+function isHarnessDefaultModelEntry(model: { id: string }) {
+  return model.id.trim().toLowerCase() === "default";
+}
+
+export function getDiscoveredPersonaModelOptions(
   response: AgentModelsResponse | null,
   provider: string,
 ): readonly PersonaModelOption[] | null {
@@ -33,23 +44,38 @@ function getDiscoveredPersonaModelOptions(
     return null;
   }
 
-  const defaultModelOption = providerRequiresExplicitModel(provider)
-    ? []
-    : [
-        {
-          id: "",
-          label:
-            provider === "relay-mesh"
-              ? "Default (auto)"
-              : response.agentDefaultModel?.trim()
-                ? `Default model (${response.agentDefaultModel})`
-                : "Default model",
-        },
-      ];
+  // One row per idea: the harness's own default catalog entry (if any) is
+  // absorbed into the canonical default row. Selecting it keeps the stored
+  // model unset — behaviorally identical, and it avoids two saved states
+  // ("default" vs unset) that mean the same thing.
+  const explicitModels = response.models.filter(
+    (model) => !isHarnessDefaultModelEntry(model),
+  );
+  const harnessDefaultEntry = response.models.find(isHarnessDefaultModelEntry);
+  const agentDefaultModel = response.agentDefaultModel?.trim();
+
+  const defaultModelOption =
+    providerRequiresExplicitModel(provider) && harnessDefaultEntry === undefined
+      ? []
+      : [
+          {
+            id: "",
+            label:
+              provider === "relay-mesh"
+                ? "Default (auto)"
+                : agentDefaultModel
+                  ? `Default model (${agentDefaultModel})`
+                  : "Default model",
+          },
+        ];
+
+  if (explicitModels.length === 0 && defaultModelOption.length === 0) {
+    return null;
+  }
 
   return [
     ...defaultModelOption,
-    ...response.models.map((model) => ({
+    ...explicitModels.map((model) => ({
       id: model.id,
       label: model.name?.trim() || model.id,
     })),

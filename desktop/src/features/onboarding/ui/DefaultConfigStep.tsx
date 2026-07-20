@@ -140,26 +140,45 @@ function AgentDefaultsSection({
     [selectedRuntimes],
   );
 
-  function handleHarnessChange(runtimeId: string) {
-    const nextEnvVars = { ...config.env_vars };
-    delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
-    const nextProvider =
-      runtimeSupportsLlmProviderSelection(runtimeId) &&
-      config.provider !== "relay-mesh"
-        ? config.provider
-        : null;
-    const next = {
-      ...config,
-      env_vars: nextEnvVars,
-      model: null,
-      preferred_runtime: runtimeId || null,
-      provider: nextProvider,
-    };
-    setIsCustomModelEditing(false);
-    setIsCustomProvider(false);
-    setConfig(next);
-    coalescerRef.current?.enqueue(next);
-  }
+  const handleHarnessChange = React.useCallback(
+    (runtimeId: string) => {
+      const nextEnvVars = { ...config.env_vars };
+      delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+      const nextProvider =
+        runtimeSupportsLlmProviderSelection(runtimeId) &&
+        config.provider !== "relay-mesh"
+          ? config.provider
+          : null;
+      const next = {
+        ...config,
+        env_vars: nextEnvVars,
+        model: null,
+        preferred_runtime: runtimeId || null,
+        provider: nextProvider,
+      };
+      setIsCustomModelEditing(false);
+      setIsCustomProvider(false);
+      setConfig(next);
+      coalescerRef.current?.enqueue(next);
+    },
+    [config],
+  );
+
+  React.useEffect(() => {
+    if (isLoading || !selectedRuntimeId) return;
+    if (config.preferred_runtime === selectedRuntimeId) return;
+
+    // The user can go Back, change which harnesses are selected, then return to
+    // this page without using this page's own harness dropdown. Reconcile that
+    // effective harness change through the same reset path so a Codex model
+    // never survives into Claude Code as a custom model (or vice versa).
+    handleHarnessChange(selectedRuntimeId);
+  }, [
+    config.preferred_runtime,
+    handleHarnessChange,
+    isLoading,
+    selectedRuntimeId,
+  ]);
 
   return (
     <section className="w-full space-y-4 text-left text-sm">

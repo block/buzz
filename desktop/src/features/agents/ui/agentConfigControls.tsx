@@ -230,6 +230,24 @@ export function RequiredFieldLabel({
   );
 }
 
+export function resolveDefaultModelLabel({
+  defaultModelLabel,
+  discoveredModelOptions,
+  globalModel,
+  isSharedCompute,
+}: {
+  defaultModelLabel?: string;
+  discoveredModelOptions: readonly PersonaModelOption[] | null;
+  globalModel?: string;
+  isSharedCompute: boolean;
+}) {
+  return (
+    defaultModelLabel ??
+    discoveredModelOptions?.find((option) => option.id.trim() === "")?.label ??
+    (isSharedCompute ? "Default (auto)" : getDefaultLlmModelLabel(globalModel))
+  );
+}
+
 export function AgentModelField({
   disabled,
   discoveredModelOptions,
@@ -305,16 +323,22 @@ export function AgentModelField({
 }) {
   const trimmedModel = model.trim();
   const isSharedCompute = provider?.trim() === "relay-mesh";
+  const discoveredDefaultOption = discoveredModelOptions?.find(
+    (option) => option.id.trim() === "",
+  );
 
-  // Buzz shared compute always has an automatic routing choice, even when
-  // discovery is empty or returns only explicit live model ids.
+  // Model discovery can report the harness's current/default model while the
+  // persisted value remains empty ("let the harness choose"). Treat that as a
+  // real, displayable option instead of a blank select state. Explicit labels
+  // from a lower-precedence/baked default still win when present.
   const defaultOption: PersonaModelOption = {
     id: "",
-    label:
-      defaultModelLabel ??
-      (isSharedCompute
-        ? "Default (auto)"
-        : getDefaultLlmModelLabel(globalModel)),
+    label: resolveDefaultModelLabel({
+      defaultModelLabel,
+      discoveredModelOptions,
+      globalModel,
+      isSharedCompute,
+    }),
   };
   const discoveredWithoutDefault = (discoveredModelOptions ?? []).filter(
     (option) => option.id.trim() !== "",
@@ -322,7 +346,9 @@ export function AgentModelField({
   const baseModelOptions = isSharedCompute
     ? [defaultOption, ...discoveredWithoutDefault]
     : [
-        ...(allowDefaultModel ? [defaultOption] : []),
+        ...(allowDefaultModel || discoveredDefaultOption
+          ? [defaultOption]
+          : []),
         ...discoveredWithoutDefault,
       ];
   const shouldShowPendingModelOption =
@@ -402,6 +428,16 @@ export function AgentModelField({
     trimmedModel.length > 0
       ? trimmedModel
       : undefined;
+  // While discovery is in flight with nothing selected, the closed field
+  // reads "Loading models…" instead of a select-prompt — the field isn't
+  // waiting on the user, it's waiting on the harness.
+  const restingPlaceholder =
+    modelDiscoveryLoading &&
+    discoveredModelOptions === null &&
+    trimmedModel.length === 0 &&
+    !isCustomModelEditing
+      ? "Loading models..."
+      : placeholder;
 
   const modelSelect = useCustomSelect ? (
     <AgentDropdownSelect
@@ -411,7 +447,7 @@ export function AgentModelField({
       id={id}
       onValueChange={handleModelSelectChange}
       options={modelOptions}
-      placeholder={placeholder}
+      placeholder={restingPlaceholder}
       placeholderClassName={placeholderClassName}
       searchable
       selectedLabel={stableSelectedModelLabel}
