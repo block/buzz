@@ -1,11 +1,13 @@
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 
-const KNOWN_ONBOARDING_RUNTIME_IDS = new Set([
-  "buzz-agent",
+const ONBOARDING_RUNTIME_ORDER = [
   "claude",
   "codex",
   "goose",
-]);
+  "buzz-agent",
+] as const;
+
+const KNOWN_ONBOARDING_RUNTIME_IDS = new Set<string>(ONBOARDING_RUNTIME_ORDER);
 
 export function runtimeUsesDefaultModelConfig(runtimeId: string) {
   return runtimeId === "buzz-agent" || runtimeId === "goose";
@@ -22,7 +24,14 @@ export function getDefaultModelConfigRuntimeId(runtimeIds: readonly string[]) {
 export function getPreferredRuntimeIdForSelection(
   runtimeIds: readonly string[],
 ) {
-  return getDefaultModelConfigRuntimeId(runtimeIds) ?? runtimeIds[0] ?? null;
+  const selectedRuntimeIds = new Set(runtimeIds);
+  return (
+    ONBOARDING_RUNTIME_ORDER.find((runtimeId) =>
+      selectedRuntimeIds.has(runtimeId),
+    ) ??
+    runtimeIds[0] ??
+    null
+  );
 }
 
 export function runtimeSelectionNeedsDefaultModelConfig(

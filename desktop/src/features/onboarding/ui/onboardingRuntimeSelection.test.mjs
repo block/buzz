@@ -101,14 +101,29 @@ test("provider-backed selections drive the default model config step", () => {
     getDefaultModelConfigRuntimeId(["claude", "codex", "goose", "buzz-agent"]),
     "buzz-agent",
   );
+});
+
+test("onboarding display order drives the preferred runtime", () => {
   assert.equal(
-    getPreferredRuntimeIdForSelection(["claude", "codex", "goose"]),
-    "goose",
-  );
-  assert.equal(
-    getPreferredRuntimeIdForSelection(["claude", "codex"]),
+    getPreferredRuntimeIdForSelection([
+      "buzz-agent",
+      "goose",
+      "codex",
+      "claude",
+    ]),
     "claude",
   );
+  assert.equal(
+    getPreferredRuntimeIdForSelection(["buzz-agent", "goose", "codex"]),
+    "codex",
+  );
+  assert.equal(
+    getPreferredRuntimeIdForSelection(["buzz-agent", "goose"]),
+    "goose",
+  );
+  assert.equal(getPreferredRuntimeIdForSelection(["buzz-agent"]), "buzz-agent");
+  assert.equal(getPreferredRuntimeIdForSelection(["custom"]), "custom");
+  assert.equal(getPreferredRuntimeIdForSelection([]), null);
 });
 
 test("any harness selection drives the defaults step", () => {
