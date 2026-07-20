@@ -29,17 +29,16 @@ pub async fn cmd_list_channels(
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     let effective_limit = limit.unwrap_or(500);
-    let raw = if member == Some(true) {
+    let events = if member == Some(true) {
         // Step 1: find channel IDs where we're a member (kind:39002)
         let my_pk = client.keys().public_key().to_hex();
         let member_filter = serde_json::json!({
             "kinds": [39002],
             "#p": [my_pk],
-            "limit": effective_limit
         });
-        let member_resp = client.query(&member_filter).await?;
-        let member_events: Vec<serde_json::Value> =
-            serde_json::from_str(&member_resp).unwrap_or_default();
+        let member_events = client
+            .query_paginated(member_filter, effective_limit)
+            .await?;
         let channel_ids: Vec<String> = member_events
             .iter()
             .map(extract_d_tag)
@@ -49,22 +48,21 @@ pub async fn cmd_list_channels(
             println!("[]");
             return Ok(());
         }
-        // Step 2: fetch kind:39000 metadata for those channels
+        // Step 2: fetch kind:39000 metadata for those channels.
         let metadata_filter = serde_json::json!({
             "kinds": [39000],
             "#d": channel_ids,
-            "limit": effective_limit
         });
-        client.query(&metadata_filter).await?
+        client
+            .query_paginated(metadata_filter, effective_limit)
+            .await?
     } else {
         let filter = serde_json::json!({
             "kinds": [39000],
-            "limit": effective_limit
         });
-        client.query(&filter).await?
+        client.query_paginated(filter, effective_limit).await?
     };
 
-    let events: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
     let channels: Vec<serde_json::Value> = events
         .iter()
         .filter(|e| {
@@ -130,16 +128,8 @@ pub async fn cmd_search_channels(
 
     let filter = serde_json::json!({
         "kinds": [39000],
-        "limit": limit,
     });
-    let raw = client.query(&filter).await?;
-
-    let events: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
-    let Some(arr) = events.as_array() else {
-        println!("[]");
-        return Ok(());
-    };
+    let arr = client.query_paginated(filter, limit).await?;
 
     let needle = query.to_ascii_lowercase();
     let mut matches: Vec<ChannelSummary> = arr

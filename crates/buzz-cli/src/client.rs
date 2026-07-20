@@ -335,6 +335,29 @@ mod media_download_tests {
     }
 }
 
+const QUERY_PAGE_SIZE: u32 = 500;
+
+fn advance_query_cursor(
+    filter: &mut serde_json::Value,
+    page: &[serde_json::Value],
+) -> Result<(), CliError> {
+    let last = page
+        .last()
+        .expect("a full query page always has a last event");
+    let created_at = last
+        .get("created_at")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| CliError::Other("query event missing created_at".into()))?;
+    let id = last
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()))
+        .ok_or_else(|| CliError::Other("query event missing valid id".into()))?;
+    filter["until"] = serde_json::json!(created_at);
+    filter["before_id"] = serde_json::json!(id);
+    Ok(())
+}
+
 pub struct BuzzClient {
     http: reqwest::Client,
     relay_url: String, // base URL, no trailing slash, e.g. "https://relay.buzz.place"
@@ -426,6 +449,36 @@ impl BuzzClient {
             Some(ref json) => req.header("x-auth-tag", json),
             None => req,
         }
+    }
+
+    /// Query up to `limit` historical events, following the relay bridge's
+    /// composite `(until, before_id)` cursor across bounded result pages.
+    pub async fn query_paginated(
+        &self,
+        mut filter: serde_json::Value,
+        limit: u32,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        let mut events = Vec::new();
+
+        while events.len() < limit as usize {
+            let page_limit = (limit as usize - events.len()).min(QUERY_PAGE_SIZE as usize);
+            filter["limit"] = serde_json::json!(page_limit);
+
+            let raw = self.query(&filter).await?;
+            let page: Vec<serde_json::Value> = serde_json::from_str(&raw)
+                .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+            let done = page.len() < page_limit;
+
+            if !done {
+                advance_query_cursor(&mut filter, &page)?;
+            }
+            events.extend(page);
+            if done {
+                break;
+            }
+        }
+
+        Ok(events)
     }
 
     /// Execute a one-shot query via the HTTP bridge.
@@ -849,7 +902,35 @@ pub fn normalize_write_response(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_response_with_id, extract_relay_response_field};
+    use super::{advance_query_cursor, create_response_with_id, extract_relay_response_field};
+
+    #[test]
+    fn query_cursor_uses_last_events_composite_sort_key() {
+        let mut filter = serde_json::json!({"kinds": [39000], "limit": 500});
+        let page = vec![
+            serde_json::json!({"id": "a".repeat(64), "created_at": 20}),
+            serde_json::json!({"id": "b".repeat(64), "created_at": 10}),
+        ];
+
+        advance_query_cursor(&mut filter, &page).unwrap();
+
+        assert_eq!(filter["until"], serde_json::json!(10));
+        assert_eq!(filter["before_id"], serde_json::json!("b".repeat(64)));
+    }
+
+    #[test]
+    fn query_cursor_rejects_missing_or_malformed_sort_key() {
+        let mut filter = serde_json::json!({});
+        assert!(
+            advance_query_cursor(&mut filter, &[serde_json::json!({"id": "a".repeat(64)})])
+                .is_err()
+        );
+        assert!(advance_query_cursor(
+            &mut filter,
+            &[serde_json::json!({"id": "not-an-event-id", "created_at": 10})]
+        )
+        .is_err());
+    }
 
     #[test]
     fn extract_relay_response_field_reads_response_message_json() {
