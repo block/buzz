@@ -20,6 +20,124 @@ const BB_SESSION_CREDENTIAL_HEADER: &str = "X-BB-Session-Credential";
 // or challenge/verify fail with `invalid_origin`. It also seeds the challenge
 // body's `origin` field so both agree.
 const BUILDERLAB_ORIGIN: &str = "https://app.builderlab.xyz";
+const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Buzz authentication complete</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #231e1e;
+      background: #d7d72e;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      min-height: 100vh;
+      min-height: 100dvh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background-color: #d7d72e;
+      background-image: radial-gradient(circle, rgba(35, 30, 30, 0.16) 1.2px, transparent 1.3px);
+      background-size: 37px 37px;
+    }
+
+    main {
+      width: min(100%, 560px);
+      padding: clamp(32px, 8vw, 64px);
+      border: 2px solid #231e1e;
+      border-radius: 28px;
+      background: #d7e7f6;
+      box-shadow: 8px 8px 0 #231e1e;
+    }
+
+    .bee {
+      display: block;
+      width: 72px;
+      height: auto;
+      margin-bottom: 40px;
+      color: #231e1e;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      min-height: 32px;
+      margin: 0 0 20px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      background: #d7d72e;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+    }
+
+    h1 {
+      max-width: 440px;
+      margin: 0;
+      font-size: clamp(40px, 9vw, 64px);
+      font-weight: 600;
+      letter-spacing: -0.055em;
+      line-height: 0.95;
+    }
+
+    p {
+      max-width: 390px;
+      margin: 24px 0 0;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+      line-height: 1.45;
+    }
+
+    @media (max-width: 480px) {
+      body {
+        padding: 16px;
+      }
+
+      main {
+        padding: 32px 28px 36px;
+        border-radius: 22px;
+        box-shadow: 6px 6px 0 #231e1e;
+      }
+
+      .bee {
+        width: 60px;
+        margin-bottom: 32px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <svg class="bee" viewBox="0 0 466 309" role="img" aria-label="Buzz">
+      <defs>
+        <mask id="bee-mask">
+          <rect width="466" height="309" fill="black"/>
+          <circle cx="91.7" cy="154.5" r="91.7" fill="white"/>
+          <circle cx="374.3" cy="154.5" r="91.7" fill="white"/>
+          <rect x="128" width="210" height="309" rx="34" fill="white"/>
+          <ellipse cx="193.3" cy="84.4" rx="27" ry="27" fill="black"/>
+          <ellipse cx="276" cy="84.4" rx="27" ry="27" fill="black"/>
+          <rect x="166.3" y="157.2" width="136.9" height="38.3" rx="5" fill="black"/>
+          <rect x="166.9" y="235.1" width="136.2" height="37.6" rx="5" fill="black"/>
+        </mask>
+      </defs>
+      <rect width="466" height="309" fill="currentColor" mask="url(#bee-mask)"/>
+    </svg>
+    <div class="eyebrow">Authentication complete</div>
+    <h1>You&rsquo;re signed in.</h1>
+    <p>You can close this window and return to Buzz.</p>
+  </main>
+</body>
+</html>"#;
 
 #[derive(Default)]
 pub(crate) struct BuilderlabSession(Mutex<Option<StoredSession>>);
@@ -88,11 +206,7 @@ async fn login_callback(
         let _ = sender.send(result);
     }
 
-    Html(
-        "<!doctype html><meta charset=utf-8><title>Buzz authentication complete</title>\
-         <h1>Authentication complete</h1><p>You can close this window and return to Buzz.</p>",
-    )
-    .into_response()
+    Html(AUTH_COMPLETE_HTML).into_response()
 }
 
 fn api_url(path: &str) -> Result<Url, String> {
@@ -529,6 +643,23 @@ pub(crate) async fn transfer_builderlab_community(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_complete_page_uses_buzz_brand() {
+        for expected in [
+            "<title>Buzz authentication complete</title>",
+            "#d7d72e",
+            "#231e1e",
+            "#d7e7f6",
+            "aria-label=\"Buzz\"",
+            "return to Buzz",
+        ] {
+            assert!(
+                AUTH_COMPLETE_HTML.contains(expected),
+                "authentication complete page is missing {expected}"
+            );
+        }
+    }
 
     #[test]
     fn api_paths_stay_on_builderlab_api_origin() {
