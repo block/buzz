@@ -2081,17 +2081,51 @@ async fn tokio_main() -> Result<()> {
                             // backed payload) so the cost is negligible.
                             let event_for_steer = buzz_event.event.clone();
                             let prompt_tag_for_steer = prompt_tag.clone();
-                            let accepted = queue.push(QueuedEvent::new(
-                                buzz_event.channel_id,
-                                buzz_event.event,
-                                std::time::Instant::now(),
-                                prompt_tag,
-                            ));
-                            // 👀 — immediate "seen" reaction, only if the event
-                            // was actually queued (not dropped by DedupMode::Drop).
-                            // Fire-and-forget: on rare fast-failure paths the
-                            // guard's cleanup may race with this add, leaving a
-                            // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
+
+                            // R6-F2: recovered-suppression seam. If this
+                            // event was boot-recovered (its id is in the
+                            // suppression set), it is already in the queue
+                            // via import_recovered — the relay replay is a
+                            // duplicate. But if the event was unresolved
+                            // (not fetched during boot), the live arrival
+                            // is the resolution: admit it at its original
+                            // seq position and clear the unresolved record.
+                            // Either way, skip try_native_steer — recovered
+                            // admissions wait for recovery-framed batch
+                            // dispatch, not mid-turn steering.
+                            let is_recovered_suppressed = recovered_suppression.remove(&event_id_hex);
+                            let (accepted, skip_steer) = if is_recovered_suppressed {
+                                // Already in the queue from boot import —
+                                // suppress the duplicate live push entirely.
+                                (false, true)
+                            } else if let Some(unresolved) = ledger.find_unresolved(buzz_event.channel_id, &event_id_hex) {
+                                // Unresolved record resolving: build a
+                                // recovered QueuedEvent with the ledger's
+                                // original seq/timestamp/cap_exempt, admit
+                                // at seq position, then consume the ledger
+                                // entry (consume-after-ownership ordering).
+                                let recovered = QueuedEvent::from_recovered(
+                                    buzz_event.channel_id,
+                                    buzz_event.event,
+                                    prompt_tag,
+                                    unresolved.admission_seq,
+                                    unresolved.enqueued_at_unix,
+                                    unresolved.cap_exempt,
+                                );
+                                queue.admit_recovered(buzz_event.channel_id, recovered);
+                                ledger.resolve_unresolved(buzz_event.channel_id, &event_id_hex);
+                                sync_dirty(&mut queue, &mut ledger);
+                                (true, true)
+                            } else {
+                                let ok = queue.push(QueuedEvent::new(
+                                    buzz_event.channel_id,
+                                    buzz_event.event,
+                                    std::time::Instant::now(),
+                                    prompt_tag,
+                                ));
+                                (ok, false)
+                            };
+
                             if accepted {
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
@@ -2099,32 +2133,13 @@ async fn tokio_main() -> Result<()> {
                                     pool::reaction_add(&rc, &eid, "👀").await;
                                 });
                             }
-                            // Event is already queued. If mode requires it AND
-                            // the channel has an in-flight task, fire cancel —
-                            // OR take the non-cancelling (ACP steer) fork for Steer signals.
-                            if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
-                                // Author eligibility (owner ∪ allowlist ∪ siblings)
-                                // is already enforced by the inbound author gate
-                                // above, so the mid-turn signal fires for every
-                                // event that reaches here.
+                            if accepted && !skip_steer && queue.is_channel_in_flight(buzz_event.channel_id) {
                                 let signal = mode_gate_signal(
                                     config.multiple_event_handling,
                                     &author_hex,
                                     owner_cache.get(),
                                 );
                                 if let Some(signal) = signal {
-                                    // Try-and-tolerate fork: when the mode
-                                    // wants a Steer, attempt the non-cancelling
-                                    // path first for any agent. On accept,
-                                    // withhold the queued event and spawn an
-                                    // ack watcher; the main loop's
-                                    // `PoolEvent::SteerAck` arm decides
-                                    // success/release/fallback. On reject
-                                    // (including `-32601 method_not_found`
-                                    // from agents that don't implement the
-                                    // extension), fall through to the universal
-                                    // cancel+merge `Steer` signal so the event
-                                    // still reaches the agent.
                                     let native_attempted = matches!(signal, ControlSignal::Steer)
                                         && try_native_steer(
                                             &mut pool,
@@ -2229,6 +2244,35 @@ async fn tokio_main() -> Result<()> {
                             if let Err(e) = relay.try_publish_event(event) {
                                 tracing::debug!("typing indicator dropped for {ch}: {e}");
                             }
+                        }
+                    }
+                    None
+                }
+                // Barrier-deadline timer arm (rev 6.1): fires when the
+                // earliest unresolved barrier expires, even when all
+                // external inputs are silent. Without this, held suffix
+                // events on quiet channels would never dispatch.
+                _ = async {
+                    match queue.next_unresolved_barrier_deadline() {
+                        Some(deadline) => {
+                            let tokio_deadline = tokio::time::Instant::from_std(deadline);
+                            tokio::time::sleep_until(tokio_deadline).await;
+                        }
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let _ = result_rx;
+                    let expired = queue.expire_due_unresolved_barriers(std::time::Instant::now());
+                    if !expired.is_empty() {
+                        tracing::info!(
+                            channels = ?expired,
+                            "unresolved barrier deadline expired — releasing held suffix"
+                        );
+                        sync_dirty(&mut queue, &mut ledger);
+                        for (channel_id, thread_tags) in
+                            dispatch_pending(&mut pool, &mut queue, &mut ledger, &ctx)
+                        {
+                            typing_channels.insert(channel_id, thread_tags);
                         }
                     }
                     None
