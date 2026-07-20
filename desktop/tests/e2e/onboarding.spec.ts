@@ -624,11 +624,13 @@ test("first-community choices expose npub and invite input", async ({
   await page
     .getByRole("button", { name: "Create or connect to my own community" })
     .click();
-  // Sign-in opens as a modal over the (blurred) "Your communities" page.
+  // Sign-in opens as a modal over the blurred hosted-community preview.
   await expect(
-    page.getByRole("heading", { name: "Sign in to Buzz" }),
+    page.getByRole("heading", { name: "Set up your community" }),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Sign in to continue" }),
+  ).toBeVisible();
   // The modal's close (X) dismisses back to the community picker.
   await page.getByRole("button", { name: "Close" }).click();
 
@@ -803,6 +805,21 @@ test("first-community owner can connect an existing hosted community", async ({
       ),
     )
     .toContain("wss://north-star.communities.buzz.xyz");
+  await page.getByTestId("community-profile-back").click();
+  await expect(
+    page.getByRole("heading", { name: "Choose a community" }),
+  ).toBeVisible();
+  await expect(page.getByText("North Star")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Request access to community" }),
+  ).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-community-onboarding-transaction.v1"),
+      ),
+    )
+    .toBeNull();
 });
 
 test("first-community owner can create and connect a hosted community", async ({
@@ -829,17 +846,44 @@ test("first-community owner can create and connect a hosted community", async ({
   await page
     .getByRole("button", { name: "Create or connect to my own community" })
     .click();
-  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Sign in to continue" }).click();
   await expect(
-    page.getByRole("heading", { name: "Connect this Buzz identity" }),
+    page.getByRole("heading", { name: "Finish connecting Buzz" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByText("Signed in as owner@example.com")).toBeVisible();
-  await page
-    .getByRole("textbox", { name: "Community address" })
-    .fill("bee-lab");
-  await expect(page.getByText("That address is available.")).toBeVisible();
-  await page.getByRole("button", { name: "Create and connect" }).click();
+  await page.getByRole("button", { name: "Connect and continue" }).click();
+  const createSurface = page.getByTestId("hosted-community-create-surface");
+  const surfaceBoxBeforeFeedback = await createSurface.boundingBox();
+  await page.getByRole("textbox", { name: "Community name" }).fill("bee-lab");
+  const availabilityFeedback = page.getByText("That address is available.");
+  await expect(availabilityFeedback).toBeVisible();
+  const [feedbackBox, surfaceBox, inputBox, suffixBox] = await Promise.all([
+    availabilityFeedback.boundingBox(),
+    createSurface.boundingBox(),
+    page.getByTestId("hosted-community-address-input").boundingBox(),
+    page.locator("#hosted-community-suffix").boundingBox(),
+  ]);
+  if (
+    !surfaceBoxBeforeFeedback ||
+    !feedbackBox ||
+    !surfaceBox ||
+    !inputBox ||
+    !suffixBox
+  ) {
+    throw new Error("Could not measure hosted community creation layout");
+  }
+  expect(surfaceBox.y).toBe(surfaceBoxBeforeFeedback.y);
+  expect(surfaceBox.height).toBe(surfaceBoxBeforeFeedback.height);
+  const addressLeft = inputBox.x;
+  const addressRight = suffixBox.x + suffixBox.width;
+  expect(
+    Math.abs(
+      (addressLeft + addressRight) / 2 - (surfaceBox.x + surfaceBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(feedbackBox.y).toBeGreaterThanOrEqual(
+    surfaceBox.y + surfaceBox.height,
+  );
+  await page.getByRole("button", { name: "Next" }).click();
   await expect(
     page.getByRole("heading", { name: "Build your profile" }),
   ).toBeVisible();
@@ -886,11 +930,9 @@ test("first-community reports a created community without a relay address", asyn
   await page
     .getByRole("button", { name: "Create or connect to my own community" })
     .click();
-  await page
-    .getByRole("textbox", { name: "Community address" })
-    .fill("bee-lab");
+  await page.getByRole("textbox", { name: "Community name" }).fill("bee-lab");
   await expect(page.getByText("That address is available.")).toBeVisible();
-  await page.getByRole("button", { name: "Create and connect" }).click();
+  await page.getByRole("button", { name: "Next" }).click();
   await expect(page.getByRole("alert")).toContainText(
     "The community was created, but Builderlab did not return its relay address.",
   );
@@ -899,9 +941,7 @@ test("first-community reports a created community without a relay address", asyn
   ).toHaveCount(0);
 });
 
-test("first-community can cancel a closed-browser sign-in and retry", async ({
-  page,
-}) => {
+test("first-community X cancels a pending sign-in", async ({ page }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await page.addInitScript((pubkey) => {
     window.localStorage.setItem(
@@ -923,22 +963,18 @@ test("first-community can cancel a closed-browser sign-in and retry", async ({
   await page
     .getByRole("button", { name: "Create or connect to my own community" })
     .click();
-  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Sign in to continue" }).click();
   await expect(page.getByText("Waiting for your browser…")).toBeVisible();
-  await page.getByRole("button", { name: "Cancel sign-in" }).click();
-  await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Cancel sign-in" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(
+    page.getByRole("button", { name: "Create or connect to my own community" }),
+  ).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
     .toEqual(expect.arrayContaining(["cancel_builderlab_login"]));
-
-  await page.evaluate(() => {
-    if (window.__BUZZ_E2E_CONFIG__?.mock)
-      window.__BUZZ_E2E_CONFIG__.mock.builderlabLoginDelayMs = 0;
-  });
-  await page.getByRole("button", { name: "Continue" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Connect this Buzz identity" }),
-  ).toBeVisible();
 });
 
 test("first-community owner can replace a mismatched account identity", async ({
