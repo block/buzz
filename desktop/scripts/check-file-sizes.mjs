@@ -442,7 +442,13 @@ const overrides = new Map([
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   // +8: harness_override thread-through in update_managed_agent so a deliberate
   // Custom pin routes to update_time_agent_command_override (comment + call).
-  ["src-tauri/src/commands/agent_models.rs", 1079],
+  // +8: OpenRouter discovery call sites + module delegation; bulk logic
+  // extracted to agent_models_openrouter.rs.
+  // +3: OpenRouter B5 test imports (filter_openrouter_models, types).
+  // +5: draft_agent_model_discovery_env extracted so discover_agent_models's
+  // provider/env derivation is a tested pure function (Thufir T4 finding —
+  // unsaved-agent discovery previously had no seam to exercise directly).
+  ["src-tauri/src/commands/agent_models.rs", 1096],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.

@@ -203,6 +203,13 @@
     "defaultValue": "medium"
   },
   {
+    "note": "openrouter: all-7 with medium default",
+    "provider": "openrouter",
+    "model": "",
+    "validValues": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
+  },
+  {
     "note": "empty provider: all-7 with medium default",
     "provider": "",
     "model": "",

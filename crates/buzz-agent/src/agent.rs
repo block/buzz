@@ -213,6 +213,7 @@ impl RunCtx<'_> {
                 self.history.push(HistoryItem::Assistant {
                     text: response.text,
                     tool_calls: Vec::new(),
+                    reasoning_details: response.reasoning_details.clone(),
                 });
                 let stop = map_stop(response.stop);
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
@@ -249,6 +250,7 @@ impl RunCtx<'_> {
             self.history.push(HistoryItem::Assistant {
                 text: response.text,
                 tool_calls: calls.clone(),
+                reasoning_details: response.reasoning_details,
             });
 
             if let Some(stop) = self.execute_calls(&calls).await {
@@ -680,6 +682,7 @@ pub(crate) fn push_hook_outputs_as_tool_results(
                 name: tool_name,
                 arguments: serde_json::json!({}),
             }],
+            reasoning_details: None,
         });
         history.push(HistoryItem::ToolResult(ToolResult {
             provider_id,
@@ -742,5 +745,78 @@ fn map_stop(p: ProviderStop) -> StopReason {
         ProviderStop::EndTurn | ProviderStop::ToolUse | ProviderStop::Other => StopReason::EndTurn,
         ProviderStop::MaxTokens => StopReason::MaxTokens,
         ProviderStop::Refusal => StopReason::Refusal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A9 regression: `reasoning_details` contributes real bytes to
+    /// `estimated_bytes` (see `types.rs::HistoryItem::size_with`), so a
+    /// history item carrying a large opaque reasoning array must actually
+    /// drive `truncate_history` eviction — not be silently invisible to the
+    /// sizing gate that decides what survives a turn.
+    #[test]
+    fn truncate_history_evicts_oldest_turn_with_reasoning_details() {
+        let big_reasoning = json!([{ "type": "reasoning.text", "text": "x".repeat(400) }]);
+        let mut history = vec![
+            HistoryItem::User("first question".into()),
+            HistoryItem::Assistant {
+                text: "first answer".into(),
+                tool_calls: vec![],
+                reasoning_details: Some(big_reasoning),
+            },
+            HistoryItem::User("second question".into()),
+            HistoryItem::Assistant {
+                text: "second answer".into(),
+                tool_calls: vec![],
+                reasoning_details: None,
+            },
+        ];
+
+        let total_before: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
+        // Budget below the total but above the second (smaller) turn alone,
+        // so only the oldest user+assistant pair — the one carrying
+        // reasoning_details — must be dropped.
+        let max_bytes = total_before - 100;
+        assert!(
+            max_bytes > 0,
+            "test fixture must leave room to evict only one turn"
+        );
+
+        truncate_history(&mut history, max_bytes);
+
+        assert_eq!(
+            history.len(),
+            2,
+            "the oldest user+assistant turn (with reasoning_details) must be evicted"
+        );
+        assert!(matches!(&history[0], HistoryItem::User(s) if s == "second question"));
+        assert!(
+            matches!(&history[1], HistoryItem::Assistant { text, .. } if text == "second answer")
+        );
+        let total_after: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
+        assert!(total_after <= max_bytes);
+    }
+
+    #[test]
+    fn truncate_history_noop_when_under_budget() {
+        let mut history = vec![
+            HistoryItem::User("hi".into()),
+            HistoryItem::Assistant {
+                text: "hello".into(),
+                tool_calls: vec![],
+                reasoning_details: None,
+            },
+        ];
+        let original_len = history.len();
+        truncate_history(&mut history, 1_000_000);
+        assert_eq!(
+            history.len(),
+            original_len,
+            "under budget must not evict anything"
+        );
     }
 }

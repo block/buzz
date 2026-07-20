@@ -86,6 +86,17 @@ pub async fn get_agent_models(
     }; // store lock released — subprocess runs without holding the lock
 
     let merged_env = discovery_env_with_baked_floor(merged_env);
+    if let Some(models) = discover_openrouter_models(
+        &state.http_client,
+        effective_provider.as_deref(),
+        &merged_env,
+        persisted_model.clone(),
+    )
+    .await?
+    {
+        return Ok(models);
+    }
+
     if let Some(models) = discover_openai_compatible_models(
         &state.http_client,
         effective_provider.as_deref(),
@@ -160,6 +171,23 @@ fn saved_agent_model_discovery_config(
     }
 }
 
+fn draft_agent_model_discovery_env(
+    agent_command: &str,
+    provider: Option<&str>,
+    env_vars: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut derived_env = BTreeMap::new();
+    if let Some(meta) = known_acp_runtime(agent_command) {
+        let provider = provider.map(str::trim).filter(|value| !value.is_empty());
+        if !meta.provider_locked {
+            if let (Some(env_key), Some(provider)) = (meta.provider_env_var, provider) {
+                derived_env.insert(env_key.to_string(), provider.to_string());
+            }
+        }
+    }
+    crate::managed_agents::merged_user_env(&derived_env, env_vars)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverAgentModelsInput {
@@ -204,20 +232,8 @@ pub async fn discover_agent_models(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| agent_command.to_string());
 
-    let mut derived_env = BTreeMap::new();
-    if let Some(meta) = known_acp_runtime(agent_command) {
-        let provider = input
-            .provider
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if !meta.provider_locked {
-            if let (Some(env_key), Some(provider)) = (meta.provider_env_var, provider) {
-                derived_env.insert(env_key.to_string(), provider.to_string());
-            }
-        }
-    }
-    let merged_env = crate::managed_agents::merged_user_env(&derived_env, &input.env_vars);
+    let merged_env =
+        draft_agent_model_discovery_env(agent_command, input.provider.as_deref(), &input.env_vars);
     let merged_env = discovery_env_with_baked_floor(merged_env);
 
     // Buzz shared compute discovery must not depend on the local OpenAI ingress: that
@@ -263,6 +279,17 @@ pub async fn discover_agent_models(
         == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
     {
         return Err("Buzz shared compute is not available in this build".to_string());
+    }
+
+    if let Some(models) = discover_openrouter_models(
+        &state.http_client,
+        input.provider.as_deref(),
+        &merged_env,
+        None,
+    )
+    .await?
+    {
+        return Ok(models);
     }
 
     if let Some(models) = discover_openai_compatible_models(
@@ -313,6 +340,15 @@ struct OpenAiModelListItem {
     created: Option<i64>,
 }
 
+#[path = "agent_models_openrouter.rs"]
+mod openrouter;
+use openrouter::discover_openrouter_models;
+#[cfg(test)]
+use openrouter::{
+    filter_openrouter_models, is_openrouter_provider, openrouter_models_url,
+    OpenRouterModelListItem, OpenRouterModelListResponse,
+};
+
 fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
     matches!(
         provider
@@ -336,7 +372,7 @@ fn openai_compatible_models_url_for_discovery(env: &BTreeMap<String, String>) ->
     format!("{}/models", base_url.trim_end_matches('/'))
 }
 
-fn env_value(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
+pub(super) fn env_value(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
     env.get(key)
         .map(String::as_str)
         .map(str::trim)
@@ -344,7 +380,7 @@ fn env_value(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn env_or_process_value(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
+pub(super) fn env_or_process_value(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
     env_value(env, key).or_else(|| {
         std::env::var(key)
             .ok()
@@ -353,7 +389,7 @@ fn env_or_process_value(env: &BTreeMap<String, String>, key: &str) -> Option<Str
     })
 }
 
-fn redaction_env_with_value(
+pub(super) fn redaction_env_with_value(
     env: &BTreeMap<String, String>,
     key: &str,
     value: &str,

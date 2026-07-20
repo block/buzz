@@ -89,6 +89,13 @@ impl Llm {
                     .await?;
                 parse_anthropic(v)
             }
+            Provider::OpenRouter => {
+                let mut body =
+                    openai_body(cfg, system_prompt, history, tools, effective_model, None);
+                apply_openrouter_mutations(&mut body, cfg.thinking_effort, effective_model);
+                let v = self.post_openrouter(cfg, &body).await?;
+                parse_openai_with_reasoning_details(v)
+            }
             Provider::OpenAi | Provider::Databricks => {
                 self.openai_request(cfg, effective_model, |use_responses| {
                     // Normalize effort for model-specific availability. Startup no longer rejects
@@ -177,6 +184,16 @@ impl Llm {
                     }],
                 });
                 Ok(parse_anthropic(self.post_anthropic(cfg, &body).await?)?.text)
+            }
+            Provider::OpenRouter => {
+                let body = openrouter_summary_body(
+                    effective_model,
+                    system_prompt,
+                    user_prompt,
+                    max_output_tokens,
+                );
+                let v = self.post_openrouter(cfg, &body).await?;
+                Ok(parse_openai(v)?.text)
             }
             Provider::OpenAi | Provider::Databricks => {
                 let r = self
@@ -366,6 +383,21 @@ impl Llm {
         }
     }
 
+    async fn post_openrouter(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
+        let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+        let mut bearer = self.auth.bearer().await?;
+        let mut refreshed = false;
+        loop {
+            match openrouter_post(&self.http, &url, body, &bearer).await {
+                Err(AgentError::LlmAuth(_)) if !refreshed => {
+                    refreshed = true;
+                    bearer = self.auth.refresh_now(&bearer).await?;
+                }
+                result => return result,
+            }
+        }
+    }
+
     /// If `err` names `/v1/responses` / "use the Responses API", latch a
     /// sticky upgrade so subsequent OpenAI calls hit Responses. Logged once.
     fn try_upgrade(&self, err: &AgentError) -> bool {
@@ -409,7 +441,11 @@ fn anthropic_body(
                 messages.push(json!({ "role": "user",
                     "content": [{ "type": "text", "text": text }] }));
             }
-            HistoryItem::Assistant { text, tool_calls } => {
+            HistoryItem::Assistant {
+                text,
+                tool_calls,
+                reasoning_details: _,
+            } => {
                 flush(&mut messages, &mut pending);
                 let mut content: Vec<Value> = Vec::new();
                 if !text.is_empty() {
@@ -501,11 +537,18 @@ fn openai_body(
                 flush_images(&mut messages, &mut pending_images);
                 messages.push(json!({ "role": "user", "content": text }));
             }
-            HistoryItem::Assistant { text, tool_calls } => {
+            HistoryItem::Assistant {
+                text,
+                tool_calls,
+                reasoning_details,
+            } => {
                 flush_images(&mut messages, &mut pending_images);
                 let mut msg = serde_json::Map::new();
                 msg.insert("role".into(), json!("assistant"));
                 msg.insert("content".into(), json!(text.as_str()));
+                if let Some(details) = reasoning_details {
+                    msg.insert("reasoning_details".into(), details.clone());
+                }
                 if !tool_calls.is_empty() {
                     let calls: Vec<Value> = tool_calls
                         .iter()
@@ -600,7 +643,11 @@ fn responses_body(
                 "role": "user",
                 "content": [{ "type": "input_text", "text": text }],
             })),
-            HistoryItem::Assistant { text, tool_calls } => {
+            HistoryItem::Assistant {
+                text,
+                tool_calls,
+                reasoning_details: _,
+            } => {
                 if !text.is_empty() {
                     input.push(json!({
                         "role": "assistant",
@@ -800,6 +847,7 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         input_tokens,
         output_tokens,
         reasoning,
+        reasoning_details: None,
     })
 }
 
@@ -905,10 +953,44 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
         input_tokens,
         output_tokens,
         reasoning,
+        reasoning_details: None,
     })
 }
 
 fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
+    // A5: error-inside-200 check — choice-level `finish_reason == "error"`
+    if let Some(choice) = v
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+    {
+        if choice.get("finish_reason").and_then(Value::as_str) == Some("error") {
+            let err = choice.get("error").cloned().unwrap_or(Value::Null);
+            // OpenRouter's `error.code` is numeric; other OpenAI-compat hosts
+            // may send a string. Accept either rather than discarding the
+            // typed code as "unknown".
+            let code = err
+                .get("code")
+                .and_then(|c| {
+                    c.as_str()
+                        .map(str::to_string)
+                        .or_else(|| c.as_i64().map(|n| n.to_string()))
+                })
+                .unwrap_or_else(|| "unknown".into());
+            let message = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider error in 200 response");
+            let error_type = err
+                .get("metadata")
+                .and_then(|m| m.get("error_type"))
+                .and_then(Value::as_str);
+            return Err(AgentError::Llm(match error_type {
+                Some(et) => format!("provider error ({code}, {et}): {message}"),
+                None => format!("provider error ({code}): {message}"),
+            }));
+        }
+    }
     let choice = v
         .get("choices")
         .and_then(Value::as_array)
@@ -956,7 +1038,22 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
         input_tokens,
         output_tokens,
         reasoning,
+        reasoning_details: None,
     })
+}
+
+fn parse_openai_with_reasoning_details(v: Value) -> Result<LlmResponse, AgentError> {
+    let reasoning_details = v
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("reasoning_details"))
+        .filter(|rd| rd.is_array())
+        .cloned();
+    let mut response = parse_openai(v)?;
+    response.reasoning_details = reasoning_details;
+    Ok(response)
 }
 
 fn make_tool_call(id: String, name: String, args: Value) -> Result<ToolCall, AgentError> {
@@ -1127,7 +1224,7 @@ where
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
-        Provider::Anthropic | Provider::OpenAi => {
+        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
         }
         Provider::Databricks | Provider::DatabricksV2 => {
@@ -1153,6 +1250,27 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
     }
 }
 
+/// Build the request body for `Llm::summarize` on `Provider::OpenRouter`.
+/// Extracted so tests can assert on the actual wire shape instead of a
+/// hand-rolled literal — summaries never carry `reasoning` or `provider`
+/// (see `apply_openrouter_mutations`, which the summary path never calls).
+fn openrouter_summary_body(
+    effective_model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    max_output_tokens: u32,
+) -> Value {
+    json!({
+        "model": effective_model,
+        "stream": false,
+        "max_completion_tokens": max_output_tokens,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_prompt },
+        ],
+    })
+}
+
 /// Return a clone of `body` with any top-level `"model"` field removed.
 /// Used for Databricks model-serving, which encodes the model in the URL
 /// path and rejects the field in the body.
@@ -1167,12 +1285,302 @@ fn strip_model(body: &Value) -> Value {
     }
 }
 
+#[derive(Debug)]
+enum OpenRouterErrorClass {
+    Retryable(Option<std::time::Duration>),
+    Unknown,
+}
+
+/// Ceiling applied to the server-supplied `Retry-After` header before we
+/// sleep on it. OpenRouter can advertise waits up to an hour, but
+/// `openrouter_post`'s per-attempt sleep happens *outside*
+/// `Client::timeout` (`cfg.llm_timeout`, default 240s) — an unclamped hint
+/// could keep a single turn alive for up to two full-duration sleeps across
+/// `MAX_RETRIES`. Clamping (never rejecting) keeps us honoring the server's
+/// backoff signal while bounding worst-case turn latency to a value smaller
+/// than the connect/response timeout.
+const RETRY_AFTER_CAP_SECS: u64 = 60;
+
+fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    let val = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let secs: u64 = val.trim().parse().ok()?;
+    (secs > 0).then(|| std::time::Duration::from_secs(secs.min(RETRY_AFTER_CAP_SECS)))
+}
+
+fn classify_openrouter_error(
+    status: u16,
+    body: &str,
+    header_retry_after: Option<std::time::Duration>,
+) -> OpenRouterErrorClass {
+    let parsed: Option<Value> = serde_json::from_str(body).ok();
+    let error_type = parsed
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(|e| e.get("metadata"))
+        .and_then(|m| m.get("error_type"))
+        .and_then(Value::as_str);
+    // OpenRouter's documented retry hint is the HTTP `Retry-After` header
+    // (see https://openrouter.ai/docs/api_reference/errors-and-debugging);
+    // no current doc specifies a body-level retry field, so we don't parse one.
+    let retry_after = header_retry_after;
+
+    match (status, error_type) {
+        (429, Some("rate_limit_exceeded")) => OpenRouterErrorClass::Retryable(retry_after),
+        (429, _) => OpenRouterErrorClass::Retryable(retry_after),
+        (502, Some("provider_unavailable")) => OpenRouterErrorClass::Retryable(None),
+        (502, _) => OpenRouterErrorClass::Retryable(None),
+        (503, Some("provider_overloaded")) => OpenRouterErrorClass::Retryable(retry_after),
+        (503, None) => OpenRouterErrorClass::Unknown,
+        (503, _) => OpenRouterErrorClass::Unknown,
+        _ => OpenRouterErrorClass::Unknown,
+    }
+}
+
+async fn openrouter_post(
+    http: &Client,
+    url: &str,
+    body: &Value,
+    bearer: &str,
+) -> Result<Value, AgentError> {
+    let body_bytes =
+        serde_json::to_vec(body).map_err(|e| AgentError::Llm(format!("serialize: {e}")))?;
+    for attempt in 0..MAX_RETRIES {
+        let resp = match http
+            .post(url)
+            .header("content-type", "application/json")
+            .header("HTTP-Referer", "https://github.com/block/buzz")
+            .header("X-OpenRouter-Title", "Buzz")
+            .bearer_auth(bearer)
+            .body(body_bytes.clone())
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if attempt + 1 < MAX_RETRIES && is_retryable_transport_error(&e) {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRIES,
+                        error = %e,
+                        "llm: openrouter transport error, retrying"
+                    );
+                    backoff_with_jitter(attempt).await;
+                    continue;
+                }
+                return Err(AgentError::Llm(format!("transport: {e}")));
+            }
+        };
+        let status = resp.status();
+        // Unlike the generic `post` path, OpenRouter's static-key auth makes
+        // 401 and 403 distinguishable: 401 is an invalid/expired key (worth
+        // one refresh-and-retry), while OpenRouter documents 403 as a
+        // guardrail/moderation/permission rejection the same key will always
+        // reproduce. Refreshing a static key returns the identical key, so
+        // classifying 403 as `LlmAuth` would just waste a duplicate request
+        // and surface Desktop's unrelated "access denied" copy.
+        if status == 401 {
+            return Err(AgentError::LlmAuth(read_error_body(resp).await));
+        }
+        if status == 403 {
+            return Err(AgentError::Llm(format!(
+                "{status}: {}",
+                read_error_body(resp).await
+            )));
+        }
+        if status == 402 {
+            return Err(AgentError::Llm(
+                "OpenRouter credits exhausted — check https://openrouter.ai/credits".into(),
+            ));
+        }
+        if status == 404 {
+            return Err(AgentError::LlmModelNotFound(format!(
+                "{status}: {}",
+                read_error_body(resp).await
+            )));
+        }
+        // A6: status+error_type retry matrix
+        if status.is_server_error() || status == 429 {
+            let header_retry_after = parse_retry_after_header(resp.headers());
+            let error_body = read_error_body(resp).await;
+            let should_retry = if attempt + 1 < MAX_RETRIES {
+                match classify_openrouter_error(status.as_u16(), &error_body, header_retry_after) {
+                    OpenRouterErrorClass::Retryable(delay) => {
+                        if let Some(d) = delay {
+                            tokio::time::sleep(d).await;
+                        } else {
+                            backoff_with_jitter(attempt).await;
+                        }
+                        true
+                    }
+                    OpenRouterErrorClass::Unknown => {
+                        backoff_with_jitter(attempt).await;
+                        true
+                    }
+                }
+            } else {
+                false
+            };
+            if should_retry {
+                continue;
+            }
+            // Terminal: classify for the user
+            return if status == 429 {
+                Err(AgentError::Llm(format!("rate limited: {error_body}")))
+            } else {
+                let parsed: Option<Value> = serde_json::from_str(&error_body).ok();
+                let has_error_type = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("error"))
+                    .and_then(|e| e.get("metadata"))
+                    .and_then(|m| m.get("error_type"))
+                    .and_then(Value::as_str)
+                    .is_some();
+                if !has_error_type && status.as_u16() == 503 {
+                    Err(AgentError::Llm(format!(
+                        "no OpenRouter endpoint supports the requested parameters — \
+                         check model, effort, and tool requirements: {error_body}"
+                    )))
+                } else {
+                    Err(AgentError::Llm(format!("{status}: {error_body}")))
+                }
+            };
+        }
+        if !status.is_success() {
+            return Err(AgentError::Llm(format!(
+                "{status}: {}",
+                read_error_body(resp).await
+            )));
+        }
+        if let Some(len) = resp.content_length() {
+            if len as usize > MAX_LLM_RESPONSE_BYTES {
+                return Err(AgentError::Llm(format!(
+                    "response too large: {len} > {MAX_LLM_RESPONSE_BYTES}"
+                )));
+            }
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        let mut stream = resp;
+        loop {
+            match stream.chunk().await {
+                Ok(Some(chunk)) => {
+                    if buf.len() + chunk.len() > MAX_LLM_RESPONSE_BYTES {
+                        return Err(AgentError::Llm(format!(
+                            "response exceeded {MAX_LLM_RESPONSE_BYTES} bytes"
+                        )));
+                    }
+                    buf.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(e) => return Err(AgentError::Llm(format!("read: {e}"))),
+            }
+        }
+        return serde_json::from_slice(&buf).map_err(|e| AgentError::Llm(format!("json: {e}")));
+    }
+    Err(AgentError::Llm("exhausted retries".into()))
+}
+
+fn apply_openrouter_mutations(
+    body: &mut Value,
+    effort: Option<ThinkingEffort>,
+    effective_model: &str,
+) {
+    if let Some(obj) = body.as_object_mut() {
+        // Remove the OpenAI-style reasoning_effort that openai_body may have set
+        obj.remove("reasoning_effort");
+
+        // A2/A3: Add OpenRouter reasoning object when effort is configured
+        if let Some(e) = effort {
+            obj.insert(
+                "reasoning".into(),
+                json!({ "effort": e.openai_effort_str() }),
+            );
+        }
+
+        // A3: require_parameters when body carries must-honor fields
+        let has_tools = obj
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        let has_reasoning = obj.contains_key("reasoning");
+        if has_tools || has_reasoning {
+            obj.insert("provider".into(), json!({ "require_parameters": true }));
+        }
+
+        // A7: Anthropic cache_control injection for anthropic/* models
+        if effective_model.starts_with("anthropic/") {
+            apply_anthropic_cache_control(obj);
+        }
+    }
+}
+
+fn apply_anthropic_cache_control(body: &mut serde_json::Map<String, Value>) {
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        // Cache the system message
+        if let Some(system_msg) = messages
+            .iter_mut()
+            .find(|m| m.get("role").and_then(Value::as_str) == Some("system"))
+        {
+            if let Some(content) = system_msg.get("content").and_then(Value::as_str) {
+                let content_str = content.to_string();
+                if let Some(obj) = system_msg.as_object_mut() {
+                    obj.insert(
+                        "content".into(),
+                        json!([{
+                            "type": "text",
+                            "text": content_str,
+                            "cache_control": { "type": "ephemeral" }
+                        }]),
+                    );
+                }
+            }
+        }
+
+        // Cache last 2 user messages (skip image-only ones — A7 mixed-content regression)
+        let mut user_count = 0;
+        for msg in messages.iter_mut().rev() {
+            if msg.get("role").and_then(Value::as_str) != Some("user") {
+                continue;
+            }
+            // Only cache string content (plain text user messages), not array content
+            // (image batches from tool results). This prevents corrupting image-only
+            // user messages by converting them to text cache breakpoints.
+            if let Some(content) = msg.get("content").and_then(Value::as_str) {
+                let content_str = content.to_string();
+                if let Some(obj) = msg.as_object_mut() {
+                    obj.insert(
+                        "content".into(),
+                        json!([{
+                            "type": "text",
+                            "text": content_str,
+                            "cache_control": { "type": "ephemeral" }
+                        }]),
+                    );
+                }
+                user_count += 1;
+            }
+            if user_count >= 2 {
+                break;
+            }
+        }
+    }
+    // Cache the last tool definition
+    if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
+        if let Some(last_tool) = tools.last_mut() {
+            if let Some(function) = last_tool.get_mut("function").and_then(Value::as_object_mut) {
+                function.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Config, HookServers, OpenAiApi, Provider};
     use crate::types::{HistoryItem, ToolCall, ToolResult, ToolResultContent};
+    use std::collections::VecDeque;
     use std::time::Duration;
+    use tokio::sync::Mutex;
 
     fn cfg(provider: Provider) -> Config {
         Config {
@@ -1216,6 +1624,7 @@ mod tests {
                     name: "dev__view_image".into(),
                     arguments: serde_json::json!({"source":"x.png"}),
                 }],
+                reasoning_details: None,
             },
             HistoryItem::ToolResult(ToolResult {
                 provider_id: "toolu_1".into(),
@@ -1265,6 +1674,7 @@ mod tests {
                     name: "dev__shell".into(),
                     arguments: serde_json::json!({"command": "ls"}),
                 }],
+                reasoning_details: None,
             },
             HistoryItem::ToolResult(ToolResult {
                 provider_id: "call_abc".into(),
@@ -1363,6 +1773,7 @@ mod tests {
                     name: "t".into(),
                     arguments: serde_json::json!({}),
                 }],
+                reasoning_details: None,
             },
         ];
         let body = responses_body(&cfg_responses(), "system", &history, &[], "model", None);
@@ -1562,6 +1973,7 @@ mod tests {
                         arguments: serde_json::json!({"source": "b.png"}),
                     },
                 ],
+                reasoning_details: None,
             },
             HistoryItem::ToolResult(ToolResult {
                 provider_id: "toolu_a".into(),
@@ -2580,5 +2992,1119 @@ mod tests {
             }]
         });
         assert_eq!(parse_responses(v).unwrap().output_tokens, None);
+    }
+
+    // ---- A3: OpenRouter body-shape tests ----
+
+    fn tools_vec() -> Vec<ToolDef> {
+        vec![ToolDef {
+            name: "dev__shell".into(),
+            description: "run a shell command".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+            }),
+        }]
+    }
+
+    #[test]
+    fn openrouter_body_tools_with_effort() {
+        let mut c = cfg(Provider::OpenRouter);
+        c.thinking_effort = Some(ThinkingEffort::High);
+        let mut body = openai_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &tools_vec(),
+            "anthropic/claude-opus-4-7",
+            None,
+        );
+        apply_openrouter_mutations(&mut body, c.thinking_effort, "anthropic/claude-opus-4-7");
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "OpenAI-style reasoning_effort must be removed"
+        );
+        assert_eq!(body["provider"]["require_parameters"], true);
+        assert!(!body["tools"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn openrouter_body_tools_no_effort() {
+        let c = cfg(Provider::OpenRouter);
+        let mut body = openai_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &tools_vec(),
+            "anthropic/claude-opus-4-7",
+            None,
+        );
+        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7");
+        assert!(
+            body.get("reasoning").is_none(),
+            "reasoning must be absent when effort is None"
+        );
+        assert_eq!(
+            body["provider"]["require_parameters"], true,
+            "require_parameters set because tools are non-empty"
+        );
+    }
+
+    #[test]
+    fn openrouter_body_empty_tools_with_effort() {
+        let mut c = cfg(Provider::OpenRouter);
+        c.thinking_effort = Some(ThinkingEffort::Medium);
+        let mut body = openai_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "anthropic/claude-opus-4-7",
+            None,
+        );
+        apply_openrouter_mutations(&mut body, c.thinking_effort, "anthropic/claude-opus-4-7");
+        assert_eq!(body["reasoning"]["effort"], "medium");
+        assert_eq!(
+            body["provider"]["require_parameters"], true,
+            "require_parameters set because reasoning is present"
+        );
+    }
+
+    #[test]
+    fn openrouter_body_empty_tools_no_effort() {
+        let c = cfg(Provider::OpenRouter);
+        let mut body = openai_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "anthropic/claude-opus-4-7",
+            None,
+        );
+        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7");
+        assert!(body.get("reasoning").is_none());
+        assert!(
+            body.get("provider").is_none(),
+            "provider object must be absent when neither tools nor reasoning"
+        );
+    }
+
+    #[test]
+    fn openrouter_summary_carries_neither_reasoning_nor_provider() {
+        let body = openrouter_summary_body(
+            "anthropic/claude-opus-4-7",
+            "summarize",
+            "text to summarize",
+            1024,
+        );
+        assert_eq!(body["model"], "anthropic/claude-opus-4-7");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["content"], "text to summarize");
+        assert!(
+            body.get("reasoning").is_none(),
+            "summary body must not carry reasoning"
+        );
+        assert!(
+            body.get("provider").is_none(),
+            "summary body must not carry provider"
+        );
+    }
+
+    // ---- A5: error-inside-200 ----
+
+    #[test]
+    fn parse_openai_error_inside_200_returns_error() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "error",
+                "error": {
+                    "code": 503,
+                    "message": "No endpoints found that support tool use"
+                }
+            }]
+        });
+        let err = parse_openai(v).unwrap_err();
+        match &err {
+            AgentError::Llm(s) => {
+                assert!(s.contains("provider error (503)"), "got: {s}");
+                assert!(s.contains("No endpoints found"), "got: {s}");
+            }
+            _ => panic!("expected AgentError::Llm, got: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_openai_error_inside_200_accepts_string_code() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "error",
+                "error": {
+                    "code": "insufficient_quota",
+                    "message": "quota exceeded"
+                }
+            }]
+        });
+        let err = parse_openai(v).unwrap_err();
+        match &err {
+            AgentError::Llm(s) => assert!(
+                s.contains("provider error (insufficient_quota)"),
+                "got: {s}"
+            ),
+            _ => panic!("expected AgentError::Llm, got: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_openai_error_inside_200_surfaces_error_type() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "error",
+                "error": {
+                    "code": 429,
+                    "message": "Rate limit exceeded",
+                    "metadata": { "error_type": "rate_limit_exceeded" }
+                }
+            }]
+        });
+        let err = parse_openai(v).unwrap_err();
+        match &err {
+            AgentError::Llm(s) => {
+                assert!(s.contains("429"), "got: {s}");
+                assert!(s.contains("rate_limit_exceeded"), "got: {s}");
+            }
+            _ => panic!("expected AgentError::Llm, got: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_openai_normal_stop_not_affected_by_error_check() {
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hello"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.text, "hello");
+        assert_eq!(r.stop, ProviderStop::EndTurn);
+    }
+
+    #[test]
+    fn parse_openai_tool_calls_not_affected_by_error_check() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "test", "arguments": "{}"}
+                    }]
+                }
+            }]
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.stop, ProviderStop::ToolUse);
+        assert_eq!(r.tool_calls.len(), 1);
+    }
+
+    // ---- A6: OpenRouter retry classification ----
+
+    #[test]
+    fn classify_429_rate_limit_body_retry_after_is_ignored() {
+        // M1: no documented body-level retry field, so a `retry_after` key
+        // inside `error.metadata` is inert — only the HTTP header (passed
+        // separately) can produce a delay.
+        let body =
+            r#"{"error":{"metadata":{"error_type":"rate_limit_exceeded","retry_after":2.5}}}"#;
+        match classify_openrouter_error(429, body, None) {
+            OpenRouterErrorClass::Retryable(None) => {}
+            other => panic!("expected Retryable(None), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_429_rate_limit_without_retry_after() {
+        let body = r#"{"error":{"metadata":{"error_type":"rate_limit_exceeded"}}}"#;
+        match classify_openrouter_error(429, body, None) {
+            OpenRouterErrorClass::Retryable(None) => {}
+            other => panic!("expected Retryable(None), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_429_prefers_http_header_over_body() {
+        // Body-level retry hints are no longer parsed (M1: undocumented field);
+        // the HTTP header is the only source, and it's honored when present.
+        let body = r#"{"error":{"metadata":{"error_type":"rate_limit_exceeded"}}}"#;
+        let header = Some(Duration::from_secs(3));
+        match classify_openrouter_error(429, body, header) {
+            OpenRouterErrorClass::Retryable(Some(d)) => {
+                assert_eq!(d, Duration::from_secs(3), "HTTP header must be honored");
+            }
+            other => panic!("expected Retryable with header delay, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_502_provider_unavailable() {
+        let body = r#"{"error":{"metadata":{"error_type":"provider_unavailable"}}}"#;
+        match classify_openrouter_error(502, body, None) {
+            OpenRouterErrorClass::Retryable(None) => {}
+            other => panic!("expected Retryable(None) for 502, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_503_provider_overloaded_with_retry_after() {
+        // No documented body-level retry field (M1); the header is the only
+        // source `classify_openrouter_error` consults.
+        let body = r#"{"error":{"metadata":{"error_type":"provider_overloaded"}}}"#;
+        let header = Some(Duration::from_secs(5));
+        match classify_openrouter_error(503, body, header) {
+            OpenRouterErrorClass::Retryable(Some(d)) => {
+                assert_eq!(d, Duration::from_secs(5));
+            }
+            other => panic!("expected Retryable with delay, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_503_untyped_is_unknown() {
+        let body = r#"{"error":{"message":"No endpoints found"}}"#;
+        match classify_openrouter_error(503, body, None) {
+            OpenRouterErrorClass::Unknown => {}
+            other => panic!("expected Unknown for untyped 503, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_500_untyped_is_unknown() {
+        match classify_openrouter_error(500, r#"{"error":{"message":"internal"}}"#, None) {
+            OpenRouterErrorClass::Unknown => {}
+            other => panic!("expected Unknown for 500, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_retry_after_header_valid() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "5".parse().unwrap());
+        assert_eq!(
+            parse_retry_after_header(&headers),
+            Some(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_header_zero_rejected() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "0".parse().unwrap());
+        assert_eq!(parse_retry_after_header(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_header_over_cap_clamped() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "3601".parse().unwrap());
+        assert_eq!(
+            parse_retry_after_header(&headers),
+            Some(Duration::from_secs(RETRY_AFTER_CAP_SECS)),
+            "over-cap hints clamp to the ceiling rather than being dropped"
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_header_at_cap_unclamped() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            RETRY_AFTER_CAP_SECS.to_string().parse().unwrap(),
+        );
+        assert_eq!(
+            parse_retry_after_header(&headers),
+            Some(Duration::from_secs(RETRY_AFTER_CAP_SECS))
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_header_missing() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert_eq!(parse_retry_after_header(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_header_non_numeric_ignored() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(parse_retry_after_header(&headers), None);
+    }
+
+    // ---- A7: Anthropic cache_control with mixed content ----
+
+    #[test]
+    fn anthropic_cache_control_mixed_text_tool_image_history() {
+        let history = vec![
+            HistoryItem::User("first question".into()),
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "toolu_1".into(),
+                    name: "dev__view_image".into(),
+                    arguments: serde_json::json!({"source": "x.png"}),
+                }],
+                reasoning_details: None,
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "toolu_1".into(),
+                content: vec![
+                    ToolResultContent::Text("10×10 image".into()),
+                    ToolResultContent::Image {
+                        data: "aW1n".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+                is_error: false,
+            }),
+            HistoryItem::User("second question about the image".into()),
+            HistoryItem::User("third question".into()),
+        ];
+        let mut body = openai_body(
+            &cfg(Provider::OpenRouter),
+            "system",
+            &history,
+            &tools_vec(),
+            "anthropic/claude-opus-4-7",
+            None,
+        );
+        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7");
+        let messages = body["messages"].as_array().unwrap();
+
+        // System message should have cache_control
+        let system = &messages[0];
+        assert_eq!(system["content"][0]["cache_control"]["type"], "ephemeral");
+
+        // Image-batch user messages (containing image_url blocks) must NOT have cache_control
+        let image_user_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| {
+                m.get("role").and_then(Value::as_str) == Some("user")
+                    && m.get("content")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .any(|b| b.get("type").and_then(Value::as_str) == Some("image_url"))
+                        })
+                        .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            !image_user_msgs.is_empty(),
+            "should have image user messages"
+        );
+        for img_msg in &image_user_msgs {
+            let content = img_msg["content"].as_array().unwrap();
+            for block in content {
+                assert!(
+                    block.get("cache_control").is_none(),
+                    "image-only user message must not receive cache_control"
+                );
+            }
+        }
+
+        // Exactly 2 text user messages should have cache_control (skipping image-only ones)
+        let cached_text_count = messages
+            .iter()
+            .filter(|m| {
+                m.get("role").and_then(Value::as_str) == Some("user")
+                    && m.get("content")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter().any(|b| {
+                                b.get("type").and_then(Value::as_str) == Some("text")
+                                    && b.get("cache_control").is_some()
+                            })
+                        })
+                        .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            cached_text_count, 2,
+            "exactly 2 text user messages should have cache_control"
+        );
+
+        // Last tool def should have cache_control
+        let tools = body["tools"].as_array().unwrap();
+        let last_tool = tools.last().unwrap();
+        assert_eq!(last_tool["function"]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn anthropic_cache_control_image_only_user_does_not_consume_slot() {
+        // An image-only user message between two text user messages must not
+        // consume a cache breakpoint slot — both text messages should get cached.
+        let history = vec![
+            HistoryItem::User("text message one".into()),
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "toolu_1".into(),
+                    name: "dev__view_image".into(),
+                    arguments: serde_json::json!({"source": "x.png"}),
+                }],
+                reasoning_details: None,
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "toolu_1".into(),
+                content: vec![ToolResultContent::Image {
+                    data: "aW1n".into(),
+                    mime_type: "image/png".into(),
+                }],
+                is_error: false,
+            }),
+            HistoryItem::User("text message two".into()),
+            HistoryItem::User("text message three".into()),
+        ];
+        let mut body = openai_body(
+            &cfg(Provider::OpenRouter),
+            "system",
+            &history,
+            &[],
+            "anthropic/claude-opus-4-7",
+            None,
+        );
+        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7");
+        let messages = body["messages"].as_array().unwrap();
+
+        // Count text user messages that got cache_control
+        let cached_text_count = messages
+            .iter()
+            .filter(|m| {
+                m.get("role").and_then(Value::as_str) == Some("user")
+                    && m.get("content")
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().any(|b| b.get("cache_control").is_some()))
+                        .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            cached_text_count, 2,
+            "image-only user messages must not consume a cache breakpoint slot"
+        );
+    }
+
+    // ---- A9: reasoning_details round-trip ----
+
+    #[test]
+    fn parse_openai_with_reasoning_details_captures_array() {
+        let details = serde_json::json!([
+            {"type": "thinking", "content": "Let me consider..."},
+            {"type": "thinking", "content": "The answer is 42."}
+        ]);
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": "",
+                    "reasoning_details": details,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "test", "arguments": "{}"}
+                    }]
+                }
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        let r = parse_openai_with_reasoning_details(v).unwrap();
+        assert_eq!(r.reasoning_details, Some(details));
+    }
+
+    #[test]
+    fn parse_openai_with_reasoning_details_none_when_absent() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "hello"}
+            }]
+        });
+        let r = parse_openai_with_reasoning_details(v).unwrap();
+        assert!(
+            r.reasoning_details.is_none(),
+            "reasoning_details must be None when not in response"
+        );
+    }
+
+    /// M2: a malformed `reasoning_details` shape (null or a bare object,
+    /// rather than the documented array) must be omitted at the parse
+    /// boundary, not stored and later replayed into the next request.
+    #[test]
+    fn parse_openai_with_reasoning_details_omits_non_array_shapes() {
+        let null_shape = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "hello", "reasoning_details": null}
+            }]
+        });
+        let r = parse_openai_with_reasoning_details(null_shape).unwrap();
+        assert!(
+            r.reasoning_details.is_none(),
+            "null reasoning_details must be omitted, not stored as Some(Null)"
+        );
+
+        let object_shape = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "hello",
+                    "reasoning_details": {"type": "thinking", "content": "not an array"}
+                }
+            }]
+        });
+        let r = parse_openai_with_reasoning_details(object_shape).unwrap();
+        assert!(
+            r.reasoning_details.is_none(),
+            "a bare-object reasoning_details must be omitted, not stored as Some(object)"
+        );
+    }
+
+    #[test]
+    fn parse_openai_plain_never_captures_reasoning_details() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "hello",
+                    "reasoning_details": [{"type": "thinking", "content": "hmm"}]
+                }
+            }]
+        });
+        let r = parse_openai(v).unwrap();
+        assert!(
+            r.reasoning_details.is_none(),
+            "plain parse_openai must never capture reasoning_details (OpenAI/Databricks regression)"
+        );
+    }
+
+    #[test]
+    fn reasoning_details_two_request_round_trip() {
+        let details = serde_json::json!([
+            {"type": "thinking", "content": "Step 1: analyze the request."},
+            {"type": "thinking", "content": "Step 2: call the tool."}
+        ]);
+        // Request 1: model returns a tool call with reasoning_details
+        let response1 = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": "",
+                    "reasoning_details": details,
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {"name": "dev__shell", "arguments": "{\"command\":\"ls\"}"}
+                    }]
+                }
+            }],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 20}
+        });
+        let r1 = parse_openai_with_reasoning_details(response1).unwrap();
+        assert_eq!(r1.reasoning_details, Some(details.clone()));
+
+        // Build history as the agent would: assistant turn with reasoning_details,
+        // followed by a tool result.
+        let history = vec![
+            HistoryItem::User("run ls".into()),
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: r1.tool_calls,
+                reasoning_details: r1.reasoning_details,
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call_abc".into(),
+                content: vec![ToolResultContent::Text("file.txt".into())],
+                is_error: false,
+            }),
+        ];
+
+        // Request 2: build the body for the continuation
+        let body = openai_body(
+            &cfg(Provider::OpenRouter),
+            "system",
+            &history,
+            &[],
+            "anthropic/claude-opus-4-7",
+            None,
+        );
+        let messages = body["messages"].as_array().unwrap();
+
+        // The assistant message must carry the identical reasoning_details array
+        let assistant_msg = messages
+            .iter()
+            .find(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+            .expect("assistant message must exist");
+        assert_eq!(
+            assistant_msg["reasoning_details"], details,
+            "reasoning_details must be replayed byte-for-byte on the assistant message"
+        );
+
+        // The assistant message must appear BEFORE the tool result
+        let assistant_idx = messages
+            .iter()
+            .position(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+            .unwrap();
+        let tool_idx = messages
+            .iter()
+            .position(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
+            .unwrap();
+        assert!(
+            assistant_idx < tool_idx,
+            "assistant with reasoning_details must precede tool result"
+        );
+    }
+
+    #[test]
+    fn reasoning_details_none_emits_no_field_in_body() {
+        let history = vec![
+            HistoryItem::User("hello".into()),
+            HistoryItem::Assistant {
+                text: "hi back".into(),
+                tool_calls: Vec::new(),
+                reasoning_details: None,
+            },
+        ];
+        let body = openai_body(
+            &cfg(Provider::OpenRouter),
+            "system",
+            &history,
+            &[],
+            "anthropic/claude-opus-4-7",
+            None,
+        );
+        let messages = body["messages"].as_array().unwrap();
+        let assistant_msg = messages
+            .iter()
+            .find(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+            .expect("assistant message must exist");
+        assert!(
+            assistant_msg.get("reasoning_details").is_none(),
+            "assistant with None reasoning_details must not emit the field"
+        );
+    }
+
+    #[test]
+    fn reasoning_details_charged_to_estimated_bytes() {
+        let details = serde_json::json!([
+            {"type": "thinking", "content": "A long chain of reasoning tokens here."}
+        ]);
+        let with = HistoryItem::Assistant {
+            text: "text".into(),
+            tool_calls: Vec::new(),
+            reasoning_details: Some(details.clone()),
+        };
+        let without = HistoryItem::Assistant {
+            text: "text".into(),
+            tool_calls: Vec::new(),
+            reasoning_details: None,
+        };
+        assert!(
+            with.estimated_bytes() > without.estimated_bytes(),
+            "reasoning_details must contribute to estimated_bytes"
+        );
+        assert!(
+            with.context_pressure_bytes() > without.context_pressure_bytes(),
+            "reasoning_details must contribute to context_pressure_bytes"
+        );
+        let details_size = serde_json::to_vec(&details).unwrap().len();
+        assert_eq!(
+            with.estimated_bytes() - without.estimated_bytes(),
+            details_size,
+            "reasoning_details contribution must equal its serialized size"
+        );
+    }
+
+    #[test]
+    fn reasoning_details_not_replayed_in_anthropic_body() {
+        let history = vec![
+            HistoryItem::User("hi".into()),
+            HistoryItem::Assistant {
+                text: "ok".into(),
+                tool_calls: Vec::new(),
+                reasoning_details: Some(
+                    serde_json::json!([{"type": "thinking", "content": "hmm"}]),
+                ),
+            },
+        ];
+        let body = anthropic_body(
+            &cfg(Provider::Anthropic),
+            "system",
+            &history,
+            &[],
+            "claude-opus-4-7",
+            None,
+        );
+        let messages = body["messages"].as_array().unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+            .unwrap();
+        assert!(
+            assistant.get("reasoning_details").is_none(),
+            "anthropic_body must not replay reasoning_details"
+        );
+    }
+
+    #[test]
+    fn reasoning_details_not_replayed_in_responses_body() {
+        let history = vec![
+            HistoryItem::User("hi".into()),
+            HistoryItem::Assistant {
+                text: "ok".into(),
+                tool_calls: Vec::new(),
+                reasoning_details: Some(
+                    serde_json::json!([{"type": "thinking", "content": "hmm"}]),
+                ),
+            },
+        ];
+        let body = responses_body(&cfg_responses(), "system", &history, &[], "model", None);
+        let body_str = serde_json::to_string(&body).unwrap();
+        assert!(
+            !body_str.contains("reasoning_details"),
+            "responses_body must not replay reasoning_details"
+        );
+    }
+
+    // ---- T4: openrouter_post transport-level regressions ----
+    //
+    // These stub an HTTP server directly and drive `openrouter_post` (not the
+    // classifier in isolation), proving the retry/attempt-accounting and
+    // header behavior the classifier-only tests above cannot see.
+
+    /// One canned response: status, body, and any extra headers (e.g.
+    /// `Retry-After`) to send back for a single request.
+    struct CannedResponse {
+        status: u16,
+        body: String,
+        extra_headers: Vec<(String, String)>,
+    }
+
+    impl CannedResponse {
+        fn new(status: u16, body: &str) -> Self {
+            Self {
+                status,
+                body: body.into(),
+                extra_headers: Vec::new(),
+            }
+        }
+
+        fn with_header(mut self, name: &str, value: &str) -> Self {
+            self.extra_headers.push((name.into(), value.into()));
+            self
+        }
+    }
+
+    fn status_line(status: u16) -> &'static str {
+        match status {
+            200 => "200 OK",
+            402 => "402 Payment Required",
+            403 => "403 Forbidden",
+            429 => "429 Too Many Requests",
+            500 => "500 Internal Server Error",
+            502 => "502 Bad Gateway",
+            503 => "503 Service Unavailable",
+            _ => panic!("unsupported status {status} in test stub"),
+        }
+    }
+
+    /// Spawns a stub HTTP server that pops one `CannedResponse` per request
+    /// (repeating the last one once the queue is exhausted, so an
+    /// over-budget attempt count is visible rather than hanging), and
+    /// captures each request's raw header block for header-attribution
+    /// assertions. Returns (url, captured_header_blocks, attempt_counter).
+    async fn spawn_openrouter_stub(
+        responses: Vec<CannedResponse>,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<String>>>,
+        Arc<std::sync::atomic::AtomicU32>,
+    ) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let attempts = Arc::new(AtomicU32::new(0));
+        let captured_clone = captured.clone();
+        let attempts_clone = attempts.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let queue = queue.clone();
+                let captured = captured_clone.clone();
+                let attempts = attempts_clone.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match sock.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                        if buf.len() > 1_000_000 {
+                            return;
+                        }
+                    }
+                    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                    let header_str = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+                    // Drain any remaining body per Content-Length so `Connection:
+                    // close` doesn't race the client's write.
+                    let content_length: usize = header_str
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse().ok())
+                        })
+                        .unwrap_or(0);
+                    let mut body_len = buf.len() - header_end;
+                    while body_len < content_length {
+                        match sock.read(&mut tmp).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => body_len += n,
+                        }
+                    }
+                    captured.lock().await.push(header_str);
+                    attempts.fetch_add(1, Ordering::SeqCst);
+
+                    let mut q = queue.lock().await;
+                    let canned = if q.len() > 1 {
+                        q.pop_front().unwrap()
+                    } else {
+                        // Repeat the final canned response so a test bug that
+                        // over-retries produces a visible extra attempt
+                        // instead of a hung connection.
+                        let last = q.front().unwrap();
+                        CannedResponse {
+                            status: last.status,
+                            body: last.body.clone(),
+                            extra_headers: last.extra_headers.clone(),
+                        }
+                    };
+                    drop(q);
+
+                    let mut resp = format!(
+                        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+                        status_line(canned.status),
+                        canned.body.len()
+                    );
+                    for (name, value) in &canned.extra_headers {
+                        resp.push_str(&format!("{name}: {value}\r\n"));
+                    }
+                    resp.push_str("Connection: close\r\n\r\n");
+                    resp.push_str(&canned.body);
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (url, captured, attempts)
+    }
+
+    /// A 403 (guardrail/moderation/permission rejection, per OpenRouter docs)
+    /// must NOT be classified as `LlmAuth`: refreshing a static key returns
+    /// the identical key, so retrying would just waste a duplicate request.
+    /// Exactly one attempt, plain `AgentError::Llm` with the body preserved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_403_single_attempt_not_auth_error() {
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![CannedResponse::new(
+            403,
+            r#"{"error":{"message":"model flagged by moderation"}}"#,
+        )])
+        .await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::Llm(s) if s.contains("403") && s.contains("model flagged by moderation")),
+            "403 must surface as AgentError::Llm with status+body, not LlmAuth: got {err:?}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "403 must not be retried (a refreshed static key is identical)"
+        );
+    }
+
+    /// A 402 short-circuits on the first attempt: no retry, one request,
+    /// the actionable credits-exhausted message.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_402_single_attempt_short_circuit() {
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![CannedResponse::new(
+            402,
+            r#"{"error":{"message":"payment required"}}"#,
+        )])
+        .await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::Llm(s) if s.contains("credits exhausted")),
+            "got {err:?}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "402 must not be retried"
+        );
+    }
+
+    /// A 429 with `Retry-After: 1` sleeps for that duration before the retry
+    /// succeeds — proving the header value is actually honored, not just
+    /// classified.
+    #[tokio::test(flavor = "current_thread")]
+    async fn openrouter_post_429_honors_retry_after_header() {
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![
+            CannedResponse::new(429, r#"{"error":{"message":"rate limited"}}"#)
+                .with_header("Retry-After", "1"),
+            CannedResponse::new(200, r#"{"choices":[{"message":{"content":"ok"}}]}"#),
+        ])
+        .await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let before = std::time::Instant::now();
+        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
+            .await
+            .expect("second attempt succeeds");
+        assert_eq!(out["choices"][0]["message"]["content"], "ok");
+        assert!(
+            before.elapsed() >= Duration::from_secs(1),
+            "must sleep at least the Retry-After hint"
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A `Retry-After` far beyond `RETRY_AFTER_CAP_SECS` must not stall the
+    /// retry loop for anywhere near its advertised duration — proving the
+    /// cap is enforced end-to-end in `openrouter_post`'s actual sleep, not
+    /// merely in the isolated `parse_retry_after_header` unit tests above.
+    /// Runs on a paused clock so a real 999999s wait would hang the test
+    /// instead of silently passing.
+    #[tokio::test(start_paused = true)]
+    async fn openrouter_post_429_retry_sleep_capped_despite_huge_retry_after() {
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![
+            CannedResponse::new(429, r#"{"error":{"message":"rate limited"}}"#)
+                .with_header("Retry-After", "999999"),
+            CannedResponse::new(200, r#"{"choices":[{"message":{"content":"ok"}}]}"#),
+        ])
+        .await;
+        let http = Client::builder().build().unwrap();
+        let before = tokio::time::Instant::now();
+        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
+            .await
+            .expect("second attempt succeeds");
+        assert_eq!(out["choices"][0]["message"]["content"], "ok");
+        assert!(
+            before.elapsed() <= Duration::from_secs(RETRY_AFTER_CAP_SECS + 5),
+            "retry sleep must be clamped to RETRY_AFTER_CAP_SECS ({RETRY_AFTER_CAP_SECS}s), \
+             not the header's 999999s: elapsed {:?}",
+            before.elapsed()
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// An untyped 503 (no `error.metadata.error_type`) exhausts all
+    /// `MAX_RETRIES` attempts, then returns the actionable routing message —
+    /// proving attempt accounting terminates rather than retrying forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_untyped_503_exhausts_retries_into_actionable_message() {
+        let canned = CannedResponse::new(503, r#"{"error":{"message":"no capacity"}}"#);
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![canned]).await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::Llm(s) if s.contains("no OpenRouter endpoint supports")),
+            "got {err:?}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_RETRIES,
+            "must exhaust exactly MAX_RETRIES attempts, no more"
+        );
+    }
+
+    /// Attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`) are on the
+    /// actual wire request, not merely asserted against a body fixture.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_sends_attribution_headers() {
+        let (url, captured, _attempts) = spawn_openrouter_stub(vec![CannedResponse::new(
+            200,
+            r#"{"choices":[{"message":{"content":"ok"}}]}"#,
+        )])
+        .await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
+            .await
+            .expect("200 succeeds");
+        let headers = captured.lock().await;
+        let header_str = headers
+            .first()
+            .expect("one request captured")
+            .to_lowercase();
+        assert!(
+            header_str.contains("http-referer: https://github.com/block/buzz"),
+            "got: {header_str}"
+        );
+        assert!(
+            header_str.contains("x-openrouter-title: buzz"),
+            "got: {header_str}"
+        );
+    }
+
+    /// A 502 without `provider_unavailable` still retries (the classifier's
+    /// unconditional-retry branch), then succeeds on attempt 2 — proving the
+    /// generic 502 path isn't accidentally routed to `Unknown`/terminal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_502_retries_then_succeeds() {
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![
+            CannedResponse::new(502, r#"{"error":{"message":"bad gateway"}}"#),
+            CannedResponse::new(200, r#"{"choices":[{"message":{"content":"ok"}}]}"#),
+        ])
+        .await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
+            .await
+            .expect("retry succeeds");
+        assert_eq!(out["choices"][0]["message"]["content"], "ok");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

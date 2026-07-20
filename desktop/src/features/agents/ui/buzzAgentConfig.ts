@@ -128,6 +128,9 @@ export function getProviderEffortConfig(
     // databricks v1 uses OpenAI Chat Completions wire format.
     return openaiConfig(m);
   }
+  if (provider === "openrouter") {
+    return { validValues: ALL_VALUES, defaultValue: "medium" };
+  }
   // openai-compat, unknown, empty — all values, default medium.
   return { validValues: ALL_VALUES, defaultValue: "medium" };
 }

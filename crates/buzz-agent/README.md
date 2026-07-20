@@ -21,9 +21,9 @@
                                             HTTPS
                                               │
                                               ▼
-                                  Anthropic Messages API
-                                   or any OpenAI-compat
-                                  (vLLM, llama.cpp, OpenRouter,
+                                  Anthropic Messages API,
+                                   OpenRouter, or any OpenAI-compat
+                                  (vLLM, llama.cpp, Databricks,
                                    Block Gateway, Ollama, …)
 ```
 
@@ -48,6 +48,12 @@ BUZZ_AGENT_PROVIDER=openai \
 OPENAI_COMPAT_API_KEY=sk-... \
 OPENAI_COMPAT_MODEL=gpt-5 \
 OPENAI_COMPAT_BASE_URL=https://api.openai.com/v1 \
+  ./target/release/buzz-agent
+
+# Or OpenRouter
+BUZZ_AGENT_PROVIDER=openrouter \
+OPENROUTER_API_KEY=sk-or-v1-... \
+OPENROUTER_MODEL=anthropic/claude-sonnet-4-5 \
   ./target/release/buzz-agent
 
 # Or Databricks model serving via OAuth 2.0 PKCE
@@ -129,15 +135,18 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
+| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `openrouter`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
 | `ANTHROPIC_API_KEY` | — | Required when provider=anthropic. |
 | `ANTHROPIC_MODEL` | — | Required when provider=anthropic. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | |
 | `ANTHROPIC_API_VERSION` | `2023-06-01` | |
 | `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
-| `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, OpenRouter, Ollama, etc. |
+| `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Ollama, etc. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
+| `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
+| `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4-5`. |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |
 | `DATABRICKS_HOST` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_MODEL` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_TOKEN` | — | Optional static bearer escape hatch. If unset, Databricks uses browser OAuth + refresh cache. |
@@ -167,16 +176,23 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | vLLM | `openai` | `POST {base}/chat/completions` | any tool-calling model |
 | llama.cpp | `openai` | `POST {base}/chat/completions` | any tool-calling GGUF |
 | Ollama | `openai` | `POST {base}/chat/completions` | llama3.1, qwen2.5-coder |
-| OpenRouter | `openai` | `POST {base}/chat/completions` | anything they route |
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
+| OpenRouter | `openrouter` | `POST {base}/chat/completions` | anything they route (extended-thinking replay, provider-agnostic tool calling) |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
 
-If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, or `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
+If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, or `BUZZ_AGENT_PROVIDER=openrouter` is selected without `OPENROUTER_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
 
 `provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
 
 By default (`OPENAI_COMPAT_API=auto`) the agent picks **Responses** when `OPENAI_COMPAT_BASE_URL` points at an `*.openai.com` host and **Chat Completions** everywhere else. Pin the choice explicitly with `OPENAI_COMPAT_API=chat` or `OPENAI_COMPAT_API=responses` for providers that diverge from the default (e.g. a Responses-compatible self-hosted gateway).
+
+`provider=openrouter` is first-class, not routed through `provider=openai`: it speaks OpenAI's Chat Completions wire format but with OpenRouter-specific extensions layered on top —
+
+- `reasoning.effort` and `provider.require_parameters` are set on the request when reasoning effort or tools are configured, so OpenRouter only routes to endpoints that actually honor them.
+- The response's `reasoning_details` array (opaque extended-thinking payload) is captured and replayed byte-for-byte on the next turn's assistant message, so multi-turn tool use keeps the model's chain-of-thought.
+- `anthropic/*` models get Anthropic-style `cache_control` breakpoints injected on the system message and the last two user messages.
+- Retryable statuses (429 and typed `provider_overloaded` 503) honor the documented `Retry-After` header (clamped to a small ceiling — see `RETRY_AFTER_CAP_SECS` in `llm.rs` — since the sleep happens outside `BUZZ_AGENT_LLM_TIMEOUT_SECS`); 502 and untyped 503 retry with jittered backoff instead. `401` is treated as an expired/invalid key and refreshed once, while `402` (no credits) and `403` (guardrail/moderation/permission) fail immediately without retry.
 
 `Provider` is a Rust `enum` with one `match` in `Llm::complete`. There is no trait, no `Box<dyn>`, no async-trait. Adding a provider is a `match` arm and one `body`/`parse` pair in `llm.rs`.
 

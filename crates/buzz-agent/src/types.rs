@@ -62,6 +62,7 @@ pub enum HistoryItem {
     Assistant {
         text: String,
         tool_calls: Vec<ToolCall>,
+        reasoning_details: Option<Value>,
     },
     ToolResult(ToolResult),
 }
@@ -83,7 +84,11 @@ impl HistoryItem {
     fn size_with(&self, content_size: fn(&ToolResultContent) -> usize) -> usize {
         match self {
             Self::User(s) => s.len(),
-            Self::Assistant { text, tool_calls } => {
+            Self::Assistant {
+                text,
+                tool_calls,
+                reasoning_details,
+            } => {
                 text.len()
                     + tool_calls
                         .iter()
@@ -95,6 +100,11 @@ impl HistoryItem {
                                     .unwrap_or(0)
                         })
                         .sum::<usize>()
+                    + reasoning_details
+                        .as_ref()
+                        .and_then(|v| serde_json::to_vec(v).ok())
+                        .map(|b| b.len())
+                        .unwrap_or(0)
             }
             Self::ToolResult(r) => {
                 r.provider_id.len() + r.content.iter().map(content_size).sum::<usize>()
@@ -152,6 +162,10 @@ pub struct LlmResponse {
     ///
     /// Empty string when the provider returned no reasoning content.
     pub reasoning: String,
+    /// Raw `reasoning_details` array from an OpenRouter response, if present.
+    /// Replayed on subsequent turns so the model can continue its chain-of-thought.
+    /// `None` for all non-OpenRouter providers.
+    pub reasoning_details: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
