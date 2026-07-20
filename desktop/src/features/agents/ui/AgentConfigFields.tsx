@@ -17,6 +17,11 @@ import { cn } from "@/shared/lib/cn";
 import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
 import type { InheritedEnvRow } from "@/features/agents/ui/EnvVarsEditor";
 import {
+  deriveAgentConfigFieldModel,
+  getRenderableEffortField,
+  hasRenderableAgentConfigField,
+} from "@/features/agents/lib/agentConfigCore";
+import {
   getBakedProviderInheritLabel,
   getGlobalModelFallback,
 } from "@/features/agents/ui/bakedEnvHelpers";
@@ -132,12 +137,6 @@ export type AgentConfigFieldsProps = {
    * match onboarding.
    */
   disclosure?: "full" | "onboarding-essential";
-  /**
-   * Harness-conditional, not part of the disclosure preset: provider choice
-   * only exists for runtimes that support LLM provider selection. PR 3
-   * derives this internally from selectedRuntime and deletes the prop.
-   */
-  showProviderField?: boolean;
   unstyled?: boolean;
   useCustomSelect?: boolean;
   useChevronSelectIcon?: boolean;
@@ -156,7 +155,6 @@ export function AgentConfigFields({
   placeholderClassName,
   selectClassName,
   disclosure = "full",
-  showProviderField = true,
   unstyled = false,
   useCustomSelect = false,
   useChevronSelectIcon = false,
@@ -172,12 +170,29 @@ export function AgentConfigFields({
     showUnavailableEffortOptions,
   } = resolveDisclosure(disclosure);
 
+  const fieldModel = React.useMemo(
+    () =>
+      deriveAgentConfigFieldModel({
+        config,
+        runtime: selectedRuntime,
+        scope: disclosure === "onboarding-essential" ? "onboarding" : "global",
+      }),
+    [config, disclosure, selectedRuntime],
+  );
+  const effortField = getRenderableEffortField(fieldModel);
+  const effortPersistenceKey =
+    effortField?.currentPersistence.kind === "envVar"
+      ? effortField.currentPersistence.key
+      : null;
   const bakedProvider = React.useMemo(
     () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
     [bakedEnv],
   );
   const selectedRuntimeId = selectedRuntime?.id ?? "";
-  const providerFieldVisible = showProviderField;
+  const providerFieldVisible = hasRenderableAgentConfigField(
+    fieldModel,
+    "provider",
+  );
   const effectiveProvider = providerFieldVisible
     ? config.provider?.trim() || bakedProvider || ""
     : "";
@@ -254,7 +269,8 @@ export function AgentConfigFields({
   // Evergreen surfaces (Settings, dialogs) edit saved data that may pair with
   // higher layers (see PR #2148 review thread), so they only act after the
   // user explicitly edits the provider in this session.
-  const healOnMount = disclosure === "onboarding-essential";
+  const healOnMount =
+    fieldModel.dependentValuePolicy.onCatalogMismatch === "onboardingCleanup";
   const userEditedProviderRef = React.useRef(false);
   // Read inside effects via ref so biome's exhaustive-deps stays honest:
   // refs are stable, and healOnMount is captured at declaration.
@@ -295,8 +311,9 @@ export function AgentConfigFields({
     selectedRuntimeId,
   ]);
 
-  const currentEffortForAutoClear =
-    config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+  const currentEffortForAutoClear = effortPersistenceKey
+    ? (config.env_vars[effortPersistenceKey] ?? "")
+    : "";
 
   // When the selected harness changes outside this component (Back → setup
   // page → choose a different harness → Next), the saved model can belong to
@@ -315,7 +332,7 @@ export function AgentConfigFields({
     }
 
     const nextEnvVars = { ...config.env_vars };
-    delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+    if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
@@ -325,6 +342,7 @@ export function AgentConfigFields({
     onConfigChange,
     onCustomModelEditingChange,
     healOnMount,
+    effortPersistenceKey,
   ]);
 
   // Orphan-model clearing follows the mount-time healing policy above: the
@@ -346,7 +364,7 @@ export function AgentConfigFields({
     }
 
     const nextEnvVars = { ...config.env_vars };
-    delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+    if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
@@ -355,6 +373,7 @@ export function AgentConfigFields({
     dependentFieldsDisabled,
     onConfigChange,
     onCustomModelEditingChange,
+    effortPersistenceKey,
   ]);
   const { validValues: effortValidForAutoClear } = getProviderEffortConfig(
     config.provider ?? "",
@@ -365,7 +384,7 @@ export function AgentConfigFields({
     effortValid: effortValidForAutoClear,
     onClear: () => {
       const nextEnvVars = { ...config.env_vars };
-      delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+      if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
       onConfigChange({ ...config, env_vars: nextEnvVars });
     },
   });
@@ -423,11 +442,13 @@ export function AgentConfigFields({
   }
 
   function handleEnvVarsChange(next: Record<string, string>) {
-    const effort = config.env_vars[BUZZ_AGENT_THINKING_EFFORT];
-    const merged =
-      effort !== undefined
-        ? { ...next, [BUZZ_AGENT_THINKING_EFFORT]: effort }
-        : next;
+    const effort = effortPersistenceKey
+      ? config.env_vars[effortPersistenceKey]
+      : undefined;
+    const merged = { ...next };
+    if (effortPersistenceKey && effort !== undefined) {
+      merged[effortPersistenceKey] = effort;
+    }
     onConfigChange({ ...config, env_vars: merged });
   }
 
@@ -481,16 +502,10 @@ export function AgentConfigFields({
     : implicitEffortProvider;
   const { validValues: effortValid, defaultValue: effortDefault } =
     getProviderEffortConfig(effortProvider, config.model ?? "");
-  const currentEffort = config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
-  // Claude Code and Codex both have harness-native effort semantics that are
-  // not represented by Buzz Agent's generic BUZZ_AGENT_THINKING_EFFORT env var:
-  // Claude exposes ACP config option `effort`; Codex currently encodes effort
-  // into model ids (e.g. `gpt-5.5[low]`). Hide the generic control until the
-  // config core can render harness-native options honestly.
-  const effortFieldVisible =
-    showEffortField &&
-    selectedRuntimeId !== "claude" &&
-    selectedRuntimeId !== "codex";
+  const currentEffort = effortPersistenceKey
+    ? (config.env_vars[effortPersistenceKey] ?? "")
+    : "";
+  const effortFieldVisible = showEffortField && effortField !== undefined;
 
   const fieldClassName = unstyled ? "space-y-4" : "space-y-1.5 p-3";
   const blockClassName = unstyled ? "" : "p-3";
@@ -684,9 +699,11 @@ export function AgentConfigFields({
             onChange={(value) => {
               const nextEnvVars = { ...config.env_vars };
               if (value === "") {
-                delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+                if (effortPersistenceKey)
+                  delete nextEnvVars[effortPersistenceKey];
               } else {
-                nextEnvVars[BUZZ_AGENT_THINKING_EFFORT] = value;
+                if (effortPersistenceKey)
+                  nextEnvVars[effortPersistenceKey] = value;
               }
               onConfigChange({ ...config, env_vars: nextEnvVars });
             }}

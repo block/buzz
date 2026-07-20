@@ -129,8 +129,12 @@ function AgentDefaultsSection({
   }, [config.preferred_runtime, selectedRuntimes]);
   const selectedRuntimeId =
     selectedRuntime?.id ?? config.preferred_runtime ?? "";
-  const selectedRuntimeSupportsModelProvider =
-    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  const configSurfaceLoading = isLoading || runtimesQuery.isLoading;
+  const configSurfaceError =
+    runtimesQuery.isError ||
+    (!configSurfaceLoading &&
+      selectedRuntimeIds.length > 0 &&
+      !selectedRuntime);
   const harnessOptions = React.useMemo(
     () =>
       selectedRuntimes.map((runtime) => ({
@@ -182,11 +186,15 @@ function AgentDefaultsSection({
 
   return (
     <section className="w-full space-y-4 text-left text-sm">
-      {isLoading ? (
+      {configSurfaceLoading ? (
         <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
           <Spinner className="h-4 w-4 border-2" />
           Loading…
         </div>
+      ) : configSurfaceError ? (
+        <p className="py-4 text-center text-sm text-destructive">
+          Couldn't load harness settings. Go back and try again.
+        </p>
       ) : (
         <div className="space-y-7">
           <div className="space-y-4">
@@ -226,7 +234,6 @@ function AgentDefaultsSection({
             placeholderClassName="text-foreground/70"
             selectClassName="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
             disclosure="onboarding-essential"
-            showProviderField={selectedRuntimeSupportsModelProvider}
             unstyled
             useCustomSelect
           />

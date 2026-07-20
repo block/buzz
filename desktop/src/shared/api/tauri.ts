@@ -174,6 +174,9 @@ export type RawAcpRuntimeCatalogEntry = {
   binary_path: string | null;
   default_args: string[];
   mcp_command: string | null;
+  model_env_var?: string | null;
+  provider_env_var?: string | null;
+  thinking_env_var?: string | null;
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
@@ -699,6 +702,9 @@ function fromRawAcpRuntimeCatalogEntry(
     binaryPath: entry.binary_path,
     defaultArgs: entry.default_args,
     mcpCommand: entry.mcp_command,
+    modelEnvVar: entry.model_env_var ?? null,
+    providerEnvVar: entry.provider_env_var ?? null,
+    thinkingEnvVar: entry.thinking_env_var ?? null,
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,

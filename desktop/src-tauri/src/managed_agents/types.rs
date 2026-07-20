@@ -573,6 +573,12 @@ pub struct AcpRuntimeCatalogEntry {
     pub binary_path: Option<String>,
     pub default_args: Vec<String>,
     pub mcp_command: Option<String>,
+    /// Environment variable used to apply the initial model, when supported.
+    pub model_env_var: Option<String>,
+    /// Environment variable used to apply the selected LLM provider, when supported.
+    pub provider_env_var: Option<String>,
+    /// Environment variable used to apply thinking effort, when supported.
+    pub thinking_env_var: Option<String>,
     pub install_hint: String,
     pub install_instructions_url: String,
     /// true when at least one automated install step is available
