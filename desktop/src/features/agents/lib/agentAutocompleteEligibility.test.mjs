@@ -4,8 +4,8 @@ import test from "node:test";
 import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
-  getPreferredAgentPubkeys,
   getSharedChannelIds,
+  isAgentIdentityInManagedList,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
@@ -136,21 +136,29 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
   assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
 });
 
-test("getPreferredAgentPubkeys: includes only active managed and reachable relay agents", () => {
-  assert.deepEqual(
-    getPreferredAgentPubkeys({
-      managedAgents: [
-        { pubkey: PUB_A, status: "running" },
-        { pubkey: PUB_B, status: "deployed" },
-        { pubkey: PUB_C, status: "stopped" },
-        { pubkey: PUB_D, status: "not_deployed" },
-      ],
-      relayAgents: [
-        { pubkey: PUB_C, status: "online" },
-        { pubkey: PUB_D, status: "offline" },
-      ],
-    }),
-    new Set([PUB_A, PUB_B, PUB_C]),
+test("isAgentIdentityInManagedList: keeps people and only current managed agent identities", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: false, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_A.toUpperCase() },
+      managedAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    false,
   );
 });
 
@@ -244,65 +252,6 @@ test("coalesceAgentAutocompleteCandidates: merges agents with the same persona i
   });
 
   assert.deepEqual(coalesce([first, second]), [second]);
-});
-
-test("coalesceAgentAutocompleteCandidates: keeps a persona fallback beside stopped instances", () => {
-  const stoppedInstance = makeAgent({
-    pubkey: PUB_A,
-    personaId: "pinky",
-    isManagedAgent: true,
-    kind: "identity",
-  });
-  const personaFallback = makeAgent({
-    pubkey: undefined,
-    personaId: "pinky",
-    kind: "persona",
-  });
-
-  assert.deepEqual(coalesce([stoppedInstance, personaFallback]), [
-    stoppedInstance,
-    personaFallback,
-  ]);
-});
-
-test("coalesceAgentAutocompleteCandidates: prefers a runnable replacement over a stale member", () => {
-  const staleMember = makeAgent({
-    pubkey: PUB_A,
-    personaId: "pinky",
-    isMember: true,
-  });
-  const runnableReplacement = makeAgent({
-    pubkey: PUB_B,
-    personaId: "pinky",
-    isManagedAgent: true,
-  });
-
-  assert.deepEqual(
-    coalesce([staleMember, runnableReplacement], {
-      preferredPubkeys: new Set([PUB_B]),
-    }),
-    [runnableReplacement],
-  );
-});
-
-test("coalesceAgentAutocompleteCandidates: keeps an invocable member for the logical agent", () => {
-  const member = makeAgent({
-    pubkey: PUB_A,
-    personaId: "pinky",
-    isMember: true,
-  });
-  const otherInstance = makeAgent({
-    pubkey: PUB_B,
-    personaId: "pinky",
-    isManagedAgent: true,
-  });
-
-  assert.deepEqual(
-    coalesce([member, otherInstance], {
-      preferredPubkeys: new Set([PUB_A, PUB_B]),
-    }),
-    [member],
-  );
 });
 
 test("coalesceAgentAutocompleteCandidates: merges agents with the same owner and name", () => {

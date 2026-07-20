@@ -14,10 +14,9 @@ import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomple
 import {
   coalesceAgentAutocompleteCandidates,
   coalesceAutocompleteCandidatesByKey,
-  getActiveManagedAgentMetadata,
   getMentionableAgentPubkeys,
-  getPreferredAgentPubkeys,
   getSharedChannelIds,
+  isAgentIdentityInManagedList,
   shouldHideAgentFromMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
@@ -152,12 +151,24 @@ export function useMentions(
       ),
     [managedAgentsQuery.data],
   );
-  const activeManagedAgentMetadata = React.useMemo(
-    () => getActiveManagedAgentMetadata(managedAgentsQuery.data),
+  const managedAgentPersonaIds = React.useMemo(
+    () =>
+      new Set(
+        (managedAgentsQuery.data ?? [])
+          .map((agent) => agent.personaId)
+          .filter((personaId): personaId is string => Boolean(personaId)),
+      ),
     [managedAgentsQuery.data],
   );
-  const managedAgentPersonaIds = activeManagedAgentMetadata.personaIds;
-  const managedAgentPubkeys = activeManagedAgentMetadata.pubkeys;
+  const managedAgentPubkeys = React.useMemo(
+    () =>
+      new Set(
+        (managedAgentsQuery.data ?? []).map((agent) =>
+          normalizePubkey(agent.pubkey),
+        ),
+      ),
+    [managedAgentsQuery.data],
+  );
   const relayAgentNamesByPubkey = React.useMemo(
     () =>
       new Map(
@@ -227,20 +238,15 @@ export function useMentions(
       new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
     [members],
   );
-  const preferredAgentPubkeys = React.useMemo(
-    () =>
-      getPreferredAgentPubkeys({
-        managedAgents: managedAgentsQuery.data,
-        relayAgents: relayAgentsQuery.data,
-      }),
-    [managedAgentsQuery.data, relayAgentsQuery.data],
-  );
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
     const candidatesByPubkey = new Map<string, MentionCandidate>();
 
     const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
       const pubkey = normalizePubkey(candidate.pubkey);
       if (isArchivedDiscovery(pubkey)) {
+        return;
+      }
+      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
         return;
       }
       if (
@@ -254,7 +260,6 @@ export function useMentions(
       ) {
         return;
       }
-
       const current = candidatesByPubkey.get(pubkey);
       if (!current) {
         candidatesByPubkey.set(pubkey, { ...candidate, pubkey });
@@ -287,7 +292,6 @@ export function useMentions(
         isManagedAgent: current.isManagedAgent || candidate.isManagedAgent,
       });
     };
-
     for (const member of members ?? []) {
       const pubkey = normalizePubkey(member.pubkey);
       const linkedPersonaId = activePersonaById.has(pubkey)
@@ -343,14 +347,9 @@ export function useMentions(
     }
 
     for (const agent of managedAgentsQuery.data ?? []) {
-      const pubkey = normalizePubkey(agent.pubkey);
-      if (!preferredAgentPubkeys.has(pubkey)) {
-        continue;
-      }
-
       addCandidate({
         kind: "identity",
-        pubkey,
+        pubkey: agent.pubkey,
         displayName: agent.name,
         isMember: false,
         isAgent: true,
@@ -407,7 +406,7 @@ export function useMentions(
       {
         currentPubkey,
         getLabel: mentionCandidateLabel,
-        preferredPubkeys: preferredAgentPubkeys,
+        preferredPubkeys: memberPubkeys,
       },
     );
   }, [
@@ -421,11 +420,12 @@ export function useMentions(
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
+    managedAgentPubkeys,
     managedAgentsQuery.data,
+    memberPubkeys,
     members,
     mentionableAgentPubkeys,
     personaNameByPubkey,
-    preferredAgentPubkeys,
     profiles,
     relayAgentNamesByPubkey,
     relayAgentsQuery.data,
