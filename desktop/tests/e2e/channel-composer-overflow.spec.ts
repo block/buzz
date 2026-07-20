@@ -52,7 +52,40 @@ async function expectOverlayBottomMask(
   const hasMask = await overlay.evaluate((element) => {
     const after = getComputedStyle(element, "::after");
     const before = getComputedStyle(element, "::before");
-    return after.content !== "none" && before.content !== "none";
+    const composer = element.querySelector<HTMLElement>(
+      '[data-testid="message-composer"]',
+    );
+    const cornerMaskContainer = element.querySelector<HTMLElement>(
+      ".composer-overlay-corner-masks",
+    );
+    if (!composer || !cornerMaskContainer) return false;
+
+    const overlayRect = element.getBoundingClientRect();
+    const composerRect = composer.getBoundingClientRect();
+    const leftMask = getComputedStyle(cornerMaskContainer, "::before");
+    const rightMask = getComputedStyle(cornerMaskContainer, "::after");
+    const tolerance = 0.5;
+
+    return (
+      after.content !== "none" &&
+      before.content !== "none" &&
+      leftMask.maskImage !== "none" &&
+      rightMask.maskImage !== "none" &&
+      Math.abs(
+        composerRect.left - overlayRect.left - Number.parseFloat(leftMask.left),
+      ) <= tolerance &&
+      Math.abs(
+        overlayRect.right -
+          composerRect.right -
+          Number.parseFloat(rightMask.right),
+      ) <= tolerance &&
+      Math.abs(
+        overlayRect.bottom -
+          composerRect.bottom -
+          Number.parseFloat(leftMask.bottom),
+      ) <= tolerance &&
+      leftMask.bottom === rightMask.bottom
+    );
   });
   expect(hasMask).toBe(true);
 }

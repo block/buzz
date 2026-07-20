@@ -816,7 +816,7 @@ export function MessageThreadPanel({
       >
         <div
           className={cn(
-            "pointer-events-auto",
+            "composer-overlay-corner-masks pointer-events-auto",
             hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS,
           )}
           style={

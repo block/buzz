@@ -734,7 +734,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               data-testid="channel-composer-overlay"
               ref={composerWrapperRef}
             >
-              <div className="pointer-events-auto">
+              <div className="composer-overlay-corner-masks pointer-events-auto">
                 {timeoutState.active ? (
                   <ComposerTimeoutBanner
                     expiresAtMs={timeoutState.expiresAtMs}
