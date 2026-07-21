@@ -798,7 +798,6 @@ impl Config {
 
         let agent_command = args.agent_command;
 
-        // Validate: agent_command must not be empty.
         if agent_command.trim().is_empty() {
             return Err(ConfigError::ConfigFile(
                 "agent_command must not be empty".into(),
@@ -807,7 +806,6 @@ impl Config {
 
         let agent_args = normalize_agent_args(&agent_command, args.agent_args);
 
-        // Warn on invalid UUIDs in --channels.
         if let Some(ref channels) = args.channels {
             for ch in channels {
                 if ch.parse::<Uuid>().is_err() {
@@ -819,7 +817,6 @@ impl Config {
             }
         }
 
-        // Cap heartbeat interval at 86400s (24h).
         let heartbeat_interval = if args.heartbeat_interval > 86400 {
             tracing::warn!(
                 interval = args.heartbeat_interval,
@@ -1068,7 +1065,6 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
         )));
     }
 
-    // Warn when Config mode has no rules; agent will receive nothing.
     if config.rules.is_empty() {
         tracing::warn!(
             path = %path.display(),
@@ -1099,7 +1095,6 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
             }
             // Fail fast: parse the expression at load time so typos don't
             // silently produce dead rules at runtime.
-            // Store the compiled AST so match_event never re-parses.
             match evalexpr::build_operator_tree(expr) {
                 Ok(node) => {
                     rule.compiled_filter = Some(Arc::new(node));
@@ -1121,8 +1116,7 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
                 )));
             }
         }
-        // Initialise the consecutive-timeout counter. Deserialization leaves it at
-        // default (new Arc<AtomicU32::new(0)>) but we set it explicitly here for clarity.
+        // Deserialization leaves consecutive_timeouts at its zero default; reset explicitly.
         rule.consecutive_timeouts = Arc::new(AtomicU32::new(0));
     }
 
