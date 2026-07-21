@@ -52,6 +52,10 @@ setup: bootstrap
 hooks:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Use the Hermit-pinned lefthook (bin/lefthook self-downloads on first use):
+    # works with no pre-installed lefthook and guarantees the pinned version
+    # rather than whatever happens to be on PATH.
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     # --path-format=absolute guarantees an absolute path from every invocation context:
     # without it, --git-common-dir returns ".git" from the main checkout and a
     # relative hooksPath would break linked-worktree dispatch just like .hooks did.
