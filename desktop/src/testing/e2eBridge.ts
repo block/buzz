@@ -4748,6 +4748,36 @@ function mulberry32(seed: number) {
 }
 
 let mockProjectEventStore: RelayEvent[] | null = null;
+const MOCK_PROJECT_BRANCHES_KEY = "buzz-e2e-project-branches";
+
+function readMockProjectBranches(): Record<string, Record<string, string>> {
+  try {
+    return JSON.parse(
+      window.sessionStorage.getItem(MOCK_PROJECT_BRANCHES_KEY) ?? "{}",
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeMockProjectBranch(
+  dtag: string,
+  branch: string,
+  commit: string | null,
+) {
+  const projects = readMockProjectBranches();
+  const branches = { ...(projects[dtag] ?? {}) };
+  if (commit) {
+    branches[branch] = commit;
+  } else {
+    delete branches[branch];
+  }
+  projects[dtag] = branches;
+  window.sessionStorage.setItem(
+    MOCK_PROJECT_BRANCHES_KEY,
+    JSON.stringify(projects),
+  );
+}
 
 function buildMockProjectEvents(): RelayEvent[] {
   const events: RelayEvent[] = [];
@@ -4795,8 +4825,11 @@ function buildMockProjectEvents(): RelayEvent[] {
             }`,
           ],
           ["refs/heads/main", "0123456789abcdef0123456789abcdef01234567"],
+          ...Object.entries(readMockProjectBranches()[seed.dtag] ?? {}).map(
+            ([branch, commit]) => [`refs/heads/${branch}`, commit],
+          ),
         ],
-        owner,
+        getConfig()?.mock?.relaySelf ?? owner,
         now - projectIndex,
         `mock-repo-state-${seed.dtag}`.replace(/[^a-zA-Z0-9]/g, ""),
       ),
@@ -9427,6 +9460,9 @@ export function maybeInstallE2eTauriMocks() {
           ]);
           repoState.created_at = Math.floor(Date.now() / 1000);
         }
+        if (dtag) {
+          writeMockProjectBranch(dtag, input.newBranch, input.expectedCommit);
+        }
         return {
           branch: input.newBranch,
           commit: input.expectedCommit,
@@ -9454,6 +9490,9 @@ export function maybeInstallE2eTauriMocks() {
             (tag) => tag[0] !== `refs/heads/${input.branch}`,
           );
           repoState.created_at = Math.floor(Date.now() / 1000);
+        }
+        if (dtag) {
+          writeMockProjectBranch(dtag, input.branch, null);
         }
         return {
           branch: input.branch,

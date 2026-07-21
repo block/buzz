@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
 import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
@@ -345,9 +346,17 @@ function eventToRepoState(event: RelayEvent): RepoState {
 }
 
 async function fetchRepoState(project: Project): Promise<RepoState | null> {
+  const relaySelf = await getRelaySelf();
+  const trustedAuthors = [
+    ...new Set(
+      [project.owner, relaySelf].filter((value): value is string =>
+        Boolean(value),
+      ),
+    ),
+  ];
   const events = await relayClient.fetchEvents({
     kinds: [KIND_REPO_STATE],
-    authors: [project.owner],
+    authors: trustedAuthors,
     "#d": [project.dtag],
     limit: 1,
   });

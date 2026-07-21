@@ -712,7 +712,10 @@ test("project branches can be created from the selected remote branch", async ({
   page,
 }) => {
   await enableProjectsFeature(page);
-  await installMockBridge(page, { projectHeadBranch: "master" });
+  await installMockBridge(page, {
+    projectHeadBranch: "master",
+    relaySelf: TEST_IDENTITIES.bob.pubkey,
+  });
   await openBuzzProject(page);
 
   await page.getByRole("button", { name: /main/ }).click();
@@ -745,6 +748,12 @@ test("project branches can be created from the selected remote branch", async ({
     () => window.__BUZZ_E2E_COMMANDS__ ?? [],
   );
   expect(commands).toContain("create_project_remote_branch");
+
+  await openBuzzProject(page);
+  await page.getByRole("button", { name: /main/ }).click();
+  await expect(
+    page.getByRole("menuitemradio", { name: "feature/branch-management" }),
+  ).toBeVisible();
 });
 
 test("project branches can be deleted but the default branch cannot", async ({

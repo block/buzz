@@ -129,6 +129,8 @@ export type MockAgentMemoryListing = {
 type MockBridgeOptions = {
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
+  /** Relay NIP-11 identity used to sign authoritative repository state. */
+  relaySelf?: string | null;
   /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
   builderlabAuth?: { email?: string; name?: string; expiresAt: string } | null;
   /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
