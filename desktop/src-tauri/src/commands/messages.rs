@@ -100,9 +100,12 @@ pub async fn get_feed(
         Vec::new()
     };
 
+    // Category values must match FeedItemCategory on the TS side
+    // (`"mention"` singular). The feed *section* is still keyed `mentions`
+    // (plural) on FeedSections — that is the bucket name, not the item field.
     let mentions: Vec<FeedItemInfo> = mention_events
         .iter()
-        .map(|ev| feed_item_from_event(ev, "mentions"))
+        .map(|ev| feed_item_from_event(ev, "mention"))
         .collect();
     let needs_action: Vec<FeedItemInfo> = approval_events
         .iter()

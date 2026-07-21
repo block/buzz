@@ -9,6 +9,7 @@ import type {
   BackendProviderCandidate,
   BackendProviderProbeResult,
   CanvasResponse,
+  FeedItemCategory,
   GetHomeFeedInput,
   HomeFeedResponse,
   ManagedAgent,
@@ -50,6 +51,11 @@ type RawAddChannelMembersResult = {
   }>;
 };
 
+// Native historically emitted the plural section name `"mentions"` on each
+// item. FeedItemCategory (and every frontend comparison) uses the singular
+// `"mention"`. Accept both on the wire so fromRawFeedItem can canonicalize.
+type RawFeedItemCategory = FeedItemCategory | "mentions";
+
 type RawFeedItem = {
   id: string;
   kind: number;
@@ -62,7 +68,7 @@ type RawFeedItem = {
   // never omits the key.
   channel_type: string | null;
   tags: string[][];
-  category: "mention" | "needs_action" | "activity" | "agent_activity";
+  category: RawFeedItemCategory;
 };
 
 type RawHomeFeedResponse = {
@@ -311,6 +317,18 @@ export async function invokeTauri<T>(
   }
 }
 
+function canonicalizeFeedItemCategory(
+  category: RawFeedItemCategory,
+): FeedItemCategory {
+  // Native get_feed historically stamped the plural section name ("mentions")
+  // onto each item. Every frontend comparison uses the singular FeedItemCategory
+  // value ("mention"). Normalize at the boundary so toast titles, inbox
+  // labeling, and sound slots keep working even if a caller still emits the
+  // legacy plural.
+  if (category === "mentions") return "mention";
+  return category;
+}
+
 export function fromRawFeedItem(item: RawFeedItem) {
   return {
     id: item.id,
@@ -325,7 +343,7 @@ export function fromRawFeedItem(item: RawFeedItem) {
     // notification filter both key off `=== undefined`).
     channelType: item.channel_type ?? undefined,
     tags: item.tags,
-    category: item.category,
+    category: canonicalizeFeedItemCategory(item.category),
   };
 }
 
