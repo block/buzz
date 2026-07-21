@@ -2845,11 +2845,16 @@ fn spawn_failure_notice(
 /// Stable, machine-readable discriminant for a failed turn, derived from the
 /// same data that already drives `outcome_label` and `is_transport_error`.
 ///
-/// This is intentionally coarser than `outcome_label`: consumers (the
-/// desktop UI, external tooling) should be able to group failures into a
-/// handful of buckets without parsing prose. New variants should only be
-/// added for a genuinely new failure shape — do not multiply classes for
-/// wording differences.
+/// Unlike `outcome_label` (which mirrors the `PromptOutcome` variant), this
+/// groups failures into a handful of actionable buckets so consumers (the
+/// desktop UI, external tooling) never have to parse prose. Naming note:
+/// `AcpError::Protocol` means a broken frame on the wire, so it lands in
+/// `"transport"` (matching the `is_transport_error` respawn grouping), while
+/// `"protocol"` is reserved for `AcpError::Json` — the agent spoke, but not
+/// valid JSON-RPC. The `agent_panic` emit site labels itself `"panic"`
+/// directly (there is no `PromptOutcome` for a panicked task). New classes
+/// should only be added for a genuinely new failure shape — do not multiply
+/// classes for wording differences.
 fn classify_turn_failure(outcome: &PromptOutcome) -> &'static str {
     match outcome {
         PromptOutcome::Ok(_) => "error",

@@ -775,7 +775,7 @@ export function saveActiveAgentTurnsForCommunity(communityId: string): void {
  * Restore a previously saved active-turns snapshot for `communityId` into the
  * module maps.  No-op when no snapshot exists.
  *
- * Clears all four module maps before writing so the function is
+ * Clears all five module maps before writing so the function is
  * self-contained — it replaces rather than merging, regardless of whether the
  * caller pre-cleared.  At the primary call site (`useCommunityInit`) the maps
  * are already empty after `resetCommunityState()`, but this guard makes the
