@@ -1042,11 +1042,35 @@ test("first-community shows the scenario cards for localhost", async ({
       "true",
     );
   }, BLANK_TYLER_IDENTITY.pubkey);
-  await installMockBridge(page, undefined, {
-    relayWsUrl: "ws://localhost:3000",
-    skipOnboardingSeed: true,
-    skipCommunitySeed: true,
-  });
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        {
+          id: "claude",
+          label: "Claude Code",
+          avatar_url: "",
+          availability: "available",
+          command: "claude",
+          binary_path: "/usr/local/bin/claude",
+          default_args: [],
+          mcp_command: null,
+          install_hint: "Install Claude Code",
+          install_instructions_url: "https://example.com",
+          can_auto_install: true,
+          underlying_cli_path: null,
+          node_required: false,
+          auth_status: { status: "logged_in" },
+          login_hint: "Sign in to Claude Code",
+        },
+      ],
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
   await page.goto("/");
 
   await expect(
@@ -1068,6 +1092,10 @@ test("first-community shows the scenario cards for localhost", async ({
       name: "Configure your default model settings",
     }),
   ).toBeVisible();
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Claude Code",
+  );
+  await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
 });
 
 test("first-community direct join reaches profile", async ({ page }) => {

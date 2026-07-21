@@ -25,7 +25,10 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
-import { getVisibleOnboardingRuntimes } from "./onboardingRuntimeSelection";
+import {
+  getReadyOnboardingRuntimes,
+  getVisibleOnboardingRuntimes,
+} from "./onboardingRuntimeSelection";
 import type { DefaultConfigStepActions } from "./types";
 
 type DefaultConfigStepProps = {
@@ -107,9 +110,18 @@ function AgentDefaultsSection({
     };
   }, []);
 
+  const effectiveReadyRuntimeIds = React.useMemo(
+    () =>
+      readyRuntimeIds.length > 0
+        ? readyRuntimeIds
+        : getReadyOnboardingRuntimes(runtimesQuery.data ?? []).map(
+            (runtime) => runtime.id,
+          ),
+    [readyRuntimeIds, runtimesQuery.data],
+  );
   const readyRuntimeIdSet = React.useMemo(
-    () => new Set(readyRuntimeIds),
-    [readyRuntimeIds],
+    () => new Set(effectiveReadyRuntimeIds),
+    [effectiveReadyRuntimeIds],
   );
   // Setup already confirmed readiness. Re-filter only for onboarding
   // visibility here; a transient auth recheck must not invalidate that handoff.
@@ -131,7 +143,7 @@ function AgentDefaultsSection({
   const configSurfaceError =
     runtimesQuery.isError ||
     (!configSurfaceLoading &&
-      readyRuntimeIds.length > 0 &&
+      effectiveReadyRuntimeIds.length > 0 &&
       readyRuntimes.length === 0);
   const harnessOptions = React.useMemo(
     () =>
