@@ -24,7 +24,11 @@ import {
   type PersonaModelOption,
 } from "./agentConfigOptions";
 import { MODEL_DISCOVERY_LOADING_VALUE } from "./usePersonaModelDiscovery";
-import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
+import {
+  MODEL_DISCOVERY_LOADING_SHORT,
+  type PersonaModelDiscoveryStatus,
+} from "./personaModelDiscoveryStatus";
+import { ModelDiscoveryStatusLine } from "./ModelDiscoveryStatusLine";
 
 export const MODEL_NO_MODELS_VALUE = "__no_models__";
 
@@ -283,9 +287,11 @@ export function AgentModelField({
   isRequired,
   model,
   modelDiscoveryLoading,
+  modelDiscoveryLoadingMessage = null,
   modelDiscoveryStatus,
   onIsCustomModelEditingChange,
   onModelChange,
+  onRetryModelDiscovery,
   placeholder = "Select model",
   placeholderClassName,
   provider,
@@ -318,9 +324,13 @@ export function AgentModelField({
   isRequired: boolean;
   model: string;
   modelDiscoveryLoading: boolean;
+  /** Progressive loading copy from {@link usePersonaModelDiscovery}. */
+  modelDiscoveryLoadingMessage?: string | null;
   modelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
   onIsCustomModelEditingChange: (value: boolean) => void;
   onModelChange: (value: string) => void;
+  /** Re-run discovery after a timeout / empty / path failure. */
+  onRetryModelDiscovery?: () => void;
   /** Trigger placeholder shown when there is no selected model option. */
   placeholder?: string;
   /** Optional class override for placeholder text. */
@@ -425,16 +435,22 @@ export function AgentModelField({
     onModelChange(nextValue);
   };
 
+  // Discovery in flight with no catalog yet: force SHORT label on the control
+  // (trigger + option). The long progressive sentence must never enter the
+  // pill — it truncates and duplicated the under-field note (#2261 screenshot).
+  const controlShowsLoading =
+    modelDiscoveryLoading && discoveredModelOptions === null;
+
   const modelOptions: AgentDropdownOption[] = [
     ...effectiveModelOptions.map((option) => ({
       label: option.label,
       value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
     })),
-    ...(modelDiscoveryLoading && discoveredModelOptions === null
+    ...(controlShowsLoading
       ? [
           {
             disabled: true,
-            label: "Loading models...",
+            label: MODEL_DISCOVERY_LOADING_SHORT,
             value: MODEL_DISCOVERY_LOADING_VALUE,
           },
         ]
@@ -454,16 +470,15 @@ export function AgentModelField({
     trimmedModel.length > 0
       ? trimmedModel
       : undefined;
-  // While discovery is in flight with nothing selected, the closed field
-  // reads "Loading models…" instead of a select-prompt — the field isn't
-  // waiting on the user, it's waiting on the harness.
-  const restingPlaceholder =
-    modelDiscoveryLoading &&
-    discoveredModelOptions === null &&
-    trimmedModel.length === 0 &&
-    !isCustomModelEditing
-      ? "Loading models..."
-      : placeholder;
+
+  // Closed trigger: while loading, always SHORT — do not fall through to
+  // selectedOption.label / selectedLabel, which could surface longer copy.
+  const controlSelectedLabel = controlShowsLoading
+    ? MODEL_DISCOVERY_LOADING_SHORT
+    : stableSelectedModelLabel;
+  const controlPlaceholder = controlShowsLoading
+    ? MODEL_DISCOVERY_LOADING_SHORT
+    : placeholder;
 
   const modelSelect = useCustomSelect ? (
     <AgentDropdownSelect
@@ -473,12 +488,16 @@ export function AgentModelField({
       id={id}
       onValueChange={handleModelSelectChange}
       options={modelOptions}
-      placeholder={restingPlaceholder}
+      placeholder={controlPlaceholder}
       placeholderClassName={placeholderClassName}
       searchable
-      selectedLabel={stableSelectedModelLabel}
+      selectedLabel={controlSelectedLabel}
       testId={testId ?? id}
-      value={modelSelectValue}
+      value={
+        controlShowsLoading && trimmedModel.length === 0 && !isCustomModelEditing
+          ? MODEL_DISCOVERY_LOADING_VALUE
+          : modelSelectValue
+      }
     />
   ) : (
     <select
@@ -491,7 +510,11 @@ export function AgentModelField({
       disabled={selectDisabled}
       id={id}
       onChange={(event) => handleModelSelectChange(event.target.value)}
-      value={modelSelectValue}
+      value={
+        controlShowsLoading && trimmedModel.length === 0 && !isCustomModelEditing
+          ? MODEL_DISCOVERY_LOADING_VALUE
+          : modelSelectValue
+      }
     >
       {modelOptions.map((option) => (
         <option
@@ -536,15 +559,21 @@ export function AgentModelField({
         />
       ) : null}
       {showStatusMessage ? (
-        <p className="text-xs text-muted-foreground">
-          {modelDiscoveryLoading
-            ? "Loading models..."
-            : modelDiscoveryStatus !== null
-              ? modelDiscoveryStatus.message
-              : discoveredModelOptions !== null
-                ? "Saved changes take effect on the next start."
-                : "Select a provider above to see available models."}
-        </p>
+        modelDiscoveryLoadingMessage || modelDiscoveryStatus !== null ? (
+          <ModelDiscoveryStatusLine
+            disabled={disabled}
+            loading={modelDiscoveryLoading}
+            loadingMessage={modelDiscoveryLoadingMessage}
+            onRetry={onRetryModelDiscovery}
+            status={modelDiscoveryStatus}
+          />
+        ) : modelDiscoveryLoading ? null : (
+          <p className="text-xs text-muted-foreground">
+            {discoveredModelOptions !== null
+              ? "Saved changes take effect on the next start."
+              : "Select a provider above to see available models."}
+          </p>
+        )
       ) : null}
     </div>
   );

@@ -61,7 +61,8 @@ test("onboarding-essential hides power tools but never the effort field", () => 
 
 // ── shouldShowModelStatusMessage ──────────────────────────────────────────────
 // The onboarding-essential preset sets showDescriptions=false.  Discovery
-// warnings must bypass the preset so first-run failures are never invisible.
+// warnings (#2246) and the slow-phase loading note (#2261) must bypass the
+// preset so first-run failures / long cold starts are never invisible.
 
 test("shouldShowModelStatusMessage_fullDisclosure_nullStatus_showsMessage", () => {
   // Full disclosure always shows the status line regardless of status.
@@ -69,9 +70,13 @@ test("shouldShowModelStatusMessage_fullDisclosure_nullStatus_showsMessage", () =
 });
 
 test("shouldShowModelStatusMessage_onboardingPreset_nullStatus_hidesMessage", () => {
-  // Happy path: no status → status line hidden in onboarding.
+  // Happy path: no status, no slow-phase note → status line hidden.
   const { showDescriptions } = resolveDisclosure("onboarding-essential");
   assert.equal(shouldShowModelStatusMessage(showDescriptions, null), false);
+  assert.equal(
+    shouldShowModelStatusMessage(showDescriptions, null, null),
+    false,
+  );
 });
 
 test("shouldShowModelStatusMessage_onboardingPreset_warningStatus_showsMessage", () => {
@@ -82,4 +87,26 @@ test("shouldShowModelStatusMessage_onboardingPreset_warningStatus_showsMessage",
     tone: "warning",
   };
   assert.equal(shouldShowModelStatusMessage(showDescriptions, warning), true);
+});
+
+test("shouldShowModelStatusMessage_onboardingPreset_earlyLoading_hidesMessage", () => {
+  // First 10s: control alone shows "Loading models…" — no under-field line.
+  const { showDescriptions } = resolveDisclosure("onboarding-essential");
+  assert.equal(
+    shouldShowModelStatusMessage(showDescriptions, null, null),
+    false,
+  );
+});
+
+test("shouldShowModelStatusMessage_onboardingPreset_slowLoading_showsMessage", () => {
+  // After MODEL_DISCOVERY_SLOW_MS the long note must not be hidden.
+  const { showDescriptions } = resolveDisclosure("onboarding-essential");
+  assert.equal(
+    shouldShowModelStatusMessage(
+      showDescriptions,
+      null,
+      "Still loading models… first launch of some harnesses (especially Codex) can take 20–60 seconds.",
+    ),
+    true,
+  );
 });

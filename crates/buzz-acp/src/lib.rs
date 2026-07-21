@@ -58,7 +58,12 @@ fn is_subcommand(name: &str) -> bool {
 }
 
 /// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
-const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Codex ACP cold-starts the Codex App Server on every `models` probe; on
+/// Windows this commonly takes ~15–25s (see #2261). 10s was too short and
+/// produced empty model lists with opaque failures. Keep this well above the
+/// observed cold path so UI retry + progressive loading can succeed.
+const MODELS_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.

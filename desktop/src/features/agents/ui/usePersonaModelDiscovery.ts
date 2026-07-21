@@ -8,6 +8,8 @@ import type {
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import {
   formatModelDiscoveryErrorStatus,
+  formatModelDiscoveryLoadingMessage,
+  MODEL_DISCOVERY_SLOW_MS,
   type PersonaModelDiscoveryStatus,
 } from "./personaModelDiscoveryStatus";
 import type { PersonaModelOption } from "./agentConfigOptions";
@@ -97,8 +99,9 @@ export function synthesizeEmptyDiscoveryStatus(
   }
   const agentLabel = response.agentName.trim() || "This agent";
   return {
-    message: `${agentLabel} reported no models. Check that the CLI is installed and signed in, then reopen this screen.`,
+    message: `${agentLabel} reported no models. Check that the CLI is installed and signed in, then retry.`,
     tone: "warning",
+    retryable: true,
   };
 }
 
@@ -166,6 +169,10 @@ export function usePersonaModelDiscovery({
   >(null);
   const [modelDiscoveryLoading, setModelDiscoveryLoading] =
     React.useState(false);
+  /** Bumped by {@link retryModelDiscovery} to force a re-probe (and skip cache). */
+  const [discoveryRetryNonce, setDiscoveryRetryNonce] = React.useState(0);
+  /** True once the current probe has been in flight past MODEL_DISCOVERY_SLOW_MS. */
+  const [discoveryLoadingSlow, setDiscoveryLoadingSlow] = React.useState(false);
   const modelDiscoveryCacheRef = React.useRef(
     new Map<string, AgentModelsResponse>(),
   );
@@ -261,6 +268,7 @@ export function usePersonaModelDiscovery({
     setModelDiscoveryStatus(null);
     setModelDiscoveryStatusKey(activeModelDiscoveryKey);
     setModelDiscoveryLoading(true);
+    setDiscoveryLoadingSlow(false);
     function runModelDiscovery() {
       void discoverAgentModels({
         agentCommand: activeAgentCommand,
@@ -273,9 +281,9 @@ export function usePersonaModelDiscovery({
             return;
           }
           // Only cache responses that yielded usable model options.  An
-          // empty/no-switching result gets the "reopen this screen" warning,
-          // and closing → reopening the dialog must re-run discovery so the
-          // user's CLI-install/sign-in is actually reflected.
+          // empty/no-switching result gets a retryable warning, and closing →
+          // reopening (or Retry) must re-run discovery so CLI install/sign-in
+          // is reflected.
           if (isCacheableDiscoveryResponse(response, trimmedProvider)) {
             modelDiscoveryCacheRef.current.set(
               activeModelDiscoveryKey,
@@ -326,6 +334,7 @@ export function usePersonaModelDiscovery({
     };
   }, [
     discoveryAgentCommand,
+    discoveryRetryNonce,
     envVars,
     modelDiscoveryKey,
     selectedRuntimeAvailability,
@@ -333,6 +342,29 @@ export function usePersonaModelDiscovery({
     shouldDebounceModelDiscovery,
     trimmedProvider,
   ]);
+
+  // One-shot slow-phase flip for status-line copy (#2261). Prefer a single
+  // timeout over a 500ms elapsed ticker that re-renders the tree for no gain.
+  React.useEffect(() => {
+    if (!modelDiscoveryLoading) {
+      setDiscoveryLoadingSlow(false);
+      return;
+    }
+    setDiscoveryLoadingSlow(false);
+    const timeout = window.setTimeout(() => {
+      setDiscoveryLoadingSlow(true);
+    }, MODEL_DISCOVERY_SLOW_MS);
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [modelDiscoveryLoading, discoveryRetryNonce, modelDiscoveryKey]);
+
+  const retryModelDiscovery = React.useCallback(() => {
+    if (modelDiscoveryKey !== null) {
+      modelDiscoveryCacheRef.current.delete(modelDiscoveryKey);
+    }
+    setDiscoveryRetryNonce((nonce) => nonce + 1);
+  }, [modelDiscoveryKey]);
 
   const activeModelDiscoveryData =
     modelDiscoveryKey !== null && modelDiscoveryDataKey === modelDiscoveryKey
@@ -359,12 +391,21 @@ export function usePersonaModelDiscovery({
     activeModelDiscoveryStatus,
   });
 
+  // null until slow phase — under-field line stays empty for the first
+  // MODEL_DISCOVERY_SLOW_MS; control already shows the short label.
+  const modelDiscoveryLoadingMessage =
+    modelDiscoveryPending && discoveryLoadingSlow
+      ? formatModelDiscoveryLoadingMessage(true)
+      : null;
+
   return {
     discoveredModelOptions,
     modelDiscoveryLoading: modelDiscoveryPending,
+    modelDiscoveryLoadingMessage,
     modelDiscoveryStatus:
       modelDiscoveryPending || discoveredModelOptions !== null
         ? null
         : activeModelDiscoveryStatus,
+    retryModelDiscovery,
   };
 }

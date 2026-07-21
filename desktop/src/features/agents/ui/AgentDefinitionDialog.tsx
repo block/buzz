@@ -496,7 +496,9 @@ export function AgentDefinitionDialog({
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
+    modelDiscoveryLoadingMessage,
     modelDiscoveryStatus,
+    retryModelDiscovery,
   } = usePersonaModelDiscovery({
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
@@ -937,10 +939,13 @@ export function AgentDefinitionDialog({
                   disabled={isPending}
                   isExplicitModelRequired={isExplicitModelRequired}
                   model={model}
+                  modelDiscoveryLoading={modelDiscoveryLoading}
+                  modelDiscoveryLoadingMessage={modelDiscoveryLoadingMessage}
                   modelDiscoveryStatus={modelDiscoveryStatus}
                   modelDropdownOptions={modelDropdownOptions}
                   modelSelectValue={modelSelectValue}
                   onCustomModelChange={setModel}
+                  onRetryModelDiscovery={retryModelDiscovery}
                   showSharedComputeAutoHint={
                     isRelayMesh &&
                     modelSelectValue === AUTO_MODEL_DROPDOWN_VALUE

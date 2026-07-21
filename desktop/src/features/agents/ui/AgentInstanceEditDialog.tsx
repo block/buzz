@@ -80,6 +80,7 @@ import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
+import { ModelDiscoveryStatusLine } from "./ModelDiscoveryStatusLine";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -410,7 +411,9 @@ export function AgentInstanceEditDialog({
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
+    modelDiscoveryLoadingMessage,
     modelDiscoveryStatus,
+    retryModelDiscovery,
   } = usePersonaModelDiscovery({
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
@@ -1079,15 +1082,22 @@ export function AgentInstanceEditDialog({
                   />
                 </div>
               ) : null}
-              <p className="text-xs text-muted-foreground">
-                {modelDiscoveryLoading
-                  ? "Loading models..."
-                  : modelDiscoveryStatus !== null
-                    ? modelDiscoveryStatus.message
-                    : discoveredModelOptions !== null
-                      ? "Saved changes take effect on the next start."
-                      : "Select a provider above to see available models."}
-              </p>
+              {modelDiscoveryLoadingMessage ||
+              modelDiscoveryStatus !== null ? (
+                <ModelDiscoveryStatusLine
+                  disabled={updateMutation.isPending}
+                  loading={modelDiscoveryLoading}
+                  loadingMessage={modelDiscoveryLoadingMessage}
+                  onRetry={retryModelDiscovery}
+                  status={modelDiscoveryStatus}
+                />
+              ) : modelDiscoveryLoading ? null : (
+                <p className="text-xs text-muted-foreground">
+                  {discoveredModelOptions !== null
+                    ? "Saved changes take effect on the next start."
+                    : "Select a provider above to see available models."}
+                </p>
+              )}
             </div>
 
             <AgentAiDefaultsNotice
