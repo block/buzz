@@ -8,6 +8,7 @@ export function buildThreadActivityFeedItems(
   threadActivityItems: ThreadActivityItem[],
   mutedRootIds: ReadonlySet<string>,
   channels: Channel[],
+  includeDmHomeActivity = false,
 ): FeedItem[] {
   const channelById = new Map(channels.map((channel) => [channel.id, channel]));
 
@@ -17,7 +18,15 @@ export function buildThreadActivityFeedItems(
       // is present in the active community's channel set. Rows persisted under
       // a different relay's scope key should never reach this function, but
       // this filter is the last line of defense against cross-community leaks.
-      if (channelById.get(item.channelId) === undefined) return false;
+      const channel = channelById.get(item.channelId);
+      if (channel === undefined) return false;
+      if (
+        channel.channelType === "dm" &&
+        getThreadReference(item.tags).parentId === null &&
+        !includeDmHomeActivity
+      ) {
+        return false;
+      }
       const rootId = getThreadReference(item.tags).rootId;
       return !rootId || !mutedRootIds.has(rootId);
     })
@@ -42,6 +51,7 @@ export function useThreadActivityFeedItems(
   threadActivityItems: ThreadActivityItem[],
   mutedRootIds: ReadonlySet<string>,
   channels: Channel[],
+  includeDmHomeActivity = false,
 ): FeedItem[] {
   const mutedRootIdsKey = [...mutedRootIds].sort().join("\0");
 
@@ -52,6 +62,13 @@ export function useThreadActivityFeedItems(
       threadActivityItems,
       mutedRootIds,
       channels,
+      includeDmHomeActivity,
     );
-  }, [channels, mutedRootIds, mutedRootIdsKey, threadActivityItems]);
+  }, [
+    channels,
+    includeDmHomeActivity,
+    mutedRootIds,
+    mutedRootIdsKey,
+    threadActivityItems,
+  ]);
 }

@@ -5,41 +5,37 @@
       "id": "workflows",
       "name": "Workflows",
       "description": "YAML-defined automations with approval gates",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "projects",
       "name": "Projects",
       "description": "Git repository browser and collaboration",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "pulse",
       "name": "Pulse",
       "description": "Activity feed with notes, social posts, and agent activity",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "forum",
       "name": "Forum Channels",
       "description": "Forum-style threaded channels for long-form discussions",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "agentManagedProfiles",
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
+    },
+    {
+      "id": "activity",
+      "name": "Activity",
+      "description": "A redesigned inbox for threads, agent updates, reminders, and drafts",
+      "platforms": ["desktop"]
     }
   ]
 }
