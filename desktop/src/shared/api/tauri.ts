@@ -325,7 +325,12 @@ export function fromRawFeedItem(item: RawFeedItem) {
     // notification filter both key off `=== undefined`).
     channelType: item.channel_type ?? undefined,
     tags: item.tags,
-    category: item.category,
+    // Canonicalize the wire plural "mentions" to singular "mention" so
+    // FeedItemCategory union expectations hold regardless of wire payload.
+    category:
+      (item.category as string) === "mentions"
+        ? "mention"
+        : (item.category as FeedItemCategory),
   };
 }
 
