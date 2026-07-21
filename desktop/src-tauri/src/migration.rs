@@ -592,22 +592,37 @@ fn refresh_builtin_agent_avatars_in_file(path: &Path, legacy_hashes: &[(&str, &s
         let Some(persona_id) = legacy_avatar_persona_id(record, legacy_hashes) else {
             continue;
         };
+        let legacy_avatar = record
+            .get("avatar_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
         let is_linked_instance = record
             .get("pubkey")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|pubkey| !pubkey.is_empty())
             && record.get("persona_id").and_then(serde_json::Value::as_str) == Some(&persona_id);
-        if !is_linked_instance || !replace_builtin_avatar(record, &persona_id, now) {
+        if !is_linked_instance {
+            continue;
+        }
+        let version_update = persona_version_updates
+            .get(&persona_id)
+            .cloned()
+            .or_else(|| {
+                legacy_avatar.as_deref().and_then(|legacy_avatar| {
+                    built_in_persona_version_update(&persona_id, legacy_avatar, now)
+                })
+            });
+        if !replace_builtin_avatar(record, &persona_id, now) {
             continue;
         }
         changed = true;
-        if let Some((old_version, new_version)) = persona_version_updates.get(&persona_id) {
+        if let Some((old_version, new_version)) = version_update {
             let source_was_current = record
                 .get("persona_source_version")
                 .and_then(serde_json::Value::as_str)
                 == Some(old_version.as_str());
             if source_was_current {
-                record["persona_source_version"] = serde_json::Value::String(new_version.clone());
+                record["persona_source_version"] = serde_json::Value::String(new_version);
             }
         }
     }
@@ -646,6 +661,22 @@ fn persona_version_from_record(record: &serde_json::Value) -> Option<String> {
     Some(crate::managed_agents::persona_events::persona_content_hash(
         &crate::managed_agents::persona_events::persona_event_content(&definition),
     ))
+}
+
+fn built_in_persona_version_update(
+    persona_id: &str,
+    legacy_avatar: &str,
+    now: &str,
+) -> Option<(String, String)> {
+    let mut current = crate::managed_agents::built_in_persona_definition(persona_id, now)?;
+    let new_version = crate::managed_agents::persona_events::persona_content_hash(
+        &crate::managed_agents::persona_events::persona_event_content(&current),
+    );
+    current.avatar_url = Some(legacy_avatar.to_string());
+    let old_version = crate::managed_agents::persona_events::persona_content_hash(
+        &crate::managed_agents::persona_events::persona_event_content(&current),
+    );
+    Some((old_version, new_version))
 }
 
 fn replace_builtin_avatar(record: &mut serde_json::Value, persona_id: &str, now: &str) -> bool {

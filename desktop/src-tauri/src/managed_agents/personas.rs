@@ -133,6 +133,12 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
         .collect()
 }
 
+pub(crate) fn built_in_persona_definition(id: &str, now: &str) -> Option<AgentDefinition> {
+    built_in_persona_records(now)
+        .into_iter()
+        .find(|persona| persona.id == id)
+}
+
 fn built_in_order(id: &str) -> Option<usize> {
     BUILT_IN_PERSONAS
         .iter()
