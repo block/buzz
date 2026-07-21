@@ -1349,6 +1349,117 @@ test("returning to agent defaults without a stored selection lists installed har
   await page.keyboard.press("Escape");
 });
 
+test("fallback keeps a no-longer-installed preferred harness without rewriting the saved config", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        availableRuntime("claude", { status: "logged_out" }),
+        availableRuntime("goose", { status: "not_applicable" }),
+        availableRuntime("buzz-agent", { status: "not_applicable" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await navigateToConfigPage(page);
+  await page.getByTestId("onboarding-finish").click();
+  await expect(page.getByText("Join or create a community")).toBeVisible();
+
+  // Simulate an install that predates selection persistence and whose saved
+  // preference is a harness that is no longer installed (Claude logged out
+  // since onboarding).
+  await page.evaluate(async () => {
+    window.localStorage.removeItem(
+      "buzz-machine-onboarding-runtime-selection.v1",
+    );
+    await (
+      window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload: unknown,
+        ) => Promise<unknown>;
+      }
+    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("set_global_agent_config", {
+      config: {
+        env_vars: {},
+        provider: null,
+        // A model the mock's Claude catalog knows, so onboarding's
+        // stale-model healing (a separate, intended cleanup) stays inert and
+        // any config write observed below is the reconcile-effect rewrite.
+        model: "claude-opus-4-20250514",
+        preferred_runtime: "claude",
+      },
+    });
+  });
+
+  await page.getByTestId("welcome-setup-back").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+
+  // The persisted preferred harness stays listed and selected even though it
+  // is no longer installed — resolving to another harness here would make the
+  // reconcile effect silently rewrite the saved config on open.
+  const harnessSelect = page.getByTestId("global-agent-default-harness");
+  await expect(harnessSelect).toHaveText("Claude");
+  await harnessSelect.click();
+  await expect(
+    page.getByTestId("global-agent-default-harness-option-claude"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("global-agent-default-harness-option-buzz-agent"),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  const savedConfig = await readSavedConfig(page);
+  expect(savedConfig?.preferred_runtime).toBe("claude");
+  expect(savedConfig?.model).toBe("claude-opus-4-20250514");
+});
+
+test("stored selection whose harnesses left the catalog falls back instead of erroring", async ({
+  page,
+}) => {
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  await navigateToConfigPage(page);
+  await page.getByTestId("onboarding-finish").click();
+  await expect(page.getByText("Join or create a community")).toBeVisible();
+
+  // A stored selection can go stale — every recorded harness id has since
+  // dropped out of the runtime catalog (e.g. uninstalled between sessions).
+  await page.evaluate(() =>
+    window.localStorage.setItem(
+      "buzz-machine-onboarding-runtime-selection.v1",
+      JSON.stringify(["retired-harness"]),
+    ),
+  );
+
+  await page.getByTestId("welcome-setup-back").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+
+  // The stale selection behaves like a missing one: installed harnesses are
+  // listed instead of the error surface.
+  await expect(
+    page.getByText("Couldn't load harness settings. Go back and try again."),
+  ).toHaveCount(0);
+  const harnessSelect = page.getByTestId("global-agent-default-harness");
+  await expect(harnessSelect).toHaveText("Buzz");
+  await harnessSelect.click();
+  await expect(
+    page.getByTestId("global-agent-default-harness-option-buzz-agent"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("global-agent-default-harness-option-goose"),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+});
+
 // ---------------------------------------------------------------------------
 // B1 regression: rapid consecutive edits must not lose the later change
 // ---------------------------------------------------------------------------

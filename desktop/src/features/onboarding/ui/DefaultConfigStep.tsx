@@ -120,17 +120,25 @@ function AgentDefaultsSection({
 
   const selectedRuntimes = React.useMemo(() => {
     const catalog = runtimesQuery.data ?? [];
-    if (selectedRuntimeIds.length > 0) {
-      return sortSelectedRuntimes(catalog, selectedRuntimeIds);
+    const storedSelection = sortSelectedRuntimes(catalog, selectedRuntimeIds);
+    if (storedSelection.length > 0) {
+      return storedSelection;
     }
-    // Reopening onboarding on this page can land here with no recorded
-    // harness selection (installs that predate selection persistence). Fall
-    // back to every installed harness rather than an empty dropdown.
-    return sortSelectedRuntimes(
-      catalog,
-      catalog.filter(runtimeIsInstalled).map((runtime) => runtime.id),
-    );
-  }, [runtimesQuery.data, selectedRuntimeIds]);
+    // Reopening onboarding on this page can land here with no usable harness
+    // selection — none was recorded (installs that predate selection
+    // persistence), or every recorded id has since left the catalog. Fall
+    // back to every installed harness rather than an empty dropdown, keeping
+    // the persisted preferred runtime listed even when it is no longer
+    // installed (e.g. logged out since onboarding) so the reconcile effect
+    // below resolves it as selected instead of rewriting the saved config.
+    const fallbackRuntimeIds = catalog
+      .filter(runtimeIsInstalled)
+      .map((runtime) => runtime.id);
+    if (config.preferred_runtime) {
+      fallbackRuntimeIds.push(config.preferred_runtime);
+    }
+    return sortSelectedRuntimes(catalog, fallbackRuntimeIds);
+  }, [config.preferred_runtime, runtimesQuery.data, selectedRuntimeIds]);
   const selectedRuntime = React.useMemo(() => {
     const preferredRuntime = selectedRuntimes.find(
       (runtime) => runtime.id === config.preferred_runtime,
