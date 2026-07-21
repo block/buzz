@@ -843,4 +843,54 @@ mod tests {
         grant.relay_hints = vec!["https://not-a-relay".into(), "ftp://nope".into()];
         assert!(fetch_data_set_cross_relay(&grant).await.is_none());
     }
+
+    /// End-to-end wire proof: stand up a real in-process WebSocket relay, let the
+    /// cross-relay path connect to it via the grant's hint, issue the `REQ`,
+    /// receive a genuine signed+encrypted `kind:30440` EVENT then EOSE, and
+    /// decrypt the payload back out. This exercises the actual socket path the
+    /// three tests above deliberately skip.
+    #[tokio::test]
+    async fn cross_relay_fetches_and_decrypts_over_real_socket() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let publisher = Keys::generate();
+        let (raw, _) = scope_key();
+        let scope_id = "scope-live";
+        let data_set = build_data_set(&publisher, scope_id, 5, raw, "the secret payload");
+        let ds_json = serde_json::to_value(&data_set).unwrap();
+
+        // Minimal NIP-01 relay: accept one connection, read the REQ to learn the
+        // subscription id, reply with the matching EVENT then EOSE.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let sub_id = loop {
+                match ws.next().await {
+                    Some(Ok(Message::Text(t))) => {
+                        let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                        break v[1].as_str().unwrap().to_string();
+                    }
+                    Some(Ok(_)) => continue,
+                    _ => return,
+                }
+            };
+            let event_msg = serde_json::json!(["EVENT", sub_id, ds_json]).to_string();
+            let eose_msg = serde_json::json!(["EOSE", sub_id]).to_string();
+            ws.send(Message::Text(event_msg.into())).await.unwrap();
+            ws.send(Message::Text(eose_msg.into())).await.unwrap();
+        });
+
+        let mut grant = grant_ref(&publisher.public_key(), scope_id, 5, raw);
+        grant.relay_hints = vec![format!("ws://{addr}")];
+
+        let fetched = fetch_data_set_cross_relay(&grant)
+            .await
+            .expect("relay should have served the data set");
+        let payload = decrypt_data_set(&fetched, &grant).unwrap();
+        assert_eq!(payload, "the secret payload");
+        server.await.unwrap();
+    }
 }
