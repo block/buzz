@@ -25,7 +25,7 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
-import { getReadyOnboardingRuntimes } from "./onboardingRuntimeSelection";
+import { getVisibleOnboardingRuntimes } from "./onboardingRuntimeSelection";
 import type { DefaultConfigStepActions } from "./types";
 
 type DefaultConfigStepProps = {
@@ -104,9 +104,11 @@ function AgentDefaultsSection({
     () => new Set(readyRuntimeIds),
     [readyRuntimeIds],
   );
+  // Setup already confirmed readiness. Re-filter only for onboarding
+  // visibility here; a transient auth recheck must not invalidate that handoff.
   const readyRuntimes = React.useMemo(
     () =>
-      getReadyOnboardingRuntimes(runtimesQuery.data ?? []).filter((runtime) =>
+      getVisibleOnboardingRuntimes(runtimesQuery.data ?? []).filter((runtime) =>
         readyRuntimeIdSet.has(runtime.id),
       ),
     [readyRuntimeIdSet, runtimesQuery.data],

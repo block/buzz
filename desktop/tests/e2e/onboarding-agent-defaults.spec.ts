@@ -200,7 +200,7 @@ test("install transitions through Sign in to Ready", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("defaults includes every ready visible harness and persists the user's choice there", async ({
+test("defaults trusts setup readiness and persists the user's visible harness choice", async ({
   page,
 }) => {
   await installMockBridge(
