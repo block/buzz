@@ -76,6 +76,8 @@ dirs = "6"
 # WebSocket client — ephemeral event publish (kind:20001 is WS-only on the relay)
 buzz-ws-client = { path = "../buzz-ws-client" }
 
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+
 # Random number generation — full jitter for exponential backoff in with_retry
 rand = { workspace = true }
 
