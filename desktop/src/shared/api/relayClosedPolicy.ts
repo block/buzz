@@ -34,14 +34,3 @@ export function classifyRelayClosed(message: string): RelayClosedClass {
   }
   return "retryable";
 }
-
-/**
- * Legacy two-value wrapper for callers that don't need rate-limit distinction.
- *
- * Returns `false` for `"terminal"` CLOSED messages and `true` for everything
- * else (including `"rate-limited"`, which must NOT permanently delete the
- * subscription — the relay may accept it again once the window expires).
- */
-export function isRetryableRelayClosed(message: string) {
-  return classifyRelayClosed(message) !== "terminal";
-}

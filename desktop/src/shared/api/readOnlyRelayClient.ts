@@ -8,10 +8,11 @@ import {
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
-
-const AUTH_TIMEOUT_MS = 8_000;
-const HISTORY_TIMEOUT_MS = 8_000;
-const PUBLISH_TIMEOUT_MS = 8_000;
+import {
+  AUTH_TIMEOUT_MS,
+  HISTORY_TIMEOUT_MS,
+  PUBLISH_TIMEOUT_MS,
+} from "@/shared/api/relayClientSession";
 
 type PendingHistory = {
   events: RelayEvent[];
