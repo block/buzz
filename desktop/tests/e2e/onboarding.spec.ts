@@ -1756,9 +1756,15 @@ test("pending avatar stays navigable and exposes retry after propagation fails",
   ).toBeLessThanOrEqual(1);
   expect(spinnerBox.width / avatarBox.width).toBeLessThanOrEqual(0.2);
 
+  await expect(page.getByTestId("community-avatar-empty")).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(
+    page.getByRole("button", { name: "Add an avatar" }),
+  ).toBeVisible();
   await expect(
     page.getByTestId("community-avatar-circle-fallback"),
-  ).toBeVisible({ timeout: 10_000 });
+  ).toHaveCount(0);
   await expect(avatarImage).toHaveCount(0);
   await expect(
     page.getByText("Avatar couldn’t finish uploading"),
