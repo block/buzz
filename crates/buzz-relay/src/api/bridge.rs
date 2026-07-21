@@ -626,13 +626,23 @@ pub async fn submit_event(
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid event JSON: {e}")))?;
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
-    super::relay_members::enforce_relay_membership(
+    let nip_oa_owner = super::relay_members::enforce_relay_membership(
         &state,
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
     )
-    .await?;
+    .await?
+    .or_else(|| {
+        if !state.config.require_relay_membership {
+            super::relay_members::extract_nip_oa_owner(&pubkey_bytes, auth_tag)
+        } else {
+            None
+        }
+    });
+    if let Some(owner) = nip_oa_owner {
+        super::relay_members::materialize_nip_oa_owner(&state, &tenant, &pubkey, &owner).await;
+    }
 
     let auth = IngestAuth::Http {
         pubkey,

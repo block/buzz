@@ -91,6 +91,11 @@ impl IngestAuth {
         }
     }
 
+    /// Pubkey used for principal-scoped accounting and policy lookups.
+    pub fn principal_pubkey_bytes(&self) -> Vec<u8> {
+        self.pubkey().to_bytes().to_vec()
+    }
+
     /// Permission scopes for this auth context.
     pub fn scopes(&self) -> &[Scope] {
         match self {
@@ -1353,7 +1358,9 @@ pub async fn ingest_event(
     // counter below is emitted at this shared seam so WebSocket and HTTP
     // transports are counted identically.
     let kind_label = super::event::bounded_kind_label(event_kind_u32(&event));
-    let author_pubkey_bytes = event.pubkey.to_bytes().to_vec();
+    // Classify the authenticated principal, not the event envelope signer:
+    // NIP-59 gift wraps deliberately use an unrelated ephemeral pubkey.
+    let author_pubkey_bytes = auth.principal_pubkey_bytes();
 
     let abstract_state = state_for_request(tenant, auth.pubkey());
     let (_guard, tracer) = EmitGuard::arm(
@@ -2905,6 +2912,24 @@ mod tests {
         assert!(
             required_scope_for_kind(KIND_GIFT_WRAP, &dummy).is_ok(),
             "KIND_GIFT_WRAP should be in the scope allowlist"
+        );
+    }
+
+    #[test]
+    fn accounting_uses_authenticated_principal_pubkey() {
+        let principal = nostr::Keys::generate();
+        let envelope_signer = nostr::Keys::generate();
+        let auth = IngestAuth::Nip42 {
+            pubkey: principal.public_key(),
+            scopes: vec![],
+            channel_ids: None,
+            conn_id: Uuid::new_v4(),
+        };
+
+        assert_ne!(principal.public_key(), envelope_signer.public_key());
+        assert_eq!(
+            auth.principal_pubkey_bytes(),
+            principal.public_key().to_bytes().to_vec()
         );
     }
 
