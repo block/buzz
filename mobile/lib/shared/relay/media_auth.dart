@@ -9,18 +9,30 @@ import 'relay_provider.dart';
 const _mediaGetAuthKind = 24242;
 const _mediaGetAuthLifetimeSeconds = 600;
 
+/// Re-sign this long before the cached auth event expires, so an in-flight
+/// request signed just before the boundary still lands well within validity.
+const _mediaGetAuthRefreshMarginSeconds = 60;
+
 /// Builds BUD-01 Blossom `t=get` auth headers for relay-host media URLs.
 ///
 /// Returns an empty map for non-relay URLs or when no signing key is available,
 /// so callers can safely use this on arbitrary profile/custom-emoji URLs without
 /// leaking Buzz credentials to third-party hosts.
-@immutable
+///
+/// The signed header is memoized until [_mediaGetAuthRefreshMarginSeconds]
+/// before expiry: repeated calls return the byte-identical map instead of
+/// producing a fresh Schnorr signature per widget build. The service itself is
+/// rebuilt (dropping the memo) whenever the relay config — base URL or signing
+/// identity — changes, via [mediaGetAuthServiceProvider].
 class MediaGetAuthService {
   final String _baseUrl;
   final String? _nsec;
   final DateTime Function() _now;
 
-  const MediaGetAuthService({
+  Map<String, String>? _cachedHeaders;
+  DateTime? _refreshAt;
+
+  MediaGetAuthService({
     required String baseUrl,
     required String? nsec,
     DateTime Function()? now,
@@ -36,12 +48,29 @@ class MediaGetAuthService {
     if (uri == null || relayUri == null) return const {};
     if (!_isRelayMediaUrl(uri, relayUri)) return const {};
 
+    final cached = _cachedHeaders;
+    final refreshAt = _refreshAt;
+    if (cached != null && refreshAt != null && _now().isBefore(refreshAt)) {
+      return cached;
+    }
+
     try {
+      final signedAt = _now();
       final authEvent = _buildGetAuthEvent(nsec);
       final encoded = base64Url
           .encode(utf8.encode(authEvent.toJson()))
           .replaceAll('=', '');
-      return {'Authorization': 'Nostr $encoded'};
+      final headers = Map<String, String>.unmodifiable({
+        'Authorization': 'Nostr $encoded',
+      });
+      _cachedHeaders = headers;
+      _refreshAt = signedAt.add(
+        const Duration(
+          seconds:
+              _mediaGetAuthLifetimeSeconds - _mediaGetAuthRefreshMarginSeconds,
+        ),
+      );
+      return headers;
     } catch (_) {
       // Read auth is best-effort: while the relay rollout flag is off, an
       // unsigned fetch still works. Once the flag is on, this request will 403

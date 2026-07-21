@@ -254,9 +254,8 @@ class _MessageImagePreview extends HookConsumerWidget {
           constraints: layout.constraints,
           child: Hero(
             tag: heroTag,
-            child: Image.network(
-              url,
-              headers: mediaGetHeadersFor(ref, url),
+            child: MediaImage(
+              url: url,
               fit: layout.fit,
               semanticLabel: semanticLabel,
               errorBuilder: (_, _, _) => _MediaPreviewFallback(
@@ -297,9 +296,8 @@ class _MessageVideoPreview extends StatelessWidget {
               fit: StackFit.expand,
               children: [
                 if (posterUrl != null)
-                  Image.network(
-                    posterUrl,
-                    headers: mediaGetHeadersForContext(context, posterUrl),
+                  MediaImage(
+                    url: posterUrl,
                     fit: BoxFit.cover,
                     errorBuilder: (_, _, _) => const _MediaPreviewFallback(
                       icon: LucideIcons.video,

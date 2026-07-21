@@ -274,12 +274,9 @@ class _MediaImageViewerPageState extends State<MediaImageViewerPage>
                       enabled: !_disableHeroOnDismiss,
                       child: Hero(
                         tag: widget.heroTag,
-                        child: Image.network(
-                          widget.imageUrl,
-                          headers: mediaGetHeadersForContext(
-                            context,
-                            widget.imageUrl,
-                          ),
+                        child: MediaImage(
+                          url: widget.imageUrl,
+                          boundDecodeToLayout: false,
                           fit: BoxFit.contain,
                           semanticLabel: widget.semanticLabel,
                           errorBuilder: (_, _, _) => const _MediaLoadFailure(
@@ -457,9 +454,8 @@ class _VideoLoadingPoster extends StatelessWidget {
         fit: StackFit.expand,
         children: [
           if (posterUrl != null)
-            Image.network(
-              posterUrl!,
-              headers: mediaGetHeadersForContext(context, posterUrl!),
+            MediaImage(
+              url: posterUrl!,
               fit: BoxFit.cover,
               errorBuilder: (_, _, _) => _videoPlaceholder(context),
             )
