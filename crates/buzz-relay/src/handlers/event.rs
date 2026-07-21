@@ -24,11 +24,11 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-use super::ingest::{IngestAuth, IngestError};
+use super::ingest::{reject_with_transport, IngestAuth, IngestError};
 
 /// Increment the rejection counter with a bounded reason label.
 fn reject(reason: &'static str) {
-    metrics::counter!("buzz_events_rejected_total", "reason" => reason).increment(1);
+    reject_with_transport("ws", reason);
 }
 
 /// Bound the `kind` label to prevent cardinality explosion from arbitrary Nostr kinds.
