@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -115,6 +116,50 @@ fn relay_server_tag(relay_url: &str) -> Option<String> {
     } else {
         Some(authority)
     }
+}
+
+/// Maximum number of attempts per request (initial attempt + two retries).
+const RETRY_MAX_ATTEMPTS: u32 = 3;
+
+/// Base sleep durations for full-jitter exponential backoff.
+/// `RETRY_BASE_SECS[i]` is the ceiling for attempt `i` before attempt `i+1`.
+const RETRY_BASE_SECS: [f64; 2] = [0.5, 1.5];
+
+/// Maximum seconds to honour a relay-provided `retry in Ns` hint from a 429.
+const RETRY_IN_MAX_SECS: u64 = 8;
+
+/// Read an env var as a `u64` of seconds and return the corresponding `Duration`.
+/// Falls back to `default` if the var is unset or unparseable.
+fn env_duration_secs(name: &str, default: u64) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(default))
+}
+
+/// Parse a `retry in Ns` hint from a relay 429 body.
+///
+/// Searches the `error` or `message` JSON field for the pattern `retry in <N>s`
+/// and returns `Some(N)`. Returns `None` when the body is missing, not valid
+/// JSON, or does not contain the pattern.
+fn parse_retry_in_secs(body: &str) -> Option<u64> {
+    let text = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .or_else(|| v.get("message"))
+                .and_then(|m| m.as_str().map(str::to_string))
+        })?;
+    const PREFIX: &str = "retry in ";
+    let after = text.find(PREFIX).map(|i| &text[i + PREFIX.len()..])?;
+    let end = after
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after.len());
+    if end == 0 || after.as_bytes().get(end) != Some(&b's') {
+        return None;
+    }
+    after[..end].parse::<u64>().ok()
 }
 
 fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
@@ -369,6 +414,13 @@ pub struct BuzzClient {
 }
 
 impl BuzzClient {
+    /// Create a new client pointing at `relay_url`.
+    ///
+    /// Timeout defaults are tuned for degraded WAN links and can be overridden
+    /// via environment variables:
+    ///
+    /// - `BUZZ_CONNECT_TIMEOUT_SECS` — TCP connect timeout (default 15 s)
+    /// - `BUZZ_TIMEOUT_SECS` — per-request total timeout (default 30 s)
     pub fn new(
         relay_url: String,
         keys: Keys,
@@ -376,8 +428,8 @@ impl BuzzClient {
         auth_tag_json: Option<String>,
     ) -> Result<Self, CliError> {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .connect_timeout(Duration::from_secs(5))
+            .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
+            .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
             .build()
             .map_err(|e| CliError::Other(e.to_string()))?;
         Ok(Self {
@@ -449,6 +501,67 @@ impl BuzzClient {
             Some(ref json) => req.header("x-auth-tag", json),
             None => req,
         }
+    }
+
+    /// Execute `op` up to `RETRY_MAX_ATTEMPTS` times, backing off on transient failures.
+    ///
+    /// Retries when `op` returns:
+    /// - `Err(CliError::Network(e))` where `e.is_connect() || e.is_timeout() || e.is_request()`
+    /// - `Ok(resp)` with status 429, 502, 503, or 504
+    ///
+    /// On 429 the relay-provided `retry in Ns` hint (from the `error` or `message`
+    /// JSON field) is used as the delay, capped at `RETRY_IN_MAX_SECS`. Unparseable
+    /// hints and all other retryable cases use full-jitter exponential backoff.
+    ///
+    /// The final attempt always returns whatever `op` produces (success or error)
+    /// so that `handle_response` can map it to the appropriate exit code.
+    async fn with_retry<'a, F, Fut>(&'a self, op: F) -> Result<reqwest::Response, CliError>
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<reqwest::Response, CliError>> + 'a,
+    {
+        for attempt in 0..RETRY_MAX_ATTEMPTS {
+            let is_last = attempt == RETRY_MAX_ATTEMPTS - 1;
+            match op().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    if !is_last && matches!(status, 429 | 502 | 503 | 504) {
+                        let delay = if status == 429 {
+                            let body = resp.text().await.unwrap_or_default();
+                            match parse_retry_in_secs(&body) {
+                                Some(hint) => Duration::from_secs(hint.min(RETRY_IN_MAX_SECS)),
+                                None => {
+                                    let base = RETRY_BASE_SECS[attempt as usize];
+                                    Duration::from_secs_f64(base * rand::random::<f64>())
+                                }
+                            }
+                        } else {
+                            let base = RETRY_BASE_SECS[attempt as usize];
+                            Duration::from_secs_f64(base * rand::random::<f64>())
+                        };
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Ok(resp);
+                }
+                Err(e) => {
+                    if let CliError::Network(ref net_err) = e {
+                        if !is_last
+                            && (net_err.is_connect()
+                                || net_err.is_timeout()
+                                || net_err.is_request())
+                        {
+                            let base = RETRY_BASE_SECS[attempt as usize];
+                            let delay = Duration::from_secs_f64(base * rand::random::<f64>());
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        unreachable!("loop exhausts all RETRY_MAX_ATTEMPTS")
     }
 
     async fn query_pages(
@@ -543,16 +656,29 @@ impl BuzzClient {
     /// Each filter is ORed by the relay (standard Nostr REQ behavior).
     pub async fn query_multi(&self, filters: &[serde_json::Value]) -> Result<String, CliError> {
         let url = format!("{}/query", self.relay_url);
-        let body_bytes = serde_json::to_vec(filters)
-            .map_err(|e| CliError::Other(format!("filter serialization failed: {e}")))?;
-        let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
-        let req = self
-            .http
-            .post(&url)
-            .header("Authorization", &auth)
-            .header("Content-Type", "application/json")
-            .body(body_bytes);
-        let resp = self.with_auth_tag(req).send().await?;
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(filters)
+                .map_err(|e| CliError::Other(format!("filter serialization failed: {e}")))?,
+        );
+        let resp = self
+            .with_retry(|| {
+                let body = body.clone();
+                let url = url.clone();
+                async move {
+                    let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                    Ok(self
+                        .with_auth_tag(
+                            self.http
+                                .post(&url)
+                                .header("Authorization", auth)
+                                .header("Content-Type", "application/json")
+                                .body(body),
+                        )
+                        .send()
+                        .await?)
+                }
+            })
+            .await?;
         self.handle_response(resp).await
     }
 
@@ -561,18 +687,29 @@ impl BuzzClient {
     #[allow(dead_code)]
     pub async fn count(&self, filter: &serde_json::Value) -> Result<String, CliError> {
         let url = format!("{}/count", self.relay_url);
-        let body_bytes = serde_json::to_vec(&[filter])
-            .map_err(|e| CliError::Other(format!("filter serialization failed: {e}")))?;
-        let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
-
-        let req = self
-            .http
-            .post(&url)
-            .header("Authorization", &auth)
-            .header("Content-Type", "application/json")
-            .body(body_bytes);
-        let resp = self.with_auth_tag(req).send().await?;
-
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(&[filter])
+                .map_err(|e| CliError::Other(format!("filter serialization failed: {e}")))?,
+        );
+        let resp = self
+            .with_retry(|| {
+                let body = body.clone();
+                let url = url.clone();
+                async move {
+                    let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                    Ok(self
+                        .with_auth_tag(
+                            self.http
+                                .post(&url)
+                                .header("Authorization", auth)
+                                .header("Content-Type", "application/json")
+                                .body(body),
+                        )
+                        .send()
+                        .await?)
+                }
+            })
+            .await?;
         self.handle_response(resp).await
     }
 
@@ -584,27 +721,49 @@ impl BuzzClient {
     /// stored events.
     pub async fn get_authed(&self, path: &str) -> Result<String, CliError> {
         let url = format!("{}{path}", self.relay_url);
-        let auth = sign_nip98(&self.keys, "GET", &url, None)?;
-        let req = self.http.get(&url).header("Authorization", &auth);
-        let resp = self.with_auth_tag(req).send().await?;
+        let resp = self
+            .with_retry(|| {
+                let url = url.clone();
+                async move {
+                    let auth = sign_nip98(&self.keys, "GET", &url, None)?;
+                    Ok(self
+                        .with_auth_tag(self.http.get(&url).header("Authorization", auth))
+                        .send()
+                        .await?)
+                }
+            })
+            .await?;
         self.handle_response(resp).await
     }
 
     /// Submit a signed Nostr event via POST /events.
     pub async fn submit_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let url = format!("{}/events", self.relay_url);
-        let body_bytes = serde_json::to_vec(&event)
-            .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?;
-        let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
-
-        let req = self
-            .http
-            .post(&url)
-            .header("Authorization", &auth)
-            .header("Content-Type", "application/json")
-            .body(body_bytes);
-        let resp = self.with_auth_tag(req).send().await?;
-
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(&event)
+                .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?,
+        );
+        let resp = self
+            .with_retry(|| {
+                let body = body.clone();
+                let url = url.clone();
+                async move {
+                    // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
+                    // event ID, keeping retries safe against the relay's replay guard.
+                    let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                    Ok(self
+                        .with_auth_tag(
+                            self.http
+                                .post(&url)
+                                .header("Authorization", auth)
+                                .header("Content-Type", "application/json")
+                                .body(body),
+                        )
+                        .send()
+                        .await?)
+                }
+            })
+            .await?;
         self.handle_response(resp).await
     }
 
@@ -615,8 +774,11 @@ impl BuzzClient {
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let ws_url = to_ws_url(&self.relay_url);
+        // Outer budget: inner wait constants (20 + 20 + 30 = 70 s) plus 5 s slack.
+        // See buzz_ws_client::{AUTH_CHALLENGE_TIMEOUT_SECS, AUTH_OK_TIMEOUT_SECS,
+        // PUBLISH_OK_TIMEOUT_SECS} for the inner floors.
         let ok =
-            buzz_ws_client::publish_event(&ws_url, event, &self.keys, self.auth_tag.as_ref(), 10)
+            buzz_ws_client::publish_event(&ws_url, event, &self.keys, self.auth_tag.as_ref(), 75)
                 .await
                 .map_err(|e| CliError::Other(e.to_string()))?;
 
@@ -714,30 +876,40 @@ impl BuzzClient {
         };
         let url = format!("{}/upload", self.relay_url);
         let upload_body = bytes::Bytes::from(bytes);
-        let req = self
-            .http
-            .put(&url)
-            .timeout(upload_timeout)
-            .header("Authorization", &auth_header)
-            .header("Content-Type", &mime)
-            .header("X-SHA-256", &sha256);
-
         let mut resp = self
-            .with_auth_tag(req)
-            .body(upload_body.clone())
-            .send()
+            .with_retry(|| {
+                let upload_body = upload_body.clone();
+                let url = url.clone();
+                let auth_header = auth_header.clone();
+                let mime = mime.clone();
+                let sha256 = sha256.clone();
+                async move {
+                    Ok(self
+                        .with_auth_tag(
+                            self.http
+                                .put(&url)
+                                .timeout(upload_timeout)
+                                .header("Authorization", &auth_header)
+                                .header("Content-Type", &mime)
+                                .header("X-SHA-256", &sha256)
+                                .body(upload_body),
+                        )
+                        .send()
+                        .await?)
+                }
+            })
             .await?;
         if should_retry_legacy_upload(resp.status()) {
             let legacy_url = format!("{}/media/upload", self.relay_url);
-            let legacy_req = self
-                .http
-                .put(&legacy_url)
-                .timeout(upload_timeout)
-                .header("Authorization", &auth_header)
-                .header("Content-Type", &mime)
-                .header("X-SHA-256", &sha256);
             resp = self
-                .with_auth_tag(legacy_req)
+                .with_auth_tag(
+                    self.http
+                        .put(&legacy_url)
+                        .timeout(upload_timeout)
+                        .header("Authorization", &auth_header)
+                        .header("Content-Type", &mime)
+                        .header("X-SHA-256", &sha256),
+                )
                 .body(upload_body)
                 .send()
                 .await?;
@@ -756,16 +928,26 @@ impl BuzzClient {
     /// Download a Blossom media blob using BUD-01 `t=get` auth.
     pub async fn download_media(&self, input: &str) -> Result<bytes::Bytes, CliError> {
         let url = media_url_from_input(&self.relay_url, input)?;
-        let auth_header = sign_blossom_get(&self.keys, &url)?;
+        // Use a dedicated client: 120 s timeout, no redirect forwarding.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             // Do not forward Authorization or x-auth-tag to redirect targets.
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| CliError::Other(format!("http client init failed: {e}")))?;
-        let req = client.get(&url).header("Authorization", auth_header);
-
-        let resp = self.with_auth_tag(req).send().await?;
+        let resp = self
+            .with_retry(|| {
+                let url = url.clone();
+                let client = client.clone();
+                async move {
+                    let auth_header = sign_blossom_get(&self.keys, &url)?;
+                    Ok(self
+                        .with_auth_tag(client.get(&url).header("Authorization", auth_header))
+                        .send()
+                        .await?)
+                }
+            })
+            .await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -949,6 +1131,71 @@ pub fn normalize_write_response(raw: &str) -> String {
         }
     }
     raw.to_string()
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::{parse_retry_in_secs, RETRY_BASE_SECS, RETRY_IN_MAX_SECS, RETRY_MAX_ATTEMPTS};
+
+    // ---- parse_retry_in_secs ----
+
+    #[test]
+    fn parse_relay_json_with_error_field() {
+        let body = r#"{"error":"rate-limited: quota exceeded; retry in 5s"}"#;
+        assert_eq!(parse_retry_in_secs(body), Some(5));
+    }
+
+    #[test]
+    fn parse_relay_json_with_message_field() {
+        let body = r#"{"message":"back off; retry in 3s please"}"#;
+        assert_eq!(parse_retry_in_secs(body), Some(3));
+    }
+
+    #[test]
+    fn parse_retry_in_zero_seconds() {
+        let body = r#"{"error":"retry in 0s"}"#;
+        assert_eq!(parse_retry_in_secs(body), Some(0));
+    }
+
+    #[test]
+    fn parse_garbled_body_returns_none() {
+        assert_eq!(parse_retry_in_secs("not json at all"), None);
+    }
+
+    #[test]
+    fn parse_missing_retry_pattern_returns_none() {
+        let body = r#"{"error":"rate-limited, please slow down"}"#;
+        assert_eq!(parse_retry_in_secs(body), None);
+    }
+
+    #[test]
+    fn parse_empty_body_returns_none() {
+        assert_eq!(parse_retry_in_secs(""), None);
+    }
+
+    // ---- jitter bounds ----
+
+    #[test]
+    fn jitter_stays_within_base() {
+        for &base in &RETRY_BASE_SECS {
+            for _ in 0..100 {
+                let jitter = base * rand::random::<f64>();
+                assert!(
+                    (0.0..=base).contains(&jitter),
+                    "jitter {jitter} out of [0, {base}]"
+                );
+            }
+        }
+    }
+
+    // ---- constant sanity ----
+
+    #[test]
+    fn retry_constants_are_sensible() {
+        assert_eq!(RETRY_MAX_ATTEMPTS, 3);
+        assert_eq!(RETRY_BASE_SECS.len(), (RETRY_MAX_ATTEMPTS - 1) as usize);
+        const { assert!(RETRY_IN_MAX_SECS > 0) };
+    }
 }
 
 #[cfg(test)]

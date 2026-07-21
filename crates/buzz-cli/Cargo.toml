@@ -76,6 +76,9 @@ dirs = "6"
 # WebSocket client — ephemeral event publish (kind:20001 is WS-only on the relay)
 buzz-ws-client = { path = "../buzz-ws-client" }
 
+# Random number generation — full jitter for exponential backoff in with_retry
+rand = { workspace = true }
+
 [dev-dependencies]
 # Scratch files for channel-templates.json fixtures in tests
 tempfile = "3"
