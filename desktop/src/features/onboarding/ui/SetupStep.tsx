@@ -110,6 +110,15 @@ function RuntimeStatus({
   const connectMutation = useConnectAcpRuntimeMutation();
   const runtimesQuery = useAcpRuntimesQuery();
   const [isWaitingForSignIn, setIsWaitingForSignIn] = React.useState(false);
+  const [didSignInCheckTimeOut, setDidSignInCheckTimeOut] =
+    React.useState(false);
+  const isReady = runtimeIsReadyForOnboarding(runtime);
+
+  React.useEffect(() => {
+    if (!isWaitingForSignIn || !isReady) return;
+    setIsWaitingForSignIn(false);
+    setDidSignInCheckTimeOut(false);
+  }, [isReady, isWaitingForSignIn]);
 
   React.useEffect(() => {
     if (!isWaitingForSignIn) return;
@@ -119,6 +128,7 @@ function RuntimeStatus({
     }, 2_000);
     const timeout = window.setTimeout(() => {
       setIsWaitingForSignIn(false);
+      setDidSignInCheckTimeOut(true);
     }, 120_000);
 
     return () => {
@@ -143,6 +153,12 @@ function RuntimeStatus({
           className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
           data-testid={`onboarding-runtime-instructions-${runtime.id}`}
           onClick={() => {
+            if (didSignInCheckTimeOut) {
+              setDidSignInCheckTimeOut(false);
+              setIsWaitingForSignIn(true);
+              void runtimesQuery.refetch();
+              return;
+            }
             if (!authMethod) {
               void methodsQuery.refetch();
               return;
@@ -160,7 +176,11 @@ function RuntimeStatus({
           type="button"
           variant="ghost"
         >
-          {isWaitingForSignIn ? "CHECKING…" : "SIGN IN"}
+          {isWaitingForSignIn
+            ? "CHECKING…"
+            : didSignInCheckTimeOut
+              ? "CHECK AGAIN"
+              : "SIGN IN"}
         </Button>
         {methodsQuery.error instanceof Error ? (
           <RuntimeErrorTooltip
