@@ -274,6 +274,17 @@ export function InvitePage({ code }: { code: string }) {
           >
             Download it now
           </a>
+          <span aria-hidden="true" className="mx-1.5 text-black/30">
+            ·
+          </span>
+          <a
+            className="font-medium text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
+            href={BUZZ_RELEASES_URL}
+            rel="noreferrer"
+            target="_blank"
+          >
+            Browse releases
+          </a>
         </p>
       </div>
 

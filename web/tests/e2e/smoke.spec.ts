@@ -74,6 +74,9 @@ test("invite requires age and legal consent before opening Buzz", async ({
     "href",
     "https://github.com/block/buzz/releases/download/v0.4.9/Buzz_0.4.9_x64-setup_alpha-unsigned.exe",
   );
+  await expect(
+    page.getByRole("link", { name: "Browse releases" }),
+  ).toHaveAttribute("href", "https://github.com/block/buzz/releases");
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
@@ -342,6 +345,10 @@ test("invite download falls back for mobile and non-desktop devices", async ({
     await page.goto("/invite/demo-code");
     await expect(
       page.getByRole("link", { name: "Download it now" }),
+      device.name,
+    ).toHaveAttribute("href", "https://github.com/block/buzz/releases");
+    await expect(
+      page.getByRole("link", { name: "Browse releases" }),
       device.name,
     ).toHaveAttribute("href", "https://github.com/block/buzz/releases");
     await context.close();
