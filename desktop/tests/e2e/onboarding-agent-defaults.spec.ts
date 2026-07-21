@@ -84,7 +84,7 @@ test("setup shows only Claude Code and Codex as detected harnesses", async ({
   await expect(page.getByRole("checkbox")).toHaveCount(0);
 });
 
-test("ready state is detected, checked, and enables Next without persisting a default", async ({
+test("ready state is detected and enables Next without persisting a default", async ({
   page,
 }) => {
   await installMockBridge(
@@ -105,7 +105,7 @@ test("ready state is detected, checked, and enables Next without persisting a de
   );
   await expect(
     page.getByTestId("onboarding-runtime-checkmark-claude"),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(
     page.getByTestId("onboarding-runtime-checkmark-codex"),
   ).toHaveCount(0);
@@ -197,7 +197,7 @@ test("install transitions through Sign in to Ready", async ({ page }) => {
   );
   await expect(
     page.getByTestId("onboarding-runtime-checkmark-claude"),
-  ).toBeVisible();
+  ).toHaveCount(0);
 });
 
 test("defaults trusts setup readiness and persists the user's visible harness choice", async ({
