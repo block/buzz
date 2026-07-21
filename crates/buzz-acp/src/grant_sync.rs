@@ -52,18 +52,24 @@
 //!
 //! The `kind:30440` data set is NOT a registered Buzz kind, so today it lives
 //! on the publisher's external relays (the grant's `a`-tag carries relay
-//! hints). [`fetch_data_set`] currently queries the harness [`RestClient`] (the
-//! connected Buzz relay); if the data set is external-only, that returns
-//! nothing and the scope is skipped with a clear log. Wiring a cross-relay
-//! fetch that honours the `a`-tag relay hints — or registering `30440` on the
-//! Buzz relay — is the follow-up that lets the data set resolve. The unwrap +
-//! decrypt path is identical either way.
+//! hints). [`fetch_data_set`] queries the connected Buzz relay first; when it
+//! doesn't hold the data set (the common external-only case),
+//! [`fetch_data_set_cross_relay`] dereferences it directly from the grant's
+//! `a`-tag relay hints over a plain NIP-01 WebSocket. This keeps the harness
+//! decoupled from where the publisher chose to store the data set, and from
+//! whether the NIP is registered on the Buzz relay. A hint relay is untrusted:
+//! whatever it serves still passes the full `decrypt_data_set` verification
+//! before it is applied. The unwrap + decrypt path is identical either way.
+
+use std::time::Duration;
 
 use base64::Engine;
 use buzz_core::engram::{self, Body};
+use futures_util::{SinkExt, StreamExt};
 use nostr::{Alphabet, Event, Keys, PublicKey, SingleLetterTag, UnsignedEvent};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use crate::relay::RestClient;
+use crate::relay::{parse_relay_message, RelayMessage, RestClient};
 
 /// NIP-59 gift wrap.
 const KIND_GIFT_WRAP: u16 = 1059;
@@ -77,6 +83,15 @@ const KIND_SCOPED_DATA_SET: u16 = 30440;
 /// Max gift-wraps to pull in one sync. Bounds a hostile flood; a real grantee
 /// holds a handful of scopes, not thousands.
 const GIFT_WRAP_LIMIT: usize = 64;
+
+/// Per-relay bound for a cross-relay data-set dereference. Kept tight because
+/// the whole sync runs inside `pool.rs`'s session-start budget; a hint that
+/// doesn't answer quickly is skipped and retried next session (fail-open).
+const CROSS_RELAY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Max relay hints to try when dereferencing one data set. Bounds a grant that
+/// carries a hostile pile of hints.
+const MAX_RELAY_HINTS: usize = 4;
 
 /// A scope reference extracted from a decrypted `kind:440` grant rumor.
 #[derive(Debug, Clone)]
@@ -202,20 +217,22 @@ async fn apply_one(
         }
     }
 
+    // Prefer the connected Buzz relay; fall back to the grant's `a`-tag relay
+    // hints when it doesn't hold the data set (the common external-only case).
     let data_set = match fetch_data_set(rest, &grant).await? {
         Some(ds) => ds,
-        None => {
-            // Almost always means the data set is external-only and the
-            // connected relay doesn't hold it. Not an error — a known gap
-            // pending cross-relay fetch (see module docs).
-            tracing::info!(
-                target: "grant_sync",
-                addr = %format!("30440:{}:{}", grant.publisher.to_hex(), grant.scope_id),
-                hints = ?grant.relay_hints,
-                "data set not on connected relay — skipping (cross-relay fetch not yet wired)"
-            );
-            return Ok(None);
-        }
+        None => match fetch_data_set_cross_relay(&grant).await {
+            Some(ds) => ds,
+            None => {
+                tracing::info!(
+                    target: "grant_sync",
+                    addr = %format!("30440:{}:{}", grant.publisher.to_hex(), grant.scope_id),
+                    hints = ?grant.relay_hints,
+                    "data set not found on connected relay or any hinted relay — skipping"
+                );
+                return Ok(None);
+            }
+        },
     };
 
     let payload = decrypt_data_set(&data_set, &grant)?;
@@ -485,6 +502,92 @@ async fn fetch_data_set(rest: &RestClient, grant: &GrantRef) -> Result<Option<Ev
         .max_by_key(|e| e.created_at))
 }
 
+/// Dereference the data set from the grant's `a`-tag relay hints, used when the
+/// connected Buzz relay does not hold it. Tries each hint in order (bounded by
+/// [`MAX_RELAY_HINTS`]) and returns the first data set found. Anything returned
+/// here still passes the full `decrypt_data_set` verification (signature,
+/// `a`-tag pubkey match, `d` match) before it is applied, so a hostile hint
+/// relay cannot inject a scope — it can at most fail to serve one.
+async fn fetch_data_set_cross_relay(grant: &GrantRef) -> Option<Event> {
+    for hint in grant.relay_hints.iter().take(MAX_RELAY_HINTS) {
+        match fetch_data_set_from_relay(hint, grant).await {
+            Ok(Some(ev)) => return Some(ev),
+            Ok(None) => {}
+            Err(reason) => {
+                tracing::debug!(
+                    target: "grant_sync",
+                    relay = %hint,
+                    "cross-relay data-set fetch failed: {reason}"
+                );
+            }
+        }
+    }
+    None
+}
+
+/// Open a plain NIP-01 WebSocket to a single external relay, issue one `REQ`
+/// for the `kind:30440` data set, and collect until EOSE or a bounded timeout.
+/// Public relays serve reads without auth, so no NIP-42 handshake is needed.
+async fn fetch_data_set_from_relay(url: &str, grant: &GrantRef) -> Result<Option<Event>, String> {
+    if !(url.starts_with("ws://") || url.starts_with("wss://")) {
+        return Err(format!("unsupported relay URL scheme: {url}"));
+    }
+
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(KIND_SCOPED_DATA_SET))
+        .author(grant.publisher)
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::D),
+            [grant.scope_id.clone()],
+        )
+        .limit(8);
+    let filter_json =
+        serde_json::to_value(&filter).map_err(|e| format!("filter serialize failed: {e}"))?;
+    const SUB_ID: &str = "grant-dataset";
+    let req = serde_json::json!(["REQ", SUB_ID, filter_json]).to_string();
+
+    let exchange = async {
+        let (mut ws, _resp) = connect_async(url)
+            .await
+            .map_err(|e| format!("connect failed: {e}"))?;
+        ws.send(Message::Text(req.into()))
+            .await
+            .map_err(|e| format!("REQ send failed: {e}"))?;
+
+        // Rollback defence (Security §7): keep the newest matching event.
+        let mut newest: Option<Event> = None;
+        while let Some(frame) = ws.next().await {
+            let frame = frame.map_err(|e| format!("ws read failed: {e}"))?;
+            match frame {
+                Message::Text(text) => match parse_relay_message(&text) {
+                    Ok(RelayMessage::Event {
+                        subscription_id,
+                        event,
+                    }) if subscription_id == SUB_ID
+                        && newest
+                            .as_ref()
+                            .is_none_or(|n| event.created_at > n.created_at) =>
+                    {
+                        newest = Some(*event);
+                    }
+                    Ok(RelayMessage::Eose { subscription_id }) if subscription_id == SUB_ID => break,
+                    Ok(RelayMessage::Closed { .. }) => break,
+                    _ => {}
+                },
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+        let _ = ws.send(Message::Close(None)).await;
+        Ok::<Option<Event>, String>(newest)
+    };
+
+    match tokio::time::timeout(CROSS_RELAY_TIMEOUT, exchange).await {
+        Ok(res) => res,
+        Err(_) => Err("cross-relay fetch timed out".into()),
+    }
+}
+
 /// Current unix time in seconds.
 fn now() -> u64 {
     nostr::Timestamp::now().as_secs()
@@ -709,5 +812,35 @@ mod tests {
         let publisher = Keys::generate();
         let grant = grant_ref(&publisher.public_key(), "scope-9", 1, [0u8; 32]);
         assert_eq!(scope_slug(&grant), "mem/grant-scope-9");
+    }
+
+    /// A non-WebSocket relay hint is rejected before any connection is opened.
+    #[tokio::test]
+    async fn cross_relay_rejects_non_ws_scheme() {
+        let publisher = Keys::generate();
+        let grant = grant_ref(&publisher.public_key(), "scope-9", 1, [0u8; 32]);
+        let err = fetch_data_set_from_relay("https://example.com", &grant)
+            .await
+            .unwrap_err();
+        assert!(err.contains("unsupported relay URL scheme"), "{err}");
+    }
+
+    /// With no relay hints, cross-relay dereference yields nothing (and never
+    /// touches the network).
+    #[tokio::test]
+    async fn cross_relay_no_hints_is_none() {
+        let publisher = Keys::generate();
+        let grant = grant_ref(&publisher.public_key(), "scope-9", 1, [0u8; 32]);
+        assert!(fetch_data_set_cross_relay(&grant).await.is_none());
+    }
+
+    /// A grant whose only hints are unusable is skipped fail-open — the errors
+    /// are swallowed and the result is simply `None`.
+    #[tokio::test]
+    async fn cross_relay_all_bad_hints_is_none() {
+        let publisher = Keys::generate();
+        let mut grant = grant_ref(&publisher.public_key(), "scope-9", 1, [0u8; 32]);
+        grant.relay_hints = vec!["https://not-a-relay".into(), "ftp://nope".into()];
+        assert!(fetch_data_set_cross_relay(&grant).await.is_none());
     }
 }
