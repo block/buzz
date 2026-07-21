@@ -316,7 +316,10 @@ const overrides = new Map([
   // migration/materialize.rs; ratchet held at 1110.
   ["src-tauri/src/migration_tests.rs", 1110],
   ["src-tauri/src/nostr_convert.rs", 1126],
-  ["src/shared/api/relayClientSession.ts", 1022],
+  // degraded-network resilience: visibleChannelId field + getter/setter, NOTICE
+  // handler for relay back-pressure, and rate-limit gate imports add ~74 lines
+  // of load-bearing degraded-network recovery code. Queued to split.
+  ["src/shared/api/relayClientSession.ts", 1096],
   // Boot-time event sync (persona/team/agent event reconcile) was split out
   // to event_sync.rs, ratcheting this limit 1575 → 1310. Remaining content is
   // the pre-identity data migrations; still queued to split further.
