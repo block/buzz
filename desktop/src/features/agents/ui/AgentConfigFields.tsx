@@ -110,6 +110,21 @@ export function resolveDisclosure(disclosure: "full" | "onboarding-essential") {
   } as const;
 }
 
+/**
+ * Determines whether the status line beneath the Model field should render.
+ *
+ * Discovery warnings bypass the `onboarding-essential` preset so that a
+ * first-run failure is never silently invisible.  On the happy path
+ * (`status === null`) the status line stays hidden in onboarding, keeping
+ * the page clean.
+ */
+export function shouldShowModelStatusMessage(
+  showDescriptions: boolean,
+  status: { message: string; tone: string } | null,
+): boolean {
+  return showDescriptions || status !== null;
+}
+
 export type AgentConfigFieldsProps = {
   bakedEnv: BakedEnvEntry[];
   selectedRuntime: AcpRuntimeCatalogEntry | undefined;
@@ -682,7 +697,10 @@ export function AgentConfigFields({
           labelClassName={fieldLabelClassName}
           selectClassName={selectClassName}
           showCustomModelOption={showCustomModelOption}
-          showStatusMessage={showDescriptions}
+          showStatusMessage={shouldShowModelStatusMessage(
+            showDescriptions,
+            modelDiscoveryStatus,
+          )}
           testId="global-agent-model"
           useCustomSelect={useCustomSelect}
           useChevronIcon={useChevronSelectIcon}

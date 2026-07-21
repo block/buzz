@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveDefaultModelLabel } from "./agentConfigControls.tsx";
+import {
+  MODEL_NO_MODELS_VALUE,
+  appendNoModelsSentinel,
+  resolveDefaultModelLabel,
+} from "./agentConfigControls.tsx";
 
 test("uses the harness-discovered default model label for an unset model", () => {
   assert.equal(
@@ -37,4 +41,28 @@ test("an explicit inherited default label wins over harness discovery", () => {
     }),
     "Default model (team-model)",
   );
+});
+
+// ── appendNoModelsSentinel ─────────────────────────────────────────────────────
+
+test("appendNoModelsSentinel_emptyOptionsDiscoveryFinished_addsDisabledRow", () => {
+  const options = appendNoModelsSentinel([], false);
+  assert.equal(options.length, 1);
+  assert.equal(options[0].disabled, true);
+  assert.equal(options[0].label, "No models found");
+  assert.equal(options[0].value, MODEL_NO_MODELS_VALUE);
+});
+
+test("appendNoModelsSentinel_emptyOptionsDiscoveryLoading_doesNotAddRow", () => {
+  const options = appendNoModelsSentinel([], true);
+  assert.equal(options.length, 0);
+});
+
+test("appendNoModelsSentinel_nonEmptyOptionsDiscoveryFinished_doesNotAddRow", () => {
+  const options = appendNoModelsSentinel(
+    [{ label: "Default model", value: "" }],
+    false,
+  );
+  assert.equal(options.length, 1);
+  assert.equal(options[0].label, "Default model");
 });

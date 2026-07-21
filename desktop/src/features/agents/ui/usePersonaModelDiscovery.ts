@@ -82,6 +82,63 @@ export function getDiscoveredPersonaModelOptions(
   ];
 }
 
+/**
+ * Returns a warning status when a discovery response resolves but contains no
+ * usable model options (either because the harness does not support model
+ * switching, or because it returned an empty model list). When options ARE
+ * available, returns null so callers can clear any prior status.
+ */
+export function synthesizeEmptyDiscoveryStatus(
+  response: AgentModelsResponse,
+  provider: string,
+): PersonaModelDiscoveryStatus | null {
+  if (getDiscoveredPersonaModelOptions(response, provider) !== null) {
+    return null;
+  }
+  const agentLabel = response.agentName.trim() || "This agent";
+  return {
+    message: `${agentLabel} reported no models. Check that the CLI is installed and signed in, then reopen this screen.`,
+    tone: "warning",
+  };
+}
+
+/**
+ * True when a discovery response is worth caching.  Responses that yielded no
+ * usable model options are intentionally excluded so that close → reopen
+ * re-runs discovery, letting the user's CLI install or sign-in be reflected
+ * without a hard refresh.
+ */
+export function isCacheableDiscoveryResponse(
+  response: AgentModelsResponse,
+  provider: string,
+): boolean {
+  return getDiscoveredPersonaModelOptions(response, provider) !== null;
+}
+
+/**
+ * Pure derivation of the "discovery is still pending" flag exposed by the
+ * hook.  Extracted so tests can verify resolved-but-empty responses do not
+ * count as pending.
+ */
+export function deriveModelDiscoveryPending({
+  modelDiscoveryLoading,
+  modelDiscoveryKey,
+  activeModelDiscoveryData,
+  activeModelDiscoveryStatus,
+}: {
+  modelDiscoveryLoading: boolean;
+  modelDiscoveryKey: string | null;
+  activeModelDiscoveryData: AgentModelsResponse | null;
+  activeModelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
+}): boolean {
+  return (
+    modelDiscoveryLoading ||
+    (modelDiscoveryKey !== null &&
+      activeModelDiscoveryData === null &&
+      activeModelDiscoveryStatus === null)
+  );
+}
+
 export function usePersonaModelDiscovery({
   envVars,
   isCustomProviderEditing,
@@ -191,7 +248,9 @@ export function usePersonaModelDiscovery({
     if (cached) {
       setModelDiscoveryData(cached);
       setModelDiscoveryDataKey(activeModelDiscoveryKey);
-      setModelDiscoveryStatus(null);
+      setModelDiscoveryStatus(
+        synthesizeEmptyDiscoveryStatus(cached, trimmedProvider),
+      );
       setModelDiscoveryStatusKey(activeModelDiscoveryKey);
       setModelDiscoveryLoading(false);
       return;
@@ -213,10 +272,21 @@ export function usePersonaModelDiscovery({
           if (modelDiscoveryRequestRef.current !== requestId) {
             return;
           }
-          modelDiscoveryCacheRef.current.set(activeModelDiscoveryKey, response);
+          // Only cache responses that yielded usable model options.  An
+          // empty/no-switching result gets the "reopen this screen" warning,
+          // and closing → reopening the dialog must re-run discovery so the
+          // user's CLI-install/sign-in is actually reflected.
+          if (isCacheableDiscoveryResponse(response, trimmedProvider)) {
+            modelDiscoveryCacheRef.current.set(
+              activeModelDiscoveryKey,
+              response,
+            );
+          }
           setModelDiscoveryData(response);
           setModelDiscoveryDataKey(activeModelDiscoveryKey);
-          setModelDiscoveryStatus(null);
+          setModelDiscoveryStatus(
+            synthesizeEmptyDiscoveryStatus(response, trimmedProvider),
+          );
           setModelDiscoveryStatusKey(activeModelDiscoveryKey);
         })
         .catch((error) => {
@@ -282,11 +352,12 @@ export function usePersonaModelDiscovery({
       ),
     [activeModelDiscoveryData, trimmedProvider],
   );
-  const modelDiscoveryPending =
-    modelDiscoveryLoading ||
-    (modelDiscoveryKey !== null &&
-      activeModelDiscoveryData === null &&
-      activeModelDiscoveryStatus === null);
+  const modelDiscoveryPending = deriveModelDiscoveryPending({
+    modelDiscoveryLoading,
+    modelDiscoveryKey,
+    activeModelDiscoveryData,
+    activeModelDiscoveryStatus,
+  });
 
   return {
     discoveredModelOptions,

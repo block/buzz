@@ -21,6 +21,7 @@ import test from "node:test";
 import {
   CANONICAL_CONFIG_BEHAVIORS,
   resolveDisclosure,
+  shouldShowModelStatusMessage,
 } from "./AgentConfigFields.tsx";
 
 test("canonical behaviors: onboarding's values are the only behavior", () => {
@@ -56,4 +57,29 @@ test("onboarding-essential hides power tools but never the effort field", () => 
     showRequiredIndicators: false,
     showUnavailableEffortOptions: false,
   });
+});
+
+// ── shouldShowModelStatusMessage ──────────────────────────────────────────────
+// The onboarding-essential preset sets showDescriptions=false.  Discovery
+// warnings must bypass the preset so first-run failures are never invisible.
+
+test("shouldShowModelStatusMessage_fullDisclosure_nullStatus_showsMessage", () => {
+  // Full disclosure always shows the status line regardless of status.
+  assert.equal(shouldShowModelStatusMessage(true, null), true);
+});
+
+test("shouldShowModelStatusMessage_onboardingPreset_nullStatus_hidesMessage", () => {
+  // Happy path: no status → status line hidden in onboarding.
+  const { showDescriptions } = resolveDisclosure("onboarding-essential");
+  assert.equal(shouldShowModelStatusMessage(showDescriptions, null), false);
+});
+
+test("shouldShowModelStatusMessage_onboardingPreset_warningStatus_showsMessage", () => {
+  // Discovery failure → status line surfaces even in onboarding-essential.
+  const { showDescriptions } = resolveDisclosure("onboarding-essential");
+  const warning = {
+    message: "Claude Code reported no models.",
+    tone: "warning",
+  };
+  assert.equal(shouldShowModelStatusMessage(showDescriptions, warning), true);
 });
