@@ -582,17 +582,25 @@ async function seedOnboardingCompletionForKnownIdentities(
 
 async function seedDefaultCommunity(
   page: Page,
-  activePubkey: string,
+  fallbackPubkey: string,
   relayWsUrl?: string,
 ) {
   await page.addInitScript(
-    ({ pubkey, relayUrl }) => {
+    ({ fallback, identityOverrideKey, relayUrl }) => {
+      // If seedActiveIdentity() ran before this script (the normal ordering),
+      // use its pubkey so the community matches the active identity and
+      // migrateMachineOnboardingCompletion's strict voucher accepts it.
+      const overrideRaw = window.localStorage.getItem(identityOverrideKey);
+      const overridePubkey =
+        overrideRaw !== null
+          ? (JSON.parse(overrideRaw) as { pubkey?: string }).pubkey
+          : undefined;
       const communityId = "e2e-default-community";
       const community = {
         id: communityId,
         name: "E2E Test",
         relayUrl,
-        pubkey,
+        pubkey: overridePubkey ?? fallback,
         addedAt: new Date().toISOString(),
       };
       window.localStorage.setItem(
@@ -601,7 +609,11 @@ async function seedDefaultCommunity(
       );
       window.localStorage.setItem("buzz-active-community-id", communityId);
     },
-    { pubkey: activePubkey, relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL },
+    {
+      fallback: fallbackPubkey,
+      identityOverrideKey: "buzz:e2e-identity-override.v1",
+      relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL,
+    },
   );
 }
 
@@ -625,7 +637,9 @@ export async function installBridge(page: Page, options: BridgeOptions) {
   // Most specs seed a community so useCommunityInit doesn't show WelcomeSetup.
   // skipOnboardingSeed only controls the onboarding-completion flag.
   // The community is stamped with the active identity's pubkey so the strict
-  // migrateMachineOnboardingCompletion voucher recognises it.
+  // migrateMachineOnboardingCompletion voucher recognises it. The init script
+  // reads the seedActiveIdentity override key (if present) and falls back to
+  // the bridge identity's pubkey or DEFAULT_MOCK_PUBKEY for mock mode.
   if (!options.skipCommunitySeed) {
     const activePubkey = identity?.pubkey ?? DEFAULT_MOCK_PUBKEY;
     await seedDefaultCommunity(page, activePubkey, options.relayWsUrl);
