@@ -191,3 +191,18 @@ fn legacy_managed_agent_auth_tag_skips_self_attestation() {
 
     assert_eq!(tag, None);
 }
+
+#[test]
+fn feed_item_from_event_emits_singular_mention_category() {
+    // FeedItemCategory on the TS side is `"mention"` (singular). Emitting the
+    // plural section name `"mentions"` here silently breaks toast titles and
+    // inbox labeling (block/buzz#2106) — every frontend comparison is
+    // `=== "mention"`.
+    let keys = Keys::generate();
+    let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "hi")
+        .sign_with_keys(&keys)
+        .expect("event should sign");
+
+    let item = feed_item_from_event(&event, "mention");
+    assert_eq!(item.category, "mention");
+}

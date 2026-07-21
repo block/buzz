@@ -6716,6 +6716,10 @@ async function handleGetFeed(
       // the DM dedupe e2e catch null-vs-undefined regressions at the API
       // conversion seam.
       channel_type: null,
+      // Native get_feed stamps FeedItemCategory's singular `"mention"` on
+      // each item (the section bucket remains `feed.mentions`). Emitting the
+      // plural here would hide the #2106 toast/inbox misclassification from
+      // relay-mode e2e — keep the bridge on the declared contract.
       category: "mention" as const,
     };
   });
