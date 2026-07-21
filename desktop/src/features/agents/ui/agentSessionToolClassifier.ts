@@ -363,15 +363,13 @@ export function parseBuzzCliCommand(
   const group = tokens[range.groupIndex];
   const verb = tokens[range.verbIndex] ?? "run";
   const operation = `${group}.${verb}`;
-  const content =
-    group === "messages" && verb === "send"
-      ? extractBuzzCliSendMessageContent(tokens, range)
-      : null;
-  const preview = content ?? extractBuzzCliObjectPreview(tokens, range);
+  const isSend = group === "messages" && verb === "send";
+  const preview = isSend
+    ? extractBuzzCliInlineContent(tokens, range)
+    : extractBuzzCliObjectPreview(tokens, range);
   const tone = buzzCliTone(group, verb);
   return {
-    renderClass:
-      group === "messages" && verb === "send" ? "message" : "relay-op",
+    renderClass: isSend ? "message" : "relay-op",
     label: titleForBuzzCli(group, verb),
     preview,
     action: actionForBuzzOperation(operation, preview, tone),
@@ -452,14 +450,14 @@ function buzzCliTone(group: string, verb: string): AgentActivityTone {
   return "write";
 }
 
-function extractBuzzCliSendMessageContent(
+function extractBuzzCliInlineContent(
   tokens: string[],
   range: BuzzCommandRange,
 ): string | null {
   const content = getFlagValue(tokens, range.verbIndex + 1, "--content");
-  if (!content) return null;
-  if (content !== "-") return content;
-  return extractSimpleEchoPipeContent(tokens, range.buzzIndex) ?? null;
+  if (!content || content === "-") return null;
+  if (content.startsWith("$(") || content.startsWith("`")) return null;
+  return content;
 }
 
 function extractBuzzCliObjectPreview(
@@ -581,28 +579,6 @@ function getFlagValue(tokens: string[], start: number, flag: string) {
     if (token.startsWith(`${flag}=`)) return token.slice(flag.length + 1);
   }
   return null;
-}
-
-export function extractSimpleEchoPipeContent(
-  tokens: string[],
-  buzzIndex: number,
-): string | null {
-  const pipeIndex = tokens.lastIndexOf("|", buzzIndex);
-  if (pipeIndex <= 0) return null;
-  const echoStart = findSegmentStart(tokens, pipeIndex - 1);
-  const leftSegment = tokens.slice(echoStart, pipeIndex);
-  if (leftSegment[0] !== "echo") return null;
-  const contentTokens = leftSegment
-    .slice(1)
-    .filter((token) => !token.startsWith("-"));
-  return contentTokens.length > 0 ? contentTokens.join(" ") : null;
-}
-
-function findSegmentStart(tokens: string[], beforeIndex: number) {
-  for (let i = beforeIndex; i >= 0; i--) {
-    if (isCommandSeparator(tokens[i])) return i + 1;
-  }
-  return 0;
 }
 
 function extractBuzzToolPreview(args: Record<string, unknown>): string | null {
