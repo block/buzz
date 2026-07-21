@@ -622,16 +622,21 @@ impl BuzzClient {
         unreachable!("loop exhausts all RETRY_MAX_ATTEMPTS")
     }
 
-    /// Execute `op` up to `RETRY_MAX_ATTEMPTS` times, including body-transfer failures.
+    /// Execute `op` up to `RETRY_MAX_ATTEMPTS` times, including body-transfer failures
+    /// and transient relay error statuses.
     ///
     /// Like `with_retry_response`, but the closure is expected to consume the response
-    /// body and return the parsed result as `T`. This covers `is_body()` mid-transfer
-    /// failures in addition to connect/timeout/request errors.
+    /// body and return the parsed result as `T`. Retries on non-last attempts when `op`
+    /// returns:
     ///
-    /// Status-level retries (429/502/503/504) are not performed here; callers must
-    /// handle those inside the closure (e.g. map to `CliError::Relay` for the final
-    /// response) — `with_retry_response` handles status retries when the body is not
-    /// consumed. Use this variant only for **idempotent** operations.
+    /// - `Err(CliError::Network(e))` where `e.is_connect() || e.is_timeout() ||
+    ///   e.is_request() || e.is_body() || e.is_decode()` — covers both connection
+    ///   failures and mid-body TCP drops.
+    /// - `Err(CliError::Relay { status: 429 | 502 | 503 | 504, .. })` — transient relay
+    ///   or proxy errors. For 429 the `retry in Ns` hint from the body is used as the
+    ///   delay (capped at `RETRY_IN_MAX_SECS`); all others use exponential jitter.
+    ///
+    /// Use this variant only for **idempotent** operations (reads, downloads).
     async fn with_retry_body<'a, T, F, Fut>(&'a self, op: F) -> Result<T, CliError>
     where
         F: Fn() -> Fut,
@@ -643,15 +648,30 @@ impl BuzzClient {
             match op().await {
                 Ok(value) => return Ok(value),
                 Err(e) => {
-                    if let CliError::Network(ref net_err) = e {
-                        if !is_last
-                            && (net_err.is_connect()
-                                || net_err.is_timeout()
-                                || net_err.is_request()
-                                || net_err.is_body()
-                                || net_err.is_decode())
-                        {
-                            tokio::time::sleep(jitter_delay(attempt)).await;
+                    if !is_last {
+                        let delay = match &e {
+                            CliError::Network(net_err)
+                                if net_err.is_connect()
+                                    || net_err.is_timeout()
+                                    || net_err.is_request()
+                                    || net_err.is_body()
+                                    || net_err.is_decode() =>
+                            {
+                                Some(jitter_delay(attempt))
+                            }
+                            CliError::Relay { status: 429, body } => {
+                                let d = parse_retry_in_secs(body)
+                                    .map(|s| Duration::from_secs(s.min(RETRY_IN_MAX_SECS)))
+                                    .unwrap_or_else(|| jitter_delay(attempt));
+                                Some(d)
+                            }
+                            CliError::Relay {
+                                status: 502..=504, ..
+                            } => Some(jitter_delay(attempt)),
+                            _ => None,
+                        };
+                        if let Some(d) = delay {
+                            tokio::time::sleep(d).await;
                             continue;
                         }
                     }
@@ -1640,6 +1660,119 @@ mod retry_policy_tests {
         assert!(
             attempts.load(Ordering::SeqCst) >= 2,
             "must have retried at least once"
+        );
+    }
+
+    /// Spin up a one-shot axum server that handles `GET /info` (and any other GET).
+    /// Same contract as `test_server` — returns base URL and attempt counter.
+    async fn get_server<F>(f: F) -> (String, Arc<AtomicU32>)
+    where
+        F: Fn(u32) -> (StatusCode, String) + Send + Sync + 'static,
+    {
+        let counter = Arc::new(AtomicU32::new(0));
+        let handler: Arc<dyn Fn(u32) -> (StatusCode, String) + Send + Sync> = Arc::new(f);
+        let state = (handler, counter.clone());
+
+        type S = (
+            Arc<dyn Fn(u32) -> (StatusCode, String) + Send + Sync>,
+            Arc<AtomicU32>,
+        );
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                axum::routing::get(
+                    |State((handler, ctr)): State<S>, _headers: HeaderMap| async move {
+                        let n = ctr.fetch_add(1, Ordering::SeqCst) + 1;
+                        let (status, body) = handler(n);
+                        Response::builder()
+                            .status(status)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap()
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), counter)
+    }
+
+    /// `with_retry_body` retries transient HTTP 502 on a read path (`get_authed`)
+    /// and succeeds on the next attempt.
+    #[tokio::test]
+    async fn query_502_is_retried_then_succeeds() {
+        let (url, attempts) = get_server(|n| {
+            if n == 1 {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "transient gateway error".to_string(),
+                )
+            } else {
+                (StatusCode::OK, r#"{"ok":true}"#.to_string())
+            }
+        })
+        .await;
+        let client = test_client(&url);
+        let result = client.get_authed("/info").await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after 502 retry, got {result:?}"
+        );
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 2,
+            "must have retried at least once"
+        );
+    }
+
+    /// `with_retry_body` retries a 429 with a `retry in Ns` hint and ultimately succeeds.
+    #[tokio::test]
+    async fn query_429_with_hint_is_retried() {
+        let (url, attempts) = get_server(|n| {
+            if n < 2 {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    r#"{"error":"retry in 0s"}"#.to_string(),
+                )
+            } else {
+                (StatusCode::OK, r#"{"ok":true}"#.to_string())
+            }
+        })
+        .await;
+        let client = test_client(&url);
+        let result = client.get_authed("/info").await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after 429 retry, got {result:?}"
+        );
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 2,
+            "must have retried at least once"
+        );
+    }
+
+    /// A definitive 4xx (403 Forbidden) is NOT retried — exactly 1 attempt.
+    #[tokio::test]
+    async fn query_403_is_not_retried() {
+        let (url, attempts) = get_server(|_n| {
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"error":"not allowed"}"#.to_string(),
+            )
+        })
+        .await;
+        let client = test_client(&url);
+        let result = client.get_authed("/info").await;
+        assert!(
+            matches!(result, Err(CliError::Relay { status: 403, .. })),
+            "expected Relay 403 error, got {result:?}"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "403 must not be retried"
         );
     }
 
