@@ -201,6 +201,11 @@ export async function replayLiveSubscriptions({
   // Send live REQs in capped batches with inter-batch delays to avoid
   // triggering per-pubkey admission control on degraded/recovering connections.
   for (let i = 0; i < replayRequests.length; i += replayBatchSize) {
+    // Re-check the gate before every batch: a previous batch may have triggered
+    // admission control and armed the gate mid-replay. Wait for it to clear,
+    // then verify the connection is still current — a newer connection may have
+    // replayed while we were suspended.
+    if (isRateLimited()) await waitForRateLimit();
     if (!isActive()) return;
     const batch = replayRequests.slice(i, i + replayBatchSize);
     await Promise.all(

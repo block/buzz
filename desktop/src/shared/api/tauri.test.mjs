@@ -1,12 +1,10 @@
 /**
- * Unit tests for tauri.ts — focused on the `relay rate-limited:` error
- * prefix detection that activates the shared rate-limit gate.
+ * Unit tests for tauri.ts — focused on `applyTauriRateLimitIfNeeded`, the
+ * extracted `relay rate-limited:` classifier that activates the shared
+ * rate-limit gate when Rust emits an HTTP 429 error prefix.
  *
- * `invokeTauri` calls `activateRateLimit(parseRateLimitHint(err.message))` when
- * `err.message.startsWith("relay rate-limited:")`. Since the Tauri invoke itself
- * can't be swapped out under the test loader, this file tests the detection
- * logic directly: correct prefix activates the gate, incorrect prefix does not,
- * and the hint is parsed and applied correctly.
+ * Testing the exported production function (not a local copy) ensures any
+ * change to the classifier logic is immediately covered here.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -50,12 +48,13 @@ globalThis.window = {
 
 setFakeNow(0);
 
-const {
-  activateRateLimit,
-  isRateLimited,
-  parseRateLimitHint,
-  resetRateLimitGate,
-} = await import("./relayRateLimitGate.ts");
+const { isRateLimited, resetRateLimitGate } = await import(
+  "./relayRateLimitGate.ts"
+);
+
+// Import the production classifier from tauri.ts — tests must exercise the
+// real function, not a local copy, so a logic change is always caught here.
+const { applyTauriRateLimitIfNeeded } = await import("./tauri.ts");
 
 function resetGate(startMs = 0) {
   pendingTimers.clear();
@@ -64,29 +63,17 @@ function resetGate(startMs = 0) {
   resetRateLimitGate();
 }
 
-/**
- * Simulates what invokeTauri does on error: if the error message starts with
- * "relay rate-limited:", call activateRateLimit with the parsed hint.
- *
- * This mirrors the exact logic at desktop/src/shared/api/tauri.ts in invokeTauri.
- */
-function applyTauriRateLimitSideEffect(message) {
-  if (message.startsWith("relay rate-limited:")) {
-    activateRateLimit(parseRateLimitHint(message));
-  }
-}
-
-// ── relay rate-limited: prefix detection → gate activation ────────────────────
+// ── applyTauriRateLimitIfNeeded: relay rate-limited: prefix ───────────────────
 
 test("relay rate-limited: prefix activates the rate-limit gate", () => {
   resetGate(0);
-  applyTauriRateLimitSideEffect("relay rate-limited: retry in 10s");
+  applyTauriRateLimitIfNeeded("relay rate-limited: retry in 10s");
   assert.equal(isRateLimited(), true, "gate must be active after 429 error");
 });
 
 test("relay rate-limited: prefix parses the retry hint and arms the gate duration", () => {
   resetGate(0);
-  applyTauriRateLimitSideEffect("relay rate-limited: retry in 7s");
+  applyTauriRateLimitIfNeeded("relay rate-limited: retry in 7s");
   // Gate should be active at 6s.
   setFakeNow(6_000);
   assert.equal(isRateLimited(), true);
@@ -97,7 +84,7 @@ test("relay rate-limited: prefix parses the retry hint and arms the gate duratio
 
 test("relay rate-limited: with no hint uses the 10s default", () => {
   resetGate(0);
-  applyTauriRateLimitSideEffect("relay rate-limited: quota exceeded");
+  applyTauriRateLimitIfNeeded("relay rate-limited: quota exceeded");
   tickTo(9_999);
   assert.equal(isRateLimited(), true);
   tickTo(10_001);
@@ -106,7 +93,7 @@ test("relay rate-limited: with no hint uses the 10s default", () => {
 
 test("non-rate-limited error does not activate the gate", () => {
   resetGate(0);
-  applyTauriRateLimitSideEffect("relay returned 404 Not Found");
+  applyTauriRateLimitIfNeeded("relay returned 404 Not Found");
   assert.equal(
     isRateLimited(),
     false,
@@ -117,7 +104,7 @@ test("non-rate-limited error does not activate the gate", () => {
 test("relay rate-limited: prefix check is case-sensitive (Rust always emits lowercase)", () => {
   resetGate(0);
   // The prefix from Rust is always lowercase; mixed-case must not trigger it.
-  applyTauriRateLimitSideEffect("Relay rate-limited: retry in 5s");
+  applyTauriRateLimitIfNeeded("Relay rate-limited: retry in 5s");
   assert.equal(
     isRateLimited(),
     false,

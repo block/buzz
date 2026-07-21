@@ -38,7 +38,9 @@ import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import {
   activateRateLimit,
   parseRateLimitHint,
+  waitForRateLimit,
 } from "@/shared/api/relayRateLimitGate";
+import { requestHistoryGated } from "@/shared/api/relayGateBoundary";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
 import {
   shouldRefuseConnect,
@@ -275,33 +277,16 @@ export class RelayClient {
     return this.requestHistory(filter);
   }
 
-  private requestHistory(filter: RelaySubscriptionFilter) {
-    return new Promise<RelayEvent[]>((resolve, reject) => {
-      const subId = `history-${crypto.randomUUID()}`;
-      const timeout = window.setTimeout(() => {
-        this.subscriptions.delete(subId);
-        void this.closeSubscription(subId);
-        reject(new Error("Timed out while loading channel history."));
-      }, HISTORY_TIMEOUT_MS);
-
-      this.subscriptions.set(subId, {
-        mode: "history",
-        events: [],
-        resolve,
-        reject,
-        timeout,
-      });
-
-      void this.sendRaw(["REQ", subId, filter]).catch((error) => {
-        window.clearTimeout(timeout);
-        this.subscriptions.delete(subId);
-        reject(
-          error instanceof Error
-            ? error
-            : new Error("Failed to request channel history."),
-        );
-      });
-    });
+  private requestHistory(
+    filter: RelaySubscriptionFilter,
+  ): Promise<RelayEvent[]> {
+    return requestHistoryGated(
+      this.subscriptions,
+      (payload) => this.sendRaw(payload),
+      (subId) => this.closeSubscription(subId),
+      filter,
+      HISTORY_TIMEOUT_MS,
+    );
   }
 
   async sendMessage(
@@ -717,11 +702,14 @@ export class RelayClient {
     await this.sendRaw(["CLOSE", subId]);
   }
 
-  publishEvent(
+  async publishEvent(
     event: RelayEvent,
     timeoutMessage: string,
     sendErrorMessage: string,
   ) {
+    // Await the gate before sending EVENT; op timeout starts after the wait.
+    await waitForRateLimit();
+
     return new Promise<RelayEvent>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         this.pendingEvents.delete(event.id);

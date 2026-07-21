@@ -510,6 +510,70 @@ test("reconnect replay starts live REQs in parallel and preserves per-sub page o
   });
 });
 
+// ── Per-batch gate re-check (F2 fix) ─────────────────────────────────────────
+
+test("batch-1 arms gate mid-replay: batch-2 is withheld until gate expires", async () => {
+  // Gate is inactive at the start of replay. Batch 1 fires and (simulating the
+  // relay's admission control) activates the gate. Batch 2 must wait until the
+  // gate clears before its REQs are sent.
+  resetGate(0);
+
+  const BATCH = REPLAY_BATCH_SIZE;
+  const sentAtMs = []; // record the fakeNow when each REQ fires
+
+  // Build BATCH+1 subscriptions so there are exactly two batches.
+  const subscriptions = new Map(
+    Array.from({ length: BATCH + 1 }, (_, i) => [
+      `sub-${i}`,
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": [`ch-${i}`], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      },
+    ]),
+  );
+
+  let _batchCount = 0;
+  const replayPromise = replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async (payload) => {
+      sentAtMs.push({ id: payload[1], ms: fakeNow });
+      // After the first full batch is sent, arm the gate for 5 s.
+      // This simulates the relay responding to batch-1 traffic with back-pressure.
+      if (sentAtMs.length === BATCH) {
+        _batchCount += 1;
+        activateRateLimit(5);
+      }
+    },
+    requestHistory: async () => [],
+    setTimeoutFn: (fn, _ms) => {
+      fn();
+      return 0;
+    },
+  });
+
+  // Advance time to expire the gate while the replay is suspended in the
+  // per-batch gate await. This unblocks the second batch.
+  tickTo(5_001);
+
+  await replayPromise;
+
+  const batch1Ids = sentAtMs.filter((r) => r.ms < 5_001).map((r) => r.id);
+  const batch2Ids = sentAtMs.filter((r) => r.ms >= 5_001).map((r) => r.id);
+
+  assert.equal(
+    batch1Ids.length,
+    BATCH,
+    "batch 1 must send exactly REPLAY_BATCH_SIZE REQs",
+  );
+  assert.equal(
+    batch2Ids.length,
+    1,
+    "batch 2 must send the remaining sub after the gate expires",
+  );
+});
+
 // ── Teardown ──────────────────────────────────────────────────────────────────
 
 test("teardown — restore Date.now", () => {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { handleRelayClosed } from "./relayClosedRecovery.ts";
+import { requestHistoryGated } from "./relayGateBoundary.ts";
 
 // ── Fake-timer setup ──────────────────────────────────────────────────────────
 // The rate-limit gate and closed-retry logic use window.setTimeout/clearTimeout.
@@ -57,6 +58,9 @@ test("production CLOSED handler rejects history once and clears its timeout", ()
   const originalWindow = globalThis.window;
   const clearedTimeouts = [];
   globalThis.window = {
+    // Provide both setTimeout (needed by activateRateLimit in the F1 fix) and
+    // clearTimeout (the existing assertion target).
+    setTimeout: (_fn, _ms) => 0,
     clearTimeout: (timeout) => clearedTimeouts.push(timeout),
   };
   try {
@@ -93,6 +97,134 @@ test("production CLOSED handler rejects history once and clears its timeout", ()
   } finally {
     globalThis.window = originalWindow;
   }
+});
+
+test("rate-limited history CLOSED arms the shared gate for concurrent ops", () => {
+  resetAll(0);
+  const subscriptions = new Map([
+    [
+      "history-1",
+      {
+        mode: "history",
+        events: [],
+        resolve: () => {},
+        reject: () => {},
+        timeout: 0,
+      },
+    ],
+  ]);
+  handleRelayClosed({
+    subscriptions,
+    subId: "history-1",
+    message: "rate-limited: quota exceeded; retry in 5s",
+    sendReq: () => Promise.resolve(),
+  });
+  assert.equal(
+    isRateLimited(),
+    true,
+    "gate must be active after rate-limited history CLOSED",
+  );
+  // Gate expires after the hint duration.
+  tickTo(5_001);
+  assert.equal(isRateLimited(), false, "gate must clear after hint duration");
+});
+
+test("non-rate-limited history CLOSED does not arm the gate", () => {
+  resetAll(0);
+  const subscriptions = new Map([
+    [
+      "history-2",
+      {
+        mode: "history",
+        events: [],
+        resolve: () => {},
+        reject: () => {},
+        timeout: 0,
+      },
+    ],
+  ]);
+  handleRelayClosed({
+    subscriptions,
+    subId: "history-2",
+    message: "error: database unavailable",
+    sendReq: () => Promise.resolve(),
+  });
+  assert.equal(
+    isRateLimited(),
+    false,
+    "gate must remain inactive for non-rate-limited history CLOSED",
+  );
+});
+
+test("gate armed by rate-limited history CLOSED defers the next REQ until expiry then resumes", async () => {
+  // Simulate: rate-limited CLOSED arrives on a history sub → gate arms for 5s.
+  // A concurrent requestHistoryGated call must not issue the REQ before 5s,
+  // and must issue it (and resolve) once the gate clears.
+  resetAll(0);
+
+  const subscriptions = new Map([
+    [
+      "history-gate",
+      {
+        mode: "history",
+        events: [],
+        resolve: () => {},
+        reject: () => {},
+        timeout: 0,
+      },
+    ],
+  ]);
+
+  // Arm the gate via a rate-limited history CLOSED.
+  handleRelayClosed({
+    subscriptions,
+    subId: "history-gate",
+    message: "rate-limited: quota exceeded; retry in 5s",
+    sendReq: () => Promise.resolve(),
+  });
+
+  assert.equal(isRateLimited(), true, "gate must be armed before the test");
+
+  const sentAt = [];
+  const reqSubscriptions = new Map();
+
+  // requestHistoryGated will await the gate, so the REQ must not fire at t=0.
+  const historyPromise = requestHistoryGated(
+    reqSubscriptions,
+    async (payload) => {
+      // Record when the REQ fires. The test harness sets up the EOSE path by
+      // adding a history subscription to reqSubscriptions immediately after
+      // the REQ is recorded, then resolving it.
+      sentAt.push(fakeNow);
+      // Resolve the returned promise by completing the sub synchronously.
+      const subId = payload[1];
+      const sub = reqSubscriptions.get(subId);
+      if (sub) {
+        window.clearTimeout(sub.timeout);
+        reqSubscriptions.delete(subId);
+        sub.resolve([]);
+      }
+    },
+    async () => {},
+    { kinds: [9], "#h": ["ch-test"], limit: 50 },
+    25_000,
+  );
+
+  // REQ must not have fired yet — gate is still active at t=0.
+  await Promise.resolve();
+  assert.equal(sentAt.length, 0, "REQ must not fire while gate is active");
+
+  // Expire the gate — the deferred REQ should fire.
+  tickTo(5_001);
+
+  await historyPromise;
+
+  assert.equal(
+    sentAt.length,
+    1,
+    "REQ must fire exactly once after gate clears",
+  );
+  assert.ok(sentAt[0] >= 5_001, "REQ must fire only after gate expiry");
 });
 
 test("production CLOSED handler removes terminal live subscriptions", () => {

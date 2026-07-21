@@ -36,6 +36,14 @@ export function handleRelayClosed({
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode === "history") {
+    // Classify before rejecting so a `rate-limited:` history CLOSED arms the
+    // gate for concurrent ops. A history sub can't be retried (the caller holds
+    // the promise), so we still reject immediately after arming.
+    const closedClass = classifyRelayClosed(message);
+    if (closedClass === "rate-limited") {
+      const hintSeconds = parseRateLimitHint(message);
+      activateRateLimit(hintSeconds);
+    }
     window.clearTimeout(subscription.timeout);
     subscriptions.delete(subId);
     subscription.reject(
