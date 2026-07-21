@@ -596,6 +596,12 @@ export type AgentModelsResponse = {
   agentDefaultModel: string | null;
   selectedModel: string | null;
   supportsSwitching: boolean;
+  effortOptions: AgentEffortOption[];
+  effortCurrentValue: string | null;
+};
+export type AgentEffortOption = {
+  value: string;
+  label: string;
 };
 export type AgentModelInfo = {
   id: string;

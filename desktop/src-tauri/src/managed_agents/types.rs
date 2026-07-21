@@ -663,6 +663,17 @@ pub struct AgentModelsResponse {
     pub selected_model: Option<String>,
     /// Whether this agent supports model switching.
     pub supports_switching: bool,
+    /// Harness-native effort choices for the selected model.
+    pub effort_options: Vec<AgentEffortOption>,
+    /// Harness-native current/default effort for the selected model.
+    pub effort_current_value: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEffortOption {
+    pub value: String,
+    pub label: String,
 }
 
 /// A single model available from an agent.

@@ -456,6 +456,8 @@ pub struct PromptContext {
     pub context_message_limit: u32,
     /// Max turns per session before proactive rotation. 0 = disabled.
     pub max_turns_per_session: u32,
+    /// Desired harness-native effort value to apply after session creation.
+    pub effort: Option<String>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
     /// Agent identity — used to derive the NIP-AE conversation key at
@@ -769,7 +771,7 @@ async fn create_session_and_apply_model(
         agent_canvas,
     );
 
-    let resp = agent
+    let mut resp = agent
         .acp
         .session_new_full(
             &ctx.cwd,
@@ -816,7 +818,11 @@ async fn create_session_and_apply_model(
     let switch_succeeded = if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
-                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
+                let switch_response =
+                    apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
+                if let Some(response) = switch_response.as_ref() {
+                    crate::acp::merge_config_options(&mut resp.raw, response);
+                }
                 true
             }
             None => {
@@ -843,11 +849,37 @@ async fn create_session_and_apply_model(
         false
     };
 
-    // Emit session config for desktop consumption (config bridge tier 1b).
-    // Emitted AFTER desired_model resolution so the desktop caches the
-    // post-switch state. modelOverridden reflects whether the switch actually
-    // applied — false on the unsupported arm so the panel doesn't show a
-    // stale override badge.
+    if let Some(effort) = ctx.effort.as_deref() {
+        if let Some(config_id) = crate::acp::resolve_effort_config_option(&resp.raw, effort) {
+            let result = tokio::time::timeout(
+                MODEL_SWITCH_TIMEOUT,
+                agent
+                    .acp
+                    .session_set_config_option(&resp.session_id, config_id, effort),
+            )
+            .await;
+            match result {
+                Ok(Ok(response)) => {
+                    crate::acp::merge_config_options(&mut resp.raw, &response);
+                }
+                Ok(Err(error)) => tracing::warn!(
+                    target: "pool::effort",
+                    "failed to apply effort {effort}: {error} — using harness default"
+                ),
+                Err(_) => tracing::warn!(
+                    target: "pool::effort",
+                    "effort apply timed out — using harness default"
+                ),
+            }
+        } else {
+            tracing::warn!(
+                target: "pool::effort",
+                "effort {effort} is not supported by the selected model — using harness default"
+            );
+        }
+    }
+
+    // Capture the final applied model and effort state for the desktop.
     agent.acp.observe(
         "session_config_captured",
         serde_json::json!({
@@ -882,7 +914,7 @@ async fn apply_model_switch(
     session_id: &str,
     desired: &str,
     method: &ModelSwitchMethod,
-) -> Result<(), AcpError> {
+) -> Result<Option<serde_json::Value>, AcpError> {
     let method_label = match method {
         ModelSwitchMethod::ConfigOption { config_id, .. } => {
             format!("configOption (configId={config_id})")
@@ -907,11 +939,12 @@ async fn apply_model_switch(
     .await;
 
     match result {
-        Ok(Ok(_)) => {
+        Ok(Ok(response)) => {
             tracing::info!(
                 target: "pool::model",
                 "applied model {desired} via {method_label} on session {session_id}"
             );
+            return Ok(Some(response));
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
         // so the caller can respawn the agent instead of reusing a poisoned one.
@@ -943,7 +976,7 @@ async fn apply_model_switch(
             return Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Set the session permission mode via `session/set_config_option`.
@@ -5249,6 +5282,7 @@ mod tests {
             channel_info: std::collections::HashMap::new(),
             context_message_limit: 0,
             max_turns_per_session: 0,
+            effort: None,
             permission_mode: PermissionMode::Default,
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,

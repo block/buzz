@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::managed_agents::known_acp_runtime;
 
 // ── buffer_contains_identifier tests ────────────────────────────────────
@@ -309,7 +311,6 @@ fn persona_with_provider(
 
 use crate::managed_agents::env_vars::{live_persona_env, merged_user_env};
 use crate::managed_agents::persona_events::persona_snapshot;
-use std::collections::BTreeMap;
 
 /// Apply a persona snapshot onto a record, mirroring `create_managed_agent`:
 /// snapshotted prompt/model/provider/source_version are pinned, with the
@@ -498,7 +499,28 @@ fn non_persona_agent_never_drifts() {
     assert!(!orphaned);
 }
 
-use super::runtime_metadata_env_vars;
+use super::{legacy_effort_spawn_bridge, runtime_metadata_env_vars};
+
+#[test]
+fn legacy_goose_effort_is_applied_under_native_key() {
+    let env = BTreeMap::from([("BUZZ_AGENT_THINKING_EFFORT".to_string(), "high".to_string())]);
+    assert_eq!(
+        legacy_effort_spawn_bridge(Some("GOOSE_THINKING_EFFORT"), &env),
+        Some(("GOOSE_THINKING_EFFORT", "high"))
+    );
+}
+
+#[test]
+fn native_goose_effort_wins_over_legacy_value() {
+    let env = BTreeMap::from([
+        ("BUZZ_AGENT_THINKING_EFFORT".to_string(), "high".to_string()),
+        ("GOOSE_THINKING_EFFORT".to_string(), "low".to_string()),
+    ]);
+    assert_eq!(
+        legacy_effort_spawn_bridge(Some("GOOSE_THINKING_EFFORT"), &env),
+        None
+    );
+}
 
 #[test]
 fn runtime_metadata_env_vars_injects_model_and_provider() {

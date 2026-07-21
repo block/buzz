@@ -253,6 +253,34 @@ fn update_request_turn_timeout_parses_for_wire_compat() {
 }
 
 #[test]
+fn normalize_agent_models_carries_native_effort_options() {
+    let raw = serde_json::json!({
+        "agent": { "name": "goose", "version": "1" },
+        "stable": { "configOptions": [
+            {
+                "id": "model",
+                "category": "model",
+                "options": [{ "value": "m1", "name": "Model 1" }]
+            },
+            {
+                "id": "thinking_effort",
+                "category": "thought_level",
+                "currentValue": "medium",
+                "options": [
+                    { "value": "low", "name": "Low" },
+                    { "value": "medium", "name": "Medium" }
+                ]
+            }
+        ]}
+    });
+    let response = super::normalize_agent_models(&raw, Some("m1".to_string()));
+    assert_eq!(response.effort_current_value.as_deref(), Some("medium"));
+    assert_eq!(response.effort_options.len(), 2);
+    assert_eq!(response.effort_options[0].value, "low");
+    assert_eq!(response.effort_options[0].label, "Low");
+}
+
+#[test]
 fn is_databricks_provider_matches_both_variants() {
     assert!(is_databricks_provider(Some("databricks")));
     assert!(is_databricks_provider(Some("databricks_v2")));
