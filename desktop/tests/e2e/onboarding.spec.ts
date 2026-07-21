@@ -621,6 +621,11 @@ test("first-community choices route join, create, owner, and member intents", as
   await expect(
     page.getByRole("heading", { name: "Join a community" }),
   ).toBeVisible();
+  await expect(page.getByText("Joining a private community?")).toBeVisible();
+  await expect(page.getByTestId("welcome-join-npub")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Copy public ID" }),
+  ).toBeVisible();
   await accessInput.fill("https://default.example.com/invite/abc123");
   await expect(page.getByTestId("invite-redeem-submit")).toBeEnabled();
 });
