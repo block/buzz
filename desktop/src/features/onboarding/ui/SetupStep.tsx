@@ -42,13 +42,6 @@ type SetupStepContentProps = SetupStepProps & {
   state: SetupStepState;
 };
 
-type InstallResultState = {
-  error: string | null;
-  success: boolean;
-};
-
-type InstallResultsState = Record<string, InstallResultState>;
-
 function useSetupStepState(): SetupStepState {
   const runtimesQuery = useAcpRuntimesQuery();
   const items = runtimesQuery.data ?? [];
@@ -462,19 +455,27 @@ function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   return null;
 }
 
-function RuntimeCard({
-  installError,
-  isInstalling,
-  onInstall,
-  runtime,
-}: {
-  installError: string | null;
-  isInstalling: boolean;
-  onInstall: () => void;
-  runtime: AcpRuntimeCatalogEntry;
-}) {
+function RuntimeCard({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+  const installMutation = useInstallAcpRuntimeMutation();
+  const [installError, setInstallError] = React.useState<string | null>(null);
   const isAvailable = runtime.availability === "available";
   const isReady = runtimeIsReadyForOnboarding(runtime);
+
+  function handleInstall() {
+    setInstallError(null);
+    installMutation.mutate(runtime.id, {
+      onSuccess: (result) => {
+        setInstallError(
+          result.success ? null : getInstallErrorMessage(result.steps),
+        );
+      },
+      onError: (error) => {
+        setInstallError(
+          error instanceof Error ? error.message : "Install failed.",
+        );
+      },
+    });
+  }
 
   return (
     <Card
@@ -498,8 +499,8 @@ function RuntimeCard({
         </div>
         <RuntimeStatus
           installError={installError}
-          isInstalling={isInstalling}
-          onInstall={onInstall}
+          isInstalling={installMutation.isPending}
+          onInstall={handleInstall}
           runtime={runtime}
         />
         {!isAvailable && runtimeDetailText(runtime) ? (
@@ -548,46 +549,12 @@ function RuntimeProvidersLoadingState() {
 }
 
 function RuntimeProvidersSection({
-  installResults,
-  onInstallResultsChange,
   runtimeProviders,
 }: {
-  installResults: InstallResultsState;
-  onInstallResultsChange: React.Dispatch<
-    React.SetStateAction<InstallResultsState>
-  >;
   runtimeProviders: SetupStepState["runtimeProviders"];
 }) {
   const { errorMessage, isChecking, items } = runtimeProviders;
   const orderedItems = getVisibleOnboardingRuntimes(items);
-  const installMutation = useInstallAcpRuntimeMutation();
-
-  function handleInstall(runtimeId: string) {
-    onInstallResultsChange((current) => ({
-      ...current,
-      [runtimeId]: { error: null, success: false },
-    }));
-
-    installMutation.mutate(runtimeId, {
-      onSuccess: (result) => {
-        onInstallResultsChange((current) => ({
-          ...current,
-          [runtimeId]: result.success
-            ? { error: null, success: true }
-            : { error: getInstallErrorMessage(result.steps), success: false },
-        }));
-      },
-      onError: (error) => {
-        onInstallResultsChange((current) => ({
-          ...current,
-          [runtimeId]: {
-            error: error instanceof Error ? error.message : "Install failed.",
-            success: false,
-          },
-        }));
-      },
-    });
-  }
 
   return (
     <section className="flex min-h-full w-full flex-col items-center">
@@ -605,16 +572,7 @@ function RuntimeProvidersSection({
         {orderedItems.length > 0 ? (
           <div className="grid min-w-0 w-full max-w-[592px] grid-cols-1 gap-4 md:grid-cols-2">
             {orderedItems.map((runtime) => (
-              <RuntimeCard
-                installError={installResults[runtime.id]?.error ?? null}
-                isInstalling={
-                  installMutation.isPending &&
-                  installMutation.variables === runtime.id
-                }
-                key={runtime.id}
-                onInstall={() => handleInstall(runtime.id)}
-                runtime={runtime}
-              />
+              <RuntimeCard key={runtime.id} runtime={runtime} />
             ))}
           </div>
         ) : isChecking ? (
@@ -646,8 +604,6 @@ function SetupStepContent({
   state,
 }: SetupStepContentProps) {
   const { runtimeProviders } = state;
-  const [installResults, setInstallResults] =
-    React.useState<InstallResultsState>({});
   const readyRuntimeIds = React.useMemo(
     () =>
       getReadyOnboardingRuntimes(runtimeProviders.items).map(
@@ -670,11 +626,7 @@ function SetupStepContent({
       direction={direction}
       transitionKey={`setup-${direction}`}
     >
-      <RuntimeProvidersSection
-        installResults={installResults}
-        onInstallResultsChange={setInstallResults}
-        runtimeProviders={runtimeProviders}
-      />
+      <RuntimeProvidersSection runtimeProviders={runtimeProviders} />
 
       <OnboardingFooter>
         <Button

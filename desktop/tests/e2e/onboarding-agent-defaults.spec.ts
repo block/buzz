@@ -35,6 +35,22 @@ function runtime(
   };
 }
 
+function installResult(runtimeId: string, success: boolean) {
+  return {
+    success,
+    steps: [
+      {
+        step: "adapter",
+        command: `mock install ${runtimeId}`,
+        success,
+        stdout: success ? "installed" : "",
+        stderr: success ? "" : `mock ${runtimeId} install failed`,
+        exit_code: success ? 0 : 1,
+      },
+    ],
+  };
+}
+
 async function navigateToSetupPage(
   page: Parameters<typeof installMockBridge>[0],
 ) {
@@ -322,6 +338,79 @@ test("failed install can be retried without shifting card content", async ({
   await expect(page.getByTestId("onboarding-runtime-ready-claude")).toHaveText(
     "READY",
   );
+});
+
+test("runtime installs progress, resolve, and retry independently", async ({
+  page,
+}) => {
+  const claudeMissing = runtime("claude", "adapter_missing", {
+    status: "unknown",
+  });
+  const codexMissing = runtime("codex", "adapter_missing", {
+    status: "unknown",
+  });
+  const claudeReady = runtime("claude", "available", {
+    status: "logged_in",
+  });
+  const codexReady = runtime("codex", "available", {
+    status: "logged_in",
+  });
+
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [claudeMissing, codexMissing],
+      acpRuntimesCatalogAfterInstallSequence: [
+        [claudeMissing, codexReady],
+        [claudeReady, codexReady],
+      ],
+      installAcpRuntimeDelayMs: 500,
+      installAcpRuntimeResults: [
+        installResult("claude", false),
+        installResult("codex", true),
+        installResult("claude", true),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const claude = page.getByTestId("onboarding-runtime-claude");
+  const codex = page.getByTestId("onboarding-runtime-codex");
+  const claudeInstall = claude.getByTestId("onboarding-runtime-install-claude");
+  const codexInstall = codex.getByTestId("onboarding-runtime-install-codex");
+
+  await claudeInstall.click();
+  await codexInstall.click();
+  await expect(
+    claude.getByRole("status", { name: "Installing Claude Code" }),
+  ).toBeVisible();
+  await expect(
+    codex.getByRole("status", { name: "Installing Codex" }),
+  ).toBeVisible();
+
+  await expect(
+    claude.getByTestId("onboarding-runtime-error-claude"),
+  ).toBeVisible();
+  await expect(claudeInstall).toHaveText("RETRY INSTALL");
+  await expect(codex.getByTestId("onboarding-runtime-ready-codex")).toHaveText(
+    "READY",
+  );
+  await expect(codex.getByTestId("onboarding-runtime-error-codex")).toHaveCount(
+    0,
+  );
+
+  await claudeInstall.click();
+  await expect(
+    claude.getByRole("status", { name: "Installing Claude Code" }),
+  ).toBeVisible();
+  await expect(codex.getByTestId("onboarding-runtime-ready-codex")).toHaveText(
+    "READY",
+  );
+  await expect(
+    claude.getByTestId("onboarding-runtime-ready-claude"),
+  ).toHaveText("READY");
 });
 
 test("install transitions through Sign in to Ready", async ({ page }) => {
