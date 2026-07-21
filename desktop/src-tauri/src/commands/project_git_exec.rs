@@ -48,6 +48,7 @@ pub(crate) struct GitAuthConfig {
     git_path: std::path::PathBuf,
     credential_helper: Option<std::path::PathBuf>,
     nsec: String,
+    allow_file_transport: bool,
 }
 
 fn read_pipe_lossy(pipe: Option<impl Read>) -> String {
@@ -156,7 +157,15 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
         ("protocol.http.allow", "always".to_string()),
         ("protocol.https.allow", "always".to_string()),
         ("protocol.ext.allow", "never".to_string()),
-        ("protocol.file.allow", "never".to_string()),
+        (
+            "protocol.file.allow",
+            if auth.allow_file_transport {
+                "always"
+            } else {
+                "never"
+            }
+            .to_string(),
+        ),
     ];
     if needs_credentials {
         let Some(cred_helper) = &auth.credential_helper else {
@@ -193,7 +202,15 @@ pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfi
         git_path,
         credential_helper,
         nsec,
+        allow_file_transport: false,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn build_test_git_auth_config() -> Result<GitAuthConfig, String> {
+    let mut auth = build_git_auth_config_for_keys(&Keys::generate())?;
+    auth.allow_file_transport = true;
+    Ok(auth)
 }
 
 /// Normalizes and validates a relay-supplied branch name. Strips a

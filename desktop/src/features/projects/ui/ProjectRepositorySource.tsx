@@ -5,7 +5,9 @@ import {
   GitBranch,
   HardDrive,
   Loader2,
+  Plus,
   RefreshCw,
+  Trash2,
   UploadCloud,
 } from "lucide-react";
 
@@ -16,6 +18,7 @@ import {
   DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { PROJECT_PANEL_ACTION_BUTTON_CLASS } from "./projectPanelStyles";
@@ -25,13 +28,23 @@ export function RepositoryBranchDropdown({
   branch,
   branchOptions,
   compact,
+  createBranchDisabled,
+  deleteBranchDisabled,
+  deleteBranchTitle,
   onBranchChange,
+  onCreateBranch,
+  onDeleteBranch,
 }: {
   branch: string;
   branchOptions: string[];
   /** Smaller trigger for inline headers. */
   compact?: boolean;
+  createBranchDisabled?: boolean;
+  deleteBranchDisabled?: boolean;
+  deleteBranchTitle?: string;
   onBranchChange: (branch: string) => void;
+  onCreateBranch?: () => void;
+  onDeleteBranch?: () => void;
 }) {
   const selectableBranches =
     branchOptions.length > 0 ? branchOptions : [branch];
@@ -68,6 +81,33 @@ export function RepositoryBranchDropdown({
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
+        {onCreateBranch || onDeleteBranch ? (
+          <>
+            <DropdownMenuSeparator />
+            {onCreateBranch ? (
+              <DropdownMenuItem
+                data-testid="project-create-branch"
+                disabled={createBranchDisabled}
+                onSelect={onCreateBranch}
+              >
+                <Plus className="h-4 w-4" />
+                Create branch…
+              </DropdownMenuItem>
+            ) : null}
+            {onDeleteBranch ? (
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                data-testid="project-delete-branch"
+                disabled={deleteBranchDisabled}
+                onSelect={onDeleteBranch}
+                title={deleteBranchTitle}
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete {branch}
+              </DropdownMenuItem>
+            ) : null}
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -78,6 +118,11 @@ export type RepoSourceHeaderControls = {
   branch: string;
   branchOptions: string[];
   onBranchChange: (branch: string) => void;
+  onCreateBranch?: () => void;
+  createBranchDisabled?: boolean;
+  onDeleteBranch?: () => void;
+  deleteBranchDisabled?: boolean;
+  deleteBranchTitle?: string;
   source: "remote" | "local";
   onSourceChange: (source: "remote" | "local") => void;
   localDisabled: boolean;

@@ -190,6 +190,7 @@ export type UserStatusLookup = Record<string, UserStatus | null>;
 export type {
   ProjectLocalRepository,
   ProjectLocalRepoSnapshot,
+  ProjectRepoBranchResult,
   ProjectRepoCommit,
   ProjectRepoContributor,
   ProjectRepoCloneResult,

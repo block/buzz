@@ -93,6 +93,12 @@ export type ProjectRepoCloneResult = {
   message: string;
 };
 
+export type ProjectRepoBranchResult = {
+  branch: string;
+  commit: string;
+  message: string;
+};
+
 export type ProjectRepoMergeResult = {
   message: string;
   mergeCommit: string;

@@ -672,6 +672,8 @@ pub fn run() {
             get_project_repo_sync_status,
             list_project_local_repositories,
             clone_project_repository,
+            create_project_remote_branch,
+            delete_project_remote_branch,
             push_project_local_repository,
             pull_project_local_repository,
             sign_project_pull_request_review_request,

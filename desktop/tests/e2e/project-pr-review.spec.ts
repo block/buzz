@@ -708,6 +708,66 @@ test("project without a checkout offers fetch feedback and dropdown cloning", as
   expect(commands).toContain("clone_project_repository");
 });
 
+test("project branches can be created from the selected remote branch", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("button", { name: /main/ }).click();
+  await page.getByTestId("project-create-branch").click();
+  await page
+    .getByTestId("project-create-branch-name")
+    .fill("feature/branch-management");
+  await page.getByTestId("project-create-branch-submit").click();
+
+  await expect(
+    page.getByText("Created branch feature/branch-management from main.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /feature\/branch-management/ }),
+  ).toBeVisible();
+  const commands = await page.evaluate(
+    () => window.__BUZZ_E2E_COMMANDS__ ?? [],
+  );
+  expect(commands).toContain("create_project_remote_branch");
+});
+
+test("project branches can be deleted but the default branch cannot", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("button", { name: /main/ }).click();
+  await expect(page.getByTestId("project-delete-branch")).toBeDisabled();
+  await page.getByTestId("project-create-branch").click();
+  await page
+    .getByTestId("project-create-branch-name")
+    .fill("feature/delete-me");
+  await page.getByTestId("project-create-branch-submit").click();
+  await expect(
+    page.getByRole("button", { name: /feature\/delete-me/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /feature\/delete-me/ }).click();
+  await page.getByTestId("project-delete-branch").click();
+  await expect(page.getByTestId("project-delete-branch-dialog")).toBeVisible();
+  await page.getByTestId("project-delete-branch-submit").click();
+
+  await expect(
+    page.getByText("Deleted branch feature/delete-me.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /main/ })).toBeVisible();
+  const commands = await page.evaluate(
+    () => window.__BUZZ_E2E_COMMANDS__ ?? [],
+  );
+  expect(commands).toContain("delete_project_remote_branch");
+});
+
 test("pushed local branch can open a pull request", async ({ page }) => {
   await enableProjectsFeature(page);
   await page.addInitScript(() => {

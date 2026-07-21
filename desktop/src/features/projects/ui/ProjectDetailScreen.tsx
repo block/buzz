@@ -28,6 +28,7 @@ import {
   usePullProjectLocalRepositoryMutation,
   usePushProjectLocalRepositoryMutation,
 } from "@/features/projects/repoSyncHooks";
+import { useProjectBranchActions } from "@/features/projects/branchMutations";
 import { useUpdateProjectPullRequestMutation } from "@/features/projects/pullRequestMutations";
 import { useCreateProjectIssueMutation } from "@/features/projects/issueMutations";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
@@ -60,6 +61,10 @@ import { useCommunities } from "@/features/communities/useCommunities";
 import { useProjectCommitDiffQuery } from "@/features/projects/useProjectCommitDiff";
 import { useGitIdentityQuery } from "@/features/projects/useGitIdentity";
 import type { ViewerGitIdentity } from "@/features/projects/lib/projectContributorMatching";
+import {
+  projectBranchManagementState,
+  projectBranchOptions,
+} from "@/features/projects/lib/projectBranches";
 import { normalizeRepositoryUrl } from "@/features/projects/lib/projectsViewHelpers";
 import { WorkspaceTabs } from "./ProjectWorkspaceTabs";
 import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
@@ -68,6 +73,10 @@ import {
   useOpenProjectTerminal,
 } from "./useOpenProjectTerminal";
 import type { CreateIssueDialogInput } from "./CreateIssueDialog";
+import {
+  CreateProjectBranchDialog,
+  DeleteProjectBranchDialog,
+} from "./ProjectBranchDialogs";
 import {
   projectPeople,
   pushPullTitle,
@@ -261,15 +270,39 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       ? localRepoDiffQuery.isLoading
       : repoDiffQuery.isLoading;
   const branchOptionsWithLocal = React.useMemo(
-    () => [
-      ...new Set(
-        [...branchOptions, repoSyncStatusQuery.data?.localBranch].filter(
-          (branch): branch is string => Boolean(branch),
-        ),
+    () =>
+      projectBranchOptions(
+        branchOptions,
+        repoSyncStatusQuery.data?.localBranch,
       ),
-    ],
     [branchOptions, repoSyncStatusQuery.data?.localBranch],
   );
+  const defaultBranch =
+    repoStateQuery.data?.head ?? project?.defaultBranch ?? null;
+  const { activeBranchCommit, activeRemoteBranch, deleteBranchReason } =
+    projectBranchManagementState({
+      activeBranch,
+      branches: repoStateQuery.data?.branches ?? [],
+      defaultBranch,
+      hasOpenPullRequest: (pullRequestsQuery.data ?? []).some(
+        (pullRequest) =>
+          pullRequest.branchName === activeBranch &&
+          (pullRequest.status === "Open" || pullRequest.status === "Draft"),
+      ),
+      remoteBranch: repoSyncStatusQuery.data?.remoteBranch,
+      remoteHead: repoSyncStatusQuery.data?.remoteHead,
+      snapshotCommit: repoSnapshotQuery.data?.latestCommit?.hash,
+    });
+  const branchActions = useProjectBranchActions({
+    activeBranch,
+    activeBranchCommit,
+    activeRemoteBranch,
+    defaultBranch,
+    deleteBranchReason,
+    project,
+    refetchRepoState: repoStateQuery.refetch,
+    selectBranch: setSelectedBranch,
+  });
   const handleFetchRepo = React.useCallback(async () => {
     const results = await Promise.all([
       repoSnapshotQuery.refetch(),
@@ -292,6 +325,12 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     branch: activeBranch ?? "",
     branchOptions: branchOptionsWithLocal,
     onBranchChange: setSelectedBranch,
+    onCreateBranch: () => branchActions.setCreateOpen(true),
+    createBranchDisabled: branchActions.createPending || !activeBranchCommit,
+    onDeleteBranch: () => branchActions.setDeleteOpen(true),
+    deleteBranchDisabled:
+      branchActions.deletePending || Boolean(deleteBranchReason),
+    deleteBranchTitle: deleteBranchReason ?? "Delete this remote branch",
     source: repoSource,
     onSourceChange: setRepoSource,
     localDisabled:
@@ -568,7 +607,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repoStateQuery,
     repoSyncStatusQuery,
   ]);
-
   const openTerminal = useOpenProjectTerminal(activeCommunity?.reposDir);
   const handleOpenTerminal = React.useCallback(() => {
     if (!project) return Promise.resolve();
@@ -711,6 +749,22 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
 
   return (
     <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
+      <CreateProjectBranchDialog
+        existingBranches={branchOptionsWithLocal}
+        onCreate={branchActions.handleCreate}
+        onOpenChange={branchActions.setCreateOpen}
+        open={branchActions.createOpen}
+        pending={branchActions.createPending}
+        sourceBranch={activeBranch ?? ""}
+        sourceCommit={activeBranchCommit}
+      />
+      <DeleteProjectBranchDialog
+        branch={activeBranch ?? ""}
+        onDelete={branchActions.handleDelete}
+        onOpenChange={branchActions.setDeleteOpen}
+        open={branchActions.deleteOpen}
+        pending={branchActions.deletePending}
+      />
       <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <div

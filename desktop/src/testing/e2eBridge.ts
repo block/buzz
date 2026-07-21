@@ -36,6 +36,7 @@ import {
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_REPO_ANNOUNCEMENT,
+  KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
   KIND_TEXT_NOTE,
@@ -4721,6 +4722,7 @@ const MOCK_PROJECT_SUBJECTS = [
 
 const MOCK_PROJECT_KINDS = new Set<number>([
   KIND_REPO_ANNOUNCEMENT,
+  KIND_REPO_STATE,
   KIND_GIT_PATCH,
   KIND_GIT_PULL_REQUEST,
   KIND_GIT_PR_UPDATE,
@@ -4773,6 +4775,20 @@ function buildMockProjectEvents(): RelayEvent[] {
         owner,
         now - (historyDays + 30 + projectIndex) * daySeconds,
         `mock-project-${seed.dtag}`.replace(/[^a-zA-Z0-9]/g, ""),
+      ),
+    );
+    events.push(
+      createMockEvent(
+        KIND_REPO_STATE,
+        "",
+        [
+          ["d", seed.dtag],
+          ["HEAD", "ref: refs/heads/main"],
+          ["refs/heads/main", "0123456789abcdef0123456789abcdef01234567"],
+        ],
+        owner,
+        now - projectIndex,
+        `mock-repo-state-${seed.dtag}`.replace(/[^a-zA-Z0-9]/g, ""),
       ),
     );
 
@@ -9370,6 +9386,67 @@ export function maybeInstallE2eTauriMocks() {
           path,
           cloned: true,
           message: "Cloned repository.",
+        };
+      }
+      case "create_project_remote_branch": {
+        const input = payload as {
+          cloneUrl: string;
+          expectedCommit: string;
+          newBranch: string;
+          sourceBranch: string;
+        };
+        const dtag = new URL(input.cloneUrl).pathname
+          .split("/")
+          .filter(Boolean)
+          .at(-1)
+          ?.replace(/\.git$/, "");
+        const repoState = getMockProjectEventStore().find(
+          (event) =>
+            event.kind === KIND_REPO_STATE &&
+            event.tags.some((tag) => tag[0] === "d" && tag[1] === dtag),
+        );
+        if (repoState) {
+          repoState.tags = repoState.tags.filter(
+            (tag) => tag[0] !== `refs/heads/${input.newBranch}`,
+          );
+          repoState.tags.push([
+            `refs/heads/${input.newBranch}`,
+            input.expectedCommit,
+          ]);
+          repoState.created_at = Math.floor(Date.now() / 1000);
+        }
+        return {
+          branch: input.newBranch,
+          commit: input.expectedCommit,
+          message: `Created branch ${input.newBranch} from ${input.sourceBranch}.`,
+        };
+      }
+      case "delete_project_remote_branch": {
+        const input = payload as {
+          branch: string;
+          cloneUrl: string;
+          expectedCommit: string;
+        };
+        const dtag = new URL(input.cloneUrl).pathname
+          .split("/")
+          .filter(Boolean)
+          .at(-1)
+          ?.replace(/\.git$/, "");
+        const repoState = getMockProjectEventStore().find(
+          (event) =>
+            event.kind === KIND_REPO_STATE &&
+            event.tags.some((tag) => tag[0] === "d" && tag[1] === dtag),
+        );
+        if (repoState) {
+          repoState.tags = repoState.tags.filter(
+            (tag) => tag[0] !== `refs/heads/${input.branch}`,
+          );
+          repoState.created_at = Math.floor(Date.now() / 1000);
+        }
+        return {
+          branch: input.branch,
+          commit: input.expectedCommit,
+          message: `Deleted branch ${input.branch}.`,
         };
       }
       case "sign_project_pull_request_review_request": {
