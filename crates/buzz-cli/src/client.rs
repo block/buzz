@@ -169,6 +169,7 @@ fn parse_retry_hint_text(text: &str) -> Option<u64> {
 /// Extracts the `error` or `message` field and delegates to
 /// `parse_retry_hint_text`. Returns `None` when the body is not valid JSON or
 /// the extracted field does not contain the pattern.
+#[cfg(test)]
 fn parse_retry_in_secs(body: &str) -> Option<u64> {
     let text = serde_json::from_str::<serde_json::Value>(body)
         .ok()
@@ -178,6 +179,22 @@ fn parse_retry_in_secs(body: &str) -> Option<u64> {
                 .and_then(|m| m.as_str().map(str::to_string))
         })?;
     parse_retry_hint_text(&text)
+}
+
+/// Extract the `error` or `message` field from a relay JSON error body.
+///
+/// Production relay error bodies are shaped as `{"error":"..."}` (via `api_error()`).
+/// Returns the extracted field value, or `None` if the body is not valid JSON or
+/// neither field is present.  The raw body should be retained for diagnostics when
+/// `None` is returned.
+fn extract_relay_message_field(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .or_else(|| v.get("message"))
+                .and_then(|m| m.as_str().map(str::to_string))
+        })
 }
 
 fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
@@ -574,70 +591,11 @@ impl BuzzClient {
         }
     }
 
-    /// Execute `op` up to `RETRY_MAX_ATTEMPTS` times, backing off on transient failures.
-    ///
-    /// Retries when `op` returns:
-    /// - `Err(CliError::Network(e))` where `e.is_connect() || e.is_timeout() || e.is_request()`
-    /// - `Ok(resp)` with status 429, 502, 503, or 504
-    ///
-    /// On 429 the relay-provided `retry in Ns` hint (from the `error` or `message`
-    /// JSON field) is used as the delay, capped at `RETRY_IN_MAX_SECS`. Unparseable
-    /// hints and all other retryable cases use full-jitter exponential backoff.
-    ///
-    /// The final attempt always returns whatever `op` produces (success or error)
-    /// so that `handle_response` can map it to the appropriate exit code.
-    ///
-    /// Body reads happen OUTSIDE this boundary. Use `with_retry_body` when body
-    /// transfer should also be covered (idempotent reads only).
-    async fn with_retry_response<'a, F, Fut>(&'a self, op: F) -> Result<reqwest::Response, CliError>
-    where
-        F: Fn() -> Fut,
-        Fut: Future<Output = Result<reqwest::Response, CliError>> + 'a,
-    {
-        for attempt in 0..RETRY_MAX_ATTEMPTS {
-            let is_last = attempt == RETRY_MAX_ATTEMPTS - 1;
-            match op().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    if !is_last && matches!(status, 429 | 502 | 503 | 504) {
-                        let delay = if status == 429 {
-                            let body = resp.text().await.unwrap_or_default();
-                            match parse_retry_in_secs(&body) {
-                                Some(hint) => Duration::from_secs(hint.min(RETRY_IN_MAX_SECS)),
-                                None => jitter_delay(attempt),
-                            }
-                        } else {
-                            jitter_delay(attempt)
-                        };
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                    return Ok(resp);
-                }
-                Err(e) => {
-                    if let CliError::Network(ref net_err) = e {
-                        if !is_last
-                            && (net_err.is_connect()
-                                || net_err.is_timeout()
-                                || net_err.is_request())
-                        {
-                            tokio::time::sleep(jitter_delay(attempt)).await;
-                            continue;
-                        }
-                    }
-                    return Err(e);
-                }
-            }
-        }
-        unreachable!("loop exhausts all RETRY_MAX_ATTEMPTS")
-    }
-
     /// Execute `op` up to `RETRY_MAX_ATTEMPTS` times, including body-transfer failures
     /// and transient relay error statuses.
     ///
-    /// Like `with_retry_response`, but the closure is expected to consume the response
-    /// body and return the parsed result as `T`. Retries on non-last attempts when `op`
-    /// returns:
+    /// The closure is expected to consume the response body and return the parsed result
+    /// as `T`. Retries on non-last attempts when `op` returns:
     ///
     /// - `Err(CliError::Network(e))` where `e.is_connect() || e.is_timeout() ||
     ///   e.is_request() || e.is_body() || e.is_decode()` — covers both connection
@@ -646,7 +604,8 @@ impl BuzzClient {
     ///   or proxy errors. For 429 the `retry in Ns` hint from the body is used as the
     ///   delay (capped at `RETRY_IN_MAX_SECS`); all others use exponential jitter.
     ///
-    /// Use this variant only for **idempotent** operations (reads, downloads).
+    /// Use this variant for all operations (reads, writes, uploads); the retry boundary
+    /// covers the entire operation including response body transfer.
     async fn with_retry_body<'a, T, F, Fut>(&'a self, op: F) -> Result<T, CliError>
     where
         F: Fn() -> Fut,
@@ -916,8 +875,11 @@ impl BuzzClient {
                             tokio::time::sleep(jitter_delay(attempt)).await;
                             continue;
                         }
-                        if net_err.is_connect()
-                            || net_err.is_timeout()
+                        if net_err.is_connect() {
+                            // Final attempt: definitively never reached the relay — retryable.
+                            return Err(e);
+                        }
+                        if net_err.is_timeout()
                             || net_err.is_request()
                             || net_err.is_body()
                             || net_err.is_decode()
@@ -935,22 +897,19 @@ impl BuzzClient {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     if status == 429 {
-                        // Only retry if the relay's own ingest layer rejected it
-                        // (body starts with "rate-limited:"). A proxy-level 429
-                        // does not guarantee the relay never saw the request.
+                        // Only retry if the relay's own ingest layer rejected it:
+                        // the extracted error/message field must start with
+                        // "rate-limited:". A proxy-level 429 (or JSON-wrapped body
+                        // whose field does not start with "rate-limited:") leaves
+                        // relay execution state ambiguous.
                         let body_text = resp.text().await.unwrap_or_default();
-                        if !is_last && body_text.trim_start().starts_with("rate-limited:") {
-                            match parse_retry_in_secs(&body_text) {
-                                Some(hint) => {
-                                    tokio::time::sleep(Duration::from_secs(
-                                        hint.min(RETRY_IN_MAX_SECS),
-                                    ))
-                                    .await;
-                                }
-                                None => {
-                                    tokio::time::sleep(jitter_delay(attempt)).await;
-                                }
-                            }
+                        let extracted = extract_relay_message_field(&body_text);
+                        let msg = extracted.as_deref().unwrap_or(&body_text);
+                        if !is_last && msg.starts_with("rate-limited:") {
+                            let delay = parse_retry_hint_text(msg)
+                                .map(|s| Duration::from_secs(s.min(RETRY_IN_MAX_SECS)))
+                                .unwrap_or_else(|| jitter_delay(attempt));
+                            tokio::time::sleep(delay).await;
                             continue;
                         }
                         // Non-ingest 429 or final attempt: outcome unknown.
@@ -1007,34 +966,37 @@ impl BuzzClient {
     }
 
     /// Submit a stored event (all non-moderation kinds) with the standard retry policy.
+    ///
+    /// The full operation — network send AND response body read — is inside the retry
+    /// boundary so that a dropped body after a 200 header is retried with the same
+    /// serialized event bytes (and a fresh per-attempt NIP-98 auth event).
     async fn submit_stored_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let url = format!("{}/events", self.relay_url);
         let body = bytes::Bytes::from(
             serde_json::to_vec(&event)
                 .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?,
         );
-        let resp = self
-            .with_retry_response(|| {
-                let body = body.clone();
-                let url = url.clone();
-                async move {
-                    // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
-                    // event ID, keeping retries safe against the relay's replay guard.
-                    let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-                    Ok(self
-                        .with_auth_tag(
-                            self.http
-                                .post(&url)
-                                .header("Authorization", auth)
-                                .header("Content-Type", "application/json")
-                                .body(body),
-                        )
-                        .send()
-                        .await?)
-                }
-            })
-            .await?;
-        self.handle_response(resp).await
+        self.with_retry_body(|| {
+            let body = body.clone();
+            let url = url.clone();
+            async move {
+                // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
+                // event ID, keeping retries safe against the relay's replay guard.
+                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                let resp = self
+                    .with_auth_tag(
+                        self.http
+                            .post(&url)
+                            .header("Authorization", auth)
+                            .header("Content-Type", "application/json")
+                            .body(body),
+                    )
+                    .send()
+                    .await?;
+                self.handle_response(resp).await
+            }
+        })
+        .await
     }
 
     /// Publish an ephemeral event via WebSocket with NIP-42 authentication.
@@ -1115,8 +1077,12 @@ impl BuzzClient {
         };
         let url = format!("{}/upload", self.relay_url);
         let upload_body = bytes::Bytes::from(bytes);
-        let mut resp = self
-            .with_retry_response(|| {
+
+        // The full upload operation — network send AND response body read — lives inside
+        // with_retry_body so that a dropped body after 200 headers is retried with the
+        // same file bytes and a fresh Blossom auth per attempt.
+        let result: Result<BlobDescriptor, CliError> = self
+            .with_retry_body(|| {
                 let upload_body = upload_body.clone();
                 let url = url.clone();
                 let mime = mime.clone();
@@ -1124,7 +1090,7 @@ impl BuzzClient {
                 async move {
                     let auth_header =
                         sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
-                    Ok(self
+                    let resp = self
                         .with_auth_tag(
                             self.http
                                 .put(&url)
@@ -1135,38 +1101,62 @@ impl BuzzClient {
                                 .body(upload_body),
                         )
                         .send()
-                        .await?)
+                        .await?;
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let s = status.as_u16();
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(CliError::Relay { status: s, body });
+                    }
+                    resp.json::<BlobDescriptor>().await.map_err(CliError::from)
                 }
             })
-            .await?;
-        // The /upload → /media/upload fallback intentionally bypasses with_retry: a 404 or
-        // 405 means the primary endpoint doesn't exist on this relay version, not a transient
-        // failure.  Retrying would loop without effect.
-        if should_retry_legacy_upload(resp.status()) {
-            let legacy_url = format!("{}/media/upload", self.relay_url);
-            let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
-            resp = self
-                .with_auth_tag(
-                    self.http
-                        .put(&legacy_url)
-                        .timeout(upload_timeout)
-                        .header("Authorization", auth_header)
-                        .header("Content-Type", &mime)
-                        .header("X-SHA-256", &sha256),
-                )
-                .body(upload_body)
-                .send()
-                .await?;
-        }
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(CliError::Relay { status, body });
+            .await;
+
+        // If the primary /upload endpoint definitively doesn't exist on this relay version
+        // (404 or 405), fall back to the legacy /media/upload endpoint.  The 404/405 switch
+        // itself is not retried; only transient failures on the selected legacy endpoint are.
+        match result {
+            Ok(desc) => return Ok(desc),
+            Err(CliError::Relay { status: s, body: _ })
+                if should_retry_legacy_upload(
+                    reqwest::StatusCode::from_u16(s).unwrap_or(reqwest::StatusCode::NOT_FOUND),
+                ) =>
+            {
+                // Fall through to legacy endpoint below.
+            }
+            Err(e) => return Err(e),
         }
 
-        resp.json::<BlobDescriptor>()
-            .await
-            .map_err(|e| CliError::Other(format!("invalid upload response: {e}")))
+        let legacy_url = format!("{}/media/upload", self.relay_url);
+        self.with_retry_body(|| {
+            let upload_body = upload_body.clone();
+            let legacy_url = legacy_url.clone();
+            let mime = mime.clone();
+            let sha256 = sha256.clone();
+            async move {
+                let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
+                let resp = self
+                    .with_auth_tag(
+                        self.http
+                            .put(&legacy_url)
+                            .timeout(upload_timeout)
+                            .header("Authorization", auth_header)
+                            .header("Content-Type", &mime)
+                            .header("X-SHA-256", &sha256)
+                            .body(upload_body),
+                    )
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(CliError::Relay { status, body });
+                }
+                resp.json::<BlobDescriptor>().await.map_err(CliError::from)
+            }
+        })
+        .await
     }
 
     /// Download a Blossom media blob using BUD-01 `t=get` auth.
@@ -1623,15 +1613,22 @@ mod retry_policy_tests {
         );
     }
 
-    /// A moderation command (kind 9041) that gets a relay-ingest 429
-    /// (`rate-limited:` prefix) IS retried until it succeeds.
+    /// A moderation command (kind 9041) that gets a relay-ingest 429 (production JSON
+    /// envelope `{"error":"rate-limited: ..."}`) IS retried, and the `retry in Ns` hint
+    /// is honoured.
+    ///
+    /// Uses a 2s hint; jitter max for attempt 0 is 0.5s, so asserting elapsed ≥ 2s
+    /// cleanly distinguishes hint-honoured from jitter-fallback.
     #[tokio::test]
     async fn moderation_kind_ingest_429_is_retried_until_success() {
         let (url, attempts) = test_server(|n| {
             if n < 2 {
                 (
                     StatusCode::TOO_MANY_REQUESTS,
-                    r#"rate-limited: quota exceeded; retry in 0s"#.to_string(),
+                    // Exact production envelope: api_error() wraps every message as
+                    // {"error":"..."}.  The extracted field starts with "rate-limited:"
+                    // so the command is retried; the hint is honoured.
+                    r#"{"error":"rate-limited: quota exceeded; retry in 2s"}"#.to_string(),
                 )
             } else {
                 (
@@ -1643,7 +1640,9 @@ mod retry_policy_tests {
         .await;
         let client = test_client(&url);
         let event = make_moderation_event(client.keys(), 9041);
+        let t0 = std::time::Instant::now();
         let result = client.submit_event(event).await;
+        let elapsed = t0.elapsed();
         assert!(
             result.is_ok(),
             "expected Ok after ingest-429 retry, got {result:?}"
@@ -1651,6 +1650,11 @@ mod retry_policy_tests {
         assert!(
             attempts.load(Ordering::SeqCst) >= 2,
             "must have retried at least once"
+        );
+        assert!(
+            elapsed.as_secs_f64() >= 2.0,
+            "elapsed {:.2}s < 2s — hint was not honoured (fell back to jitter)",
+            elapsed.as_secs_f64()
         );
     }
 
@@ -1672,6 +1676,35 @@ mod retry_policy_tests {
             attempts.load(Ordering::SeqCst),
             1,
             "must not retry 502 for moderation kind"
+        );
+    }
+
+    /// When all retry attempts are connect-failures (the relay definitively never saw
+    /// the request), `submit_event` must return `CliError::Network` with
+    /// `retryable:true` — not `DeliveryUnknown`.  Connect-failure is the one error
+    /// condition the implementation itself identifies as confirmed-unreceived.
+    #[tokio::test]
+    async fn exhausted_connect_failures_return_network_retryable() {
+        // Bind a port, capture the address, then drop the listener so every
+        // subsequent connect attempt is refused immediately.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let base = format!("http://{addr}");
+        let client = test_client(&base);
+        let event = make_moderation_event(client.keys(), 9040);
+        let err = client.submit_event(event).await.unwrap_err();
+        // Must be Network (retryable), not DeliveryUnknown (retryable:false).
+        assert!(
+            matches!(err, super::super::error::CliError::Network(_)),
+            "exhausted connect failures must surface as Network, got {err:?}"
+        );
+        // Confirm the error description does not suggest ambiguous delivery.
+        let description = format!("{err:?}");
+        assert!(
+            !description.contains("outcome unknown"),
+            "connect failure must not be labeled DeliveryUnknown; got: {description}"
         );
     }
 
@@ -1894,6 +1927,174 @@ mod retry_policy_tests {
             counter.load(Ordering::SeqCst),
             3,
             "expected 3 attempts (2 body-loss + 1 success)"
+        );
+    }
+
+    /// `submit_event` (non-moderation kind) uses `with_retry_body` — the full
+    /// operation including response body read is inside the retry boundary.
+    /// A partial-body drop after 200 headers must be retried with the same
+    /// serialized event bytes (and a fresh NIP-98 auth per attempt).
+    #[tokio::test]
+    async fn stored_event_body_loss_is_retried_with_same_event_bytes() {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter2 = counter.clone();
+        let bodies: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bodies2 = bodies.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let n = counter2.fetch_add(1, Ordering::SeqCst) + 1;
+
+                // Read the full HTTP request so we can capture the body.
+                let mut buf = vec![0u8; 8192];
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    stream.read(&mut buf),
+                )
+                .await;
+                // Capture raw request bytes for assertion.
+                let body_end = buf
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map(|i| i + 4)
+                    .unwrap_or(0);
+                let payload = buf[body_end..].to_vec();
+                bodies2.lock().unwrap().push(payload);
+
+                if n < 3 {
+                    // Partial body drop.
+                    let partial = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"partial\":";
+                    let _ = stream.write_all(partial).await;
+                } else {
+                    let ok = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 41\r\n\r\n{\"event_id\":\"abc\",\"accepted\":true,\"message\":\"\"}";
+                    let _ = stream.write_all(ok).await;
+                }
+            }
+        });
+
+        let base = format!("http://{addr}");
+        let client = test_client(&base);
+        let event = make_stored_event(client.keys());
+        let result = client.submit_event(event).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after body-loss retries, got {result:?}"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "expected 3 attempts (2 body-loss + 1 success)"
+        );
+        // All three attempts must have sent the same serialized event bytes.
+        let captured = bodies.lock().unwrap();
+        assert_eq!(captured.len(), 3, "must have captured 3 request bodies");
+        // Each attempt's payload must be identical (same signed event bytes).
+        assert_eq!(
+            captured[0], captured[1],
+            "attempt 1 and 2 must use identical event bytes"
+        );
+        assert_eq!(
+            captured[1], captured[2],
+            "attempt 2 and 3 must use identical event bytes"
+        );
+    }
+
+    /// `upload_file` uses `with_retry_body` — the full operation including response
+    /// body read is inside the retry boundary.  A partial-body drop after 200 headers
+    /// must be retried with identical file bytes and a fresh Blossom auth per attempt.
+    #[tokio::test]
+    async fn upload_body_loss_is_retried_with_same_file_bytes() {
+        use std::io::Write;
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        // Write a minimal JPEG file so MIME detection works.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // JPEG magic + JFIF app0 marker: enough for `infer` to detect image/jpeg.
+        let jpeg_header: &[u8] = &[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+        ];
+        tmp.write_all(jpeg_header).unwrap();
+        let file_path = tmp.path().to_str().unwrap().to_string();
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter2 = counter.clone();
+        let auth_headers: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let auth_headers2 = auth_headers.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let n = counter2.fetch_add(1, Ordering::SeqCst) + 1;
+
+                // Read the request headers to extract the Authorization value.
+                let mut buf = vec![0u8; 8192];
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    stream.read(&mut buf),
+                )
+                .await;
+                // Extract the Authorization header value.
+                let req_str = String::from_utf8_lossy(&buf);
+                let auth = req_str
+                    .lines()
+                    .find(|l| l.to_lowercase().starts_with("authorization:"))
+                    .map(|l| l.to_string())
+                    .unwrap_or_default();
+                auth_headers2.lock().unwrap().push(auth);
+
+                if n < 3 {
+                    // Partial body drop.
+                    let partial = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"partial\":";
+                    let _ = stream.write_all(partial).await;
+                } else {
+                    // Valid BlobDescriptor response.
+                    let ok_body = r#"{"url":"https://relay.test/media/aabbcc.jpg","sha256":"aabbcc","size":12,"type":"image/jpeg","uploaded":0}"#;
+                    let ok = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                        ok_body.len(),
+                        ok_body
+                    );
+                    let _ = stream.write_all(ok.as_bytes()).await;
+                }
+            }
+        });
+
+        let base = format!("http://{addr}");
+        let client = test_client(&base);
+        let result = client.upload_file(&file_path).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after upload body-loss retries, got {result:?}"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "expected 3 upload attempts (2 body-loss + 1 success)"
+        );
+        // Each attempt must carry a distinct Authorization header (fresh Blossom auth).
+        let auths = auth_headers.lock().unwrap();
+        assert_eq!(auths.len(), 3, "must have captured 3 auth headers");
+        // All three must be non-empty (auth was signed).
+        assert!(
+            auths.iter().all(|a| a.contains("Nostr ")),
+            "each attempt must carry Nostr auth"
         );
     }
 }
