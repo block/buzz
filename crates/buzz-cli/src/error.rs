@@ -11,7 +11,7 @@ pub enum CliError {
     Relay { status: u16, body: String },
 
     /// Network-level failure (connect, timeout, DNS)
-    #[error("network error: {0}")]
+    #[error("network error: {}", fmt_reqwest_error(.0))]
     Network(#[from] reqwest::Error),
 
     /// Auth missing or rejected (401/403)
@@ -37,6 +37,36 @@ pub enum CliError {
     Other(String),
 }
 
+/// Walk the full `std::error::Error::source()` chain on a `reqwest::Error`
+/// and render it as a colon-separated string, e.g.
+/// `error sending request: dns error: failed to lookup address information: ...`
+fn fmt_reqwest_error(e: &reqwest::Error) -> String {
+    let mut msg = e.to_string();
+    let mut source: &dyn std::error::Error = e;
+    while let Some(cause) = source.source() {
+        let cause_str = cause.to_string();
+        if !msg.contains(&cause_str) {
+            msg.push_str(": ");
+            msg.push_str(&cause_str);
+        }
+        source = cause;
+    }
+    msg
+}
+
+/// Returns `true` when the error is transient and a retry may succeed.
+///
+/// Network errors (DNS brownout, connect failure, timeout) and relay
+/// overload responses (429 / 502 / 503 / 504) are retryable.  All other
+/// errors indicate a permanent failure: auth, bad input, or logic errors.
+pub fn is_retryable_error(e: &CliError) -> bool {
+    match e {
+        CliError::Network(_) => true,
+        CliError::Relay { status, .. } => matches!(status, 429 | 502 | 503 | 504),
+        _ => false,
+    }
+}
+
 /// Map CliError to process exit code.
 /// 0=success (not an error), 1=user/not-found, 2=network/relay, 3=auth,
 /// 4=other, 5=write conflict (NIP-33 dominated head).
@@ -60,7 +90,7 @@ pub fn exit_code(e: &CliError) -> i32 {
 }
 
 /// Serialize error to JSON and write to stderr.
-/// Format: {"error": "<category>", "message": "<human-readable detail>"}
+/// Format: {"error": "<category>", "message": "<human-readable detail>", "retryable": <bool>}
 pub fn print_error(e: &CliError) {
     let category = match e {
         CliError::Usage(_) => "user_error",
@@ -81,6 +111,101 @@ pub fn print_error(e: &CliError) {
     let obj = serde_json::json!({
         "error": category,
         "message": e.to_string(),
+        "retryable": is_retryable_error(e),
     });
     eprintln!("{}", obj);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- is_retryable_error ----
+
+    #[test]
+    fn network_errors_are_retryable() {
+        // Build a real reqwest::Error via a deliberately bad URL (no I/O needed).
+        let e = reqwest::Client::new().get("not-a-url").build().unwrap_err();
+        assert!(is_retryable_error(&CliError::Network(e)));
+    }
+
+    #[test]
+    fn relay_429_502_503_504_are_retryable() {
+        for status in [429u16, 502, 503, 504] {
+            assert!(
+                is_retryable_error(&CliError::Relay {
+                    status,
+                    body: String::new()
+                }),
+                "status {status} should be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn relay_400_401_403_404_422_are_not_retryable() {
+        for status in [400u16, 401, 403, 404, 422] {
+            assert!(
+                !is_retryable_error(&CliError::Relay {
+                    status,
+                    body: String::new()
+                }),
+                "status {status} should not be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn other_errors_are_not_retryable() {
+        assert!(!is_retryable_error(&CliError::Usage("bad flag".into())));
+        assert!(!is_retryable_error(&CliError::Auth("missing key".into())));
+        assert!(!is_retryable_error(&CliError::Key("bad key".into())));
+        assert!(!is_retryable_error(&CliError::Conflict(
+            "superseded".into()
+        )));
+        assert!(!is_retryable_error(&CliError::NotFound("gone".into())));
+        assert!(!is_retryable_error(&CliError::Other("unexpected".into())));
+    }
+
+    // ---- print_error "retryable" field ----
+
+    #[test]
+    fn json_error_includes_retryable_field_for_network() {
+        let e = reqwest::Client::new().get("not-a-url").build().unwrap_err();
+        let err = CliError::Network(e);
+        let v = serde_json::json!({
+            "error": "network_error",
+            "message": err.to_string(),
+            "retryable": is_retryable_error(&err),
+        });
+        assert_eq!(v["retryable"].as_bool(), Some(true));
+        assert_eq!(v["error"].as_str(), Some("network_error"));
+    }
+
+    #[test]
+    fn json_error_retryable_false_for_usage() {
+        let err = CliError::Usage("bad flag".into());
+        let v = serde_json::json!({
+            "error": "user_error",
+            "message": err.to_string(),
+            "retryable": is_retryable_error(&err),
+        });
+        assert_eq!(v["retryable"].as_bool(), Some(false));
+    }
+
+    // ---- Display source-chain ----
+
+    #[test]
+    fn network_display_includes_detail_beyond_prefix() {
+        let e = reqwest::Client::new().get("not-a-url").build().unwrap_err();
+        let display = CliError::Network(e).to_string();
+        assert!(
+            display.starts_with("network error:"),
+            "display should start with 'network error:': {display}"
+        );
+        assert!(
+            display.len() > "network error: ".len(),
+            "display should contain error detail: {display}"
+        );
+    }
 }
