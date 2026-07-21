@@ -7,12 +7,14 @@ import { flushSync } from "react-dom";
 
 import { AnimatedAvatarCapture } from "@/features/profile/ui/AnimatedAvatarCapture";
 import { AvatarCustomColorPanel } from "@/features/profile/ui/AvatarCustomColorPanel";
+import { ProfileAvatarUploadPreview } from "@/features/profile/ui/ProfileAvatarUploadPreview";
 import { ProfileAvatarModeTabs } from "@/features/profile/ui/ProfileAvatarModeTabs";
 import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import { Spinner } from "@/shared/ui/spinner";
+import { waitForPendingButtonPaint } from "./ProfileAvatarEditor.pending";
 import {
   AVATAR_COLORS,
   AVATAR_COLOR_SWATCHES,
@@ -49,22 +51,6 @@ const DONE_BUTTON_SHELL_TRANSITION = {
   ease: [0.23, 1, 0.32, 1],
 } as const;
 
-function waitForPendingButtonPaint() {
-  return new Promise<void>((resolve) => {
-    if (
-      typeof window === "undefined" ||
-      typeof window.requestAnimationFrame !== "function"
-    ) {
-      setTimeout(resolve, 0);
-      return;
-    }
-
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => setTimeout(resolve, 0));
-    });
-  });
-}
-
 type EmojiMartEmoji = {
   native?: string;
 };
@@ -97,6 +83,7 @@ export function ProfileAvatarEditor({
   onAnimatedAvatarApply,
   onDone,
   onUploadingChange,
+  previewName,
   showEmojiColorControlsWhenEmpty = false,
   disabled,
   testIdPrefix = "profile-avatar",
@@ -624,6 +611,13 @@ export function ProfileAvatarEditor({
                     onClick={openPicker}
                     type="button"
                   >
+                    {isOnboardingModal && avatarUrl ? (
+                      <ProfileAvatarUploadPreview
+                        avatarUrl={avatarUrl}
+                        label={previewName}
+                        testId={`${testIdPrefix}-upload-preview`}
+                      />
+                    ) : null}
                     <span
                       aria-hidden="true"
                       className={cn(

@@ -1313,10 +1313,35 @@ test("connected first-community profile step offers equal-width Next and Back co
     },
   );
   await installFakeCamera(page, { failRequests: 1 });
-  await installMockBridge(page, undefined, {
-    relayWsUrl: "wss://default.example.com",
-    skipOnboardingSeed: true,
-  });
+  const uploadedAvatarUrl = "https://mock.relay/media/community-avatar.png";
+  await page.route(uploadedAvatarUrl, (route) =>
+    route.fulfill({
+      body: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        "base64",
+      ),
+      contentType: "image/png",
+    }),
+  );
+  await installMockBridge(
+    page,
+    {
+      uploadDescriptors: [
+        {
+          filename: "community-avatar.png",
+          sha256: "c".repeat(64),
+          size: 128,
+          type: "image/png",
+          uploaded: 1_779_900_000,
+          url: "https://mock.relay/media/community-avatar.png",
+        },
+      ],
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+    },
+  );
   await page.goto("/");
 
   await expect(page.getByTestId("community-onboarding-flow")).toBeVisible();
@@ -1432,6 +1457,15 @@ test("connected first-community profile step offers equal-width Next and Back co
     dialogBox.y + dialogBox.height,
   );
   const saveButton = page.getByTestId("community-avatar-done");
+  await page.getByTestId("community-avatar-input").setInputFiles({
+    buffer: Buffer.from("community-avatar-bytes"),
+    mimeType: "image/png",
+    name: "community-avatar.png",
+  });
+  await expect(
+    page.getByTestId("community-avatar-upload-preview-image"),
+  ).toHaveAttribute("src", uploadedAvatarUrl);
+  await expect(avatarDialog).toBeVisible();
   const modeContentShell = page.getByTestId(
     "community-avatar-mode-content-shell",
   );
