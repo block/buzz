@@ -590,11 +590,28 @@ async function seedDefaultCommunity(
       // If seedActiveIdentity() ran before this script (the normal ordering),
       // use its pubkey so the community matches the active identity and
       // migrateMachineOnboardingCompletion's strict voucher accepts it.
-      const overrideRaw = window.localStorage.getItem(identityOverrideKey);
-      const overridePubkey =
-        overrideRaw !== null
-          ? (JSON.parse(overrideRaw) as { pubkey?: string }).pubkey
-          : undefined;
+      // Mirror readStoredIdentityOverride()'s shape validation: require all
+      // three fields to be non-empty strings; fall through to fallback on
+      // malformed JSON, stored null, or partial objects.
+      let overridePubkey: string | undefined;
+      try {
+        const overrideRaw = window.localStorage.getItem(identityOverrideKey);
+        if (overrideRaw !== null) {
+          const parsed: unknown = JSON.parse(overrideRaw);
+          if (
+            parsed !== null &&
+            typeof parsed === "object" &&
+            typeof (parsed as Record<string, unknown>).pubkey === "string" &&
+            typeof (parsed as Record<string, unknown>).privateKey ===
+              "string" &&
+            typeof (parsed as Record<string, unknown>).username === "string"
+          ) {
+            overridePubkey = (parsed as { pubkey: string }).pubkey;
+          }
+        }
+      } catch {
+        // malformed entry — fall through to fallback
+      }
       const communityId = "e2e-default-community";
       const community = {
         id: communityId,
