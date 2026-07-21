@@ -366,21 +366,39 @@ fn definition_runtime_edit_changes_hash_for_materialized_record() {
     );
 }
 
-/// (c) An explicit agent_command_override (ladder step 1) must beat a
-/// changed definition runtime — the badge must NOT fire for a pinned instance.
+/// (c) A pin naming a KNOWN runtime no longer beats a changed definition
+/// runtime — apply_persona_snapshot clears the stale pin, so the badge fires.
 #[test]
-fn agent_command_override_beats_definition_runtime_change() {
+fn known_runtime_pin_yields_to_definition_runtime_change() {
     let mut rec = record();
     rec.persona_id = Some("pers".into());
     rec.runtime = Some("goose".into()); // materialized runtime
-    rec.agent_command_override = Some("goose".into()); // explicit per-instance pin
+    rec.agent_command_override = Some("goose".into()); // create-time pin
+
+    let before = [persona("pers", Some("goose"), "prompt")];
+    let after = [persona("pers", Some("claude"), "prompt")];
+    assert_ne!(
+        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
+        "stale known-runtime pin must not shadow a definition runtime edit"
+    );
+}
+
+/// (c2) A custom-command override (no matching known runtime) still beats a
+/// changed definition runtime — the badge must NOT fire for such a pin.
+#[test]
+fn custom_command_override_beats_definition_runtime_change() {
+    let mut rec = record();
+    rec.persona_id = Some("pers".into());
+    rec.runtime = Some("goose".into()); // materialized runtime
+    rec.agent_command_override = Some("/opt/custom/my-agent".into());
 
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_eq!(
         spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
         spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
-        "explicit override must win regardless of definition runtime change"
+        "custom command override must win regardless of definition runtime change"
     );
 }
 
