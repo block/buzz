@@ -1,11 +1,13 @@
 import * as React from "react";
-import { UserRound } from "lucide-react";
+import { CircleAlert, UserRound } from "lucide-react";
 
+import { useAvatarPresentation } from "@/features/profile/avatarPresentationStore";
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
+import { Spinner } from "@/shared/ui/spinner";
 
 type ProfileAvatarProps = {
   avatarUrl: string | null;
@@ -29,16 +31,18 @@ export function ProfileAvatar({
   testId,
 }: ProfileAvatarProps) {
   const initials = getInitials(label);
+  const presentation = useAvatarPresentation(avatarUrl);
+  const presentedAvatarUrl = presentation?.displayUrl ?? avatarUrl;
 
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.
-  const animated = parseAnimatedAvatarUrl(avatarUrl);
+  const animated = parseAnimatedAvatarUrl(presentedAvatarUrl);
   const [isHovered, setIsHovered] = React.useState(false);
   const baseUrl = animated
     ? isHovered
       ? animated.animationUrl
       : animated.posterUrl
-    : avatarUrl;
+    : presentedAvatarUrl;
 
   // Compute the live (proxied) source. Failures are tracked per resolved URL so
   // the poster and hover animation can recover independently.
@@ -96,6 +100,26 @@ export function ProfileAvatar({
             <UserRound className={iconClassName} />
           )}
         </AvatarFallback>
+      ) : null}
+      {presentation?.state === "pending" ? (
+        <span
+          aria-label="Avatar upload pending"
+          className="absolute bottom-0 right-0 flex h-[28%] max-h-9 min-h-4 w-[28%] max-w-9 min-w-4 items-center justify-center rounded-full bg-amber-300 text-amber-950 shadow-sm ring-2 ring-background"
+          data-testid={testId ? `${testId}-upload-pending` : undefined}
+          role="status"
+        >
+          <Spinner aria-hidden="true" className="h-[60%] w-[60%] border-2" />
+        </span>
+      ) : null}
+      {presentation?.state === "failed" ? (
+        <span
+          aria-label="Avatar upload failed"
+          className="absolute bottom-0 right-0 flex h-[28%] max-h-9 min-h-4 w-[28%] max-w-9 min-w-4 items-center justify-center rounded-full bg-destructive text-destructive-foreground shadow-sm ring-2 ring-background"
+          data-testid={testId ? `${testId}-upload-failed` : undefined}
+          role="status"
+        >
+          <CircleAlert aria-hidden="true" className="h-[70%] w-[70%]" />
+        </span>
       ) : null}
     </Avatar>
   );

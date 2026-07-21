@@ -76,9 +76,6 @@ export function ProfileAvatarEditor({
   onAnimatedAvatarApply,
   onDone,
   onUploadingChange,
-  onUploadPreviewStart,
-  onUploadPreviewSettled,
-  uploadPreviewUrl,
   previewName,
   showEmojiColorControlsWhenEmpty = false,
   disabled,
@@ -99,7 +96,6 @@ export function ProfileAvatarEditor({
   const [isDragging, setIsDragging] = React.useState(false);
   const [urlDraft, setUrlDraft] = React.useState("");
   const localPreview = useLocalAvatarPreview();
-  const activeUploadPreviewUrl = uploadPreviewUrl ?? localPreview.previewUrl;
   const [selectedEmoji, setSelectedEmoji] = React.useState<string | null>(
     () => initialEmojiAvatar?.emoji ?? null,
   );
@@ -178,8 +174,6 @@ export function ProfileAvatarEditor({
     React.useState(false);
   const uploadPreviewLifecycle = useUploadPreviewLifecycle({
     clearFallback: localPreview.clearPreview,
-    onSettled: onUploadPreviewSettled,
-    onStart: onUploadPreviewStart,
     onSuccess: handleUploadSuccess,
     showFallback: localPreview.showFilePreview,
   });
@@ -617,9 +611,9 @@ export function ProfileAvatarEditor({
                     type="button"
                   >
                     {isOnboardingModal &&
-                    (activeUploadPreviewUrl || avatarUrl) ? (
+                    (localPreview.previewUrl || avatarUrl) ? (
                       <ProfileAvatarUploadPreview
-                        avatarUrl={activeUploadPreviewUrl || avatarUrl || ""}
+                        avatarUrl={localPreview.previewUrl || avatarUrl || ""}
                         label={previewName}
                         testId={`${testIdPrefix}-upload-preview`}
                       />

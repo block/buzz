@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { beginAvatarPresentation } from "@/features/profile/avatarPresentationStore";
+
 export const DONE_BUTTON_CONTENT_TRANSITION = {
   duration: 0.14,
   ease: [0.23, 1, 0.32, 1],
@@ -28,28 +30,27 @@ export function waitForPendingButtonPaint() {
 
 export function useUploadPreviewLifecycle({
   clearFallback,
-  onSettled,
-  onStart,
   onSuccess,
   showFallback,
 }: {
   clearFallback: () => void;
-  onSettled?: (succeeded: boolean) => void;
-  onStart?: (file: File) => void;
   onSuccess: (uploadedUrl: string) => void;
   showFallback: (file: File) => void;
 }) {
-  const succeededRef = React.useRef(false);
+  const pendingFileRef = React.useRef<File | null>(null);
 
   return {
-    onUploadSettled: () =>
-      onSettled ? onSettled(succeededRef.current) : clearFallback(),
+    onUploadSettled: () => {
+      pendingFileRef.current = null;
+      clearFallback();
+    },
     onUploadStart: (file: File) => {
-      succeededRef.current = false;
-      (onStart ?? showFallback)(file);
+      pendingFileRef.current = file;
+      showFallback(file);
     },
     onUploadSuccess: (uploadedUrl: string) => {
-      succeededRef.current = true;
+      const pendingFile = pendingFileRef.current;
+      if (pendingFile) beginAvatarPresentation(uploadedUrl, pendingFile);
       onSuccess(uploadedUrl);
     },
   };

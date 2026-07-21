@@ -1314,7 +1314,13 @@ test("connected first-community profile step offers equal-width Next and Back co
   );
   await installFakeCamera(page, { failRequests: 1 });
   const uploadedAvatarUrl = "https://mock.relay/media/community-avatar.png";
-  await page.route(uploadedAvatarUrl, async (route) => {
+  let avatarRequestCount = 0;
+  await page.route(`${uploadedAvatarUrl}*`, async (route) => {
+    avatarRequestCount += 1;
+    if (avatarRequestCount === 1) {
+      await route.fulfill({ status: 404 });
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     await route.fulfill({
       body: Buffer.from(
@@ -1477,18 +1483,25 @@ test("connected first-community profile step offers equal-width Next and Back co
   await expect(previewImage).toHaveAttribute("src", localPreviewUrl ?? "");
   await saveButton.click();
   await expect(avatarDialog).toHaveCount(0);
+  const avatarCircleImage = page.getByTestId("community-avatar-circle-image");
+  await expect(avatarCircleImage).toHaveAttribute("src", /^blob:/);
   await expect(
-    page.getByTestId("community-avatar-circle-image"),
-  ).toHaveAttribute("src", localPreviewUrl ?? "");
+    page.getByTestId("community-avatar-circle-upload-pending"),
+  ).toBeVisible();
+  await expect(page.getByTestId("community-profile-name-key")).toBeEnabled();
   await expect
-    .poll(() =>
-      page.getByTestId("community-avatar-circle-image").getAttribute("src"),
-    )
-    .not.toBe(localPreviewUrl);
+    .poll(() => avatarCircleImage.getAttribute("src"))
+    .not.toMatch(/^blob:/);
+  await expect(
+    page.getByTestId("community-avatar-circle-upload-pending"),
+  ).toHaveCount(0);
 
   await avatarButton.click();
   await expect(avatarDialog).toBeVisible();
-  await expect(previewImage).toHaveAttribute("src", uploadedAvatarUrl);
+  await expect(previewImage).toHaveAttribute(
+    "src",
+    new RegExp(`^${uploadedAvatarUrl}`),
+  );
   const modeContentShell = page.getByTestId(
     "community-avatar-mode-content-shell",
   );
@@ -1621,6 +1634,117 @@ test("connected first-community profile step offers equal-width Next and Back co
       ),
     )
     .toBeNull();
+});
+
+test("pending avatar stays navigable and exposes retry after propagation fails", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript(
+    ({ pubkey, transactionStorageKey }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        transactionStorageKey,
+        JSON.stringify({
+          id: "txn-avatar-propagation",
+          source: "first-community",
+          stage: "profile",
+          relayUrl: "wss://default.example.com",
+          communityName: "Default",
+          communityId: "e2e-default-community",
+          addedCommunity: true,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    {
+      pubkey: BLANK_TYLER_IDENTITY.pubkey,
+      transactionStorageKey: COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
+    },
+  );
+
+  const uploadedAvatarUrl =
+    "https://mock.relay/media/pending-community-avatar.png";
+  let avatarReady = false;
+  await page.route(`${uploadedAvatarUrl}*`, async (route) => {
+    if (!avatarReady) {
+      await route.fulfill({ status: 404 });
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await route.fulfill({
+      body: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        "base64",
+      ),
+      contentType: "image/png",
+    });
+  });
+  await installMockBridge(
+    page,
+    {
+      uploadDelayMs: 250,
+      uploadDescriptors: [
+        {
+          filename: "pending-community-avatar.png",
+          sha256: "d".repeat(64),
+          size: 128,
+          type: "image/png",
+          uploaded: 1_779_900_000,
+          url: uploadedAvatarUrl,
+        },
+      ],
+    },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("community-profile-name-key").fill("Tyler");
+  await page.getByTestId("community-avatar-open").click();
+  await page.getByTestId("community-avatar-input").setInputFiles({
+    buffer: Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ),
+    mimeType: "image/png",
+    name: "pending-community-avatar.png",
+  });
+  await page.getByTestId("community-avatar-done").click();
+
+  const avatarImage = page.getByTestId("community-avatar-circle-image");
+  await expect(avatarImage).toHaveAttribute("src", /^blob:/);
+  await expect(
+    page.getByTestId("community-avatar-circle-upload-pending"),
+  ).toBeVisible();
+  await expect(page.getByTestId("community-profile-next")).toBeEnabled();
+
+  await expect(
+    page.getByTestId("community-avatar-circle-upload-failed"),
+  ).toBeVisible({ timeout: 10_000 });
+  await expect(avatarImage).toHaveAttribute("src", /^blob:/);
+  await expect(
+    page.getByText("Avatar couldn’t finish uploading"),
+  ).toBeVisible();
+
+  avatarReady = true;
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(
+    page.getByTestId("community-avatar-circle-upload-pending"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("community-avatar-circle-upload-failed"),
+  ).toHaveCount(0);
+  await expect
+    .poll(() => avatarImage.getAttribute("src"))
+    .not.toMatch(/^blob:/);
 });
 
 test("membership denial on community profile save offers recovery", async ({
