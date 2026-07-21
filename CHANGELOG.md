@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.4.22
+
+- Keep avatar preview visible during upload ([#2237](https://github.com/block/buzz/pull/2237)) ([`f609fcee0`](https://github.com/block/buzz/commit/f609fcee02cd3de9cde2aa4f94fc054d1865a58a))
+- fix(desktop): keep machine onboarding for unrecognized identities after reset ([#2244](https://github.com/block/buzz/pull/2244)) ([`fd55ab662`](https://github.com/block/buzz/commit/fd55ab662450a81a9ce49397f0e42aec0e4cb765))
+- fix(managed-agents): stale harness pin shadows runtime edits; add Restart quick action ([#2252](https://github.com/block/buzz/pull/2252)) ([`ec0e450f1`](https://github.com/block/buzz/commit/ec0e450f1d1587c254d8f29e60c6af4f0ed2419d))
+- fix(desktop): surface model discovery failures in agent config UI ([#2246](https://github.com/block/buzz/pull/2246)) ([`083f6d625`](https://github.com/block/buzz/commit/083f6d62570b6027b58b0721dc103c762d84fdab))
+- Hide bundled harnesses from onboarding ([#2233](https://github.com/block/buzz/pull/2233)) ([`50f441216`](https://github.com/block/buzz/commit/50f44121671343e1327323ad164ae86566531242))
+- Restore npub copy option for private community joins ([#2232](https://github.com/block/buzz/pull/2232)) ([`9cd13f3d5`](https://github.com/block/buzz/commit/9cd13f3d5aa27d841679780d9074df15d85943ce))
+- fix(desktop): align onboarding runtime auth ([#2229](https://github.com/block/buzz/pull/2229)) ([`c1de3e7c0`](https://github.com/block/buzz/commit/c1de3e7c0eab936f2a4aa27c74a5fba74c752062))
+- fix(desktop): survive degraded networks with rate-limit-aware relay client ([#2197](https://github.com/block/buzz/pull/2197)) ([`258cc9206`](https://github.com/block/buzz/commit/258cc92064e219145690323c0dc00a0bdf9c3cf0))
+- feat(desktop): browse immutable repository tags ([#2231](https://github.com/block/buzz/pull/2231)) ([`c11b7b611`](https://github.com/block/buzz/commit/c11b7b611e63ce127469118391cde6d55e7b5a97))
+- Update built-in agent avatars ([#2215](https://github.com/block/buzz/pull/2215)) ([`396ce6473`](https://github.com/block/buzz/commit/396ce6473ea009066b326def29a6ef3e72ac5089))
+- fix(mesh): dedupe models + retry throttled startup channel discovery ([#2063](https://github.com/block/buzz/pull/2063)) ([`97b8b22ee`](https://github.com/block/buzz/commit/97b8b22ee976c4b13127d616e383baa64173ac62))
+- fix(desktop): keep project branches after reload ([#2214](https://github.com/block/buzz/pull/2214)) ([`001184395`](https://github.com/block/buzz/commit/001184395eacba07017b514a133aed8010ca4c73))
+- fix(git): make project branch workflows reliable ([#2213](https://github.com/block/buzz/pull/2213)) ([`166f27be4`](https://github.com/block/buzz/commit/166f27be4bc1abf2d465493bf2137353045399dc))
+- feat(desktop): manage project branches ([#2212](https://github.com/block/buzz/pull/2212)) ([`b2c38c775`](https://github.com/block/buzz/commit/b2c38c775b996edfa730302a0dbeed622d3702db))
+- feat(cli): manage repository protection rules ([#2193](https://github.com/block/buzz/pull/2193)) ([`f94324598`](https://github.com/block/buzz/commit/f94324598d84b2db9a05a3fa1f855970c4c5b575))
+
+
 ## v0.4.21
 
 - fix(desktop): clarify data deletion action ([#2208](https://github.com/block/buzz/pull/2208)) ([`e315c498`](https://github.com/block/buzz/commit/e315c4982f5ab05d05be5935a765c3047bdc076d))
