@@ -122,7 +122,7 @@ echo "==> Installing GStreamer launcher shim on the app binary"
 # silently ship — so fail loudly (mirrors the libwayland guard above).
 APPRUN_WRAPPED="$WORKDIR/squashfs-root/AppRun.wrapped"
 if ! grep -aq "GST_PLUGIN_SYSTEM_PATH_1_0" "$APPRUN_WRAPPED"; then
-  echo "Error: AppRun.wrapped no longer references GST_PLUGIN_SYSTEM_PATH_1_0 — GStreamer path injection changed; re-verify fix-appimage.sh" >&2
+  echo "Error: AppRun.wrapped is missing or no longer references GST_PLUGIN_SYSTEM_PATH_1_0 — GStreamer path injection changed; re-verify fix-appimage.sh" >&2
   exit 1
 fi
 
@@ -155,11 +155,11 @@ for var in GST_PLUGIN_SYSTEM_PATH_1_0 GST_PLUGIN_SYSTEM_PATH \
            GST_PLUGIN_PATH_1_0 GST_PLUGIN_PATH \
            GST_PLUGIN_SCANNER GST_PLUGIN_SCANNER_1_0; do
   val="${!var-}"
-  if [[ -n "$val" && "$val" == *"$appdir"* ]]; then
+  if [[ -n "$val" && "$val" == *"$appdir/"* ]]; then
     unset "$var"
   fi
 done
-exec "$here/buzz-desktop.bin" "$@"
+exec -a "buzz-desktop" "$here/buzz-desktop.bin" "$@"
 SHIM
 chmod +x "$APP_BIN"
 
