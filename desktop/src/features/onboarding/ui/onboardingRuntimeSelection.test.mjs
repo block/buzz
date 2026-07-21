@@ -6,6 +6,7 @@ import {
   getPreferredRuntimeIdForSelection,
   runtimeCanAdvanceOnboarding,
   runtimeCanBeSelected,
+  runtimeIsOnboardingChoice,
   runtimeSelectionNeedsDefaultModelConfig,
   runtimeSelectionNeedsDefaultsStep,
 } from "./onboardingRuntimeSelection.ts";
@@ -41,24 +42,16 @@ test("known onboarding harnesses can be selected regardless of setup state", () 
       true,
     );
   }
-
-  for (const id of ["buzz-agent", "goose"]) {
-    assert.equal(
-      runtimeCanBeSelected(runtime(id, "available", "not_applicable")),
-      true,
-    );
-    assert.equal(
-      runtimeCanBeSelected(runtime(id, "not_installed", "not_applicable")),
-      true,
-    );
-  }
 });
 
-test("unknown runtimes are not onboarding choices", () => {
-  assert.equal(
-    runtimeCanBeSelected(runtime("custom", "available", "logged_in")),
-    false,
-  );
+test("Buzz, Goose, and unknown runtimes are not onboarding choices", () => {
+  for (const id of ["buzz-agent", "goose", "custom"]) {
+    assert.equal(runtimeIsOnboardingChoice(id), false);
+    assert.equal(
+      runtimeCanBeSelected(runtime(id, "available", "logged_in")),
+      false,
+    );
+  }
 });
 
 test("selected runtimes can advance only after setup is complete", () => {

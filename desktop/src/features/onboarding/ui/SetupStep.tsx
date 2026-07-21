@@ -1,27 +1,27 @@
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AlertTriangle, Check, ExternalLink } from "lucide-react";
+import { Check } from "lucide-react";
 
 import {
   useAcpAuthMethodsQuery,
   useAcpRuntimesQuery,
   useConnectAcpRuntimeMutation,
   useInstallAcpRuntimeMutation,
-  useGitBashPrerequisiteQuery,
 } from "@/features/agents/hooks";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
-import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
+  ONBOARDING_RUNTIME_ORDER,
   runtimeCanAdvanceOnboarding,
   runtimeCanBeSelected,
+  runtimeIsOnboardingChoice,
 } from "./onboardingRuntimeSelection";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { RuntimeErrorTooltip } from "./RuntimeErrorTooltip";
@@ -609,62 +609,6 @@ function RuntimeCard({
   );
 }
 
-function GitBashPrerequisiteCard() {
-  const query = useGitBashPrerequisiteQuery();
-  const prerequisite = query.data;
-  if (!prerequisite) return null;
-
-  return (
-    <div
-      className={cn(
-        "mx-auto w-full max-w-[560px] rounded-2xl bg-white/75 p-3 text-left sm:p-4",
-        !prerequisite.available && "ring-1 ring-amber-500/40",
-      )}
-      data-testid="onboarding-git-bash"
-    >
-      <div className="flex items-center gap-2">
-        {prerequisite.available ? (
-          <Check className="h-4 w-4 text-primary" />
-        ) : (
-          <AlertTriangle className="h-4 w-4 text-warning" />
-        )}
-        <h2 className="text-base font-medium">Git Bash</h2>
-        {prerequisite.available ? (
-          <Badge
-            className="border border-primary/20 bg-primary/10 text-primary"
-            variant="outline"
-          >
-            Installed
-          </Badge>
-        ) : null}
-      </div>
-      {prerequisite.available ? (
-        <p className="mt-2 break-all font-mono text-xs text-muted-foreground">
-          {prerequisite.path}
-        </p>
-      ) : (
-        <>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Required for buzz-agent shell tools on Windows.
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground/80">
-            {prerequisite.installHint}
-          </p>
-          <Button
-            className="mt-3"
-            onClick={() => void openUrl(prerequisite.installInstructionsUrl)}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            <ExternalLink className="h-4 w-4" /> Install Git for Windows
-          </Button>
-        </>
-      )}
-    </div>
-  );
-}
-
 function RuntimeProvidersLoadingState() {
   return (
     <div
@@ -703,15 +647,13 @@ function RuntimeProvidersSection({
   selectedRuntimeIds: readonly string[];
 }) {
   const { errorMessage, isChecking, items } = runtimeProviders;
-  const runtimeOrder = ["claude", "codex", "goose", "buzz-agent"];
-  const orderedItems = [...items].sort((left, right) => {
-    const leftIndex = runtimeOrder.indexOf(left.id);
-    const rightIndex = runtimeOrder.indexOf(right.id);
-    return (
-      (leftIndex === -1 ? runtimeOrder.length : leftIndex) -
-      (rightIndex === -1 ? runtimeOrder.length : rightIndex)
+  const orderedItems = items
+    .filter((runtime) => runtimeIsOnboardingChoice(runtime.id))
+    .sort(
+      (left, right) =>
+        ONBOARDING_RUNTIME_ORDER.indexOf(left.id) -
+        ONBOARDING_RUNTIME_ORDER.indexOf(right.id),
     );
-  });
   const installMutation = useInstallAcpRuntimeMutation();
   const selectedRuntimeIdSet = React.useMemo(
     () => new Set(selectedRuntimeIds),
@@ -782,9 +724,7 @@ function RuntimeProvidersSection({
       </div>
 
       <div className="flex w-full flex-1 flex-col items-center justify-center gap-8 py-10">
-        <GitBashPrerequisiteCard />
-
-        {items.length > 0 ? (
+        {orderedItems.length > 0 ? (
           <fieldset className="grid min-w-0 w-full max-w-[592px] grid-cols-1 gap-4 border-0 p-0 md:grid-cols-2">
             <legend className="sr-only">Agent harnesses</legend>
             {orderedItems.map((runtime) => (
