@@ -1006,32 +1006,83 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
         ("builtin:fizz", fizz_hash.as_str()),
         ("builtin:honey", honey_hash.as_str()),
     ];
-    let records = serde_json::json!([
-        {
-            "pubkey": "",
-            "slug": "builtin:fizz",
-            "persona_id": null,
-            "avatar_url": old_fizz,
-            "updated_at": "before"
-        },
-        {
-            "pubkey": "fizz-instance",
-            "persona_id": "builtin:fizz",
-            "avatar_url": old_fizz,
-            "updated_at": "before"
-        },
-        {
-            "pubkey": "honey-instance",
-            "persona_id": "builtin:honey",
-            "avatar_url": "data:image/png;base64,user-customized",
-            "updated_at": "before"
-        },
-        {
-            "pubkey": "custom-instance",
-            "persona_id": "custom:fizz",
-            "avatar_url": old_fizz,
-            "updated_at": "before"
-        }
+    let definition = crate::managed_agents::AgentDefinition {
+        id: "builtin:fizz".to_string(),
+        display_name: "Fizz".to_string(),
+        avatar_url: Some(old_fizz.to_string()),
+        system_prompt: "A customized built-in prompt".to_string(),
+        runtime: Some("goose".to_string()),
+        model: Some("test-model".to_string()),
+        provider: Some("test-provider".to_string()),
+        name_pool: vec!["Fizzy".to_string()],
+        is_builtin: true,
+        is_active: true,
+        source_team: None,
+        source_team_persona_slug: None,
+        env_vars: Default::default(),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        parallelism: None,
+        created_at: "before".to_string(),
+        updated_at: "before".to_string(),
+    };
+    let old_persona_version = crate::managed_agents::persona_events::persona_content_hash(
+        &crate::managed_agents::persona_events::persona_event_content(&definition),
+    );
+    let mut definition_record = serde_json::to_value(definition.into_agent_record()).unwrap();
+    definition_record["future_definition_field"] = serde_json::json!("preserved");
+
+    let instance =
+        |pubkey: &str, persona_id: &str, avatar_url: &str, persona_source_version: &str| {
+            serde_json::json!({
+                "name": pubkey,
+                "pubkey": pubkey,
+                "persona_id": persona_id,
+                "relay_url": "ws://localhost:3000",
+                "avatar_url": avatar_url,
+                "acp_command": "buzz-acp",
+                "agent_command": "goose",
+                "agent_args": [],
+                "mcp_command": "",
+                "turn_timeout_seconds": 320,
+                "parallelism": 4,
+                "system_prompt": "A customized built-in prompt",
+                "model": "test-model",
+                "provider": "test-provider",
+                "persona_source_version": persona_source_version,
+                "env_vars": {},
+                "start_on_app_launch": true,
+                "created_at": "before",
+                "updated_at": "before",
+                "last_started_at": null,
+                "last_stopped_at": null,
+                "last_exit_code": null,
+                "last_error": null
+            })
+        };
+    let mut synced_instance = instance(
+        "fizz-instance",
+        "builtin:fizz",
+        old_fizz,
+        &old_persona_version,
+    );
+    synced_instance["future_instance_field"] = serde_json::json!("preserved");
+    let records = serde_json::Value::Array(vec![
+        definition_record,
+        synced_instance,
+        instance(
+            "drifted-fizz-instance",
+            "builtin:fizz",
+            old_fizz,
+            "genuinely-drifted-version",
+        ),
+        instance(
+            "honey-instance",
+            "builtin:honey",
+            "data:image/png;base64,user-customized",
+            "honey-version",
+        ),
+        instance("custom-instance", "custom:fizz", old_fizz, "custom-version"),
     ]);
     std::fs::write(&path, serde_json::to_vec_pretty(&records).unwrap()).unwrap();
 
@@ -1042,15 +1093,32 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
     let new_fizz = crate::managed_agents::built_in_persona_avatar_url("builtin:fizz").unwrap();
     assert_eq!(migrated[0]["avatar_url"], new_fizz);
     assert_eq!(migrated[0]["updated_at"], "after");
+    assert_eq!(migrated[0]["future_definition_field"], "preserved");
+    let migrated_definition: crate::managed_agents::ManagedAgentRecord =
+        serde_json::from_value(migrated[0].clone()).unwrap();
+    let new_persona_version = crate::managed_agents::persona_events::persona_content_hash(
+        &crate::managed_agents::persona_events::persona_event_content(
+            &migrated_definition.to_definition_view().unwrap(),
+        ),
+    );
+    assert_ne!(new_persona_version, old_persona_version);
     assert_eq!(migrated[1]["avatar_url"], new_fizz);
     assert_eq!(migrated[1]["updated_at"], "after");
+    assert_eq!(migrated[1]["persona_source_version"], new_persona_version);
+    assert_eq!(migrated[1]["future_instance_field"], "preserved");
+    assert_eq!(migrated[2]["avatar_url"], new_fizz);
+    assert_eq!(migrated[2]["updated_at"], "after");
     assert_eq!(
-        migrated[2]["avatar_url"],
+        migrated[2]["persona_source_version"],
+        "genuinely-drifted-version"
+    );
+    assert_eq!(
+        migrated[3]["avatar_url"],
         "data:image/png;base64,user-customized"
     );
-    assert_eq!(migrated[2]["updated_at"], "before");
-    assert_eq!(migrated[3]["avatar_url"], old_fizz);
     assert_eq!(migrated[3]["updated_at"], "before");
+    assert_eq!(migrated[4]["avatar_url"], old_fizz);
+    assert_eq!(migrated[4]["updated_at"], "before");
 
     let once = std::fs::read(&path).unwrap();
     refresh_builtin_agent_avatars_in_file(&path, &legacy_hashes, "later");

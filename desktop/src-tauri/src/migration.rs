@@ -547,42 +547,123 @@ fn refresh_builtin_agent_avatars(app: &tauri::AppHandle) {
 }
 
 fn refresh_builtin_agent_avatars_in_file(path: &Path, legacy_hashes: &[(&str, &str)], now: &str) {
-    patch_json_records(path, |record| {
-        let persona_id = record
-            .get("persona_id")
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| record.get("slug").and_then(serde_json::Value::as_str));
-        let Some(persona_id) = persona_id else {
-            return false;
-        };
-        let Some(legacy_hash) = legacy_hashes
-            .iter()
-            .find_map(|(id, hash)| (*id == persona_id).then_some(*hash))
-        else {
-            return false;
-        };
-        let Some(current_avatar) = record.get("avatar_url").and_then(serde_json::Value::as_str)
-        else {
-            return false;
-        };
-        if hex::encode(Sha256::digest(current_avatar.as_bytes())) != legacy_hash {
-            return false;
-        }
-        let Some(replacement) = crate::managed_agents::built_in_persona_avatar_url(persona_id)
-        else {
-            return false;
-        };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(mut records) = serde_json::from_str::<Vec<serde_json::Value>>(&contents) else {
+        eprintln!(
+            "buzz-desktop: refresh-builtin-agent-avatars: invalid JSON in {}",
+            path.display()
+        );
+        return;
+    };
 
-        record.insert(
-            "avatar_url".to_string(),
-            serde_json::Value::String(replacement.to_string()),
-        );
-        record.insert(
-            "updated_at".to_string(),
-            serde_json::Value::String(now.to_string()),
-        );
-        true
-    });
+    // Definitions must be migrated first so linked instances can advance from
+    // the exact old persona hash to the exact new one. Only advance an instance
+    // that was in sync before migration; a genuinely drifted instance keeps its
+    // old source version and therefore keeps its out-of-date indicator.
+    let mut persona_version_updates = std::collections::HashMap::new();
+    let mut changed = false;
+    for record in &mut records {
+        let Some(persona_id) = legacy_avatar_persona_id(record, legacy_hashes) else {
+            continue;
+        };
+        let is_definition = record
+            .get("pubkey")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(str::is_empty)
+            && record.get("slug").and_then(serde_json::Value::as_str) == Some(&persona_id);
+        if !is_definition {
+            continue;
+        }
+        let old_version = persona_version_from_record(record);
+        if !replace_builtin_avatar(record, &persona_id, now) {
+            continue;
+        }
+        changed = true;
+        if let (Some(old_version), Some(new_version)) =
+            (old_version, persona_version_from_record(record))
+        {
+            persona_version_updates.insert(persona_id, (old_version, new_version));
+        }
+    }
+
+    for record in &mut records {
+        let Some(persona_id) = legacy_avatar_persona_id(record, legacy_hashes) else {
+            continue;
+        };
+        let is_linked_instance = record
+            .get("pubkey")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|pubkey| !pubkey.is_empty())
+            && record.get("persona_id").and_then(serde_json::Value::as_str) == Some(&persona_id);
+        if !is_linked_instance || !replace_builtin_avatar(record, &persona_id, now) {
+            continue;
+        }
+        changed = true;
+        if let Some((old_version, new_version)) = persona_version_updates.get(&persona_id) {
+            let source_was_current = record
+                .get("persona_source_version")
+                .and_then(serde_json::Value::as_str)
+                == Some(old_version.as_str());
+            if source_was_current {
+                record["persona_source_version"] = serde_json::Value::String(new_version.clone());
+            }
+        }
+    }
+
+    if changed {
+        if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
+            if let Err(e) = crate::managed_agents::atomic_write_json_restricted(path, &bytes) {
+                eprintln!("buzz-desktop: refresh-builtin-agent-avatars: {e}");
+            }
+        }
+    }
+}
+
+fn legacy_avatar_persona_id(
+    record: &serde_json::Value,
+    legacy_hashes: &[(&str, &str)],
+) -> Option<String> {
+    let persona_id = record
+        .get("persona_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| record.get("slug").and_then(serde_json::Value::as_str))?;
+    let legacy_hash = legacy_hashes
+        .iter()
+        .find_map(|(id, hash)| (*id == persona_id).then_some(*hash))?;
+    let current_avatar = record
+        .get("avatar_url")
+        .and_then(serde_json::Value::as_str)?;
+    (hex::encode(Sha256::digest(current_avatar.as_bytes())) == legacy_hash)
+        .then(|| persona_id.to_string())
+}
+
+fn persona_version_from_record(record: &serde_json::Value) -> Option<String> {
+    let record: crate::managed_agents::ManagedAgentRecord =
+        serde_json::from_value(record.clone()).ok()?;
+    let definition = record.to_definition_view()?;
+    Some(crate::managed_agents::persona_events::persona_content_hash(
+        &crate::managed_agents::persona_events::persona_event_content(&definition),
+    ))
+}
+
+fn replace_builtin_avatar(record: &mut serde_json::Value, persona_id: &str, now: &str) -> bool {
+    let Some(replacement) = crate::managed_agents::built_in_persona_avatar_url(persona_id) else {
+        return false;
+    };
+    let Some(record) = record.as_object_mut() else {
+        return false;
+    };
+    record.insert(
+        "avatar_url".to_string(),
+        serde_json::Value::String(replacement.to_string()),
+    );
+    record.insert(
+        "updated_at".to_string(),
+        serde_json::Value::String(now.to_string()),
+    );
+    true
 }
 
 /// Create symlinks for shared agent data files from the current (worktree)
