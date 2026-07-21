@@ -1134,12 +1134,20 @@ fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
         "codex Windows install must use powershell; got: {codex_cmds:?}"
     );
 
-    // Goose and buzz-agent must NOT use Windows-specific commands.
+    // Goose pins GOOSE_BIN_DIR on Windows so the binary lands on a discovery path.
     let goose = super::known_acp_runtime_exact("goose").unwrap();
-    assert_eq!(
-        goose.cli_install_commands_for_os(),
-        goose.cli_install_commands,
-        "goose must use the same commands on all platforms"
+    let goose_cmds = goose.cli_install_commands_for_os();
+    assert!(
+        goose_cmds
+            .iter()
+            .any(|c| c.contains("GOOSE_BIN_DIR") && c.contains(".local/bin")),
+        "goose Windows install must pin GOOSE_BIN_DIR; got {goose_cmds:?}"
+    );
+    // buzz-agent still has no OS-specific install surface.
+    let buzz = super::known_acp_runtime_exact("buzz-agent").unwrap();
+    assert!(
+        buzz.cli_install_commands_for_os().is_empty(),
+        "buzz-agent must not grow install commands"
     );
 }
 
@@ -1182,6 +1190,10 @@ fn test_login_shell_path_returns_none_on_windows() {
         "login_shell_path() must return None on Windows to prevent POSIX PATH leaking into native children"
     );
 }
+
+// Windows well-known binary dirs (goose + Node) live in tests/windows_paths.rs.
+#[cfg(windows)]
+mod windows_paths;
 
 // ── Phase C: .cmd shim resolution on Windows ───────────────────────────────
 
@@ -1234,39 +1246,5 @@ fn test_no_git_bash_resolved_returns_none() {
     assert_eq!(
         result, None,
         "empty environment with registry disabled must not resolve a Git Bash"
-    );
-}
-
-/// When `resolve_bash_path` returns `None` (no Git Bash anywhere),
-/// `install_shell_from` maps it to `Err(GIT_BASH_INSTALL_HINT)` — the exact
-/// Doctor hint shown to the user. Tests the pure error-mapping seam, not the
-/// resolution chain.
-#[cfg(windows)]
-#[test]
-fn test_install_shell_from_none_returns_hint() {
-    use crate::commands::install_shell_from;
-    use crate::managed_agents::git_bash;
-
-    let result = install_shell_from(None);
-    assert_eq!(
-        result,
-        Err(git_bash::GIT_BASH_INSTALL_HINT.to_string()),
-        "install_shell_from(None) must return the Git Bash install hint"
-    );
-}
-
-/// When `resolve_bash_path` returns `Some(path)`, `install_shell_from`
-/// passes it through as `Ok`.
-#[cfg(windows)]
-#[test]
-fn test_install_shell_from_some_returns_path() {
-    use crate::commands::install_shell_from;
-
-    let path = std::path::PathBuf::from(r"C:\Git\bin\bash.exe");
-    let result = install_shell_from(Some(path.clone()));
-    assert_eq!(
-        result,
-        Ok(path),
-        "install_shell_from(Some) must return the path as Ok"
     );
 }

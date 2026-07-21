@@ -50,8 +50,9 @@ pub(super) async fn run_agent_models_command(
         }
         crate::managed_agents::configure_runtime_cli(&mut cmd, known_acp_runtime(&agent_command));
         cmd.stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
+            .stderr(std::process::Stdio::piped());
+        crate::windows_console::hide_console(&mut cmd);
+        cmd.output()
             .map_err(|e| format!("failed to spawn buzz-acp models: {e}"))
     })
     .await

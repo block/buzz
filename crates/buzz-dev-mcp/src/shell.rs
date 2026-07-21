@@ -177,6 +177,7 @@ pub async fn run(
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
     set_process_group(&mut cmd);
+    hide_console_window(&mut cmd);
 
     let started = Instant::now();
     let mut child = match cmd.spawn() {
@@ -631,6 +632,21 @@ fn set_process_group(cmd: &mut Command) {
 
 #[cfg(not(unix))]
 fn set_process_group(_cmd: &mut Command) {}
+
+/// Suppress the console window on Windows GUI hosts (Buzz desktop).
+/// No-op on Unix. Local helper — this crate does not share desktop's util.
+fn hide_console_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        // tokio::process::Command exposes creation_flags as an inherent Windows method.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
 
 /// Kill primitive covering the spawned bash AND every descendant it forks,
 /// mirroring the same guarantee across platforms.
