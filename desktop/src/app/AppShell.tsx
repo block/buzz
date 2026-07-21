@@ -789,7 +789,11 @@ export function AppShell() {
                           isCreateChannelOpen={isCreateChannelOpen}
                           isPresencePending={presenceSession.isPending}
                           onAddCommunity={(community) => {
-                            const id = communitiesHook.addCommunity(community);
+                            const id = communitiesHook.addCommunity({
+                              ...community,
+                              pubkey:
+                                community.pubkey ?? identityQuery.data?.pubkey,
+                            });
                             handleSwitchCommunity(id);
                           }}
                           onAddCommunityOpenChange={

@@ -47,14 +47,14 @@ export function migrateMachineOnboardingCompletion(
   pubkey: string,
   /**
    * The `pubkey` field of the active community from localStorage, or
-   * `undefined` if no community is configured. When a community is present
-   * but its `pubkey` field is absent (legacy entries predating the field),
-   * pass `null` — absent is treated as a match so the veteran-upgrade path
-   * is preserved. Pass `undefined` when there is no active community at all.
+   * `undefined` if no community is configured. Community-creation paths stamp
+   * the current identity's pubkey on write; absent pubkey (`null`) therefore
+   * indicates a legacy entry that pre-dates the stamp and is NOT treated as a
+   * voucher. Pass `undefined` when there is no active community at all.
    *
-   * Using the community's own pubkey rather than a bare boolean prevents a
-   * freshly generated post-reset key from being vouched for by a stale
-   * community entry that survived the webview wipe.
+   * Using the community's own pubkey prevents a freshly generated post-reset
+   * key from being vouched for by a stale community entry that survived the
+   * webview wipe.
    */
   activeCommunityPubkey: string | null | undefined,
   isSharedIdentity: boolean,
@@ -68,10 +68,14 @@ export function migrateMachineOnboardingCompletion(
     ) === "true";
 
   // A community entry vouches for the current pubkey only when its recorded
-  // pubkey matches (or is absent — legacy entries predate the field).
+  // pubkey matches. Absent pubkey (legacy entries predating the stamp) and
+  // no community at all (undefined) do not vouch — after community creation
+  // paths stamp pubkey on write, absent means the entry pre-dates the stamp
+  // and cannot be trusted to identify which identity created it.
   const communityVouchesForPubkey =
     activeCommunityPubkey !== undefined &&
-    (activeCommunityPubkey === null || activeCommunityPubkey === pubkey);
+    activeCommunityPubkey !== null &&
+    activeCommunityPubkey === pubkey;
 
   if (
     !completedLegacyOnboarding &&

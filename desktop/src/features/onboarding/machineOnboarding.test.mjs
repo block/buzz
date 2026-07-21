@@ -88,24 +88,29 @@ test("migrate_matching_community_pubkey_vouches_for_current_key", () => {
   });
 });
 
-// ── Absent community pubkey (legacy entry) ───────────────────────────────────
+// ── Absent community pubkey — regression case (Thufir pass 1) ───────────────
 
-test("migrate_absent_community_pubkey_vouches_for_current_key", () => {
-  // Community exists but has no pubkey field (pre-field legacy entry).
-  // `null` represents absent → treated as a match to preserve the
-  // veteran-upgrade path.
+test("migrate_absent_community_pubkey_does_not_vouch_for_fresh_identity", () => {
+  // Stale current-format community with no pubkey stamp (created before the
+  // stamp was added, or from an older build) + freshly generated identity
+  // after a dev reset. The absent pubkey must NOT vouch — this was the
+  // reachable producer of the half-onboarded state.
   withFakeWindow({}, (storage) => {
     const result = migrateMachineOnboardingCompletion(
       PUBKEY_A,
-      null, // absent pubkey on a community that does exist
+      null, // absent pubkey — could be legacy OR an unstamped modern entry
       false,
     );
     assert.equal(
       result,
-      true,
-      "absent pubkey must vouch (legacy compatibility)",
+      false,
+      "absent pubkey must not vouch for a fresh identity",
     );
-    assert.equal(storage.getItem(V2_KEY), "true");
+    assert.equal(
+      storage.getItem(V2_KEY),
+      null,
+      "completion must not be written to storage",
+    );
   });
 });
 
