@@ -305,6 +305,11 @@ pub(crate) fn spawn_transcription_task(
                         continue;
                     }
                 };
+            // Wait before signing: the relay enforces NIP-98 freshness (±60s)
+            // and the gate may hold for up to MAX_HINT_SECONDS (300s). Sign
+            // the kind event and build NIP-98 auth after the wait so both
+            // timestamps are fresh — single clean order: wait → sign → auth → send.
+            crate::relay_admission::wait_for_rate_limit().await;
             let event = match builder.sign_with_keys(&keys) {
                 Ok(e) => e,
                 Err(e) => {
@@ -312,11 +317,6 @@ pub(crate) fn spawn_transcription_task(
                     continue;
                 }
             };
-            // Wait before signing NIP-98 auth: the relay enforces NIP-98
-            // freshness (±60s) and the gate may hold for up to MAX_HINT_SECONDS
-            // (300s). Kind-event signing has no freshness requirement but is
-            // placed after the wait for a single clean order.
-            crate::relay_admission::wait_for_rate_limit().await;
             let body_bytes = event.as_json().into_bytes();
             let url = format!("{relay_base_url}/events");
             let auth_header = match crate::relay::build_nip98_auth_header_for_keys(

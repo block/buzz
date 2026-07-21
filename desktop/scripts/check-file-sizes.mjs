@@ -318,9 +318,10 @@ const overrides = new Map([
   ["src-tauri/src/nostr_convert.rs", 1126],
   // degraded-network resilience: relay.rs grew past 1000 with the addition of
   // relay_error_message hint-capping (oversized-hint test via loopback TCP) and
-  // the relay_admission freshness-verification test. Load-bearing correctness
-  // fix; queued to split test helpers to relay/tests.rs.
-  ["src-tauri/src/relay.rs", 1037],
+  // the relay_admission freshness-verification test. The loopback mock was
+  // hardened (std::net + request-read-before-write) adding ~10 lines.
+  // Queued to split test helpers to relay/tests.rs.
+  ["src-tauri/src/relay.rs", 1047],
   // degraded-network resilience: visibleChannelId field + getter/setter, NOTICE
   // handler for relay back-pressure, and rate-limit gate imports add ~74 lines
   // of load-bearing degraded-network recovery code. Queued to split.

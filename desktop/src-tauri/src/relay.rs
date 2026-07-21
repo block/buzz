@@ -710,23 +710,33 @@ mod tests {
     #[tokio::test]
     async fn oversized_hint_is_capped_in_relay_error_message_string() {
         use crate::relay_admission::MAX_HINT_SECONDS;
-        use std::io::Write as _;
-        use tokio::net::TcpListener;
+        use std::io::{Read as _, Write as _};
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Use a std::net listener on a std::thread — the same pattern as the
+        // relay_admission loopback tests. This avoids two races that cause CI
+        // failures with tokio::net + into_std():
+        //  1. No request read: the client is still sending when the response
+        //     arrives → hyper `UnexpectedMessage`/`Canceled` under load.
+        //  2. into_std() leaves the socket in nonblocking mode → write_all
+        //     may return WouldBlock and silently drop the response.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
         // Serve a 429 with a hint far exceeding MAX_HINT_SECONDS (300).
         let oversized = 1_000_000u64;
         let body = format!(r#"{{"error":"rate-limited: quota exceeded; retry in {oversized}s"}}"#);
         let body_len = body.len();
-        tokio::spawn(async move {
-            if let Ok((stream, _)) = listener.accept().await {
-                let mut std_stream = stream.into_std().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Read the request first so the client finishes sending before
+                // we write the response — mirrors relay_admission.rs pattern.
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
                 let response = format!(
-                    "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\n\r\n{body}"
+                    "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n{body}"
                 );
-                let _ = std_stream.write_all(response.as_bytes());
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
             }
         });
 
