@@ -60,6 +60,33 @@ test("parseBuzzCliCommand returns null preview for heredoc/cat stdin sends", () 
   assert.equal(descriptor?.preview, null);
 });
 
+test("parseBuzzCliCommand returns null preview for --content with embedded command substitution", () => {
+  const descriptor = parseBuzzCliCommand(
+    'buzz messages send --channel some-uuid --content "prefix $(cat /tmp/f)"',
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, null);
+});
+
+test("parseBuzzCliCommand returns null preview for --content with a bare variable", () => {
+  const descriptor = parseBuzzCliCommand(
+    'buzz messages send --channel some-uuid --content "$MESSAGE"',
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, null);
+});
+
+test("parseBuzzCliCommand returns null preview for --content with a prefixed variable", () => {
+  const descriptor = parseBuzzCliCommand(
+    'buzz messages send --channel some-uuid --content "prefix $MESSAGE"',
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, null);
+});
+
 test("parseBuzzCliCommand preserves inline --content for sends", () => {
   const descriptor = parseBuzzCliCommand(
     'buzz messages send --channel agents --content "Hello from inline"',

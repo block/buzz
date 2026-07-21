@@ -456,7 +456,7 @@ function extractBuzzCliInlineContent(
 ): string | null {
   const content = getFlagValue(tokens, range.verbIndex + 1, "--content");
   if (!content || content === "-") return null;
-  if (content.startsWith("$(") || content.startsWith("`")) return null;
+  if (content.includes("$") || content.includes("`")) return null;
   return content;
 }
 
