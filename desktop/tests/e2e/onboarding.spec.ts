@@ -588,8 +588,13 @@ test("first-community choices route join, create, owner, and member intents", as
   });
   await expect(existing).toBeVisible();
   await existing.click();
-  await expect(page.getByTestId("existing-community-choices")).toBeVisible();
-  await expect(page.getByRole("button", { name: "I own it" })).toBeVisible();
+  // Owner/member split lives on its own page, mirroring the hub layout.
+  await expect(
+    page.getByRole("heading", { name: "Reconnect to your community" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "I own the community" }),
+  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "I’m a member or admin" }),
   ).toBeVisible();
@@ -605,7 +610,12 @@ test("first-community choices route join, create, owner, and member intents", as
   );
   await accessInput.fill("https://default.example.com");
   await expect(page.getByTestId("invite-redeem-submit")).toBeEnabled();
+  // Back from the member form returns to the role choice, then to the hub.
   await page.getByRole("button", { name: "Back" }).click();
+  await expect(
+    page.getByRole("button", { name: "I own the community" }),
+  ).toBeVisible();
+  await page.getByTestId("existing-back").click();
 
   await page.getByRole("button", { name: /Join a community/ }).click();
   await expect(

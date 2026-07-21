@@ -56,7 +56,26 @@ const MODAL_PRIMARY_ACTION_CLASS = `${ONBOARDING_PRIMARY_CTA_CLASS} !text-[rgb(v
 const MODAL_BACK_ACTION_CLASS =
   "h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15";
 
-export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
+type HostedCommunityOnboardingProps = {
+  onBack: () => void;
+  /**
+   * Fires once the account is signed in with a linked identity — the parent
+   * uses this to reveal the stage page only after the sign-in modal has
+   * finished driving the flow.
+   */
+  onReady?: () => void;
+  /**
+   * While true, render only the sign-in modal and keep the page scaffolding
+   * hidden, so whatever screen launched the flow stays visible behind it.
+   */
+  stageHidden?: boolean;
+};
+
+export function HostedCommunityOnboarding({
+  onBack,
+  onReady,
+  stageHidden = false,
+}: HostedCommunityOnboardingProps) {
   const onboarding = useCommunityOnboarding();
   const shouldReduceMotion = useReducedMotion();
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;
@@ -310,6 +329,15 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
   const ready = Boolean(auth && identity && !identityMismatch);
   const modalOpen = !loading && !ready;
 
+  // Tell the parent once sign-in completes so it can reveal the stage page.
+  // Guarded so it fires exactly once per mount.
+  const readyNotifiedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (loading || !ready || readyNotifiedRef.current) return;
+    readyNotifiedRef.current = true;
+    onReady?.();
+  }, [loading, onReady, ready]);
+
   const errorBox = error ? (
     <div
       className="flex items-start gap-3 rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-left"
@@ -425,6 +453,130 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
         </form>
       </Card>
     );
+
+  const signInDialog = (
+    <Dialog
+      open={modalOpen}
+      onOpenChange={(open) => {
+        if (open) return;
+        if (action === "Signing in…") {
+          cancelSignInAndGoBack();
+          return;
+        }
+        if (!busy) goBack();
+      }}
+    >
+      <DialogContent
+        className="buzz-onboarding-neutral-theme max-w-[560px] text-foreground [&_button]:shadow-none"
+        closeButtonClassName={ONBOARDING_INK_ICON_CLASS}
+        data-system-color-scheme="light"
+        overlayClassName="bg-[rgb(var(--buzz-hosted-community-modal-overlay-bg)/0.25)]"
+        surface="textured"
+      >
+        <div className="mx-auto flex w-full max-w-sm flex-col items-center py-2 text-center">
+          <BuzzMark className="mb-5 h-auto w-9 text-foreground" />
+
+          {!auth ? (
+            <>
+              <DialogTitle className="text-xl font-medium text-foreground">
+                Set up your community
+              </DialogTitle>
+              <DialogDescription className="mt-2 text-sm leading-6 text-foreground">
+                Sign in to connect a community you already own or create a new
+                one. We’ll open Builderlab in your browser, then bring you back
+                to Buzz.
+              </DialogDescription>
+              {errorBox ? <div className="mt-5 w-full">{errorBox}</div> : null}
+              {action === "Signing in…" ? (
+                <Button
+                  className={`mt-6 ${MODAL_PRIMARY_ACTION_CLASS}`}
+                  disabled
+                >
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                  Waiting for your browser…
+                </Button>
+              ) : (
+                <Button
+                  className={`mt-6 ${MODAL_PRIMARY_ACTION_CLASS}`}
+                  onClick={signIn}
+                >
+                  Sign in to continue
+                </Button>
+              )}
+              {/* Quiet breadcrumb: Buzz itself is open source; this hosted
+                    relay is the one account-backed piece of the flow. */}
+              <p className="mt-6 w-full border-t border-foreground/10 pt-4 text-xs leading-5 text-foreground/45">
+                Buzz is open source. Builderlab hosts the relay for this
+                account.
+              </p>
+            </>
+          ) : !identity ? (
+            <>
+              <DialogTitle className="text-xl font-medium text-foreground">
+                Finish connecting Buzz
+              </DialogTitle>
+              <DialogDescription className="mt-2 text-sm leading-6 text-foreground">
+                Your Builderlab account
+                {auth.email ? ` (${auth.email})` : ""} is ready. Connect this
+                device’s Buzz identity to finish setup. Your private key stays
+                on this device.
+              </DialogDescription>
+              {errorBox ? <div className="mt-5 w-full">{errorBox}</div> : null}
+              <Button
+                className={`mt-6 ${MODAL_PRIMARY_ACTION_CLASS}`}
+                disabled={busy}
+                onClick={() => void connectIdentity()}
+              >
+                {busy ? (
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                ) : null}
+                {busy ? action : "Connect and continue"}
+              </Button>
+            </>
+          ) : (
+            <>
+              <DialogTitle className="text-xl font-medium text-foreground">
+                This account uses a different Buzz identity
+              </DialogTitle>
+              <DialogDescription className="mt-2 text-sm leading-6 text-foreground">
+                This account is connected to another Buzz identity. Reconnect
+                this device, or sign out to use a different email.
+              </DialogDescription>
+              <p className="mt-4 w-full break-all rounded-xl bg-[rgb(var(--buzz-hosted-community-identity-bg)/0.5)] px-4 py-3 text-left font-mono text-xs text-foreground">
+                Account: {identity.npub ?? boundPubkey}
+                <br />
+                This device: {localNpub ?? localPubkey}
+              </p>
+              {errorBox ? <div className="mt-5 w-full">{errorBox}</div> : null}
+              <div className="mt-6 flex flex-col items-stretch gap-2">
+                <Button
+                  className={MODAL_PRIMARY_ACTION_CLASS}
+                  disabled={busy}
+                  onClick={() => void switchToDeviceIdentity()}
+                >
+                  {busy ? action : "Use this device's identity"}
+                </Button>
+                <Button
+                  className={MODAL_BACK_ACTION_CLASS}
+                  disabled={busy}
+                  onClick={() => void signOut()}
+                  variant="ghost"
+                >
+                  Sign in with a different email
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+
+  // While the sign-in modal drives the flow, keep the launching page
+  // visible behind it instead of swapping to this stage prematurely.
+  if (stageHidden) {
+    return signInDialog;
+  }
 
   return (
     <div className="flex min-h-[calc(100dvh-15.625rem)] w-full max-w-[920px] flex-col items-center text-center">
@@ -619,127 +771,7 @@ export function HostedCommunityOnboarding({ onBack }: { onBack: () => void }) {
         </OnboardingFooter>
       ) : null}
 
-      <Dialog
-        open={modalOpen}
-        onOpenChange={(open) => {
-          if (open) return;
-          if (action === "Signing in…") {
-            cancelSignInAndGoBack();
-            return;
-          }
-          if (!busy) goBack();
-        }}
-      >
-        <DialogContent
-          className="buzz-onboarding-neutral-theme max-w-[560px] text-foreground [&_button]:shadow-none"
-          closeButtonClassName={ONBOARDING_INK_ICON_CLASS}
-          data-system-color-scheme="light"
-          overlayClassName="bg-[rgb(var(--buzz-hosted-community-modal-overlay-bg)/0.25)]"
-          surface="textured"
-        >
-          <div className="mx-auto flex w-full max-w-sm flex-col items-center py-2 text-center">
-            <BuzzMark className="mb-5 h-auto w-9 text-foreground" />
-
-            {!auth ? (
-              <>
-                <DialogTitle className="text-xl font-medium text-foreground">
-                  Set up your community
-                </DialogTitle>
-                <DialogDescription className="mt-2 text-sm leading-6 text-foreground">
-                  Sign in to connect a community you already own or create a new
-                  one. We’ll open Builderlab in your browser, then bring you
-                  back to Buzz.
-                </DialogDescription>
-                {errorBox ? (
-                  <div className="mt-5 w-full">{errorBox}</div>
-                ) : null}
-                {action === "Signing in…" ? (
-                  <Button
-                    className={`mt-6 ${MODAL_PRIMARY_ACTION_CLASS}`}
-                    disabled
-                  >
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                    Waiting for your browser…
-                  </Button>
-                ) : (
-                  <Button
-                    className={`mt-6 ${MODAL_PRIMARY_ACTION_CLASS}`}
-                    onClick={signIn}
-                  >
-                    Sign in to continue
-                  </Button>
-                )}
-                {/* Quiet breadcrumb: Buzz itself is open source; this hosted
-                    relay is the one account-backed piece of the flow. */}
-                <p className="mt-6 w-full border-t border-foreground/10 pt-4 text-xs leading-5 text-foreground/45">
-                  Buzz is open source. Builderlab hosts the relay for this
-                  account.
-                </p>
-              </>
-            ) : !identity ? (
-              <>
-                <DialogTitle className="text-xl font-medium text-foreground">
-                  Finish connecting Buzz
-                </DialogTitle>
-                <DialogDescription className="mt-2 text-sm leading-6 text-foreground">
-                  Your Builderlab account
-                  {auth.email ? ` (${auth.email})` : ""} is ready. Connect this
-                  device’s Buzz identity to finish setup. Your private key stays
-                  on this device.
-                </DialogDescription>
-                {errorBox ? (
-                  <div className="mt-5 w-full">{errorBox}</div>
-                ) : null}
-                <Button
-                  className={`mt-6 ${MODAL_PRIMARY_ACTION_CLASS}`}
-                  disabled={busy}
-                  onClick={() => void connectIdentity()}
-                >
-                  {busy ? (
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                  ) : null}
-                  {busy ? action : "Connect and continue"}
-                </Button>
-              </>
-            ) : (
-              <>
-                <DialogTitle className="text-xl font-medium text-foreground">
-                  This account uses a different Buzz identity
-                </DialogTitle>
-                <DialogDescription className="mt-2 text-sm leading-6 text-foreground">
-                  This account is connected to another Buzz identity. Reconnect
-                  this device, or sign out to use a different email.
-                </DialogDescription>
-                <p className="mt-4 w-full break-all rounded-xl bg-[rgb(var(--buzz-hosted-community-identity-bg)/0.5)] px-4 py-3 text-left font-mono text-xs text-foreground">
-                  Account: {identity.npub ?? boundPubkey}
-                  <br />
-                  This device: {localNpub ?? localPubkey}
-                </p>
-                {errorBox ? (
-                  <div className="mt-5 w-full">{errorBox}</div>
-                ) : null}
-                <div className="mt-6 flex flex-col items-stretch gap-2">
-                  <Button
-                    className={MODAL_PRIMARY_ACTION_CLASS}
-                    disabled={busy}
-                    onClick={() => void switchToDeviceIdentity()}
-                  >
-                    {busy ? action : "Use this device's identity"}
-                  </Button>
-                  <Button
-                    className={MODAL_BACK_ACTION_CLASS}
-                    disabled={busy}
-                    onClick={() => void signOut()}
-                    variant="ghost"
-                  >
-                    Sign in with a different email
-                  </Button>
-                </div>
-              </>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
+      {signInDialog}
     </div>
   );
 }

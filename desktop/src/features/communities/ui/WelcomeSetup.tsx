@@ -17,7 +17,7 @@ import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 
-type WelcomeSetupPage = "welcome" | "join" | "member" | "owned";
+type WelcomeSetupPage = "welcome" | "existing" | "join" | "member" | "owned";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
@@ -28,8 +28,6 @@ type WelcomeSetupProps = {
 
 const COMMUNITY_OPTION_CARD_CLASS =
   "w-full max-w-[320px] items-center px-6 py-4 text-center text-sm font-normal leading-6 text-foreground [--buzz-card-textured-min-height:88px] transition-[filter] duration-150 ease-out hover:brightness-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-foreground/35";
-const COMMUNITY_ROLE_CARD_CLASS =
-  "w-full max-w-[240px] items-center px-5 py-3 text-center text-sm font-normal text-foreground [--buzz-card-textured-min-height:64px] transition-[filter] duration-150 ease-out hover:brightness-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-foreground/35";
 
 export function WelcomeSetup({
   initialPage = "welcome",
@@ -39,19 +37,22 @@ export function WelcomeSetup({
   const [page, setPage] = React.useState<WelcomeSetupPage>(initialPage);
   const [transitionMode, setTransitionMode] =
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
-  const [showExistingChoices, setShowExistingChoices] = React.useState(false);
+  // While true, the Builderlab sign-in modal floats over the current page —
+  // we only navigate to the hosted stage once sign-in completes, so the page
+  // behind the modal never changes out from under the user.
+  const [isHostedSignInOpen, setIsHostedSignInOpen] = React.useState(false);
   const communityOnboarding = useCommunityOnboarding();
   const systemColorScheme = useSystemColorScheme();
 
-  const showPage = React.useCallback((nextPage: WelcomeSetupPage) => {
-    setTransitionMode(nextPage === "welcome" ? "backward" : "forward");
-    setPage(nextPage);
-  }, []);
-
-  const showOwnedPage = React.useCallback(() => {
-    setTransitionMode("forward");
-    setPage("owned");
-  }, []);
+  const showPage = React.useCallback(
+    (nextPage: WelcomeSetupPage, direction?: OnboardingTransitionDirection) => {
+      setTransitionMode(
+        direction ?? (nextPage === "welcome" ? "backward" : "forward"),
+      );
+      setPage(nextPage);
+    },
+    [],
+  );
 
   const startConnection = React.useCallback(
     (relayUrl: string) => {
@@ -104,11 +105,11 @@ export function WelcomeSetup({
                   How would you like to get started?
                 </h1>
                 <p className="mt-3 text-sm leading-6 text-foreground/80">
-                  Join a community, create your own, or reconnect one on this
-                  device.
+                  Join with an invite, create your own community, or reconnect
+                  one you already have.
                 </p>
               </div>
-              <div className="flex w-full flex-1 flex-col items-center justify-center gap-5 py-8">
+              <div className="flex w-full flex-1 translate-y-16 flex-col items-center justify-center gap-20 py-8">
                 <Card
                   asChild
                   className={COMMUNITY_OPTION_CARD_CLASS}
@@ -119,12 +120,7 @@ export function WelcomeSetup({
                     onClick={() => showPage("join")}
                     type="button"
                   >
-                    <span>
-                      <span className="block">Join a community</span>
-                      <span className="mt-1 block text-xs text-foreground/65">
-                        Use an invite link or community URL
-                      </span>
-                    </span>
+                    Join a community
                   </button>
                 </Card>
                 <Card
@@ -134,15 +130,10 @@ export function WelcomeSetup({
                 >
                   <button
                     data-testid="community-choice-create"
-                    onClick={() => showOwnedPage()}
+                    onClick={() => setIsHostedSignInOpen(true)}
                     type="button"
                   >
-                    <span>
-                      <span className="block">Create a community</span>
-                      <span className="mt-1 block text-xs text-foreground/65">
-                        Start something new
-                      </span>
-                    </span>
+                    Create a community
                   </button>
                 </Card>
                 <Card
@@ -151,49 +142,74 @@ export function WelcomeSetup({
                   variant="textured"
                 >
                   <button
-                    aria-expanded={showExistingChoices}
-                    onClick={() => setShowExistingChoices((shown) => !shown)}
+                    data-testid="community-choice-existing"
+                    onClick={() => showPage("existing")}
                     type="button"
                   >
-                    <span>
-                      <span className="block">I already have a community</span>
-                      <span className="mt-1 block text-xs text-foreground/65">
-                        Reconnect on this device
-                      </span>
-                    </span>
+                    I already have a community
                   </button>
                 </Card>
-                {showExistingChoices ? (
-                  <div
-                    className="flex w-full flex-wrap justify-center gap-4"
-                    data-testid="existing-community-choices"
-                  >
-                    <Card
-                      asChild
-                      className={COMMUNITY_ROLE_CARD_CLASS}
-                      variant="textured"
-                    >
-                      <button onClick={() => showOwnedPage()} type="button">
-                        I own it
-                      </button>
-                    </Card>
-                    <Card
-                      asChild
-                      className={COMMUNITY_ROLE_CARD_CLASS}
-                      variant="textured"
-                    >
-                      <button onClick={() => showPage("member")} type="button">
-                        I’m a member or admin
-                      </button>
-                    </Card>
-                  </div>
-                ) : null}
               </div>
               <OnboardingFooter>
                 <Button
                   className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
                   data-testid="welcome-setup-back"
                   onClick={onBack}
+                  type="button"
+                  variant="ghost"
+                >
+                  Back
+                </Button>
+              </OnboardingFooter>
+            </OnboardingSlideTransition>
+          ) : page === "existing" ? (
+            <OnboardingSlideTransition
+              className="flex h-full min-h-0 w-full flex-col items-center text-center"
+              containerClassName="h-full min-h-0 [&>.buzz-onboarding-transition-line]:h-full"
+              direction={transitionDirection}
+              transitionKey={`existing-${transitionDirection}`}
+            >
+              <div className="w-full max-w-[760px]">
+                <h1 className="text-title font-normal">
+                  Reconnect to your community
+                </h1>
+                <p className="mt-3 text-sm leading-6 text-foreground/80">
+                  Tell us your role so we can find the fastest way back in.
+                </p>
+              </div>
+              <div className="flex w-full flex-1 translate-y-16 flex-col items-center justify-center gap-20 py-8">
+                <Card
+                  asChild
+                  className={COMMUNITY_OPTION_CARD_CLASS}
+                  variant="textured"
+                >
+                  <button
+                    data-testid="existing-choice-owner"
+                    onClick={() => setIsHostedSignInOpen(true)}
+                    type="button"
+                  >
+                    I own the community
+                  </button>
+                </Card>
+                <Card
+                  asChild
+                  className={COMMUNITY_OPTION_CARD_CLASS}
+                  variant="textured"
+                >
+                  <button
+                    data-testid="existing-choice-member"
+                    onClick={() => showPage("member")}
+                    type="button"
+                  >
+                    I’m a member or admin
+                  </button>
+                </Card>
+              </div>
+              <OnboardingFooter>
+                <Button
+                  className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+                  data-testid="existing-back"
+                  onClick={() => showPage("welcome")}
                   type="button"
                   variant="ghost"
                 >
@@ -231,7 +247,9 @@ export function WelcomeSetup({
                 <InviteRedeemForm
                   error={null}
                   isRedeeming={false}
-                  onCancel={() => showPage("welcome")}
+                  onCancel={() =>
+                    showPage(page === "member" ? "existing" : "welcome")
+                  }
                   onConnect={startConnection}
                   onRedeem={redeemInvite}
                   placeholder="Invite link or community URL"
@@ -240,6 +258,16 @@ export function WelcomeSetup({
               </div>
             </OnboardingSlideTransition>
           )}
+          {isHostedSignInOpen && page !== "owned" ? (
+            <HostedCommunityOnboarding
+              onBack={() => setIsHostedSignInOpen(false)}
+              onReady={() => {
+                setIsHostedSignInOpen(false);
+                showPage("owned");
+              }}
+              stageHidden
+            />
+          ) : null}
         </div>
       </OnboardingFooterProvider>
     </div>
