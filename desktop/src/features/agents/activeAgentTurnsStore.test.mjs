@@ -593,10 +593,7 @@ describe("activeAgentTurnsStore", () => {
       const failure = getLastTurnFailureForAgent(AGENT);
       assert.ok(failure, "turn_error must persist a last-failure record");
       assert.equal(failure.outcome, "idle_timeout");
-      assert.equal(
-        failure.error,
-        "Idle timeout — no agent activity for 30s",
-      );
+      assert.equal(failure.error, "Idle timeout — no agent activity for 30s");
       assert.equal(failure.code, null);
       assert.equal(failure.errorClass, "timeout");
       assert.equal(failure.timestamp, Date.parse("2024-01-01T00:00:05Z"));
@@ -653,7 +650,11 @@ describe("activeAgentTurnsStore", () => {
           kind: "turn_error",
           turnId: "t1",
           channelId: "c1",
-          payload: { outcome: "error", error: "boom", error_class: "transport" },
+          payload: {
+            outcome: "error",
+            error: "boom",
+            error_class: "transport",
+          },
         }),
       ]);
       assert.ok(getLastTurnFailureForAgent(AGENT), "failure must be recorded");
