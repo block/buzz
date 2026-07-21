@@ -218,6 +218,35 @@ fn resp_was_success(status: u16) -> bool {
     (200..300).contains(&status)
 }
 
+/// Returns `true` if a stored-event exhaustion error is ambiguous (the relay
+/// may have executed the command) and should be converted to `DeliveryUnknown`.
+///
+/// Connect failures are definitively pre-relay (never executed) so they remain
+/// retryable. Canonical pre-ingest 429 (`Relay{status:429}`) was provably
+/// rejected before storage — also retryable. Everything else (timeout, body
+/// loss, decode error, proxy 502-504) may have crossed the relay's storage
+/// boundary and must not invite an outer re-sign.
+fn is_stored_event_exhaustion_ambiguous(e: &CliError) -> bool {
+    match e {
+        CliError::Network(net_err) => {
+            // Connect is definitively pre-relay.
+            if net_err.is_connect() {
+                return false;
+            }
+            // Timeout, body, decode, request — ambiguous.
+            net_err.is_timeout() || net_err.is_body() || net_err.is_decode() || net_err.is_request()
+        }
+        // Canonical pre-ingest 429 — relay did not store.
+        CliError::Relay { status: 429, .. } => false,
+        // Proxy 502-504 — relay may have accepted before the proxy failed.
+        CliError::Relay {
+            status: 502..=504, ..
+        } => true,
+        // All other variants are not retried by with_retry_body; not ambiguous.
+        _ => false,
+    }
+}
+
 fn is_safe_media_path_segment(sha256_ext: &str) -> bool {
     let segments: Vec<&str> = sha256_ext.split('.').collect();
     match segments.as_slice() {
@@ -905,14 +934,27 @@ impl BuzzClient {
                         let body_text = resp.text().await.unwrap_or_default();
                         let extracted = extract_relay_message_field(&body_text);
                         let msg = extracted.as_deref().unwrap_or(&body_text);
-                        if !is_last && msg.starts_with("rate-limited:") {
-                            let delay = parse_retry_hint_text(msg)
-                                .map(|s| Duration::from_secs(s.min(RETRY_IN_MAX_SECS)))
-                                .unwrap_or_else(|| jitter_delay(attempt));
-                            tokio::time::sleep(delay).await;
-                            continue;
+                        if msg.starts_with("rate-limited:") {
+                            // Canonical pre-ingest 429: the relay provably did not execute
+                            // the command. Retry while budget remains; on exhaustion return
+                            // Relay(429) (retryable:true) — the caller may retry the exact
+                            // same command. DeliveryUnknown is reserved for outcomes where
+                            // relay execution is genuinely ambiguous (proxy 429, 502-504,
+                            // timeout/body-loss after the relay may have acted).
+                            if !is_last {
+                                let delay = parse_retry_hint_text(msg)
+                                    .map(|s| Duration::from_secs(s.min(RETRY_IN_MAX_SECS)))
+                                    .unwrap_or_else(|| jitter_delay(attempt));
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                            // Budget exhausted — still pre-ingest, still safe to retry.
+                            return Err(CliError::Relay {
+                                status: 429,
+                                body: body_text,
+                            });
                         }
-                        // Non-ingest 429 or final attempt: outcome unknown.
+                        // Non-canonical 429 (proxy-level or unrecognised body): outcome unknown.
                         return Err(CliError::DeliveryUnknown(format!(
                             "moderation command (kind {}) outcome unknown: HTTP 429",
                             event.kind.as_u16()
@@ -970,33 +1012,57 @@ impl BuzzClient {
     /// The full operation — network send AND response body read — is inside the retry
     /// boundary so that a dropped body after a 200 header is retried with the same
     /// serialized event bytes (and a fresh per-attempt NIP-98 auth event).
+    ///
+    /// **Exhaustion policy:** after all attempts, connect failures and canonical
+    /// pre-ingest 429 remain retryable (`CliError::Network`/`CliError::Relay{429}`)
+    /// because the relay provably never executed them. Any other final failure
+    /// (timeout, request, body loss, decode, proxy 502-504) is ambiguous — the
+    /// relay may have stored the event — so we surface `DeliveryUnknown`
+    /// (retryable:false) to prevent an outer re-sign creating a duplicate write.
+    /// Content-addressed uploads are exempt: same bytes ⇒ same hash, so outer
+    /// re-run is safe regardless of the failure kind.
     async fn submit_stored_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let url = format!("{}/events", self.relay_url);
         let body = bytes::Bytes::from(
             serde_json::to_vec(&event)
                 .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?,
         );
-        self.with_retry_body(|| {
-            let body = body.clone();
-            let url = url.clone();
-            async move {
-                // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
-                // event ID, keeping retries safe against the relay's replay guard.
-                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-                let resp = self
-                    .with_auth_tag(
-                        self.http
-                            .post(&url)
-                            .header("Authorization", auth)
-                            .header("Content-Type", "application/json")
-                            .body(body),
-                    )
-                    .send()
-                    .await?;
-                self.handle_response(resp).await
+        let result = self
+            .with_retry_body(|| {
+                let body = body.clone();
+                let url = url.clone();
+                async move {
+                    // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
+                    // event ID, keeping retries safe against the relay's replay guard.
+                    let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                    let resp = self
+                        .with_auth_tag(
+                            self.http
+                                .post(&url)
+                                .header("Authorization", auth)
+                                .header("Content-Type", "application/json")
+                                .body(body),
+                        )
+                        .send()
+                        .await?;
+                    self.handle_response(resp).await
+                }
+            })
+            .await;
+
+        // Translate ambiguous final errors to DeliveryUnknown so an outer agent
+        // following retryable:true does not re-sign and risk a duplicate write.
+        // Connect failures stay Network (retryable:true) — definitively never received.
+        // Canonical pre-ingest 429 (Relay{429}) stays retryable — definitively not stored.
+        if let Err(ref e) = result {
+            if is_stored_event_exhaustion_ambiguous(e) {
+                let kind_u16 = event.kind.as_u16();
+                return Err(CliError::DeliveryUnknown(format!(
+                    "stored event (kind {kind_u16}) outcome unknown after all attempts: {e}"
+                )));
             }
-        })
-        .await
+        }
+        result
     }
 
     /// Publish an ephemeral event via WebSocket with NIP-42 authentication.
@@ -1658,6 +1724,41 @@ mod retry_policy_tests {
         );
     }
 
+    /// A moderation command that receives the canonical pre-ingest 429 on EVERY
+    /// attempt exhausts the retry budget and surfaces `CliError::Relay { status: 429 }` —
+    /// NOT `DeliveryUnknown`. The relay provably never executed the command on any
+    /// attempt, so the caller must be told it is safe to retry.
+    #[tokio::test]
+    async fn exhausted_ingest_429_returns_relay_429_retryable() {
+        let (url, attempts) = test_server(|_n| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"error":"rate-limited: quota exceeded; retry in 0s"}"#.to_string(),
+            )
+        })
+        .await;
+        let client = test_client(&url);
+        let event = make_moderation_event(client.keys(), 9040);
+        let err = client.submit_event(event).await.unwrap_err();
+
+        // Must be Relay(429), not DeliveryUnknown.
+        assert!(
+            matches!(err, CliError::Relay { status: 429, .. }),
+            "exhausted ingest 429 must surface as Relay(429), got {err:?}"
+        );
+        // Must NOT be retryable:false.
+        assert!(
+            crate::error::is_retryable_error(&err),
+            "Relay(429) must be retryable; got {err:?}"
+        );
+        // All RETRY_MAX_ATTEMPTS must have been tried.
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "all retry attempts must fire for exhausted ingest 429"
+        );
+    }
+
     /// A moderation command (kind 9042) that gets HTTP 502 returns `DeliveryUnknown`
     /// immediately — proxy errors leave relay execution state ambiguous.
     #[tokio::test]
@@ -2095,6 +2196,100 @@ mod retry_policy_tests {
         assert!(
             auths.iter().all(|a| a.contains("Nostr ")),
             "each attempt must carry Nostr auth"
+        );
+    }
+
+    /// When all retry attempts for a stored event end with a partial body (200
+    /// headers, dropped connection), the final error must be `DeliveryUnknown`
+    /// (retryable:false) — the relay may have stored the event on any attempt, so
+    /// an outer re-sign would risk a duplicate visible write.  All three attempts
+    /// must fire with identical serialized event bytes.
+    #[tokio::test]
+    async fn stored_event_all_body_losses_return_delivery_unknown() {
+        use tokio::io::AsyncWriteExt;
+
+        let bodies: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bodies2 = bodies.clone();
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter2 = counter.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                counter2.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0u8; 8192];
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    stream.read(&mut buf),
+                )
+                .await;
+                // Extract the request body (after the blank line separating headers).
+                let raw = buf.split(|&b| b == 0).next().unwrap_or(&buf).to_vec();
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    bodies2.lock().unwrap().push(raw[pos + 4..].to_vec());
+                }
+                // Partial body: send headers + truncated body, then drop.
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"partial\":",
+                    )
+                    .await;
+                // Drop stream — causes body-loss error on the client side.
+            }
+        });
+
+        let base = format!("http://{addr}");
+        let client = test_client(&base);
+        let event = make_stored_event(client.keys());
+        let err = client.submit_event(event).await.unwrap_err();
+
+        // Final error must be DeliveryUnknown — relay may have accepted any attempt.
+        assert!(
+            matches!(err, CliError::DeliveryUnknown(_)),
+            "all-body-loss exhaustion must return DeliveryUnknown, got {err:?}"
+        );
+        // All RETRY_MAX_ATTEMPTS must have fired.
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "all 3 attempts must be made before surfacing DeliveryUnknown"
+        );
+        // All attempts must have sent identical serialized event bytes.
+        let captured = bodies.lock().unwrap();
+        if captured.len() >= 2 {
+            assert_eq!(
+                captured[0], captured[1],
+                "all attempts must use identical event bytes"
+            );
+        }
+    }
+
+    /// When all retry attempts for a stored event return HTTP 502, the final error
+    /// must be `DeliveryUnknown` (retryable:false) — a proxy 502 may occur after
+    /// the relay accepted the event.
+    #[tokio::test]
+    async fn stored_event_all_502s_return_delivery_unknown() {
+        let (url, attempts) =
+            test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
+        let client = test_client(&url);
+        let event = make_stored_event(client.keys());
+        let err = client.submit_event(event).await.unwrap_err();
+
+        assert!(
+            matches!(err, CliError::DeliveryUnknown(_)),
+            "all-502 exhaustion must return DeliveryUnknown, got {err:?}"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "all 3 attempts must fire before surfacing DeliveryUnknown"
         );
     }
 }
