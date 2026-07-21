@@ -14,6 +14,8 @@ import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { useLastTurnFailure } from "@/features/agents/activeAgentTurnsStore";
+import type { TurnFailure } from "@/features/agents/activeAgentTurnsStore";
 import { useNow } from "@/shared/lib/useNow";
 import type {
   ManagedAgent,
@@ -23,7 +25,10 @@ import type {
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { AgentConfigPanel } from "./AgentConfigPanel";
-import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
+import {
+  friendlyAgentLastError,
+  friendlyTurnErrorCopy,
+} from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
@@ -93,6 +98,13 @@ export function ManagedAgentRow({
     agent.lastError,
     agent.lastErrorCode,
   );
+  // Classified turn failure from the observer stream (turn_error/agent_panic,
+  // see activeAgentTurnsStore) — distinct pipeline from `agent.lastError`
+  // above (recovered from the process log tail on exit): this one persists
+  // past a mid-session turn failure that never crashed the process, so the
+  // "Working in #channel" badge above doesn't just silently vanish (#1659).
+  // Cleared once the agent completes a turn successfully.
+  const lastTurnFailure = useLastTurnFailure(agent.pubkey);
 
   return (
     <div
@@ -125,6 +137,7 @@ export function ManagedAgentRow({
               <StatusBlock
                 friendlyError={friendlyError}
                 isWorking={isWorking}
+                lastTurnFailure={lastTurnFailure}
                 presenceLoaded={presenceLoaded}
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
@@ -148,6 +161,7 @@ export function ManagedAgentRow({
               <StatusBlock
                 friendlyError={friendlyError}
                 isWorking={isWorking}
+                lastTurnFailure={lastTurnFailure}
                 presenceLoaded={presenceLoaded}
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
@@ -345,6 +359,7 @@ function WorkingBadge({
 function StatusBlock({
   friendlyError,
   isWorking,
+  lastTurnFailure,
   presenceLoaded,
   presenceStatus,
   processDetail,
@@ -352,6 +367,7 @@ function StatusBlock({
 }: {
   friendlyError: ReturnType<typeof friendlyAgentLastError>;
   isWorking: boolean;
+  lastTurnFailure: TurnFailure | null;
   presenceLoaded: boolean;
   presenceStatus: PresenceStatus | undefined;
   processDetail: string;
@@ -378,6 +394,16 @@ function StatusBlock({
           data-testid="managed-agent-last-error"
         >
           {friendlyError.copy}
+        </p>
+      ) : null}
+      {lastTurnFailure ? (
+        <p
+          className="text-xs text-muted-foreground"
+          data-testid="managed-agent-last-turn-error"
+        >
+          Last turn error (
+          {lastTurnFailure.errorClass ?? lastTurnFailure.outcome}):{" "}
+          {friendlyTurnErrorCopy(lastTurnFailure.error, lastTurnFailure.code)}
         </p>
       ) : null}
     </div>
