@@ -231,6 +231,17 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
         .map_err(|_| MALFORMED_RESPONSE_MESSAGE.to_string())
 }
 
+/// Extract the `retry in Ns` hint from a rate-limit error string.
+///
+/// Matches the canonical format emitted by the relay in both HTTP 429 bodies
+/// and CLOSED/NOTICE messages: `quota exceeded; retry in 4s`.
+fn extract_retry_in_hint(body: &str) -> Option<u64> {
+    let re_match = body.find("retry in ")?;
+    let after = &body[re_match + "retry in ".len()..];
+    let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u64>().ok()
+}
+
 pub async fn relay_error_message(response: reqwest::Response) -> String {
     let status = response.status();
 
@@ -249,6 +260,16 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
 
     // Real relay error: extract the structured message field if available.
     let body = response.text().await.unwrap_or_default();
+
+    // 429 Too Many Requests → typed `relay rate-limited:` prefix so the TS
+    // client can activate the rate-limit gate without confusing it with a
+    // connectivity failure (`relay unreachable:`).
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        if let Some(secs) = extract_retry_in_hint(&body) {
+            return format!("relay rate-limited: retry in {secs}s");
+        }
+        return "relay rate-limited: quota exceeded".to_string();
+    }
 
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
         if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
@@ -624,9 +645,34 @@ pub async fn submit_signed_event_with_keys(
 mod tests {
     use super::{
         build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-        parse_command_response, relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
+        extract_retry_in_hint, parse_command_response, relay_http_base_url,
+        MALFORMED_RESPONSE_MESSAGE,
     };
     use serde::Deserialize;
+
+    // ── extract_retry_in_hint ────────────────────────────────────────────────
+
+    #[test]
+    fn extracts_hint_from_429_body() {
+        assert_eq!(
+            extract_retry_in_hint(r#"{"error":"rate-limited: quota exceeded; retry in 4s"}"#),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn extracts_hint_when_no_json_wrapper() {
+        assert_eq!(extract_retry_in_hint("retry in 30s"), Some(30));
+    }
+
+    #[test]
+    fn returns_none_when_no_hint_present() {
+        assert_eq!(
+            extract_retry_in_hint(r#"{"error":"rate-limited: quota exceeded"}"#),
+            None
+        );
+        assert_eq!(extract_retry_in_hint(""), None);
+    }
 
     // ── effective_agent_relay_url: per-agent override precedence ─────────────
 

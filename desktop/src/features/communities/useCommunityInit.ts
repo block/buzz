@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
 import { applyCommunity, getDefaultRelayUrl } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { getOverrides } from "@/shared/features";
@@ -34,6 +35,7 @@ import type { Community } from "./types";
  */
 function resetCommunityState(): void {
   relayClient.disconnect();
+  resetRateLimitGate();
   clearAllDrafts();
   resetAgentObserverStore();
   resetActiveAgentTurnsStore();

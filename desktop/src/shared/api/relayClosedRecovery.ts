@@ -1,4 +1,8 @@
-import { isRetryableRelayClosed } from "@/shared/api/relayClosedPolicy";
+import { classifyRelayClosed } from "@/shared/api/relayClosedPolicy";
+import {
+  activateRateLimit,
+  parseRateLimitHint,
+} from "@/shared/api/relayRateLimitGate";
 import {
   sortEvents,
   type RelaySubscription,
@@ -62,17 +66,35 @@ function recoverLiveSubscriptionFromClosed({
 }) {
   subscription.resolveReady?.();
   subscription.resolveReady = undefined;
-  if (!isRetryableRelayClosed(message)) {
+
+  const closedClass = classifyRelayClosed(message);
+
+  if (closedClass === "terminal") {
+    // Auth/access/filter failure — permanently remove the subscription so it
+    // doesn't silently loop.
     subscriptions.delete(subId);
     return;
   }
+
   if (subscription.closedRetryTimeout !== undefined) return;
 
   const attempt = subscription.closedRetryAttempt ?? 0;
-  const delayMs = Math.min(
+  const backoffMs = Math.min(
     RETRY_BASE_DELAY_MS * 2 ** attempt,
     RETRY_MAX_DELAY_MS,
   );
+
+  let delayMs = backoffMs;
+
+  if (closedClass === "rate-limited") {
+    // Activate the gate so concurrent operations back off too.
+    const hintSeconds = parseRateLimitHint(message);
+    activateRateLimit(hintSeconds);
+    // Retry no sooner than the gate window; at least as long as the backoff.
+    const gateRemainingMs = hintSeconds !== null ? hintSeconds * 1_000 : 10_000;
+    delayMs = Math.max(backoffMs, gateRemainingMs);
+  }
+
   subscription.closedRetryAttempt = attempt + 1;
   subscription.closedRetryTimeout = window.setTimeout(() => {
     subscription.closedRetryTimeout = undefined;

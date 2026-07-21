@@ -1,4 +1,8 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import {
+  activateRateLimit,
+  parseRateLimitHint,
+} from "@/shared/api/relayRateLimitGate";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -287,7 +291,13 @@ export async function invokeTauri<T>(
   try {
     return await tauriInvoke<T>(command, args);
   } catch (error) {
-    throw toTauriError(error);
+    const err = toTauriError(error);
+    // Rust emits `relay rate-limited:` for HTTP 429 responses. Activate the
+    // shared gate so the TS relay client backs off for the same window.
+    if (err.message.startsWith("relay rate-limited:")) {
+      activateRateLimit(parseRateLimitHint(err.message));
+    }
+    throw err;
   }
 }
 
