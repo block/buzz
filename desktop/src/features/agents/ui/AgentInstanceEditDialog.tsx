@@ -726,8 +726,14 @@ export function AgentInstanceEditDialog({
           autoRestartOnConfigChange,
         );
       }
+      // Rename saved locally, but the relay may still hold the old kind:0
+      // profile (stale @mention resolution and From: lines). Re-saving won't
+      // retry — name_changed compares against the already-updated record —
+      // but an agent start will, via reconcile_agent_profile.
       if (result.profileSyncError) {
-        console.warn("Relay profile sync failed:", result.profileSyncError);
+        toast.warning(
+          `${result.agent.name} was saved, but relay profile sync failed: ${result.profileSyncError}. The relay may still show the old name — restart the agent to retry the sync.`,
+        );
       }
       handleOpenChange(false);
       onUpdated?.(result.agent);
