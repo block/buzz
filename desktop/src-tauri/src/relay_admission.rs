@@ -1,11 +1,21 @@
 //! Admission gate for relay HTTP bridge requests.
 //!
-//! When the relay answers 429, every relay-backed Tauri command must hold new
-//! HTTP requests until the quota window clears — matching the TS-side gate in
-//! `relayRateLimitGate.ts` that already governs WebSocket operations. Gating
-//! here, at the single Rust choke point all relay HTTP flows share, covers
-//! every command (including raw `invoke()` call sites that bypass
-//! `invokeTauri`) without touching dozens of TS callers.
+//! When the relay answers 429, every relay-backed HTTP request must hold new
+//! sends until the quota window clears — matching the TS-side gate in
+//! `relayRateLimitGate.ts` that already governs WebSocket operations.
+//!
+//! **Coverage:** all entry points in `relay.rs` (`query_relay_at`,
+//! `submit_event`, `submit_signed_event`, `submit_signed_event_with_keys`,
+//! `sync_managed_agent_profile`) and the three previously-direct senders
+//! (`submit_engram_event` in snapshot import + team_snapshot, huddle STT)
+//! all call `wait_for_rate_limit()` before `.send()`. Remaining relay-derived
+//! sends (`/info`, media upload/download) operate on per-request credentials
+//! that are not tied to the community quota principal; they are explicitly
+//! outside this gate's admission domain.
+//!
+//! **Community scope:** the gate is reset on every `apply_workspace` call,
+//! mirroring the TS gate's `resetRateLimitGate()` on community switch in
+//! `useCommunityInit.ts`. A 429 from community A cannot stall community B.
 //!
 //! Mirrors the TS gate's semantics: overlapping hints never shrink the window,
 //! and a hint-less 429 arms the same 10-second default.
@@ -18,20 +28,28 @@ use tokio::time::{sleep_until, Duration, Instant};
 /// so both halves of the client back off for the same window.
 const DEFAULT_RATE_LIMIT_SECONDS: u64 = 10;
 
+/// Maximum hint the gate will honour from a relay 429 response.
+/// Prevents an untrusted relay from pinning traffic for an unreasonable window
+/// or overflowing `Instant` arithmetic.
+const MAX_HINT_SECONDS: u64 = 300;
+
 static GATE_EXPIRY: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Arm (or extend) the admission gate from a relay 429.
 ///
 /// `retry_in_seconds` is the parsed `retry in Ns` hint, if the relay provided
-/// one. The expiry only ever moves forward: a shorter hint arriving under a
-/// longer active window is ignored, so overlapping 429s never schedule a
-/// premature retry.
+/// one. Hints are capped at `MAX_HINT_SECONDS`; values of zero or `None` use
+/// `DEFAULT_RATE_LIMIT_SECONDS`. The expiry only ever moves forward: a shorter
+/// hint arriving under a longer active window is ignored, so overlapping 429s
+/// never schedule a premature retry.
 pub fn activate_rate_limit(retry_in_seconds: Option<u64>) {
     let secs = match retry_in_seconds {
-        Some(s) if s > 0 => s,
+        Some(s) if s > 0 => s.min(MAX_HINT_SECONDS),
         _ => DEFAULT_RATE_LIMIT_SECONDS,
     };
-    let new_expiry = Instant::now() + Duration::from_secs(secs);
+    let new_expiry = Instant::now()
+        .checked_add(Duration::from_secs(secs))
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(DEFAULT_RATE_LIMIT_SECONDS));
     let mut guard = GATE_EXPIRY.lock().unwrap_or_else(|e| e.into_inner());
     match *guard {
         Some(current) if new_expiry <= current => {}
@@ -59,7 +77,17 @@ pub async fn wait_for_rate_limit() {
     }
 }
 
-/// Reset the gate. Test-only: production never clears an armed window early.
+/// Reset the gate on a workspace/community change.
+///
+/// Called by `apply_workspace` to ensure a 429 from community A does not stall
+/// requests to community B. Mirrors `resetRateLimitGate()` in
+/// `useCommunityInit.ts`.
+pub fn reset_gate_for_workspace_change() {
+    *GATE_EXPIRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Reset the gate. Test-only: production never clears an armed window early
+/// except via `reset_gate_for_workspace_change`.
 #[cfg(test)]
 pub fn reset_rate_limit_gate() {
     *GATE_EXPIRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -135,6 +163,90 @@ mod tests {
         reset_rate_limit_gate();
     }
 
+    // ── hint capping and overflow safety ─────────────────────────────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn hint_zero_uses_default() {
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+        activate_rate_limit(Some(0));
+        let start = Instant::now();
+        wait_for_rate_limit().await;
+        assert_eq!(
+            Instant::now() - start,
+            Duration::from_secs(DEFAULT_RATE_LIMIT_SECONDS),
+            "hint=0 must use the default"
+        );
+        reset_rate_limit_gate();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hint_at_max_is_honoured() {
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+        activate_rate_limit(Some(MAX_HINT_SECONDS));
+        let start = Instant::now();
+        wait_for_rate_limit().await;
+        assert_eq!(
+            Instant::now() - start,
+            Duration::from_secs(MAX_HINT_SECONDS),
+            "hint at the cap must be honoured in full"
+        );
+        reset_rate_limit_gate();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oversize_hint_is_clamped_to_max() {
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+        // An oversize hint (including u64::MAX) must clamp rather than panic.
+        activate_rate_limit(Some(u64::MAX));
+        let start = Instant::now();
+        wait_for_rate_limit().await;
+        assert_eq!(
+            Instant::now() - start,
+            Duration::from_secs(MAX_HINT_SECONDS),
+            "u64::MAX hint must clamp to MAX_HINT_SECONDS"
+        );
+        reset_rate_limit_gate();
+    }
+
+    // ── community / workspace boundary ───────────────────────────────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn workspace_change_clears_armed_gate() {
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+        activate_rate_limit(Some(60));
+        // Switch workspace — gate for community A must not stall community B.
+        reset_gate_for_workspace_change();
+        let start = Instant::now();
+        wait_for_rate_limit().await;
+        assert_eq!(
+            Instant::now(),
+            start,
+            "gate must be clear immediately after workspace change"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn community_a_gate_does_not_block_community_b() {
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+        // Community A gets a 429 with a 30s window.
+        activate_rate_limit(Some(30));
+        // Community switch.
+        reset_gate_for_workspace_change();
+        // Community B's first request must not wait.
+        let start = Instant::now();
+        wait_for_rate_limit().await;
+        assert_eq!(
+            Instant::now(),
+            start,
+            "community A's armed gate must not delay community B"
+        );
+    }
+
     /// Acceptance: a 429 from one relay-backed command withholds the next
     /// relay-backed command until the hinted window expires, then it resumes.
     ///
@@ -181,8 +293,6 @@ mod tests {
         *state.relay_url_override.lock().unwrap() = Some(format!("http://{addr}"));
         let filters = [serde_json::json!({ "kinds": [1], "limit": 1 })];
 
-        let started = std::time::Instant::now();
-
         // Command 1: the relay answers 429 — the caller sees the typed error
         // and the admission gate arms for the hinted 1s window.
         let err = crate::relay::query_relay(&state, &filters)
@@ -193,6 +303,10 @@ mod tests {
             "429 must map to the typed rate-limited error, got: {err}"
         );
 
+        // Measure from after command 1 returns so the timer only covers the
+        // admission wait (not command 1's own network time).
+        let after_first_429 = std::time::Instant::now();
+
         // Command 2: must be withheld until the window expires, then resume
         // and succeed against the now-healthy relay.
         let events = crate::relay::query_relay(&state, &filters)
@@ -200,10 +314,11 @@ mod tests {
             .expect("second command must resume and succeed after expiry");
         assert!(events.is_empty());
 
+        let wait_elapsed = after_first_429.elapsed();
         assert!(
-            started.elapsed() >= Duration::from_secs(1),
+            wait_elapsed >= Duration::from_secs(1),
             "second command ran {}ms after the 429 — it must wait out the full 1s window",
-            started.elapsed().as_millis()
+            wait_elapsed.as_millis()
         );
 
         server.join().unwrap();

@@ -910,6 +910,7 @@ async fn submit_engram_event(
     if let Some(tag) = auth_tag {
         request = request.header("x-auth-tag", tag);
     }
+    crate::relay_admission::wait_for_rate_limit().await;
     let response = request
         .body(event_json.to_vec())
         .send()
