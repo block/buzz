@@ -1345,6 +1345,16 @@ async fn tokio_main() -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
 
+    let agent_display_name =
+        pool::fetch_agent_display_name(&relay.rest_client(), &config.keys).await;
+    if let Some(ref display_name) = agent_display_name {
+        tracing::info!(display_name, "resolved agent display name");
+    } else {
+        tracing::warn!(
+            "agent kind:0 profile has no display name; identity prompt will use pubkey only"
+        );
+    }
+
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
     // Best-effort: a failure here is non-fatal (we just lose the startup window
@@ -1554,6 +1564,7 @@ async fn tokio_main() -> Result<()> {
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
         agent_keys: config.keys.clone(),
+        agent_display_name,
         agent_owner_pubkey: startup_owner
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),

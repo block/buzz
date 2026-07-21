@@ -1025,7 +1025,7 @@ const MAX_PROMPT_LABEL_LEN: usize = 64;
 /// Sanitize a profile label for safe embedding in prompt structure.
 /// Strips control characters (newlines, tabs, etc.) that could break
 /// prompt formatting, and truncates to [`MAX_PROMPT_LABEL_LEN`].
-fn sanitize_prompt_label(raw: &str) -> Option<String> {
+pub(crate) fn sanitize_prompt_label(raw: &str) -> Option<String> {
     let clean: String = raw
         .trim()
         .chars()
@@ -1363,6 +1363,8 @@ pub struct FormatPromptArgs<'a> {
     pub base_prompt: Option<&'a str>,
     /// System prompt content for legacy agents (protocol_version < 2).
     pub system_prompt: Option<&'a str>,
+    /// Agent identity section for legacy agents (protocol_version < 2).
+    pub agent_identity: Option<&'a str>,
     /// Team instructions for legacy agents, rendered after `[System]`.
     pub team_instructions: Option<&'a str>,
     /// Rendered `[Channel Canvas]` metadata section for legacy agents.
@@ -1386,12 +1388,13 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 /// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):
-/// 0. `[Base]` — base prompt (only for legacy agents without systemPrompt support)
-/// 1. `[System]` — system prompt (only for legacy agents without systemPrompt support)
-/// 2. `[Agent Memory — core]` — if agent core memory is set
-/// 3. `[Context]` — scope, channel name, and contextual hints for the agent
-/// 4. `[Thread Context]` or `[Conversation Context]` — if fetched
-/// 5. `[Event]` / `[Buzz events]` — the triggering event(s)
+/// 0. `[Agent Identity]` — agent identity (legacy agents only)
+/// 1. `[Base]` — base prompt (legacy agents only)
+/// 2. `[System]` — system prompt (legacy agents only)
+/// 3. `[Agent Memory — core]` — if agent core memory is set
+/// 4. `[Context]` — scope, channel name, and contextual hints for the agent
+/// 5. `[Thread Context]` or `[Conversation Context]` — if fetched
+/// 6. `[Event]` / `[Buzz events]` — the triggering event(s)
 ///
 /// Each section is returned as its own block rather than one joined string so
 /// the observer frame's size trimmer (`fit_observer_event_to_budget`) elides
@@ -1427,6 +1430,9 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // system_prompt as user-message sections. Modern agents receive these
     // via the system role in session/new.
     if !args.has_system_prompt_support {
+        if let Some(identity) = args.agent_identity {
+            sections.push(identity.to_string());
+        }
         if let Some(bp) = args.base_prompt {
             sections.push(base_section(bp));
         }
@@ -2295,6 +2301,35 @@ mod tests {
             "modern agents must not get core in the user message; got: {prompt}"
         );
         assert!(prompt.starts_with("[Context]"));
+    }
+
+    #[test]
+    fn test_format_prompt_legacy_identity_precedes_base_and_system() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hi");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let sections = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                agent_identity: Some("[Agent Identity]\nidentity"),
+                base_prompt: Some("base"),
+                system_prompt: Some("persona"),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(sections[0], "[Agent Identity]\nidentity");
+        assert_eq!(sections[1], "[Base]\nbase");
+        assert_eq!(sections[2], "[System]\npersona");
     }
 
     #[test]
