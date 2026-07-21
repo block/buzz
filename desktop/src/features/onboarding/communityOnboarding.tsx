@@ -257,12 +257,27 @@ export type ProfileCheckAction =
   | { action: "show-profile" };
 
 /**
+ * Returns true when a live transaction snapshot still represents the
+ * same connecting request that launched the profile check.
+ *
+ * Extracted as a pure predicate so the stale-result guard in App.tsx can
+ * be unit-tested without mounting a component.
+ */
+export function isTransactionStillConnecting(
+  live: CommunityOnboardingTransaction | null | undefined,
+  transactionId: string,
+): boolean {
+  return live?.id === transactionId && live.stage === "connecting";
+}
+
+/**
  * Runs a bounded profile fetch and returns the action to take at the
  * `connecting → profile` transition.
  *
- * Accepts `fetchProfile` and `timeoutMs` as parameters so callers (and tests)
- * can supply controlled implementations. The timeout promise uses the caller-
- * supplied `setTimeout` so fake timers work in tests without touching globals.
+ * Accepts `fetchProfile`, `timeoutMs`, and `scheduleTimeout` as parameters so
+ * callers (and tests) can supply controlled implementations. `scheduleTimeout`
+ * must return a cancellation handle (like `window.setTimeout`) so the timer
+ * can be cleared when the fetch settles before the deadline.
  *
  * Any fetch error or timeout → `{ action: "show-profile" }` (never strands
  * onboarding).
@@ -270,17 +285,21 @@ export type ProfileCheckAction =
 export async function resolveProfileCheckAction(
   fetchProfile: () => Promise<Profile>,
   timeoutMs: number,
-  scheduleTimeout: (fn: () => void, ms: number) => void = (fn, ms) =>
-    void window.setTimeout(fn, ms),
+  scheduleTimeout: (
+    fn: () => void,
+    ms: number,
+  ) => ReturnType<typeof setTimeout> = (fn, ms) => window.setTimeout(fn, ms),
 ): Promise<ProfileCheckAction> {
+  let timerId: ReturnType<typeof setTimeout> | undefined;
   try {
     const profile = await Promise.race([
       fetchProfile(),
-      new Promise<never>((_, reject) =>
-        scheduleTimeout(
-          () => reject(new Error("profile-check-timeout")),
-          timeoutMs,
-        ),
+      new Promise<never>(
+        (_, reject) =>
+          (timerId = scheduleTimeout(
+            () => reject(new Error("profile-check-timeout")),
+            timeoutMs,
+          )),
       ),
     ]);
     return shouldSkipCommunityOnboarding(profile)
@@ -288,6 +307,8 @@ export async function resolveProfileCheckAction(
       : { action: "show-profile" };
   } catch {
     return { action: "show-profile" };
+  } finally {
+    if (timerId !== undefined) clearTimeout(timerId);
   }
 }
 

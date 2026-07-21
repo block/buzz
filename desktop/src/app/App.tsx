@@ -22,6 +22,7 @@ import {
   useCommunityOnboarding,
   markCommunityOnboardingComplete,
   resolveProfileCheckAction,
+  isTransactionStillConnecting,
 } from "@/features/onboarding/communityOnboarding";
 import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboardingFlow";
 import {
@@ -409,20 +410,15 @@ function CommunityApp({
     if (profileCheckTransactionRef.current === transactionId) return;
     profileCheckTransactionRef.current = transactionId;
 
-    // Settled flag: ensures exactly one of {skip, show-profile} fires even if
-    // a timeout and a late success both resolve for the same request.
-    let settled = false;
-
+    // resolveProfileCheckAction resolves exactly once (Promise.race + timer
+    // cleared on settle), so no settled flag is needed here.
     void resolveProfileCheckAction(getProfile, 10_000).then((result) => {
-      if (settled) return;
-      settled = true;
-
-      // Atomic staleness guard: the transaction must still be the same one
-      // that launched this request AND must still be in the connecting stage.
-      // This covers: (a) user cancelled A and started B — B must not be
-      // cleared; (b) cancel without replacement — ref is null, guard fires.
-      const live = transactionRef.current;
-      if (live?.id !== transactionId || live.stage !== "connecting") return;
+      // Atomic staleness guard via isTransactionStillConnecting: the
+      // transaction must still be the same one that launched this request
+      // AND still be in connecting. Covers cancel+replacement (B's ID !== A's)
+      // and cancel-without-replacement (transactionRef.current is null).
+      if (!isTransactionStillConnecting(transactionRef.current, transactionId))
+        return;
 
       if (result.action === "skip") {
         markCommunityOnboardingComplete(result.profile.pubkey, relayUrl);

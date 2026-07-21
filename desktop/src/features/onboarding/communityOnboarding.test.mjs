@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   clearCommunityOnboardingTransaction,
+  isTransactionStillConnecting,
   loadCommunityOnboardingTransaction,
   markCommunityOnboardingComplete,
   resolveProfileCheckAction,
@@ -284,5 +285,60 @@ test("resolveProfileCheckAction_lateSuccessAfterTimeout_doesNotSkip", async () =
     result.action,
     "show-profile",
     "late success after timeout must not complete onboarding",
+  );
+});
+
+// ── isTransactionStillConnecting — stale-transaction guard ───────────────────
+
+/**
+ * Builds a minimal transaction stub for testing the guard predicate.
+ * Only `id` and `stage` are inspected by isTransactionStillConnecting.
+ */
+function makeTransaction(id, stage) {
+  return {
+    id,
+    stage,
+    source: "add-community",
+    relayUrl: "wss://relay.example",
+    communityName: "test",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+test("isTransactionStillConnecting_matchingIdAndStage_returnsTrue", () => {
+  assert.equal(
+    isTransactionStillConnecting(makeTransaction("tx-a", "connecting"), "tx-a"),
+    true,
+    "same id + connecting stage → guard passes",
+  );
+});
+
+test("isTransactionStillConnecting_replacedTransaction_returnsFalse", () => {
+  // Transaction B replaced A while the fetch was in flight.
+  // The callback for A must not clear B.
+  assert.equal(
+    isTransactionStillConnecting(makeTransaction("tx-b", "connecting"), "tx-a"),
+    false,
+    "different id (replacement) → guard rejects stale success",
+  );
+});
+
+test("isTransactionStillConnecting_cancelWithNoReplacement_returnsFalse", () => {
+  // User cancelled without starting a new transaction; ref is null.
+  assert.equal(
+    isTransactionStillConnecting(null, "tx-a"),
+    false,
+    "null ref (cancel without replacement) → guard rejects stale success",
+  );
+});
+
+test("isTransactionStillConnecting_stagePastConnecting_returnsFalse", () => {
+  // Fallback already advanced the transaction to 'profile' before the skip
+  // result arrived — double-completion must not occur.
+  assert.equal(
+    isTransactionStillConnecting(makeTransaction("tx-a", "profile"), "tx-a"),
+    false,
+    "stage advanced past connecting → guard rejects late action",
   );
 });
