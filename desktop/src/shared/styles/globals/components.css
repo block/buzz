@@ -37,7 +37,13 @@
     bottom: calc(var(--buzz-sidebar-edge-fade-size) * -1);
     height: var(--buzz-sidebar-edge-fade-size);
     left: 0;
+    opacity: 0;
     right: 0;
+  }
+
+  [data-testid="app-sidebar"][data-scrolled-from-top="true"]
+    [data-testid="sidebar-pinned-header"]::before {
+    opacity: 1;
   }
 
   [data-testid="app-sidebar"] [data-sidebar="footer"]::before {
