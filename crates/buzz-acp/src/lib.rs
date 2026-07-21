@@ -343,72 +343,102 @@ fn spawn_relay_observer_publisher(
     owner_pubkey: PublicKey,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut coalescer = ObserverChunkCoalescer::default();
-        let mut pacer = ObserverPublishPacer::new();
-        // Subscribe before pacing so live events remain buffered while the snapshot drains.
+        // Subscribe BEFORE snapshotting so an event emitted between the two
+        // calls is never lost: it lands in the snapshot, the live receiver, or
+        // both. The overlap is deduped in the run loop via the snapshot's
+        // high-water `seq` (monotonic, assigned at emit).
+        let rx = observer.subscribe();
         let snapshot = observer.snapshot();
-        let mut rx = observer.subscribe();
-        for event in snapshot {
-            for event in coalescer.ingest(event) {
-                publish_relay_observer_event(
-                    &publisher,
-                    &keys,
-                    &agent_pubkey_hex,
-                    &owner_pubkey_hex,
-                    &owner_pubkey,
-                    &mut pacer,
-                    event,
-                )
-                .await;
-            }
-        }
-
-        let mut flush_interval = tokio::time::interval(std::time::Duration::from_millis(500));
-        flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                result = rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            for event in coalescer.ingest(event) {
-                                publish_relay_observer_event(
-                                    &publisher, &keys, &agent_pubkey_hex,
-                                    &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
-                                ).await;
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                            for event in coalescer.flush() {
-                                publish_relay_observer_event(
-                                    &publisher, &keys, &agent_pubkey_hex,
-                                    &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
-                                ).await;
-                            }
-                            tracing::warn!(dropped = count, "relay observer publisher lagged");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            for event in coalescer.flush() {
-                                publish_relay_observer_event(
-                                    &publisher, &keys, &agent_pubkey_hex,
-                                    &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
-                                ).await;
-                            }
-                            break;
-                        }
-                    }
-                }
-                _ = flush_interval.tick() => {
-                    // Periodic flush ensures live streaming even during continuous chunk delivery.
-                    for event in coalescer.flush() {
-                        publish_relay_observer_event(
-                            &publisher, &keys, &agent_pubkey_hex,
-                            &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
-                        ).await;
-                    }
-                }
-            }
-        }
+        run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            keys,
+            agent_pubkey_hex,
+            owner_pubkey_hex,
+            owner_pubkey,
+        )
+        .await;
     })
+}
+
+async fn run_relay_observer_publisher(
+    snapshot: Vec<observer::ObserverEvent>,
+    mut rx: tokio::sync::broadcast::Receiver<observer::ObserverEvent>,
+    publisher: RelayEventPublisher,
+    keys: nostr::Keys,
+    agent_pubkey_hex: String,
+    owner_pubkey_hex: String,
+    owner_pubkey: PublicKey,
+) {
+    let mut coalescer = ObserverChunkCoalescer::default();
+    let mut pacer = ObserverPublishPacer::new();
+    let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
+    for event in snapshot {
+        for event in coalescer.ingest(event) {
+            publish_relay_observer_event(
+                &publisher,
+                &keys,
+                &agent_pubkey_hex,
+                &owner_pubkey_hex,
+                &owner_pubkey,
+                &mut pacer,
+                event,
+            )
+            .await;
+        }
+    }
+
+    let mut flush_interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        // Skip live events already delivered via the snapshot
+                        // (the subscribe-before-snapshot overlap).
+                        if event.seq <= max_snapshot_seq {
+                            continue;
+                        }
+                        for event in coalescer.ingest(event) {
+                            publish_relay_observer_event(
+                                &publisher, &keys, &agent_pubkey_hex,
+                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                            ).await;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        for event in coalescer.flush() {
+                            publish_relay_observer_event(
+                                &publisher, &keys, &agent_pubkey_hex,
+                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                            ).await;
+                        }
+                        tracing::warn!(dropped = count, "relay observer publisher lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        for event in coalescer.flush() {
+                            publish_relay_observer_event(
+                                &publisher, &keys, &agent_pubkey_hex,
+                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                            ).await;
+                        }
+                        break;
+                    }
+                }
+            }
+            _ = flush_interval.tick() => {
+                // Periodic flush ensures live streaming even during continuous chunk delivery.
+                for event in coalescer.flush() {
+                    publish_relay_observer_event(
+                        &publisher, &keys, &agent_pubkey_hex,
+                        &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                    ).await;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -4120,6 +4150,71 @@ mod author_gate_tests {
                 "under default OwnerOnly, the {label} must be admitted so steering can fire"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod observer_snapshot_race_tests {
+    use super::*;
+    use nostr::Keys;
+
+    fn emit_marker(observer: &observer::ObserverHandle, marker: &str) {
+        observer.emit(
+            "test_event",
+            None,
+            &observer::context_for(None, None, None),
+            serde_json::json!({ "marker": marker }),
+        );
+    }
+
+    /// An event emitted between `subscribe()` and `snapshot()` lands in BOTH
+    /// the snapshot and the live receiver; the seq high-water dedupe must
+    /// deliver it exactly once — and never lose events on either side of it.
+    #[tokio::test(start_paused = true)]
+    async fn overlap_between_subscribe_and_snapshot_publishes_exactly_once() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+
+        // Before the publisher starts: replay-buffer only.
+        emit_marker(&observer, "before");
+        // The race window: emitted after subscribe() but before snapshot(),
+        // so it is present in the snapshot AND queued on the receiver.
+        let rx = observer.subscribe();
+        emit_marker(&observer, "overlap");
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.len(), 2, "overlap event must be in the snapshot");
+        // After the snapshot: live receiver only.
+        emit_marker(&observer, "after");
+        // Close the broadcast channel so the run loop drains and exits.
+        drop(observer);
+
+        run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            agent_keys.public_key().to_hex(),
+            owner_keys.public_key().to_hex(),
+            owner_keys.public_key(),
+        )
+        .await;
+
+        // The run loop has exited, dropping the publisher; drain the forwarded
+        // events until the channel closes (deterministic — no try_recv race
+        // with the test_pair forwarding task).
+        let mut markers = Vec::new();
+        while let Some(event) = published_rx.recv().await {
+            let payload: serde_json::Value =
+                decrypt_observer_payload(&owner_keys, &event).expect("decrypt published frame");
+            markers.push(payload["payload"]["marker"].as_str().unwrap().to_string());
+        }
+        assert_eq!(
+            markers,
+            ["before", "overlap", "after"],
+            "each event must be published exactly once, in order"
+        );
     }
 }
 
