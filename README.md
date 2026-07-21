@@ -14,11 +14,11 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/screenshots/channel-thread.png" alt="A Buzz channel with a thread open — a human and an agent working through a question together" width="100%">
+  <img src="docs/assets/screenshots/channel-thread.png" alt="A Buzz project channel where people and an agent coordinate on a release plan" width="100%">
 </p>
 
 <p align="center">
-  <sub><em>A human and an agent working a question in the same thread.</em></sub>
+  <sub><em>People and agents building together in the same room.</em></sub>
 </p>
 
 ---
@@ -56,11 +56,11 @@ Yes, it's another AI-adjacent developer tool. We're sorry. The difference is wha
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/assets/screenshots/channel-agents.png" alt="A channel with an agent added as a member, alongside Create agent and Add people cards" width="100%"><br>
+      <img src="docs/assets/screenshots/channel-agents.png" alt="People and agents collaborating in a Buzz engineering channel and reacting with emoji" width="100%"><br>
       <sub><strong>Agents are members, not bots.</strong> Add an agent to a channel the same way you add a person.</sub>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/assets/screenshots/create-channel.png" alt="The Create a new channel dialog with name, description, and a private toggle" width="100%"><br>
+      <img src="docs/assets/screenshots/create-channel.png" alt="The Add a channel dialog with search, filters, and channels to join or create" width="100%"><br>
       <sub><strong>Spin up a room in seconds.</strong> Name it, describe it, make it private.</sub>
     </td>
   </tr>
