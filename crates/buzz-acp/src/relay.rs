@@ -1188,6 +1188,35 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
     }
 }
 
+/// Retain command intent after a live send failure.
+///
+/// Subscription state must survive reconnect; ephemeral publishes are deliberately
+/// discarded because replaying a typing indicator after reconnect is meaningless.
+/// `Shutdown` and `Reconnect` are handled by the caller.
+fn retain_failed_command_intent(state: &mut BgState, cmd: RelayCommand) {
+    match cmd {
+        RelayCommand::PublishEvent { .. } => {}
+        cmd => apply_command_to_state(state, cmd),
+    }
+}
+
+/// Preserve stateful commands already consumed during replay when that replay
+/// loses its live socket before the deferred queue can be executed.
+///
+/// Commands are applied in arrival order. Ephemeral publishes are discarded by
+/// [`retain_failed_command_intent`], and pacing never queues `Shutdown`.
+fn retain_deferred_command_intent(
+    state: &mut BgState,
+    deferred_commands: &mut VecDeque<RelayCommand>,
+) {
+    while let Some(cmd) = deferred_commands.pop_front() {
+        match cmd {
+            RelayCommand::Shutdown | RelayCommand::Reconnect => {}
+            cmd => retain_failed_command_intent(state, cmd),
+        }
+    }
+}
+
 /// Execute a command on a live WebSocket connection.
 ///
 /// Handles the five data commands: Subscribe, Unsubscribe,
@@ -1282,10 +1311,16 @@ async fn execute_connected_command(
             true
         }
         RelayCommand::SubscribeMembership => {
+            state.membership_sub_active = true;
+            if state.check_rate_gate().is_some() {
+                debug!("rate-gated: deferring membership subscription");
+                state.membership_resub_needed = true;
+                return true;
+            }
             let since = state.membership_last_seen.or(state.startup_watermark);
             let sent = send_membership_subscribe(ws, agent_pubkey_hex, since).await;
             if sent {
-                state.membership_sub_active = true;
+                state.membership_resub_needed = false;
                 if state.membership_last_seen.is_none() {
                     state.membership_last_seen = since;
                 }
@@ -1293,18 +1328,24 @@ async fn execute_connected_command(
             } else {
                 // Send failed — record intent so reconnect restores it.
                 warn!("membership subscribe REQ failed — recording intent for reconnect");
-                state.membership_sub_active = true;
+                state.membership_resub_needed = true;
                 false
             }
         }
         RelayCommand::SubscribeObserverControls => {
+            state.observer_control_sub_active = true;
+            if state.check_rate_gate().is_some() {
+                debug!("rate-gated: deferring observer control subscription");
+                state.observer_resub_needed = true;
+                return true;
+            }
             let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
             if sent {
-                state.observer_control_sub_active = true;
+                state.observer_resub_needed = false;
                 true
             } else {
                 warn!("observer control subscribe REQ failed — recording intent for reconnect");
-                state.observer_control_sub_active = true;
+                state.observer_resub_needed = true;
                 false
             }
         }
@@ -1468,7 +1509,7 @@ async fn run_background_task(
             {
                 ResubscribeResult::Ok => {}
                 ResubscribeResult::Shutdown => return,
-                ResubscribeResult::ControlFailed => {
+                ResubscribeResult::RetryConnection => {
                     warn!("proactive resubscribe had failures — triggering reconnect");
                     let _ = event_tx.try_send(None);
                     match try_autonomous_reconnect(
@@ -2267,9 +2308,9 @@ async fn process_handshake_buffer(
 enum ResubscribeResult {
     /// All subscriptions restored (or parked for drain recovery).
     Ok,
-    /// A control subscription (membership or observer) failed to send.
-    /// Caller should treat this as a failed reconnect attempt.
-    ControlFailed,
+    /// A control subscription or deferred live command failed to send.
+    /// Caller should retry the connection.
+    RetryConnection,
     /// A `Shutdown` command arrived during a pacing sleep.
     /// Caller must return immediately (background task is exiting).
     Shutdown,
@@ -2280,21 +2321,22 @@ enum ResubscribeResult {
 /// per channel, and only clears the drop tracker when the REQ is confirmed sent.
 ///
 /// Paces REQs at `REQ_PACING_INTERVAL` (125 ms) via a shutdown-aware sleep so
-/// a 48-channel reconnect burst spreads over ≈6 s without starving the select!
-/// loop of frames, commands, or ping ticks. If the gate is active mid-burst,
-/// remaining channels are parked in `rate_limited_pending` instead of sent.
+/// a 48-channel reconnect burst spreads over ≈6 s. Commands received during a
+/// pacing sleep are deferred in arrival order and executed on the live socket
+/// after replay. If the gate is active mid-burst, remaining channels are parked
+/// in `rate_limited_pending` instead of sent.
 ///
 /// A failed CHANNEL REQ is parked in `resubscribe_retry` rather than failing
-/// the whole reconnect. Only membership and observer-control failures return
-/// `ControlFailed` — their silent loss breaks joins and agent pause/resume.
+/// the whole reconnect. Only membership, observer-control, or deferred-command
+/// failures return `RetryConnection` — their silent loss would leave live state
+/// inconsistent with command intent.
 ///
-/// When `is_fresh_connection` is `true` (new socket established), the
-/// rate-limit gate and pending queues are cleared because a fresh connection
-/// resets the relay's admission window. When `false` (proactive resubscribe on
-/// the EXISTING socket), they are preserved so parked channels aren't lost.
+/// A relay quota gate is keyed by community and pubkey, so replacing the socket
+/// does not reset it. Fresh connections may clear derived pending/retry queues
+/// before rebuilding them from `active_subscriptions`, but the gate itself is
+/// always preserved until its deadline expires.
 ///
-/// Returns [`ResubscribeResult`] signalling success, control-sub failure, or
-/// shutdown.
+/// Returns [`ResubscribeResult`] signalling success, retry, or shutdown.
 async fn resubscribe_after_reconnect(
     ws: &mut WsStream,
     cmd_rx: &mut mpsc::Receiver<RelayCommand>,
@@ -2302,24 +2344,21 @@ async fn resubscribe_after_reconnect(
     agent_pubkey_hex: &str,
     is_fresh_connection: bool,
 ) -> ResubscribeResult {
-    // Only clear stale gate state on a FRESH connection. A proactive resubscribe
-    // on the existing socket must preserve the gate and pending queues —
-    // clearing them would discard parked channels and burst into a still-closed
-    // admission window.
     if is_fresh_connection {
-        state.rate_limit_gate = None;
+        // These queues are derived from active subscription intent and rebuilt
+        // below. The rate-limit gate is deliberately preserved: the relay's
+        // shared admission counter survives socket replacement.
         state.rate_limited_pending.clear();
         state.resubscribe_retry.clear();
-        // Control-sub pending flags are implicitly cleared by the resub below.
     }
 
+    let mut deferred_commands = VecDeque::new();
     let channels: Vec<Uuid> = state.active_subscriptions.keys().copied().collect();
     if !channels.is_empty() {
         info!(
             "resubscribing to {} channel(s) after reconnect",
             channels.len()
         );
-        let mut sent_any = false;
         for channel_id in channels {
             // Gate re-armed mid-burst — park remaining channels.
             if let Some(retry_after) = state.check_rate_gate() {
@@ -2346,9 +2385,8 @@ async fn resubscribe_after_reconnect(
                 send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await;
             if this_sent {
                 state.channel_dropped_since.remove(&channel_id);
-                sent_any = true;
-                // Shutdown-aware pacing sleep between REQs.
-                if !pacing_sleep(cmd_rx, state, REQ_PACING_INTERVAL).await {
+                // Shutdown-aware pacing sleep before any next replay/deferred REQ.
+                if !pacing_sleep(cmd_rx, &mut deferred_commands, REQ_PACING_INTERVAL).await {
                     return ResubscribeResult::Shutdown;
                 }
             } else {
@@ -2360,46 +2398,61 @@ async fn resubscribe_after_reconnect(
                 state.resubscribe_retry.insert(channel_id);
             }
         }
-        let _ = sent_any; // consumed above for pacing logic
     }
 
     // Membership and observer-control are control-plane subscriptions: a silent
-    // failure breaks join notifications and agent pause/resume. These still force
-    // a full reconnect retry rather than silent degradation.
+    // failure breaks join notifications and agent pause/resume. A shared quota
+    // gate parks their intent for the main-loop drain just like channel REQs.
     if state.membership_sub_active {
-        if !state.active_subscriptions.is_empty()
-            && !pacing_sleep(cmd_rx, state, REQ_PACING_INTERVAL).await
-        {
-            return ResubscribeResult::Shutdown;
-        }
-        let replay_since = match (state.membership_dropped_since, state.membership_last_seen) {
-            (Some(d), Some(l)) => Some(d.min(l)),
-            (Some(d), None) => Some(d),
-            (None, Some(l)) => Some(l),
-            (None, None) => state.startup_watermark,
-        };
-        let sent = send_membership_subscribe(ws, agent_pubkey_hex, replay_since).await;
-        if sent {
-            state.membership_dropped_since = None;
-            state.membership_resub_needed = false;
+        if state.check_rate_gate().is_some() {
+            debug!("rate-gated: parking membership resubscribe after reconnect");
+            state.membership_resub_needed = true;
         } else {
-            warn!("failed to resubscribe membership after reconnect");
-            return ResubscribeResult::ControlFailed;
+            if !state.active_subscriptions.is_empty()
+                && !pacing_sleep(cmd_rx, &mut deferred_commands, REQ_PACING_INTERVAL).await
+            {
+                return ResubscribeResult::Shutdown;
+            }
+            let replay_since = match (state.membership_dropped_since, state.membership_last_seen) {
+                (Some(d), Some(l)) => Some(d.min(l)),
+                (Some(d), None) => Some(d),
+                (None, Some(l)) => Some(l),
+                (None, None) => state.startup_watermark,
+            };
+            let sent = send_membership_subscribe(ws, agent_pubkey_hex, replay_since).await;
+            if sent {
+                state.membership_dropped_since = None;
+                state.membership_resub_needed = false;
+            } else {
+                warn!("failed to resubscribe membership after reconnect");
+                retain_deferred_command_intent(state, &mut deferred_commands);
+                return ResubscribeResult::RetryConnection;
+            }
         }
     }
 
     if state.observer_control_sub_active {
-        if !pacing_sleep(cmd_rx, state, REQ_PACING_INTERVAL).await {
-            return ResubscribeResult::Shutdown;
+        if state.check_rate_gate().is_some() {
+            debug!("rate-gated: parking observer control resubscribe after reconnect");
+            state.observer_resub_needed = true;
+        } else {
+            if !pacing_sleep(cmd_rx, &mut deferred_commands, REQ_PACING_INTERVAL).await {
+                return ResubscribeResult::Shutdown;
+            }
+            if !send_observer_control_subscribe(ws, agent_pubkey_hex).await {
+                warn!("failed to resubscribe observer controls after reconnect");
+                retain_deferred_command_intent(state, &mut deferred_commands);
+                return ResubscribeResult::RetryConnection;
+            }
+            state.observer_resub_needed = false;
         }
-        if !send_observer_control_subscribe(ws, agent_pubkey_hex).await {
-            warn!("failed to resubscribe observer controls after reconnect");
-            return ResubscribeResult::ControlFailed;
-        }
-        state.observer_resub_needed = false;
     }
 
-    ResubscribeResult::Ok
+    match drain_commands(ws, cmd_rx, &mut deferred_commands, state, agent_pubkey_hex).await {
+        ReconnectOutcome::Ok => ResubscribeResult::Ok,
+        ReconnectOutcome::Failed => ResubscribeResult::RetryConnection,
+        ReconnectOutcome::Shutdown => ResubscribeResult::Shutdown,
+    }
 }
 
 /// Drain `rate_limited_pending` channels whose retry deadline has passed.
@@ -2522,29 +2575,38 @@ async fn drain_resubscribe_retry(
 enum ReconnectOutcome {
     /// Reconnected and resubscribed successfully.
     Ok,
-    /// All attempts exhausted — caller should fall back to wait_for_reconnect.
+    /// Reconnect or resubscription attempts failed; caller should retry or fall
+    /// back to `wait_for_reconnect`. Live command intent is retained.
     Failed,
     /// A Shutdown command was received during backoff — caller must return immediately.
     Shutdown,
 }
 
-/// Drain all pending commands after a successful reconnect.
-///
-/// Processes queued commands that arrived while reconnecting. Reconnect
-/// commands are silently dropped (already reconnected). Shutdown causes an
-/// immediate close-frame + return of `ReconnectOutcome::Shutdown`. All other
-/// commands are executed on the live socket via [`execute_connected_command`].
-/// If any send fails, remaining commands are recorded as intent via
-/// [`apply_command_to_state`] and the drain continues (the caller's next
-/// read/ping will detect the dead socket).
-async fn drain_post_reconnect(
+/// Execute commands deferred during paced replay, then commands that arrived
+/// while the deferred queue was draining. FIFO order is preserved across both
+/// sources. Subscription REQs are paced; CLOSE, ephemeral EVENT, and local-state
+/// commands execute immediately. A failed live send records remaining command
+/// intent and returns `Failed`; Shutdown closes the socket immediately.
+async fn drain_commands(
     ws: &mut WsStream,
     cmd_rx: &mut mpsc::Receiver<RelayCommand>,
+    deferred_commands: &mut VecDeque<RelayCommand>,
     state: &mut BgState,
     agent_pubkey_hex: &str,
 ) -> ReconnectOutcome {
     let mut send_failed = false;
-    while let Ok(cmd) = cmd_rx.try_recv() {
+    loop {
+        let cmd = match deferred_commands.pop_front() {
+            Some(cmd) => cmd,
+            None => match cmd_rx.try_recv() {
+                Ok(cmd) => cmd,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    return ReconnectOutcome::Shutdown;
+                }
+            },
+        };
+
         if send_failed {
             match cmd {
                 RelayCommand::Shutdown => {
@@ -2552,10 +2614,11 @@ async fn drain_post_reconnect(
                     return ReconnectOutcome::Shutdown;
                 }
                 RelayCommand::Reconnect => {}
-                cmd => apply_command_to_state(state, cmd),
+                cmd => retain_failed_command_intent(state, cmd),
             }
             continue;
         }
+
         match cmd {
             RelayCommand::Reconnect => {
                 debug!("drained stale Reconnect after reconnect");
@@ -2565,16 +2628,54 @@ async fn drain_post_reconnect(
                 let _ = ws_send_timeout(ws, Message::Close(None), WS_SEND_TIMEOUT_SECS).await;
                 return ReconnectOutcome::Shutdown;
             }
+            RelayCommand::Subscribe { .. }
+            | RelayCommand::SubscribeMembership
+            | RelayCommand::SubscribeObserverControls => {
+                // A gated subscription is only parked in state; pace only an
+                // actual live send attempt.
+                let pace_after = state.check_rate_gate().is_none();
+                if !execute_connected_command(ws, state, agent_pubkey_hex, cmd).await {
+                    warn!("send failed during post-reconnect drain — recording remaining commands as intent");
+                    send_failed = true;
+                }
+                if !send_failed
+                    && pace_after
+                    && !pacing_sleep(cmd_rx, deferred_commands, REQ_PACING_INTERVAL).await
+                {
+                    return ReconnectOutcome::Shutdown;
+                }
+            }
             cmd => {
-                let ok = execute_connected_command(ws, state, agent_pubkey_hex, cmd).await;
-                if !ok {
+                if !execute_connected_command(ws, state, agent_pubkey_hex, cmd).await {
                     warn!("send failed during post-reconnect drain — recording remaining commands as intent");
                     send_failed = true;
                 }
             }
         }
     }
-    ReconnectOutcome::Ok
+
+    if send_failed {
+        ReconnectOutcome::Failed
+    } else {
+        ReconnectOutcome::Ok
+    }
+}
+
+/// Drain all pending commands after a successful reconnect.
+///
+/// Processes queued commands that arrived while reconnecting. Reconnect
+/// commands are silently dropped (already reconnected). Shutdown causes an
+/// immediate close-frame + return of `ReconnectOutcome::Shutdown`. All other
+/// commands are executed on the live socket via [`execute_connected_command`].
+/// If any subscription send fails, remaining commands are recorded as intent
+/// and `Failed` is returned so the caller can reconnect.
+async fn drain_post_reconnect(
+    ws: &mut WsStream,
+    cmd_rx: &mut mpsc::Receiver<RelayCommand>,
+    state: &mut BgState,
+    agent_pubkey_hex: &str,
+) -> ReconnectOutcome {
+    drain_commands(ws, cmd_rx, &mut VecDeque::new(), state, agent_pubkey_hex).await
 }
 
 /// Attempt autonomous reconnect on socket loss.
@@ -2646,7 +2747,7 @@ async fn try_autonomous_reconnect(
                     {
                         ResubscribeResult::Ok => return ReconnectOutcome::Ok,
                         ResubscribeResult::Shutdown => return ReconnectOutcome::Shutdown,
-                        ResubscribeResult::ControlFailed => {
+                        ResubscribeResult::RetryConnection => {
                             warn!("resubscribe failed after autonomous reconnect — treating as failed attempt");
                             // Fall through to backoff sleep and retry.
                         }
@@ -2784,7 +2885,7 @@ async fn wait_for_reconnect(
                             return drain_post_reconnect(ws, cmd_rx, state, agent_pubkey_hex).await;
                         }
                         ResubscribeResult::Shutdown => return ReconnectOutcome::Shutdown,
-                        ResubscribeResult::ControlFailed => {
+                        ResubscribeResult::RetryConnection => {
                             warn!("resubscribe failed after reconnect — will retry with backoff");
                             // Fall through to backoff sleep.
                         }
@@ -3057,11 +3158,12 @@ pub(crate) fn is_dns_error(err: &RelayError) -> bool {
 ///
 /// Unlike `dns_flat_sleep`, no jitter is applied — exact `duration` is required
 /// to maintain the ≤8 REQ/s pacing invariant. Non-Shutdown commands received
-/// during the sleep are applied to state (matching `dns_flat_sleep` semantics).
-/// Returns `true` if sleep completed normally, `false` if shutdown was received.
+/// during the sleep are deferred in arrival order for live execution after
+/// replay. Returns `true` if sleep completed normally, `false` if shutdown was
+/// received.
 async fn pacing_sleep(
     cmd_rx: &mut mpsc::Receiver<RelayCommand>,
-    state: &mut BgState,
+    deferred_commands: &mut VecDeque<RelayCommand>,
     duration: Duration,
 ) -> bool {
     let deadline = tokio::time::Instant::now() + duration;
@@ -3073,7 +3175,7 @@ async fn pacing_sleep(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(RelayCommand::Shutdown) | None => return false,
-                    Some(cmd) => apply_command_to_state(state, cmd),
+                    Some(cmd) => deferred_commands.push_back(cmd),
                 }
             }
         }
@@ -4013,6 +4115,231 @@ mod tests {
             .custom_created_at(ts)
             .sign_with_keys(keys)
             .expect("signing should succeed")
+    }
+
+    async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test websocket");
+        let address = listener.local_addr().expect("read test address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept test websocket");
+            tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete server websocket handshake")
+        });
+        let (client, _) = connect_async(format!("ws://{address}"))
+            .await
+            .expect("connect test websocket");
+        (client, server.await.expect("join test websocket server"))
+    }
+
+    async fn next_test_frame(
+        server: &mut WebSocketStream<tokio::net::TcpStream>,
+    ) -> serde_json::Value {
+        let message = timeout(Duration::from_secs(1), server.next())
+            .await
+            .expect("timed out waiting for websocket frame")
+            .expect("test websocket closed")
+            .expect("read test websocket frame");
+        serde_json::from_str(message.to_text().expect("expected text frame"))
+            .expect("parse test websocket frame")
+    }
+
+    fn test_channel_filter() -> ChannelFilter {
+        ChannelFilter {
+            kinds: Some(vec![9]),
+            require_mention: false,
+        }
+    }
+
+    fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
+        apply_command_to_state(
+            state,
+            RelayCommand::Subscribe {
+                channel_id,
+                filter: test_channel_filter(),
+                replay_since: Some(1_000),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_reconnect_preserves_gate_until_pending_replay_resumes() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        seed_test_subscription(&mut state, channel_id);
+        state.rate_limit_gate = Some(tokio::time::Instant::now() + Duration::from_millis(150));
+
+        let result =
+            resubscribe_after_reconnect(&mut client, &mut cmd_rx, &mut state, "agent-pubkey", true)
+                .await;
+
+        assert!(matches!(result, ResubscribeResult::Ok));
+        assert!(state.rate_limit_gate.is_some());
+        assert!(state.rate_limited_pending.contains_key(&channel_id));
+        assert!(
+            timeout(Duration::from_millis(50), server.next())
+                .await
+                .is_err(),
+            "fresh reconnect must not send REQ while the shared quota gate is active"
+        );
+
+        tokio::time::sleep(Duration::from_millis(125)).await;
+        assert_eq!(
+            drain_rate_limited_pending(&mut client, &mut state, "agent-pubkey", 1).await,
+            1
+        );
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(frame[0], "REQ");
+        assert_eq!(frame[1], channel_sub_id(channel_id));
+    }
+
+    #[tokio::test]
+    async fn subscribe_during_replay_pacing_is_sent_on_live_socket() {
+        let (client, mut server) = test_ws_pair().await;
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let replayed_channel = Uuid::new_v4();
+        let deferred_channel = Uuid::new_v4();
+        seed_test_subscription(&mut state, replayed_channel);
+
+        let task = tokio::spawn(async move {
+            let mut client = client;
+            let result = resubscribe_after_reconnect(
+                &mut client,
+                &mut cmd_rx,
+                &mut state,
+                "agent-pubkey",
+                true,
+            )
+            .await;
+            (result, state)
+        });
+
+        let replay = next_test_frame(&mut server).await;
+        assert_eq!(replay[1], channel_sub_id(replayed_channel));
+        cmd_tx
+            .send(RelayCommand::Subscribe {
+                channel_id: deferred_channel,
+                filter: test_channel_filter(),
+                replay_since: Some(2_000),
+            })
+            .await
+            .expect("queue subscribe during pacing");
+
+        let deferred = next_test_frame(&mut server).await;
+        assert_eq!(deferred[0], "REQ");
+        assert_eq!(deferred[1], channel_sub_id(deferred_channel));
+        let (result, state) = task.await.expect("join resubscribe task");
+        assert!(matches!(result, ResubscribeResult::Ok));
+        assert!(state.active_subscriptions.contains_key(&deferred_channel));
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_during_replay_pacing_sends_close_on_live_socket() {
+        let (client, mut server) = test_ws_pair().await;
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        seed_test_subscription(&mut state, channel_id);
+
+        let task = tokio::spawn(async move {
+            let mut client = client;
+            let result = resubscribe_after_reconnect(
+                &mut client,
+                &mut cmd_rx,
+                &mut state,
+                "agent-pubkey",
+                true,
+            )
+            .await;
+            (result, state)
+        });
+
+        let replay = next_test_frame(&mut server).await;
+        assert_eq!(replay[1], channel_sub_id(channel_id));
+        cmd_tx
+            .send(RelayCommand::Unsubscribe { channel_id })
+            .await
+            .expect("queue unsubscribe during pacing");
+
+        let close = next_test_frame(&mut server).await;
+        assert_eq!(close, json!(["CLOSE", channel_sub_id(channel_id)]));
+        let (result, state) = task.await.expect("join resubscribe task");
+        assert!(matches!(result, ResubscribeResult::Ok));
+        assert!(!state.active_subscriptions.contains_key(&channel_id));
+    }
+
+    #[tokio::test]
+    async fn publish_during_replay_pacing_is_sent_on_live_socket() {
+        let (client, mut server) = test_ws_pair().await;
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        seed_test_subscription(&mut state, channel_id);
+        let event = make_test_event(&nostr::Keys::generate(), 2_000);
+        let event_id = event.id.to_hex();
+
+        let task = tokio::spawn(async move {
+            let mut client = client;
+            let result = resubscribe_after_reconnect(
+                &mut client,
+                &mut cmd_rx,
+                &mut state,
+                "agent-pubkey",
+                true,
+            )
+            .await;
+            result
+        });
+
+        let replay = next_test_frame(&mut server).await;
+        assert_eq!(replay[1], channel_sub_id(channel_id));
+        cmd_tx
+            .send(RelayCommand::PublishEvent {
+                event: Box::new(event),
+            })
+            .await
+            .expect("queue publish during pacing");
+
+        let publish = next_test_frame(&mut server).await;
+        assert_eq!(publish[0], "EVENT");
+        assert_eq!(publish[1]["id"], event_id);
+        assert!(matches!(
+            task.await.expect("join resubscribe task"),
+            ResubscribeResult::Ok
+        ));
+    }
+
+    #[test]
+    fn failed_replay_retains_deferred_subscription_intent_in_fifo_order() {
+        let mut state = BgState::new();
+        let kept_channel = Uuid::new_v4();
+        let removed_channel = Uuid::new_v4();
+        seed_test_subscription(&mut state, removed_channel);
+        let event = make_test_event(&nostr::Keys::generate(), 2_000);
+        let mut deferred = VecDeque::from([
+            RelayCommand::Subscribe {
+                channel_id: kept_channel,
+                filter: test_channel_filter(),
+                replay_since: Some(2_000),
+            },
+            RelayCommand::Unsubscribe {
+                channel_id: removed_channel,
+            },
+            RelayCommand::PublishEvent {
+                event: Box::new(event),
+            },
+        ]);
+
+        retain_deferred_command_intent(&mut state, &mut deferred);
+
+        assert!(deferred.is_empty());
+        assert!(state.active_subscriptions.contains_key(&kept_channel));
+        assert!(!state.active_subscriptions.contains_key(&removed_channel));
     }
 
     #[test]
