@@ -61,6 +61,8 @@ export function useProjectBranchActions(input: {
   defaultBranch: string | null;
   deleteBranchReason: string | null;
   refetchRepoState: () => Promise<unknown>;
+  rememberBranch: (branch: { name: string; commit: string }) => void;
+  forgetBranch: (branch: string) => void;
   selectBranch: (branch: string | null) => void;
 }) {
   const [createOpen, setCreateOpen] = React.useState(false);
@@ -81,6 +83,7 @@ export function useProjectBranchActions(input: {
         newBranch,
       });
       await input.refetchRepoState();
+      input.rememberBranch({ name: result.branch, commit: result.commit });
       input.selectBranch(result.branch);
       toast.success(result.message);
     },
@@ -89,6 +92,7 @@ export function useProjectBranchActions(input: {
       input.activeBranch,
       input.activeBranchCommit,
       input.refetchRepoState,
+      input.rememberBranch,
       input.selectBranch,
     ],
   );
@@ -104,6 +108,7 @@ export function useProjectBranchActions(input: {
       branch: input.activeBranch,
       expectedCommit: input.activeRemoteBranch.commit,
     });
+    input.forgetBranch(result.branch);
     input.selectBranch(input.defaultBranch);
     await input.refetchRepoState();
     toast.success(result.message);
@@ -113,6 +118,7 @@ export function useProjectBranchActions(input: {
     input.activeRemoteBranch,
     input.defaultBranch,
     input.deleteBranchReason,
+    input.forgetBranch,
     input.refetchRepoState,
     input.selectBranch,
   ]);

@@ -38,10 +38,13 @@ test("reports duplicate branch names", () => {
 
 test("combines remote and local branch options without duplicates", () => {
   assert.deepEqual(
-    projectBranchOptions(["main", "feature/remote"], "feature/local"),
-    ["main", "feature/remote", "feature/local"],
+    projectBranchOptions(
+      ["main", "feature/remote"],
+      ["feature/local", "space"],
+    ),
+    ["main", "feature/remote", "feature/local", "space"],
   );
-  assert.deepEqual(projectBranchOptions(["main"], "main"), ["main"]);
+  assert.deepEqual(projectBranchOptions(["main"], ["main"]), ["main"]);
 });
 
 test("ignores a dangling HEAD and selects a published branch", () => {

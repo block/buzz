@@ -1,6 +1,7 @@
 use super::project_git_exec::{
     build_git_auth_config, clean_branch, run_git, validate_workspace_clone_url, GitAuthConfig,
 };
+use super::project_git_push::push_project_local_repository_blocking;
 use super::project_repo_paths::{canonical_repos_roots, find_local_repo_dir};
 use crate::app_state::AppState;
 use serde::Serialize;
@@ -52,6 +53,7 @@ pub struct ProjectLocalRepoInfo {
 pub struct ProjectRepoSyncStatusInfo {
     pub local_path: Option<String>,
     pub local_branch: Option<String>,
+    pub local_branches: Vec<String>,
     pub local_head: Option<String>,
     pub local_short_head: Option<String>,
     pub remote_branch: Option<String>,
@@ -492,7 +494,7 @@ pub(crate) fn normalize_branch_option(branch: Option<&str>) -> Option<String> {
     clean_branch(branch.map(str::to_string))
 }
 
-fn compare_local_remote_status(
+pub(crate) fn compare_local_remote_status(
     repo_dir: &std::path::Path,
     clone_url: &str,
     branch_name: Option<&str>,
@@ -502,6 +504,23 @@ fn compare_local_remote_status(
     let local_branch = run_git(&["branch", "--show-current"], Some(repo_dir), auth)
         .ok()
         .and_then(|output| first_output_line(&output));
+    let local_branches = run_git(
+        &[
+            "for-each-ref",
+            "--count=200",
+            "--format=%(refname:short)",
+            "refs/heads/",
+        ],
+        Some(repo_dir),
+        auth,
+    )
+    .map(|output| {
+        output
+            .lines()
+            .filter_map(|branch| normalize_branch_option(Some(branch)))
+            .collect()
+    })
+    .unwrap_or_default();
     // The local checkout's branch name is attacker-influencable (a hostile
     // remote can point HEAD at a flag-shaped refname), so it must pass the
     // same `clean_branch` validation as relay-supplied names before it is
@@ -549,6 +568,17 @@ fn compare_local_remote_status(
     )
     .ok()
     .and_then(|output| first_output_line(&output));
+    // A legacy empty clone may have an unborn local `master` while the project
+    // declares `main`. Permit that mismatch only when the remote has no branch
+    // refs at all; any lookup failure is treated as non-empty (fail closed).
+    let remote_has_branches = run_git(
+        &["ls-remote", "--heads", "--end-of-options", "origin"],
+        Some(repo_dir),
+        auth,
+    )
+    .map(|output| !output.trim().is_empty())
+    .unwrap_or(true);
+    let is_first_publish = remote_head.is_none() && !remote_has_branches;
     let merge_base = base_branch.as_deref().and_then(|base_branch| {
         run_git(
             &[
@@ -596,7 +626,7 @@ fn compare_local_remote_status(
 
     let push_block_reason = if local_head.is_none() {
         Some("No local commits to push.".to_string())
-    } else if local_branch.as_deref() != Some(branch.as_str()) {
+    } else if local_branch.as_deref() != Some(branch.as_str()) && !is_first_publish {
         Some(format!(
             "Local checkout is on a different branch than {branch}."
         ))
@@ -634,6 +664,7 @@ fn compare_local_remote_status(
     ProjectRepoSyncStatusInfo {
         local_path: Some(repo_dir.display().to_string()),
         local_branch,
+        local_branches,
         local_head: local_head.clone(),
         local_short_head: local_head.as_deref().map(short_hash),
         remote_branch: Some(branch),
@@ -832,6 +863,7 @@ pub async fn get_project_repo_sync_status(
             return Ok(ProjectRepoSyncStatusInfo {
                 local_path: None,
                 local_branch: None,
+                local_branches: Vec::new(),
                 local_head: None,
                 local_short_head: None,
                 remote_branch: branch_name
@@ -881,44 +913,13 @@ pub async fn push_project_local_repository(
         else {
             return Err("No local checkout found.".to_string());
         };
-        let status = compare_local_remote_status(
+        push_project_local_repository_blocking(
             &repo_dir,
-            &clone_url,
-            branch_name.as_deref(),
-            base_branch.as_deref(),
+            clone_url,
+            branch_name,
+            base_branch,
             &auth,
-        );
-        if !status.can_push {
-            return Err(status
-                .push_block_reason
-                .unwrap_or_else(|| "Local checkout cannot be pushed.".to_string()));
-        }
-        let branch = status
-            .remote_branch
-            .clone()
-            .ok_or_else(|| "No branch selected for push.".to_string())?;
-        let commit = status
-            .local_head
-            .clone()
-            .ok_or_else(|| "No local commit selected for push.".to_string())?;
-        run_git(
-            &[
-                "push",
-                "--end-of-options",
-                "origin",
-                format!("HEAD:{branch}").as_str(),
-            ],
-            Some(&repo_dir),
-            &auth,
-        )?;
-
-        Ok(ProjectRepoPushResult {
-            pushed: true,
-            message: format!("Pushed {branch} to remote."),
-            branch,
-            commit,
-            merge_base: status.merge_base,
-        })
+        )
     })
     .await
     .map_err(|error| format!("repo push task failed: {error}"))?

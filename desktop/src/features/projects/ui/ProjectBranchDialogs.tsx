@@ -26,7 +26,11 @@ import {
 import { Input } from "@/shared/ui/input";
 
 function errorMessage(error: unknown, fallback: string) {
-  return error instanceof Error ? error.message : fallback;
+  if (!(error instanceof Error)) return fallback;
+  if (error.message.includes("no channel binding")) {
+    return "This repository is owned by another identity and is not linked to a project channel.";
+  }
+  return error.message;
 }
 
 export function CreateProjectBranchDialog({

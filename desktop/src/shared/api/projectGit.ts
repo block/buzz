@@ -68,6 +68,7 @@ type RawProjectLocalRepository = {
 type RawProjectRepoSyncStatus = {
   local_path: string | null;
   local_branch: string | null;
+  local_branches: string[];
   local_head: string | null;
   local_short_head: string | null;
   remote_branch: string | null;
@@ -281,6 +282,7 @@ function fromRawProjectRepoSyncStatus(
   return {
     localPath: status.local_path,
     localBranch: status.local_branch,
+    localBranches: status.local_branches,
     localHead: status.local_head,
     localShortHead: status.local_short_head,
     remoteBranch: status.remote_branch,

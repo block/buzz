@@ -964,6 +964,7 @@ declare global {
     __BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__?: {
       local_path: string | null;
       local_branch: string | null;
+      local_branches: string[];
       local_head: string | null;
       local_short_head: string | null;
       remote_branch: string | null;
@@ -9324,6 +9325,7 @@ export function maybeInstallE2eTauriMocks() {
           window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__ ?? {
             local_path: null,
             local_branch: null,
+            local_branches: [],
             local_head: null,
             local_short_head: null,
             remote_branch: "main",
@@ -9376,6 +9378,7 @@ export function maybeInstallE2eTauriMocks() {
         window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__ = {
           local_path: path,
           local_branch: "main",
+          local_branches: ["main"],
           local_head: commit,
           local_short_head: commit.slice(0, 7),
           remote_branch: "main",

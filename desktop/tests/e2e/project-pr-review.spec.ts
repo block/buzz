@@ -730,6 +730,17 @@ test("project branches can be created from the selected remote branch", async ({
   await expect(
     page.getByRole("button", { name: /feature\/branch-management/ }),
   ).toBeVisible();
+  await page
+    .getByRole("button", { name: /feature\/branch-management/ })
+    .click();
+  await expect(
+    page.getByRole("menuitemradio", { name: "feature/branch-management" }),
+  ).toBeVisible();
+  await page.getByRole("menuitemradio", { name: "main" }).click();
+  await page.getByRole("button", { name: /main/ }).click();
+  await expect(
+    page.getByRole("menuitemradio", { name: "feature/branch-management" }),
+  ).toBeVisible();
   const commands = await page.evaluate(
     () => window.__BUZZ_E2E_COMMANDS__ ?? [],
   );
@@ -775,6 +786,7 @@ test("pushed local branch can open a pull request", async ({ page }) => {
     window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__ = {
       local_path: "/tmp/buzz/REPOS/buzz",
       local_branch: "feature/projects-workflow",
+      local_branches: ["feature/projects-workflow", "space"],
       local_head: commit,
       local_short_head: commit.slice(0, 7),
       remote_branch: "feature/projects-workflow",
@@ -796,6 +808,9 @@ test("pushed local branch can open a pull request", async ({ page }) => {
   await openBuzzProject(page);
 
   await page.getByRole("button", { name: /main/ }).click();
+  await expect(
+    page.getByRole("menuitemradio", { name: "space" }),
+  ).toBeVisible();
   await page
     .getByRole("menuitemradio", { name: "feature/projects-workflow" })
     .click();

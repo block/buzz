@@ -38,15 +38,25 @@ export function projectBranchNameError(
 
 export function projectBranchOptions(
   remoteBranches: string[],
-  localBranch?: string | null,
+  localBranches: string[] = [],
 ): string[] {
-  return [
-    ...new Set(
-      [...remoteBranches, localBranch].filter((branch): branch is string =>
-        Boolean(branch),
-      ),
-    ),
-  ];
+  return [...new Set([...remoteBranches, ...localBranches].filter(Boolean))];
+}
+
+export function projectBranchOptionsFromSync(
+  remoteBranches: string[],
+  syncStatus?: {
+    localBranch: string | null;
+    localBranches: string[];
+    localHead: string | null;
+  },
+): string[] {
+  const localBranches =
+    syncStatus?.localBranches ??
+    (syncStatus?.localHead && syncStatus.localBranch
+      ? [syncStatus.localBranch]
+      : []);
+  return projectBranchOptions(remoteBranches, localBranches);
 }
 
 /** Resolve a usable default branch when a repository advertises a stale HEAD. */
