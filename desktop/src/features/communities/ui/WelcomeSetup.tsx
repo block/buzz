@@ -102,7 +102,7 @@ export function WelcomeSetup({
             >
               <div className="w-full max-w-[760px]">
                 <h1 className="text-title font-normal">
-                  Join a creative community
+                  Join or create a community
                 </h1>
                 <p className="mt-3 text-sm leading-6 text-foreground/80">
                   Join with an invite, create your own community, or reconnect
