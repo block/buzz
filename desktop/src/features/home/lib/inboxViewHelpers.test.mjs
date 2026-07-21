@@ -4,6 +4,7 @@ import test from "node:test";
 import { formatTimelineMessages } from "../../messages/lib/formatTimelineMessages.ts";
 import { getConfigNudgeAuthorPubkey } from "../../messages/ui/configNudgeAuthPubkey.ts";
 import {
+  filterActivityInboxItems,
   getContextMessageDepth,
   getReactionTargetId,
   isInboxThreadContextEvent,
@@ -11,6 +12,15 @@ import {
   toInboxContextMessage,
   toTimelineMessage,
 } from "./inboxViewHelpers.ts";
+
+test("Activity uses the dedicated reminder list instead of feed reminder rows", () => {
+  const message = { item: { kind: 9 } };
+  const reminder = { item: { kind: 40007 } };
+  const items = [message, reminder];
+
+  assert.equal(filterActivityInboxItems(items, false), items);
+  assert.deepEqual(filterActivityInboxItems(items, true), [message]);
+});
 
 // --- matchesInboxFilter ---
 
@@ -32,6 +42,32 @@ test("matchesInboxFilter is false when the category is absent", () => {
     false,
   );
   assert.equal(matchesInboxFilter({ categories: [] }, "mentions"), false);
+});
+
+test("owned-agent filtering uses the representative event author", () => {
+  const owned = new Set(["owned-agent"]);
+  assert.equal(
+    matchesInboxFilter(
+      {
+        categories: ["activity"],
+        item: { pubkey: "OWNED-AGENT" },
+      },
+      "agent_activity",
+      owned,
+    ),
+    true,
+  );
+  assert.equal(
+    matchesInboxFilter(
+      {
+        categories: ["agent_activity"],
+        item: { pubkey: "somebody-elses-agent" },
+      },
+      "agent_activity",
+      owned,
+    ),
+    false,
+  );
 });
 
 test("matchesInboxFilter matches thread rows by thread tags", () => {

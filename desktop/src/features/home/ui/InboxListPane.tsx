@@ -1,8 +1,10 @@
 import {
+  Bell,
   ChevronDown,
   Clock,
   Ellipsis,
   ExternalLink,
+  FileText,
   MailOpen,
 } from "lucide-react";
 import * as React from "react";
@@ -13,12 +15,18 @@ import {
   type InboxItem,
   type InboxTypeLabel,
 } from "@/features/home/lib/inbox";
+import { buildActivityListRows } from "@/features/home/lib/activityListRows";
 import {
   DraftsPanel,
+  getDraftPreview,
   type DraftViewItem,
 } from "@/features/messages/ui/DraftsPanel";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
-import { RemindersPanel } from "@/features/reminders/ui/RemindersPanel";
+import type { Reminder } from "@/features/reminders/lib/reminderTypes";
+import {
+  RemindersPanel,
+  useReminderSources,
+} from "@/features/reminders/ui/RemindersPanel";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -58,6 +66,41 @@ const FILTER_OPTIONS: Array<{ label: string; value: InboxFilter }> = [
   { value: "reminders", label: "Reminders" },
   { value: "drafts", label: "Drafts" },
 ];
+
+const ACTIVITY_FILTER_OPTIONS: Array<{
+  label: string;
+  value: InboxFilter;
+}> = [
+  { value: "all", label: "All" },
+  { value: "mention", label: "Mentions" },
+  { value: "thread", label: "Threads" },
+  { value: "needs_action", label: "Needs action" },
+  { value: "agent_activity", label: "Agents" },
+  { value: "reminders", label: "Reminders" },
+  { value: "drafts", label: "Drafts" },
+];
+
+const ACTIVITY_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
+  all: "No activity yet",
+  mention: "No mentions found",
+  thread: "No threads found",
+  needs_action: "Nothing needs action",
+  activity: "No activity found",
+  agent_activity: "No agent updates found",
+  reminders: "No reminders",
+  drafts: "No drafts",
+};
+
+const ACTIVITY_UNREAD_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
+  all: "No unread activity",
+  mention: "No unread mentions",
+  thread: "No unread threads",
+  needs_action: "No unread items needing action",
+  activity: "No unread activity",
+  agent_activity: "No unread agent updates",
+  reminders: "No unread reminders",
+  drafts: "No unread drafts",
+};
 
 const INBOX_HEADER_ICON_BUTTON_CLASS =
   "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring data-[state=open]:bg-muted/70 data-[state=open]:text-foreground disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0";
@@ -101,7 +144,72 @@ function ActivityLabel({
   );
 }
 
+function formatReminderStatus(notBefore: number | undefined) {
+  if (notBefore === undefined) return "Pending";
+  const secondsUntil = notBefore - Math.floor(Date.now() / 1_000);
+  if (secondsUntil <= 0) return "Reminder due";
+  if (secondsUntil < 60) return "Reminder in less than a minute";
+  if (secondsUntil < 3_600) {
+    return `Reminder in ${Math.floor(secondsUntil / 60)}m`;
+  }
+  if (secondsUntil < 86_400) {
+    return `Reminder in ${Math.floor(secondsUntil / 3_600)}h`;
+  }
+  return `Reminder in ${Math.floor(secondsUntil / 86_400)}d`;
+}
+
+function PersonalItemRow({
+  id,
+  kind,
+  location,
+  onClick,
+  preview,
+  status,
+}: {
+  id: string;
+  kind: "drafts" | "reminders";
+  location: InboxTypeLabel | null;
+  onClick: () => void;
+  preview: string;
+  status: string;
+}) {
+  const isDraft = kind === "drafts";
+  const Icon = isDraft ? FileText : Bell;
+
+  return (
+    <button
+      className="flex w-full items-center gap-3 border-b border-border/45 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-hidden"
+      data-testid={`home-all-${kind}-${id}`}
+      onClick={onClick}
+      type="button"
+    >
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        <Icon className="h-4 w-4" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-semibold text-foreground">
+          {isDraft ? "Draft" : "Reminder"}
+        </span>
+        {location ? (
+          <ActivityLabel
+            isActionRequired={false}
+            isDone={false}
+            label={location}
+          />
+        ) : null}
+        <span className="block truncate text-sm text-muted-foreground">
+          {preview}
+        </span>
+      </span>
+      <span className="shrink-0 text-xs font-medium text-muted-foreground">
+        {status}
+      </span>
+    </button>
+  );
+}
+
 type InboxListPaneProps = {
+  activityEnabled: boolean;
   activeReminderEventIds?: ReadonlySet<string>;
   agentPubkeys?: ReadonlySet<string>;
   activeDraftCount: number;
@@ -117,16 +225,20 @@ type InboxListPaneProps = {
   onRemindLater: (item: InboxItem) => void;
   onSelect: (itemId: string) => void;
   onSelectDraft: (draftKey: string) => void;
+  onSelectReminder: (reminderId: string) => void;
   onUnreadOnlyChange: (checked: boolean) => void;
   selectedConversationId: string | null;
   selectedDraftKey: string | null;
   showRightDivider?: boolean;
   dueReminderCount: number;
   reminderPubkey?: string;
+  reminders: readonly Reminder[];
+  selectedReminderId: string | null;
   unreadOnly: boolean;
 };
 
 export function InboxListPane({
+  activityEnabled,
   activeReminderEventIds,
   agentPubkeys,
   activeDraftCount,
@@ -142,15 +254,22 @@ export function InboxListPane({
   onRemindLater,
   onSelect,
   onSelectDraft,
+  onSelectReminder,
   onUnreadOnlyChange,
   selectedConversationId,
   selectedDraftKey,
   showRightDivider = false,
   dueReminderCount,
   reminderPubkey,
+  reminders,
+  selectedReminderId,
   unreadOnly,
 }: InboxListPaneProps) {
-  const activeFilter = FILTER_OPTIONS.find((option) => option.value === filter);
+  const filterOptions = activityEnabled
+    ? ACTIVITY_FILTER_OPTIONS
+    : FILTER_OPTIONS;
+  const activeFilter = filterOptions.find((option) => option.value === filter);
+  const viewLabel = activityEnabled ? "activity" : "inbox";
   const isReminders = filter === "reminders";
   const isDrafts = filter === "drafts";
   const inboxStatusLabel =
@@ -160,6 +279,16 @@ export function InboxListPane({
         ? `${activeDraftCount} active draft${activeDraftCount === 1 ? "" : "s"}`
         : null;
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const activityRows = React.useMemo(
+    () =>
+      buildActivityListRows({
+        drafts: unreadOnly ? [] : draftItems,
+        items,
+        reminders: unreadOnly ? [] : reminders,
+      }),
+    [draftItems, items, reminders, unreadOnly],
+  );
+  const reminderSources = useReminderSources(reminders);
   const unreadVisibleItemCount = React.useMemo(
     () =>
       items.reduce((count, item) => count + (doneSet.has(item.id) ? 0 : 1), 0),
@@ -408,7 +537,7 @@ export function InboxListPane({
               <Popover>
                 <PopoverTrigger asChild>
                   <button
-                    aria-label="Inbox options"
+                    aria-label={`${activityEnabled ? "Activity" : "Inbox"} options`}
                     className={cn(INBOX_HEADER_ICON_BUTTON_CLASS, "-mr-4")}
                     data-testid="inbox-options-trigger"
                     type="button"
@@ -427,7 +556,7 @@ export function InboxListPane({
                       className="text-sm font-medium text-foreground"
                       htmlFor="inbox-unread-only-switch"
                     >
-                      Show unread
+                      {activityEnabled ? "Show unread only" : "Show unread"}
                     </label>
                     <Switch
                       checked={unreadOnly}
@@ -459,7 +588,7 @@ export function InboxListPane({
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
-                    aria-label={`Filter inbox: ${activeFilter?.label ?? "All"}${inboxStatusLabel ? `. ${inboxStatusLabel}` : ""}`}
+                    aria-label={`Filter ${viewLabel}: ${activeFilter?.label ?? "All"}${inboxStatusLabel ? `. ${inboxStatusLabel}` : ""}`}
                     className={cn(
                       INBOX_HEADER_ICON_BUTTON_CLASS,
                       "relative -ml-2 w-auto gap-1 px-2 text-sm font-medium text-foreground",
@@ -469,13 +598,13 @@ export function InboxListPane({
                   >
                     <span>{activeFilter?.label ?? "All"}</span>
                     <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                    {dueReminderCount > 0 ? (
+                    {!activityEnabled && dueReminderCount > 0 ? (
                       <span
                         aria-hidden="true"
                         className="absolute right-1.5 top-0 h-1.5 w-1.5 rounded-full bg-primary ring-2 ring-background"
                         data-testid="inbox-reminder-badge"
                       />
-                    ) : activeDraftCount > 0 ? (
+                    ) : !activityEnabled && activeDraftCount > 0 ? (
                       <span
                         aria-hidden="true"
                         className="absolute right-1.5 top-0 h-1.5 w-1.5 rounded-full bg-primary ring-2 ring-background"
@@ -491,7 +620,7 @@ export function InboxListPane({
                     }
                     value={filter}
                   >
-                    {FILTER_OPTIONS.map((option) => (
+                    {filterOptions.map((option) => (
                       <DropdownMenuRadioItem
                         key={option.value}
                         value={option.value}
@@ -499,12 +628,16 @@ export function InboxListPane({
                         <span className="flex flex-1 items-center justify-between gap-2">
                           {option.label}
                           {option.value === "reminders" &&
-                          dueReminderCount > 0 ? (
+                          (activityEnabled
+                            ? reminders.length
+                            : dueReminderCount) > 0 ? (
                             <span
                               className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
                               data-testid="inbox-reminder-badge-option"
                             >
-                              {dueReminderCount}
+                              {activityEnabled
+                                ? reminders.length
+                                : dueReminderCount}
                             </span>
                           ) : option.value === "drafts" &&
                             activeDraftCount > 0 ? (
@@ -532,7 +665,13 @@ export function InboxListPane({
           data-testid="home-inbox-reminders"
         >
           {reminderPubkey ? (
-            <RemindersPanel includeDone pubkey={reminderPubkey} />
+            <RemindersPanel
+              includeDone={!activityEnabled}
+              onSelectReminder={activityEnabled ? onSelectReminder : undefined}
+              presentation={activityEnabled ? "activity-list" : "card"}
+              pubkey={reminderPubkey}
+              selectedReminderId={selectedReminderId}
+            />
           ) : null}
         </div>
       ) : isDrafts ? (
@@ -553,16 +692,92 @@ export function InboxListPane({
           data-testid="home-inbox-list"
           ref={scrollRef}
         >
-          {items.length === 0 ? (
+          {activityEnabled && filter === "all" && activityRows.length > 0 ? (
+            <VirtualizedList
+              estimateSize={96}
+              getItemKey={(row) => row.key}
+              items={activityRows}
+              renderItem={(row) => {
+                if (row.kind === "inbox") return renderItem(row.item);
+
+                if (row.kind === "reminder") {
+                  const source = reminderSources.get(row.reminder.id);
+                  return (
+                    <PersonalItemRow
+                      id={row.reminder.id}
+                      kind="reminders"
+                      location={
+                        source?.channel
+                          ? source.channel.channelType === "dm"
+                            ? {
+                                text: `In DM with ${source.channelLabel}`,
+                                channelLabel: null,
+                              }
+                            : { text: "In", channelLabel: source.channelLabel }
+                          : null
+                      }
+                      onClick={() => {
+                        onSelectReminder(row.reminder.id);
+                        onFilterChange("reminders");
+                      }}
+                      preview={
+                        row.reminder.content.target?.preview ||
+                        row.reminder.content.note ||
+                        "Reminder"
+                      }
+                      status={formatReminderStatus(row.reminder.notBefore)}
+                    />
+                  );
+                }
+
+                const { entry, source } = row.item;
+                return (
+                  <PersonalItemRow
+                    id={entry.key}
+                    kind="drafts"
+                    location={
+                      source.channel
+                        ? source.channel.channelType === "dm"
+                          ? {
+                              text: `In DM with ${source.label}`,
+                              channelLabel: null,
+                            }
+                          : { text: "In", channelLabel: source.label }
+                        : null
+                    }
+                    onClick={() => {
+                      onSelectDraft(entry.key);
+                      onFilterChange("drafts");
+                    }}
+                    preview={getDraftPreview(entry.draft)}
+                    status="Draft saved"
+                  />
+                );
+              }}
+              scrollRef={scrollRef}
+            />
+          ) : items.length === 0 ? (
             <div className="flex h-full min-h-64 items-center justify-center px-6 text-center">
               <div>
                 <p className="text-sm font-medium text-foreground">
-                  {unreadOnly ? "No unread messages" : "No messages found"}
+                  {activityEnabled
+                    ? unreadOnly
+                      ? ACTIVITY_UNREAD_EMPTY_STATE_TITLES[filter]
+                      : ACTIVITY_EMPTY_STATE_TITLES[filter]
+                    : unreadOnly
+                      ? "No unread messages"
+                      : "No messages found"}
                 </p>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {unreadOnly
-                    ? "Turn off the unread filter to see read messages."
-                    : "Switch back to all mail to see more messages."}
+                  {activityEnabled
+                    ? unreadOnly
+                      ? "Turn off Show unread only to see read activity."
+                      : filter === "all"
+                        ? "New activity will appear here."
+                        : "Switch back to All to see other activity."
+                    : unreadOnly
+                      ? "Turn off the unread filter to see read messages."
+                      : "Switch back to all mail to see more messages."}
                 </p>
               </div>
             </div>

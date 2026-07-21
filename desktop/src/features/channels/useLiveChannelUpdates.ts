@@ -25,6 +25,7 @@ import { refreshChannelsWhenIdle } from "./refreshChannelsWhenIdle";
 
 export type UseLiveChannelUpdatesOptions = {
   currentPubkey?: string;
+  includeDmHomeActivity?: boolean;
   /**
    * When true, DM notifications also fire for the channel the user is
    * currently viewing (normally suppressed).
@@ -86,6 +87,14 @@ export function isChannelUnreadTriggerKind(kind: number, isDmChannel: boolean) {
   return isDmChannel
     ? isDmNotifiableKind(kind)
     : UNREAD_TRIGGER_KINDS.has(kind);
+}
+
+export function isHomeActivityEvent(
+  isDmChannel: boolean,
+  isThreadedReply: boolean,
+  includeDmHomeActivity = false,
+) {
+  return isThreadedReply || (isDmChannel && includeDmHomeActivity);
 }
 
 export function withChannelTagFallback(
@@ -278,7 +287,13 @@ export function useLiveChannelUpdates(
         }
       } else {
         options.onChannelMessage?.(channelId, event);
-        if (isThreadedReply) {
+        if (
+          isHomeActivityEvent(
+            isDmChannel,
+            isThreadedReply,
+            options.includeDmHomeActivity,
+          )
+        ) {
           options.onThreadReplyNotification?.(channelId, event);
         }
       }

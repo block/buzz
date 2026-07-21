@@ -22,6 +22,34 @@ export function mergeKnownAgentPubkeys(
   return pubkeys;
 }
 
+/** Agent identities controlled by the current user. */
+export function mergeOwnedAgentPubkeys(
+  managedAgents: readonly { pubkey: string }[] | undefined,
+  profiles:
+    | Readonly<Record<string, { ownerPubkey?: string | null }>>
+    | undefined,
+  currentPubkey: string | null | undefined,
+): ReadonlySet<string> {
+  const pubkeys = new Set<string>();
+  for (const agent of managedAgents ?? []) {
+    pubkeys.add(normalizePubkey(agent.pubkey));
+  }
+
+  if (!currentPubkey) return pubkeys;
+
+  const ownerPubkey = normalizePubkey(currentPubkey);
+  for (const [pubkey, profile] of Object.entries(profiles ?? {})) {
+    if (
+      profile.ownerPubkey &&
+      normalizePubkey(profile.ownerPubkey) === ownerPubkey
+    ) {
+      pubkeys.add(normalizePubkey(pubkey));
+    }
+  }
+
+  return pubkeys;
+}
+
 /**
  * Channel-scoped variant: the managed ∪ relay baseline plus this channel's
  * bot members (role `bot` or `isAgent`), so member-only agents are included.

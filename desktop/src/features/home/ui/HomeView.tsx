@@ -8,7 +8,6 @@ import { useChannelsQuery, useOpenDmMutation } from "@/features/channels/hooks";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { ChannelManagementSheet } from "@/features/channels/ui/ChannelManagementSheet";
 import {
-  type InboxFilter,
   type InboxContextMessage,
   type InboxItem,
   type InboxReply,
@@ -17,13 +16,16 @@ import {
   getInboxConversationId,
 } from "@/features/home/lib/inbox";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
+import { useActivityInboxFilter } from "@/features/home/useActivityInboxFilter";
+import { useOwnedAgentPubkeys } from "@/features/home/useOwnedAgentPubkeys";
 import {
+  filterActivityInboxItems,
   getReactionTargetId,
   matchesInboxFilter,
   toInboxContextMessage,
 } from "@/features/home/lib/inboxViewHelpers";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
-import { useHomeDrafts } from "@/features/home/useHomeDrafts";
+import { useHomePersonalActivity } from "@/features/home/useHomePersonalActivity";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
 import {
   type ProfilePanelTab,
@@ -35,14 +37,15 @@ import {
   profilePanelViewFromSearch,
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import {
-  INBOX_COLUMN_MIN_WIDTH_PX,
   INBOX_SINGLE_COLUMN_BREAKPOINT_PX,
   useResizableInboxListWidth,
 } from "@/features/home/useResizableInboxListWidth";
+import { getHomePaneLayout } from "@/features/home/lib/homePaneLayout";
+import { getHomeMessageCapabilities } from "@/features/home/lib/homeMessageCapabilities";
 import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
-import { DraftDetailPane } from "@/features/messages/ui/DraftDetailPane";
+import { HomePersonalActivityDetail } from "@/features/home/ui/HomePersonalActivityDetail";
 import {
   useChannelMessagesQuery,
   useToggleReactionMutation,
@@ -57,10 +60,6 @@ import { getThreadReference } from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
-import {
-  countDueReminders,
-  useRemindersQuery,
-} from "@/features/reminders/hooks";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type { HomeFeedResponse } from "@/shared/api/types";
@@ -104,6 +103,7 @@ function findItemByEventId(
 }
 
 type HomeViewProps = {
+  activityEnabled: boolean;
   feed?: HomeFeedResponse;
   isLoading?: boolean;
   errorMessage?: string;
@@ -118,6 +118,7 @@ type HomeViewProps = {
 };
 
 export function HomeView({
+  activityEnabled,
   feed,
   isLoading = false,
   errorMessage,
@@ -131,7 +132,7 @@ export function HomeView({
   const isNarrowHomeViewport =
     homeInboxWidthPx > 0 &&
     homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
-  const [filter, setFilter] = React.useState<InboxFilter>("all");
+  const [filter, setFilter] = useActivityInboxFilter(activityEnabled);
   const [unreadOnly, setUnreadOnly] = React.useState(false);
   // Explicit selections are mirrored to the URL (`?item=`), so back/forward
   // restores the detail pane each history entry was showing and reloads
@@ -142,18 +143,28 @@ export function HomeView({
   const isReminders = filter === "reminders";
   const isDrafts = filter === "drafts";
   const isMessagesMode = !isReminders && !isDrafts;
-  const remindersQuery = useRemindersQuery(currentPubkey);
-  const dueReminderCount = countDueReminders(remindersQuery.data ?? []);
   const {
-    activeCount: activeDraftCount,
-    deleteDraft: handleDeleteDraft,
-    items: draftItems,
-    selectedItem: selectedDraftItem,
-    selectedKey: selectedDraftKey,
-    selectDraft: setSelectedDraftKey,
-  } = useHomeDrafts({
+    drafts: {
+      activeCount: activeDraftCount,
+      deleteDraft: handleDeleteDraft,
+      items: draftItems,
+      selectedItem: selectedDraftItem,
+      selectedKey: selectedDraftKey,
+      selectDraft: setSelectedDraftKey,
+    },
+    dueReminderCount,
+    pendingReminders,
+    reminders: {
+      selectedId: selectedReminderId,
+      selectedItem: selectedReminder,
+      select: setSelectedReminderId,
+    },
+  } = useHomePersonalActivity({
+    activityEnabled,
+    currentPubkey,
     isDrafts,
     isNarrowHomeViewport,
+    isReminders,
     viewportWidthPx: homeInboxWidthPx,
   });
   // `?item=` is Messages-mode-only machinery: a reminder never enters the
@@ -342,6 +353,11 @@ export function HomeView({
     enabled: feedProfilePubkeys.length > 0,
   });
   const feedProfiles = feedProfilesQuery.data?.profiles;
+  const ownedAgentPubkeys = useOwnedAgentPubkeys(
+    activityEnabled,
+    feedProfiles,
+    currentPubkey,
+  );
   const feedOwnerPubkeys = React.useMemo(
     () => [
       ...new Set(
@@ -370,16 +386,15 @@ export function HomeView({
 
     return pubkeys;
   }, [feedProfiles, communityAgentPubkeys]);
-  const inboxItems = React.useMemo(
-    () =>
-      buildInboxItems({
-        channels,
-        currentPubkey,
-        feed,
-        profiles: feedProfiles,
-      }),
-    [channels, currentPubkey, feed, feedProfiles],
-  );
+  const inboxItems = React.useMemo(() => {
+    const items = buildInboxItems({
+      channels,
+      currentPubkey,
+      feed,
+      profiles: feedProfiles,
+    });
+    return filterActivityInboxItems(items, activityEnabled);
+  }, [activityEnabled, channels, currentPubkey, feed, feedProfiles]);
   const { effectiveDoneSet, markItemRead, markItemUnread } =
     useHomeInboxReadState({
       items: inboxItems,
@@ -421,15 +436,21 @@ export function HomeView({
   const filteredItems = React.useMemo(() => {
     return inboxItems.filter(
       (item) =>
-        matchesInboxFilter(item, filter) &&
+        matchesInboxFilter(
+          item,
+          filter,
+          activityEnabled ? ownedAgentPubkeys : undefined,
+        ) &&
         (!unreadOnly ||
           !effectiveDoneSet.has(item.id) ||
           item.conversationId === selectedConversationId),
     );
   }, [
     effectiveDoneSet,
+    activityEnabled,
     filter,
     inboxItems,
+    ownedAgentPubkeys,
     selectedConversationId,
     unreadOnly,
   ]);
@@ -629,63 +650,35 @@ export function HomeView({
     );
   }
 
-  const canReact =
-    selectedItem !== null &&
-    selectedItem.item.channelId !== null &&
-    availableChannelIds.has(selectedItem.item.channelId);
-  const canReply =
-    canReact &&
-    selectedItem.item.kind !== 45001 &&
-    selectedItem.item.kind !== 45003;
-  const disabledReplyReason =
-    canReply || !selectedItem
-      ? null
-      : selectedItem.item.channelId
-        ? availableChannelIds.has(selectedItem.item.channelId)
-          ? "This item does not support inline replies yet."
-          : "Open the linked channel to reply."
-        : "This inbox item does not have a reply target.";
-  const canDelete =
-    selectedItem !== null &&
-    currentPubkey?.trim().toLowerCase() ===
-      selectedItem.item.pubkey.trim().toLowerCase();
-  const isSinglePanelDetailView =
-    isMessagesMode &&
-    isNarrowHomeViewport &&
-    selectedEventId !== null &&
-    !isSinglePanelAuxiliaryView;
-  const isSinglePanelDraftDetailView =
-    isDrafts &&
-    isNarrowHomeViewport &&
-    selectedDraftItem !== null &&
-    !isSinglePanelAuxiliaryView;
-  const showListPane =
-    !isSinglePanelDetailView &&
-    !isSinglePanelDraftDetailView &&
-    !isSinglePanelAuxiliaryView;
-  const showDetailPane =
-    !isSinglePanelAuxiliaryView &&
-    ((isMessagesMode && (!isNarrowHomeViewport || isSinglePanelDetailView)) ||
-      (isDrafts && (!isNarrowHomeViewport || isSinglePanelDraftDetailView)));
-  const auxiliaryPaneWidthPx = isSinglePanelAuxiliaryView
-    ? homeInboxWidthPx
-    : threadPanelWidthPx;
-  const maxEffectiveInboxListWidthPx =
-    homeInboxWidthPx > 0
-      ? Math.max(
-          INBOX_COLUMN_MIN_WIDTH_PX,
-          homeInboxWidthPx -
-            INBOX_COLUMN_MIN_WIDTH_PX -
-            (hasAuxiliaryPane ? auxiliaryPaneWidthPx : 0),
-        )
-      : undefined;
-  const effectiveInboxListWidthPx =
-    homeInboxWidthPx > 0
-      ? Math.min(
-          inboxListWidthPx,
-          maxEffectiveInboxListWidthPx ?? inboxListWidthPx,
-        )
-      : inboxListWidthPx;
+  const { canDelete, canReact, canReply, disabledReplyReason } =
+    getHomeMessageCapabilities(
+      selectedItem,
+      currentPubkey,
+      availableChannelIds,
+    );
+  const {
+    auxiliaryPaneWidthPx,
+    effectiveInboxListWidthPx,
+    isSinglePanelDetailView,
+    isSinglePanelDraftDetailView,
+    isSinglePanelReminderDetailView,
+    showDetailPane,
+    showListPane,
+  } = getHomePaneLayout({
+    activityEnabled,
+    hasAuxiliaryPane,
+    homeWidthPx: homeInboxWidthPx,
+    inboxListWidthPx,
+    isDrafts,
+    isMessagesMode,
+    isNarrow: isNarrowHomeViewport,
+    isReminders,
+    isSinglePanelAuxiliaryView,
+    selectedDraft: selectedDraftItem !== null,
+    selectedEvent: selectedEventId !== null,
+    selectedReminder: selectedReminder !== null,
+    threadPanelWidthPx,
+  });
 
   return (
     <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
@@ -722,6 +715,7 @@ export function HomeView({
 
           {showListPane ? (
             <InboxListPane
+              activityEnabled={activityEnabled}
               activeReminderEventIds={activeReminderEventIds}
               agentPubkeys={inboxAgentPubkeys}
               activeDraftCount={activeDraftCount}
@@ -762,10 +756,13 @@ export function HomeView({
                 markItemRead(itemId);
               }}
               onSelectDraft={setSelectedDraftKey}
+              onSelectReminder={setSelectedReminderId}
               onUnreadOnlyChange={setUnreadOnly}
               reminderPubkey={currentPubkey}
+              reminders={pendingReminders}
               selectedConversationId={selectedConversationId}
               selectedDraftKey={selectedDraftKey}
+              selectedReminderId={selectedReminderId}
               showRightDivider={showListPane && showDetailPane}
               unreadOnly={unreadOnly}
             />
@@ -931,16 +928,20 @@ export function HomeView({
               replies={selectedItemReplies}
             />
           ) : null}
-          {showDetailPane && isDrafts ? (
-            <DraftDetailPane
-              item={selectedDraftItem}
-              key={selectedDraftItem?.entry.key ?? "empty"}
+          {showDetailPane && (isDrafts || isReminders) ? (
+            <HomePersonalActivityDetail
+              currentPubkey={currentPubkey}
+              draftItem={selectedDraftItem}
+              mode={isDrafts ? "drafts" : "reminders"}
               onBack={
                 isSinglePanelDraftDetailView
                   ? () => setSelectedDraftKey(null)
-                  : undefined
+                  : isSinglePanelReminderDetailView
+                    ? () => setSelectedReminderId(null)
+                    : undefined
               }
-              onDelete={handleDeleteDraft}
+              onDeleteDraft={handleDeleteDraft}
+              reminder={selectedReminder}
             />
           ) : null}
           {profilePanelPubkey ? (

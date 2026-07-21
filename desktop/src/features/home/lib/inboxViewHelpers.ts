@@ -2,6 +2,7 @@ import {
   formatInboxFullTimestamp,
   type InboxContextMessage,
   type InboxFilter,
+  type InboxItem,
 } from "@/features/home/lib/inbox";
 import {
   getChannelIdFromTags,
@@ -14,11 +15,22 @@ import type {
   RelayEvent,
   UserProfileSummary,
 } from "@/shared/api/types";
+import { KIND_REMINDER } from "@/shared/constants/kinds";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 
 function hasThreadReplyTags(tags: string[][]) {
   const thread = getThreadReference(tags);
   return thread.parentId !== null && !isBroadcastReply(tags);
+}
+
+export function filterActivityInboxItems(
+  items: InboxItem[],
+  activityEnabled: boolean,
+) {
+  return activityEnabled
+    ? items.filter((item) => item.item.kind !== KIND_REMINDER)
+    : items;
 }
 
 export function matchesInboxFilter(
@@ -28,6 +40,7 @@ export function matchesInboxFilter(
     item?: FeedItem;
   },
   filter: InboxFilter,
+  ownedAgentPubkeys?: ReadonlySet<string>,
 ) {
   if (filter === "all") {
     return true;
@@ -37,6 +50,13 @@ export function matchesInboxFilter(
     return [item.item, ...(item.groupItems ?? [])].some((groupItem) =>
       groupItem ? hasThreadReplyTags(groupItem.tags) : false,
     );
+  }
+
+  if (filter === "agent_activity" && ownedAgentPubkeys) {
+    const representative = item.item ?? item.groupItems?.at(-1);
+    return representative
+      ? ownedAgentPubkeys.has(normalizePubkey(representative.pubkey))
+      : false;
   }
 
   return item.categories.includes(filter);

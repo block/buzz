@@ -4,6 +4,7 @@ import { useAppShell } from "@/app/AppShellContext";
 import { useHomeFeedQuery } from "@/features/home/hooks";
 import { HomeView } from "@/features/home/ui/HomeView";
 import type { HomeFeedResponse } from "@/shared/api/types";
+import { useFeatureEnabled } from "@/shared/features";
 import {
   isRelayUnreachableError,
   RELAY_UNREACHABLE_MESSAGE,
@@ -25,6 +26,7 @@ export function HomeScreen({
   onOpenContext,
 }: HomeScreenProps) {
   const homeFeedQuery = useHomeFeedQuery();
+  const activityEnabled = useFeatureEnabled("activity");
   const { threadActivityFeedItems } = useAppShell();
 
   const augmentedFeed = React.useMemo((): HomeFeedResponse | undefined => {
@@ -48,6 +50,7 @@ export function HomeScreen({
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <HomeView
+        activityEnabled={activityEnabled}
         availableChannelIds={availableChannelIds}
         currentPubkey={currentPubkey}
         errorMessage={
