@@ -909,7 +909,6 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
 
     let mut command = std::process::Command::new(binary_path);
     command.args(&probe_args[1..]);
-    cli_probe::configure_auth_probe_command(&mut command, probe_args);
     if let Some(ref path) = augmented_path {
         command.env("PATH", path);
     }

@@ -580,30 +580,42 @@ fn name_matches_interpreter_rejects_node_prefix() {
 }
 
 #[test]
-fn claude_spawn_scrubs_ambient_api_key() {
+fn claude_spawn_uses_the_probed_cli_executable() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let cli = temp
+        .path()
+        .join(format!("claude{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&cli, "").expect("write fake cli");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake cli executable");
+    }
+    let original_path = std::env::var_os("PATH");
+    std::env::set_var("PATH", temp.path());
+
     let mut command = std::process::Command::new("buzz-acp");
-    command.env("ANTHROPIC_API_KEY", "stale");
+    super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
 
-    super::scrub_ambient_runtime_credentials(
-        &mut command,
-        super::known_acp_runtime("claude-agent-acp"),
-    );
-
+    if let Some(path) = original_path {
+        std::env::set_var("PATH", path);
+    } else {
+        std::env::remove_var("PATH");
+    }
     assert!(command
         .get_envs()
-        .any(|(key, value)| key == "ANTHROPIC_API_KEY" && value.is_none()));
+        .any(|(key, value)| { key == "CLAUDE_CODE_EXECUTABLE" && value == Some(cli.as_os_str()) }));
 }
 
 #[test]
-fn non_claude_spawn_preserves_ambient_api_key() {
+fn codex_spawn_does_not_set_a_claude_executable() {
     let mut command = std::process::Command::new("buzz-acp");
-    command.env("ANTHROPIC_API_KEY", "explicit");
-
-    super::scrub_ambient_runtime_credentials(&mut command, super::known_acp_runtime("codex-acp"));
-
-    assert!(command.get_envs().any(|(key, value)| {
-        key == "ANTHROPIC_API_KEY" && value == Some(std::ffi::OsStr::new("explicit"))
-    }));
+    super::configure_runtime_cli(&mut command, super::known_acp_runtime("codex-acp"));
+    assert!(!command
+        .get_envs()
+        .any(|(key, _)| key == "CLAUDE_CODE_EXECUTABLE"));
 }
 
 // ── PGID-based orphan sweep tests ───────────────────────────────────────

@@ -233,10 +233,18 @@ export function welcomeStarterRuntimeUpdate(
   existing: ManagedAgent,
   desired: CreateManagedAgentInput,
 ) {
+  if (!desired.agentCommand) return null;
+
+  const desiredArgs = desired.agentArgs ?? [];
+  const desiredModel = desired.model ?? null;
+  const desiredProvider = desired.provider ?? null;
+  const desiredMcpCommand = desired.mcpCommand ?? "";
   if (
-    !desired.agentCommand ||
-    (existing.agentCommand === desired.agentCommand &&
-      existing.agentArgs.join(",") === (desired.agentArgs ?? []).join(","))
+    existing.agentCommand === desired.agentCommand &&
+    existing.agentArgs.join(",") === desiredArgs.join(",") &&
+    existing.model === desiredModel &&
+    existing.provider === desiredProvider &&
+    existing.mcpCommand === desiredMcpCommand
   ) {
     return null;
   }
@@ -245,7 +253,10 @@ export function welcomeStarterRuntimeUpdate(
     pubkey: existing.pubkey,
     agentCommand: desired.agentCommand,
     harnessOverride: true,
-    agentArgs: desired.agentArgs ?? [],
+    agentArgs: desiredArgs,
+    mcpCommand: desiredMcpCommand,
+    model: desiredModel,
+    provider: desiredProvider,
   };
 }
 

@@ -1467,12 +1467,18 @@ pub(crate) fn build_respond_to_env(
     Ok((set, remove))
 }
 
-fn scrub_ambient_runtime_credentials(
+pub(crate) fn configure_runtime_cli(
     command: &mut std::process::Command,
     runtime: Option<&KnownAcpRuntime>,
 ) {
-    if runtime.is_some_and(|runtime| runtime.id == "claude") {
-        command.env_remove("ANTHROPIC_API_KEY");
+    let Some(runtime) = runtime else {
+        return;
+    };
+    if runtime.id != "claude" {
+        return;
+    }
+    if let Some(cli_path) = runtime.underlying_cli.and_then(resolve_command) {
+        command.env("CLAUDE_CODE_EXECUTABLE", cli_path);
     }
 }
 
@@ -1829,11 +1835,6 @@ pub fn spawn_agent_child(
         );
     }
 
-    // Claude subscription auth must come from the CLI credential store unless
-    // the user explicitly configured an API key in Buzz. A stale key inherited
-    // from the Desktop process otherwise overrides a valid subscription login.
-    scrub_ambient_runtime_credentials(&mut command, runtime_meta);
-
     // ── User env vars: live persona env under agent overrides ──────────
     //
     // The record's `env_vars` holds agent-level overrides only. The linked
@@ -1858,6 +1859,7 @@ pub fn spawn_agent_child(
     for (key, value) in super::env_vars::merged_user_env(&persona_over_global, &record.env_vars) {
         command.env(key, value);
     }
+    configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
     // transport at spawn time and scrub any unrelated ambient OpenAI key.
