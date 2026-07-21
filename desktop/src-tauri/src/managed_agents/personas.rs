@@ -61,6 +61,13 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
     },
 ];
 
+pub(crate) fn built_in_persona_avatar_url(id: &str) -> Option<&'static str> {
+    BUILT_IN_PERSONAS
+        .iter()
+        .find(|persona| persona.id == id)
+        .and_then(|persona| persona.avatar_url)
+}
+
 const RETIRED_PERSONAS: &[(&str, &str)] = &[
     (
         "builtin:solo",

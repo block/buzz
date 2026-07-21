@@ -991,3 +991,81 @@ fn migrate_legacy_nest_preserves_user_edited_agents_md() {
         "a user-edited live AGENTS.md must never be clobbered"
     );
 }
+
+#[test]
+fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizations() {
+    use sha2::{Digest as _, Sha256};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("managed-agents.json");
+    let old_fizz = "data:image/png;base64,old-fizz";
+    let old_honey = "data:image/png;base64,old-honey";
+    let fizz_hash = hex::encode(Sha256::digest(old_fizz.as_bytes()));
+    let honey_hash = hex::encode(Sha256::digest(old_honey.as_bytes()));
+    let legacy_hashes = [
+        ("builtin:fizz", fizz_hash.as_str()),
+        ("builtin:honey", honey_hash.as_str()),
+    ];
+    let records = serde_json::json!([
+        {
+            "pubkey": "",
+            "slug": "builtin:fizz",
+            "persona_id": null,
+            "avatar_url": old_fizz,
+            "updated_at": "before"
+        },
+        {
+            "pubkey": "fizz-instance",
+            "persona_id": "builtin:fizz",
+            "avatar_url": old_fizz,
+            "updated_at": "before"
+        },
+        {
+            "pubkey": "honey-instance",
+            "persona_id": "builtin:honey",
+            "avatar_url": "data:image/png;base64,user-customized",
+            "updated_at": "before"
+        },
+        {
+            "pubkey": "custom-instance",
+            "persona_id": "custom:fizz",
+            "avatar_url": old_fizz,
+            "updated_at": "before"
+        }
+    ]);
+    std::fs::write(&path, serde_json::to_vec_pretty(&records).unwrap()).unwrap();
+
+    refresh_builtin_agent_avatars_in_file(&path, &legacy_hashes, "after");
+
+    let migrated: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let new_fizz = crate::managed_agents::built_in_persona_avatar_url("builtin:fizz").unwrap();
+    assert_eq!(migrated[0]["avatar_url"], new_fizz);
+    assert_eq!(migrated[0]["updated_at"], "after");
+    assert_eq!(migrated[1]["avatar_url"], new_fizz);
+    assert_eq!(migrated[1]["updated_at"], "after");
+    assert_eq!(
+        migrated[2]["avatar_url"],
+        "data:image/png;base64,user-customized"
+    );
+    assert_eq!(migrated[2]["updated_at"], "before");
+    assert_eq!(migrated[3]["avatar_url"], old_fizz);
+    assert_eq!(migrated[3]["updated_at"], "before");
+
+    let once = std::fs::read(&path).unwrap();
+    refresh_builtin_agent_avatars_in_file(&path, &legacy_hashes, "later");
+    assert_eq!(std::fs::read(&path).unwrap(), once);
+}
+
+#[test]
+fn current_builtin_agent_avatars_do_not_match_legacy_hashes() {
+    use sha2::{Digest as _, Sha256};
+
+    for (id, legacy_hash) in LEGACY_BUILTIN_AVATAR_HASHES {
+        let current = crate::managed_agents::built_in_persona_avatar_url(id).unwrap();
+        assert_ne!(
+            hex::encode(Sha256::digest(current.as_bytes())),
+            *legacy_hash
+        );
+    }
+}

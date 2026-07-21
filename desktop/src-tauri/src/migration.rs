@@ -15,6 +15,7 @@
 //! discovery table. Ensures known providers always have their canonical
 //! `mcp_command`; unknown/custom agents are left untouched.
 
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
@@ -175,6 +176,7 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // Post-fold readers of the runtime map (`load_persona_runtimes`) fall
     // back to the unified store's definitions.
     fold_personas_into_agent_store(app);
+    refresh_builtin_agent_avatars(app);
     // B5: manufacture definitions for standalone agents AFTER the fold (so
     // pre-existing definition slugs are present for collision checks) and
     // before event sync republishes — the backfilled link is what flips the
@@ -509,6 +511,78 @@ fn patch_json_records(
             }
         }
     }
+}
+
+const LEGACY_BUILTIN_AVATAR_HASHES: &[(&str, &str)] = &[
+    (
+        "builtin:fizz",
+        "2771b8c9c46aa3c8ac1c4d2acfa23fa9ba35b79c4b1694554e923081e3b8b4d0",
+    ),
+    (
+        "builtin:honey",
+        "1979e54ef77fc94ec688170bd74dade35c563e7fcc82bb0714c672dfb018eab9",
+    ),
+    (
+        "builtin:bumble",
+        "c08cf3b8b4c3f8721df6143367ababdebae8f913b9c654401ba74bb3d233655b",
+    ),
+];
+
+/// Refresh the prior seeded avatar on built-in definitions and linked agent
+/// instances while preserving any avatar the user customized. Matching by the
+/// full data URL digest makes the migration idempotent and avoids relying on
+/// timestamps or other persona fields the user may also have edited.
+fn refresh_builtin_agent_avatars(app: &tauri::AppHandle) {
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let path = dir.join("agents/managed-agents.json");
+    if path.exists() {
+        refresh_builtin_agent_avatars_in_file(
+            &path,
+            LEGACY_BUILTIN_AVATAR_HASHES,
+            &crate::util::now_iso(),
+        );
+    }
+}
+
+fn refresh_builtin_agent_avatars_in_file(path: &Path, legacy_hashes: &[(&str, &str)], now: &str) {
+    patch_json_records(path, |record| {
+        let persona_id = record
+            .get("persona_id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| record.get("slug").and_then(serde_json::Value::as_str));
+        let Some(persona_id) = persona_id else {
+            return false;
+        };
+        let Some(legacy_hash) = legacy_hashes
+            .iter()
+            .find_map(|(id, hash)| (*id == persona_id).then_some(*hash))
+        else {
+            return false;
+        };
+        let Some(current_avatar) = record.get("avatar_url").and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        if hex::encode(Sha256::digest(current_avatar.as_bytes())) != legacy_hash {
+            return false;
+        }
+        let Some(replacement) = crate::managed_agents::built_in_persona_avatar_url(persona_id)
+        else {
+            return false;
+        };
+
+        record.insert(
+            "avatar_url".to_string(),
+            serde_json::Value::String(replacement.to_string()),
+        );
+        record.insert(
+            "updated_at".to_string(),
+            serde_json::Value::String(now.to_string()),
+        );
+        true
+    });
 }
 
 /// Create symlinks for shared agent data files from the current (worktree)
