@@ -167,5 +167,23 @@ strip = true
 # aws-creds to a fork that adopts the aws-creds portion of durch/rust-s3#449
 # (FULL_URI + token-file + Authorization header, refresh-safe, with a loopback
 # allowlist for the auth token). Revert to crates.io once #449 lands upstream.
+#
+# SECURITY TRACKING (quick-xml DoS): rust-s3 0.37.2 and the aws-creds fork above
+# both pull in quick-xml 0.38.4, which is affected by RUSTSEC-2026-0194 (O(N²) CPU
+# amplification on malformed attribute values) and RUSTSEC-2026-0195 (unbounded
+# memory growth from deeply-nested XML). The fix requires quick-xml ≥ 0.40.0, but
+# that is a semver-incompatible bump from rust-s3's current ^0.38 pin — a Cargo
+# workspace patch cannot bridge incompatible minor versions without recompile errors.
+#
+# Exploitability in buzz: quick-xml is reached only via S3 API response parsing
+# (ListBucket/GetObject XML). In production the S3 endpoint is operator-controlled
+# and trusted; risk materialises only if the S3 layer is compromised or MITM'd.
+#
+# Remediation path:
+#   1. Upstream: https://github.com/durch/rust-s3 — bump quick-xml to ^0.40 and
+#      release ≥0.38.0 (or 0.37.3). Track: durch/rust-s3#[upstream issue].
+#   2. Fork: mirror the same bump in tlongwell-block/rust-s3 and advance the
+#      rev pin in aws-creds below to pick up the fix.
+# Remove this comment block once the pin above is updated to a fixed revision.
 [patch.crates-io]
 aws-creds = { git = "https://github.com/tlongwell-block/rust-s3", rev = "c9fce3620dd434c1f810101d672cf384268dbb0f" }
