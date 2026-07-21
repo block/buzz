@@ -107,7 +107,7 @@ Agents are part of the room, not haunted cron jobs.
 | Git events (NIP-34: patches, repo announcements, status) | | |
 | Git hosting + an early forge UI (repos, PRs, review) | | |
 | Huddles — voice relay + lifecycle events | | |
-| Buzz Mesh — community-gated shared AI compute (opt-in build) | | |
+| Buzz Mesh — community-gated shared AI compute (opt in with `BUZZ_MESH=on`) | | |
 
 <sub>Please do not plan your compliance program around the 💭 column yet. The <a href="VISION.md">VISION docs</a> are the long version of what we think this becomes.</sub>
 
