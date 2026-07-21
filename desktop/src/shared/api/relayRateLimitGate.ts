@@ -14,6 +14,16 @@
 /** Minimum gate duration when the relay provides no `retry in Ns` hint. */
 const DEFAULT_RATE_LIMIT_SECONDS = 10;
 
+/**
+ * Maximum hint the TS gate will honour from a relay 429 response.
+ *
+ * Mirrors `MAX_HINT_SECONDS` in `relay_admission.rs` (Rust). The Rust relay
+ * layer clamps the hint before embedding it in the error string, so in practice
+ * this TS cap is a defence-in-depth guard against any future Rust path that
+ * forgets to clamp, keeping both gates on the same documented bound.
+ */
+export const MAX_HINT_SECONDS = 300;
+
 let expiresAt: number | null = null;
 let gateTimer: number | null = null;
 let gateResolve: (() => void) | null = null;
@@ -45,7 +55,7 @@ export function parseRateLimitHint(msg: string): number | null {
 export function activateRateLimit(retryInSeconds: number | null): void {
   const durationMs =
     (retryInSeconds != null && retryInSeconds > 0
-      ? retryInSeconds
+      ? Math.min(retryInSeconds, MAX_HINT_SECONDS)
       : DEFAULT_RATE_LIMIT_SECONDS) * 1_000;
   const newExpiry = Date.now() + durationMs;
 

@@ -35,7 +35,10 @@ const DEFAULT_RATE_LIMIT_SECONDS: u64 = 10;
 /// Maximum hint the gate will honour from a relay 429 response.
 /// Prevents an untrusted relay from pinning traffic for an unreasonable window
 /// or overflowing `Instant` arithmetic.
-const MAX_HINT_SECONDS: u64 = 300;
+/// Exposed `pub` so `relay.rs` can clamp the hint before embedding it in the
+/// returned error string — ensuring every consumer (Rust gate and TS gate via
+/// `applyTauriRateLimitIfNeeded`) sees the same capped value.
+pub const MAX_HINT_SECONDS: u64 = 300;
 
 static GATE_EXPIRY: Mutex<Option<Instant>> = Mutex::new(None);
 
@@ -352,6 +355,70 @@ mod tests {
             elapsed >= Duration::from_secs(5),
             "waiter woke at {}ms — must not wake before A's 5s expiry even after reset",
             elapsed.as_millis()
+        );
+
+        reset_rate_limit_gate();
+    }
+
+    /// Wait-then-sign ensures NIP-98 auth is fresh after an admission wait.
+    ///
+    /// The relay enforces NIP-98 freshness within ±60s (`TIMESTAMP_TOLERANCE_SECS`
+    /// in `buzz-auth`), while the gate honours hints up to `MAX_HINT_SECONDS`
+    /// (300s). Signing BEFORE the wait produces a stale `created_at` that would
+    /// be rejected on any active window >60s.
+    ///
+    /// This test arms a 1s gate, records the wall-clock time immediately AFTER
+    /// the wait returns, then builds the NIP-98 header and asserts its
+    /// `created_at` is ≥ the wake time — proving the sign happened post-wait.
+    #[tokio::test]
+    async fn nip98_auth_created_at_is_fresh_after_admission_wait() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+        use serde::Deserialize;
+
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+
+        // Arm the gate for 1s (real time — NIP-98 uses SystemTime, not Tokio clock).
+        activate_rate_limit(Some(1));
+
+        // Wait out the gate — this is the critical ordering: wait THEN sign.
+        wait_for_rate_limit().await;
+
+        // Capture the wake time as a Unix timestamp AFTER the wait returns.
+        let wake_unix: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Build NIP-98 auth header (contains a signed event whose `created_at`
+        // is set at sign time — i.e., now, after the wait).
+        let keys = nostr::Keys::generate();
+        let header = crate::relay::build_nip98_auth_header_for_keys(
+            &keys,
+            &reqwest::Method::POST,
+            "https://relay.example.com/events",
+            b"{}",
+        )
+        .expect("header build must succeed");
+
+        // Decode the base64-encoded Nostr event from "Nostr <base64>".
+        let b64 = header
+            .strip_prefix("Nostr ")
+            .expect("header must start with 'Nostr '");
+        let json_bytes = BASE64.decode(b64).expect("valid base64");
+
+        #[derive(Deserialize)]
+        struct EventShell {
+            created_at: u64,
+        }
+        let shell: EventShell = serde_json::from_slice(&json_bytes).expect("valid event JSON");
+
+        assert!(
+            shell.created_at >= wake_unix,
+            "NIP-98 created_at ({}) must be >= wake time ({}); \
+             signing before the wait produces stale auth",
+            shell.created_at,
+            wake_unix
         );
 
         reset_rate_limit_gate();

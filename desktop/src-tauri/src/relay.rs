@@ -269,8 +269,14 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
     // instead of burning it (see `relay_admission`).
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         let hint = extract_retry_in_hint(&body);
-        crate::relay_admission::activate_rate_limit(hint);
-        if let Some(secs) = hint {
+        // Clamp the hint to MAX_HINT_SECONDS before arming the Rust gate AND
+        // before embedding it in the returned string. Every consumer (Rust gate
+        // via `activate_rate_limit` and TS gate via `applyTauriRateLimitIfNeeded`)
+        // must see the same capped value — a single policy point prevents the TS
+        // gate from receiving an uncapped hint from an untrusted relay.
+        let capped_hint = hint.map(|s| s.min(crate::relay_admission::MAX_HINT_SECONDS));
+        crate::relay_admission::activate_rate_limit(capped_hint);
+        if let Some(secs) = capped_hint {
             return format!("relay rate-limited: retry in {secs}s");
         }
         return "relay rate-limited: quota exceeded".to_string();
@@ -691,6 +697,57 @@ mod tests {
         assert_eq!(
             extract_retry_in_hint("retry in 99999999999999999999999s"),
             None
+        );
+    }
+
+    // ── relay_error_message: hint capping ────────────────────────────────────
+    //
+    // Verify that an oversized relay hint is capped in the returned message
+    // string, not just inside `activate_rate_limit()`. This guarantees every
+    // consumer — including the TS gate via `applyTauriRateLimitIfNeeded` —
+    // receives the capped value rather than the raw untrusted relay value.
+
+    #[tokio::test]
+    async fn oversized_hint_is_capped_in_relay_error_message_string() {
+        use crate::relay_admission::MAX_HINT_SECONDS;
+        use std::io::Write as _;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Serve a 429 with a hint far exceeding MAX_HINT_SECONDS (300).
+        let oversized = 1_000_000u64;
+        let body = format!(r#"{{"error":"rate-limited: quota exceeded; retry in {oversized}s"}}"#);
+        let body_len = body.len();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let mut std_stream = stream.into_std().unwrap();
+                let response = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\n\r\n{body}"
+                );
+                let _ = std_stream.write_all(response.as_bytes());
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("request must succeed");
+
+        let msg = super::relay_error_message(response).await;
+
+        // The message must embed the CAPPED hint, not the raw 1 000 000.
+        assert_eq!(
+            msg,
+            format!("relay rate-limited: retry in {MAX_HINT_SECONDS}s"),
+            "relay_error_message must embed the capped hint, not the raw untrusted value"
+        );
+        assert!(
+            !msg.contains(&oversized.to_string()),
+            "raw oversized hint must not appear in the message string"
         );
     }
 

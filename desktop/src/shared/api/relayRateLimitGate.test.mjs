@@ -52,6 +52,7 @@ const {
   resetRateLimitGate,
   rateLimitRemainingMs,
   parseRateLimitHint,
+  MAX_HINT_SECONDS,
 } = await import("./relayRateLimitGate.ts");
 
 // Helper to reset between tests.
@@ -147,6 +148,56 @@ test("negative hint uses 10s default", () => {
   assert.equal(isRateLimited(), true);
   tickTo(10_001);
   assert.equal(isRateLimited(), false);
+});
+
+// ── MAX_HINT_SECONDS cap ──────────────────────────────────────────────────────
+
+test("oversized hint is clamped to MAX_HINT_SECONDS", () => {
+  reset(0);
+  // A relay sending 1 000 000s must not pin the gate beyond 300s.
+  activateRateLimit(1_000_000);
+  // Gate must still be active at MAX_HINT_SECONDS - 1 ms.
+  tickTo(MAX_HINT_SECONDS * 1_000 - 1);
+  assert.equal(
+    isRateLimited(),
+    true,
+    "gate must be active just before cap expiry",
+  );
+  // Gate must expire at MAX_HINT_SECONDS.
+  tickTo(MAX_HINT_SECONDS * 1_000 + 1);
+  assert.equal(isRateLimited(), false, "gate must expire at MAX_HINT_SECONDS");
+});
+
+test("hint exactly at MAX_HINT_SECONDS is honoured without clamping", () => {
+  reset(0);
+  activateRateLimit(MAX_HINT_SECONDS);
+  tickTo(MAX_HINT_SECONDS * 1_000 - 1);
+  assert.equal(isRateLimited(), true);
+  tickTo(MAX_HINT_SECONDS * 1_000 + 1);
+  assert.equal(isRateLimited(), false);
+});
+
+test("applyTauriRateLimitIfNeeded with oversized hint clamps to MAX_HINT_SECONDS", async () => {
+  // This test imports applyTauriRateLimitIfNeeded separately and verifies that
+  // the TS cap applies even when the message string contains a large hint value
+  // (the Rust layer clamps in practice, but TS must be independently safe).
+  reset(0);
+  const { applyTauriRateLimitIfNeeded } = await import("./tauri.ts");
+  // Simulate a message that somehow escaped the Rust cap (defence-in-depth).
+  applyTauriRateLimitIfNeeded("relay rate-limited: retry in 1000000s");
+  // Gate should cap at MAX_HINT_SECONDS * 1000 ms.
+  tickTo(MAX_HINT_SECONDS * 1_000 - 1);
+  assert.equal(
+    isRateLimited(),
+    true,
+    "gate must still be active just before cap",
+  );
+  tickTo(MAX_HINT_SECONDS * 1_000 + 1);
+  assert.equal(
+    isRateLimited(),
+    false,
+    "gate must expire at MAX_HINT_SECONDS, not 1 000 000s",
+  );
 });
 
 // ── waitForRateLimit ──────────────────────────────────────────────────────────
