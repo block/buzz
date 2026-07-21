@@ -14,6 +14,9 @@ export type ProfileAvatarEditorProps = {
   onModeChange?: (mode: AvatarMode) => void;
   onUploadedAvatarChange?: (url: string | null) => void;
   onUploadingChange?: (isUploading: boolean) => void;
+  uploadPreviewUrl?: string | null;
+  onUploadPreviewStart?: (file: File) => void;
+  onUploadPreviewSettled?: (succeeded: boolean) => void;
   onAnimatedAvatarApply?: (url: string) => void;
   onDone?: () => void;
   donePending?: boolean;

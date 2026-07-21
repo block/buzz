@@ -15,7 +15,10 @@ import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import { Spinner } from "@/shared/ui/spinner";
 import {
+  DONE_BUTTON_CONTENT_TRANSITION,
+  DONE_BUTTON_SHELL_TRANSITION,
   useLocalAvatarPreview,
+  useUploadPreviewLifecycle,
   waitForPendingButtonPaint,
 } from "./ProfileAvatarEditor.helpers";
 import {
@@ -44,15 +47,6 @@ import type {
   AvatarMode,
   ProfileAvatarEditorProps,
 } from "./ProfileAvatarEditor.types";
-const DONE_BUTTON_CONTENT_TRANSITION = {
-  duration: 0.14,
-  ease: [0.23, 1, 0.32, 1],
-} as const;
-const DONE_BUTTON_SHELL_TRANSITION = {
-  duration: 0.18,
-  ease: [0.23, 1, 0.32, 1],
-} as const;
-type EmojiMartEmoji = { native?: string };
 
 const INITIAL_EMOJI_AVATAR_COLORS = AVATAR_COLORS.filter(
   (color) => color !== DEFAULT_EMOJI_AVATAR_COLOR,
@@ -82,6 +76,9 @@ export function ProfileAvatarEditor({
   onAnimatedAvatarApply,
   onDone,
   onUploadingChange,
+  onUploadPreviewStart,
+  onUploadPreviewSettled,
+  uploadPreviewUrl,
   previewName,
   showEmojiColorControlsWhenEmpty = false,
   disabled,
@@ -102,6 +99,7 @@ export function ProfileAvatarEditor({
   const [isDragging, setIsDragging] = React.useState(false);
   const [urlDraft, setUrlDraft] = React.useState("");
   const localPreview = useLocalAvatarPreview();
+  const activeUploadPreviewUrl = uploadPreviewUrl ?? localPreview.previewUrl;
   const [selectedEmoji, setSelectedEmoji] = React.useState<string | null>(
     () => initialEmojiAvatar?.emoji ?? null,
   );
@@ -178,6 +176,13 @@ export function ProfileAvatarEditor({
   );
   const [isAnimatedApplyPending, setIsAnimatedApplyPending] =
     React.useState(false);
+  const uploadPreviewLifecycle = useUploadPreviewLifecycle({
+    clearFallback: localPreview.clearPreview,
+    onSettled: onUploadPreviewSettled,
+    onStart: onUploadPreviewStart,
+    onSuccess: handleUploadSuccess,
+    showFallback: localPreview.showFilePreview,
+  });
   const {
     clearError: clearUploadError,
     errorMessage: uploadErrorMessage,
@@ -186,11 +191,7 @@ export function ProfileAvatarEditor({
     isUploading,
     openPicker,
     uploadFile,
-  } = useAvatarUpload({
-    onUploadStart: localPreview.showFilePreview,
-    onUploadSettled: localPreview.clearPreview,
-    onUploadSuccess: handleUploadSuccess,
-  });
+  } = useAvatarUpload(uploadPreviewLifecycle);
   const isInputDisabled = disabled || isUploading || isAnimatedApplyPending;
   const handleAnimatedApply = React.useCallback(
     (animatedUrl: string) => {
@@ -616,9 +617,9 @@ export function ProfileAvatarEditor({
                     type="button"
                   >
                     {isOnboardingModal &&
-                    (localPreview.previewUrl || avatarUrl) ? (
+                    (activeUploadPreviewUrl || avatarUrl) ? (
                       <ProfileAvatarUploadPreview
-                        avatarUrl={localPreview.previewUrl || avatarUrl || ""}
+                        avatarUrl={activeUploadPreviewUrl || avatarUrl || ""}
                         label={previewName}
                         testId={`${testIdPrefix}-upload-preview`}
                       />
@@ -770,7 +771,7 @@ export function ProfileAvatarEditor({
                       icons="outline"
                       navPosition="bottom"
                       onEmojiSelect={(
-                        emoji: EmojiMartEmoji,
+                        emoji: { native?: string },
                         event?: MouseEvent,
                       ) => {
                         if (isInputDisabled) {
@@ -933,7 +934,7 @@ export function ProfileAvatarEditor({
                 >
                   <span className="grid place-items-center">
                     <AnimatePresence initial={false}>
-                      {isDoneButtonPending ? (
+                      {isDoneButtonPending && !isOnboardingModal ? (
                         <motion.span
                           animate={{ opacity: 1, y: 0 }}
                           className="col-start-1 row-start-1 inline-flex items-center justify-center gap-2"

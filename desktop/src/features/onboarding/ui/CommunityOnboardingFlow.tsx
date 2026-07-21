@@ -19,12 +19,14 @@ import {
   parseEmojiAvatarDataUrl,
   ProfileAvatarEditor,
 } from "@/features/profile/ui/ProfileAvatarEditor";
+import { useLocalAvatarPreview } from "@/features/profile/ui/ProfileAvatarEditor.helpers";
 import { updateProfile } from "@/shared/api/tauriProfiles";
 import { getIdentity, importIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { relayClient } from "@/shared/api/relayClient";
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
@@ -73,11 +75,15 @@ function AvatarCircle({
   onClick,
   previewName,
   triggerRef,
+  onRemoteAvatarReady,
+  remoteAvatarUrl,
 }: {
   avatarUrl: string;
   onClick: () => void;
   previewName: string;
   triggerRef?: React.Ref<HTMLButtonElement>;
+  onRemoteAvatarReady?: () => void;
+  remoteAvatarUrl?: string;
 }) {
   const emojiAvatar = parseEmojiAvatarDataUrl(avatarUrl);
   const hasAvatar = avatarUrl.trim().length > 0;
@@ -91,6 +97,15 @@ function AvatarCircle({
       ref={triggerRef}
       type="button"
     >
+      {onRemoteAvatarReady && remoteAvatarUrl ? (
+        <img
+          alt=""
+          aria-hidden="true"
+          className="pointer-events-none absolute h-px w-px opacity-0"
+          onLoad={onRemoteAvatarReady}
+          src={rewriteRelayUrl(remoteAvatarUrl)}
+        />
+      ) : null}
       {emojiAvatar ? (
         <span
           className="flex h-36 w-36 items-center justify-center overflow-hidden rounded-full text-5xl shadow-xs"
@@ -103,6 +118,7 @@ function AvatarCircle({
           avatarUrl={avatarUrl}
           className="h-36 w-36 rounded-full text-4xl"
           label={previewName}
+          testId="community-avatar-circle"
         />
       ) : (
         <span className="flex h-36 w-36 items-center justify-center rounded-full bg-white/30 text-[var(--buzz-onboarding-backup-ink)] transition-colors group-hover:bg-white/40">
@@ -145,6 +161,7 @@ export function CommunityOnboardingFlow({
   const systemColorScheme = useSystemColorScheme();
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
+  const avatarPreview = useLocalAvatarPreview();
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
   const [isAvatarEditorOpen, setIsAvatarEditorOpen] = React.useState(false);
   const [starterPersonas, setStarterPersonas] = React.useState<AgentPersona[]>(
@@ -452,9 +469,15 @@ export function CommunityOnboardingFlow({
                 </div>
                 <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center pt-8">
                   <AvatarCircle
-                    avatarUrl={avatarUrl}
+                    avatarUrl={avatarPreview.previewUrl || avatarUrl}
                     onClick={() => setIsAvatarEditorOpen(true)}
+                    onRemoteAvatarReady={
+                      avatarPreview.previewUrl && avatarUrl
+                        ? avatarPreview.clearPreview
+                        : undefined
+                    }
                     previewName={displayName.trim() || "Your profile"}
+                    remoteAvatarUrl={avatarUrl}
                     triggerRef={avatarTriggerRef}
                   />
                   <label
@@ -548,11 +571,19 @@ export function CommunityOnboardingFlow({
                       emojiPickerTheme="auto"
                       emojiPickerThemeVars={NEUTRAL_EMOJI_PICKER_THEME_VARS}
                       onDone={() => setIsAvatarEditorOpen(false)}
+                      onModeChange={(mode) => {
+                        if (mode !== "image") avatarPreview.clearPreview();
+                      }}
+                      onUploadPreviewSettled={(succeeded) => {
+                        if (!succeeded) avatarPreview.clearPreview();
+                      }}
+                      onUploadPreviewStart={avatarPreview.showFilePreview}
                       onUploadingChange={setIsUploadingAvatar}
                       onUrlChange={setAvatarUrl}
                       presentation="onboarding-modal"
                       previewName={displayName.trim() || "Your profile"}
                       testIdPrefix="community-avatar"
+                      uploadPreviewUrl={avatarPreview.previewUrl}
                     />
                   </div>
                 </DialogContent>

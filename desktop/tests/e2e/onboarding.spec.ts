@@ -1314,15 +1314,16 @@ test("connected first-community profile step offers equal-width Next and Back co
   );
   await installFakeCamera(page, { failRequests: 1 });
   const uploadedAvatarUrl = "https://mock.relay/media/community-avatar.png";
-  await page.route(uploadedAvatarUrl, (route) =>
-    route.fulfill({
+  await page.route(uploadedAvatarUrl, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await route.fulfill({
       body: Buffer.from(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
         "base64",
       ),
       contentType: "image/png",
-    }),
-  );
+    });
+  });
   await installMockBridge(
     page,
     {
@@ -1471,8 +1472,23 @@ test("connected first-community profile step offers equal-width Next and Back co
   );
   await expect(previewImage).toHaveAttribute("src", /^blob:/);
   await expect(saveButton).toBeDisabled();
-  await expect(previewImage).toHaveAttribute("src", uploadedAvatarUrl);
+  await expect(saveButton).toHaveText("Save");
+  const localPreviewUrl = await previewImage.getAttribute("src");
+  await expect(previewImage).toHaveAttribute("src", localPreviewUrl ?? "");
+  await saveButton.click();
+  await expect(avatarDialog).toHaveCount(0);
+  await expect(
+    page.getByTestId("community-avatar-circle-image"),
+  ).toHaveAttribute("src", localPreviewUrl ?? "");
+  await expect
+    .poll(() =>
+      page.getByTestId("community-avatar-circle-image").getAttribute("src"),
+    )
+    .not.toBe(localPreviewUrl);
+
+  await avatarButton.click();
   await expect(avatarDialog).toBeVisible();
+  await expect(previewImage).toHaveAttribute("src", uploadedAvatarUrl);
   const modeContentShell = page.getByTestId(
     "community-avatar-mode-content-shell",
   );
