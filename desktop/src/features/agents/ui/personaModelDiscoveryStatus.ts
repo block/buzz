@@ -172,6 +172,17 @@ export function formatModelDiscoveryErrorStatus(
     return null;
   }
 
+  // Hook synthesizes this when availability !== "available". Discovery is
+  // never attempted (no modelDiscoveryKey), so Retry would be a no-op —
+  // point the user at install/settings instead of offering Retry (#2267).
+  if (message.toLowerCase().includes("runtime not available")) {
+    return {
+      message:
+        "This agent runtime is not available. Install or reinstall it in Settings > Agents.",
+      tone: "warning",
+    };
+  }
+
   if (isModelDiscoveryTimeoutError(message)) {
     return {
       message:

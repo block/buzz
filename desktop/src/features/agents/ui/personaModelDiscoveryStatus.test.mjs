@@ -79,6 +79,17 @@ test("model discovery status stays quiet for missing Databricks defaults", () =>
   assert.equal(status, null);
 });
 
+test("runtime unavailable is not retryable (Retry would be a no-op)", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("Runtime not available: not_installed"),
+    "anthropic",
+  );
+  assert.equal(status?.tone, "warning");
+  assert.equal(status?.retryable, undefined);
+  assert.match(status?.message ?? "", /not available/i);
+  assert.match(status?.message ?? "", /Settings/i);
+});
+
 // ── #2261 timeout / PATH / progressive loading ────────────────────────────────
 
 test("isModelDiscoveryTimeoutError matches buzz-acp probe timeout text", () => {

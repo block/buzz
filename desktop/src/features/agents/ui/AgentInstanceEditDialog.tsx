@@ -788,14 +788,22 @@ export function AgentInstanceEditDialog({
     model,
     provider: providerForDiscovery,
   });
+  // Match AgentModelField: while probing with no catalog yet, force the
+  // control onto the short loading sentinel so the closed trigger does not
+  // keep showing a stale default/previous model with no loading cue (#2261).
+  const controlShowsModelLoading =
+    modelDiscoveryLoading && discoveredModelOptions === null;
   const modelDropdownOptions = buildModelDropdownOptions({
     allowCustom: !isRelayMesh,
     globalModel: isRelayMesh ? undefined : inheritedModelDefault.value,
     globalModelLabel: isRelayMesh ? undefined : inheritedModelLabel,
-    loading: modelDiscoveryLoading && discoveredModelOptions === null,
+    loading: controlShowsModelLoading,
     loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
     options: effectiveModelOptions,
   });
+  const modelControlValue = controlShowsModelLoading
+    ? MODEL_DISCOVERY_LOADING_VALUE
+    : modelSelectValue;
 
   // Provider field derived state
   const trimmedProvider = provider.trim();
@@ -1058,7 +1066,7 @@ export function AgentInstanceEditDialog({
                 onValueChange={handleModelDropdownChange}
                 options={modelDropdownOptions}
                 placeholder="Default model"
-                value={modelSelectValue}
+                value={modelControlValue}
               />
               {showCustomModelInput ? (
                 <div

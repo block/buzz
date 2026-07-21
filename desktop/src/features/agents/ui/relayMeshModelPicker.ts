@@ -7,6 +7,7 @@ import {
   type PersonaDropdownOption,
   type PersonaModelOption,
 } from "./agentConfigOptions";
+import { MODEL_DISCOVERY_LOADING_SHORT } from "./personaModelDiscoveryStatus";
 
 function withSharedComputeAutoOption(
   options: readonly PersonaModelOption[],
@@ -87,7 +88,14 @@ export function modelDropdownOptions({
   return [
     ...modelOptions,
     ...(loading
-      ? [{ disabled: true, label: "Loading models...", value: loadingValue }]
+      ? [
+          {
+            disabled: true,
+            // Keep short — long progressive copy is under-field only (#2261).
+            label: MODEL_DISCOVERY_LOADING_SHORT,
+            value: loadingValue,
+          },
+        ]
       : []),
     ...(allowCustom
       ? [{ label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE }]
