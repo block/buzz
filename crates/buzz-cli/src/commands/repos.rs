@@ -277,12 +277,13 @@ pub async fn cmd_list_repos(
         filter["authors"] = serde_json::json!([pk]);
     }
 
-    if let Some(n) = limit {
-        filter["limit"] = serde_json::json!(n);
-    }
-
-    let resp = client.query(&filter).await?;
-    println!("{resp}");
+    let events = match limit {
+        Some(limit) => client.query_paginated(filter, limit).await?,
+        None => client.query_all(filter).await?,
+    };
+    let output = serde_json::to_string(&events)
+        .map_err(|error| CliError::Other(format!("failed to serialize relay response: {error}")))?;
+    println!("{output}");
     Ok(())
 }
 
