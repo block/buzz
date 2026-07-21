@@ -188,7 +188,7 @@ pub struct RelayAgentInfo {
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {
     pub pubkey: String,
     pub name: String,

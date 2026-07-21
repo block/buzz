@@ -16,6 +16,7 @@ import {
   channelsQueryKey,
   upsertCachedChannelMember,
 } from "@/features/channels/hooks";
+import { updateCachedChannelMemberDisplayName } from "@/features/channels/channelMemberProfileCache";
 import { evictUsersBatchEntries } from "@/features/profile/hooks";
 import {
   createManagedAgent,
@@ -359,7 +360,7 @@ export function useUpdateManagedAgentMutation() {
 
   return useMutation({
     mutationFn: (input: UpdateManagedAgentInput) => updateManagedAgent(input),
-    onSuccess: (result) => {
+    onSuccess: async (result, variables) => {
       queryClient.setQueryData<ManagedAgent[]>(
         managedAgentsQueryKey,
         (current) => {
@@ -369,6 +370,14 @@ export function useUpdateManagedAgentMutation() {
           );
         },
       );
+
+      if (variables.name !== undefined && !result.profileSyncError) {
+        await updateCachedChannelMemberDisplayName(
+          queryClient,
+          result.agent.pubkey,
+          result.agent.name,
+        );
+      }
     },
     onSettled: async (_data, _error, variables) => {
       // Backend republishes kind:0 on a name change (sync_managed_agent_profile),
