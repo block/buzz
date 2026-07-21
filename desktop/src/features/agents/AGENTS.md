@@ -54,8 +54,12 @@ with a TypeScript lookup table or an id comparison in a component.
    flags were deliberately killed in #2148 (`CANONICAL_CONFIG_BEHAVIORS`).
    Surface differences are expressed via the `disclosure` preset, not new
    boolean props.
-7. **Onboarding does not change.** `onboarding-agent-defaults.spec.ts` is the
-   acceptance gate for anything touching the shared renderer.
+7. **Onboarding setup detects readiness; it does not select defaults.** The
+   setup page derives visible and ready harnesses from the runtime catalog and
+   only offers install or sign-in actions. The following defaults page is the
+   sole onboarding surface that chooses and persists `preferred_runtime`.
+   `onboarding-agent-defaults.spec.ts` is the acceptance gate for anything
+   touching this flow or the shared renderer.
 
 ## The tests that enforce this
 
