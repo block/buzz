@@ -121,9 +121,6 @@ function AgentDefaultsSection({
   const selectedRuntimeId = selectedRuntime?.id ?? "";
   const configSurfaceLoading = isLoading || runtimesQuery.isLoading;
 
-  React.useEffect(() => {
-    onHasDefaultRuntimeChange(selectedRuntimeId.length > 0);
-  }, [onHasDefaultRuntimeChange, selectedRuntimeId]);
   const configSurfaceError =
     runtimesQuery.isError ||
     (!configSurfaceLoading &&
@@ -148,6 +145,21 @@ function AgentDefaultsSection({
     },
     [config],
   );
+
+  React.useEffect(() => {
+    if (configSurfaceLoading || selectedRuntimeId) return;
+    if (readyRuntimes.length !== 1) return;
+    handleHarnessChange(readyRuntimes[0].id);
+  }, [
+    configSurfaceLoading,
+    handleHarnessChange,
+    readyRuntimes,
+    selectedRuntimeId,
+  ]);
+
+  React.useEffect(() => {
+    onHasDefaultRuntimeChange(selectedRuntimeId.length > 0);
+  }, [onHasDefaultRuntimeChange, selectedRuntimeId]);
 
   return (
     <section className="w-full space-y-4 text-left text-sm">

@@ -200,7 +200,40 @@ test("install transitions through Sign in to Ready", async ({ page }) => {
   ).toHaveCount(0);
 });
 
-test("defaults trusts setup readiness and persists the user's visible harness choice", async ({
+test("defaults auto-selects the only ready visible harness", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("buzz-agent", "available", { status: "not_applicable" }),
+        runtime("goose", "available", { status: "not_applicable" }),
+        runtime("claude", "available", { status: "logged_in" }),
+        runtime("codex", "available", { status: "logged_out" }),
+      ],
+      globalAgentConfig: {
+        env_vars: {},
+        provider: null,
+        model: null,
+        preferred_runtime: null,
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Claude Code",
+  );
+  await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
+  await expect.poll(() => readSavedRuntime(page)).toBe("claude");
+});
+
+test("defaults requires a choice when multiple visible harnesses are ready", async ({
   page,
 }) => {
   await installMockBridge(
