@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.4.21
+
+- fix(desktop): clarify data deletion action ([#2208](https://github.com/block/buzz/pull/2208)) ([`e315c498`](https://github.com/block/buzz/commit/e315c4982f5ab05d05be5935a765c3047bdc076d))
+- feat: brand authentication complete page ([#2192](https://github.com/block/buzz/pull/2192)) ([`1470ac3a`](https://github.com/block/buzz/commit/1470ac3a4c06d2f3c151750c91c3feea8d4bb1f5))
+- fix(buzz-acp,buzz-agent): surface stall duration and fate ([#2204](https://github.com/block/buzz/pull/2204)) ([`cd6b573f`](https://github.com/block/buzz/commit/cd6b573f8d1fa25880a6be96643fc49612bc2a64))
+- fix(desktop): resolve activity feed showing channel UUID instead of message content ([#2201](https://github.com/block/buzz/pull/2201)) ([`c5d00a35`](https://github.com/block/buzz/commit/c5d00a3589a9c0f5979431c5b35ad40fdd9a3e32))
+- feat(cli): add agents archive/unarchive/archived subcommands ([#2173](https://github.com/block/buzz/pull/2173)) ([`7d799206`](https://github.com/block/buzz/commit/7d7992067b2914b582b7e6d31a6174603b480b4b))
+- Simplify first-community onboarding choices (UI only) ([#2194](https://github.com/block/buzz/pull/2194)) ([`6ab45d75`](https://github.com/block/buzz/commit/6ab45d75deba26a3ce36fe108ba76072747790fe))
+- Fix persisted agent defaults display ([#2182](https://github.com/block/buzz/pull/2182)) ([`d538111b`](https://github.com/block/buzz/commit/d538111b511154279eb610929d92ade45657ac80))
+- fix(timeout): unified turn-timeout fix — cap inheritance, steer renewal, activity-aware requeue, LLM stall surfacing ([#2175](https://github.com/block/buzz/pull/2175)) ([`0f86a608`](https://github.com/block/buzz/commit/0f86a608b9169bb08a804e0e7cb0f712bc7a018b))
+- fix(desktop): scope draft store per workspace relay ([#2179](https://github.com/block/buzz/pull/2179)) ([`2eff2cb3`](https://github.com/block/buzz/commit/2eff2cb3910a30c47c0f3e32d3947171e9ea56d6))
+- fix(desktop): avoid forwarding click event as channel callback ([#2174](https://github.com/block/buzz/pull/2174)) ([`9ed843a0`](https://github.com/block/buzz/commit/9ed843a0ac0ca3f9d0f02a8171b4bd17e187d99f))
+- Polish agent defaults surfaces: app dropdowns + collapsed Advanced env vars ([#2184](https://github.com/block/buzz/pull/2184)) ([`8c77a0cf`](https://github.com/block/buzz/commit/8c77a0cf8fe49357012695baeaa3629ebe3317f7))
+
+
 ## v0.4.20
 
 - fix(desktop): composite harness loader opacity ([#2180](https://github.com/block/buzz/pull/2180)) ([`77900e69`](https://github.com/block/buzz/commit/77900e69b3bc70a00010d826df2b55d2538ed4f2))
