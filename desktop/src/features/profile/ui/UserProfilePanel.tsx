@@ -34,6 +34,7 @@ import {
 } from "@/features/agents/lib/instanceInputForDefinition";
 import {
   isManagedAgentActive,
+  respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
@@ -488,6 +489,27 @@ export function UserProfilePanel({
     stopAgentMutation.mutateAsync,
   ]);
 
+  const handleAgentRestart = React.useCallback(async () => {
+    if (!managedAgent) return;
+
+    try {
+      await respawnManagedAgentWithRules({
+        agent: managedAgent,
+        startManagedAgent: startAgentMutation.mutateAsync,
+        stopManagedAgent: stopAgentMutation.mutateAsync,
+      });
+      toast.success(`Restarted ${managedAgent.name}.`);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Agent restart failed.",
+      );
+    }
+  }, [
+    managedAgent,
+    startAgentMutation.mutateAsync,
+    stopAgentMutation.mutateAsync,
+  ]);
+
   const handleInstantiateAgent = React.useCallback(async () => {
     if (!resolvedPersona) return;
 
@@ -828,6 +850,7 @@ export function UserProfilePanel({
           followMutation={followMutation}
           agentInstruction={agentInstruction}
           handleAgentPrimaryAction={handleAgentPrimaryAction}
+          handleAgentRestart={handleAgentRestart}
           handleEditAgent={handleEditAgent}
           handleEditPersona={canEditPersona ? handleEditPersona : undefined}
           handleInstantiateAgent={handleInstantiateAgent}
