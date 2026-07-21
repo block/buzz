@@ -102,6 +102,9 @@ export function ReadmePanel({
             onBranchChange={sourceControls.onBranchChange}
             onCreateBranch={sourceControls.onCreateBranch}
             onDeleteBranch={sourceControls.onDeleteBranch}
+            onTagChange={sourceControls.onTagChange}
+            selectedTag={sourceControls.selectedTag}
+            tagOptions={sourceControls.tagOptions}
           />
           <div className="ml-auto flex shrink-0 items-center">
             <RepoSyncActionButton controls={sourceControls} />

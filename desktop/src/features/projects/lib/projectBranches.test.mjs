@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   normalizeProjectBranchName,
+  projectBranchCreationReason,
   projectBranchManagementState,
   projectBranchNameError,
   projectBranchOptions,
@@ -45,6 +46,24 @@ test("combines remote and local branch options without duplicates", () => {
     ["main", "feature/remote", "feature/local", "space"],
   );
   assert.deepEqual(projectBranchOptions(["main"], ["main"]), ["main"]);
+});
+
+test("explains why a branch cannot be created", () => {
+  assert.equal(
+    projectBranchCreationReason({
+      activeBranch: "main",
+      activeBranchCommit: null,
+      localHead: "a".repeat(40),
+    }),
+    "Push the first local commit to main before creating another branch.",
+  );
+  assert.equal(
+    projectBranchCreationReason({
+      activeBranch: "main",
+      activeBranchCommit: "a".repeat(40),
+    }),
+    null,
+  );
 });
 
 test("ignores a dangling HEAD and selects a published branch", () => {

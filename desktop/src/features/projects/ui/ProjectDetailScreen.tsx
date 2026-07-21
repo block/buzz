@@ -30,6 +30,7 @@ import {
 } from "@/features/projects/repoSyncHooks";
 import { useProjectBranchActions } from "@/features/projects/branchMutations";
 import { useOptimisticProjectBranches } from "@/features/projects/useOptimisticProjectBranches";
+import { useProjectRepositoryRefSelection } from "@/features/projects/useProjectRepositoryRefSelection";
 import { useUpdateProjectPullRequestMutation } from "@/features/projects/pullRequestMutations";
 import { useCreateProjectIssueMutation } from "@/features/projects/issueMutations";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
@@ -63,6 +64,7 @@ import { useProjectCommitDiffQuery } from "@/features/projects/useProjectCommitD
 import { useGitIdentityQuery } from "@/features/projects/useGitIdentity";
 import type { ViewerGitIdentity } from "@/features/projects/lib/projectContributorMatching";
 import {
+  projectBranchCreationReason,
   projectBranchManagementState,
   projectBranchOptionsFromSync,
   resolveProjectDefaultBranch,
@@ -75,11 +77,9 @@ import {
   useOpenProjectTerminal,
 } from "./useOpenProjectTerminal";
 import type { CreateIssueDialogInput } from "./CreateIssueDialog";
+import { ProjectBranchActionDialogs } from "./ProjectBranchActionDialogs";
 import {
-  CreateProjectBranchDialog,
-  DeleteProjectBranchDialog,
-} from "./ProjectBranchDialogs";
-import {
+  PROJECT_TAB_CRUMB_LABELS,
   projectPeople,
   pushPullTitle,
   snapshotHasContent,
@@ -126,11 +126,16 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
           (pullRequest) => pullRequest.branchName ?? null,
         ) ?? [],
     });
-  const [selectedBranch, setSelectedBranch] = React.useState<string | null>(
-    null,
-  );
-  const activeBranch =
-    selectedBranch ?? defaultBranch ?? branchOptions[0] ?? null;
+  const { activeBranch, selectBranch, selectedTag, selectTag } =
+    useProjectRepositoryRefSelection({
+      branchOptions,
+      defaultBranch,
+      projectAvailable: Boolean(project),
+      projectPending: projectQuery.isPending,
+      tags: repoStateQuery.data?.tags ?? [],
+    });
+  const activeTag =
+    repoStateQuery.data?.tags.find((tag) => tag.name === selectedTag) ?? null;
   const [selectedPullRequestId, setSelectedPullRequestId] = React.useState<
     string | null
   >(pullRequestId ?? null);
@@ -207,7 +212,8 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const repoSnapshotQuery = useProjectRepoSnapshotQuery(
     project,
     activeBranch,
-    selectedBranchPullRequest,
+    selectedTag ? null : selectedBranchPullRequest,
+    activeTag,
   );
   const repoDiffQuery = useProjectRepoDiffQuery(
     project,
@@ -290,7 +296,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     });
   const handleBranchChange = React.useCallback(
     (branch: string | null) => {
-      setSelectedBranch(branch);
+      selectBranch(branch);
       if (
         branch &&
         repoSource === "local" &&
@@ -299,7 +305,14 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         setRepoSource("remote");
       }
     },
-    [repoSource, repoSyncStatusQuery.data?.localBranch],
+    [repoSource, repoSyncStatusQuery.data?.localBranch, selectBranch],
+  );
+  const handleTagChange = React.useCallback(
+    (tag: string) => {
+      selectTag(tag);
+      setRepoSource("remote");
+    },
+    [selectTag],
   );
   const branchActions = useProjectBranchActions({
     activeBranch,
@@ -313,13 +326,11 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     rememberBranch,
     selectBranch: handleBranchChange,
   });
-  const createBranchReason = !activeBranch
-    ? "Choose a branch first."
-    : !activeBranchCommit
-      ? repoSyncStatusQuery.data?.localHead
-        ? `Push the first local commit to ${activeBranch} before creating another branch.`
-        : "Create the repository's first commit before creating another branch."
-      : null;
+  const createBranchReason = projectBranchCreationReason({
+    activeBranch,
+    activeBranchCommit,
+    localHead: repoSyncStatusQuery.data?.localHead,
+  });
   const handleFetchRepo = React.useCallback(async () => {
     const results = await Promise.all([
       repoSnapshotQuery.refetch(),
@@ -341,7 +352,10 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const filesSourceControls: RepoSourceHeaderControls = {
     branch: activeBranch ?? "",
     branchOptions: branchOptionsWithLocal,
+    selectedTag,
+    tagOptions: repoStateQuery.data?.tags ?? [],
     onBranchChange: handleBranchChange,
+    onTagChange: handleTagChange,
     onCreateBranch: () => branchActions.setCreateOpen(true),
     createBranchDisabled: branchActions.createPending || !activeBranchCommit,
     createBranchTitle: createBranchReason ?? "Create a remote branch",
@@ -349,38 +363,44 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     deleteBranchDisabled:
       branchActions.deletePending || Boolean(deleteBranchReason),
     deleteBranchTitle: deleteBranchReason ?? "Delete this remote branch",
-    source: repoSource,
+    source: selectedTag ? "remote" : repoSource,
     onSourceChange: setRepoSource,
     localDisabled:
-      !repoSyncStatusQuery.data?.localPath &&
-      !localRepoSnapshotQuery.data &&
-      !localRepoSnapshotQuery.isLoading,
+      Boolean(selectedTag) ||
+      (!repoSyncStatusQuery.data?.localPath &&
+        !localRepoSnapshotQuery.data &&
+        !localRepoSnapshotQuery.isLoading),
     localLabel: localRepoSnapshotQuery.isLoading
       ? "Local checking"
       : repoSyncStatusQuery.data?.localPath || localRepoSnapshotQuery.data
         ? "Local"
         : "Local missing",
     remoteLabel: repoSnapshotQuery.isLoading ? "Remote checking" : "Remote",
-    onCloneLocal: project?.cloneUrls[0]
-      ? () => {
-          void handleCloneRepo();
-        }
-      : undefined,
+    onCloneLocal:
+      !selectedTag && project?.cloneUrls[0]
+        ? () => {
+            void handleCloneRepo();
+          }
+        : undefined,
     clonePending: cloneRepoMutation.isPending,
-    canPush: repoSyncStatusQuery.data?.canPush ?? false,
-    onPush: () => {
-      void handlePushLocalRepo();
-    },
+    canPush: !selectedTag && (repoSyncStatusQuery.data?.canPush ?? false),
+    onPush: selectedTag
+      ? undefined
+      : () => {
+          void handlePushLocalRepo();
+        },
     pushDisabled:
       pushLocalRepoMutation.isPending || !repoSyncStatusQuery.data?.canPush,
     pushPending: pushLocalRepoMutation.isPending,
     pushTitle:
       repoSyncStatusQuery.data?.pushBlockReason ??
       pushPullTitle("Push", repoSyncStatusQuery.data?.aheadCount, "local"),
-    canPull: repoSyncStatusQuery.data?.canPull ?? false,
-    onPull: () => {
-      void handlePullLocalRepo();
-    },
+    canPull: !selectedTag && (repoSyncStatusQuery.data?.canPull ?? false),
+    onPull: selectedTag
+      ? undefined
+      : () => {
+          void handlePullLocalRepo();
+        },
     pullDisabled:
       pullLocalRepoMutation.isPending || !repoSyncStatusQuery.data?.canPull,
     pullPending: pullLocalRepoMutation.isPending,
@@ -406,21 +426,14 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       // pullRequestId/issueId selections — clearing here would discard them
       // before the detail view ever gets a chance to open.
       if (projectPending) return;
-      setSelectedBranch(null);
       setSelectedPullRequestId(null);
       setSelectedIssueId(null);
       setSelectedCommitHash(null);
-      return;
     }
-    setSelectedBranch((currentBranch) => {
-      if (currentBranch && branchOptions.includes(currentBranch)) {
-        return currentBranch;
-      }
-      return defaultBranch ?? branchOptions[0] ?? null;
-    });
-  }, [project, branchOptions, defaultBranch, projectPending]);
+  }, [project, projectPending]);
   React.useEffect(() => {
     setRepoSource((currentSource) => {
+      if (selectedTag) return "remote";
       if (currentSource === "local" && !hasLocalCheckout) return "remote";
       if (
         currentSource === "remote" &&
@@ -431,7 +444,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       }
       return currentSource;
     });
-  }, [hasLocalCheckout, hasRemoteSnapshot]);
+  }, [hasLocalCheckout, hasRemoteSnapshot, selectedTag]);
   const peoplePubkeys = React.useMemo(() => {
     if (!project) return [];
     // Include PR authors/updaters so commit rows can resolve avatars for
@@ -746,16 +759,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
           }
         : null;
   // Sub-tab crumb when no work item is open. Overview (readme) is home.
-  const TAB_CRUMB_LABELS: Record<string, string> = {
-    files: "Files",
-    activity: "Commits",
-    issues: "Issues",
-    prs: "Pull Request",
-    contributors: "Contributors",
-  };
   const activeTabCrumb = activeWorkItemCrumb
     ? null
-    : (TAB_CRUMB_LABELS[activeTab] ?? null);
+    : (PROJECT_TAB_CRUMB_LABELS[activeTab] ?? null);
   const handleGoToProjectHome = () => {
     setSelectedPullRequestId(null);
     setSelectedIssueId(null);
@@ -767,21 +773,11 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
 
   return (
     <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
-      <CreateProjectBranchDialog
+      <ProjectBranchActionDialogs
+        actions={branchActions}
+        activeBranch={activeBranch}
+        activeBranchCommit={activeBranchCommit}
         existingBranches={branchOptionsWithLocal}
-        onCreate={branchActions.handleCreate}
-        onOpenChange={branchActions.setCreateOpen}
-        open={branchActions.createOpen}
-        pending={branchActions.createPending}
-        sourceBranch={activeBranch ?? ""}
-        sourceCommit={activeBranchCommit}
-      />
-      <DeleteProjectBranchDialog
-        branch={activeBranch ?? ""}
-        onDelete={branchActions.handleDelete}
-        onOpenChange={branchActions.setDeleteOpen}
-        open={branchActions.deleteOpen}
-        pending={branchActions.deletePending}
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -942,7 +938,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 localSnapshot={localRepoSnapshotQuery.data}
                 localSnapshotError={localRepoSnapshotQuery.error}
                 localSnapshotLoading={localRepoSnapshotQuery.isLoading}
-                onBranchChange={setSelectedBranch}
+                onBranchChange={handleBranchChange}
                 onOpenMergeRecoveryTerminal={handleOpenMergeRecoveryTerminal}
                 onOpenTerminal={() => {
                   void handleOpenTerminal();

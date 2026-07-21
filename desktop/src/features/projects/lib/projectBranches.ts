@@ -59,6 +59,18 @@ export function projectBranchOptionsFromSync(
   return projectBranchOptions(remoteBranches, localBranches);
 }
 
+export function projectBranchCreationReason(input: {
+  activeBranch: string | null;
+  activeBranchCommit: string | null;
+  localHead?: string | null;
+}): string | null {
+  if (!input.activeBranch) return "Choose a branch first.";
+  if (input.activeBranchCommit) return null;
+  return input.localHead
+    ? `Push the first local commit to ${input.activeBranch} before creating another branch.`
+    : "Create the repository's first commit before creating another branch.";
+}
+
 /** Resolve a usable default branch when a repository advertises a stale HEAD. */
 export function resolveProjectDefaultBranch(
   announcedBranch: string,
