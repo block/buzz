@@ -34,6 +34,7 @@ import {
 } from "@/features/agents/lib/instanceInputForDefinition";
 import {
   isManagedAgentActive,
+  respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
@@ -451,10 +452,19 @@ export function UserProfilePanel({
     ],
   );
 
-  const handleAgentPrimaryAction = React.useCallback(async () => {
+  const handleAgentPrimaryAction = async (restart = false) => {
     if (!managedAgent) return;
 
     try {
+      if (restart && managedAgent.backend.type === "local") {
+        await respawnManagedAgentWithRules({
+          agent: managedAgent,
+          startManagedAgent: startAgentMutation.mutateAsync,
+          stopManagedAgent: stopAgentMutation.mutateAsync,
+        });
+        toast.success(`Restarted ${managedAgent.name}.`);
+        return;
+      }
       if (isManagedAgentActive(managedAgent)) {
         const result = await stopManagedAgentWithRules({
           agent: managedAgent,
@@ -480,13 +490,7 @@ export function UserProfilePanel({
         error instanceof Error ? error.message : "Agent action failed.",
       );
     }
-  }, [
-    channelsQuery.data,
-    managedAgent,
-    relayAgentsQuery.data,
-    startAgentMutation.mutateAsync,
-    stopAgentMutation.mutateAsync,
-  ]);
+  };
 
   const handleInstantiateAgent = React.useCallback(async () => {
     if (!resolvedPersona) return;
@@ -828,6 +832,7 @@ export function UserProfilePanel({
           followMutation={followMutation}
           agentInstruction={agentInstruction}
           handleAgentPrimaryAction={handleAgentPrimaryAction}
+          handleAgentRestart={() => void handleAgentPrimaryAction(true)}
           handleEditAgent={handleEditAgent}
           handleEditPersona={canEditPersona ? handleEditPersona : undefined}
           handleInstantiateAgent={handleInstantiateAgent}

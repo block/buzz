@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { startManagedAgentWithRules } from "./managedAgentControlActions.ts";
+import {
+  respawnManagedAgentWithRules,
+  startManagedAgentWithRules,
+} from "./managedAgentControlActions.ts";
 
 function agent(overrides = {}) {
   return {
@@ -76,4 +79,20 @@ test("ordinary local agents still start normally", async () => {
     },
   });
   assert.equal(calledWith, "deadbeef".repeat(8));
+});
+
+test("running local agents stop before restart", async () => {
+  const calls = [];
+  const runningAgent = agent({ status: "running" });
+
+  await respawnManagedAgentWithRules({
+    agent: runningAgent,
+    stopManagedAgent: async (pubkey) => calls.push(["stop", pubkey]),
+    startManagedAgent: async (pubkey) => calls.push(["start", pubkey]),
+  });
+
+  assert.deepEqual(calls, [
+    ["stop", runningAgent.pubkey],
+    ["start", runningAgent.pubkey],
+  ]);
 });

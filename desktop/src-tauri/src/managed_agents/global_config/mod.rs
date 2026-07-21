@@ -204,44 +204,42 @@ pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> 
     atomic_write_json_restricted(&path, &payload)
 }
 
-/// Resolve the effective model and provider for an agent using the
-/// precedence chain: `agent record → linked persona → global defaults → None`.
+/// Resolve the effective model and provider for an agent.
 ///
-/// This is the single source of truth used by readiness evaluation, spawn,
-/// and deploy-payload construction. All three paths must use this function so
-/// they agree on what model/provider the agent will actually run with.
+/// Definition-linked instances resolve model through `definition → global → None`.
+/// Their materialized record model is a snapshot, not an override, so consulting
+/// it would let stale bytes beat a newly edited definition for one spawn.
+/// Definition-less legacy instances resolve model through `record → global → None`.
+/// Provider retains its existing `record → definition → global` precedence; this
+/// launch fix deliberately does not change provider semantics.
 ///
-/// # Arguments
-/// * `record` — the `ManagedAgentRecord` (may have `None` for model/provider)
-/// * `personas` — all current persona records (looked up by `record.persona_id`)
-/// * `global` — global agent config defaults
-///
-/// # Returns
-/// `(effective_model, effective_provider)` — both `Option<&str>`.
+/// This is the single source of truth used by readiness evaluation and spawn.
+/// Both paths must use this function so they agree on what model/provider the
+/// agent will actually run with.
 pub(crate) fn resolve_effective_model_provider<'a>(
     record: &'a ManagedAgentRecord,
     personas: &'a [AgentDefinition],
     global: &'a GlobalAgentConfig,
 ) -> (Option<&'a str>, Option<&'a str>) {
-    let (persona_model, persona_provider) = record
+    if let Some(persona) = record
         .persona_id
         .as_deref()
-        .and_then(|pid| personas.iter().find(|p| p.id == pid))
-        .map(|p| (p.model.as_deref(), p.provider.as_deref()))
-        .unwrap_or((None, None));
+        .and_then(|pid| personas.iter().find(|persona| persona.id == pid))
+    {
+        return (
+            persona.model.as_deref().or(global.model.as_deref()),
+            record
+                .provider
+                .as_deref()
+                .or(persona.provider.as_deref())
+                .or(global.provider.as_deref()),
+        );
+    }
 
-    let effective_model = record
-        .model
-        .as_deref()
-        .or(persona_model)
-        .or(global.model.as_deref());
-    let effective_provider = record
-        .provider
-        .as_deref()
-        .or(persona_provider)
-        .or(global.provider.as_deref());
-
-    (effective_model, effective_provider)
+    (
+        record.model.as_deref().or(global.model.as_deref()),
+        record.provider.as_deref().or(global.provider.as_deref()),
+    )
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ import {
   MessageSquare,
   Pencil,
   Play,
+  RotateCw,
   Square,
   UserMinus,
   UserPlus,
@@ -77,6 +78,7 @@ export type ProfileSummaryViewProps = {
   canInstantiateAgent: boolean;
   agentInstruction: string | null;
   handleAgentPrimaryAction: () => void;
+  handleAgentRestart: () => void;
   handleEditAgent: () => void;
   handleEditPersona?: () => void;
   handleInstantiateAgent: () => void;
@@ -189,6 +191,7 @@ export function ProfileSummaryView({
   canInstantiateAgent,
   agentInstruction,
   handleAgentPrimaryAction,
+  handleAgentRestart,
   handleEditAgent,
   handleEditPersona,
   handleInstantiateAgent,
@@ -367,6 +370,11 @@ export function ProfileSummaryView({
           onAgentPrimaryAction={
             isOwner === true && managedAgent
               ? handleAgentPrimaryAction
+              : undefined
+          }
+          onAgentRestart={
+            isOwner === true && managedAgent?.backend.type === "local"
+              ? handleAgentRestart
               : undefined
           }
           isFollowing={isFollowing}
@@ -629,6 +637,7 @@ function ProfilePrimaryActions({
   isFollowing,
   messagePending,
   onAgentPrimaryAction,
+  onAgentRestart,
   onEditAgent,
   onMessage,
   pubkey,
@@ -642,6 +651,7 @@ function ProfilePrimaryActions({
   isFollowing: boolean;
   messagePending?: boolean;
   onAgentPrimaryAction?: () => void;
+  onAgentRestart?: () => void;
   onEditAgent: () => void;
   onMessage?: () => void;
   pubkey: string;
@@ -696,6 +706,15 @@ function ProfilePrimaryActions({
           label={agentActionLabel}
           onClick={onAgentPrimaryAction}
           testId="user-profile-agent-primary-action"
+        />
+      ) : null}
+      {onAgentRestart ? (
+        <ProfileQuickAction
+          disabled={agentActionDisabled}
+          icon={RotateCw}
+          label="Restart"
+          onClick={onAgentRestart}
+          testId="user-profile-agent-restart"
         />
       ) : null}
     </div>

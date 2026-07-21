@@ -376,19 +376,19 @@ fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefini
     }
 }
 
-/// Tier 1 — agent record wins: record has explicit model/provider; they must
-/// outrank both the linked persona and the global defaults. Fails against any
-/// implementation that prefers global or persona over the record.
+/// Linked definitions are authoritative for model: stale materialized record
+/// bytes must not win over an edited definition on the next spawn. Provider
+/// retains the existing record-first behavior.
 #[test]
-fn resolve_agent_record_wins_over_persona_and_global() {
+fn resolve_linked_definition_model_wins_over_stale_record() {
     let mut record = bare_record();
     record.persona_id = Some("p1".to_string());
-    record.model = Some("record-model".to_string());
-    record.provider = Some("record-provider".to_string());
+    record.model = Some("stale-record-model".to_string());
+    record.provider = Some("stale-record-provider".to_string());
     let personas = vec![persona(
         "p1",
-        Some("persona-model"),
-        Some("persona-provider"),
+        Some("edited-definition-model"),
+        Some("edited-definition-provider"),
     )];
     let global = GlobalAgentConfig {
         model: Some("global-model".to_string()),
@@ -398,12 +398,29 @@ fn resolve_agent_record_wins_over_persona_and_global() {
 
     let (model, provider) = resolve_effective_model_provider(&record, &personas, &global);
 
-    assert_eq!(model, Some("record-model"), "record model must win");
-    assert_eq!(
-        provider,
-        Some("record-provider"),
-        "record provider must win"
-    );
+    assert_eq!(model, Some("edited-definition-model"));
+    assert_eq!(provider, Some("stale-record-provider"));
+}
+
+/// Clearing a linked definition model means inherit global; stale materialized
+/// record bytes must not survive the first restart.
+#[test]
+fn resolve_linked_definition_model_clear_uses_global_over_stale_record() {
+    let mut record = bare_record();
+    record.persona_id = Some("p1".to_string());
+    record.model = Some("stale-record-model".to_string());
+    record.provider = Some("stale-record-provider".to_string());
+    let personas = vec![persona("p1", None, None)];
+    let global = GlobalAgentConfig {
+        model: Some("global-model".to_string()),
+        provider: Some("global-provider".to_string()),
+        ..Default::default()
+    };
+
+    let (model, provider) = resolve_effective_model_provider(&record, &personas, &global);
+
+    assert_eq!(model, Some("global-model"));
+    assert_eq!(provider, Some("stale-record-provider"));
 }
 
 /// Tier 2 — persona fallback: record has no model/provider; the linked
@@ -543,18 +560,15 @@ fn resolve_all_none_when_no_source_provides_values() {
     );
 }
 
-/// Partial tier — record has model but not provider; persona has provider but
-/// not model; global has both. Each field resolves independently through the
-/// three-tier chain.
+/// Linked fields resolve independently: a blank definition model inherits the
+/// global model even when the record still carries stale bytes, while provider
+/// retains its existing record → definition → global chain.
 #[test]
-fn resolve_each_field_resolves_independently_through_tiers() {
+fn resolve_linked_fields_use_their_intended_precedence() {
     let mut record = bare_record();
     record.persona_id = Some("p1".to_string());
-    record.model = Some("record-model".to_string());
-    // record.provider = None → falls through to persona
+    record.model = Some("stale-record-model".to_string());
     let personas = vec![persona("p1", None, Some("persona-provider"))];
-    // persona.model = None → global fills model if record also had none, but
-    // record has model here so global is not needed for model.
     let global = GlobalAgentConfig {
         model: Some("global-model".to_string()),
         provider: Some("global-provider".to_string()),
@@ -563,12 +577,26 @@ fn resolve_each_field_resolves_independently_through_tiers() {
 
     let (model, provider) = resolve_effective_model_provider(&record, &personas, &global);
 
-    assert_eq!(model, Some("record-model"), "record wins for model");
-    assert_eq!(
-        provider,
-        Some("persona-provider"),
-        "persona wins for provider when record has none"
-    );
+    assert_eq!(model, Some("global-model"));
+    assert_eq!(provider, Some("persona-provider"));
+}
+
+/// Definition-less instances retain their own explicit values over globals.
+#[test]
+fn resolve_definition_less_record_wins_over_global() {
+    let mut record = bare_record();
+    record.model = Some("record-model".to_string());
+    record.provider = Some("record-provider".to_string());
+    let global = GlobalAgentConfig {
+        model: Some("global-model".to_string()),
+        provider: Some("global-provider".to_string()),
+        ..Default::default()
+    };
+
+    let (model, provider) = resolve_effective_model_provider(&record, &[], &global);
+
+    assert_eq!(model, Some("record-model"));
+    assert_eq!(provider, Some("record-provider"));
 }
 
 // ── IPC serialization ─────────────────────────────────────────────────────────

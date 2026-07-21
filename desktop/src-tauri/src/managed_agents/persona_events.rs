@@ -451,11 +451,13 @@ pub fn persona_snapshot_with_agent_config_fallback(
     }
 }
 
-/// Re-pin `record` to `persona`: build the snapshot (via
-/// [`persona_snapshot_with_agent_config_fallback`], so blank persona
-/// `model`/`provider` preserve the record's own values) and mirror it onto the
+/// Re-pin `record` to `persona`: build the snapshot and mirror it onto the
 /// record — the definition quad (`system_prompt`/`model`/`provider`/`runtime`),
 /// the env-override self-heal, and the `persona_source_version` drift basis.
+///
+/// Model is definition-authoritative: a blank definition model clears stale
+/// materialized bytes so spawn can resolve the current global default. Provider
+/// retains its existing blank-definition fallback behavior.
 ///
 /// This is the single apply used by every snapshot-apply site: the spawn
 /// re-pin (`start_local_agent_with_preflight`), the launch backfill and
@@ -469,13 +471,13 @@ pub fn persona_snapshot_with_agent_config_fallback(
 pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDefinition) {
     let snapshot = persona_snapshot_with_agent_config_fallback(
         persona,
-        record.model.as_deref(),    // fallback: record.model
-        record.provider.as_deref(), // fallback: record.provider
+        record.model.as_deref(),
+        record.provider.as_deref(),
     );
     if let Some(prompt) = snapshot.system_prompt {
         record.system_prompt = Some(prompt);
     }
-    record.model = snapshot.model;
+    record.model = persona.model.clone();
     record.provider = snapshot.provider;
     record.runtime = snapshot.runtime;
     // env_vars stay overrides-only. Self-heal records written before the env

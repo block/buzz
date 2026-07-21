@@ -82,6 +82,33 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
 }
 
 #[test]
+fn inherited_persona_model_converges_after_one_restart() {
+    let mut rec = record();
+    rec.persona_id = Some("persona".into());
+    rec.system_prompt = Some("prompt".into());
+    rec.model = Some("stale-model".into());
+    let definition = persona("persona", Some("goose"), "prompt");
+    let global = GlobalAgentConfig {
+        model: Some("new-default-model".into()),
+        ..Default::default()
+    };
+
+    let hash_before_restart = spawn_config_hash(
+        &rec,
+        std::slice::from_ref(&definition),
+        &[],
+        "wss://ws.example",
+        &global,
+    );
+    apply_persona_snapshot(&mut rec, &definition);
+    assert_eq!(rec.model, None);
+    let hash_after_restart =
+        spawn_config_hash(&rec, &[definition], &[], "wss://ws.example", &global);
+
+    assert_eq!(hash_before_restart, hash_after_restart);
+}
+
+#[test]
 fn hash_is_deterministic() {
     let rec = record();
     assert_eq!(
