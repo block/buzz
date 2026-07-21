@@ -352,6 +352,34 @@ async fn snapshot_workspace_state(
     Ok((refs, head))
 }
 
+fn resolve_published_head(
+    refs: &BTreeMap<String, String>,
+    observed_head: String,
+    parent_head: &str,
+) -> String {
+    let is_published_branch =
+        |name: &str| name.starts_with("refs/heads/") && refs.contains_key(name);
+    if is_published_branch(&observed_head) {
+        return observed_head;
+    }
+    if is_published_branch(parent_head) {
+        return parent_head.to_string();
+    }
+    for preferred in ["refs/heads/main", "refs/heads/master"] {
+        if refs.contains_key(preferred) {
+            return preferred.to_string();
+        }
+    }
+    if let Some(branch) = refs.keys().find(|name| name.starts_with("refs/heads/")) {
+        return branch.clone();
+    }
+    if !observed_head.is_empty() {
+        observed_head
+    } else {
+        parent_head.to_string()
+    }
+}
+
 fn digest_from_pack_key(key: &str) -> Result<String, CasError> {
     key.strip_prefix("packs/")
         .filter(|digest| digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()))
@@ -1014,16 +1042,10 @@ async fn cas_publish_inner(
     // below uses them as the "negative" set to produce the delta pack.
     let (refs_after, head_observed) = snapshot_workspace_state(repo_path, scratch_dir).await?;
 
-    // HEAD fallback: a bare repo serving pushes shouldn't have detached
-    // HEAD, but if `git symbolic-ref` failed (or returned empty), inherit
-    // the parent's HEAD rather than installing an empty one. `validate()`
-    // below rejects "empty after fallback" — that's the first-push +
-    // detached-HEAD case where the writer must declare a HEAD.
-    let head = if head_observed.is_empty() {
-        parent_state.parent.head.clone()
-    } else {
-        head_observed
-    };
+    // Fresh bare repositories can inherit Git's environment-dependent
+    // `master` symref even when the first push creates `main`. Publish a real
+    // branch whenever one exists so HEAD never advertises a phantom branch.
+    let head = resolve_published_head(&refs_after, head_observed, &parent_state.parent.head);
 
     let packs_before = parent_state.parent.packs.len();
     let mut compaction_failure = None;
@@ -1328,6 +1350,24 @@ mod tests {
         assert!(digest_from_pack_key("manifests/abc").is_err());
         assert!(digest_from_pack_key("packs/abc").is_err());
         assert!(digest_from_pack_key(&format!("packs/{}", "g".repeat(64))).is_err());
+    }
+
+    #[test]
+    fn published_head_ignores_dangling_master_when_main_exists() {
+        let refs = BTreeMap::from([("refs/heads/main".to_string(), "1".repeat(40))]);
+        assert_eq!(
+            resolve_published_head(&refs, "refs/heads/master".to_string(), ""),
+            "refs/heads/main"
+        );
+    }
+
+    #[test]
+    fn published_head_preserves_an_existing_nonstandard_branch() {
+        let refs = BTreeMap::from([("refs/heads/release".to_string(), "1".repeat(40))]);
+        assert_eq!(
+            resolve_published_head(&refs, "refs/heads/release".to_string(), "refs/heads/main"),
+            "refs/heads/release"
+        );
     }
 
     #[test]

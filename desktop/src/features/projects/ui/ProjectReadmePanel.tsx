@@ -96,6 +96,7 @@ export function ReadmePanel({
             branchOptions={sourceControls.branchOptions}
             compact
             createBranchDisabled={sourceControls.createBranchDisabled}
+            createBranchTitle={sourceControls.createBranchTitle}
             deleteBranchDisabled={sourceControls.deleteBranchDisabled}
             deleteBranchTitle={sourceControls.deleteBranchTitle}
             onBranchChange={sourceControls.onBranchChange}

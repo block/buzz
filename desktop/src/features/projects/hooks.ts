@@ -38,6 +38,7 @@ import type {
   RelayEvent,
 } from "@/shared/api/types";
 import { summarizeProjectActivityEvents } from "./projectActivity.mjs";
+import { resolveProjectDefaultBranch } from "./lib/projectBranches";
 import { effectiveCloneUrls } from "./lib/projectCloneUrl";
 import type { ProjectIssue } from "./projectIssues.mjs";
 import { projectIssueEventsToIssues } from "./projectIssues.mjs";
@@ -308,9 +309,13 @@ async function fetchProject(projectId: string): Promise<Project | null> {
 
   if (isDeletedByA(project, deletionEvents)) return null;
   const repoState = await fetchRepoState(project);
-  return repoState?.head
-    ? { ...project, defaultBranch: repoState.head }
-    : project;
+  return {
+    ...project,
+    defaultBranch: resolveProjectDefaultBranch(
+      project.defaultBranch,
+      repoState,
+    ),
+  };
 }
 
 function eventToRepoState(event: RelayEvent): RepoState {

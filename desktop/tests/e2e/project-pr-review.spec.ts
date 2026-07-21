@@ -712,7 +712,7 @@ test("project branches can be created from the selected remote branch", async ({
   page,
 }) => {
   await enableProjectsFeature(page);
-  await installMockBridge(page);
+  await installMockBridge(page, { projectHeadBranch: "master" });
   await openBuzzProject(page);
 
   await page.getByRole("button", { name: /main/ }).click();

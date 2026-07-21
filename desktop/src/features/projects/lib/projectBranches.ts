@@ -49,6 +49,25 @@ export function projectBranchOptions(
   ];
 }
 
+/** Resolve a usable default branch when a repository advertises a stale HEAD. */
+export function resolveProjectDefaultBranch(
+  announcedBranch: string,
+  repoState?: {
+    branches: Array<{ name: string }>;
+    head: string | null;
+  } | null,
+): string {
+  if (!repoState || repoState.branches.length === 0) {
+    return repoState?.head ?? announcedBranch;
+  }
+  const published = new Set(repoState.branches.map((branch) => branch.name));
+  if (repoState.head && published.has(repoState.head)) return repoState.head;
+  if (published.has(announcedBranch)) return announcedBranch;
+  if (published.has("main")) return "main";
+  if (published.has("master")) return "master";
+  return repoState.branches[0]?.name ?? announcedBranch;
+}
+
 export function projectBranchManagementState(input: {
   activeBranch: string | null;
   defaultBranch: string | null;

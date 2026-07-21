@@ -29,6 +29,7 @@ export function RepositoryBranchDropdown({
   branchOptions,
   compact,
   createBranchDisabled,
+  createBranchTitle,
   deleteBranchDisabled,
   deleteBranchTitle,
   onBranchChange,
@@ -40,6 +41,7 @@ export function RepositoryBranchDropdown({
   /** Smaller trigger for inline headers. */
   compact?: boolean;
   createBranchDisabled?: boolean;
+  createBranchTitle?: string;
   deleteBranchDisabled?: boolean;
   deleteBranchTitle?: string;
   onBranchChange: (branch: string) => void;
@@ -85,14 +87,22 @@ export function RepositoryBranchDropdown({
           <>
             <DropdownMenuSeparator />
             {onCreateBranch ? (
-              <DropdownMenuItem
-                data-testid="project-create-branch"
-                disabled={createBranchDisabled}
-                onSelect={onCreateBranch}
-              >
-                <Plus className="h-4 w-4" />
-                Create branch…
-              </DropdownMenuItem>
+              <>
+                <DropdownMenuItem
+                  data-testid="project-create-branch"
+                  disabled={createBranchDisabled}
+                  onSelect={onCreateBranch}
+                  title={createBranchTitle}
+                >
+                  <Plus className="h-4 w-4" />
+                  Create branch…
+                </DropdownMenuItem>
+                {createBranchDisabled && createBranchTitle ? (
+                  <p className="max-w-56 px-2 py-1 text-xs text-muted-foreground">
+                    {createBranchTitle}
+                  </p>
+                ) : null}
+              </>
             ) : null}
             {onDeleteBranch ? (
               <DropdownMenuItem
@@ -120,6 +130,7 @@ export type RepoSourceHeaderControls = {
   onBranchChange: (branch: string) => void;
   onCreateBranch?: () => void;
   createBranchDisabled?: boolean;
+  createBranchTitle?: string;
   onDeleteBranch?: () => void;
   deleteBranchDisabled?: boolean;
   deleteBranchTitle?: string;

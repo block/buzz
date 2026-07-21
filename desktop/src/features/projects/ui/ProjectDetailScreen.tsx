@@ -64,6 +64,7 @@ import type { ViewerGitIdentity } from "@/features/projects/lib/projectContribut
 import {
   projectBranchManagementState,
   projectBranchOptions,
+  resolveProjectDefaultBranch,
 } from "@/features/projects/lib/projectBranches";
 import { normalizeRepositoryUrl } from "@/features/projects/lib/projectsViewHelpers";
 import { WorkspaceTabs } from "./ProjectWorkspaceTabs";
@@ -111,25 +112,24 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const project = projectQuery.data;
   const repoStateQuery = useRepoStateQuery(project);
   const pullRequestsQuery = useProjectPullRequestsQuery(project);
+  const defaultBranch = project
+    ? resolveProjectDefaultBranch(project.defaultBranch, repoStateQuery.data)
+    : null;
   const branchOptions = React.useMemo(() => {
     const names = [
-      project?.defaultBranch,
+      defaultBranch,
       ...(repoStateQuery.data?.branches.map((branch) => branch.name) ?? []),
       ...(pullRequestsQuery.data
         ?.map((pullRequest) => pullRequest.branchName)
         .filter((name): name is string => Boolean(name)) ?? []),
     ].filter((name): name is string => Boolean(name));
     return [...new Set(names)];
-  }, [
-    project?.defaultBranch,
-    pullRequestsQuery.data,
-    repoStateQuery.data?.branches,
-  ]);
+  }, [defaultBranch, pullRequestsQuery.data, repoStateQuery.data?.branches]);
   const [selectedBranch, setSelectedBranch] = React.useState<string | null>(
     null,
   );
   const activeBranch =
-    selectedBranch ?? project?.defaultBranch ?? branchOptions[0] ?? null;
+    selectedBranch ?? defaultBranch ?? branchOptions[0] ?? null;
   const [selectedPullRequestId, setSelectedPullRequestId] = React.useState<
     string | null
   >(pullRequestId ?? null);
@@ -273,12 +273,16 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     () =>
       projectBranchOptions(
         branchOptions,
-        repoSyncStatusQuery.data?.localBranch,
+        repoSyncStatusQuery.data?.localHead
+          ? repoSyncStatusQuery.data.localBranch
+          : null,
       ),
-    [branchOptions, repoSyncStatusQuery.data?.localBranch],
+    [
+      branchOptions,
+      repoSyncStatusQuery.data?.localBranch,
+      repoSyncStatusQuery.data?.localHead,
+    ],
   );
-  const defaultBranch =
-    repoStateQuery.data?.head ?? project?.defaultBranch ?? null;
   const { activeBranchCommit, activeRemoteBranch, deleteBranchReason } =
     projectBranchManagementState({
       activeBranch,
@@ -303,6 +307,11 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     refetchRepoState: repoStateQuery.refetch,
     selectBranch: setSelectedBranch,
   });
+  const createBranchReason = !activeBranch
+    ? "Choose a branch first."
+    : !activeBranchCommit
+      ? "Create the repository's first commit before creating another branch."
+      : null;
   const handleFetchRepo = React.useCallback(async () => {
     const results = await Promise.all([
       repoSnapshotQuery.refetch(),
@@ -327,6 +336,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     onBranchChange: setSelectedBranch,
     onCreateBranch: () => branchActions.setCreateOpen(true),
     createBranchDisabled: branchActions.createPending || !activeBranchCommit,
+    createBranchTitle: createBranchReason ?? "Create a remote branch",
     onDeleteBranch: () => branchActions.setDeleteOpen(true),
     deleteBranchDisabled:
       branchActions.deletePending || Boolean(deleteBranchReason),
@@ -398,9 +408,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       if (currentBranch && branchOptions.includes(currentBranch)) {
         return currentBranch;
       }
-      return project.defaultBranch ?? branchOptions[0] ?? null;
+      return defaultBranch ?? branchOptions[0] ?? null;
     });
-  }, [project, branchOptions, projectPending]);
+  }, [project, branchOptions, defaultBranch, projectPending]);
   React.useEffect(() => {
     setRepoSource((currentSource) => {
       if (currentSource === "local" && !hasLocalCheckout) return "remote";

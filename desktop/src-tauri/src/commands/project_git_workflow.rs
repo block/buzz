@@ -333,6 +333,26 @@ fn clone_destination_root(repos_dir: Option<&str>) -> Result<std::path::PathBuf,
     }
 }
 
+fn align_unborn_head_branch(
+    repo_dir: &std::path::Path,
+    branch: Option<&str>,
+    auth: &GitAuthConfig,
+) -> Result<(), String> {
+    let Some(branch) = branch else {
+        return Ok(());
+    };
+    if run_git(&["rev-parse", "--verify", "HEAD"], Some(repo_dir), auth).is_ok() {
+        return Ok(());
+    }
+    let target = format!("refs/heads/{branch}");
+    run_git(
+        &["symbolic-ref", "HEAD", target.as_str()],
+        Some(repo_dir),
+        auth,
+    )
+    .map(|_| ())
+}
+
 pub(crate) fn clone_project_repository_blocking(
     repos_dir: Option<&str>,
     project_dtag: &str,
@@ -381,6 +401,7 @@ pub(crate) fn clone_project_repository_blocking(
             auth,
         )?;
     }
+    align_unborn_head_branch(&repo_dir, branch.as_deref(), auth)?;
 
     Ok(ProjectRepoCloneResult {
         path: repo_dir.display().to_string(),
@@ -642,11 +663,28 @@ pub async fn merge_project_pull_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_merged_status_event, build_review_request_event, classify_merge_error,
-        normalize_commit, same_repository, validate_merge_status_metadata,
+        align_unborn_head_branch, build_merged_status_event, build_review_request_event,
+        classify_merge_error, normalize_commit, same_repository, validate_merge_status_metadata,
         ProjectPullRequestMergeError,
     };
+    use crate::commands::project_git_exec::{build_test_git_auth_config, run_git};
     use nostr::{Event, JsonUtil, Keys, Timestamp};
+
+    #[test]
+    fn empty_clone_uses_requested_default_branch() {
+        let auth = build_test_git_auth_config().expect("build test git config");
+        let repo = tempfile::tempdir().expect("create repository");
+        run_git(&["init"], Some(repo.path()), &auth).expect("initialize repository");
+
+        align_unborn_head_branch(repo.path(), Some("main"), &auth).expect("align unborn HEAD");
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join(".git/HEAD"))
+                .expect("read HEAD")
+                .trim(),
+            "ref: refs/heads/main"
+        );
+    }
 
     #[test]
     fn normalize_commit_accepts_sha1_and_sha256_hex() {

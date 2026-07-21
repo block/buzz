@@ -178,6 +178,11 @@ pub async fn load_manifest_for_read(
         .map(|(_etag, _digest, manifest)| manifest))
 }
 
+async fn init_bare_repo(path: &Path) -> Result<(), HydrateError> {
+    run_git(path, &["init", "--bare", "--quiet"]).await?;
+    run_git(path, &["symbolic-ref", "HEAD", "refs/heads/main"]).await
+}
+
 /// Hydrate a bare repo for write (`receive-pack`) and return the
 /// `ParentState` the workspace was hydrated from.
 ///
@@ -190,10 +195,10 @@ pub async fn load_manifest_for_read(
 /// workspace was hydrated from.
 ///
 /// First-push case (pointer absent): returns `(empty bare repo,
-/// ParentState::fresh())`. The empty bare repo is a fresh `git init --bare`
-/// with no refs and no objects; `receive-pack` will accept the first push
-/// and create whatever refs the client sends, and `cas_publish` will CAS
-/// the pointer with `If-None-Match: *`.
+/// ParentState::fresh())`. The empty bare repo has HEAD initialized to `main`
+/// but no refs or objects; `receive-pack` will accept the first push and create
+/// whatever refs the client sends, and `cas_publish` will CAS the pointer with
+/// `If-None-Match: *`.
 ///
 /// Any below-pointer failure (manifest 404 under non-empty pointer, digest
 /// mismatch, malformed pointer body) is a hard error — never silently
@@ -220,7 +225,7 @@ pub async fn hydrate_for_write(
                 HydrateError::Hydrate(format!("tempdir in {:?}: {e}", options.scratch_dir))
             })?;
             let path = tempdir.path().to_path_buf();
-            run_git(&path, &["init", "--bare", "--quiet"]).await?;
+            init_bare_repo(&path).await?;
             Ok((
                 HydratedRepo {
                     _tempdir: tempdir,
@@ -294,7 +299,7 @@ async fn materialize_manifest(
     let tempdir = TempDir::new_in(options.scratch_dir)
         .map_err(|e| HydrateError::Hydrate(format!("tempdir in {:?}: {e}", options.scratch_dir)))?;
     let path = tempdir.path().to_path_buf();
-    run_git(&path, &["init", "--bare", "--quiet"]).await?;
+    init_bare_repo(&path).await?;
 
     // Phase 1: fetch, write, and index one pack at a time. Keeping only one
     // verified pack body resident avoids a manifest with many historical packs
@@ -498,6 +503,21 @@ mod tests {
         assert!(!is_hex_oid(&"a".repeat(39)));
         assert!(!is_hex_oid(&"g".repeat(40))); // non-hex
         assert!(!is_hex_oid(""));
+    }
+
+    #[tokio::test]
+    async fn fresh_bare_repo_defaults_head_to_main() {
+        let scratch = TempDir::new().expect("scratch");
+        init_bare_repo(scratch.path())
+            .await
+            .expect("initialize bare repo");
+        assert_eq!(
+            tokio::fs::read_to_string(scratch.path().join("HEAD"))
+                .await
+                .expect("read HEAD")
+                .trim(),
+            "ref: refs/heads/main"
+        );
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ import {
   projectBranchManagementState,
   projectBranchNameError,
   projectBranchOptions,
+  resolveProjectDefaultBranch,
 } from "./projectBranches.ts";
 
 test("normalizes plain and full branch refs", () => {
@@ -41,6 +42,30 @@ test("combines remote and local branch options without duplicates", () => {
     ["main", "feature/remote", "feature/local"],
   );
   assert.deepEqual(projectBranchOptions(["main"], "main"), ["main"]);
+});
+
+test("ignores a dangling HEAD and selects a published branch", () => {
+  assert.equal(
+    resolveProjectDefaultBranch("master", {
+      branches: [{ name: "main" }],
+      head: "master",
+    }),
+    "main",
+  );
+  assert.equal(
+    resolveProjectDefaultBranch("release", {
+      branches: [{ name: "release" }, { name: "main" }],
+      head: "missing",
+    }),
+    "release",
+  );
+});
+
+test("preserves HEAD for empty repositories", () => {
+  assert.equal(
+    resolveProjectDefaultBranch("main", { branches: [], head: "master" }),
+    "master",
+  );
 });
 
 test("derives branch commits and deletion safeguards", () => {
