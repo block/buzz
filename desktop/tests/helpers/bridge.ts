@@ -580,14 +580,19 @@ async function seedOnboardingCompletionForKnownIdentities(
   );
 }
 
-async function seedDefaultCommunity(page: Page, relayWsUrl?: string) {
+async function seedDefaultCommunity(
+  page: Page,
+  activePubkey: string,
+  relayWsUrl?: string,
+) {
   await page.addInitScript(
-    ({ relayUrl }) => {
+    ({ pubkey, relayUrl }) => {
       const communityId = "e2e-default-community";
       const community = {
         id: communityId,
         name: "E2E Test",
         relayUrl,
+        pubkey,
         addedAt: new Date().toISOString(),
       };
       window.localStorage.setItem(
@@ -596,7 +601,7 @@ async function seedDefaultCommunity(page: Page, relayWsUrl?: string) {
       );
       window.localStorage.setItem("buzz-active-community-id", communityId);
     },
-    { relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL },
+    { pubkey: activePubkey, relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL },
   );
 }
 
@@ -619,8 +624,11 @@ export async function installBridge(page: Page, options: BridgeOptions) {
 
   // Most specs seed a community so useCommunityInit doesn't show WelcomeSetup.
   // skipOnboardingSeed only controls the onboarding-completion flag.
+  // The community is stamped with the active identity's pubkey so the strict
+  // migrateMachineOnboardingCompletion voucher recognises it.
   if (!options.skipCommunitySeed) {
-    await seedDefaultCommunity(page, options.relayWsUrl);
+    const activePubkey = identity?.pubkey ?? DEFAULT_MOCK_PUBKEY;
+    await seedDefaultCommunity(page, activePubkey, options.relayWsUrl);
   }
   if (!options.skipOnboardingSeed) {
     await seedOnboardingCompletionForKnownIdentities(page, options.relayWsUrl);
