@@ -1027,7 +1027,11 @@ struct BgState {
     /// Bounded at `GATED_OBSERVER_QUEUE_CAP` (drop-oldest); drained by the
     /// main loop one frame per pacing tick once the gate clears.
     gated_observer_pending: VecDeque<Box<Event>>,
-    /// Frames evicted from `gated_observer_pending` since the last drain-empty
+    /// Observer frames written to the socket but not yet acknowledged. The
+    /// relay's rate-limit NOTICE does not carry an event ID, so all unresolved
+    /// observer writes are moved back ahead of the parked FIFO when one arrives.
+    observer_in_flight: VecDeque<Box<Event>>,
+    /// Frames evicted from the bounded pending/in-flight observer buffers since
     /// summary log. Makes overflow loss visible instead of silent.
     gated_observer_dropped: u64,
     /// Channels whose REQ failed during `resubscribe_after_reconnect`.
@@ -1063,6 +1067,7 @@ impl BgState {
             membership_resub_needed: false,
             observer_resub_needed: false,
             gated_observer_pending: VecDeque::new(),
+            observer_in_flight: VecDeque::new(),
             gated_observer_dropped: 0,
             resubscribe_retry: HashSet::new(),
             backoff_step: 0,
@@ -1177,6 +1182,41 @@ impl BgState {
             );
         }
         self.gated_observer_pending.push_back(event);
+    }
+
+    /// Restore unresolved observer writes ahead of frames parked after the
+    /// gate armed. NOTICE has no event ID, so conservatively retry every frame
+    /// without an OK; duplicate IDs are harmless at the relay.
+    fn requeue_observer_in_flight(&mut self) {
+        while let Some(event) = self.observer_in_flight.pop_back() {
+            self.gated_observer_pending.push_front(event);
+        }
+        while self.gated_observer_pending.len() > GATED_OBSERVER_QUEUE_CAP {
+            self.gated_observer_pending.pop_front();
+            self.gated_observer_dropped += 1;
+        }
+    }
+
+    fn track_observer_in_flight(&mut self, event: Box<Event>) {
+        if self.observer_in_flight.len() >= GATED_OBSERVER_QUEUE_CAP {
+            self.observer_in_flight.pop_front();
+            self.gated_observer_dropped += 1;
+            warn!(
+                dropped_total = self.gated_observer_dropped,
+                "observer acknowledgment window full — dropped oldest frame"
+            );
+        }
+        self.observer_in_flight.push_back(event);
+    }
+
+    fn acknowledge_observer_frame(&mut self, event_id: &str) {
+        if let Some(index) = self
+            .observer_in_flight
+            .iter()
+            .position(|event| event.id.to_hex() == event_id)
+        {
+            self.observer_in_flight.remove(index);
+        }
     }
 }
 
@@ -1445,9 +1485,12 @@ async fn execute_connected_command(
             // Best-effort: log a send failure but don't trigger reconnect — the
             // next ping or read will detect the dead socket. A failed observer
             // frame is parked so the post-reconnect drain redelivers it.
-            if !send_publish_event_frame(ws, &event).await
-                && event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME
-            {
+            let is_observer = event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME;
+            if send_publish_event_frame(ws, &event).await {
+                if is_observer {
+                    state.track_observer_in_flight(event);
+                }
+            } else if is_observer {
                 state.park_gated_observer_frame(event);
             }
             true
@@ -2142,6 +2185,7 @@ async fn handle_ws_message(
                     if message.starts_with("rate-limited:") {
                         let secs = parse_rate_limit_retry_secs(&message).unwrap_or(0);
                         let deadline = state.set_rate_limit_gate(secs);
+                        state.requeue_observer_in_flight();
                         warn!(
                             "rate-limit gate armed via NOTICE until ~{:.1}s from now",
                             deadline
@@ -2305,6 +2349,7 @@ async fn handle_ws_message(
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
                         return false;
                     }
+                    state.acknowledge_observer_frame(&event_id);
                     debug!("OK for event {event_id}: accepted={accepted} message={message}");
                 }
             }
@@ -2588,6 +2633,7 @@ async fn drain_gated_observer_pending(
             state.gated_observer_pending.push_front(event);
             break;
         }
+        state.track_observer_in_flight(event);
         sent += 1;
     }
     if state.gated_observer_pending.is_empty() && state.gated_observer_dropped > 0 {
@@ -2843,6 +2889,7 @@ async fn try_autonomous_reconnect(
     observer_control_tx: &mpsc::Sender<Event>,
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
+    state.requeue_observer_in_flight();
     // 5 attempts, up to 16s base backoff. Shares delay values with the
     // initial-connect retry in `HarnessRelay::connect()` (STARTUP_CONNECT_BACKOFFS) —
     // see its doc comment for how the two loops consume the array differently.
@@ -2972,6 +3019,7 @@ async fn wait_for_reconnect(
     skip_drain: bool,
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
+    state.requeue_observer_in_flight();
     if !skip_drain {
         // Drain commands until we get Reconnect (or Shutdown).
         // Other commands update state so reconnect reflects latest intent.
@@ -5856,6 +5904,29 @@ mod tests {
             assert_eq!(frame[1]["id"], expected.id.to_hex(), "order preserved");
         }
         assert!(state.gated_observer_pending.is_empty());
+    }
+
+    #[test]
+    fn observer_notice_requeues_unacknowledged_frames_and_ok_retires_them() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let accepted = make_observer_frame(&keys);
+        let rejected = make_observer_frame(&keys);
+        let later = make_observer_frame(&keys);
+
+        state.track_observer_in_flight(Box::new(accepted.clone()));
+        state.track_observer_in_flight(Box::new(rejected.clone()));
+        state.acknowledge_observer_frame(&accepted.id.to_hex());
+        state.park_gated_observer_frame(Box::new(later.clone()));
+        state.requeue_observer_in_flight();
+
+        let ids: Vec<_> = state
+            .gated_observer_pending
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(ids, [rejected.id, later.id]);
+        assert!(state.observer_in_flight.is_empty());
     }
 
     /// The parked-frame queue is bounded: overflow evicts the oldest frame and
