@@ -8,7 +8,8 @@ use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, ManagedAgentProcess, ManagedAgentRecord, ManagedAgentSummary,
+        spawn_key_refusal, KnownAcpRuntime, ManagedAgentProcess, ManagedAgentRecord,
+        ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -1466,6 +1467,15 @@ pub(crate) fn build_respond_to_env(
     Ok((set, remove))
 }
 
+fn scrub_ambient_runtime_credentials(
+    command: &mut std::process::Command,
+    runtime: Option<&KnownAcpRuntime>,
+) {
+    if runtime.is_some_and(|runtime| runtime.id == "claude") {
+        command.env_remove("ANTHROPIC_API_KEY");
+    }
+}
+
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -1818,6 +1828,11 @@ pub fn spawn_agent_child(
             record.name,
         );
     }
+
+    // Claude subscription auth must come from the CLI credential store unless
+    // the user explicitly configured an API key in Buzz. A stale key inherited
+    // from the Desktop process otherwise overrides a valid subscription login.
+    scrub_ambient_runtime_credentials(&mut command, runtime_meta);
 
     // ── User env vars: live persona env under agent overrides ──────────
     //

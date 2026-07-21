@@ -47,6 +47,15 @@ pub(crate) enum ProbeOutcome {
 /// one term.
 const CONFIG_PARSE_SIGNALS: &[&str] = &["error loading configuration", "unknown variant"];
 
+pub(crate) fn configure_auth_probe_command(
+    command: &mut std::process::Command,
+    probe_args: &[&str],
+) {
+    if probe_args.first() == Some(&"claude") {
+        command.env_remove("ANTHROPIC_API_KEY");
+    }
+}
+
 /// Run the probe at the resolved absolute path so the GUI-PATH gap is
 /// bypassed. Injects the same augmented PATH used for launched agents so
 /// script shims with `/usr/bin/env <interpreter>` shebangs can find runtimes
@@ -58,6 +67,7 @@ pub(crate) fn login_probe(
 ) -> ProbeOutcome {
     let mut command = std::process::Command::new(binary_path);
     command.args(&probe_args[1..]);
+    configure_auth_probe_command(&mut command, probe_args);
     if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
@@ -96,6 +106,28 @@ pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::{ProbeOutcome, CONFIG_PARSE_SIGNALS};
+
+    #[test]
+    fn claude_auth_probe_removes_ambient_api_key() {
+        let mut command = std::process::Command::new("claude");
+        command.env("ANTHROPIC_API_KEY", "invalid-but-present");
+        super::configure_auth_probe_command(&mut command, &["claude", "auth", "status"]);
+
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| { key == "ANTHROPIC_API_KEY" && value.is_none() }));
+    }
+
+    #[test]
+    fn codex_auth_probe_leaves_unrelated_api_key_alone() {
+        let mut command = std::process::Command::new("codex");
+        command.env("ANTHROPIC_API_KEY", "unrelated");
+        super::configure_auth_probe_command(&mut command, &["codex", "login", "status"]);
+
+        assert!(command.get_envs().any(|(key, value)| {
+            key == "ANTHROPIC_API_KEY" && value == Some(std::ffi::OsStr::new("unrelated"))
+        }));
+    }
 
     #[cfg(unix)]
     #[test]

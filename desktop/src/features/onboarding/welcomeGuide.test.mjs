@@ -8,6 +8,7 @@ import {
   pickWelcomeGuideAgent,
   pickWelcomeGuideAgentForRelay,
   pickWelcomeTeamStarterAgentForRelay,
+  welcomeStarterRuntimeUpdate,
   WELCOME_GUIDE_AGENT_NAME,
   WELCOME_GUIDE_PERSONA_ID,
   WELCOME_TEAM_ID,
@@ -203,6 +204,46 @@ test("all Welcome starters use the onboarding runtime preference", async () => {
     assert.equal(input.spawnAfterCreate, false);
     assert.equal(input.startOnAppLaunch, false);
   }
+});
+
+test("existing Welcome starter is repinned when onboarding runtime changes", () => {
+  const existing = makeAgent({
+    pubkey: PUB_A,
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    agentCommand: "claude-agent-acp",
+    agentArgs: ["--old"],
+  });
+
+  assert.deepEqual(
+    welcomeStarterRuntimeUpdate(existing, {
+      name: "Fizz",
+      agentCommand: "codex-acp",
+      agentArgs: ["--new"],
+    }),
+    {
+      pubkey: PUB_A,
+      agentCommand: "codex-acp",
+      harnessOverride: true,
+      agentArgs: ["--new"],
+    },
+  );
+});
+
+test("existing Welcome starter needs no update when runtime already matches", () => {
+  const existing = makeAgent({
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    agentCommand: "codex-acp",
+    agentArgs: ["--same"],
+  });
+
+  assert.equal(
+    welcomeStarterRuntimeUpdate(existing, {
+      name: "Fizz",
+      agentCommand: "codex-acp",
+      agentArgs: ["--same"],
+    }),
+    null,
+  );
 });
 
 test("welcome team starter definitions and role identities are stable", () => {

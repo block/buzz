@@ -579,6 +579,33 @@ fn name_matches_interpreter_rejects_node_prefix() {
     assert!(!super::name_matches_interpreter("node-gyp"));
 }
 
+#[test]
+fn claude_spawn_scrubs_ambient_api_key() {
+    let mut command = std::process::Command::new("buzz-acp");
+    command.env("ANTHROPIC_API_KEY", "stale");
+
+    super::scrub_ambient_runtime_credentials(
+        &mut command,
+        super::known_acp_runtime("claude-agent-acp"),
+    );
+
+    assert!(command
+        .get_envs()
+        .any(|(key, value)| key == "ANTHROPIC_API_KEY" && value.is_none()));
+}
+
+#[test]
+fn non_claude_spawn_preserves_ambient_api_key() {
+    let mut command = std::process::Command::new("buzz-acp");
+    command.env("ANTHROPIC_API_KEY", "explicit");
+
+    super::scrub_ambient_runtime_credentials(&mut command, super::known_acp_runtime("codex-acp"));
+
+    assert!(command.get_envs().any(|(key, value)| {
+        key == "ANTHROPIC_API_KEY" && value == Some(std::ffi::OsStr::new("explicit"))
+    }));
+}
+
 // ── PGID-based orphan sweep tests ───────────────────────────────────────
 
 /// Validates the kernel invariant that the orphan sweep PGID fix relies on:
