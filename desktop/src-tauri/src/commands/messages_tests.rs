@@ -159,6 +159,28 @@ fn thread_replies_filter_pages_with_composite_cursor() {
 }
 
 #[test]
+fn feed_item_categories_match_the_frontend_union() {
+    // The frontend `FeedItemCategory` union (desktop/src/shared/api/tauri.ts)
+    // and every consumer (`notificationTitle`, inbox grouping, sound slots)
+    // compare `category === "mention"` — singular. The sections object key is
+    // plural ("mentions"), and emitting the plural as the per-item category
+    // made native mention items fall through every match arm (block/buzz#2106:
+    // "X mentioned you" toasts rendered as "Needs Action"). The e2e bridge
+    // emits the singular, so relay-mode tests never see the native shape —
+    // this unit test is the only guard against the contract drifting again.
+    assert_eq!(FEED_CATEGORY_MENTION, "mention");
+    assert_eq!(FEED_CATEGORY_NEEDS_ACTION, "needs_action");
+
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "hey @you")
+        .tags([nostr::Tag::parse(["h", "channel-1"]).expect("valid tag")])
+        .sign_with_keys(&Keys::generate())
+        .expect("event should sign");
+    let item = feed_item_from_event(&event, FEED_CATEGORY_MENTION);
+    assert_eq!(item.category, "mention");
+    assert_eq!(item.channel_id.as_deref(), Some("channel-1"));
+}
+
+#[test]
 fn stored_managed_agent_auth_tag_trims_blank_values() {
     assert_eq!(
         stored_managed_agent_auth_tag(Some("  [\"auth\",\"owner\",\"\",\"sig\"]  ")),

@@ -41,6 +41,14 @@ const TIMELINE_KINDS: [u32; 11] = [
     buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
 ];
 
+/// Per-item feed `category` values — the frontend `FeedItemCategory` union
+/// (desktop/src/shared/api/tauri.ts) declares the singular "mention", while
+/// the `FeedSections` JSON key stays plural ("mentions"). Every frontend
+/// consumer compares `category === "mention"`, so emitting the plural here
+/// misclassifies native mention items (wrong toast title, inbox grouping).
+const FEED_CATEGORY_MENTION: &str = "mention";
+const FEED_CATEGORY_NEEDS_ACTION: &str = "needs_action";
+
 #[tauri::command]
 pub async fn get_feed(
     since: Option<i64>,
@@ -102,11 +110,11 @@ pub async fn get_feed(
 
     let mentions: Vec<FeedItemInfo> = mention_events
         .iter()
-        .map(|ev| feed_item_from_event(ev, "mentions"))
+        .map(|ev| feed_item_from_event(ev, FEED_CATEGORY_MENTION))
         .collect();
     let needs_action: Vec<FeedItemInfo> = approval_events
         .iter()
-        .map(|ev| feed_item_from_event(ev, "needs_action"))
+        .map(|ev| feed_item_from_event(ev, FEED_CATEGORY_NEEDS_ACTION))
         .collect();
 
     let total = (mentions.len() + needs_action.len()) as u64;
