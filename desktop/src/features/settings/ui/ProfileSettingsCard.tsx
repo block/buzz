@@ -1009,13 +1009,27 @@ export function ProfileSettingsCard({
                 onClick={() => {
                   setIsSignOutPending(true);
                   // Keep the pending state if signOut() resolves before restart.
-                  signOut().catch((err: unknown) => {
-                    setIsSignOutPending(false);
-                    setIsSignOutOpen(false);
-                    toast.error(
-                      err instanceof Error ? err.message : "Sign out failed.",
-                    );
-                  });
+                  signOut()
+                    .then(() => {
+                      // Clear web storage for this origin on the success path
+                      // only. This covers dev builds where the Rust webview wipe
+                      // targets the .app-bundle WebKit dir (missing in `tauri
+                      // dev`), preventing stale community config from vouching
+                      // for the fresh key on next boot. In production the Rust
+                      // wipe already handles this; the clear here is redundant
+                      // but harmless. The restart may race this clear — that is
+                      // acceptable; Fix A (pubkey-scoped heuristic) is the
+                      // correctness gate.
+                      window.localStorage.clear();
+                      window.sessionStorage.clear();
+                    })
+                    .catch((err: unknown) => {
+                      setIsSignOutPending(false);
+                      setIsSignOutOpen(false);
+                      toast.error(
+                        err instanceof Error ? err.message : "Sign out failed.",
+                      );
+                    });
                 }}
               >
                 {isSignOutPending ? "Signing out…" : "Delete My Data"}

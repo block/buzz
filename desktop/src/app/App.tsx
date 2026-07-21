@@ -494,7 +494,9 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   const { activeCommunity } = useCommunities();
   const communityOnboarding = useCommunityOnboarding();
   const machine = useMachineOnboardingState({
-    hasConfiguredCommunity: activeCommunity !== null,
+    activeCommunityPubkey: activeCommunity
+      ? (activeCommunity.pubkey ?? null)
+      : undefined,
     isSharedIdentity: sharedIdentity,
   });
   const [machineInitialPage, setMachineInitialPage] =

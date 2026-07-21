@@ -36,15 +36,27 @@ function clearMachineOnboardingCompletion(pubkey: string | null) {
 }
 
 function forceMachineOnboarding() {
-  if (!import.meta.env.DEV || typeof window === "undefined") return false;
+  if (!import.meta.env?.DEV || typeof window === "undefined") return false;
   return (
     new URL(window.location.href).searchParams.get("machineOnboarding") === "1"
   );
 }
 
-function migrateMachineOnboardingCompletion(
+/** @internal Exported for unit testing only. */
+export function migrateMachineOnboardingCompletion(
   pubkey: string,
-  hasConfiguredCommunity: boolean,
+  /**
+   * The `pubkey` field of the active community from localStorage, or
+   * `undefined` if no community is configured. When a community is present
+   * but its `pubkey` field is absent (legacy entries predating the field),
+   * pass `null` — absent is treated as a match so the veteran-upgrade path
+   * is preserved. Pass `undefined` when there is no active community at all.
+   *
+   * Using the community's own pubkey rather than a bare boolean prevents a
+   * freshly generated post-reset key from being vouched for by a stale
+   * community entry that survived the webview wipe.
+   */
+  activeCommunityPubkey: string | null | undefined,
   isSharedIdentity: boolean,
 ) {
   if (forceMachineOnboarding()) return false;
@@ -54,9 +66,16 @@ function migrateMachineOnboardingCompletion(
     window.localStorage.getItem(
       completionKey(LEGACY_ONBOARDING_COMPLETION_STORAGE_KEY, pubkey),
     ) === "true";
+
+  // A community entry vouches for the current pubkey only when its recorded
+  // pubkey matches (or is absent — legacy entries predate the field).
+  const communityVouchesForPubkey =
+    activeCommunityPubkey !== undefined &&
+    (activeCommunityPubkey === null || activeCommunityPubkey === pubkey);
+
   if (
     !completedLegacyOnboarding &&
-    !hasConfiguredCommunity &&
+    !communityVouchesForPubkey &&
     !isSharedIdentity
   ) {
     return false;
@@ -74,10 +93,10 @@ function identitySettled(status: QueryStatus, isFetching: boolean) {
 }
 
 export function useMachineOnboardingState({
-  hasConfiguredCommunity,
+  activeCommunityPubkey,
   isSharedIdentity,
 }: {
-  hasConfiguredCommunity: boolean;
+  activeCommunityPubkey: string | null | undefined;
   isSharedIdentity: boolean;
 }) {
   const queryClient = useQueryClient();
@@ -130,7 +149,7 @@ export function useMachineOnboardingState({
     if (
       migrateMachineOnboardingCompletion(
         currentPubkey,
-        hasConfiguredCommunity,
+        activeCommunityPubkey,
         isSharedIdentity,
       )
     ) {
@@ -139,7 +158,7 @@ export function useMachineOnboardingState({
     setEvaluatedPubkey(currentPubkey);
   }, [
     currentPubkey,
-    hasConfiguredCommunity,
+    activeCommunityPubkey,
     identityLost,
     identityQuery.status,
     isSharedIdentity,
