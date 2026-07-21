@@ -14,7 +14,10 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import { Spinner } from "@/shared/ui/spinner";
-import { waitForPendingButtonPaint } from "./ProfileAvatarEditor.pending";
+import {
+  useLocalAvatarPreview,
+  waitForPendingButtonPaint,
+} from "./ProfileAvatarEditor.helpers";
 import {
   AVATAR_COLORS,
   AVATAR_COLOR_SWATCHES,
@@ -41,7 +44,6 @@ import type {
   AvatarMode,
   ProfileAvatarEditorProps,
 } from "./ProfileAvatarEditor.types";
-
 const DONE_BUTTON_CONTENT_TRANSITION = {
   duration: 0.14,
   ease: [0.23, 1, 0.32, 1],
@@ -50,10 +52,7 @@ const DONE_BUTTON_SHELL_TRANSITION = {
   duration: 0.18,
   ease: [0.23, 1, 0.32, 1],
 } as const;
-
-type EmojiMartEmoji = {
-  native?: string;
-};
+type EmojiMartEmoji = { native?: string };
 
 const INITIAL_EMOJI_AVATAR_COLORS = AVATAR_COLORS.filter(
   (color) => color !== DEFAULT_EMOJI_AVATAR_COLOR,
@@ -102,6 +101,7 @@ export function ProfileAvatarEditor({
   const [mode, setMode] = React.useState<AvatarMode>("image");
   const [isDragging, setIsDragging] = React.useState(false);
   const [urlDraft, setUrlDraft] = React.useState("");
+  const localPreview = useLocalAvatarPreview();
   const [selectedEmoji, setSelectedEmoji] = React.useState<string | null>(
     () => initialEmojiAvatar?.emoji ?? null,
   );
@@ -186,7 +186,11 @@ export function ProfileAvatarEditor({
     isUploading,
     openPicker,
     uploadFile,
-  } = useAvatarUpload({ onUploadSuccess: handleUploadSuccess });
+  } = useAvatarUpload({
+    onUploadStart: localPreview.showFilePreview,
+    onUploadSettled: localPreview.clearPreview,
+    onUploadSuccess: handleUploadSuccess,
+  });
   const isInputDisabled = disabled || isUploading || isAnimatedApplyPending;
   const handleAnimatedApply = React.useCallback(
     (animatedUrl: string) => {
@@ -611,9 +615,10 @@ export function ProfileAvatarEditor({
                     onClick={openPicker}
                     type="button"
                   >
-                    {isOnboardingModal && avatarUrl ? (
+                    {isOnboardingModal &&
+                    (localPreview.previewUrl || avatarUrl) ? (
                       <ProfileAvatarUploadPreview
-                        avatarUrl={avatarUrl}
+                        avatarUrl={localPreview.previewUrl || avatarUrl || ""}
                         label={previewName}
                         testId={`${testIdPrefix}-upload-preview`}
                       />

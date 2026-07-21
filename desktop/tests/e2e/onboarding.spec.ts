@@ -1326,6 +1326,7 @@ test("connected first-community profile step offers equal-width Next and Back co
   await installMockBridge(
     page,
     {
+      uploadDelayMs: 1_000,
       uploadDescriptors: [
         {
           filename: "community-avatar.png",
@@ -1458,13 +1459,19 @@ test("connected first-community profile step offers equal-width Next and Back co
   );
   const saveButton = page.getByTestId("community-avatar-done");
   await page.getByTestId("community-avatar-input").setInputFiles({
-    buffer: Buffer.from("community-avatar-bytes"),
+    buffer: Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ),
     mimeType: "image/png",
     name: "community-avatar.png",
   });
-  await expect(
-    page.getByTestId("community-avatar-upload-preview-image"),
-  ).toHaveAttribute("src", uploadedAvatarUrl);
+  const previewImage = page.getByTestId(
+    "community-avatar-upload-preview-image",
+  );
+  await expect(previewImage).toHaveAttribute("src", /^blob:/);
+  await expect(saveButton).toBeDisabled();
+  await expect(previewImage).toHaveAttribute("src", uploadedAvatarUrl);
   await expect(avatarDialog).toBeVisible();
   const modeContentShell = page.getByTestId(
     "community-avatar-mode-content-shell",
