@@ -126,14 +126,22 @@ const RETRY_MAX_ATTEMPTS: u32 = 3;
 const RETRY_BASE_SECS: [f64; 2] = [0.5, 1.5];
 
 /// Maximum seconds to honour a relay-provided `retry in Ns` hint from a 429.
-const RETRY_IN_MAX_SECS: u64 = 8;
+/// Defensive cap against pathological hints; real relay hints observed up to ~24 s.
+const RETRY_IN_MAX_SECS: u64 = 30;
+
+/// Returns a full-jitter delay for attempt `i`: a random duration in `[0, RETRY_BASE_SECS[i])`.
+fn jitter_delay(attempt: u32) -> Duration {
+    Duration::from_secs_f64(RETRY_BASE_SECS[attempt as usize] * rand::random::<f64>())
+}
 
 /// Read an env var as a `u64` of seconds and return the corresponding `Duration`.
-/// Falls back to `default` if the var is unset or unparseable.
+/// Falls back to `default` if the var is unset, unparseable, or zero (zero is treated
+/// as invalid to prevent accidentally disabling all timeouts).
 fn env_duration_secs(name: &str, default: u64) -> Duration {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(default))
 }
@@ -259,6 +267,43 @@ fn sign_blossom_get(keys: &Keys, media_url: &str) -> Result<String, CliError> {
     ];
 
     let auth_event = EventBuilder::new(Kind::from(24242), "Get media")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+
+    Ok(format!(
+        "Nostr {}",
+        URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
+    ))
+}
+
+fn sign_blossom_upload(
+    keys: &Keys,
+    sha256: &str,
+    mime: &str,
+    relay_url: &str,
+) -> Result<String, CliError> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use nostr::Timestamp;
+
+    let now = Timestamp::now().as_secs();
+    let expiry: u64 = if mime.starts_with("video/") {
+        3600
+    } else {
+        600
+    };
+    let exp_str = (now + expiry).to_string();
+
+    let mut tags = vec![
+        Tag::parse(["t", "upload"]).map_err(|e| CliError::Other(e.to_string()))?,
+        Tag::parse(["x", sha256]).map_err(|e| CliError::Other(e.to_string()))?,
+        Tag::parse(["expiration", &exp_str]).map_err(|e| CliError::Other(e.to_string()))?,
+    ];
+    if let Some(domain) = relay_server_tag(relay_url) {
+        tags.push(Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?);
+    }
+
+    let auth_event = EventBuilder::new(Kind::from(24242), "Upload file")
         .tags(tags)
         .sign_with_keys(keys)
         .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
@@ -421,6 +466,8 @@ impl BuzzClient {
     ///
     /// - `BUZZ_CONNECT_TIMEOUT_SECS` — TCP connect timeout (default 15 s)
     /// - `BUZZ_TIMEOUT_SECS` — per-request total timeout (default 30 s)
+    ///
+    /// A value of zero for either variable is treated as invalid and falls back to the default.
     pub fn new(
         relay_url: String,
         keys: Keys,
@@ -530,14 +577,10 @@ impl BuzzClient {
                             let body = resp.text().await.unwrap_or_default();
                             match parse_retry_in_secs(&body) {
                                 Some(hint) => Duration::from_secs(hint.min(RETRY_IN_MAX_SECS)),
-                                None => {
-                                    let base = RETRY_BASE_SECS[attempt as usize];
-                                    Duration::from_secs_f64(base * rand::random::<f64>())
-                                }
+                                None => jitter_delay(attempt),
                             }
                         } else {
-                            let base = RETRY_BASE_SECS[attempt as usize];
-                            Duration::from_secs_f64(base * rand::random::<f64>())
+                            jitter_delay(attempt)
                         };
                         tokio::time::sleep(delay).await;
                         continue;
@@ -551,9 +594,7 @@ impl BuzzClient {
                                 || net_err.is_timeout()
                                 || net_err.is_request())
                         {
-                            let base = RETRY_BASE_SECS[attempt as usize];
-                            let delay = Duration::from_secs_f64(base * rand::random::<f64>());
-                            tokio::time::sleep(delay).await;
+                            tokio::time::sleep(jitter_delay(attempt)).await;
                             continue;
                         }
                     }
@@ -774,9 +815,10 @@ impl BuzzClient {
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let ws_url = to_ws_url(&self.relay_url);
-        // Outer budget: inner wait constants (20 + 20 + 30 = 70 s) plus 5 s slack.
+        // Hard cap — inner wait ceilings sum to 70 s; connect time and network RTT are
+        // additional overhead absorbed by this budget.
         // See buzz_ws_client::{AUTH_CHALLENGE_TIMEOUT_SECS, AUTH_OK_TIMEOUT_SECS,
-        // PUBLISH_OK_TIMEOUT_SECS} for the inner floors.
+        // PUBLISH_OK_TIMEOUT_SECS} for the inner ceilings.
         let ok =
             buzz_ws_client::publish_event(&ws_url, event, &self.keys, self.auth_tag.as_ref(), 75)
                 .await
@@ -835,40 +877,8 @@ impl BuzzClient {
         // 4. SHA-256
         let sha256 = hex::encode(Sha256::digest(&bytes));
 
-        // 5. Sign Blossom auth event (kind:24242)
-        use nostr::Timestamp;
-        let now = Timestamp::now().as_secs();
-        let expiry = if mime.starts_with("video/") {
-            3600
-        } else {
-            600
-        };
-        let exp_str = (now + expiry).to_string();
-
-        let mut blossom_tags = vec![
-            Tag::parse(["t", "upload"]).map_err(|e| CliError::Other(e.to_string()))?,
-            Tag::parse(["x", &sha256]).map_err(|e| CliError::Other(e.to_string()))?,
-            Tag::parse(["expiration", &exp_str]).map_err(|e| CliError::Other(e.to_string()))?,
-        ];
-        // Extract server domain from relay URL for BUD-11 server tag
-        if let Some(domain) = relay_server_tag(&self.relay_url) {
-            blossom_tags
-                .push(Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?);
-        }
-
-        let auth_event = EventBuilder::new(Kind::from(24242), "Upload file")
-            .tags(blossom_tags)
-            .sign_with_keys(&self.keys)
-            .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
-
-        // 6. Base64url encode the auth event for the header
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let auth_header = format!(
-            "Nostr {}",
-            URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
-        );
-
-        // 7. PUT request to the BUD-02 /upload endpoint with a generous timeout.
+        // 5. PUT request to the BUD-02 /upload endpoint with a generous timeout.
+        // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
         let upload_timeout = if mime.starts_with("video/") {
             Duration::from_secs(600)
         } else {
@@ -880,16 +890,17 @@ impl BuzzClient {
             .with_retry(|| {
                 let upload_body = upload_body.clone();
                 let url = url.clone();
-                let auth_header = auth_header.clone();
                 let mime = mime.clone();
                 let sha256 = sha256.clone();
                 async move {
+                    let auth_header =
+                        sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
                     Ok(self
                         .with_auth_tag(
                             self.http
                                 .put(&url)
                                 .timeout(upload_timeout)
-                                .header("Authorization", &auth_header)
+                                .header("Authorization", auth_header)
                                 .header("Content-Type", &mime)
                                 .header("X-SHA-256", &sha256)
                                 .body(upload_body),
@@ -899,14 +910,18 @@ impl BuzzClient {
                 }
             })
             .await?;
+        // The /upload → /media/upload fallback intentionally bypasses with_retry: a 404 or
+        // 405 means the primary endpoint doesn't exist on this relay version, not a transient
+        // failure.  Retrying would loop without effect.
         if should_retry_legacy_upload(resp.status()) {
             let legacy_url = format!("{}/media/upload", self.relay_url);
+            let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
             resp = self
                 .with_auth_tag(
                     self.http
                         .put(&legacy_url)
                         .timeout(upload_timeout)
-                        .header("Authorization", &auth_header)
+                        .header("Authorization", auth_header)
                         .header("Content-Type", &mime)
                         .header("X-SHA-256", &sha256),
                 )
@@ -1135,7 +1150,12 @@ pub fn normalize_write_response(raw: &str) -> String {
 
 #[cfg(test)]
 mod retry_tests {
-    use super::{parse_retry_in_secs, RETRY_BASE_SECS, RETRY_IN_MAX_SECS, RETRY_MAX_ATTEMPTS};
+    use std::time::Duration;
+
+    use super::{
+        env_duration_secs, jitter_delay, parse_retry_in_secs, RETRY_BASE_SECS, RETRY_IN_MAX_SECS,
+        RETRY_MAX_ATTEMPTS,
+    };
 
     // ---- parse_retry_in_secs ----
 
@@ -1177,12 +1197,13 @@ mod retry_tests {
 
     #[test]
     fn jitter_stays_within_base() {
-        for &base in &RETRY_BASE_SECS {
+        for attempt in 0..RETRY_BASE_SECS.len() as u32 {
+            let base = RETRY_BASE_SECS[attempt as usize];
             for _ in 0..100 {
-                let jitter = base * rand::random::<f64>();
+                let delay = jitter_delay(attempt).as_secs_f64();
                 assert!(
-                    (0.0..=base).contains(&jitter),
-                    "jitter {jitter} out of [0, {base}]"
+                    (0.0..=base).contains(&delay),
+                    "jitter {delay} out of [0, {base}]"
                 );
             }
         }
@@ -1195,6 +1216,30 @@ mod retry_tests {
         assert_eq!(RETRY_MAX_ATTEMPTS, 3);
         assert_eq!(RETRY_BASE_SECS.len(), (RETRY_MAX_ATTEMPTS - 1) as usize);
         const { assert!(RETRY_IN_MAX_SECS > 0) };
+    }
+
+    // ---- env_duration_secs ----
+
+    #[test]
+    fn env_duration_secs_parsing() {
+        // All assertions share one env var key; sequential set/remove prevents races.
+        const KEY: &str = "BUZZ_CLI_TEST_DURATION_SECS";
+
+        // Valid numeric value is parsed.
+        std::env::set_var(KEY, "42");
+        assert_eq!(env_duration_secs(KEY, 30), Duration::from_secs(42));
+
+        // Non-numeric falls back to default.
+        std::env::set_var(KEY, "not-a-number");
+        assert_eq!(env_duration_secs(KEY, 30), Duration::from_secs(30));
+
+        // Zero is treated as invalid and falls back to default.
+        std::env::set_var(KEY, "0");
+        assert_eq!(env_duration_secs(KEY, 30), Duration::from_secs(30));
+
+        // Unset uses the default.
+        std::env::remove_var(KEY);
+        assert_eq!(env_duration_secs(KEY, 30), Duration::from_secs(30));
     }
 }
 

@@ -56,12 +56,14 @@ fn fmt_reqwest_error(e: &reqwest::Error) -> String {
 
 /// Returns `true` when the error is transient and a retry may succeed.
 ///
-/// Network errors (DNS brownout, connect failure, timeout) and relay
-/// overload responses (429 / 502 / 503 / 504) are retryable.  All other
-/// errors indicate a permanent failure: auth, bad input, or logic errors.
+/// Transport-level network errors (connect failure, timeout, or mid-request) and relay
+/// overload responses (429 / 502 / 503 / 504) are retryable.  All other errors indicate
+/// a permanent failure: auth, bad input, builder errors, or logic errors.
 pub fn is_retryable_error(e: &CliError) -> bool {
     match e {
-        CliError::Network(_) => true,
+        CliError::Network(ref net_err) => {
+            net_err.is_connect() || net_err.is_timeout() || net_err.is_request()
+        }
         CliError::Relay { status, .. } => matches!(status, 429 | 502 | 503 | 504),
         _ => false,
     }
@@ -123,10 +125,14 @@ mod tests {
     // ---- is_retryable_error ----
 
     #[test]
-    fn network_errors_are_retryable() {
-        // Build a real reqwest::Error via a deliberately bad URL (no I/O needed).
+    fn network_builder_errors_are_not_retryable() {
+        // A bad URL produces a builder-level reqwest::Error (is_builder() == true).
+        // Builder errors are not transport failures — not retryable.
+        // Transport errors (is_connect/timeout/request) require live I/O to construct;
+        // the predicate here mirrors with_retry's condition exactly.
         let e = reqwest::Client::new().get("not-a-url").build().unwrap_err();
-        assert!(is_retryable_error(&CliError::Network(e)));
+        assert!(e.is_builder(), "expected a builder error from bad URL");
+        assert!(!is_retryable_error(&CliError::Network(e)));
     }
 
     #[test]
@@ -171,6 +177,8 @@ mod tests {
 
     #[test]
     fn json_error_includes_retryable_field_for_network() {
+        // Builder errors (bad URL) are not transport-level — retryable: false.
+        // This test verifies the JSON shape and that the field is present.
         let e = reqwest::Client::new().get("not-a-url").build().unwrap_err();
         let err = CliError::Network(e);
         let v = serde_json::json!({
@@ -178,7 +186,7 @@ mod tests {
             "message": err.to_string(),
             "retryable": is_retryable_error(&err),
         });
-        assert_eq!(v["retryable"].as_bool(), Some(true));
+        assert_eq!(v["retryable"].as_bool(), Some(false));
         assert_eq!(v["error"].as_str(), Some("network_error"));
     }
 
