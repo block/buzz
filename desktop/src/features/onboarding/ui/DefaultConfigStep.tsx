@@ -40,10 +40,13 @@ function formatHarnessLabel(runtime: AcpRuntimeCatalogEntry | undefined) {
 }
 
 function AgentDefaultsSection({
-  onHasDefaultRuntimeChange,
+  onPersistenceStateChange,
   readyRuntimeIds,
 }: {
-  onHasDefaultRuntimeChange: (hasDefaultRuntime: boolean) => void;
+  onPersistenceStateChange: (state: {
+    canComplete: boolean;
+    flush: () => Promise<void>;
+  }) => void;
   readyRuntimeIds: readonly string[];
 }) {
   const runtimesQuery = useAcpRuntimesQuery();
@@ -55,8 +58,10 @@ function AgentDefaultsSection({
   const [bakedEnv, setBakedEnv] = React.useState<BakedEnvEntry[]>([]);
   const coalescerRef = React.useRef<{
     enqueue: (value: GlobalAgentConfig) => void;
+    flush: () => Promise<void>;
     cancel: () => void;
   } | null>(null);
+  const [isSaving, setIsSaving] = React.useState(false);
 
   React.useEffect(() => {
     let unmounted = false;
@@ -87,7 +92,9 @@ function AgentDefaultsSection({
       // set_global_agent_config returns a save result (config + restart
       // counts); the coalescer round-trips the persisted config only.
       async (next) => (await setGlobalAgentConfig(next)).config,
-      () => undefined, // saving state not surfaced in this autosave UX
+      (saving) => {
+        if (!unmounted) setIsSaving(saving);
+      },
       (saved) => {
         if (!unmounted) setConfig(saved);
       },
@@ -157,9 +164,16 @@ function AgentDefaultsSection({
     selectedRuntimeId,
   ]);
 
+  const flushPersistence = React.useCallback(
+    () => coalescerRef.current?.flush() ?? Promise.resolve(),
+    [],
+  );
   React.useEffect(() => {
-    onHasDefaultRuntimeChange(selectedRuntimeId.length > 0);
-  }, [onHasDefaultRuntimeChange, selectedRuntimeId]);
+    onPersistenceStateChange({
+      canComplete: selectedRuntimeId.length > 0 && !isSaving,
+      flush: flushPersistence,
+    });
+  }, [flushPersistence, isSaving, onPersistenceStateChange, selectedRuntimeId]);
 
   return (
     <section className="w-full space-y-4 text-left text-sm">
@@ -230,7 +244,26 @@ export function DefaultConfigStep({
   direction,
   readyRuntimeIds,
 }: DefaultConfigStepProps) {
-  const [hasDefaultRuntime, setHasDefaultRuntime] = React.useState(false);
+  const [persistenceState, setPersistenceState] = React.useState<{
+    canComplete: boolean;
+    flush: () => Promise<void>;
+  }>({ canComplete: false, flush: () => Promise.resolve() });
+  const [completionError, setCompletionError] = React.useState<string | null>(
+    null,
+  );
+  const [isCompleting, setIsCompleting] = React.useState(false);
+
+  const handleComplete = React.useCallback(async () => {
+    setIsCompleting(true);
+    setCompletionError(null);
+    try {
+      await persistenceState.flush();
+      actions.complete();
+    } catch {
+      setCompletionError("Couldn't save your default harness. Try again.");
+      setIsCompleting(false);
+    }
+  }, [actions, persistenceState]);
 
   return (
     <OnboardingSlideTransition
@@ -253,9 +286,17 @@ export function DefaultConfigStep({
       <div className="flex w-full flex-1 items-center justify-center py-10">
         <div className="w-full max-w-[328px]">
           <AgentDefaultsSection
-            onHasDefaultRuntimeChange={setHasDefaultRuntime}
+            onPersistenceStateChange={setPersistenceState}
             readyRuntimeIds={readyRuntimeIds}
           />
+          {completionError ? (
+            <p
+              className="mt-3 text-center text-xs text-destructive"
+              role="alert"
+            >
+              {completionError}
+            </p>
+          ) : null}
         </div>
       </div>
 
@@ -263,8 +304,8 @@ export function DefaultConfigStep({
         <Button
           className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
           data-testid="onboarding-finish"
-          disabled={!hasDefaultRuntime}
-          onClick={actions.complete}
+          disabled={!persistenceState.canComplete || isCompleting}
+          onClick={() => void handleComplete()}
           type="button"
         >
           Next

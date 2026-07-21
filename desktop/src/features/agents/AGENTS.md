@@ -68,7 +68,8 @@ with a TypeScript lookup table or an id comparison in a component.
 - `ui/agentConfigFieldsContract.test.mjs` — canonical behaviors + disclosure
   presets. If this fails, you probably reintroduced a per-surface flag.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
-  pin (35 tests).
+  acceptance coverage for readiness, failure states, defaults, navigation, and
+  persistence races.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 
 ## Keep this file true

@@ -113,6 +113,110 @@ test("ready state is detected and enables Next without persisting a default", as
   expect(await readSavedRuntime(page)).toBeNull();
 });
 
+test("setup shows runtime discovery loading before rendering harnesses", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+      ],
+      acpRuntimesDelayMs: 500,
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await expect(page.getByTestId("onboarding-runtime-loading")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-claude")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-loading")).toHaveCount(0);
+});
+
+test("unknown authentication can be checked again", async ({ page }) => {
+  const unknown = runtime("claude", "available", { status: "unknown" });
+  const loggedIn = runtime("claude", "available", { status: "logged_in" });
+  await installMockBridge(
+    page,
+    { acpRuntimesCatalogSequence: [[unknown], [loggedIn]] },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const checkAgain = page.getByRole("button", {
+    name: "Check Claude Code again",
+  });
+  await expect(checkAgain).toHaveText("CHECK AGAIN");
+  await checkAgain.click();
+  await expect(page.getByTestId("onboarding-runtime-ready-claude")).toHaveText(
+    "READY",
+  );
+});
+
+test("auth discovery failure stays actionable without exposing internals", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_out" }),
+      ],
+      acpAuthMethodsError: "sensitive auth discovery details",
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const card = page.getByTestId("onboarding-runtime-claude");
+  await expect(
+    card.getByRole("status", { name: /Sign-in unavailable/ }),
+  ).toBeVisible();
+  await expect(
+    card.getByTestId("onboarding-runtime-instructions-claude"),
+  ).toHaveText("SIGN IN");
+  await expect(card).not.toContainText("sensitive auth discovery details");
+});
+
+test("terminal launch failure keeps Sign in available", async ({ page }) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_out" }),
+      ],
+      acpAuthMethods: {
+        claude: {
+          methods: [
+            {
+              id: "subscription",
+              name: "Claude.ai subscription",
+              description: null,
+              type: "terminal",
+            },
+          ],
+        },
+      },
+      connectAcpRuntimeError: "sensitive launch details",
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const card = page.getByTestId("onboarding-runtime-claude");
+  const signIn = card.getByRole("button", { name: "Sign in to Claude Code" });
+  await signIn.click();
+  await expect(
+    card.getByRole("status", { name: /Sign-in failed/ }),
+  ).toBeVisible();
+  await expect(signIn).toHaveText("SIGN IN");
+  await expect(card).not.toContainText("sensitive launch details");
+});
+
 test("sign in stays pending until catalog detection confirms Ready", async ({
   page,
 }) => {
@@ -151,6 +255,73 @@ test("sign in stays pending until catalog detection confirms Ready", async ({
     { timeout: 5_000 },
   );
   await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
+});
+
+test("failed install can be retried without shifting card content", async ({
+  page,
+}) => {
+  const notInstalled = runtime("claude", "adapter_missing", {
+    status: "unknown",
+  });
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [notInstalled],
+      installAcpRuntimeResults: [
+        {
+          success: false,
+          steps: [
+            {
+              step: "adapter",
+              command: "mock install claude",
+              success: false,
+              stdout: "",
+              stderr: "sensitive install details",
+              exit_code: 1,
+            },
+          ],
+        },
+        {
+          success: true,
+          steps: [
+            {
+              step: "adapter",
+              command: "mock install claude",
+              success: true,
+              stdout: "installed",
+              stderr: "",
+              exit_code: 0,
+            },
+          ],
+        },
+      ],
+      acpRuntimesCatalogAfterInstall: [
+        runtime("claude", "available", { status: "logged_in" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const card = page.getByTestId("onboarding-runtime-claude");
+  const heading = card.getByRole("heading", { name: "Claude Code" });
+  const headingTop = await heading.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
+  const install = page.getByTestId("onboarding-runtime-install-claude");
+  await install.click();
+  const error = page.getByTestId("onboarding-runtime-error-claude");
+  await expect(error).toBeVisible();
+  await expect(install).toHaveText("RETRY INSTALL");
+  await expect(error).not.toContainText("sensitive install details");
+  expect(
+    await heading.evaluate((element) => element.getBoundingClientRect().top),
+  ).toBe(headingTop);
+  await install.click();
+  await expect(page.getByTestId("onboarding-runtime-ready-claude")).toHaveText(
+    "READY",
+  );
 });
 
 test("install transitions through Sign in to Ready", async ({ page }) => {
@@ -200,6 +371,83 @@ test("install transitions through Sign in to Ready", async ({ page }) => {
   ).toHaveCount(0);
 });
 
+test("defaults waits for baked configuration before rendering fields", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+      ],
+      bakedBuildEnv: [
+        { key: "ANTHROPIC_API_KEY", masked: true, value: "••••••" },
+      ],
+      bakedBuildEnvDelayMs: 500,
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-setup-next").click();
+
+  await expect(page.getByText("Loading…")).toBeVisible();
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Claude Code",
+  );
+});
+
+test("defaults renders only fields supported by the selected harness", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+      ],
+      globalAgentConfig: {
+        env_vars: { BUZZ_AGENT_THINKING_EFFORT: "high" },
+        provider: null,
+        model: "stale-model",
+        preferred_runtime: null,
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-setup-next").click();
+
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Claude Code",
+  );
+  await expect(page.getByTestId("global-agent-provider")).toHaveCount(0);
+  await expect(page.getByTestId("global-agent-model")).toHaveText(
+    "Default model",
+  );
+  await expect(
+    page.getByTestId("global-agent-thinking-effort-select"),
+  ).toHaveCount(0);
+});
+
+test("defaults Back returns to harness setup", async ({ page }) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-setup-next").click();
+  await page.getByTestId("onboarding-back").click();
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+});
+
 test("defaults auto-selects the only ready visible harness", async ({
   page,
 }) => {
@@ -231,6 +479,43 @@ test("defaults auto-selects the only ready visible harness", async ({
   );
   await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
   await expect.poll(() => readSavedRuntime(page)).toBe("claude");
+});
+
+test("Finish waits for the latest rapid harness choice to persist", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+        runtime("codex", "available", { status: "logged_in" }),
+      ],
+      globalAgentConfig: {
+        env_vars: {},
+        provider: null,
+        model: null,
+        preferred_runtime: null,
+      },
+      setGlobalAgentConfigDelayMs: 300,
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-setup-next").click();
+
+  const harness = page.getByTestId("global-agent-default-harness");
+  await harness.click();
+  await page.getByTestId("global-agent-default-harness-option-claude").click();
+  await harness.click();
+  await page.getByTestId("global-agent-default-harness-option-codex").click();
+  const finish = page.getByTestId("onboarding-finish");
+  await expect(finish).toBeDisabled();
+  await expect(finish).toBeEnabled({ timeout: 2_000 });
+  await finish.click();
+  await expect(page.getByText("Join or create a community")).toBeVisible();
+  expect(await readSavedRuntime(page)).toBe("codex");
 });
 
 test("defaults requires a choice when multiple visible harnesses are ready", async ({
