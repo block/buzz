@@ -20,6 +20,7 @@ import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
+  ONBOARDING_RUNTIME_ORDER,
   runtimeCanAdvanceOnboarding,
   runtimeCanBeSelected,
 } from "./onboardingRuntimeSelection";
@@ -703,13 +704,12 @@ function RuntimeProvidersSection({
   selectedRuntimeIds: readonly string[];
 }) {
   const { errorMessage, isChecking, items } = runtimeProviders;
-  const runtimeOrder = ["claude", "codex", "goose", "buzz-agent"];
   const orderedItems = [...items].sort((left, right) => {
-    const leftIndex = runtimeOrder.indexOf(left.id);
-    const rightIndex = runtimeOrder.indexOf(right.id);
+    const leftIndex = ONBOARDING_RUNTIME_ORDER.indexOf(left.id);
+    const rightIndex = ONBOARDING_RUNTIME_ORDER.indexOf(right.id);
     return (
-      (leftIndex === -1 ? runtimeOrder.length : leftIndex) -
-      (rightIndex === -1 ? runtimeOrder.length : rightIndex)
+      (leftIndex === -1 ? ONBOARDING_RUNTIME_ORDER.length : leftIndex) -
+      (rightIndex === -1 ? ONBOARDING_RUNTIME_ORDER.length : rightIndex)
     );
   });
   const installMutation = useInstallAcpRuntimeMutation();

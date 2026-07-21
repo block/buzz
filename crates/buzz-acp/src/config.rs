@@ -612,7 +612,7 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        | "claudecode" | "pi" | "pi-acp" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
 }
@@ -1433,7 +1433,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_codex_and_claude_args_to_empty() {
+    fn normalizes_zero_arg_adapters_to_empty() {
         assert_eq!(
             normalize_agent_args("codex-acp", Vec::new()),
             Vec::<String>::new()
@@ -1456,6 +1456,10 @@ mod tests {
         );
         assert_eq!(
             normalize_agent_args("claude-agent-acp", vec!["acp".into()]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            normalize_agent_args("pi-acp", vec!["acp".into()]),
             Vec::<String>::new()
         );
     }

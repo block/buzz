@@ -405,6 +405,7 @@ test("runtime cards use the selected onboarding order", async ({ page }) => {
       acpRuntimesCatalog: [
         availableRuntime("buzz-agent", { status: "not_applicable" }),
         availableRuntime("goose", { status: "not_applicable" }),
+        availableRuntime("pi", { status: "not_applicable" }),
         availableRuntime("codex", { status: "logged_in" }),
         availableRuntime("claude", { status: "logged_in" }),
       ],
@@ -423,6 +424,7 @@ test("runtime cards use the selected onboarding order", async ({ page }) => {
     "onboarding-runtime-claude",
     "onboarding-runtime-codex",
     "onboarding-runtime-goose",
+    "onboarding-runtime-pi",
     "onboarding-runtime-buzz-agent",
   ]);
   await expect(

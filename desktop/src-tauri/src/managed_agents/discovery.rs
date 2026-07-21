@@ -16,6 +16,7 @@ pub(crate) use runtime_metadata::KnownAcpRuntime;
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const PI_AVATAR_URL: &str = "https://pi.dev/logo-auto.svg";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
@@ -156,6 +157,38 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "pi",
+        label: "Pi",
+        commands: &["pi-acp"],
+        aliases: &["pi-acp"],
+        avatar_url: PI_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("pi"),
+        cli_install_commands: &["curl -fsSL https://pi.dev/install.sh | sh"],
+        cli_install_commands_windows: &["npm install -g @earendil-works/pi-coding-agent --ignore-scripts"],
+        adapter_install_commands: &["npm install -g pi-acp"],
+        install_instructions_url: "https://github.com/svkozak/pi-acp",
+        cli_install_hint: "Install Pi via the official installer.",
+        adapter_install_hint: "Install the Pi ACP adapter via npm.",
+        // Pi discovers the canonical `.agents/skills` directory directly.
+        skill_dir: None,
+        supports_acp_model_switching: true,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.pi/agent/settings.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: None,
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -344,7 +377,7 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        | "claudecode" | "pi" | "pi-acp" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
 }
@@ -1315,5 +1348,7 @@ pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
     Some(runtime.avatar_url.to_string())
 }
 
+#[cfg(test)]
+mod pi_tests;
 #[cfg(test)]
 mod tests;

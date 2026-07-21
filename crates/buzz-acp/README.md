@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), and **Pi** (via [pi-acp](https://github.com/svkozak/pi-acp)).
 
 ## Prerequisites
 
@@ -70,6 +70,22 @@ buzz-acp
 ```
 
 > **API key note:** `codex-acp` always attempts a ChatGPT WebSocket login first, which logs a `426 Upgrade Required` error. This is expected and non-fatal — it falls back to `OPENAI_API_KEY` automatically. Set `OPENAI_API_KEY` to ensure it has a working fallback.
+
+## Running with Pi
+
+[pi-acp](https://github.com/svkozak/pi-acp) exposes Pi over ACP while preserving Pi's models, credentials, skills, extensions, and project context.
+
+```bash
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+npm install -g pi-acp
+
+# Configure credentials once if needed.
+pi
+# Then select pi-acp in Buzz, or launch the harness directly:
+BUZZ_ACP_AGENT_COMMAND=pi-acp buzz-acp
+```
+
+Pi discovers Buzz's generated `buzz-cli` skill from the canonical `.agents/skills` directory, so no Pi-specific skill copy is needed.
 
 ## Running with Claude Code
 

@@ -42,7 +42,7 @@ test("known onboarding harnesses can be selected regardless of setup state", () 
     );
   }
 
-  for (const id of ["buzz-agent", "goose"]) {
+  for (const id of ["buzz-agent", "goose", "pi"]) {
     assert.equal(
       runtimeCanBeSelected(runtime(id, "available", "not_applicable")),
       true,
@@ -98,7 +98,13 @@ test("provider-backed selections drive the default model config step", () => {
     true,
   );
   assert.equal(
-    getDefaultModelConfigRuntimeId(["claude", "codex", "goose", "buzz-agent"]),
+    getDefaultModelConfigRuntimeId([
+      "claude",
+      "codex",
+      "goose",
+      "pi",
+      "buzz-agent",
+    ]),
     "buzz-agent",
   );
 });
@@ -108,19 +114,21 @@ test("onboarding display order drives the preferred runtime", () => {
     getPreferredRuntimeIdForSelection([
       "buzz-agent",
       "goose",
+      "pi",
       "codex",
       "claude",
     ]),
     "claude",
   );
   assert.equal(
-    getPreferredRuntimeIdForSelection(["buzz-agent", "goose", "codex"]),
+    getPreferredRuntimeIdForSelection(["buzz-agent", "pi", "goose", "codex"]),
     "codex",
   );
   assert.equal(
     getPreferredRuntimeIdForSelection(["buzz-agent", "goose"]),
     "goose",
   );
+  assert.equal(getPreferredRuntimeIdForSelection(["buzz-agent", "pi"]), "pi");
   assert.equal(getPreferredRuntimeIdForSelection(["buzz-agent"]), "buzz-agent");
   assert.equal(getPreferredRuntimeIdForSelection(["custom"]), "custom");
   assert.equal(getPreferredRuntimeIdForSelection([]), null);
@@ -132,4 +140,5 @@ test("any harness selection drives the defaults step", () => {
   assert.equal(runtimeSelectionNeedsDefaultsStep(["codex"]), true);
   assert.equal(runtimeSelectionNeedsDefaultsStep(["claude", "codex"]), true);
   assert.equal(runtimeSelectionNeedsDefaultsStep(["goose"]), true);
+  assert.equal(runtimeSelectionNeedsDefaultsStep(["pi"]), true);
 });

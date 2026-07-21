@@ -38,6 +38,9 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "claude_code_acp",
     "codex-acp",
     "codex_acp",
+    "pi-acp",
+    "pi_acp",
+    "pi",
     "goose",
     // buzz-dev-mcp's multicall personalities (rg, tree, buzz,
     // git-credential-nostr, git-sign-nostr) are short-lived per-tool-call
