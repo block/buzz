@@ -5,6 +5,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
+use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
 
 use crate::{
     app_state::AppState,
@@ -778,7 +779,7 @@ pub async fn update_managed_agent(
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
     // Phase 1: local save (synchronous, under lock)
-    let (summary, sync_params) = {
+    let (summary, sync_params, rollback) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -795,6 +796,7 @@ pub async fn update_managed_agent(
         }
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
+        let previous_record = record.clone();
 
         let mut name_changed = false;
         if let Some(name_update) = input.name {
@@ -938,37 +940,39 @@ pub async fn update_managed_agent(
             let personas = load_personas(&app).unwrap_or_default();
             build_managed_agent_summary(&app, record, &runtimes, &personas)?
         };
-        (summary, sync_params)
+        let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
+        (summary, sync_params, rollback)
     }; // lock dropped here
 
     try_regenerate_nest(&app);
 
-    // Phase 2: relay profile sync (async, best-effort, outside lock)
-    let profile_sync_error =
-        if let Some((agent_keys, relay_url, display_name, avatar_url, auth_tag)) = sync_params {
-            match sync_managed_agent_profile(
-                &state,
-                &relay_url,
-                &agent_keys,
-                &display_name,
-                avatar_url.as_deref(),
-                auth_tag.as_deref(),
-            )
-            .await
-            {
-                Ok(()) => None,
-                Err(e) => {
-                    eprintln!("buzz-desktop: relay profile sync failed after rename: {e}");
-                    Some(e)
-                }
-            }
-        } else {
-            None
-        };
+    // Phase 2: relay profile sync (async, outside lock). A rename is committed
+    // only when this succeeds; otherwise restore the complete pre-edit record
+    // so Desktop and the relay keep one authoritative name.
+    if let Some((agent_keys, relay_url, display_name, avatar_url, auth_tag)) = sync_params {
+        if let Err(sync_error) = sync_managed_agent_profile(
+            &state,
+            &relay_url,
+            &agent_keys,
+            &display_name,
+            avatar_url.as_deref(),
+            auth_tag.as_deref(),
+        )
+        .await
+        {
+            let rollback = rollback.ok_or_else(|| {
+                "missing local rollback state after relay profile sync failure".to_string()
+            })?;
+            rollback_failed_agent_update(&app, &state, &summary.pubkey, rollback)?;
+            return Err(format!(
+                "Agent rename failed because its relay profile could not be updated. No changes were saved: {sync_error}"
+            ));
+        }
+    }
 
     Ok(UpdateManagedAgentResponse {
         agent: summary,
-        profile_sync_error,
+        profile_sync_error: None,
     })
 }
 

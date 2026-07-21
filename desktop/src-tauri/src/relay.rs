@@ -441,7 +441,7 @@ pub async fn sync_managed_agent_profile(
     if !response.status().is_success() {
         let msg = relay_error_message(response).await;
         return Err(format!(
-            "Created the agent, but could not sync its profile metadata: {msg}"
+            "Could not sync the agent's profile metadata: {msg}"
         ));
     }
 

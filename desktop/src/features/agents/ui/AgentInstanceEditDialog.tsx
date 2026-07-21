@@ -726,9 +726,6 @@ export function AgentInstanceEditDialog({
           autoRestartOnConfigChange,
         );
       }
-      if (result.profileSyncError) {
-        console.warn("Relay profile sync failed:", result.profileSyncError);
-      }
       handleOpenChange(false);
       onUpdated?.(result.agent);
       // The auto-restart policy deliberately never fires for a stopped or
