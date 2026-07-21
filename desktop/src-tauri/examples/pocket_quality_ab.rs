@@ -264,11 +264,7 @@ fn main() -> Result<(), String> {
     // Explicit fresh-engine cold-start clips for the two highest-signal texts.
     // Idle runs intentionally omit them: they happen after the post-idle clips
     // and add no valid idle observation.
-    for item in if idle_minutes.is_none() {
-        &CORPUS[..]
-    } else {
-        &[]
-    } {
+    for item in if idle_minutes.is_none() { CORPUS } else { &[] } {
         if !matches!(item.id, "short_one_word" | "multi_relay_review") {
             continue;
         }
