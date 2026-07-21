@@ -93,11 +93,13 @@ function RuntimeReadinessIndicator({
 
 function RuntimeStatus({
   installError,
+  installSuccess,
   isInstalling,
   onInstall,
   runtime,
 }: {
   installError: string | null;
+  installSuccess: boolean;
   isInstalling: boolean;
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
@@ -242,6 +244,24 @@ function RuntimeStatus({
       <Button
         aria-label={`Check ${runtime.label} again`}
         className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+        disabled={runtimesQuery.isFetching}
+        onClick={() => void runtimesQuery.refetch()}
+        type="button"
+        variant="ghost"
+      >
+        {runtimesQuery.isFetching ? "CHECKING…" : "CHECK AGAIN"}
+      </Button>
+    );
+  }
+
+  // Install finished but rediscovery has not marked the runtime ready yet.
+  // Do not treat local installSuccess as READY (#2239); offer recheck instead.
+  if (installSuccess) {
+    return (
+      <Button
+        aria-label={`Check ${runtime.label} again`}
+        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+        data-testid={`onboarding-runtime-check-again-${runtime.id}`}
         disabled={runtimesQuery.isFetching}
         onClick={() => void runtimesQuery.refetch()}
         type="button"
@@ -464,11 +484,13 @@ function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 
 function RuntimeCard({
   installError,
+  installSuccess,
   isInstalling,
   onInstall,
   runtime,
 }: {
   installError: string | null;
+  installSuccess: boolean;
   isInstalling: boolean;
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
@@ -498,6 +520,7 @@ function RuntimeCard({
         </div>
         <RuntimeStatus
           installError={installError}
+          installSuccess={installSuccess}
           isInstalling={isInstalling}
           onInstall={onInstall}
           runtime={runtime}
@@ -607,6 +630,7 @@ function RuntimeProvidersSection({
             {orderedItems.map((runtime) => (
               <RuntimeCard
                 installError={installResults[runtime.id]?.error ?? null}
+                installSuccess={installResults[runtime.id]?.success ?? false}
                 isInstalling={
                   installMutation.isPending &&
                   installMutation.variables === runtime.id
