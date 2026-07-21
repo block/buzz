@@ -2666,6 +2666,21 @@ impl Db {
         workflow::find_by_owner_and_name(&self.pool, community_id, owner_pubkey, name).await
     }
 
+    /// Delete every workflow matching `(community_id, owner_pubkey, name)`.
+    /// Used for NIP-09 a-tag deletion where the d-tag is the workflow name
+    /// (not UUID) -- unlike `find_workflow_by_owner_and_name`, this removes
+    /// *all* same-named rows for the owner, not just the first.
+    /// Returns the deleted rows' `(id, channel_id)`.
+    pub async fn delete_workflows_for_owner_by_name(
+        &self,
+        community_id: CommunityId,
+        owner_pubkey: &[u8],
+        name: &str,
+    ) -> Result<Vec<(Uuid, Option<Uuid>)>> {
+        workflow::delete_workflows_for_owner_by_name(&self.pool, community_id, owner_pubkey, name)
+            .await
+    }
+
     /// Create a new workflow run.
     pub async fn create_workflow_run(
         &self,
