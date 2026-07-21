@@ -185,9 +185,11 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        val transformedBytes = runCatching {
+        val transformedBytes = try {
             AndroidImageProcessor.encodeAndScrub(bitmap, format)
-        }.getOrNull() ?: run {
+        } catch (_: IllegalArgumentException) {
+            null
+        } ?: run {
             result.error(
                 errorCode,
                 encodeFailureMessage,
