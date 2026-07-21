@@ -36,11 +36,17 @@ export function parseRateLimitHint(msg: string): number | null {
  *
  * If the gate is already active, the expiry is pushed forward to the maximum of
  * the existing expiry and the new hint — overlapping hints never shrink the
- * window. If `retryInSeconds` is `null`, the gate uses the default 10-second
- * fallback.
+ * window. Non-positive or absent hints use the 10-second default; a 0s gate
+ * would resolve immediately and swallow the signal.
+ *
+ * Note: buzz-acp uses a 5s no-hint default; desktop deliberately uses 10s here
+ * for a wider back-off window on degraded connections.
  */
 export function activateRateLimit(retryInSeconds: number | null): void {
-  const durationMs = (retryInSeconds ?? DEFAULT_RATE_LIMIT_SECONDS) * 1_000;
+  const durationMs =
+    (retryInSeconds != null && retryInSeconds > 0
+      ? retryInSeconds
+      : DEFAULT_RATE_LIMIT_SECONDS) * 1_000;
   const newExpiry = Date.now() + durationMs;
 
   if (expiresAt !== null && newExpiry <= expiresAt) {
@@ -90,8 +96,23 @@ export function waitForRateLimit(): Promise<void> {
 }
 
 /**
+ * Returns the milliseconds remaining on the active gate, or 0 when inactive.
+ *
+ * Use this instead of re-deriving the hint from the message so that a shorter
+ * relay hint arriving under a longer active gate never schedules a premature
+ * retry.
+ */
+export function rateLimitRemainingMs(): number {
+  if (expiresAt === null) return 0;
+  return Math.max(0, expiresAt - Date.now());
+}
+
+/**
  * Reset all gate state. Must be called on community switch so a rate-limit hint
  * from the old relay does not bleed into the new community's session.
+ *
+ * Any in-flight `waitForRateLimit()` awaiters are resolved immediately so they
+ * do not leak into the new session.
  */
 export function resetRateLimitGate(): void {
   if (gateTimer !== null) {
@@ -99,6 +120,8 @@ export function resetRateLimitGate(): void {
     gateTimer = null;
   }
   expiresAt = null;
+  const resolve = gateResolve;
   gateResolve = null;
   gatePromise = null;
+  resolve?.();
 }

@@ -132,10 +132,6 @@ export class RelayClient {
     this.visibleChannelId = id;
   }
 
-  getVisibleChannelId(): string | null {
-    return this.visibleChannelId;
-  }
-
   /**
    * Cleanly tear down the connection without scheduling a reconnect.
    * Used during community switches to reset the singleton before the
@@ -159,6 +155,7 @@ export class RelayClient {
     this.hasConnectedOnce = false;
     this.notifyReconnectListeners = false;
     this.terminal = false;
+    this.visibleChannelId = null;
     this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
@@ -851,7 +848,7 @@ export class RelayClient {
       const notice: string = rest[0];
       // Relay back-pressure signal — activate the gate so pending operations
       // back off until the window expires.
-      if (notice.toLowerCase().startsWith("rate-limited:")) {
+      if (notice.startsWith("rate-limited:")) {
         activateRateLimit(parseRateLimitHint(notice));
       }
     }
@@ -954,12 +951,14 @@ export class RelayClient {
   }
 
   private async replayLiveSubscriptions() {
+    const generation = this.connectionGeneration;
     try {
       await replayLiveSubscriptions({
         subscriptions: this.subscriptions,
         sendRaw: (payload) => this.sendRaw(payload),
         requestHistory: (filter) => this.requestHistory(filter),
         visibleChannelId: this.visibleChannelId,
+        isActive: () => this.connectionGeneration === generation,
       });
     } catch (error) {
       const reconnectError =

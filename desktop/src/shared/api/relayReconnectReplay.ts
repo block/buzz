@@ -129,6 +129,7 @@ export async function replayLiveSubscriptions({
   interBatchDelayMs = REPLAY_INTER_BATCH_DELAY_MS,
   setTimeoutFn = (fn: () => void, ms: number) =>
     window.setTimeout(fn, ms) as unknown as number,
+  isActive = () => true,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   sendRaw: (payload: unknown[]) => Promise<void>;
@@ -143,10 +144,20 @@ export async function replayLiveSubscriptions({
   interBatchDelayMs?: number;
   /** setTimeout implementation (injectable for tests). */
   setTimeoutFn?: (fn: () => void, ms: number) => number;
+  /**
+   * Returns false when the connection that initiated this replay has been
+   * superseded by a newer one. After the gate await resumes, a stale replay
+   * must not double-send REQs on the live socket.
+   */
+  isActive?: () => boolean;
 }) {
   // If the relay has signalled back-pressure, wait for the gate to clear
   // before blasting a full set of REQs that would immediately be rate-limited.
   if (isRateLimited()) await waitForRateLimit();
+
+  // A newer connection may have replayed while this one was suspended at the
+  // gate — abort silently to avoid double-sending every REQ on the live socket.
+  if (!isActive()) return;
 
   const replayRequests = Array.from(subscriptions.entries())
     .filter(
@@ -174,23 +185,23 @@ export async function replayLiveSubscriptions({
   // active channel recover before others on degraded networks.
   if (visibleChannelId !== null) {
     replayRequests.sort((a, b) => {
-      const aVisible = (
-        a.subscription.filter["#h"] as string[] | undefined
-      )?.includes(visibleChannelId)
-        ? -1
-        : 0;
-      const bVisible = (
-        b.subscription.filter["#h"] as string[] | undefined
-      )?.includes(visibleChannelId)
-        ? 1
-        : 0;
-      return aVisible + bVisible;
+      const aVis =
+        (a.subscription.filter["#h"] as string[] | undefined)?.includes(
+          visibleChannelId,
+        ) ?? false;
+      const bVis =
+        (b.subscription.filter["#h"] as string[] | undefined)?.includes(
+          visibleChannelId,
+        ) ?? false;
+      if (aVis === bVis) return 0;
+      return aVis ? -1 : 1;
     });
   }
 
   // Send live REQs in capped batches with inter-batch delays to avoid
   // triggering per-pubkey admission control on degraded/recovering connections.
   for (let i = 0; i < replayRequests.length; i += replayBatchSize) {
+    if (!isActive()) return;
     const batch = replayRequests.slice(i, i + replayBatchSize);
     await Promise.all(
       batch.map(({ subId, subscription, replaySince, shouldPageReplay }) =>
