@@ -256,13 +256,18 @@ fn normalize_relay_self_hex(self_hex: &str) -> Result<String, CliError> {
     Ok(self_hex.to_ascii_lowercase())
 }
 
-/// Read and verify the relay's NIP-IA archived-identities snapshot (kind 13535).
+/// Fetch and verify the relay's NIP-IA archived-identities snapshot (kind
+/// 13535). Shared by `cmd_archived` (trust failures are fatal — verifying
+/// repair state is the command's whole purpose) and the `--template`
+/// resolver's archive filter, which fails open on a trust failure instead
+/// (see `channels::resolve_roster_with_archive_filter`'s doc comment for
+/// why).
 ///
 /// Three trust states:
-/// - State 1: no events — `{"archived": []}`, exit 0
-/// - State 2: event passes all checks — `{"archived": [...]}`, exit 0
-/// - State 3: trust failure — error, exit nonzero
-async fn cmd_archived(client: &BuzzClient) -> Result<(), CliError> {
+/// - State 1: no events — `Ok(vec![])`
+/// - State 2: event passes all checks — `Ok(<pubkeys>)`
+/// - State 3: trust failure — `Err`, naming the specific failure
+pub(crate) async fn fetch_archived_snapshot(client: &BuzzClient) -> Result<Vec<String>, CliError> {
     // Fetch NIP-11 info to get the relay's self pubkey.
     let nip11_raw = client
         .get_public("/")
@@ -287,8 +292,7 @@ async fn cmd_archived(client: &BuzzClient) -> Result<(), CliError> {
 
     // State 1: no events.
     if events.is_empty() {
-        println!("{}", json!({"archived": []}));
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // State 2 or 3: verify then collect.
@@ -297,6 +301,14 @@ async fn cmd_archived(client: &BuzzClient) -> Result<(), CliError> {
         .map_err(|e| CliError::Other(format!("archived-identities event is malformed: {e}")))?;
     let archived = verify_archived_event(&event, &self_hex)?;
 
+    Ok(archived.into_iter().map(str::to_string).collect())
+}
+
+/// `buzz agents archived`: read path over [`fetch_archived_snapshot`] for
+/// direct invocation — a trust failure (state 3) is fatal here so a
+/// verification command can never look like success.
+async fn cmd_archived(client: &BuzzClient) -> Result<(), CliError> {
+    let archived = fetch_archived_snapshot(client).await?;
     println!("{}", json!({"archived": archived}));
     Ok(())
 }

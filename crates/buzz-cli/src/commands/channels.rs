@@ -1,13 +1,14 @@
 use std::collections::HashSet;
 
 use buzz_core::kind::{KIND_MANAGED_AGENT, KIND_TEAM};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::client::{
     extract_d_tag, extract_p_tags, extract_tag_value, normalize_write_response,
     print_create_response, BuzzClient,
 };
+use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
@@ -328,7 +329,7 @@ pub async fn cmd_create_channel(
 }
 
 /// A resolved live managed-agent instance backing a template persona slug.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ResolvedAgent {
     persona_id: String,
     pubkey: String,
@@ -342,10 +343,10 @@ struct ManagedAgentContent {
     persona_id: Option<String>,
 }
 
-/// Outcome of resolving a template's roster against the relay, before any
-/// channel-creation side effects. `skipped` (zero live instances) and
-/// cardinality errors are both known at this point — resolution happens
-/// entirely before channel creation so ambiguity aborts with zero side effects.
+/// Outcome of the pure F4 cardinality rule alone (see
+/// [`apply_cardinality_rule`]) — zero live instances is a plain "skipped"
+/// slug here, with no notion of *why* (archive filtering happens one layer
+/// up, in [`build_roster_resolution`]).
 #[derive(Debug)]
 struct ResolvedRoster {
     /// Exactly one live instance per persona slug — safe to add.
@@ -353,6 +354,41 @@ struct ResolvedRoster {
     /// Persona slugs with no live kind:30177 instance for the effective
     /// owner (cold-start provisioning is desktop-only, out of scope here).
     skipped: Vec<String>,
+}
+
+/// One live instance dropped from the roster because it's archived
+/// (NIP-IA) — reported so an operator can see exactly what was excluded,
+/// not just that a slug ended up short.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ArchivedExclusion {
+    persona_id: String,
+    pubkey: String,
+}
+
+/// A persona slug with no agent added to the roster, and why. Distinguishes
+/// "no live instances ever existed" from "instances existed but all are
+/// archived" — both look the same as a bare skip otherwise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SkippedSlug {
+    persona_id: String,
+    reason: String,
+}
+
+/// Archive-aware roster resolution: the [`apply_cardinality_rule`] outcome
+/// after archived instances are filtered out first, plus what the archive
+/// filter itself excluded and whether its snapshot could be trusted.
+#[derive(Debug)]
+struct RosterResolution {
+    /// Exactly one live, non-archived instance per persona slug.
+    agents: Vec<ResolvedAgent>,
+    skipped: Vec<SkippedSlug>,
+    /// The complete archive-exclusion list, never just the first.
+    archived_excluded: Vec<ArchivedExclusion>,
+    /// Set when the archived-identities snapshot failed its trust check
+    /// (NIP-IA state 3) and the filter fell back to "no known archived
+    /// identities" rather than fabricating a resolution. `None` means the
+    /// snapshot was trusted (states 1/2) or there was nothing to filter.
+    archive_state_warning: Option<String>,
 }
 
 /// Fetch kind:30176 (team) events authored by `owner` with `#d = [team_id]`
@@ -465,16 +501,116 @@ fn apply_cardinality_rule(
     Ok(ResolvedRoster { agents, skipped })
 }
 
+/// The stderr warning + embedded-in-report/error-detail message for an
+/// untrusted archived-identities snapshot (NIP-IA state 3) — one wording,
+/// shared by [`build_roster_resolution`]'s immediate stderr print and
+/// [`resolve_roster_with_archive_filter`]'s `archive_state_warning`/error-
+/// detail paths, so the two never drift.
+fn archive_snapshot_warning(e: &CliError) -> String {
+    format!("archived-identities snapshot untrusted, proceeding without archive filtering: {e}")
+}
+
+/// Pure archive-filter + cardinality core of [`build_roster_resolution`],
+/// taking the already-fetched `found` set and the already-attempted archive
+/// snapshot fetch (`archived_result`) so it's directly unit-testable without
+/// any relay I/O — same separation as [`apply_cardinality_rule`] vs
+/// [`scan_managed_agents_by_owner`].
+///
+/// Archive filtering deliberately **fails open** on `archived_result: Err`
+/// (NIP-IA snapshot state 3): filtering with an empty archived set rather
+/// than fabricating a resolution, since filtering can only *remove*
+/// ambiguity, never resolve it. The trust failure is always surfaced: on
+/// stderr immediately by the caller (network-adjacent, not this function's
+/// job), and in whichever of `RosterResolution::archive_state_warning` or
+/// the returned error the caller ends up on here.
+fn resolve_roster_with_archive_filter(
+    slugs: &[String],
+    found: Vec<ResolvedAgent>,
+    archived_result: Result<Vec<String>, CliError>,
+) -> Result<RosterResolution, CliError> {
+    let (archived, archive_state_warning) = match archived_result {
+        Ok(pubkeys) => (pubkeys.into_iter().collect::<HashSet<String>>(), None),
+        Err(e) => (HashSet::new(), Some(archive_snapshot_warning(&e))),
+    };
+
+    let mut archived_excluded = Vec::new();
+    let mut live_found = Vec::new();
+    for agent in found {
+        if archived.contains(&agent.pubkey) {
+            archived_excluded.push(ArchivedExclusion {
+                persona_id: agent.persona_id.clone(),
+                pubkey: agent.pubkey.clone(),
+            });
+        } else {
+            live_found.push(agent);
+        }
+    }
+
+    let resolved = apply_cardinality_rule(slugs, &live_found).map_err(|e| {
+        match (e, &archive_state_warning) {
+            (CliError::Usage(msg), Some(warning)) => {
+                CliError::Usage(format!("{msg} (warning: {warning})"))
+            }
+            (other, _) => other,
+        }
+    })?;
+
+    let archived_slugs: HashSet<&str> = archived_excluded
+        .iter()
+        .map(|a| a.persona_id.as_str())
+        .collect();
+    let skipped = resolved
+        .skipped
+        .into_iter()
+        .map(|persona_id| {
+            let reason = if archived_slugs.contains(persona_id.as_str()) {
+                "all instances archived".to_string()
+            } else {
+                "no live instances".to_string()
+            };
+            SkippedSlug { persona_id, reason }
+        })
+        .collect();
+
+    Ok(RosterResolution {
+        agents: resolved.agents,
+        skipped,
+        archived_excluded,
+        archive_state_warning,
+    })
+}
+
+/// Sync tail of [`build_roster_resolution`]: emits the state-3 trust-failure
+/// warning to `warn_sink` (production: stderr) and then runs
+/// [`resolve_roster_with_archive_filter`]. Split out from the async relay
+/// I/O so the emission and the resolution it gates are exercised together
+/// through an injected writer — the only way to prove the emission is still
+/// wired to the same trust check the resolution result carries.
+fn finalize_roster_resolution(
+    slugs: &[String],
+    found: Vec<ResolvedAgent>,
+    archived_result: Result<Vec<String>, CliError>,
+    warn_sink: &mut dyn std::io::Write,
+) -> Result<RosterResolution, CliError> {
+    if let Err(e) = &archived_result {
+        let warning = archive_snapshot_warning(e);
+        let _ = writeln!(warn_sink, "{}", serde_json::json!({"warning": warning}));
+    }
+    resolve_roster_with_archive_filter(slugs, found, archived_result)
+}
+
 /// Resolve a template's roster against the relay: expand team entries into
 /// persona slugs (via kind:30176), scan for live kind:30177 instances scoped
-/// to the effective owner, and apply the cardinality rule per slug. Runs
+/// to the effective owner, filter out archived (NIP-IA) instances, and apply
+/// the cardinality rule per slug (see [`resolve_roster_with_archive_filter`]
+/// for the pure filter+cardinality core and the fail-open contract). Runs
 /// entirely before any channel-creation side effect — a cardinality error
 /// aborts with nothing created.
-async fn resolve_template_roster(
+async fn build_roster_resolution(
     client: &BuzzClient,
     owner: &str,
     roster: &TemplateAgentRoster,
-) -> Result<ResolvedRoster, CliError> {
+) -> Result<RosterResolution, CliError> {
     let mut slugs: Vec<String> = Vec::new();
     for entry in &roster.personas {
         if !slugs.contains(&entry.persona_id) {
@@ -491,15 +627,19 @@ async fn resolve_template_roster(
     }
 
     if slugs.is_empty() {
-        return Ok(ResolvedRoster {
+        return Ok(RosterResolution {
             agents: Vec::new(),
             skipped: Vec::new(),
+            archived_excluded: Vec::new(),
+            archive_state_warning: None,
         });
     }
 
     let slug_set: HashSet<&str> = slugs.iter().map(String::as_str).collect();
     let found = scan_managed_agents_by_owner(client, owner, &slug_set).await?;
-    apply_cardinality_rule(&slugs, &found)
+
+    let archived_result = fetch_archived_snapshot(client).await;
+    finalize_roster_resolution(&slugs, found, archived_result, &mut std::io::stderr())
 }
 
 /// `buzz channels create --template <name>`: load a desktop-local channel
@@ -507,7 +647,7 @@ async fn resolve_template_roster(
 /// channel, apply the canvas template, and add resolved agents as members.
 ///
 /// Roster resolution happens entirely before channel creation (see
-/// `resolve_template_roster`) so an ambiguous roster aborts with zero side
+/// `build_roster_resolution`) so an ambiguous roster aborts with zero side
 /// effects. Channel creation, canvas, and member-add are best-effort from
 /// that point: canvas failures and per-member add failures are reported,
 /// not fatal.
@@ -554,7 +694,7 @@ pub async fn cmd_create_channel_from_template(
         .auth_tag_owner_hex()
         .unwrap_or_else(|| client.keys().public_key().to_hex());
 
-    let resolved = resolve_template_roster(client, &owner, &template.agents).await?;
+    let resolved = build_roster_resolution(client, &owner, &template.agents).await?;
 
     let channel_uuid = Uuid::new_v4();
     let vis = match visibility {
@@ -633,17 +773,48 @@ pub async fn cmd_create_channel_from_template(
     } else {
         "partial"
     };
-    let report = serde_json::json!({
+    let report = build_template_report(
+        &channel_uuid.to_string(),
+        &template.name,
+        status,
+        canvas_applied,
+        members_added,
+        member_failures,
+        &resolved,
+    );
+    println!("{report}");
+    Ok(())
+}
+
+/// Pure construction of `channels create --template`'s final stdout report.
+/// Isolated from `cmd_create_channel_from_template` so the `archive_state_warning`
+/// insertion is directly testable against a `RosterResolution` without any
+/// relay I/O or channel-creation side effects — production prints exactly
+/// what this returns.
+#[allow(clippy::too_many_arguments)]
+fn build_template_report(
+    channel_id: &str,
+    template_name: &str,
+    status: &str,
+    canvas_applied: bool,
+    members_added: Vec<serde_json::Value>,
+    member_failures: Vec<serde_json::Value>,
+    resolved: &RosterResolution,
+) -> serde_json::Value {
+    let mut report = serde_json::json!({
         "status": status,
-        "channel_id": channel_uuid.to_string(),
-        "template": template.name,
+        "channel_id": channel_id,
+        "template": template_name,
         "canvas_applied": canvas_applied,
         "members_added": members_added,
         "skipped": resolved.skipped,
+        "archived_excluded": resolved.archived_excluded,
         "member_failures": member_failures,
     });
-    println!("{report}");
-    Ok(())
+    if let Some(warning) = &resolved.archive_state_warning {
+        report["archive_state_warning"] = serde_json::Value::String(warning.clone());
+    }
+    report
 }
 
 /// Validate a user-supplied TTL (in seconds): must be a positive value that
@@ -1005,8 +1176,10 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cardinality_rule, cmd_set_add_policy, name_matches, validate_ttl_seconds,
-        ChannelSummary, ResolvedAgent,
+        apply_cardinality_rule, build_template_report, cmd_set_add_policy,
+        finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
+        validate_ttl_seconds, ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution,
+        SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -1288,5 +1461,253 @@ mod tests {
         let resolved = apply_cardinality_rule(&slugs, &found).expect("resolves");
         assert_eq!(resolved.agents.len(), 1);
         assert_eq!(resolved.agents[0].persona_id, "builtin:fizz");
+    }
+
+    // --- PR B: archive-aware roster resolution (resolve_roster_with_archive_filter) ---
+
+    #[test]
+    fn archive_filter_drops_archived_instance_and_resolves_to_live_one() {
+        // Two instances of the same persona, one archived: the archived one
+        // is dropped before cardinality runs, so the slug resolves cleanly
+        // to the live instance instead of hitting the multi-instance error.
+        let slugs = vec!["builtin:fizz".to_string()];
+        let live_pk = "a".repeat(64);
+        let archived_pk = "b".repeat(64);
+        let found = vec![
+            agent("builtin:fizz", &live_pk),
+            agent("builtin:fizz", &archived_pk),
+        ];
+        let resolution =
+            resolve_roster_with_archive_filter(&slugs, found, Ok(vec![archived_pk.clone()]))
+                .expect("resolves to the single live instance");
+        assert_eq!(resolution.agents.len(), 1);
+        assert_eq!(resolution.agents[0].pubkey, live_pk);
+        assert!(resolution.skipped.is_empty());
+        assert_eq!(
+            resolution.archived_excluded,
+            vec![ArchivedExclusion {
+                persona_id: "builtin:fizz".to_string(),
+                pubkey: archived_pk,
+            }]
+        );
+        assert!(resolution.archive_state_warning.is_none());
+    }
+
+    #[test]
+    fn archive_filter_all_instances_archived_is_skipped_with_explicit_reason() {
+        // Every live instance for the slug is archived: distinguishable
+        // from "no instances ever existed" via the skip reason, and both
+        // exclusions appear in the complete archived_excluded list.
+        let slugs = vec!["builtin:fizz".to_string()];
+        let pk1 = "a".repeat(64);
+        let pk2 = "b".repeat(64);
+        let found = vec![agent("builtin:fizz", &pk1), agent("builtin:fizz", &pk2)];
+        let resolution =
+            resolve_roster_with_archive_filter(&slugs, found, Ok(vec![pk1.clone(), pk2.clone()]))
+                .expect("all-archived is a skip, not an error");
+        assert!(resolution.agents.is_empty());
+        assert_eq!(
+            resolution.skipped,
+            vec![SkippedSlug {
+                persona_id: "builtin:fizz".to_string(),
+                reason: "all instances archived".to_string(),
+            }]
+        );
+        assert_eq!(resolution.archived_excluded.len(), 2);
+    }
+
+    #[test]
+    fn archive_filter_no_instances_ever_existed_is_skipped_with_different_reason() {
+        // Zero live instances (nothing to archive) must not be confused
+        // with "all instances archived" — no exclusions were made.
+        let slugs = vec!["builtin:fizz".to_string()];
+        let resolution = resolve_roster_with_archive_filter(&slugs, vec![], Ok(vec![]))
+            .expect("zero instances is not fatal");
+        assert!(resolution.agents.is_empty());
+        assert_eq!(
+            resolution.skipped,
+            vec![SkippedSlug {
+                persona_id: "builtin:fizz".to_string(),
+                reason: "no live instances".to_string(),
+            }]
+        );
+        assert!(resolution.archived_excluded.is_empty());
+    }
+
+    #[test]
+    fn archive_filter_state3_on_success_path_proceeds_with_warning() {
+        // Snapshot trust failure (state 3) fails open: resolution proceeds
+        // exactly as if no archive filtering had happened, but the warning
+        // is threaded into the report via archive_state_warning.
+        let slugs = vec!["builtin:fizz".to_string()];
+        let pk = "a".repeat(64);
+        let found = vec![agent("builtin:fizz", &pk)];
+        let archived_err = CliError::Other("relay info document missing 'self' field".into());
+        let resolution = resolve_roster_with_archive_filter(&slugs, found, Err(archived_err))
+            .expect("fails open — resolution still succeeds");
+        assert_eq!(resolution.agents.len(), 1);
+        assert_eq!(resolution.agents[0].pubkey, pk);
+        assert!(resolution.archived_excluded.is_empty());
+        let warning = resolution
+            .archive_state_warning
+            .expect("state-3 warning must be present on the success path");
+        assert!(warning.contains("untrusted"));
+    }
+
+    #[test]
+    fn archive_filter_state3_on_ambiguity_path_keeps_hard_error_with_warning() {
+        // Snapshot trust failure alongside an unrelated multi-instance
+        // ambiguity: the cardinality hard-error is unchanged (fail-open
+        // never removes an error the non-filtered path would have hit),
+        // but the trust warning rides along in the error detail — never a
+        // fake success report on stdout.
+        let slugs = vec!["builtin:fizz".to_string()];
+        let found = vec![
+            agent("builtin:fizz", &"a".repeat(64)),
+            agent("builtin:fizz", &"b".repeat(64)),
+        ];
+        let archived_err = CliError::Other("query failure".into());
+        let err = resolve_roster_with_archive_filter(&slugs, found, Err(archived_err))
+            .expect_err("ambiguity error must still propagate");
+        assert!(matches!(err, CliError::Usage(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("builtin:fizz"),
+            "error should name the slug: {msg}"
+        );
+        assert!(
+            msg.contains("untrusted"),
+            "error detail should carry the trust warning: {msg}"
+        );
+    }
+
+    #[test]
+    fn archive_filter_report_shape_includes_archived_excluded() {
+        // A slug with no archiving at all still gets an (empty) complete
+        // archived_excluded list in the resolution — the field is always
+        // present, not conditionally omitted.
+        let slugs = vec!["builtin:fizz".to_string()];
+        let pk = "a".repeat(64);
+        let found = vec![agent("builtin:fizz", &pk)];
+        let resolution = resolve_roster_with_archive_filter(&slugs, found, Ok(vec![]))
+            .expect("resolves with nothing archived");
+        assert!(resolution.archived_excluded.is_empty());
+        let serialized = serde_json::to_value(&resolution.archived_excluded).unwrap();
+        assert_eq!(serialized, serde_json::json!([]));
+    }
+
+    // --- Observable-boundary regressions for the state-3 warning wiring ---
+    //
+    // The tests above exercise `resolve_roster_with_archive_filter` (the pure
+    // core), which never touches stderr or the stdout report — deleting the
+    // stderr emission at the `finalize_roster_resolution` call site, or the
+    // `archive_state_warning` insertion in `build_template_report`, left all
+    // of them green. These three go through the two production seams
+    // directly so a regression at either wiring point fails a test.
+
+    fn empty_report_inputs() -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+        (Vec::new(), Vec::new())
+    }
+
+    #[test]
+    fn archive_filter_state3_success_warns_on_sink_and_in_report() {
+        // State-3 fails open on the success path: the trust warning must
+        // reach BOTH observable boundaries — the stderr sink at the point
+        // of detection, and the top-level report field the caller prints.
+        let slugs = vec!["builtin:fizz".to_string()];
+        let pk = "a".repeat(64);
+        let found = vec![agent("builtin:fizz", &pk)];
+        let archived_err = CliError::Other("relay info document missing 'self' field".into());
+        let mut sink: Vec<u8> = Vec::new();
+        let resolution = finalize_roster_resolution(&slugs, found, Err(archived_err), &mut sink)
+            .expect("fails open — resolution still succeeds");
+
+        let sink_text = String::from_utf8(sink).expect("sink is UTF-8");
+        let lines: Vec<&str> = sink_text.lines().collect();
+        assert_eq!(lines.len(), 1, "exactly one warning line: {sink_text:?}");
+        let parsed: serde_json::Value =
+            serde_json::from_str(lines[0]).expect("warning line is parseable JSON");
+        let warning = parsed["warning"]
+            .as_str()
+            .expect("warning line has a string 'warning' field");
+        assert!(warning.contains("untrusted"), "got: {warning}");
+
+        let (members_added, member_failures) = empty_report_inputs();
+        let report = build_template_report(
+            "channel-1",
+            "template-1",
+            "ok",
+            false,
+            members_added,
+            member_failures,
+            &resolution,
+        );
+        assert_eq!(
+            report["archive_state_warning"].as_str(),
+            Some(warning),
+            "report must carry the same warning text as the stderr sink: {report}"
+        );
+    }
+
+    #[test]
+    fn archive_filter_state3_ambiguity_warns_on_sink_and_in_error_detail() {
+        // State-3 alongside an unrelated cardinality ambiguity: the warning
+        // still reaches the stderr sink at detection time, and the hard
+        // error's own detail carries it too. No report is constructible on
+        // this path by construction — the function returns `Err` before
+        // `cmd_create_channel_from_template` ever reaches `build_template_report`.
+        let slugs = vec!["builtin:fizz".to_string()];
+        let found = vec![
+            agent("builtin:fizz", &"a".repeat(64)),
+            agent("builtin:fizz", &"b".repeat(64)),
+        ];
+        let archived_err = CliError::Other("query failure".into());
+        let mut sink: Vec<u8> = Vec::new();
+        let err = finalize_roster_resolution(&slugs, found, Err(archived_err), &mut sink)
+            .expect_err("ambiguity error must still propagate");
+
+        let sink_text = String::from_utf8(sink).expect("sink is UTF-8");
+        assert_eq!(
+            sink_text.lines().count(),
+            1,
+            "exactly one warning line: {sink_text:?}"
+        );
+        assert!(
+            sink_text.contains("untrusted"),
+            "stderr sink should carry the trust warning: {sink_text}"
+        );
+        assert!(matches!(err, CliError::Usage(_)));
+        assert!(
+            err.to_string().contains("untrusted"),
+            "error detail should carry the trust warning: {err}"
+        );
+    }
+
+    #[test]
+    fn build_template_report_omits_warning_key_when_none() {
+        // The insertion must not be unconditional — a trusted (states 1/2)
+        // resolution's report has NO `archive_state_warning` key at all,
+        // not merely a null one, so this can't be satisfied by always
+        // inserting the field.
+        let resolution = RosterResolution {
+            agents: Vec::new(),
+            skipped: Vec::new(),
+            archived_excluded: Vec::new(),
+            archive_state_warning: None,
+        };
+        let (members_added, member_failures) = empty_report_inputs();
+        let report = build_template_report(
+            "channel-1",
+            "template-1",
+            "ok",
+            false,
+            members_added,
+            member_failures,
+            &resolution,
+        );
+        assert!(
+            report.get("archive_state_warning").is_none(),
+            "no warning key expected: {report}"
+        );
     }
 }
