@@ -798,7 +798,7 @@ impl Config {
 
         let agent_command = args.agent_command;
 
-        // Finding #49a — agent_command must not be empty.
+        // Validate: agent_command must not be empty.
         if agent_command.trim().is_empty() {
             return Err(ConfigError::ConfigFile(
                 "agent_command must not be empty".into(),
@@ -807,7 +807,7 @@ impl Config {
 
         let agent_args = normalize_agent_args(&agent_command, args.agent_args);
 
-        // Finding #49b — warn on invalid UUIDs in --channels.
+        // Warn on invalid UUIDs in --channels.
         if let Some(ref channels) = args.channels {
             for ch in channels {
                 if ch.parse::<Uuid>().is_err() {
@@ -819,7 +819,7 @@ impl Config {
             }
         }
 
-        // Finding #49c — cap heartbeat interval at 86400s (24h).
+        // Cap heartbeat interval at 86400s (24h).
         let heartbeat_interval = if args.heartbeat_interval > 86400 {
             tracing::warn!(
                 interval = args.heartbeat_interval,
@@ -885,9 +885,9 @@ impl Config {
             }
         };
 
-        // Finding #20 — idle_timeout must be strictly less than max_turn_duration.
-        // If idle_timeout >= max_turn_duration, the absolute wall-clock cap would
-        // fire before the idle timeout ever could, making idle_timeout a dead letter.
+        // idle_timeout must be strictly less than max_turn_duration. If idle_timeout
+        // >= max_turn_duration, the absolute wall-clock cap would fire before the idle
+        // timeout ever could, making idle_timeout a dead letter.
         if idle_timeout_secs >= max_turn_duration_secs {
             return Err(ConfigError::ConfigFile(format!(
                 "idle_timeout ({}s) must be less than max_turn_duration ({}s)",
@@ -1068,7 +1068,7 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
         )));
     }
 
-    // Finding #49d — warn when Config mode has no rules; agent will receive nothing.
+    // Warn when Config mode has no rules; agent will receive nothing.
     if config.rules.is_empty() {
         tracing::warn!(
             path = %path.display(),
@@ -1099,7 +1099,7 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
             }
             // Fail fast: parse the expression at load time so typos don't
             // silently produce dead rules at runtime.
-            // Finding #34 — store the compiled AST so match_event never re-parses.
+            // Store the compiled AST so match_event never re-parses.
             match evalexpr::build_operator_tree(expr) {
                 Ok(node) => {
                     rule.compiled_filter = Some(Arc::new(node));
@@ -1121,9 +1121,8 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
                 )));
             }
         }
-        // Initialise the consecutive-timeout counter (finding #25).
-        // Deserialization leaves it at default (new Arc<AtomicU32::new(0)>)
-        // but we set it explicitly here for clarity.
+        // Initialise the consecutive-timeout counter. Deserialization leaves it at
+        // default (new Arc<AtomicU32::new(0)>) but we set it explicitly here for clarity.
         rule.consecutive_timeouts = Arc::new(AtomicU32::new(0));
     }
 

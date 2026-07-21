@@ -1157,11 +1157,10 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
-    //
-    // Finding #10: one agent failing to start must not kill the whole pool.
-    // We attempt each spawn under a 60-second timeout; failures are logged and
-    // skipped. If ALL agents fail we return an error. A partial pool is valid —
-    // the harness continues with reduced capacity and logs a warning.
+    // One agent failing to start must not kill the whole pool. We attempt each
+    // spawn under a 60-second timeout; failures are logged and skipped. If ALL
+    // agents fail we return an error. A partial pool is valid — the harness
+    // continues with reduced capacity and logs a warning.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(config.agents as usize);
     for i in 0..config.agents as usize {
         // Spawn OUTSIDE the timeout so we always own the child for cleanup.
@@ -1248,13 +1247,11 @@ async fn tokio_main() -> Result<()> {
     tracing::info!("agent_pool_ready agents={}", live_count);
     let mut pool = AgentPool::from_slots(agent_slots);
 
-    //
-    // Finding #22: capture a startup watermark BEFORE connecting to the relay.
-    // This timestamp is used for membership notification replay (via
-    // startup_watermark) and as the initial subscribe_since for channels
-    // discovered at startup. The Subscribe handler falls back to
-    // subscribe_since when last_seen is None, closing the blind spot
-    // between "agents ready" and "first REQ sent".
+    // Capture a startup watermark BEFORE connecting to the relay. This timestamp
+    // is used for membership notification replay (via startup_watermark) and as
+    // the initial subscribe_since for channels discovered at startup. The Subscribe
+    // handler falls back to subscribe_since when last_seen is None, closing the
+    // blind spot between "agents ready" and "first REQ sent".
     let startup_watermark: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1273,7 +1270,7 @@ async fn tokio_main() -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
 
-    // Finding #22: tell the relay background task the watermark so it can use
+    // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
     // Best-effort: a failure here is non-fatal (we just lose the startup window
     // protection, which is the same as the pre-fix behaviour).
@@ -1697,8 +1694,8 @@ async fn tokio_main() -> Result<()> {
             let (result_rx, join_set) = pool.rx_and_join_set();
             tokio::select! {
                 biased;
-                // Finding #24: recv() returning None means all senders dropped
-                // (pool was torn down). Break cleanly instead of panicking.
+                // recv() returning None means all senders dropped (pool was torn down).
+                // Break cleanly instead of panicking.
                 r = result_rx.recv() => match r {
                     Some(result) => Some(PoolEvent::Result(Box::new(result))),
                     None => {

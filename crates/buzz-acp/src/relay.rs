@@ -474,7 +474,7 @@ enum RelayCommand {
     SubscribeObserverControls,
     /// Publish a signed event to the relay (for typing indicators, etc.).
     PublishEvent { event: Box<Event> },
-    /// Set the startup watermark timestamp for Finding #22.
+    /// Set the startup watermark timestamp.
     /// The background task uses this as the floor `since` for membership
     /// notification replay so events before startup are never re-delivered.
     SetStartupWatermark { ts: u64 },
@@ -544,8 +544,8 @@ impl HarnessRelay {
         // jittered backoff. A terminal error (bad URL, bad auth tag,
         // rejected/invalid signing key) fails immediately — see
         // `is_terminal_connect_error`.
-        // Finding #8: capture the handshake buffer and pass it to the background
-        // task so buffered messages aren't silently discarded.
+        // Capture the handshake buffer and pass it to the background task
+        // so buffered messages aren't silently discarded.
         let (ws, handshake_buffer) =
             retry_initial_connect(|| do_connect(relay_url, keys, auth_tag.as_ref())).await?;
 
@@ -811,7 +811,7 @@ impl HarnessRelay {
         Ok(event)
     }
 
-    /// Set the startup watermark timestamp (Finding #22).
+    /// Set the startup watermark timestamp.
     ///
     /// Call this once after `connect()` with the Unix timestamp captured just
     /// before the relay connection was established. The background task uses
@@ -945,9 +945,9 @@ struct BgState {
     /// The main loop checks this flag and triggers a proactive resubscribe
     /// (without waiting for a disconnect) so dropped events are replayed.
     proactive_resubscribe_needed: bool,
-    /// Unix timestamp captured just before the relay connection was established
-    /// (Finding #22). Used as the floor `since` for membership notification
-    /// replay so events predating this session are never re-delivered.
+    /// Unix timestamp captured just before the relay connection was established.
+    /// Used as the floor `since` for membership notification replay so events
+    /// predating this session are never re-delivered.
     startup_watermark: Option<u64>,
     /// Replay floor captured when each channel was first subscribed.
     /// Used as the `since` fallback on reconnect for channels that have no
@@ -1235,7 +1235,7 @@ async fn run_background_task(
 ) {
     let mut state = BgState::new();
 
-    // Finding #8: process any messages buffered during the initial auth handshake.
+    // Process any messages buffered during the initial auth handshake.
     // If a buffered message signals connection drop, trigger reconnect immediately.
     let handshake_ok = process_handshake_buffer(
         &mut ws,
@@ -1301,18 +1301,18 @@ async fn run_background_task(
         // no reset needed here since they haven't been declared yet.
     }
 
-    // Finding #31: client-initiated ping to detect silent connection death.
+    // Client-initiated ping to detect silent connection death.
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_pong = Instant::now();
     let mut ping_sent = false;
 
-    // Finding #42: track connection stability for backoff reset.
+    // Track connection stability for backoff reset.
     let mut connected_since = Instant::now();
     let mut stable_logged = false;
 
     loop {
-        // Finding #3: check proactive resubscribe flag before blocking on select!
+        // Check proactive resubscribe flag before blocking on select!
         if state.proactive_resubscribe_needed {
             state.proactive_resubscribe_needed = false;
             info!("proactive resubscribe triggered by backpressure event loss");
@@ -1380,7 +1380,7 @@ async fn run_background_task(
                        // Determine if the socket is lost.
                        let socket_lost = match raw {
                            Some(Ok(msg)) => {
-                               // Finding #31: track pong replies directly, before dispatch.
+                               // Track pong replies directly, before dispatch.
                                if matches!(msg, Message::Pong(_)) {
                                    last_pong = Instant::now();
                                    ping_sent = false;
@@ -1604,8 +1604,7 @@ async fn run_background_task(
                    }
                }
 
-        // Finding #42: log when connection has been stable for STABLE_CONNECTION_SECS.
-        // Log once when the connection has been stable. Diagnostic only.
+        // Log once when the connection has been stable for STABLE_CONNECTION_SECS. Diagnostic only.
         if !stable_logged && connected_since.elapsed() > Duration::from_secs(STABLE_CONNECTION_SECS)
         {
             stable_logged = true;
@@ -1682,7 +1681,7 @@ async fn handle_ws_message(
                             channel_id: channel_uuid,
                             event: *event,
                         };
-                        // Finding #3: warn at 80% capacity.
+                        // Warn at 80% capacity.
                         let cap = event_tx.max_capacity();
                         let used = cap - event_tx.capacity();
                         if used >= (cap * 4 / 5) {
@@ -1706,8 +1705,7 @@ async fn handle_ws_message(
                                 // replay starts early enough to re-deliver it.
                                 state.membership_dropped_since =
                                     Some(state.membership_dropped_since.map_or(ts, |d| d.min(ts)));
-                                // Finding #3: proactively trigger resubscribe without
-                                // waiting for a disconnect.
+                                // Proactively trigger resubscribe without waiting for a disconnect.
                                 state.proactive_resubscribe_needed = true;
                                 warn!(
                                     channel_id = %channel_uuid,
@@ -1725,7 +1723,7 @@ async fn handle_ws_message(
                                 channel_id,
                                 event: *event,
                             };
-                            // Finding #3: warn at 80% capacity.
+                            // Warn at 80% capacity.
                             let cap = event_tx.max_capacity();
                             let used = cap - event_tx.capacity();
                             if used >= (cap * 4 / 5) {
@@ -1748,7 +1746,7 @@ async fn handle_ws_message(
                                         .entry(channel_id)
                                         .and_modify(|d| *d = (*d).min(ts))
                                         .or_insert(ts);
-                                    // Finding #3: proactively trigger resubscribe.
+                                    // Proactively trigger resubscribe.
                                     state.proactive_resubscribe_needed = true;
                                     warn!(
                                         channel_id = %channel_id,
@@ -1788,7 +1786,7 @@ async fn handle_ws_message(
                         return true;
                     }
 
-                    // Finding #15: CLOSED needs cleanup and resubscribe, not just logging.
+                    // CLOSED needs cleanup and resubscribe, not just logging.
                     // Classify the error to decide how to respond.
                     let is_auth_error = message.starts_with("auth-required")
                         || message.starts_with("restricted")
@@ -1885,7 +1883,7 @@ async fn handle_ws_message(
                     }
                 }
                 RelayMessage::Auth { challenge } => {
-                    // Finding #18: AUTH send failure must trigger reconnect.
+                    // AUTH send failure must trigger reconnect.
                     debug!("received mid-session AUTH challenge — re-authenticating");
                     if let Err(e) =
                         send_auth_response(ws, &challenge, relay_url, keys, auth_tag).await
@@ -1900,7 +1898,7 @@ async fn handle_ws_message(
                     message,
                 } => {
                     if !accepted && message.starts_with("auth") {
-                        // Finding #18: AUTH OK with accepted=false means auth was rejected.
+                        // AUTH OK with accepted=false means auth was rejected.
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
                         return false;
                     }
@@ -1925,7 +1923,7 @@ async fn handle_ws_message(
     }
 }
 
-/// Process messages buffered during the NIP-42 auth handshake (Finding #8).
+/// Process messages buffered during the NIP-42 auth handshake.
 ///
 /// `do_connect` buffers any non-AUTH/non-OK messages it receives while waiting
 /// for the challenge and OK. Those messages would otherwise be silently
@@ -2067,9 +2065,8 @@ async fn resubscribe_after_reconnect(
 
 /// Attempt autonomous reconnect on socket loss.
 ///
-/// Finding #42: 5 attempts with 1s→2s→4s→8s→16s backoff (was 3 attempts).
-/// Finding #27: ±20% jitter on each sleep.
-/// Finding #8: process handshake buffer on success.
+/// 5 attempts with 1s→2s→4s→8s→16s backoff (was 3 attempts), ±20% jitter on each sleep.
+/// Processes the handshake buffer on success.
 ///
 /// Outcome of an autonomous reconnect attempt.
 enum ReconnectOutcome {
@@ -2150,10 +2147,9 @@ async fn try_autonomous_reconnect(
     observer_control_tx: &mpsc::Sender<Event>,
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
-    // Finding #42: 5 attempts, up to 16s base backoff. Shares delay values
-    // with the initial-connect retry in `HarnessRelay::connect()`
-    // (STARTUP_CONNECT_BACKOFFS) — see its doc comment for how the two
-    // loops consume the array differently.
+    // 5 attempts, up to 16s base backoff. Shares delay values with the
+    // initial-connect retry in `HarnessRelay::connect()` (STARTUP_CONNECT_BACKOFFS) —
+    // see its doc comment for how the two loops consume the array differently.
     let backoffs = STARTUP_CONNECT_BACKOFFS;
 
     for (attempt, delay) in backoffs.iter().enumerate() {
@@ -2166,7 +2162,7 @@ async fn try_autonomous_reconnect(
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
                 info!("autonomous reconnect succeeded (attempt {})", attempt + 1);
-                // Finding #8: process buffered messages from the handshake.
+                // Process buffered messages from the handshake.
                 let handshake_ok = process_handshake_buffer(
                     ws,
                     handshake_buffer,
@@ -2263,8 +2259,8 @@ async fn wait_for_reconnect(
         }
     }
 
-    // Finding #42: 6 attempts with backoff up to 32s + jitter (Finding #27).
-    // Finding #27: use tokio::select! so shutdown is honoured during sleep.
+    // 6 attempts with backoff up to 32s + jitter; uses tokio::select! so shutdown is
+    // honoured during sleep.
     let backoffs = [
         Duration::from_secs(1),
         Duration::from_secs(2),
@@ -2281,7 +2277,7 @@ async fn wait_for_reconnect(
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
                 info!("relay reconnected to {relay_url}");
-                // Finding #8: process buffered messages from the handshake.
+                // Process buffered messages from the handshake.
                 let handshake_ok = process_handshake_buffer(
                     ws,
                     handshake_buffer,

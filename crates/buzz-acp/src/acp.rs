@@ -2655,7 +2655,7 @@ mod tests {
     #[tokio::test]
     async fn idle_resets_on_stdout_activity() {
         // Send valid JSON (session/update notifications) to reset the idle timer.
-        // Non-JSON lines no longer reset idle (Finding #6 hardening).
+        // Non-JSON lines no longer reset idle — only valid JSON notifications do.
         let mut client = spawn_script(
             r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
         )
