@@ -1298,6 +1298,10 @@ mod test_support;
 mod tests;
 
 #[cfg(test)]
+#[path = "migration_avatar_tests.rs"]
+mod avatar_tests;
+
+#[cfg(test)]
 #[path = "migration_command_tests.rs"]
 mod command_tests;
 
