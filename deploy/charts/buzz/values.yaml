@@ -329,6 +329,13 @@ git:
   packCacheVolumeSize: 7Gi       # per-pod emptyDir; includes cold-population staging
   maxReposPerPubkey: 100
   maxConcurrentOps: 20
+  gc:
+    enabled: false               # dry-run inventory only; never deletes objects
+    intervalSeconds: 3600
+    maxPointers: 10000
+    maxObjectsPerPrefix: 10000
+    maxManifestBytesPerScan: 536870912
+    scanTimeoutSeconds: 300
 
 # ── Migrations ───────────────────────────────────────────────────────────────
 # Relay runs sqlx migrations at startup via BUZZ_AUTO_MIGRATE=true.

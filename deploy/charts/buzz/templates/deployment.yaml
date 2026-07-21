@@ -150,6 +150,12 @@ spec:
             - { name: BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS, value: {{ .Values.git.packCacheMaxConcurrentPopulations | quote }} }
             - { name: BUZZ_GIT_MAX_REPOS_PER_PUBKEY, value: {{ .Values.git.maxReposPerPubkey | quote }} }
             - { name: BUZZ_GIT_MAX_CONCURRENT_OPS, value: {{ .Values.git.maxConcurrentOps | quote }} }
+            - { name: BUZZ_GIT_GC_ENABLED, value: {{ .Values.git.gc.enabled | quote }} }
+            - { name: BUZZ_GIT_GC_INTERVAL_SECS, value: {{ .Values.git.gc.intervalSeconds | quote }} }
+            - { name: BUZZ_GIT_GC_MAX_POINTERS, value: {{ .Values.git.gc.maxPointers | quote }} }
+            - { name: BUZZ_GIT_GC_MAX_OBJECTS_PER_PREFIX, value: {{ .Values.git.gc.maxObjectsPerPrefix | quote }} }
+            - { name: BUZZ_GIT_GC_MAX_MANIFEST_BYTES_PER_SCAN, value: {{ .Values.git.gc.maxManifestBytesPerScan | quote }} }
+            - { name: BUZZ_GIT_GC_SCAN_TIMEOUT_SECS, value: {{ .Values.git.gc.scanTimeoutSeconds | quote }} }
 
             # ── S3 (non-secret) ──────────────────────────────────────
             {{- $s3Endpoint := include "buzz.s3Endpoint" . }}

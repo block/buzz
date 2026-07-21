@@ -145,6 +145,26 @@ pub struct ProbeReport {
     pub transport_drops: usize,
 }
 
+/// One object returned by a bounded prefix listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredObject {
+    /// Full object key.
+    pub key: String,
+    /// Object size reported by the backend.
+    pub size: u64,
+    /// Backend-provided last-modified timestamp.
+    pub last_modified: String,
+}
+
+/// Bounded result from listing one object-store prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectList {
+    /// Objects returned, up to the caller's limit.
+    pub objects: Vec<StoredObject>,
+    /// Whether more objects exist beyond this result.
+    pub truncated: bool,
+}
+
 /// Failure carrying the phase that failed plus enough context to diagnose.
 #[derive(Debug, thiserror::Error)]
 #[error("conformance probe failed in phase '{phase}' (round {round}, key {key}): {reason}")]
@@ -238,6 +258,70 @@ impl GitStore {
             )));
         }
         Ok(format!("idx/{pack_digest}"))
+    }
+
+    /// List at most `max_objects` objects below `prefix`.
+    ///
+    /// Pagination is handled internally, but the caller-provided bound keeps
+    /// background inventory work from growing without limit. A truncated
+    /// result must never be treated as a complete reachability snapshot.
+    pub async fn list_prefix(
+        &self,
+        prefix: &str,
+        max_objects: usize,
+    ) -> Result<ObjectList, StoreError> {
+        if max_objects == 0 {
+            return Ok(ObjectList {
+                objects: Vec::new(),
+                truncated: true,
+            });
+        }
+
+        let mut objects = Vec::new();
+        let mut continuation_token = None;
+        loop {
+            let remaining = max_objects.saturating_sub(objects.len());
+            if remaining == 0 {
+                return Ok(ObjectList {
+                    objects,
+                    truncated: continuation_token.is_some(),
+                });
+            }
+            let page_size = remaining.min(1_000);
+            let (page, status) = self
+                .bucket
+                .list_page(
+                    prefix.to_string(),
+                    None,
+                    continuation_token,
+                    None,
+                    Some(page_size),
+                )
+                .await?;
+            if !(200..300).contains(&status) {
+                return Err(StoreError::Backend(S3Error::HttpFailWithBody(
+                    status,
+                    "unexpected list status".to_string(),
+                )));
+            }
+            objects.extend(page.contents.into_iter().map(|object| StoredObject {
+                key: object.key,
+                size: object.size,
+                last_modified: object.last_modified,
+            }));
+            continuation_token = page.next_continuation_token;
+            if continuation_token.is_none() {
+                return Ok(ObjectList {
+                    objects,
+                    truncated: false,
+                });
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn delete_for_test(&self, key: &str) {
+        let _ = self.bucket.delete_object(key).await;
     }
 
     /// Create-only write of a content-addressed object (pack or manifest).

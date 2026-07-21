@@ -158,6 +158,17 @@ assumption for any S3-compatible backend.
   orphaned could 404 a concurrent reader mid-hydrate — see Theorem 2's reliance
   on every named pack being GETtable.)
 
+  The relay includes an opt-in, leader-elected **dry-run inventory** for this
+  future GC (`BUZZ_GIT_GC_ENABLED=true`). It lists only `manifests/`, `packs/`,
+  and `idx/`, computes reachability from every current `repos/*/pointer`, and
+  exports observed candidate counts and bytes. Pointer count, listed objects,
+  manifest bytes, and scan duration are bounded; truncated prefix inventories
+  are explicitly reported as incomplete. It never deletes. A candidate report
+  is not a deletion proof: production reclamation additionally requires
+  durable evidence that an object stayed unreachable longer than the maximum
+  read lifetime and coordination preventing a concurrent publisher from
+  making an old content-addressed object reachable during sweep.
+
 - **(A2) Strong read-after-write.** A read issued after a successful `PUT`
   observes that write. (AWS S3 provides this for all regions and all
   PUT/DELETE.)
