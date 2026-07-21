@@ -263,9 +263,14 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
 
     // 429 Too Many Requests → typed `relay rate-limited:` prefix so the TS
     // client can activate the rate-limit gate without confusing it with a
-    // connectivity failure (`relay unreachable:`).
+    // connectivity failure (`relay unreachable:`). Also arm the Rust-side
+    // admission gate here — the one place every relay HTTP error funnels
+    // through — so the next relay-backed command waits out the quota window
+    // instead of burning it (see `relay_admission`).
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        if let Some(secs) = extract_retry_in_hint(&body) {
+        let hint = extract_retry_in_hint(&body);
+        crate::relay_admission::activate_rate_limit(hint);
+        if let Some(secs) = hint {
             return format!("relay rate-limited: retry in {secs}s");
         }
         return "relay rate-limited: quota exceeded".to_string();
@@ -307,6 +312,7 @@ pub async fn query_relay_at(
     api_base_url: &str,
     filters: &[serde_json::Value],
 ) -> Result<Vec<nostr::Event>, String> {
+    crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/query", api_base_url);
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
@@ -403,6 +409,7 @@ pub async fn sync_managed_agent_profile(
     avatar_url: Option<&str>,
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
+    crate::relay_admission::wait_for_rate_limit().await;
     // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
     let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
     let event_json = event.as_json();
@@ -503,6 +510,7 @@ pub async fn submit_event(
     builder: nostr::EventBuilder,
     state: &AppState,
 ) -> Result<SubmitEventResponse, String> {
+    crate::relay_admission::wait_for_rate_limit().await;
     // All synchronous work (signing) must complete before any .await
     // so the MutexGuard is dropped and the future remains Send.
     let url = format!("{}/events", relay_api_base_url_with_override(state));
@@ -550,6 +558,7 @@ pub async fn submit_signed_event(
     event: &nostr::Event,
     state: &AppState,
 ) -> Result<SubmitEventResponse, String> {
+    crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/events", relay_api_base_url_with_override(state));
     let body_bytes = event.as_json().into_bytes();
     let auth_header = {
@@ -607,6 +616,7 @@ pub async fn submit_signed_event_with_keys(
     if event.pubkey != keys.public_key() {
         return Err("signed event does not match the publishing identity".to_string());
     }
+    crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/events", relay_api_base_url_with_override(state));
     let body_bytes = event.as_json().into_bytes();
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
