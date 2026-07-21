@@ -1,5 +1,13 @@
 # Changelog
 
+## mobile-v0.4.9
+
+- fix(mobile): sanitize Android image uploads ([#2188](https://github.com/block/buzz/pull/2188)) ([`ee21da90b`](https://github.com/block/buzz/commit/ee21da90bd6b1da6bfaaf22ba00749398aaa9640))
+- chore(release): release Buzz Mobile version 0.4.8 ([#2187](https://github.com/block/buzz/pull/2187)) ([`fb8c90cf5`](https://github.com/block/buzz/commit/fb8c90cf597960e48fe55a9baceb8a5a08112ccc))
+- fix(mobile): image upload fails due to unstripped metadata ([#2185](https://github.com/block/buzz/pull/2185)) ([`37f15b200`](https://github.com/block/buzz/commit/37f15b20019169363b697aee41c99573b7bc3f24))
+- chore(deps): update all non-major dependencies ([#2152](https://github.com/block/buzz/pull/2152)) ([`6da407742`](https://github.com/block/buzz/commit/6da407742a09ee531c53a99ca5d2d314f0b38aef))
+
+
 ## mobile-v0.4.8
 
 - fix(mobile): image upload fails due to unstripped metadata ([#2185](https://github.com/block/buzz/pull/2185)) ([`37f15b200`](https://github.com/block/buzz/commit/37f15b20019169363b697aee41c99573b7bc3f24))
