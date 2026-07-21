@@ -1299,6 +1299,36 @@ fn validate_event_reminder(event: &Event) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Resolve the `author_type` metric label (`"agent"` / `"human"`) for an
+/// event author, from `users.agent_owner_pubkey IS NOT NULL` via a
+/// per-community cache. Metric-labeling only — never used for authorization.
+/// Unknown pubkeys and lookup errors count as "human" (the label must not
+/// add a failure path to ingest).
+async fn author_type_label(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    author_pubkey_bytes: Vec<u8>,
+) -> &'static str {
+    let key = (tenant.community(), author_pubkey_bytes);
+    let cached = state.author_type_cache.get(&key);
+    let is_agent = match cached {
+        Some(v) => v,
+        None => {
+            let v = match state.db.get_agent_channel_policy(key.0, &key.1).await {
+                Ok(Some((_, owner))) => owner.is_some(),
+                Ok(None) | Err(_) => false,
+            };
+            state.author_type_cache.insert(key, v);
+            v
+        }
+    };
+    if is_agent {
+        "agent"
+    } else {
+        "human"
+    }
+}
+
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
 /// Shared by WebSocket and HTTP transports. The caller constructs [`IngestAuth`]
@@ -1319,6 +1349,12 @@ pub async fn ingest_event(
     event: Event,
     auth: IngestAuth,
 ) -> Result<IngestResult, IngestError> {
+    // Captured before `event` moves into the inner fn: the stored-events
+    // counter below is emitted at this shared seam so WebSocket and HTTP
+    // transports are counted identically.
+    let kind_label = super::event::bounded_kind_label(event_kind_u32(&event));
+    let author_pubkey_bytes = event.pubkey.to_bytes().to_vec();
+
     let abstract_state = state_for_request(tenant, auth.pubkey());
     let (_guard, tracer) = EmitGuard::arm(
         state.tracer.clone(),
@@ -1327,6 +1363,22 @@ pub async fn ingest_event(
     );
 
     let result = ingest_event_inner(state, &tracer, tenant, event, auth).await;
+
+    // Fleet-wide stored counter: kind + author_type only, no community tag
+    // (see the cardinality rationale on buzz_events_received_total —
+    // author_type is a 2-value label so it merely doubles the kind series).
+    // Emitted here rather than per-transport so HTTP bridge ingests count too.
+    if let Ok(r) = &result {
+        if r.accepted {
+            let author_type = author_type_label(state, tenant, author_pubkey_bytes).await;
+            metrics::counter!(
+                "buzz_events_stored_total",
+                "kind" => kind_label,
+                "author_type" => author_type
+            )
+            .increment(1);
+        }
+    }
 
     // Map terminal error variants onto the closed SanitizedReason
     // alphabet (spec line 778). The inner fn's success path emits

@@ -547,6 +547,12 @@ pub struct AppState {
     /// Prevents repeated DB lookups from bursty observer traffic.
     #[allow(clippy::type_complexity)]
     pub observer_owner_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>, Vec<u8>), bool>>,
+    /// Cache for the `author_type` metric label on the ingest path.
+    /// Key: (community_id, author pubkey bytes). Value: is_agent
+    /// (`users.agent_owner_pubkey IS NOT NULL`). The mapping is
+    /// first-write-wins and set during auth before an agent's first event,
+    /// so a short TTL only bounds staleness for the rare backfill race.
+    pub author_type_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), bool>>,
 
     /// Runtime conformance tracer. Production binds [`crate::conformance::NoopTracer`]
     /// (zero cost). Conformance tests bind [`crate::conformance::JsonlTracer`] to
@@ -715,6 +721,12 @@ impl AppState {
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(1_000)
+                    .time_to_live(std::time::Duration::from_secs(300))
+                    .build(),
+            ),
+            author_type_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(300))
                     .build(),
             ),

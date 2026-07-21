@@ -32,7 +32,7 @@ fn reject(reason: &'static str) {
 }
 
 /// Bound the `kind` label to prevent cardinality explosion from arbitrary Nostr kinds.
-fn bounded_kind_label(kind: u32) -> String {
+pub(crate) fn bounded_kind_label(kind: u32) -> String {
     match kind {
         0..=9 | 1059 | 1063 => kind.to_string(),
         8000..=8003 | 9000..=9022 | 9030..=9036 => kind.to_string(),
@@ -598,7 +598,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     // Rationale: bounded_kind_label passes through all 10k values in
     // 20000..=29999 (client-controlled ephemeral range). Crossing kind ×
     // community would produce up to millions of series. Keep kind fleet-wide.
-    metrics::counter!("buzz_events_received_total", "kind" => kind_str.clone()).increment(1);
+    metrics::counter!("buzz_events_received_total", "kind" => kind_str).increment(1);
     // Per-community volume counter: community-only, no kind tag.
     // Use this for per-community throughput graphs; the fleet counter above
     // for per-kind breakdowns.
@@ -705,9 +705,8 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
         Ok(result) => {
             if result.accepted {
-                // Fleet-wide stored counter: kind-only, no community tag.
-                // Same cardinality rationale as buzz_events_received_total above.
-                metrics::counter!("buzz_events_stored_total", "kind" => kind_str).increment(1);
+                // buzz_events_stored_total is emitted inside ingest_event()
+                // (shared WS/HTTP seam), not here.
                 info!(
                     event_id = %result.event_id,
                     kind = kind_u32,
