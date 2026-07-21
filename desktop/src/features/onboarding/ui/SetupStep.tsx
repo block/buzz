@@ -72,7 +72,9 @@ function RuntimeReadinessIndicator({
   runtime: AcpRuntimeCatalogEntry;
   ready: boolean;
 }) {
-  if (!ready) return null;
+  // Checkmark temporarily hidden; flip to true to restore it.
+  const showReadinessCheckmark = false;
+  if (!ready || !showReadinessCheckmark) return null;
 
   return (
     <span
