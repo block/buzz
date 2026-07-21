@@ -318,6 +318,45 @@ test("replay waits for rate-limit gate before sending REQs", async () => {
   assert.equal(sentIds.length, 1, "REQ sent after gate expired");
 });
 
+// ── Connection-generation guard ───────────────────────────────────────────────
+
+test("stale replay sends no REQs when generation advances while gate was active", async () => {
+  resetGate(0);
+  activateRateLimit(5); // gate active for 5 seconds
+
+  let generationActive = true; // true = current, false = stale
+  const sentIds = [];
+
+  const replayPromise = replayLiveSubscriptions({
+    subscriptions: new Map([
+      [
+        "sub-1",
+        {
+          mode: "live",
+          filter: { kinds: [9], "#h": ["ch-1"], limit: 50 },
+          onEvent: () => {},
+          lastSeenCreatedAt: undefined,
+        },
+      ],
+    ]),
+    sendRaw: async (payload) => {
+      sentIds.push(payload[1]);
+    },
+    requestHistory: async () => [],
+    isActive: () => generationActive,
+  });
+
+  // Advance the generation (simulate new connection) before the gate resolves.
+  generationActive = false;
+
+  // Fire the gate timer.
+  tickTo(5_001);
+
+  await replayPromise;
+
+  assert.equal(sentIds.length, 0, "no REQs sent for a stale replay");
+});
+
 // ── Paged replay (existing behaviour) ────────────────────────────────────────
 
 test("channel reconnect replay pages the missed window until a short page", async () => {

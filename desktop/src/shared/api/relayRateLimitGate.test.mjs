@@ -50,6 +50,7 @@ const {
   isRateLimited,
   waitForRateLimit,
   resetRateLimitGate,
+  rateLimitRemainingMs,
   parseRateLimitHint,
 } = await import("./relayRateLimitGate.ts");
 
@@ -130,6 +131,24 @@ test("null hint uses 10s default", () => {
   assert.equal(isRateLimited(), false);
 });
 
+test("zero hint uses 10s default (0s gate would be swallowed)", () => {
+  reset(0);
+  activateRateLimit(0);
+  tickTo(9_999);
+  assert.equal(isRateLimited(), true);
+  tickTo(10_001);
+  assert.equal(isRateLimited(), false);
+});
+
+test("negative hint uses 10s default", () => {
+  reset(0);
+  activateRateLimit(-5);
+  tickTo(9_999);
+  assert.equal(isRateLimited(), true);
+  tickTo(10_001);
+  assert.equal(isRateLimited(), false);
+});
+
 // ── waitForRateLimit ──────────────────────────────────────────────────────────
 
 test("waitForRateLimit resolves immediately when not rate-limited", async () => {
@@ -200,18 +219,76 @@ test("resetRateLimitGate clears the timer so it does not fire later", () => {
   assert.equal(pendingTimers.size, 0);
 });
 
-test("waitForRateLimit resolves immediately after resetRateLimitGate", async () => {
+test("in-flight waitForRateLimit resolves when resetRateLimitGate is called", async () => {
   reset(0);
   activateRateLimit(30);
-  // Start waiting before reset (intentionally not awaited — tests the in-flight case).
-  waitForRateLimit();
 
+  let inFlightResolved = false;
+  const inFlight = waitForRateLimit().then(() => {
+    inFlightResolved = true;
+  });
+
+  // Not yet resolved before reset.
+  await Promise.resolve();
+  assert.equal(inFlightResolved, false);
+
+  // reset resolves the in-flight awaiter immediately.
   resetRateLimitGate();
-  // Now the gate is gone. The in-flight promise won't resolve on its own
-  // (the timer was cleared). Confirm the gate read is clean.
+  await inFlight;
+  assert.equal(inFlightResolved, true);
+
+  // Gate is now clear.
   assert.equal(isRateLimited(), false);
-  // A new waitForRateLimit after reset should resolve immediately.
+
+  // A new wait should also resolve immediately.
   await waitForRateLimit();
+});
+
+// ── rateLimitRemainingMs ──────────────────────────────────────────────────────
+
+test("rateLimitRemainingMs returns 0 when gate is inactive", () => {
+  reset(0);
+  assert.equal(rateLimitRemainingMs(), 0);
+});
+
+test("rateLimitRemainingMs returns remaining ms when gate is active", () => {
+  reset(0);
+  activateRateLimit(10); // expires at 10_000 ms
+  setFakeNow(3_000);
+  assert.equal(rateLimitRemainingMs(), 7_000);
+});
+
+test("rateLimitRemainingMs returns 0 after gate expires", () => {
+  reset(0);
+  activateRateLimit(5);
+  tickTo(5_001);
+  assert.equal(rateLimitRemainingMs(), 0);
+});
+
+// ── NOTICE → gate integration ─────────────────────────────────────────────────
+// Verifies that the session NOTICE handler logic — a case-sensitive
+// `startsWith("rate-limited:")` check followed by activateRateLimit — correctly
+// arms the gate. The relay always emits lowercase prefixes.
+
+test("rate-limited: NOTICE prefix (case-sensitive) activates the gate", () => {
+  reset(0);
+  const notice = "rate-limited: quota exceeded; retry in 8s";
+  if (notice.startsWith("rate-limited:")) {
+    activateRateLimit(parseRateLimitHint(notice));
+  }
+  assert.equal(isRateLimited(), true);
+  tickTo(8_001);
+  assert.equal(isRateLimited(), false);
+});
+
+test("Rate-limited: NOTICE with uppercase prefix does NOT activate the gate (relay always emits lowercase)", () => {
+  reset(0);
+  const notice = "Rate-limited: quota exceeded; retry in 8s";
+  if (notice.startsWith("rate-limited:")) {
+    activateRateLimit(parseRateLimitHint(notice));
+  }
+  // Uppercase is not emitted by the relay — gate should remain inactive.
+  assert.equal(isRateLimited(), false);
 });
 
 // ── Cleanup ───────────────────────────────────────────────────────────────────
