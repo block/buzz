@@ -10,8 +10,8 @@
 //! agent's `kind:1059` gift-wraps. So a granted capability sits on the relay,
 //! addressed correctly to the agent, and never reaches its context.
 //!
-//! `sync_grants` is the missing runtime step. Per *NIP-DA* (`REPOS/nips/DA.md`)
-//! and the reference design in `OUTBOX/GRANT_INGESTION_HANDLER.md`:
+//! `sync_grants` is the missing runtime step, implementing NIP-DA
+//! (<https://github.com/nostr-protocol/nips/pull/2411>):
 //!
 //! 1. **Fetch** — `REQ {kinds:[1059], "#p":[agent_pk]}` for gift-wraps.
 //! 2. **Unwrap (NIP-59)** — two NIP-44 decrypts: outer wrapper (ephemeral →
