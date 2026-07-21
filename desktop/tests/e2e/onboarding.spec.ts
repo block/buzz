@@ -1724,14 +1724,47 @@ test("pending avatar stays navigable and exposes retry after propagation fails",
   await expect(
     page.getByTestId("community-avatar-circle-upload-pending"),
   ).toBeVisible();
+  await expect(avatarImage).toHaveClass(/brightness-75/);
   await expect(page.getByTestId("community-profile-next")).toBeEnabled();
+  await page.waitForTimeout(500);
+  await expect(
+    page.getByTestId("community-avatar-circle-upload-pending"),
+  ).toBeVisible();
+
+  const avatar = page.getByTestId("community-avatar-circle");
+  const pendingSpinner = page
+    .getByTestId("community-avatar-circle-upload-pending")
+    .locator(".sprout-arc-spinner");
+  const [avatarBox, spinnerBox] = await Promise.all([
+    avatar.boundingBox(),
+    pendingSpinner.boundingBox(),
+  ]);
+  if (!avatarBox || !spinnerBox) {
+    throw new Error("Could not measure pending avatar spinner");
+  }
+  expect(
+    Math.abs(
+      avatarBox.x + avatarBox.width / 2 - (spinnerBox.x + spinnerBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      avatarBox.y +
+        avatarBox.height / 2 -
+        (spinnerBox.y + spinnerBox.height / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(spinnerBox.width / avatarBox.width).toBeLessThanOrEqual(0.2);
 
   await expect(
-    page.getByTestId("community-avatar-circle-upload-failed"),
+    page.getByTestId("community-avatar-circle-fallback"),
   ).toBeVisible({ timeout: 10_000 });
-  await expect(avatarImage).toHaveAttribute("src", /^blob:/);
+  await expect(avatarImage).toHaveCount(0);
   await expect(
     page.getByText("Avatar couldn’t finish uploading"),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Your default avatar is showing instead."),
   ).toBeVisible();
 
   avatarReady = true;
@@ -1739,9 +1772,8 @@ test("pending avatar stays navigable and exposes retry after propagation fails",
   await expect(
     page.getByTestId("community-avatar-circle-upload-pending"),
   ).toBeVisible();
-  await expect(
-    page.getByTestId("community-avatar-circle-upload-failed"),
-  ).toHaveCount(0);
+  await expect(avatarImage).toHaveAttribute("src", /^blob:/);
+  await expect(avatarImage).toHaveClass(/brightness-75/);
   await expect
     .poll(() => avatarImage.getAttribute("src"))
     .not.toMatch(/^blob:/);

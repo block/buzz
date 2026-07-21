@@ -1,5 +1,5 @@
 import * as React from "react";
-import { CircleAlert, UserRound } from "lucide-react";
+import { UserRound } from "lucide-react";
 
 import { useAvatarPresentation } from "@/features/profile/avatarPresentationStore";
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
@@ -73,7 +73,11 @@ export function ProfileAvatar({
       {src !== undefined ? (
         <AvatarImage
           alt={`${label} avatar`}
-          className={cn("object-cover", imageClassName)}
+          className={cn(
+            "object-cover",
+            presentation?.state === "pending" && "brightness-75",
+            imageClassName,
+          )}
           data-testid={testId ? `${testId}-image` : undefined}
           onLoadingStatusChange={(status) => {
             if (status === "error") setFailedSrc(liveSrc);
@@ -104,21 +108,13 @@ export function ProfileAvatar({
       {presentation?.state === "pending" ? (
         <span
           aria-label="Avatar upload pending"
-          className="absolute bottom-0 right-0 flex h-[28%] max-h-9 min-h-4 w-[28%] max-w-9 min-w-4 items-center justify-center rounded-full bg-amber-300 text-amber-950 shadow-sm ring-2 ring-background"
+          className="pointer-events-none absolute inset-0 flex items-center justify-center text-white drop-shadow-sm"
           data-testid={testId ? `${testId}-upload-pending` : undefined}
           role="status"
         >
-          <Spinner aria-hidden="true" className="h-[60%] w-[60%] border-2" />
-        </span>
-      ) : null}
-      {presentation?.state === "failed" ? (
-        <span
-          aria-label="Avatar upload failed"
-          className="absolute bottom-0 right-0 flex h-[28%] max-h-9 min-h-4 w-[28%] max-w-9 min-w-4 items-center justify-center rounded-full bg-destructive text-destructive-foreground shadow-sm ring-2 ring-background"
-          data-testid={testId ? `${testId}-upload-failed` : undefined}
-          role="status"
-        >
-          <CircleAlert aria-hidden="true" className="h-[70%] w-[70%]" />
+          <span className="flex size-7 items-center justify-center rounded-full bg-black/35">
+            <Spinner aria-hidden="true" className="border-2" size={16} />
+          </span>
         </span>
       ) : null}
     </Avatar>

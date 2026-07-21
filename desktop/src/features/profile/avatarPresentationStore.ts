@@ -109,7 +109,7 @@ async function verifyPresentation(
 
   if (!isCurrent(entry) || entry.snapshot.state !== "pending") return;
   entry.snapshot = {
-    displayUrl: entry.snapshot.displayUrl,
+    displayUrl: entry.remoteUrl,
     state: "failed",
   };
   emitChange();
@@ -118,7 +118,7 @@ async function verifyPresentation(
       label: "Retry",
       onClick: () => retryAvatarPresentation(entry.remoteUrl),
     },
-    description: "Your pending avatar is still local to this device.",
+    description: "Your default avatar is showing instead.",
     id: toastId(entry.remoteUrl),
   });
 }
@@ -144,7 +144,7 @@ export function retryAvatarPresentation(remoteUrl: string): void {
   if (entry?.snapshot.state !== "failed") return;
   entry.generation = nextGeneration++;
   entry.snapshot = {
-    displayUrl: entry.snapshot.displayUrl,
+    displayUrl: entry.localPreviewUrl ?? entry.remoteUrl,
     state: "pending",
   };
   emitChange();
