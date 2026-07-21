@@ -198,16 +198,16 @@ pub struct DbPoolStats {
     pub max: u32,
 }
 
-/// Owns a detached Postgres session holding a relay advisory leader lock.
+/// Owns the detached Postgres session holding the relay usage-metrics advisory lock.
 ///
 /// The connection deliberately does not return to the main pool: session advisory
 /// locks must remain bound to this exact physical connection, and the poller
 /// pings it before each leader-only collection tick.
-pub struct AdvisoryLockLeader {
+pub struct UsageMetricsLeader {
     connection: PgConnection,
 }
 
-impl AdvisoryLockLeader {
+impl UsageMetricsLeader {
     /// Returns whether the lock-owning session is still reachable.
     ///
     /// Bounded to 5 seconds — a blackholed connection (no RST) would otherwise
@@ -508,20 +508,23 @@ impl Db {
         })
     }
 
-    /// Try to acquire a detached session advisory lock for singleton relay work.
+    /// Try to acquire the detached session advisory lock for relay usage metrics.
     ///
     /// The returned guard owns the exact connection that acquired the lock. It is
     /// detached from the shared pool so a stable leader neither returns a locked
     /// session to other callers nor permanently consumes a pool slot. Dropping the
     /// guard closes the connection and releases the session-scoped lock.
-    pub async fn try_advisory_lock(&self, lock_key: i64) -> Result<Option<AdvisoryLockLeader>> {
+    pub async fn try_lock_usage_metrics(
+        &self,
+        lock_key: i64,
+    ) -> Result<Option<UsageMetricsLeader>> {
         let mut connection = self.pool.acquire().await?;
         let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
             .bind(lock_key)
             .fetch_one(&mut *connection)
             .await?;
         if acquired {
-            Ok(Some(AdvisoryLockLeader {
+            Ok(Some(UsageMetricsLeader {
                 connection: connection.detach(),
             }))
         } else {
@@ -4660,14 +4663,14 @@ mod tests {
         let key = 0x4255_5A5A_4D45_5452;
 
         let mut leader = first
-            .try_advisory_lock(key)
+            .try_lock_usage_metrics(key)
             .await
             .expect("first lock attempt")
             .expect("first database handle becomes leader");
         assert!(leader.is_live().await, "lock owner remains reachable");
         assert!(
             second
-                .try_advisory_lock(key)
+                .try_lock_usage_metrics(key)
                 .await
                 .expect("second lock attempt")
                 .is_none(),
@@ -4677,7 +4680,7 @@ mod tests {
         drop(leader);
         assert!(
             second
-                .try_advisory_lock(key)
+                .try_lock_usage_metrics(key)
                 .await
                 .expect("lock attempt after leader drop")
                 .is_some(),
