@@ -32,6 +32,13 @@ pub enum CliError {
     #[error("{0}")]
     NotFound(String),
 
+    /// A non-idempotent command's outcome is unknown: the request may have
+    /// reached the relay, but the response was lost. Never auto-retried and
+    /// never labeled retryable — the relay executes these commands before any
+    /// dedup, so a blind re-run can duplicate the mutation.
+    #[error("delivery unknown: {0}")]
+    DeliveryUnknown(String),
+
     /// Catch-all for unexpected failures
     #[error("{0}")]
     Other(String),
@@ -56,15 +63,23 @@ fn fmt_reqwest_error(e: &reqwest::Error) -> String {
 
 /// Returns `true` when the error is transient and a retry may succeed.
 ///
-/// Transport-level network errors (connect failure, timeout, or mid-request) and relay
-/// overload responses (429 / 502 / 503 / 504) are retryable.  All other errors indicate
-/// a permanent failure: auth, bad input, builder errors, or logic errors.
+/// Transport-level network errors (connect failure, timeout, mid-request,
+/// mid-body transfer, or body decode failure) and relay overload responses
+/// (429 / 502 / 503 / 504) are retryable.  `DeliveryUnknown` is never
+/// retryable: the operation may already have executed.  All other errors
+/// indicate a permanent failure: auth, bad input, builder errors, or logic
+/// errors.
 pub fn is_retryable_error(e: &CliError) -> bool {
     match e {
         CliError::Network(ref net_err) => {
-            net_err.is_connect() || net_err.is_timeout() || net_err.is_request()
+            net_err.is_connect()
+                || net_err.is_timeout()
+                || net_err.is_request()
+                || net_err.is_body()
+                || net_err.is_decode()
         }
         CliError::Relay { status, .. } => matches!(status, 429 | 502 | 503 | 504),
+        CliError::DeliveryUnknown(_) => false,
         _ => false,
     }
 }
@@ -87,6 +102,7 @@ pub fn exit_code(e: &CliError) -> i32 {
         CliError::Key(_) => 3,
         CliError::Conflict(_) => 5,
         CliError::NotFound(_) => 1,
+        CliError::DeliveryUnknown(_) => 2,
         CliError::Other(_) => 4,
     }
 }
@@ -108,6 +124,7 @@ pub fn print_error(e: &CliError) {
         CliError::Key(_) => "key_error",
         CliError::Conflict(_) => "conflict",
         CliError::NotFound(_) => "not_found",
+        CliError::DeliveryUnknown(_) => "delivery_unknown",
         CliError::Other(_) => "error",
     };
     let obj = serde_json::json!({

@@ -177,6 +177,20 @@ fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
     )
 }
 
+/// Returns `true` for moderation command kinds (9040–9044).
+///
+/// These events execute immediately at the relay without dedup, so they must
+/// not be blindly retried on ambiguous outcomes.
+fn is_moderation_kind(kind: u16) -> bool {
+    matches!(kind, 9040..=9044)
+}
+
+/// Returns `true` for HTTP status codes that indicate a successful response
+/// (equivalent to `reqwest::StatusCode::is_success()` for u16).
+fn resp_was_success(status: u16) -> bool {
+    (200..300).contains(&status)
+}
+
 fn is_safe_media_path_segment(sha256_ext: &str) -> bool {
     let segments: Vec<&str> = sha256_ext.split('.').collect();
     match segments.as_slice() {
@@ -562,7 +576,10 @@ impl BuzzClient {
     ///
     /// The final attempt always returns whatever `op` produces (success or error)
     /// so that `handle_response` can map it to the appropriate exit code.
-    async fn with_retry<'a, F, Fut>(&'a self, op: F) -> Result<reqwest::Response, CliError>
+    ///
+    /// Body reads happen OUTSIDE this boundary. Use `with_retry_body` when body
+    /// transfer should also be covered (idempotent reads only).
+    async fn with_retry_response<'a, F, Fut>(&'a self, op: F) -> Result<reqwest::Response, CliError>
     where
         F: Fn() -> Fut,
         Fut: Future<Output = Result<reqwest::Response, CliError>> + 'a,
@@ -593,6 +610,46 @@ impl BuzzClient {
                             && (net_err.is_connect()
                                 || net_err.is_timeout()
                                 || net_err.is_request())
+                        {
+                            tokio::time::sleep(jitter_delay(attempt)).await;
+                            continue;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        unreachable!("loop exhausts all RETRY_MAX_ATTEMPTS")
+    }
+
+    /// Execute `op` up to `RETRY_MAX_ATTEMPTS` times, including body-transfer failures.
+    ///
+    /// Like `with_retry_response`, but the closure is expected to consume the response
+    /// body and return the parsed result as `T`. This covers `is_body()` mid-transfer
+    /// failures in addition to connect/timeout/request errors.
+    ///
+    /// Status-level retries (429/502/503/504) are not performed here; callers must
+    /// handle those inside the closure (e.g. map to `CliError::Relay` for the final
+    /// response) — `with_retry_response` handles status retries when the body is not
+    /// consumed. Use this variant only for **idempotent** operations.
+    async fn with_retry_body<'a, T, F, Fut>(&'a self, op: F) -> Result<T, CliError>
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<T, CliError>> + 'a,
+        T: 'a,
+    {
+        for attempt in 0..RETRY_MAX_ATTEMPTS {
+            let is_last = attempt == RETRY_MAX_ATTEMPTS - 1;
+            match op().await {
+                Ok(value) => return Ok(value),
+                Err(e) => {
+                    if let CliError::Network(ref net_err) = e {
+                        if !is_last
+                            && (net_err.is_connect()
+                                || net_err.is_timeout()
+                                || net_err.is_request()
+                                || net_err.is_body()
+                                || net_err.is_decode())
                         {
                             tokio::time::sleep(jitter_delay(attempt)).await;
                             continue;
@@ -701,26 +758,25 @@ impl BuzzClient {
             serde_json::to_vec(filters)
                 .map_err(|e| CliError::Other(format!("filter serialization failed: {e}")))?,
         );
-        let resp = self
-            .with_retry(|| {
-                let body = body.clone();
-                let url = url.clone();
-                async move {
-                    let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-                    Ok(self
-                        .with_auth_tag(
-                            self.http
-                                .post(&url)
-                                .header("Authorization", auth)
-                                .header("Content-Type", "application/json")
-                                .body(body),
-                        )
-                        .send()
-                        .await?)
-                }
-            })
-            .await?;
-        self.handle_response(resp).await
+        self.with_retry_body(|| {
+            let body = body.clone();
+            let url = url.clone();
+            async move {
+                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                let resp = self
+                    .with_auth_tag(
+                        self.http
+                            .post(&url)
+                            .header("Authorization", auth)
+                            .header("Content-Type", "application/json")
+                            .body(body),
+                    )
+                    .send()
+                    .await?;
+                self.handle_response(resp).await
+            }
+        })
+        .await
     }
 
     /// Execute a one-shot count via the HTTP bridge.
@@ -732,26 +788,25 @@ impl BuzzClient {
             serde_json::to_vec(&[filter])
                 .map_err(|e| CliError::Other(format!("filter serialization failed: {e}")))?,
         );
-        let resp = self
-            .with_retry(|| {
-                let body = body.clone();
-                let url = url.clone();
-                async move {
-                    let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-                    Ok(self
-                        .with_auth_tag(
-                            self.http
-                                .post(&url)
-                                .header("Authorization", auth)
-                                .header("Content-Type", "application/json")
-                                .body(body),
-                        )
-                        .send()
-                        .await?)
-                }
-            })
-            .await?;
-        self.handle_response(resp).await
+        self.with_retry_body(|| {
+            let body = body.clone();
+            let url = url.clone();
+            async move {
+                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                let resp = self
+                    .with_auth_tag(
+                        self.http
+                            .post(&url)
+                            .header("Authorization", auth)
+                            .header("Content-Type", "application/json")
+                            .body(body),
+                    )
+                    .send()
+                    .await?;
+                self.handle_response(resp).await
+            }
+        })
+        .await
     }
 
     /// GET an authed relay endpoint (NIP-98), returning the raw JSON body.
@@ -762,30 +817,174 @@ impl BuzzClient {
     /// stored events.
     pub async fn get_authed(&self, path: &str) -> Result<String, CliError> {
         let url = format!("{}{path}", self.relay_url);
-        let resp = self
-            .with_retry(|| {
-                let url = url.clone();
-                async move {
-                    let auth = sign_nip98(&self.keys, "GET", &url, None)?;
-                    Ok(self
-                        .with_auth_tag(self.http.get(&url).header("Authorization", auth))
-                        .send()
-                        .await?)
-                }
-            })
-            .await?;
-        self.handle_response(resp).await
+        self.with_retry_body(|| {
+            let url = url.clone();
+            async move {
+                let auth = sign_nip98(&self.keys, "GET", &url, None)?;
+                let resp = self
+                    .with_auth_tag(self.http.get(&url).header("Authorization", auth))
+                    .send()
+                    .await?;
+                self.handle_response(resp).await
+            }
+        })
+        .await
     }
 
     /// Submit a signed Nostr event via POST /events.
+    ///
+    /// For non-idempotent moderation command kinds (9040–9044), an ambiguous
+    /// outcome (mid-request error, body loss, non-ingest 429, or 502/503/504)
+    /// surfaces as `CliError::DeliveryUnknown` instead of being retried.  These
+    /// events execute at the relay *before* any dedup check, so a blind re-send
+    /// can duplicate the mutation.  Only confirmed-unreceived failures (TCP
+    /// connect error or a pre-ingest 429 carrying a `rate-limited:` body) are
+    /// safe to retry.
+    ///
+    /// All other event kinds retain the standard retry policy.
     pub async fn submit_event(&self, event: nostr::Event) -> Result<String, CliError> {
+        let kind = event.kind.as_u16();
+        if is_moderation_kind(kind) {
+            self.submit_moderation_event(event).await
+        } else {
+            self.submit_stored_event(event).await
+        }
+    }
+
+    /// Submit a moderation command (kinds 9040–9044) with non-idempotent retry policy.
+    async fn submit_moderation_event(&self, event: nostr::Event) -> Result<String, CliError> {
+        let url = format!("{}/events", self.relay_url);
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(&event)
+                .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?,
+        );
+
+        for attempt in 0..RETRY_MAX_ATTEMPTS {
+            let is_last = attempt == RETRY_MAX_ATTEMPTS - 1;
+
+            // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
+            // event ID, keeping retries safe against the relay's replay guard.
+            let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+            let send_result: Result<reqwest::Response, CliError> = self
+                .with_auth_tag(
+                    self.http
+                        .post(&url)
+                        .header("Authorization", auth)
+                        .header("Content-Type", "application/json")
+                        .body(body.clone()),
+                )
+                .send()
+                .await
+                .map_err(CliError::from);
+
+            match send_result {
+                Err(e) => {
+                    if let CliError::Network(ref net_err) = e {
+                        // Only connect-failure is safe to retry: the relay never saw
+                        // the request. Timeout and mid-request errors are ambiguous.
+                        if !is_last && net_err.is_connect() {
+                            tokio::time::sleep(jitter_delay(attempt)).await;
+                            continue;
+                        }
+                        if net_err.is_connect()
+                            || net_err.is_timeout()
+                            || net_err.is_request()
+                            || net_err.is_body()
+                            || net_err.is_decode()
+                        {
+                            // Ambiguous: the relay may have executed this command.
+                            return Err(CliError::DeliveryUnknown(format!(
+                                "moderation command (kind {}) outcome unknown: {}",
+                                event.kind.as_u16(),
+                                net_err
+                            )));
+                        }
+                    }
+                    return Err(e);
+                }
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    if status == 429 {
+                        // Only retry if the relay's own ingest layer rejected it
+                        // (body starts with "rate-limited:"). A proxy-level 429
+                        // does not guarantee the relay never saw the request.
+                        let body_text = resp.text().await.unwrap_or_default();
+                        if !is_last && body_text.trim_start().starts_with("rate-limited:") {
+                            match parse_retry_in_secs(&body_text) {
+                                Some(hint) => {
+                                    tokio::time::sleep(Duration::from_secs(
+                                        hint.min(RETRY_IN_MAX_SECS),
+                                    ))
+                                    .await;
+                                }
+                                None => {
+                                    tokio::time::sleep(jitter_delay(attempt)).await;
+                                }
+                            }
+                            continue;
+                        }
+                        // Non-ingest 429 or final attempt: outcome unknown.
+                        return Err(CliError::DeliveryUnknown(format!(
+                            "moderation command (kind {}) outcome unknown: HTTP 429",
+                            event.kind.as_u16()
+                        )));
+                    }
+                    if matches!(status, 502..=504) {
+                        // Proxy-level error: the relay may have received and executed
+                        // the command before the proxy failed.
+                        return Err(CliError::DeliveryUnknown(format!(
+                            "moderation command (kind {}) outcome unknown: HTTP {status}",
+                            event.kind.as_u16()
+                        )));
+                    }
+                    // 2xx or definitive error (4xx other than 429): read body normally.
+                    let body_text = resp.text().await.map_err(|e| {
+                        // Body loss after relay confirmed receipt is ambiguous for
+                        // non-idempotent commands.
+                        CliError::DeliveryUnknown(format!(
+                            "moderation command (kind {}) outcome unknown: response body lost: {e}",
+                            event.kind.as_u16()
+                        ))
+                    })?;
+                    // Map the body through handle_response's error logic inline.
+                    if !resp_was_success(status) {
+                        let message = serde_json::from_str::<serde_json::Value>(&body_text)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("error")
+                                    .or_else(|| v.get("message"))
+                                    .and_then(|m| m.as_str())
+                                    .map(str::to_string)
+                            })
+                            .unwrap_or(body_text);
+                        let message = if status == 403 && std::env::var("BUZZ_AUTH_TAG").is_ok() {
+                            format!(
+                                "{message} (BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it)"
+                            )
+                        } else {
+                            message
+                        };
+                        return Err(CliError::Relay {
+                            status,
+                            body: message,
+                        });
+                    }
+                    return Ok(body_text);
+                }
+            }
+        }
+        unreachable!("loop exhausts all RETRY_MAX_ATTEMPTS")
+    }
+
+    /// Submit a stored event (all non-moderation kinds) with the standard retry policy.
+    async fn submit_stored_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let url = format!("{}/events", self.relay_url);
         let body = bytes::Bytes::from(
             serde_json::to_vec(&event)
                 .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?,
         );
         let resp = self
-            .with_retry(|| {
+            .with_retry_response(|| {
                 let body = body.clone();
                 let url = url.clone();
                 async move {
@@ -887,7 +1086,7 @@ impl BuzzClient {
         let url = format!("{}/upload", self.relay_url);
         let upload_body = bytes::Bytes::from(bytes);
         let mut resp = self
-            .with_retry(|| {
+            .with_retry_response(|| {
                 let upload_body = upload_body.clone();
                 let url = url.clone();
                 let mime = mime.clone();
@@ -950,26 +1149,24 @@ impl BuzzClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| CliError::Other(format!("http client init failed: {e}")))?;
-        let resp = self
-            .with_retry(|| {
-                let url = url.clone();
-                let client = client.clone();
-                async move {
-                    let auth_header = sign_blossom_get(&self.keys, &url)?;
-                    Ok(self
-                        .with_auth_tag(client.get(&url).header("Authorization", auth_header))
-                        .send()
-                        .await?)
+        self.with_retry_body(|| {
+            let url = url.clone();
+            let client = client.clone();
+            async move {
+                let auth_header = sign_blossom_get(&self.keys, &url)?;
+                let resp = self
+                    .with_auth_tag(client.get(&url).header("Authorization", auth_header))
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(CliError::Relay { status, body });
                 }
-            })
-            .await?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(CliError::Relay { status, body });
-        }
-
-        resp.bytes().await.map_err(CliError::Network)
+                resp.bytes().await.map_err(CliError::Network)
+            }
+        })
+        .await
     }
 
     async fn handle_response(&self, resp: reqwest::Response) -> Result<String, CliError> {
@@ -1153,8 +1350,8 @@ mod retry_tests {
     use std::time::Duration;
 
     use super::{
-        env_duration_secs, jitter_delay, parse_retry_in_secs, RETRY_BASE_SECS, RETRY_IN_MAX_SECS,
-        RETRY_MAX_ATTEMPTS,
+        env_duration_secs, is_moderation_kind, jitter_delay, parse_retry_in_secs, RETRY_BASE_SECS,
+        RETRY_IN_MAX_SECS, RETRY_MAX_ATTEMPTS,
     };
 
     // ---- parse_retry_in_secs ----
@@ -1191,6 +1388,25 @@ mod retry_tests {
     #[test]
     fn parse_empty_body_returns_none() {
         assert_eq!(parse_retry_in_secs(""), None);
+    }
+
+    // ---- is_moderation_kind ----
+
+    #[test]
+    fn moderation_kind_covers_9040_through_9044() {
+        for kind in 9040u16..=9044 {
+            assert!(is_moderation_kind(kind), "kind {kind} should be moderation");
+        }
+    }
+
+    #[test]
+    fn non_moderation_kinds_are_not_moderation() {
+        for kind in [1u16, 9039, 9045, 39000, 20000, 30023] {
+            assert!(
+                !is_moderation_kind(kind),
+                "kind {kind} should not be moderation"
+            );
+        }
     }
 
     // ---- jitter bounds ----
@@ -1240,6 +1456,255 @@ mod retry_tests {
         // Unset uses the default.
         std::env::remove_var(KEY);
         assert_eq!(env_duration_secs(KEY, 30), Duration::from_secs(30));
+    }
+}
+
+/// Integration tests for the kind-aware retry policy and body-boundary coverage.
+///
+/// These tests spin up a local HTTP server using axum and issue real HTTP requests
+/// through `BuzzClient` to verify behavioural properties — not implementation details.
+#[cfg(test)]
+mod retry_policy_tests {
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, Response, StatusCode};
+    use axum::routing::post;
+    use axum::Router;
+    use nostr::{EventBuilder, Keys, Kind};
+    use tokio::net::TcpListener;
+
+    use super::super::error::CliError;
+    use super::BuzzClient;
+
+    /// Spawn a one-shot axum server on a random port.  The handler `f` receives the
+    /// attempt counter (incremented before every call) and returns a `(StatusCode,
+    /// String)`.  Returns the base URL and a join handle so the caller can assert
+    /// attempt counts after the test.
+    async fn test_server<F>(f: F) -> (String, Arc<AtomicU32>)
+    where
+        F: Fn(u32) -> (StatusCode, String) + Send + Sync + 'static,
+    {
+        let counter = Arc::new(AtomicU32::new(0));
+        let handler: Arc<dyn Fn(u32) -> (StatusCode, String) + Send + Sync> = Arc::new(f);
+        let state = (handler, counter.clone());
+
+        type S = (
+            Arc<dyn Fn(u32) -> (StatusCode, String) + Send + Sync>,
+            Arc<AtomicU32>,
+        );
+        let app = Router::new()
+            .route(
+                "/events",
+                post(
+                    |State((handler, ctr)): State<S>, _headers: HeaderMap, _body: Body| async move {
+                        let n = ctr.fetch_add(1, Ordering::SeqCst) + 1;
+                        let (status, body) = handler(n);
+                        Response::builder()
+                            .status(status)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap()
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), counter)
+    }
+
+    fn test_client(base_url: &str) -> BuzzClient {
+        let keys = Keys::generate();
+        BuzzClient::new(base_url.to_string(), keys, None, None).unwrap()
+    }
+
+    fn make_moderation_event(keys: &Keys, kind: u16) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(kind), "")
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    fn make_stored_event(keys: &Keys) -> nostr::Event {
+        EventBuilder::new(Kind::TextNote, "hi")
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    /// A moderation command (kind 9040) that fails the first attempt with HTTP 429
+    /// carrying a plain (non-relay-ingest) body is NOT retried — surfaces as
+    /// `DeliveryUnknown`.
+    #[tokio::test]
+    async fn moderation_kind_non_ingest_429_returns_delivery_unknown() {
+        let (url, attempts) = test_server(|_n| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"error":"slow down"}"#.to_string(),
+            )
+        })
+        .await;
+        let client = test_client(&url);
+        let event = make_moderation_event(client.keys(), 9040);
+        let err = client.submit_event(event).await.unwrap_err();
+        assert!(
+            matches!(err, CliError::DeliveryUnknown(_)),
+            "expected DeliveryUnknown, got {err:?}"
+        );
+        // Non-ingest 429 must not be retried — exactly 1 attempt.
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "must not retry non-ingest 429"
+        );
+    }
+
+    /// A moderation command (kind 9041) that gets a relay-ingest 429
+    /// (`rate-limited:` prefix) IS retried until it succeeds.
+    #[tokio::test]
+    async fn moderation_kind_ingest_429_is_retried_until_success() {
+        let (url, attempts) = test_server(|n| {
+            if n < 2 {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    r#"rate-limited: quota exceeded; retry in 0s"#.to_string(),
+                )
+            } else {
+                (
+                    StatusCode::OK,
+                    r#"{"event_id":"abc","accepted":true,"message":""}"#.to_string(),
+                )
+            }
+        })
+        .await;
+        let client = test_client(&url);
+        let event = make_moderation_event(client.keys(), 9041);
+        let result = client.submit_event(event).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after ingest-429 retry, got {result:?}"
+        );
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 2,
+            "must have retried at least once"
+        );
+    }
+
+    /// A moderation command (kind 9042) that gets HTTP 502 returns `DeliveryUnknown`
+    /// immediately — proxy errors leave relay execution state ambiguous.
+    #[tokio::test]
+    async fn moderation_kind_502_returns_delivery_unknown() {
+        let (url, attempts) =
+            test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
+        let client = test_client(&url);
+        let event = make_moderation_event(client.keys(), 9042);
+        let err = client.submit_event(event).await.unwrap_err();
+        assert!(
+            matches!(err, CliError::DeliveryUnknown(_)),
+            "expected DeliveryUnknown for 502, got {err:?}"
+        );
+        // 502 must not be retried — exactly 1 attempt.
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "must not retry 502 for moderation kind"
+        );
+    }
+
+    /// A stored (non-moderation) event submitted to a server that returns 502 on the
+    /// first attempt and then succeeds is retried under the standard policy.
+    #[tokio::test]
+    async fn stored_event_502_is_retried_under_standard_policy() {
+        let (url, attempts) = test_server(|n| {
+            if n == 1 {
+                (StatusCode::BAD_GATEWAY, "transient".to_string())
+            } else {
+                (
+                    StatusCode::OK,
+                    r#"{"event_id":"abc","accepted":true,"message":""}"#.to_string(),
+                )
+            }
+        })
+        .await;
+        let client = test_client(&url);
+        let event = make_stored_event(client.keys());
+        let result = client.submit_event(event).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after 502 retry for stored event, got {result:?}"
+        );
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 2,
+            "must have retried at least once"
+        );
+    }
+
+    /// `with_retry_body` retries on `is_body()` network errors (F2: body transfer inside
+    /// the retry boundary).  Verified by confirming that a call through `get_authed`
+    /// (which uses `with_retry_body`) retries when the server drops the connection after
+    /// sending headers.  We simulate body loss by returning an intentionally truncated
+    /// chunked response that reqwest will surface as an `is_body()` error.
+    ///
+    /// This test uses a raw TCP server to write partial HTTP responses; axum cannot
+    /// easily simulate mid-body connection drops.
+    #[tokio::test]
+    async fn with_retry_body_retries_on_body_transfer_failure() {
+        use tokio::io::AsyncWriteExt;
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter2 = counter.clone();
+
+        // Bind a raw TCP listener.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let n = counter2.fetch_add(1, Ordering::SeqCst) + 1;
+
+                // Consume the request (required to avoid connection reset by server).
+                let mut buf = vec![0u8; 4096];
+                use tokio::io::AsyncReadExt;
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    stream.read(&mut buf),
+                )
+                .await;
+
+                if n < 3 {
+                    // Attempts 1 & 2: send valid headers claiming a body, then drop.
+                    let partial = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"partial\":";
+                    let _ = stream.write_all(partial).await;
+                    // Drop the stream without completing the body — causes is_body() on client.
+                } else {
+                    // Attempt 3: complete response.
+                    let ok = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}";
+                    let _ = stream.write_all(ok).await;
+                }
+            }
+        });
+
+        let base = format!("http://{addr}");
+        // get_authed internally uses with_retry_body — the body read is inside the retry loop.
+        let client = test_client(&base);
+        // Stub path: the raw TCP server ignores the URL and always responds based on attempt count.
+        let result = client.get_authed("/any-path").await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after body-loss retries, got {result:?}"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "expected 3 attempts (2 body-loss + 1 success)"
+        );
     }
 }
 

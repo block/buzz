@@ -82,3 +82,5 @@ rand = { workspace = true }
 [dev-dependencies]
 # Scratch files for channel-templates.json fixtures in tests
 tempfile = "3"
+# Minimal HTTP test server for retry/policy integration tests
+axum = { workspace = true }
