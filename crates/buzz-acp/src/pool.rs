@@ -859,13 +859,13 @@ async fn create_session_and_apply_model(
     );
 
     // Apply permission mode if not the agent's built-in default AND the agent
-    // advertises the requested mode in session/new. Agents that don't support
+    // advertises a compatible mode in session/new. Agents that don't support
     // the mode (e.g., goose crashes on unrecognized set_config_option values)
-    // are safely skipped — the harness auto-approves via handle_permission_request.
-    if !ctx.permission_mode.is_default()
-        && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
-    {
-        apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
+    // are safely skipped; the harness auto-approves via handle_permission_request.
+    if !ctx.permission_mode.is_default() {
+        if let Some(mode_id) = resolve_permission_mode_id(&resp.raw, &ctx.permission_mode) {
+            apply_permission_mode(&mut agent.acp, &resp.session_id, mode_id).await?;
+        }
     }
 
     Ok(resp.session_id)
@@ -946,26 +946,43 @@ async fn apply_model_switch(
     Ok(())
 }
 
+/// Resolve the ACP mode ID that matches the requested permission semantics.
+///
+/// Most adapters use Buzz's wire IDs directly. Codex ACP names its equivalent
+/// bypass preset `agent-full-access`, so accept that as a compatibility alias
+/// only when `bypassPermissions` itself is not advertised.
+fn resolve_permission_mode_id(
+    session_new_result: &serde_json::Value,
+    permission_mode: &PermissionMode,
+) -> Option<&'static str> {
+    let available_modes = session_new_result
+        .get("modes")
+        .and_then(|m| m.get("availableModes"))
+        .and_then(|a| a.as_array())?;
+
+    let requested = permission_mode.as_wire_str();
+    if available_modes
+        .iter()
+        .any(|mode| mode.get("id").and_then(|value| value.as_str()) == Some(requested))
+    {
+        return Some(requested);
+    }
+
+    if matches!(permission_mode, PermissionMode::BypassPermissions)
+        && available_modes.iter().any(|mode| {
+            mode.get("id").and_then(|value| value.as_str()) == Some("agent-full-access")
+        })
+    {
+        return Some("agent-full-access");
+    }
+
+    None
+}
+
 /// Set the session permission mode via `session/set_config_option`.
 ///
 /// Non-fatal for most errors: logs and proceeds. The agent falls back
 /// to its default permission mode (`"default"`), which still works via
-/// Check if the agent's `session/new` response advertises a given mode ID
-/// in `result.modes.availableModes[].id`. Returns `false` if the modes
-/// field is absent or the mode isn't listed.
-fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) -> bool {
-    session_new_result
-        .get("modes")
-        .and_then(|m| m.get("availableModes"))
-        .and_then(|a| a.as_array())
-        .map(|modes| {
-            modes
-                .iter()
-                .any(|m| m.get("id").and_then(|v| v.as_str()) == Some(mode_wire))
-        })
-        .unwrap_or(false)
-}
-
 /// per-tool auto-approval in `handle_permission_request`.
 ///
 /// **Fatal exception:** if the agent process exits (e.g., goose crashes on
@@ -973,11 +990,10 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
 async fn apply_permission_mode(
     acp: &mut AcpClient,
     session_id: &str,
-    mode: &PermissionMode,
+    mode_wire: &str,
 ) -> Result<(), AcpError> {
-    let wire = mode.as_wire_str();
     let result = tokio::time::timeout(PERMISSION_MODE_TIMEOUT, async {
-        acp.session_set_config_option(session_id, "mode", wire)
+        acp.session_set_config_option(session_id, "mode", mode_wire)
             .await
     })
     .await;
@@ -986,7 +1002,7 @@ async fn apply_permission_mode(
         Ok(Ok(_)) => {
             tracing::info!(
                 target: "pool::permission",
-                "applied permission mode {wire:?} on session {session_id}"
+                "applied permission mode {mode_wire:?} on session {session_id}"
             );
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
@@ -998,7 +1014,7 @@ async fn apply_permission_mode(
         | Ok(Err(e @ AcpError::AgentExited)) => {
             tracing::error!(
                 target: "pool::permission",
-                "fatal error setting permission mode {wire:?}: {e}"
+                "fatal error setting permission mode {mode_wire:?}: {e}"
             );
             return Err(e);
         }
@@ -1006,7 +1022,7 @@ async fn apply_permission_mode(
         Ok(Err(e)) => {
             tracing::warn!(
                 target: "pool::permission",
-                "failed to set permission mode {wire:?}: {e} — falling back to per-tool auto-approval"
+                "failed to set permission mode {mode_wire:?}: {e} — falling back to per-tool auto-approval"
             );
         }
         Err(_) => {
@@ -3608,6 +3624,59 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[test]
+    fn permission_mode_prefers_the_requested_wire_id() {
+        let session = json!({
+            "modes": {
+                "availableModes": [
+                    {"id": "bypassPermissions"},
+                    {"id": "agent-full-access"}
+                ]
+            }
+        });
+
+        assert_eq!(
+            resolve_permission_mode_id(&session, &PermissionMode::BypassPermissions),
+            Some("bypassPermissions")
+        );
+    }
+
+    #[test]
+    fn bypass_permissions_maps_to_codex_full_access_mode() {
+        let session = json!({
+            "modes": {
+                "availableModes": [
+                    {"id": "read-only"},
+                    {"id": "agent"},
+                    {"id": "agent-full-access"}
+                ]
+            }
+        });
+
+        assert_eq!(
+            resolve_permission_mode_id(&session, &PermissionMode::BypassPermissions),
+            Some("agent-full-access")
+        );
+    }
+
+    #[test]
+    fn permission_mode_does_not_map_to_a_weaker_semantic_alias() {
+        let session = json!({
+            "modes": {
+                "availableModes": [
+                    {"id": "read-only"},
+                    {"id": "agent"},
+                    {"id": "agent-full-access"}
+                ]
+            }
+        });
+
+        assert_eq!(
+            resolve_permission_mode_id(&session, &PermissionMode::AcceptEdits),
+            None
+        );
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
