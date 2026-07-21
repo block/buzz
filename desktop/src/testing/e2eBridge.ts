@@ -10489,6 +10489,10 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "agent_metric_archive_default_enabled":
         return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;
+      case "set_prevent_sleep_active":
+        return null;
+      case "plugin:window|is_fullscreen":
+        return false;
       case "merge_save_subscription_kinds": {
         // Mirrors `merge_owner_p_kinds`: union `kind` into the owner_p row's
         // kinds, creating the row if it doesn't exist yet.
