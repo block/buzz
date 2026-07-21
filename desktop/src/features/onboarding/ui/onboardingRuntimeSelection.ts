@@ -4,6 +4,7 @@ export const ONBOARDING_RUNTIME_ORDER = [
   "claude",
   "codex",
   "goose",
+  "pi",
   "buzz-agent",
 ];
 
@@ -56,7 +57,9 @@ export function runtimeCanBeSelected(runtime: AcpRuntimeCatalogEntry) {
       runtime.authStatus.status === "logged_out"
     );
   }
-  return runtime.id === "buzz-agent" || runtime.id === "goose";
+  return (
+    runtime.id === "buzz-agent" || runtime.id === "goose" || runtime.id === "pi"
+  );
 }
 
 export function runtimeCanAdvanceOnboarding(runtime: AcpRuntimeCatalogEntry) {

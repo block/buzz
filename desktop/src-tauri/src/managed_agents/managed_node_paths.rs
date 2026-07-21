@@ -46,7 +46,7 @@ pub(crate) fn buzz_managed_command_path(command: &str, basename: &str) -> Option
     if command.contains(std::path::MAIN_SEPARATOR)
         || !matches!(
             command,
-            "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "node" | "npm"
+            "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "pi-acp" | "pi" | "node" | "npm"
         )
     {
         return None;
