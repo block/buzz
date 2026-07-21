@@ -279,6 +279,10 @@ mod tests {
             let _ = stream.flush();
         });
 
+        // Capture t0 before arming so elapsed is measured from before the gate
+        // expiry is set (expiry = now + 1s), guaranteeing elapsed ≥ 1s.
+        let t0 = std::time::Instant::now();
+
         // Arm the gate for 1s — simulates what relay_error_message does on any
         // gated path that receives a 429, e.g. submit_engram_event.
         activate_rate_limit(Some(1));
@@ -289,7 +293,6 @@ mod tests {
 
         // query_relay is a different gated path — it must wait out the 1s window
         // even though it was not the source of the 429.
-        let t0 = std::time::Instant::now();
         let events = crate::relay::query_relay(&state, &filters)
             .await
             .expect("query must succeed after admission wait");
