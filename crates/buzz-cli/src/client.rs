@@ -146,19 +146,13 @@ fn env_duration_secs(name: &str, default: u64) -> Duration {
         .unwrap_or_else(|| Duration::from_secs(default))
 }
 
-/// Parse a `retry in Ns` hint from a relay 429 body.
+/// Scan a plain-text string for a `retry in <N>s` pattern and return `N`.
 ///
-/// Searches the `error` or `message` JSON field for the pattern `retry in <N>s`
-/// and returns `Some(N)`. Returns `None` when the body is missing, not valid
-/// JSON, or does not contain the pattern.
-fn parse_retry_in_secs(body: &str) -> Option<u64> {
-    let text = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| {
-            v.get("error")
-                .or_else(|| v.get("message"))
-                .and_then(|m| m.as_str().map(str::to_string))
-        })?;
+/// Matches the literal substring `retry in ` followed by one or more ASCII digits
+/// and the character `s`. Works on both extracted field values (`rate-limited:
+/// quota exceeded; retry in 4s`) and substrings of raw relay JSON bodies.
+/// Returns `None` when the pattern is absent or the digit sequence is empty.
+fn parse_retry_hint_text(text: &str) -> Option<u64> {
     const PREFIX: &str = "retry in ";
     let after = text.find(PREFIX).map(|i| &text[i + PREFIX.len()..])?;
     let end = after
@@ -168,6 +162,22 @@ fn parse_retry_in_secs(body: &str) -> Option<u64> {
         return None;
     }
     after[..end].parse::<u64>().ok()
+}
+
+/// Parse a `retry in Ns` hint from a relay 429 JSON body.
+///
+/// Extracts the `error` or `message` field and delegates to
+/// `parse_retry_hint_text`. Returns `None` when the body is not valid JSON or
+/// the extracted field does not contain the pattern.
+fn parse_retry_in_secs(body: &str) -> Option<u64> {
+    let text = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .or_else(|| v.get("message"))
+                .and_then(|m| m.as_str().map(str::to_string))
+        })?;
+    parse_retry_hint_text(&text)
 }
 
 fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
@@ -660,7 +670,7 @@ impl BuzzClient {
                                 Some(jitter_delay(attempt))
                             }
                             CliError::Relay { status: 429, body } => {
-                                let d = parse_retry_in_secs(body)
+                                let d = parse_retry_hint_text(body)
                                     .map(|s| Duration::from_secs(s.min(RETRY_IN_MAX_SECS)))
                                     .unwrap_or_else(|| jitter_delay(attempt));
                                 Some(d)
@@ -1370,8 +1380,8 @@ mod retry_tests {
     use std::time::Duration;
 
     use super::{
-        env_duration_secs, is_moderation_kind, jitter_delay, parse_retry_in_secs, RETRY_BASE_SECS,
-        RETRY_IN_MAX_SECS, RETRY_MAX_ATTEMPTS,
+        env_duration_secs, is_moderation_kind, jitter_delay, parse_retry_hint_text,
+        parse_retry_in_secs, RETRY_BASE_SECS, RETRY_IN_MAX_SECS, RETRY_MAX_ATTEMPTS,
     };
 
     // ---- parse_retry_in_secs ----
@@ -1408,6 +1418,36 @@ mod retry_tests {
     #[test]
     fn parse_empty_body_returns_none() {
         assert_eq!(parse_retry_in_secs(""), None);
+    }
+
+    // ---- parse_retry_hint_text ----
+
+    #[test]
+    fn hint_text_plain_extracted_field_returns_secs() {
+        // Shape produced by handle_response: JSON extracted, plain text arrives.
+        assert_eq!(
+            parse_retry_hint_text("rate-limited: quota exceeded; retry in 4s"),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn hint_text_raw_json_body_returns_secs() {
+        // Shape from download_media's inline error path: raw JSON body preserved.
+        assert_eq!(
+            parse_retry_hint_text(r#"{"error":"rate-limited: retry in 7s"}"#),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn hint_text_plain_no_pattern_returns_none() {
+        assert_eq!(parse_retry_hint_text("rate-limited: slow down"), None);
+    }
+
+    #[test]
+    fn hint_text_empty_returns_none() {
+        assert_eq!(parse_retry_hint_text(""), None);
     }
 
     // ---- is_moderation_kind ----
@@ -1727,14 +1767,20 @@ mod retry_policy_tests {
         );
     }
 
-    /// `with_retry_body` retries a 429 with a `retry in Ns` hint and ultimately succeeds.
+    /// `with_retry_body` retries a 429 with a `retry in Ns` hint, honours the hint
+    /// delay (not the shorter jitter fallback), and ultimately succeeds.
+    ///
+    /// Uses a 2s hint; jitter max for attempt 0 is 0.5s, so asserting elapsed ≥ 2s
+    /// cleanly distinguishes hint-honoured from jitter-fallback.
     #[tokio::test]
     async fn query_429_with_hint_is_retried() {
         let (url, attempts) = get_server(|n| {
             if n < 2 {
                 (
                     StatusCode::TOO_MANY_REQUESTS,
-                    r#"{"error":"retry in 0s"}"#.to_string(),
+                    // handle_response extracts the "error" field; the plain text
+                    // "rate-limited: retry in 2s" then reaches parse_retry_hint_text.
+                    r#"{"error":"rate-limited: retry in 2s"}"#.to_string(),
                 )
             } else {
                 (StatusCode::OK, r#"{"ok":true}"#.to_string())
@@ -1742,7 +1788,13 @@ mod retry_policy_tests {
         })
         .await;
         let client = test_client(&url);
+        let t0 = std::time::Instant::now();
+        // Measure from just before attempt 1 fires so we capture the inter-attempt wait.
         let result = client.get_authed("/info").await;
+        // Record elapsed after attempt 1 returns (inside the future) is not possible
+        // directly, but the total includes the hint sleep; jitter max is 0.5s so ≥ 2s
+        // proves the hint was honoured.
+        let elapsed = t0.elapsed();
         assert!(
             result.is_ok(),
             "expected Ok after 429 retry, got {result:?}"
@@ -1750,6 +1802,11 @@ mod retry_policy_tests {
         assert!(
             attempts.load(Ordering::SeqCst) >= 2,
             "must have retried at least once"
+        );
+        assert!(
+            elapsed.as_secs_f64() >= 2.0,
+            "elapsed {:.2}s < 2s — hint was not honoured (fell back to jitter)",
+            elapsed.as_secs_f64()
         );
     }
 
