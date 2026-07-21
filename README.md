@@ -186,7 +186,7 @@ If you'd rather point buzz at a different bash-compatible shell, set `BUZZ_SHELL
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          buzz-relay                                     │
 │  NIP-01 · NIP-42 auth · channel/DM/media/workflow/git REST · audit log  │
-└───┬──────────────────────────┬──────────────────────────┬──────────────┘
+└───┬──────────────────────────┬──────────────────────────┬───────────────┘
     │                          │                          │
  ┌──▼───────────┐       ┌──────▼──────┐           ┌───────▼─────┐
  │   Postgres   │       │    Redis    │           │   S3/MinIO  │
