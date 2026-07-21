@@ -8,6 +8,10 @@ import {
   isRelayConnectionDegraded,
   useRelayConnection,
 } from "@/shared/api/useRelayConnection";
+import {
+  isRateLimited,
+  waitForRateLimit,
+} from "@/shared/api/relayRateLimitGate";
 
 export const AUTO_HEAL_MIN_INTERVAL_MS = 15_000;
 
@@ -102,10 +106,22 @@ export function useRelayAutoHeal(): void {
 
   if (schedulerRef.current === null) {
     schedulerRef.current = new RelayAutoHealScheduler(
-      () =>
-        void queryClient.invalidateQueries({
-          predicate: isRelayDependentQuery,
-        }),
+      () => {
+        if (isRateLimited()) {
+          // Connection recovered but the relay is still under back-pressure.
+          // Defer the invalidate until the rate-limit window clears so queries
+          // don't immediately refetch and generate another burst.
+          void waitForRateLimit().then(() => {
+            void queryClient.invalidateQueries({
+              predicate: isRelayDependentQuery,
+            });
+          });
+        } else {
+          void queryClient.invalidateQueries({
+            predicate: isRelayDependentQuery,
+          });
+        }
+      },
       AUTO_HEAL_MIN_INTERVAL_MS,
       window.setTimeout.bind(window),
       window.clearTimeout.bind(window),

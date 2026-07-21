@@ -4,12 +4,60 @@ import test from "node:test";
 import {
   buildReconnectReplayFilter,
   replayLiveSubscriptions,
+  REPLAY_BATCH_SIZE,
 } from "./relayReconnectReplay.ts";
 import { buildChannelFilter } from "./relayChannelFilters.ts";
 
-function replayFilter(filter, since, until) {
-  return buildReconnectReplayFilter(filter, since, until);
+// ── Fake-timer + Date.now setup for gate tests ────────────────────────────────
+
+let fakeNow = 0;
+const pendingTimers = new Map();
+let nextTimerId = 1;
+
+function fakeSetTimeout(fn, ms) {
+  const id = nextTimerId++;
+  pendingTimers.set(id, { fn, fireAt: fakeNow + ms });
+  return id;
 }
+
+function fakeClearTimeout(id) {
+  pendingTimers.delete(id);
+}
+
+function tickTo(ms) {
+  fakeNow = ms;
+  for (const [id, { fn, fireAt }] of Array.from(pendingTimers.entries())) {
+    if (fireAt <= fakeNow) {
+      pendingTimers.delete(id);
+      fn();
+    }
+  }
+}
+
+globalThis.window = {
+  setTimeout: fakeSetTimeout,
+  clearTimeout: fakeClearTimeout,
+};
+
+const origDateNow = Date.now;
+function setFakeNow(ms) {
+  fakeNow = ms;
+  Date.now = () => fakeNow;
+}
+
+// Import gate module AFTER window shim so it picks up the fake timers.
+const { activateRateLimit, resetRateLimitGate } = await import(
+  "./relayRateLimitGate.ts"
+);
+
+function resetGate(startMs = 0) {
+  pendingTimers.clear();
+  nextTimerId = 1;
+  setFakeNow(startMs);
+  resetRateLimitGate();
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function event(id, createdAt) {
   return {
@@ -28,6 +76,12 @@ function eventRange(prefix, start, count) {
     event(`${prefix}-${index}`, start + index),
   );
 }
+
+function replayFilter(filter, since, until) {
+  return buildReconnectReplayFilter(filter, since, until);
+}
+
+// ── buildReconnectReplayFilter ────────────────────────────────────────────────
 
 test("reconnect replay preserves small steady-state limits when adding since", () => {
   const filter = {
@@ -102,7 +156,172 @@ test("initial subscription replay preserves the original filter", () => {
   assert.equal(replayFilter(filter, undefined), filter);
 });
 
+// ── Batching: REPLAY_BATCH_SIZE cap ──────────────────────────────────────────
+
+test("replay sends all subs in one batch when count equals REPLAY_BATCH_SIZE", async () => {
+  resetGate();
+  let delayCount = 0;
+  const sentIds = [];
+
+  const subscriptions = new Map(
+    Array.from({ length: REPLAY_BATCH_SIZE }, (_, i) => [
+      `sub-${i}`,
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": [`ch-${i}`], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      },
+    ]),
+  );
+
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async (payload) => {
+      sentIds.push(payload[1]);
+    },
+    requestHistory: async () => [],
+    setTimeoutFn: (fn, _ms) => {
+      delayCount++;
+      fn();
+      return 0;
+    },
+  });
+
+  assert.equal(sentIds.length, REPLAY_BATCH_SIZE);
+  assert.equal(delayCount, 0, "no inter-batch delay for exactly one batch");
+});
+
+test("replay splits subscriptions into batches of REPLAY_BATCH_SIZE", async () => {
+  resetGate();
+  let delayCount = 0;
+  const sentIds = [];
+  const batchBreakpoints = []; // indices where a delay fired
+
+  const subCount = REPLAY_BATCH_SIZE + 3;
+  const subscriptions = new Map(
+    Array.from({ length: subCount }, (_, i) => [
+      `sub-${i}`,
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": [`ch-${i}`], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      },
+    ]),
+  );
+
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async (payload) => {
+      sentIds.push(payload[1]);
+    },
+    requestHistory: async () => [],
+    setTimeoutFn: (fn, _ms) => {
+      delayCount++;
+      batchBreakpoints.push(sentIds.length);
+      fn();
+      return 0;
+    },
+  });
+
+  assert.equal(delayCount, 1, "one inter-batch delay between two batches");
+  assert.equal(sentIds.length, subCount, "all subs sent");
+  // The delay fired after the first batch (REPLAY_BATCH_SIZE subs sent).
+  assert.equal(batchBreakpoints[0], REPLAY_BATCH_SIZE);
+});
+
+// ── Visible-channel priority ──────────────────────────────────────────────────
+
+test("visible channel subscription is sent first", async () => {
+  resetGate();
+  const sentOrder = [];
+
+  const subscriptions = new Map([
+    [
+      "other-1",
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": ["ch-other"], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      },
+    ],
+    [
+      "visible-sub",
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": ["ch-visible"], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      },
+    ],
+    [
+      "other-2",
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": ["ch-other2"], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      },
+    ],
+  ]);
+
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async (payload) => {
+      sentOrder.push(payload[1]);
+    },
+    requestHistory: async () => [],
+    visibleChannelId: "ch-visible",
+  });
+
+  assert.equal(sentOrder[0], "visible-sub", "visible sub sent first");
+  assert.equal(sentOrder.length, 3);
+});
+
+// ── Rate-limit gate deferral ──────────────────────────────────────────────────
+
+test("replay waits for rate-limit gate before sending REQs", async () => {
+  resetGate(0);
+  activateRateLimit(5); // gate active for 5 seconds
+
+  const sentIds = [];
+
+  const replayPromise = replayLiveSubscriptions({
+    subscriptions: new Map([
+      [
+        "sub-1",
+        {
+          mode: "live",
+          filter: { kinds: [9], "#h": ["ch-1"], limit: 50 },
+          onEvent: () => {},
+          lastSeenCreatedAt: undefined,
+        },
+      ],
+    ]),
+    sendRaw: async (payload) => {
+      sentIds.push(payload[1]);
+    },
+    requestHistory: async () => [],
+    setTimeoutFn: (fn, _ms) => {
+      fn();
+      return 0;
+    },
+  });
+
+  // Gate expires — replay should proceed now.
+  tickTo(5_001);
+
+  await replayPromise;
+
+  assert.equal(sentIds.length, 1, "REQ sent after gate expired");
+});
+
+// ── Paged replay (existing behaviour) ────────────────────────────────────────
+
 test("channel reconnect replay pages the missed window until a short page", async () => {
+  resetGate();
   const delivered = [];
   const historyFilters = [];
   const sentPayloads = [];
@@ -174,6 +393,7 @@ test("channel reconnect replay pages the missed window until a short page", asyn
 });
 
 test("reconnect replay starts live REQs in parallel and preserves per-sub page order", async () => {
+  resetGate();
   const sentPayloads = [];
   const sendResolvers = [];
   const historyFiltersByChannel = {
@@ -249,4 +469,11 @@ test("reconnect replay starts live REQs in parallel and preserves per-sub page o
     "channel-1": [2000, 1501],
     "channel-2": [2000, 1701],
   });
+});
+
+// ── Teardown ──────────────────────────────────────────────────────────────────
+
+test("teardown — restore Date.now", () => {
+  Date.now = origDateNow;
+  assert.ok(true);
 });
