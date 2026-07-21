@@ -516,7 +516,9 @@ fn patch_json_records(
 struct LegacyBuiltInAvatar<'a> {
     persona_id: &'a str,
     data_url_sha256: &'a str,
-    media_sha256: &'a str,
+    // Catalog-created agents persist the blob descriptor for the PNG after
+    // `sanitize_image_for_upload` re-encodes it, not the decoded source bytes.
+    sanitized_media_sha256: &'a str,
     persona_content_hash: &'a str,
 }
 
@@ -524,19 +526,19 @@ const LEGACY_BUILTIN_AVATARS: &[LegacyBuiltInAvatar<'static>] = &[
     LegacyBuiltInAvatar {
         persona_id: "builtin:fizz",
         data_url_sha256: "2771b8c9c46aa3c8ac1c4d2acfa23fa9ba35b79c4b1694554e923081e3b8b4d0",
-        media_sha256: "0bb529c5f99cdbe383adb40e318b48708a43689bfac47042a03d4c8b95cbf7aa",
+        sanitized_media_sha256: "1a4964ff4cf6c499df1a77a941c211c7d1e7ef755f1c395bc9a3b0f2878114a6",
         persona_content_hash: "b36381d042c8eb5c786a1a692c7ba5a47ae129b9972a1473b64d8fe03f4817c1",
     },
     LegacyBuiltInAvatar {
         persona_id: "builtin:honey",
         data_url_sha256: "1979e54ef77fc94ec688170bd74dade35c563e7fcc82bb0714c672dfb018eab9",
-        media_sha256: "8cff762b2f9172504be6e4205d914d497d1496db276ad2b44b95fe07601bff99",
+        sanitized_media_sha256: "0e0ed9a35d4050bdd290aa8138d5ab811f222549f6acc3cee40a7feb65933e1f",
         persona_content_hash: "9c9b6b11f1cdd56ba645de02213c562e59c3690bf3f217f74a85df8e6575fd06",
     },
     LegacyBuiltInAvatar {
         persona_id: "builtin:bumble",
         data_url_sha256: "c08cf3b8b4c3f8721df6143367ababdebae8f913b9c654401ba74bb3d233655b",
-        media_sha256: "3ed0dc8d85d18122a3d15b991bd965c85067e8d22adc2af3865800f8b1c2fa3d",
+        sanitized_media_sha256: "9f798c61f8965b80beb808f505feb0a5b33726545188ea8212cc9ab22d05f0b6",
         persona_content_hash: "544a73f9106a3c8848b0f308b7a8b6f95077ac8deccdb9ed5552caa833d66c95",
     },
 ];
@@ -678,8 +680,8 @@ fn legacy_avatar_match<'a>(
         .and_then(serde_json::Value::as_str)?;
     let matches_data_url =
         hex::encode(Sha256::digest(current_avatar.as_bytes())) == metadata.data_url_sha256;
-    let matches_uploaded_media =
-        uploaded_media_sha256(current_avatar).is_some_and(|sha256| sha256 == metadata.media_sha256);
+    let matches_uploaded_media = uploaded_media_sha256(current_avatar)
+        .is_some_and(|sha256| sha256 == metadata.sanitized_media_sha256);
     (matches_data_url || matches_uploaded_media).then(|| LegacyAvatarMatch {
         persona_id: persona_id.to_string(),
         metadata,

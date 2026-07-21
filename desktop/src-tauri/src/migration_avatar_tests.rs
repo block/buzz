@@ -14,13 +14,13 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
         LegacyBuiltInAvatar {
             persona_id: "builtin:fizz",
             data_url_sha256: fizz_hash.as_str(),
-            media_sha256: "",
+            sanitized_media_sha256: "",
             persona_content_hash: "",
         },
         LegacyBuiltInAvatar {
             persona_id: "builtin:honey",
             data_url_sha256: honey_hash.as_str(),
-            media_sha256: "",
+            sanitized_media_sha256: "",
             persona_content_hash: "",
         },
     ];
@@ -174,7 +174,7 @@ fn refresh_builtin_agent_avatars_updates_versions_without_stored_definitions() {
     let legacy_avatars = [LegacyBuiltInAvatar {
         persona_id: "builtin:fizz",
         data_url_sha256: fizz_hash.as_str(),
-        media_sha256: "",
+        sanitized_media_sha256: "",
         persona_content_hash: old_version.as_str(),
     }];
     let records = serde_json::json!([
@@ -228,7 +228,7 @@ fn refresh_builtin_agent_avatars_updates_uploaded_media_urls() {
     let legacy_avatars = [LegacyBuiltInAvatar {
         persona_id: "builtin:fizz",
         data_url_sha256: "not-a-data-url-hash",
-        media_sha256,
+        sanitized_media_sha256: media_sha256,
         persona_content_hash: old_persona_version,
     }];
     let matching_url = format!("https://relay.example/media/{media_sha256}.png?download=1");
