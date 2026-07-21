@@ -1027,6 +1027,28 @@ fn is_retryable_transport_error(e: &reqwest::Error) -> bool {
     e.is_timeout() || e.is_connect() || e.is_request()
 }
 
+/// Build the terminal `AgentError::Llm` for a `post()` exit that has given up
+/// retrying — persistent retryable status, transport failure, or a body-read
+/// break. `detail` carries the specific cause (status/body, or the transport
+/// error text); `elapsed` and `attempts` are the cumulative cost of every
+/// attempt made on this call, including the retries that failed before this
+/// one. When cumulative time crosses `STALL_NOTICE_THRESHOLD`, this also logs
+/// a `tracing::warn!` so a slow-building outage is visible in logs even
+/// before an operator reads the returned error text.
+fn terminal_llm_error(elapsed: std::time::Duration, attempts: u32, detail: &str) -> AgentError {
+    if elapsed >= STALL_NOTICE_THRESHOLD {
+        tracing::warn!(
+            cumulative_stall = ?elapsed,
+            attempts,
+            "llm: cumulative stall {elapsed:?} across {attempts} attempts ({detail})"
+        );
+    }
+    AgentError::Llm(format!(
+        "{detail} (cumulative {elapsed:?}, {attempts} attempt{})",
+        if attempts == 1 { "" } else { "s" },
+    ))
+}
+
 async fn post<F>(http: &Client, url: &str, body: &Value, apply: F) -> Result<Value, AgentError>
 where
     F: Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
@@ -1055,14 +1077,11 @@ where
                     backoff_with_jitter(attempt).await;
                     continue;
                 }
-                let elapsed = call_start.elapsed();
-                if elapsed >= STALL_NOTICE_THRESHOLD {
-                    tracing::warn!(
-                        cumulative_stall = ?elapsed,
-                        "llm: cumulative stall {elapsed:?} across {attempt} retries (transport failure)"
-                    );
-                }
-                return Err(AgentError::Llm(format!("transport: {e}")));
+                return Err(terminal_llm_error(
+                    call_start.elapsed(),
+                    attempt + 1,
+                    &format!("transport: {e}"),
+                ));
             }
         };
         let status = resp.status();
@@ -1071,21 +1090,32 @@ where
         // the two are indistinguishable at the HTTP-status layer. The caller's
         // retry loop keys off `LlmAuth` and refreshes once; the per-call guard
         // bounds a pure-authz 403 to one wasted refresh before it propagates.
+        // Not a stall path: auth failures are not surfaced through
+        // terminal_llm_error, they resolve on the next call after refresh.
         if status == 401 || status == 403 {
             return Err(AgentError::LlmAuth(read_error_body(resp).await));
         }
-        if (status.is_server_error() || status == 429 || status.as_u16() == 499)
-            && attempt + 1 < MAX_RETRIES
-        {
-            tracing::warn!(
-                attempt = attempt + 1,
-                max_attempts = MAX_RETRIES,
-                %status,
-                "llm: retryable status, retrying"
-            );
-            backoff_with_jitter(attempt).await;
-            continue;
+        if status.is_server_error() || status == 429 || status.as_u16() == 499 {
+            if attempt + 1 < MAX_RETRIES {
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts = MAX_RETRIES,
+                    %status,
+                    "llm: retryable status, retrying"
+                );
+                backoff_with_jitter(attempt).await;
+                continue;
+            }
+            let body = read_error_body(resp).await;
+            return Err(terminal_llm_error(
+                call_start.elapsed(),
+                attempt + 1,
+                &format!("exhausted retries: {status}: {body}"),
+            ));
         }
+        // Not a stall path: the model is misconfigured, not the transport or
+        // upstream capacity — no retry was attempted, so cumulative duration
+        // would be misleading.
         if status == 404 {
             return Err(AgentError::LlmModelNotFound(format!(
                 "{status}: {}",
@@ -1118,21 +1148,18 @@ where
                     buf.extend_from_slice(&chunk);
                 }
                 Ok(None) => break,
-                Err(e) => return Err(AgentError::Llm(format!("read: {e}"))),
+                Err(e) => {
+                    return Err(terminal_llm_error(
+                        call_start.elapsed(),
+                        attempt + 1,
+                        &format!("body read: {e}"),
+                    ));
+                }
             }
         }
         return serde_json::from_slice(&buf).map_err(|e| AgentError::Llm(format!("json: {e}")));
     }
-    let elapsed = call_start.elapsed();
-    if elapsed >= STALL_NOTICE_THRESHOLD {
-        tracing::warn!(
-            cumulative_stall = ?elapsed,
-            "llm: cumulative stall {elapsed:?} across {MAX_RETRIES} retries (exhausted)"
-        );
-    }
-    Err(AgentError::Llm(format!(
-        "exhausted retries (cumulative {elapsed:?})"
-    )))
+    unreachable!("loop always returns on its final iteration (attempt + 1 == MAX_RETRIES)");
 }
 
 /// Build the `TokenSource` for the configured provider.
@@ -1193,6 +1220,7 @@ mod tests {
     use crate::config::{Config, HookServers, OpenAiApi, Provider};
     use crate::types::{HistoryItem, ToolCall, ToolResult, ToolResultContent};
     use std::time::Duration;
+    use tracing_subscriber::layer::SubscriberExt;
 
     fn cfg(provider: Provider) -> Config {
         Config {
@@ -2316,14 +2344,158 @@ mod tests {
         let err = post(&client, &url, &serde_json::json!({}), |b| b)
             .await
             .unwrap_err();
-        assert!(
-            matches!(&err, AgentError::Llm(msg) if msg.contains("499")),
-            "expected AgentError::Llm mentioning 499, got: {err:?}"
-        );
+        match &err {
+            AgentError::Llm(msg) => {
+                assert!(
+                    msg.contains("exhausted retries") && msg.contains("499"),
+                    "expected 'exhausted retries' + '499' in error, got: {msg}"
+                );
+                assert!(
+                    msg.contains("cumulative") && msg.contains("3 attempts"),
+                    "expected cumulative duration + exact attempt count, got: {msg}"
+                );
+            }
+            other => panic!("expected AgentError::Llm, got: {other:?}"),
+        }
         assert_eq!(
             accepts.load(Ordering::SeqCst),
             MAX_RETRIES,
             "server must see exactly MAX_RETRIES attempts — 499 must be retried"
+        );
+    }
+
+    /// `terminal_llm_error` below `STALL_NOTICE_THRESHOLD` carries the detail
+    /// and attempt count but no stall-specific text — this is the common case
+    /// (a handful of quick retries), not an outage.
+    #[test]
+    fn terminal_llm_error_below_threshold_carries_detail_no_stall_claim() {
+        let err = terminal_llm_error(Duration::from_secs(2), 3, "exhausted retries: 499: body");
+        match err {
+            AgentError::Llm(msg) => {
+                assert!(msg.contains("cumulative 2s"), "must carry duration: {msg}");
+                assert!(
+                    msg.contains("3 attempts"),
+                    "must carry attempt count: {msg}"
+                );
+                assert!(
+                    msg.contains("exhausted retries") && msg.contains("499"),
+                    "must preserve detail: {msg}"
+                );
+            }
+            other => panic!("expected Llm, got: {other:?}"),
+        }
+    }
+
+    /// Above `STALL_NOTICE_THRESHOLD`, the error still carries the same
+    /// detail/duration/count — the threshold only gates the extra
+    /// `tracing::warn!` (not separately assertable here), not the error text.
+    /// Singular "1 attempt" (not "1 attempts") confirms the pluralization.
+    #[test]
+    fn terminal_llm_error_above_threshold_uses_singular_attempt() {
+        let err = terminal_llm_error(Duration::from_secs(301), 1, "transport: connection reset");
+        match err {
+            AgentError::Llm(msg) => {
+                assert!(
+                    msg.contains("cumulative 301s"),
+                    "must carry duration: {msg}"
+                );
+                assert!(msg.contains("1 attempt"), "must carry count: {msg}");
+                assert!(
+                    !msg.contains("1 attempts"),
+                    "singular for count of 1: {msg}"
+                );
+            }
+            other => panic!("expected Llm, got: {other:?}"),
+        }
+    }
+
+    /// Captures `tracing::warn!` events emitted during a scoped subscriber
+    /// so a test can assert on the stall-notice threshold without a real
+    /// sleep or a global logger.
+    struct StallWarnCapture {
+        count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct StallWarnVisitor {
+        saw_cumulative_stall: bool,
+        saw_attempts: bool,
+    }
+
+    impl tracing::field::Visit for StallWarnVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {
+            match field.name() {
+                "cumulative_stall" => self.saw_cumulative_stall = true,
+                "attempts" => self.saw_attempts = true,
+                _ => {}
+            }
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, _value: u64) {
+            if field.name() == "attempts" {
+                self.saw_attempts = true;
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StallWarnCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            let mut visitor = StallWarnVisitor {
+                saw_cumulative_stall: false,
+                saw_attempts: false,
+            };
+            event.record(&mut visitor);
+            if visitor.saw_cumulative_stall && visitor.saw_attempts {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Runs `f` under a scoped subscriber that only counts `WARN` events
+    /// carrying both `cumulative_stall` and `attempts` fields — the shape
+    /// `terminal_llm_error`'s stall notice emits. Returns that count.
+    fn count_stall_warnings(f: impl FnOnce()) -> usize {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(StallWarnCapture {
+            count: count.clone(),
+        });
+        tracing::subscriber::with_default(subscriber, f);
+        count.load(Ordering::SeqCst)
+    }
+
+    /// Below `STALL_NOTICE_THRESHOLD`, `terminal_llm_error` must not emit the
+    /// stall warning at all — otherwise every ordinary retry-exhaustion would
+    /// falsely read as an outage. This is mutation-sensitive: deleting the
+    /// threshold branch, weakening `>=` to `>` at the boundary, or an
+    /// always-warn mutation are all caught by pairing this with the 300s case
+    /// below.
+    #[test]
+    fn terminal_llm_error_below_threshold_emits_no_stall_warning() {
+        let warnings = count_stall_warnings(|| {
+            let _ = terminal_llm_error(Duration::from_secs(299), 3, "exhausted retries: 499");
+        });
+        assert_eq!(warnings, 0, "no stall warning below STALL_NOTICE_THRESHOLD");
+    }
+
+    /// At `STALL_NOTICE_THRESHOLD`, `terminal_llm_error` must emit exactly
+    /// one stall warning carrying the duration and attempt count — the
+    /// never-warn mutation is caught here; combined with the 299s case above,
+    /// a deleted branch or an always-warn mutation are caught by whichever
+    /// assertion it violates.
+    #[test]
+    fn terminal_llm_error_at_threshold_emits_one_stall_warning() {
+        let warnings = count_stall_warnings(|| {
+            let _ = terminal_llm_error(Duration::from_secs(300), 5, "transport: connection reset");
+        });
+        assert_eq!(
+            warnings, 1,
+            "exactly one stall warning with duration+attempts fields at threshold"
         );
     }
 

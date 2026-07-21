@@ -27,7 +27,7 @@ const MAX_PENDING_PER_CHANNEL: usize = 500;
 const MAX_BATCH_EVENTS: usize = 50;
 
 /// Maximum retry attempts before a batch is dead-lettered.
-const MAX_RETRIES: u32 = 10;
+pub(crate) const MAX_RETRIES: u32 = 10;
 
 /// Base retry delay in seconds (doubled each attempt).
 const BASE_RETRY_DELAY_SECS: u64 = 5;
@@ -599,6 +599,16 @@ impl EventQueue {
     #[cfg(test)]
     pub fn queued_event_count(&self, channel_id: &Uuid) -> usize {
         self.queues.get(channel_id).map_or(0, |q| q.len())
+    }
+
+    /// Force a channel's retry-attempt counter to `count`, simulating `count`
+    /// prior failed attempts without needing to drive fake flush/requeue
+    /// cycles through the queue (which would leave artifact events behind).
+    /// Test-only — lets integration tests outside this module exercise
+    /// `requeue()`'s dead-letter threshold directly.
+    #[cfg(test)]
+    pub fn set_retry_count_for_test(&mut self, channel_id: Uuid, count: u32) {
+        self.retry_counts.insert(channel_id, count);
     }
 
     /// Drop all queued (non-in-flight) events for a channel.
