@@ -158,6 +158,12 @@ type E2eConfig = {
       archived_at?: string | null;
     };
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
+    /** Catalog returned after a successful mocked install. */
+    acpRuntimesCatalogAfterInstall?: RawAcpRuntimeCatalogEntry[];
+    /** Catalog responses after install for testing later sign-in completion. */
+    acpRuntimesCatalogAfterInstallSequence?: RawAcpRuntimeCatalogEntry[][];
+    /** Catalog responses for successive discovery calls. The final response repeats. */
+    acpRuntimesCatalogSequence?: RawAcpRuntimeCatalogEntry[][];
     acpRuntimesDelayMs?: number;
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     acpAuthMethodsErrors?: Record<string, string>;
@@ -6785,6 +6791,9 @@ function withMockRuntimeConfigMetadata(
   };
 }
 
+let runtimeCatalogDiscoveryCount = 0;
+let mockInstallCompleted = false;
+
 async function handleDiscoverAcpRuntimes(
   config: E2eConfig | undefined,
 ): Promise<RawAcpRuntimeCatalogEntry[]> {
@@ -6795,6 +6804,26 @@ async function handleDiscoverAcpRuntimes(
     });
   }
 
+  const afterInstallSequence =
+    config?.mock?.acpRuntimesCatalogAfterInstallSequence;
+  if (mockInstallCompleted && afterInstallSequence?.length) {
+    const index = Math.min(
+      runtimeCatalogDiscoveryCount,
+      afterInstallSequence.length - 1,
+    );
+    runtimeCatalogDiscoveryCount += 1;
+    return afterInstallSequence[index].map(withMockRuntimeConfigMetadata);
+  }
+  const afterInstall = config?.mock?.acpRuntimesCatalogAfterInstall;
+  if (mockInstallCompleted && afterInstall) {
+    return afterInstall.map(withMockRuntimeConfigMetadata);
+  }
+  const sequence = config?.mock?.acpRuntimesCatalogSequence;
+  if (sequence && sequence.length > 0) {
+    const index = Math.min(runtimeCatalogDiscoveryCount, sequence.length - 1);
+    runtimeCatalogDiscoveryCount += 1;
+    return sequence[index].map(withMockRuntimeConfigMetadata);
+  }
   const configured = config?.mock?.acpRuntimesCatalog;
   if (configured) {
     return configured.map(withMockRuntimeConfigMetadata);
@@ -6940,12 +6969,16 @@ async function handleInstallAcpRuntime(
   if (sequence && sequence.length > 0) {
     const idx = Math.min(installCallCount, sequence.length - 1);
     installCallCount++;
-    return sequence[idx];
+    const result = sequence[idx];
+    if (result.success) mockInstallCompleted = true;
+    return result;
   }
   const configured = config?.mock?.installAcpRuntimeResult;
   if (configured) {
+    if (configured.success) mockInstallCompleted = true;
     return configured;
   }
+  mockInstallCompleted = true;
   return {
     success: true,
     steps: [

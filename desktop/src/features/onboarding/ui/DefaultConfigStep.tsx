@@ -124,7 +124,9 @@ function AgentDefaultsSection({
   }, [onHasDefaultRuntimeChange, selectedRuntimeId]);
   const configSurfaceError =
     runtimesQuery.isError ||
-    (!configSurfaceLoading && readyRuntimeIds.length > 0 && !selectedRuntime);
+    (!configSurfaceLoading &&
+      readyRuntimeIds.length > 0 &&
+      readyRuntimes.length === 0);
   const harnessOptions = React.useMemo(
     () =>
       readyRuntimes.map((runtime) => ({

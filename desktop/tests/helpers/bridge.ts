@@ -144,6 +144,12 @@ type MockBridgeOptions = {
     archived_at?: string | null;
   }>;
   acpRuntimesCatalog?: Record<string, unknown>[];
+  /** Catalog returned after a successful mocked install. */
+  acpRuntimesCatalogAfterInstall?: Record<string, unknown>[];
+  /** Catalog responses after install for testing later sign-in completion. */
+  acpRuntimesCatalogAfterInstallSequence?: Record<string, unknown>[][];
+  /** Catalog responses for successive discovery calls. The final response repeats. */
+  acpRuntimesCatalogSequence?: Record<string, unknown>[][];
   acpRuntimesDelayMs?: number;
   acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
   acpAuthMethodsError?: string;

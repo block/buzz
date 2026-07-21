@@ -107,6 +107,23 @@ function RuntimeStatus({
   });
   const connectMutation = useConnectAcpRuntimeMutation();
   const runtimesQuery = useAcpRuntimesQuery();
+  const [isWaitingForSignIn, setIsWaitingForSignIn] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!isWaitingForSignIn) return;
+
+    const interval = window.setInterval(() => {
+      void runtimesQuery.refetch();
+    }, 2_000);
+    const timeout = window.setTimeout(() => {
+      setIsWaitingForSignIn(false);
+    }, 120_000);
+
+    return () => {
+      window.clearInterval(interval);
+      window.clearTimeout(timeout);
+    };
+  }, [isWaitingForSignIn, runtimesQuery.refetch]);
   const authMethods = getOnboardingAuthMethods(
     runtime,
     methodsQuery.data?.methods ?? [],
@@ -128,15 +145,20 @@ function RuntimeStatus({
               void methodsQuery.refetch();
               return;
             }
-            connectMutation.mutate({
-              methodId: authMethod.id,
-              runtimeId: runtime.id,
-            });
+            connectMutation.mutate(
+              {
+                methodId: authMethod.id,
+                runtimeId: runtime.id,
+              },
+              {
+                onSuccess: () => setIsWaitingForSignIn(true),
+              },
+            );
           }}
           type="button"
           variant="ghost"
         >
-          SIGN IN
+          {isWaitingForSignIn ? "CHECKING…" : "SIGN IN"}
         </Button>
         {methodsQuery.error instanceof Error ? (
           <RuntimeErrorTooltip
@@ -611,9 +633,13 @@ function SetupStepContent({
       ),
     [runtimeProviders.items],
   );
+  const readyRuntimeIdsKey = readyRuntimeIds.join("\0");
+  // The key prevents catalog object refreshes from creating an effect loop
+  // when the detected ready IDs have not changed.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keyed by ID content
   React.useEffect(() => {
     onReadyRuntimeIdsChange(readyRuntimeIds);
-  }, [onReadyRuntimeIdsChange, readyRuntimeIds]);
+  }, [onReadyRuntimeIdsChange, readyRuntimeIdsKey]);
 
   return (
     <OnboardingSlideTransition
@@ -633,7 +659,7 @@ function SetupStepContent({
           className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
           data-testid="onboarding-setup-next"
           disabled={readyRuntimeIds.length === 0}
-          onClick={actions.next}
+          onClick={() => actions.next(readyRuntimeIds)}
           type="button"
         >
           Next

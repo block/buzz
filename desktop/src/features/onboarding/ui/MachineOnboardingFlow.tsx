@@ -214,8 +214,9 @@ export function MachineOnboardingFlow({
               actions={{
                 back: () =>
                   setPage(identityWasImported ? "key-import" : "backup"),
-                next: () => {
-                  if (readyRuntimeIds.length > 0) setPage("config");
+                next: (runtimeIds) => {
+                  setReadyRuntimeIds(Array.from(runtimeIds));
+                  setPage("config");
                 },
               }}
               direction="forward"
