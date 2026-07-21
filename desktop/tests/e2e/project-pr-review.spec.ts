@@ -756,6 +756,43 @@ test("project branches can be created from the selected remote branch", async ({
   ).toBeVisible();
 });
 
+test("repository tags can be browsed as immutable remote snapshots", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("button", { name: /main/ }).click();
+  await expect(page.getByText("Tags", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("menuitemradio", { name: /v1\.0\.0.*0123456/ }),
+  ).toBeVisible();
+  await page.getByRole("menuitemradio", { name: /v1\.0\.0.*0123456/ }).click();
+
+  await expect(page.getByRole("button", { name: /v1\.0\.0/ })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Remote", exact: true }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+          .reverse()
+          .find((entry) => entry.command === "get_project_repo_snapshot");
+        return (call?.payload as { targetRef?: string } | undefined)?.targetRef;
+      }),
+    )
+    .toBe("refs/tags/v1.0.0");
+  await page.getByRole("button", { name: /v1\.0\.0/ }).click();
+  await expect(page.getByTestId("project-create-branch")).toHaveCount(0);
+  await expect(page.getByTestId("project-delete-branch")).toHaveCount(0);
+
+  await page.getByRole("menuitemradio", { name: "main" }).click();
+  await page.getByRole("button", { name: /main/ }).click();
+  await expect(page.getByTestId("project-create-branch")).toBeVisible();
+});
+
 test("project branches can be deleted but the default branch cannot", async ({
   page,
 }) => {

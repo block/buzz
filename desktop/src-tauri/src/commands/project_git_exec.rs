@@ -237,6 +237,17 @@ pub(crate) fn clean_branch(value: Option<String>) -> Option<String> {
         .map(ToString::to_string)
 }
 
+pub(crate) fn clean_target_ref(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_string();
+    for prefix in ["refs/tags/", "refs/nostr/"] {
+        if let Some(name) = value.strip_prefix(prefix) {
+            let clean_name = clean_branch(Some(name.to_string()))?;
+            return (clean_name == name).then_some(format!("{prefix}{clean_name}"));
+        }
+    }
+    None
+}
+
 pub(crate) fn validate_clone_url(clone_url: &str) -> Result<(), String> {
     let parsed = Url::parse(clone_url).map_err(|error| format!("invalid clone URL: {error}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -304,7 +315,7 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_branch, git_needs_credentials, git_subcommand, validate_clone_url,
+        clean_branch, clean_target_ref, git_needs_credentials, git_subcommand, validate_clone_url,
         validate_clone_url_against_relay,
     };
 
@@ -360,6 +371,20 @@ mod tests {
         assert_eq!(clean_branch(Some("trailing/".into())), None);
         assert_eq!(clean_branch(Some("bad name".into())), None);
         assert_eq!(clean_branch(None), None);
+    }
+
+    #[test]
+    fn clean_target_ref_accepts_only_tags_and_pull_request_refs() {
+        assert_eq!(
+            clean_target_ref(Some("refs/tags/v1.0.0".into())),
+            Some("refs/tags/v1.0.0".to_string())
+        );
+        assert_eq!(
+            clean_target_ref(Some("refs/nostr/abc123".into())),
+            Some("refs/nostr/abc123".to_string())
+        );
+        assert_eq!(clean_target_ref(Some("refs/heads/main".into())), None);
+        assert_eq!(clean_target_ref(Some("refs/tags/../main".into())), None);
     }
 
     #[test]

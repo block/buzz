@@ -4825,6 +4825,7 @@ function buildMockProjectEvents(): RelayEvent[] {
             }`,
           ],
           ["refs/heads/main", "0123456789abcdef0123456789abcdef01234567"],
+          ["refs/tags/v1.0.0", "0123456789abcdef0123456789abcdef01234567"],
           ...Object.entries(readMockProjectBranches()[seed.dtag] ?? {}).map(
             ([branch, commit]) => [`refs/heads/${branch}`, commit],
           ),

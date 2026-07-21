@@ -1,5 +1,6 @@
 use super::project_git_exec::{
-    build_git_auth_config, clean_branch, run_git, validate_workspace_clone_url, GitAuthConfig,
+    build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_workspace_clone_url,
+    GitAuthConfig,
 };
 use super::project_git_push::push_project_local_repository_blocking;
 use super::project_repo_paths::{canonical_repos_roots, find_local_repo_dir};
@@ -717,8 +718,9 @@ pub async fn get_project_repo_snapshot(
     let auth = build_git_auth_config(&state)?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
-    let target_ref = target_ref.filter(|value| value.starts_with("refs/") && !value.contains(".."));
+    let target_ref = clean_target_ref(target_ref);
     let target_commit = target_commit
+        .map(|value| value.to_ascii_lowercase())
         .filter(|value| matches!(value.len(), 40 | 64))
         .filter(|value| value.chars().all(|c| c.is_ascii_hexdigit()));
 
@@ -729,38 +731,53 @@ pub async fn get_project_repo_snapshot(
             .to_str()
             .ok_or_else(|| "temporary repository path is not UTF-8".to_string())?;
 
-        let mut clone_args = vec!["clone", "--filter=blob:none"];
-        if let Some(ref branch) = branch {
-            clone_args.push("--branch");
-            clone_args.push(branch.as_str());
-        }
-        clone_args.push(clone_url.as_str());
-        clone_args.push(repo_path);
-
-        if run_git(&clone_args, None, &auth).is_err() && branch.is_some() {
-            let has_pr_target = target_ref.is_some() || target_commit.is_some();
-            let fallback_args = if has_pr_target {
-                vec![
+        let explicit_target = target_ref.as_deref().or(target_commit.as_deref());
+        if let Some(fetch_ref) = explicit_target {
+            run_git(
+                &[
                     "clone",
                     "--filter=blob:none",
                     "--no-checkout",
                     clone_url.as_str(),
                     repo_path,
-                ]
-            } else {
-                vec!["clone", "--filter=blob:none", clone_url.as_str(), repo_path]
-            };
-            run_git(&fallback_args, None, &auth)?;
-            if has_pr_target {
-                let fetch_ref = target_ref.as_deref().or(target_commit.as_deref()).unwrap();
+                ],
+                None,
+                &auth,
+            )?;
+            run_git(
+                &["fetch", "--depth=100", "origin", fetch_ref],
+                Some(&repo_dir),
+                &auth,
+            )?;
+            if let Some(expected_commit) = target_commit.as_deref() {
+                let fetched_commit = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &auth)
+                    .ok()
+                    .and_then(|output| first_output_line(&output))
+                    .map(|commit| commit.to_ascii_lowercase())
+                    .ok_or_else(|| "Could not resolve the requested repository ref.".to_string())?;
+                if fetched_commit != expected_commit {
+                    return Err(
+                        "The requested repository ref changed. Refresh and try again.".to_string(),
+                    );
+                }
+            }
+            run_git(
+                &["checkout", "--detach", "FETCH_HEAD"],
+                Some(&repo_dir),
+                &auth,
+            )?;
+        } else {
+            let mut clone_args = vec!["clone", "--filter=blob:none"];
+            if let Some(ref branch) = branch {
+                clone_args.push("--branch");
+                clone_args.push(branch.as_str());
+            }
+            clone_args.push(clone_url.as_str());
+            clone_args.push(repo_path);
+            if run_git(&clone_args, None, &auth).is_err() && branch.is_some() {
                 run_git(
-                    &["fetch", "--depth=100", "origin", fetch_ref],
-                    Some(&repo_dir),
-                    &auth,
-                )?;
-                run_git(
-                    &["checkout", "--detach", "FETCH_HEAD"],
-                    Some(&repo_dir),
+                    &["clone", "--filter=blob:none", clone_url.as_str(), repo_path],
+                    None,
                     &auth,
                 )?;
             }
