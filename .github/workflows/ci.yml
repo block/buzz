@@ -304,7 +304,7 @@ jobs:
             target/ci/buzz-relay
             target/ci/git-credential-nostr
             target/ci/backend-integration-tests.tar.zst
-          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
+          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -338,7 +338,7 @@ jobs:
             target/ci/buzz-relay
             target/ci/git-credential-nostr
             target/ci/backend-integration-tests.tar.zst
-          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
+          key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.github/workflows/ci.yml') }}
       - name: Upload relay artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
