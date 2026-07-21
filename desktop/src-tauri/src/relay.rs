@@ -684,6 +684,16 @@ mod tests {
         assert_eq!(extract_retry_in_hint(""), None);
     }
 
+    #[test]
+    fn overlong_digit_string_returns_none() {
+        // A digit sequence that exceeds u64::MAX cannot be parsed; the function
+        // must return None (→ caller uses the default) rather than panicking.
+        assert_eq!(
+            extract_retry_in_hint("retry in 99999999999999999999999s"),
+            None
+        );
+    }
+
     // ── effective_agent_relay_url: per-agent override precedence ─────────────
 
     #[test]

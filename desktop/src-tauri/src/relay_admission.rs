@@ -8,10 +8,14 @@
 //! `submit_event`, `submit_signed_event`, `submit_signed_event_with_keys`,
 //! `sync_managed_agent_profile`) and the three previously-direct senders
 //! (`submit_engram_event` in snapshot import + team_snapshot, huddle STT)
-//! all call `wait_for_rate_limit()` before `.send()`. Remaining relay-derived
-//! sends (`/info`, media upload/download) operate on per-request credentials
-//! that are not tied to the community quota principal; they are explicitly
-//! outside this gate's admission domain.
+//! all call `wait_for_rate_limit()` before `.send()`.
+//!
+//! **Media upload/download and `/info`** call `relay_error_message()` on
+//! non-200 responses, so their 429s arm the shared gate as conservative
+//! back-off (any relay overload signal is worth honouring across domains).
+//! They do not call `wait_for_rate_limit()` themselves — their operations
+//! are driven by user-initiated file transfers rather than bridge event flow,
+//! and they have independent retry logic.
 //!
 //! **Community scope:** the gate is reset on every `apply_workspace` call,
 //! mirroring the TS gate's `resetRateLimitGate()` on community switch in
@@ -245,6 +249,109 @@ mod tests {
             start,
             "community A's armed gate must not delay community B"
         );
+    }
+
+    /// A 429 on one admission-gated path withholds sends on a different path
+    /// until the hinted window expires.
+    ///
+    /// Arms the gate directly (as `relay_error_message` would on a 429 response),
+    /// then drives a second distinct gated send through the loopback acceptance
+    /// server and asserts it waited out the window before succeeding.
+    #[tokio::test]
+    async fn gate_armed_by_one_path_withholds_another_path() {
+        use std::io::{Read, Write};
+
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+
+        // The loopback server answers every request with 200 [].
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
+            );
+            let _ = stream.flush();
+        });
+
+        // Arm the gate for 1s — simulates what relay_error_message does on any
+        // gated path that receives a 429, e.g. submit_engram_event.
+        activate_rate_limit(Some(1));
+
+        let state = crate::app_state::build_app_state();
+        *state.relay_url_override.lock().unwrap() = Some(format!("http://{addr}"));
+        let filters = [serde_json::json!({ "kinds": [1], "limit": 1 })];
+
+        // query_relay is a different gated path — it must wait out the 1s window
+        // even though it was not the source of the 429.
+        let t0 = std::time::Instant::now();
+        let events = crate::relay::query_relay(&state, &filters)
+            .await
+            .expect("query must succeed after admission wait");
+        let elapsed = t0.elapsed();
+
+        assert!(
+            events.is_empty(),
+            "server returns empty; unexpected events: {events:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "cross-path send ran {}ms — it must wait out the 1s window armed by another path",
+            elapsed.as_millis()
+        );
+
+        drop(server);
+        reset_rate_limit_gate();
+    }
+
+    /// A waiter parked on community A's gate must NOT wake early when the gate
+    /// is reset by a workspace change — it sleeps until the original expiry,
+    /// then rechecks, finds the gate clear, and proceeds.
+    ///
+    /// This documents the contract: `sleep_until` is already scheduled against
+    /// A's expiry; the reset clears `GATE_EXPIRY` but cannot cancel an in-flight
+    /// sleep.  The recheck loop in `wait_for_rate_limit` then sees `None` and
+    /// returns.  Net effect: the waiter observes at most one full window, which
+    /// is the same bound as if the workspace had not changed.
+    #[tokio::test(start_paused = true)]
+    async fn parked_waiter_does_not_wake_early_after_workspace_reset() {
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+
+        // Arm a 5s gate for community A.
+        activate_rate_limit(Some(5));
+
+        let start = Instant::now();
+
+        // Spawn a waiter that parks on the gate.
+        let waiter = tokio::spawn(async {
+            wait_for_rate_limit().await;
+            Instant::now()
+        });
+
+        // After 2s (well before the 5s expiry), simulate a workspace change
+        // that resets the gate.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        reset_gate_for_workspace_change();
+
+        let woke_at = waiter.await.unwrap();
+        let elapsed = woke_at - start;
+
+        // The waiter must have waited at least until A's original expiry (5s).
+        // It cannot be woken early by the reset — only the recheck loop exit
+        // can terminate it, and the recheck fires after sleep_until(expiry).
+        assert!(
+            elapsed >= Duration::from_secs(5),
+            "waiter woke at {}ms — must not wake before A's 5s expiry even after reset",
+            elapsed.as_millis()
+        );
+
+        reset_rate_limit_gate();
     }
 
     /// Acceptance: a 429 from one relay-backed command withholds the next
