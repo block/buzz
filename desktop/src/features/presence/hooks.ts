@@ -2,6 +2,8 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { isRateLimited } from "@/shared/api/relayRateLimitGate";
+import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { getOsIdleSeconds } from "@/shared/api/osIdle";
 import { getPresence } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -79,6 +81,8 @@ export function usePresenceQuery(
 ) {
   const normalizedPubkeys = normalizePubkeys(pubkeys);
   const enabled = (options?.enabled ?? true) && normalizedPubkeys.length > 0;
+  const connectionState = useRelayConnection();
+  const connected = connectionState === "connected";
 
   return useQuery<PresenceLookup>({
     enabled,
@@ -86,8 +90,9 @@ export function usePresenceQuery(
     queryFn: () => getPresence(normalizedPubkeys),
     staleTime: 30_000,
     // Backstop poll: catches REST-only writers (ACP agents) and TTL expiry
-    // (crashed clients). WS events handle the fast path.
-    refetchInterval: 60_000,
+    // (crashed clients). WS events handle the fast path. Pause on degraded
+    // connections — HTTP presence calls fail anyway and consume relay quota.
+    refetchInterval: connected ? 60_000 : false,
   });
 }
 
@@ -370,6 +375,11 @@ export function usePresenceSession(pubkey?: string) {
     }
 
     const intervalId = window.setInterval(() => {
+      // Skip heartbeat ticks while the relay is unavailable or rate-limited —
+      // the publish would fail anyway and consumes quota the recovery needs.
+      if (relayClient.getConnectionState() !== "connected" || isRateLimited()) {
+        return;
+      }
       syncPresence(currentStatus);
     }, PRESENCE_HEARTBEAT_INTERVAL_MS);
 
