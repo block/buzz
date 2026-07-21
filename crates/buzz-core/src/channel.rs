@@ -7,6 +7,14 @@
 use std::fmt;
 use std::str::FromStr;
 
+/// Returns the canonical display name for a channel.
+///
+/// Channel names are rendered with a leading `#` by clients, so user-supplied
+/// hash prefixes are removed here to keep the stored name prefix-free.
+pub fn canonical_channel_name(name: &str) -> &str {
+    name.trim_start_matches('#')
+}
+
 /// Whether a channel is publicly visible or invite-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelVisibility {
@@ -165,5 +173,18 @@ impl FromStr for MemberRole {
             "bot" => Ok(Self::Bot),
             other => Err(format!("unknown member role: {other:?}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_channel_name;
+
+    #[test]
+    fn channel_names_drop_all_leading_hashes() {
+        assert_eq!(canonical_channel_name("channel"), "channel");
+        assert_eq!(canonical_channel_name("#channel"), "channel");
+        assert_eq!(canonical_channel_name("###channel"), "channel");
+        assert_eq!(canonical_channel_name("channel#topic"), "channel#topic");
     }
 }

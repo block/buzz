@@ -620,9 +620,18 @@ pub fn build_update_channel(
             ));
         }
     }
+    if name
+        .map(buzz_core::channel::canonical_channel_name)
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(SdkError::InvalidTag("channel name is required".into()));
+    }
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(n) = name {
-        tags.push(tag(&["name", n])?);
+        tags.push(tag(&[
+            "name",
+            buzz_core::channel::canonical_channel_name(n),
+        ])?);
     }
     if let Some(a) = about {
         tags.push(tag(&["about", a])?);
@@ -670,6 +679,10 @@ pub fn build_create_channel(
     about: Option<&str>,
     ttl: Option<i32>,
 ) -> Result<EventBuilder, SdkError> {
+    let name = buzz_core::channel::canonical_channel_name(name);
+    if name.trim().is_empty() {
+        return Err(SdkError::InvalidTag("channel name is required".into()));
+    }
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["name", name])?];
     if let Some(v) = visibility {
         tags.push(tag(&["visibility", v.as_str()])?);
@@ -2382,6 +2395,20 @@ mod tests {
     }
 
     #[test]
+    fn update_channel_strips_all_leading_hashes_from_name() {
+        let ev = sign(build_update_channel(uuid(), Some("###new-name"), None, None, None).unwrap());
+        assert!(has_tag(&ev, "name", "new-name"));
+    }
+
+    #[test]
+    fn update_channel_rejects_hash_only_name() {
+        assert!(matches!(
+            build_update_channel(uuid(), Some("###"), None, None, None),
+            Err(SdkError::InvalidTag(_))
+        ));
+    }
+
+    #[test]
     fn update_channel_visibility_and_ttl() {
         let cid = uuid();
         let ev =
@@ -2469,6 +2496,37 @@ mod tests {
         );
         assert_eq!(ev.kind.as_u16(), 9007);
         assert!(has_tag(&ev, "name", "dev"));
+    }
+
+    #[test]
+    fn create_channel_strips_all_leading_hashes_from_name() {
+        let ev = sign(
+            build_create_channel(
+                uuid(),
+                "###dev",
+                None::<Visibility>,
+                None::<ChannelKind>,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&ev, "name", "dev"));
+    }
+
+    #[test]
+    fn create_channel_rejects_hash_only_name() {
+        assert!(matches!(
+            build_create_channel(
+                uuid(),
+                "###",
+                None::<Visibility>,
+                None::<ChannelKind>,
+                None,
+                None,
+            ),
+            Err(SdkError::InvalidTag(_))
+        ));
     }
 
     #[test]
