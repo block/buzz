@@ -1305,7 +1305,6 @@ async fn run_background_task(
     let mut stable_logged = false;
 
     loop {
-        // Check proactive resubscribe flag before blocking on select!
         if state.proactive_resubscribe_needed {
             state.proactive_resubscribe_needed = false;
             info!("proactive resubscribe triggered by backpressure event loss");
