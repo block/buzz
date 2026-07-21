@@ -1,9 +1,14 @@
 //! Pocket TTS engine wrapper around sherpa-onnx's `OfflineTts`.
 //!
-//! Pocket TTS is a small (~189 MB int8 ONNX) zero-shot voice-cloning TTS
+//! Pocket TTS is a small (~473 MB fp32 ONNX) zero-shot voice-cloning TTS
 //! model from Kyutai. It runs quickly on CPU via sherpa-onnx, replacing the
 //! previous Kokoro-82M engine that also required an espeak-free but
 //! lexicon-heavy G2P pipeline (Misaki + CMUdict).
+//!
+//! Full-precision fp32 sessions, not the ~189 MB int8 quantization we
+//! originally shipped: a direct same-runtime A/B (k2-fsa/sherpa-onnx#3172)
+//! found the int8 ONNX export audibly degraded output quality, and fp32
+//! "significantly improved quality even at 1 step".
 //!
 //! ## Attribution
 //!
@@ -14,7 +19,7 @@
 //! - **ONNX export**: KevinAHM —
 //!   <https://huggingface.co/KevinAHM/pocket-tts-onnx>. CC-BY-4.0.
 //! - **sherpa-onnx repackage**: csukuangfj / k2-fsa —
-//!   <https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-int8-2026-01-26>.
+//!   <https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-2026-01-26>.
 //!   Repackages KevinAHM's export with the file layout sherpa-onnx's
 //!   `OfflineTtsPocketModelConfig` expects. CC-BY-4.0.
 //! - **Reference voice WAV** (`reference_sample.wav`): the "Mary
@@ -147,10 +152,10 @@ const SHERPA_ONNX_FRAMES_AFTER_EOS_DEFAULT: i32 = 3;
 
 // ── ONNX file names (five Pocket TTS sessions plus two JSON tables) ───────────
 
-const FILE_LM_MAIN: &str = "lm_main.int8.onnx";
-const FILE_LM_FLOW: &str = "lm_flow.int8.onnx";
+const FILE_LM_MAIN: &str = "lm_main.onnx";
+const FILE_LM_FLOW: &str = "lm_flow.onnx";
 const FILE_ENCODER: &str = "encoder.onnx";
-const FILE_DECODER: &str = "decoder.int8.onnx";
+const FILE_DECODER: &str = "decoder.onnx";
 const FILE_TEXT_COND: &str = "text_conditioner.onnx";
 const FILE_VOCAB: &str = "vocab.json";
 const FILE_TOKEN_SCORES: &str = "token_scores.json";
