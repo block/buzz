@@ -1018,7 +1018,7 @@ export function ProfileSettingsCard({
                   });
                 }}
               >
-                {isSignOutPending ? "Signing out…" : "Sign Out"}
+                {isSignOutPending ? "Signing out…" : "Delete My Data"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
