@@ -35,11 +35,18 @@ export function CustomHarnessFields({
   const onboarding = size === "onboarding";
 
   return (
-    <div className={cn("space-y-4", onboarding && "grid gap-3 sm:grid-cols-2 sm:space-y-0")}>
+    <div
+      className={cn(
+        "space-y-4",
+        onboarding && "grid gap-3 sm:grid-cols-2 sm:space-y-0",
+      )}
+    >
       <div className="space-y-1.5">
         <label
           className={cn(
-            onboarding ? "text-xs font-medium text-foreground" : "text-sm font-medium text-foreground",
+            onboarding
+              ? "text-xs font-medium text-foreground"
+              : "text-sm font-medium text-foreground",
             !onboarding && "pl-0",
           )}
           htmlFor={commandId}
@@ -85,7 +92,9 @@ export function CustomHarnessFields({
       <div className="space-y-1.5">
         <label
           className={cn(
-            onboarding ? "text-xs font-medium text-foreground" : "text-sm font-medium text-foreground",
+            onboarding
+              ? "text-xs font-medium text-foreground"
+              : "text-sm font-medium text-foreground",
           )}
           htmlFor={argsId}
         >

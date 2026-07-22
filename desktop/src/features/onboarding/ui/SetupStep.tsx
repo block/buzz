@@ -689,9 +689,7 @@ function SetupStepContent({
   const byoIsReady = byoSelected && byoCommand.trim().length > 0;
   const readyRuntimeIds = React.useMemo(
     () =>
-      byoIsReady
-        ? [...catalogReadyIds, CUSTOM_RUNTIME_ID]
-        : catalogReadyIds,
+      byoIsReady ? [...catalogReadyIds, CUSTOM_RUNTIME_ID] : catalogReadyIds,
     [byoIsReady, catalogReadyIds],
   );
   const readyRuntimeIdsKey = readyRuntimeIds.join("\0");

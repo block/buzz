@@ -174,7 +174,12 @@ function AgentDefaultsSection({
       items.push(customHarnessCatalogStub());
     }
     return items;
-  }, [config.preferred_runtime, customReady, customRuntime, readyCatalogRuntimes]);
+  }, [
+    config.preferred_runtime,
+    customReady,
+    customRuntime,
+    readyCatalogRuntimes,
+  ]);
   const selectedRuntime = React.useMemo(
     () =>
       readyRuntimes.find((runtime) => runtime.id === config.preferred_runtime),
@@ -355,8 +360,7 @@ export function DefaultConfigStep({
   );
   const [isCompleting, setIsCompleting] = React.useState(false);
   const customOnly =
-    readyRuntimeIds.length === 1 &&
-    isCustomRuntimeId(readyRuntimeIds[0] ?? "");
+    readyRuntimeIds.length === 1 && isCustomRuntimeId(readyRuntimeIds[0] ?? "");
 
   const handleComplete = React.useCallback(async () => {
     setIsCompleting(true);
