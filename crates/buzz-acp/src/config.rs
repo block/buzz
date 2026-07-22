@@ -54,6 +54,16 @@ pub enum SubscribeMode {
     Config,
 }
 
+/// Author policy for followed-thread admissions (#2270 loop guard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum FollowThreadAuthors {
+    /// Admit unmentioned followed-thread replies from humans only (default).
+    Humans,
+    /// Admit unmentioned followed-thread replies from any author, including
+    /// agents. Opting in accepts the risk of agent↔agent auto-continuation.
+    All,
+}
+
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum DedupMode {
     Drop,
@@ -344,6 +354,18 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_FOLLOW_THREADS")]
     pub no_follow_threads: bool,
 
+    /// Whose unmentioned replies a followed thread admits. `humans` (default)
+    /// admits human authors only — agent-authored replies still require an
+    /// explicit @mention, so two agents sharing a thread can never
+    /// auto-continue each other. `all` admits any author.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_FOLLOW_THREAD_AUTHORS",
+        default_value = "humans",
+        value_enum
+    )]
+    pub follow_thread_authors: FollowThreadAuthors,
+
     /// Sliding inactivity TTL, in seconds, for followed threads. A thread the
     /// agent participated in stops being followed after this long without
     /// activity; a fresh @mention re-joins it.
@@ -536,6 +558,8 @@ pub struct Config {
     pub follow_threads: bool,
     /// Sliding inactivity TTL for followed thread roots, in seconds.
     pub thread_follow_ttl_secs: u64,
+    /// Author policy for followed-thread admissions (loop guard).
+    pub follow_thread_authors: FollowThreadAuthors,
     pub config_path: PathBuf,
     pub context_message_limit: u32,
     /// Maximum turns per session before proactive rotation. 0 = disabled.
@@ -1014,6 +1038,7 @@ impl Config {
             no_mention_filter: args.no_mention_filter,
             follow_threads: !args.no_follow_threads,
             thread_follow_ttl_secs: args.thread_follow_ttl_secs,
+            follow_thread_authors: args.follow_thread_authors,
             config_path: args.config,
             context_message_limit: args.context_message_limit,
             max_turns_per_session: args.max_turns_per_session,
@@ -1391,6 +1416,7 @@ mod tests {
             no_mention_filter: false,
             follow_threads: true,
             thread_follow_ttl_secs: 86_400,
+            follow_thread_authors: FollowThreadAuthors::Humans,
             config_path: PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
