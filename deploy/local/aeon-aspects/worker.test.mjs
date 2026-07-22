@@ -114,6 +114,17 @@ test("LaunchAgent rendering rejects unsafe or relative runtime paths", () => {
     /must be absolute/,
   );
   assert.throws(
+    () => renderDisabledLaunchAgent(manifest, identityMap, "nexus", { agentCommandPrefixArgs: ["relative.mjs"] }),
+    /must be absolute/,
+  );
+  assert.throws(
+    () =>
+      renderDisabledLaunchAgent(manifest, identityMap, "nexus", {
+        agentCommandPrefixArgs: ["/immutable/a/openclaw.mjs", "/immutable/b/openclaw.mjs"],
+      }),
+    /exactly one/,
+  );
+  assert.throws(
     () => renderDisabledLaunchAgent(manifest, identityMap, "nexus", { openclawStateDir: "/state" }),
     /must be supplied together/,
   );
@@ -170,6 +181,18 @@ test("Fleet can keep launchd-owned paths local while Buzz reads its canonical co
   );
   assert.match(rendered.plist, /<key>WorkingDirectory<\/key><string>\/Users\/operator<\/string>/);
   assert.match(rendered.plist, /<key>StandardOutPath<\/key><string>\/Users\/operator\/Library\/Logs\/AEON\/nexus\.buzz-acp\.log<\/string>/);
+});
+
+test("Fleet can launch immutable OpenClaw through a local Node identity", () => {
+  const rendered = renderDisabledLaunchAgent(manifest, identityMap, "nexus", {
+    openclawPath: "/owned/bin/openclaw",
+    agentCommandPrefixArgs: ["/immutable/generation/openclaw.mjs"],
+  });
+  assert.equal(rendered.argv[rendered.argv.indexOf("--agent-command") + 1], "/owned/bin/openclaw");
+  assert.equal(
+    rendered.argv[rendered.argv.indexOf("--agent-args") + 1],
+    "/immutable/generation/openclaw.mjs,acp,--session,agent:main:buzz-private,--require-existing,--token-file,/REQUIRES_FLEET/owned-token-file,--url,ws://127.0.0.1:18806,--provenance,meta+receipt,--no-prefix-cwd",
+  );
 });
 
 test("worker restart renders the identical require-existing Gateway binding", () => {

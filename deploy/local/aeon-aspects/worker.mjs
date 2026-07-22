@@ -122,6 +122,19 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
   const executablePath = options.executablePath ?? null;
   const openclawConfigPath = options.openclawConfigPath ?? null;
   const openclawStateDir = options.openclawStateDir ?? null;
+  const agentCommandPrefixArgs = options.agentCommandPrefixArgs ?? [];
+  if (!Array.isArray(agentCommandPrefixArgs)) {
+    throw new Error("agentCommandPrefixArgs must be an array");
+  }
+  if (agentCommandPrefixArgs.length > 1) {
+    throw new Error("agentCommandPrefixArgs accepts exactly one OpenClaw entrypoint");
+  }
+  for (const [index, value] of agentCommandPrefixArgs.entries()) {
+    if (typeof value !== "string" || !value.startsWith("/") || !value.endsWith("/openclaw.mjs")) {
+      throw new Error(`agentCommandPrefixArgs[${index}] must be absolute`);
+    }
+    assertArgSafe(value, `agentCommandPrefixArgs[${index}]`);
+  }
   for (const [label, value] of Object.entries({
     buzzAcpPath,
     openclawPath,
@@ -149,6 +162,10 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
   const rendered = renderWorker(manifest, identityMap, aspect, tokenFile);
   const agentCommandIndex = rendered.args.indexOf("--agent-command") + 1;
   rendered.args[agentCommandIndex] = openclawPath;
+  if (agentCommandPrefixArgs.length > 0) {
+    const agentArgsIndex = rendered.args.indexOf("--agent-args") + 1;
+    rendered.args[agentArgsIndex] = [agentCommandPrefixArgs.join(","), rendered.args[agentArgsIndex]].join(",");
+  }
   const configIndex = rendered.args.indexOf("--config") + 1;
   rendered.args[configIndex] = configPath ?? `${workingDirectory}/${rendered.args[configIndex]}`;
   // launchd may reject direct execution of provenance-marked development binaries.
