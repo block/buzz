@@ -40,6 +40,8 @@ import type { SetupStepActions, SetupStepState } from "./types";
 type SetupStepProps = {
   actions: SetupStepActions;
   direction: OnboardingTransitionDirection;
+  /** Restored when returning from the config step so BYO fields survive remount. */
+  initialByoDraft?: ByoHarnessDraft | null;
   onReadyRuntimeIdsChange: (runtimeIds: readonly string[]) => void;
 };
 
@@ -669,15 +671,22 @@ function RuntimeProvidersSection({
 function SetupStepContent({
   actions,
   direction,
+  initialByoDraft = null,
   onReadyRuntimeIdsChange,
   state,
 }: SetupStepContentProps) {
   const { runtimeProviders } = state;
   const [installResults, setInstallResults] =
     React.useState<InstallResultsState>({});
-  const [byoSelected, setByoSelected] = React.useState(false);
-  const [byoCommand, setByoCommand] = React.useState("");
-  const [byoArgs, setByoArgs] = React.useState("acp");
+  const [byoSelected, setByoSelected] = React.useState(() =>
+    Boolean(initialByoDraft?.command.trim()),
+  );
+  const [byoCommand, setByoCommand] = React.useState(
+    () => initialByoDraft?.command ?? "",
+  );
+  const [byoArgs, setByoArgs] = React.useState(
+    () => initialByoDraft?.args ?? "acp",
+  );
 
   const catalogReadyIds = React.useMemo(
     () =>
@@ -756,6 +765,7 @@ function SetupStepContent({
 export function SetupStep({
   actions,
   direction,
+  initialByoDraft = null,
   onReadyRuntimeIdsChange,
 }: SetupStepProps) {
   const state = useSetupStepState();
@@ -764,6 +774,7 @@ export function SetupStep({
     <SetupStepContent
       actions={actions}
       direction={direction}
+      initialByoDraft={initialByoDraft}
       onReadyRuntimeIdsChange={onReadyRuntimeIdsChange}
       state={state}
     />

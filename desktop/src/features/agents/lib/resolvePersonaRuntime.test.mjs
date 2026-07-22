@@ -3,8 +3,11 @@ import test from "node:test";
 
 import {
   collectRuntimeWarnings,
+  getDefaultPersonaRuntime,
   resolvePersonaRuntime,
+  resolvePreferredHarness,
 } from "./resolvePersonaRuntime.ts";
+import { buildCustomAcpRuntime } from "./customHarness.ts";
 
 function makeRuntime(id, label = `${id} label`) {
   return { id, label, command: id, avatarUrl: "" };
@@ -176,4 +179,56 @@ test("collectRuntimeWarnings — override=false behaves identically to no overri
 
 test("collectRuntimeWarnings — empty personas array always returns empty", () => {
   assert.deepEqual(collectRuntimeWarnings([], runtimes, goose, true), []);
+});
+
+test("getDefaultPersonaRuntime — preferred_runtime custom returns null", () => {
+  assert.equal(getDefaultPersonaRuntime(runtimes, "custom"), null);
+});
+
+test("resolvePreferredHarness — builds custom runtime from global command/args", () => {
+  const runtime = resolvePreferredHarness(runtimes, {
+    preferred_runtime: "custom",
+    preferred_agent_command: "agent",
+    preferred_agent_args: ["acp"],
+  });
+  assert.equal(runtime?.id, "custom");
+  assert.equal(runtime?.command, "agent");
+  assert.deepEqual(runtime?.defaultArgs, ["acp"]);
+  assert.equal(runtime?.availability, "available");
+});
+
+test("resolvePreferredHarness — incomplete custom falls back to catalog", () => {
+  const available = [
+    { ...claude, availability: "available" },
+    { ...goose, availability: "available" },
+  ];
+  const runtime = resolvePreferredHarness(available, {
+    preferred_runtime: "custom",
+    preferred_agent_command: "  ",
+    preferred_agent_args: [],
+  });
+  // Preference order without buzz-agent: goose, then first available.
+  assert.equal(runtime?.id, "goose");
+});
+
+test("resolvePersonaRuntime — persona custom + global custom uses BYO runtime", () => {
+  const custom = buildCustomAcpRuntime("agent", ["acp"]);
+  const result = resolvePersonaRuntime("custom", runtimes, custom);
+  assert.equal(result.runtime, custom);
+  assert.deepEqual(result.warnings, []);
+  assert.equal(result.isOverridden, false);
+});
+
+test("resolvePersonaRuntime — persona custom without global BYO falls back with override", () => {
+  const result = resolvePersonaRuntime("custom", runtimes, claude);
+  assert.equal(result.runtime, claude);
+  assert.equal(result.isOverridden, true);
+  assert.match(result.warnings[0], /custom harness/);
+});
+
+test("resolvePersonaRuntime — persona custom with no default returns null", () => {
+  const result = resolvePersonaRuntime("custom", runtimes, null);
+  assert.equal(result.runtime, null);
+  assert.equal(result.isOverridden, false);
+  assert.match(result.warnings[0], /no custom command/);
 });

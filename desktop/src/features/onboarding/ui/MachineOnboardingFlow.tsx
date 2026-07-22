@@ -223,6 +223,7 @@ export function MachineOnboardingFlow({
                 },
               }}
               direction="forward"
+              initialByoDraft={byoDraft}
               onReadyRuntimeIdsChange={handleReadyRuntimeIdsChange}
             />
           ) : (

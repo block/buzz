@@ -54,11 +54,16 @@ export function resolvePreferredHarness(
 ): AcpRuntime | null {
   const custom = resolvePreferredCustomRuntime(config);
   if (custom) return custom;
+  const available = runtimes.filter(
+    (runtime): runtime is AcpRuntime => runtime.availability === "available",
+  );
+  // Incomplete BYO (preferred_runtime custom, empty command) must not poison
+  // catalog fallback — getDefaultPersonaRuntime returns null for "custom".
   return getDefaultPersonaRuntime(
-    runtimes.filter(
-      (runtime): runtime is AcpRuntime => runtime.availability === "available",
-    ),
-    config.preferred_runtime,
+    available,
+    isCustomRuntimeId(config.preferred_runtime)
+      ? null
+      : config.preferred_runtime,
   );
 }
 

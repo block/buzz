@@ -112,6 +112,20 @@ function AgentDefaultsSection({
         next = applyCustomHarnessPreference(next, byoDraft);
         seededByoRef.current = true;
         coalescer.enqueue(next);
+      } else if (
+        !byoDraft?.command.trim() &&
+        isCustomRuntimeId(next.preferred_runtime) &&
+        !readyRuntimeIds.includes(CUSTOM_RUNTIME_ID)
+      ) {
+        // Setup advanced without BYO (or cleared it after Back). Drop a
+        // custom preference seeded on an earlier pass through this step.
+        const fallbackId = readyRuntimeIds.find(
+          (id) => id !== CUSTOM_RUNTIME_ID,
+        );
+        if (fallbackId) {
+          next = resetConfigForHarnessChange(next, fallbackId);
+          coalescer.enqueue(next);
+        }
       }
       setConfig(next);
       if (bakedEnvResult.status === "fulfilled") {
@@ -126,7 +140,7 @@ function AgentDefaultsSection({
       unmounted = true;
       coalescer.cancel();
     };
-  }, [byoDraft]);
+  }, [byoDraft, readyRuntimeIds]);
 
   const customReady = readyRuntimeIds.includes(CUSTOM_RUNTIME_ID);
   const effectiveReadyRuntimeIds = React.useMemo(

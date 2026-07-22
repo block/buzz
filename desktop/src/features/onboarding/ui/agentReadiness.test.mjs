@@ -238,6 +238,23 @@ test("resolveAgentReadiness_legacy_config_does_not_treat_goose_binary_as_ready",
 // Preferred runtime isolation
 // ---------------------------------------------------------------------------
 
+test("resolveAgentReadiness_preferred_goose_does_not_borrow_ready_buzz_agent_config", () => {
+  const runtimes = [
+    makeRuntime({ id: "goose", label: "Goose" }),
+    makeRuntime({ id: "buzz-agent", label: "Buzz Agent" }),
+  ];
+  const result = resolveAgentReadiness(
+    runtimes,
+    makeConfig({
+      provider: "anthropic",
+      model: null,
+      env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
+    }),
+    "preferred",
+  );
+  assert.equal(result.ready, false);
+});
+
 test("resolveAgentReadiness_preferred_custom_command_is_ready", () => {
   const result = resolveAgentReadiness(
     [],
