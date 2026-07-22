@@ -482,6 +482,8 @@ Current singletons that are reset on community switch:
 - `resetAgentObserverStore()` — agent observer relay store
 - `resetActiveAgentTurnsStore()` — active agent turn timers
 - `resetAgentWorkingSignal()` — agent working indicator signal
+- `resetAvatarProfileSync()` — pending verified-avatar profile writes
+- `resetAvatarPresentations()` — avatar probes, previews, and Retry toasts
 - `resetSidebarRelayConnectionCardState()` — sidebar relay card dismiss state
 - `resetMediaCaches()` — proxy port and relay origin caches
 - `resetVideoPlayerState()` — video player singleton

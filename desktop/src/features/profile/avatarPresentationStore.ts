@@ -153,6 +153,16 @@ export function disposeAvatarPresentation(remoteUrl: string): void {
   emitChange();
 }
 
+export function resetAvatarPresentations(): void {
+  for (const entry of presentations.values()) {
+    entry.generation = nextGeneration++;
+    toast.dismiss(toastId(entry.remoteUrl));
+    releaseLocalPreview(entry);
+  }
+  presentations.clear();
+  emitChange();
+}
+
 export function retryAvatarPresentation(remoteUrl: string): void {
   const entry = presentations.get(remoteUrl);
   if (entry?.snapshot.state !== "failed") return;

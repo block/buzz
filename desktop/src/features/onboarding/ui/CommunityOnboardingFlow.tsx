@@ -13,18 +13,15 @@ import {
   takePendingWelcomeChannelForDirectEntry,
   WELCOME_SURFACE_READY_EVENT,
 } from "@/features/onboarding/welcome";
-import {
-  getAvatarPresentation,
-  subscribeAvatarPresentations,
-  useAvatarPresentation,
-} from "@/features/profile/avatarPresentationStore";
+import { useAvatarPresentation } from "@/features/profile/avatarPresentationStore";
+import { saveAvatarWhenReady } from "@/features/profile/avatarProfileSync";
 import { profileQueryKey } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
   parseEmojiAvatarDataUrl,
   ProfileAvatarEditor,
 } from "@/features/profile/ui/ProfileAvatarEditor";
-import { getProfile, updateProfile } from "@/shared/api/tauriProfiles";
+import { updateProfile } from "@/shared/api/tauriProfiles";
 import { getIdentity, importIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { relayClient } from "@/shared/api/relayClient";
@@ -65,59 +62,6 @@ const ENTERING_CURTAIN_FADE_MS = 500;
  * fade anyway rather than stranding the user on the onboarding screen.
  */
 const ENTERING_CURTAIN_MAX_WAIT_MS = 8_000;
-
-// Upload verification can finish after onboarding unmounts, so these
-// subscriptions deliberately live for the lifetime of the application.
-const pendingAvatarProfileSyncs = new Map<string, () => void>();
-
-function normalizedAvatarUrl(avatarUrl: string | null | undefined) {
-  return avatarUrl?.trim() || null;
-}
-
-function saveAvatarWhenReady(
-  avatarUrl: string,
-  expectedPubkey: string,
-  expectedAvatarUrl: string | null,
-): void {
-  const syncKey = `${expectedPubkey}:${avatarUrl}`;
-  if (pendingAvatarProfileSyncs.has(syncKey)) return;
-
-  let isSaving = false;
-  const stop = () => {
-    pendingAvatarProfileSyncs.get(syncKey)?.();
-    pendingAvatarProfileSyncs.delete(syncKey);
-  };
-  const saveIfReady = () => {
-    const presentation = getAvatarPresentation(avatarUrl);
-    if (!presentation) {
-      stop();
-      return;
-    }
-    if (presentation.state !== "ready" || isSaving) return;
-
-    isSaving = true;
-    void getProfile()
-      .then((profile) => {
-        // Do not overwrite an identity or avatar the user changed meanwhile.
-        if (
-          profile.pubkey !== expectedPubkey ||
-          normalizedAvatarUrl(profile.avatarUrl) !==
-            normalizedAvatarUrl(expectedAvatarUrl)
-        ) {
-          return;
-        }
-        return updateProfile({ avatarUrl });
-      })
-      .catch(() => undefined)
-      .finally(stop);
-  };
-
-  pendingAvatarProfileSyncs.set(
-    syncKey,
-    subscribeAvatarPresentations(saveIfReady),
-  );
-  saveIfReady();
-}
 
 const NEUTRAL_EMOJI_PICKER_THEME_VARS = {
   "--buzz-emoji-picker-rgb-background":
