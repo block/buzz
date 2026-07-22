@@ -466,6 +466,15 @@ impl AcpClient {
         #[cfg(unix)]
         cmd.process_group(0);
 
+        // Desktop launches buzz-acp with CREATE_NO_WINDOW. Without the same flag
+        // here, each adapter (cmd.exe → node, buzz-agent, …) allocates its own
+        // console — one window per agent (#2292).
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
         let mut child = cmd.spawn()?;
 
         let stdin = child
