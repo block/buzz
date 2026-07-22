@@ -627,13 +627,20 @@ fn parse_anchored_replies(
                     values.get(1).map(|value| value.as_str()) == Some(expected_channel.as_str());
             }
         }
-        let exact_reply = event.tags.iter().any(|tag| {
+        let mut reply_anchor_count = 0;
+        let mut exact_reply = false;
+        for tag in event.tags.iter() {
             let values = tag.as_slice();
-            values.first().map(|value| value.as_str()) == Some("e")
-                && values.get(1).map(|value| value.as_str()) == Some(request_event_id)
+            if values.first().map(|value| value.as_str()) == Some("e")
                 && values.get(3).map(|value| value.as_str()) == Some("reply")
-        });
-        if h_tag_count == 1 && exact_channel && exact_reply {
+            {
+                reply_anchor_count += 1;
+                exact_reply = values.len() == 4
+                    && values.get(1).map(|value| value.as_str()) == Some(request_event_id)
+                    && values.get(2).map(|value| value.as_str()) == Some("");
+            }
+        }
+        if h_tag_count == 1 && exact_channel && reply_anchor_count == 1 && exact_reply {
             replies.push(AnchoredReply {
                 event_id: event.id.to_hex(),
                 reply_to: request_event_id.to_ascii_lowercase(),
@@ -4852,6 +4859,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replies.len(), 2);
+    }
+
+    #[test]
+    fn anchored_reply_parser_rejects_multiple_reply_markers_in_one_event() {
+        let keys = Keys::generate();
+        let channel = Uuid::new_v4();
+        let request = "a".repeat(64);
+        let ambiguous = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "ambiguous",
+        )
+        .tags([
+            Tag::parse(["h".to_string(), channel.to_string()]).unwrap(),
+            Tag::parse([
+                "e".to_string(),
+                request.clone(),
+                String::new(),
+                "reply".to_string(),
+            ])
+            .unwrap(),
+            Tag::parse([
+                "e".to_string(),
+                "b".repeat(64),
+                String::new(),
+                "reply".to_string(),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+
+        assert!(parse_anchored_replies(
+            &serde_json::json!([ambiguous]),
+            channel,
+            keys.public_key(),
+            &request,
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
