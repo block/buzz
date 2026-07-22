@@ -80,7 +80,7 @@ class _CustomChannelSection extends StatelessWidget {
   }
 }
 
-class _CustomSectionHeader extends StatelessWidget {
+class _CustomSectionHeader extends ConsumerWidget {
   final ChannelSection section;
   final bool expanded;
   final bool isFirst;
@@ -104,8 +104,12 @@ class _CustomSectionHeader extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final sectionColor = context.colors.primary;
+    final icon = section.icon;
+    final customEmoji = icon == null
+        ? null
+        : _resolveCustomEmoji(icon, ref.watch(customEmojiListProvider));
 
     return GestureDetector(
       onTap: onToggle,
@@ -123,11 +127,28 @@ class _CustomSectionHeader extends StatelessWidget {
               width: _kChannelLeadingWidth,
               child: Align(
                 alignment: Alignment.centerLeft,
-                child: Icon(
-                  LucideIcons.folder,
-                  size: _kChannelIconSize,
-                  color: sectionColor,
-                ),
+                child: icon == null || icon.isEmpty
+                    ? Icon(
+                        LucideIcons.folder,
+                        size: _kChannelIconSize,
+                        color: sectionColor,
+                      )
+                    : customEmoji != null
+                    ? CustomEmojiImage(
+                        shortcode: customEmoji.shortcode,
+                        url: customEmoji.url,
+                        size: _kChannelIconSize,
+                      )
+                    : Text(
+                        icon,
+                        maxLines: 1,
+                        overflow: TextOverflow.visible,
+                        style: TextStyle(
+                          fontSize: _kChannelIconSize,
+                          height: 1,
+                          color: sectionColor,
+                        ),
+                      ),
               ),
             ),
             const SizedBox(width: _kChannelLabelGap),
@@ -190,6 +211,16 @@ class _CustomSectionHeader extends StatelessWidget {
       ),
     );
   }
+}
+
+CustomEmoji? _resolveCustomEmoji(String icon, List<CustomEmoji> palette) {
+  if (!icon.startsWith(':') || !icon.endsWith(':')) return null;
+  final shortcode = normalizeShortcode(icon);
+  if (shortcode == null) return null;
+  for (final emoji in palette) {
+    if (emoji.shortcode == shortcode) return emoji;
+  }
+  return null;
 }
 
 class _SectionNameDialog extends HookWidget {
