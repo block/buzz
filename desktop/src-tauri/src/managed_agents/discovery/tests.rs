@@ -83,10 +83,15 @@ fn normalizes_opencode_and_cursor_args_to_acp() {
 fn opencode_and_cursor_are_known_native_acp_runtimes() {
     let opencode = super::known_acp_runtime_exact("opencode").expect("OpenCode runtime");
     assert_eq!(opencode.commands, ["opencode"]);
+    assert_eq!(opencode.underlying_cli, Some("opencode"));
+    assert!(!opencode.cli_install_commands_for_os().is_empty());
     assert_eq!(normalize_agent_args(opencode.commands[0], Vec::new()), vec!["acp"]);
 
     let cursor = super::known_acp_runtime_exact("cursor").expect("Cursor runtime");
     assert_eq!(cursor.commands, ["agent", "cursor-agent"]);
+    assert_eq!(cursor.underlying_cli, Some("agent"));
+    assert!(!cursor.cli_install_commands_for_os().is_empty());
+    assert!(!cursor.provider_locked);
     assert_eq!(normalize_agent_args(cursor.commands[0], Vec::new()), vec!["acp"]);
 }
 

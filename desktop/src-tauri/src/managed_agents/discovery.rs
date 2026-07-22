@@ -167,7 +167,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         avatar_url: OPENCODE_AVATAR_URL,
         mcp_command: None,
         mcp_hooks: false,
-        underlying_cli: None,
+        // OpenCode's CLI is its native ACP server; retain the CLI identity so
+        // the installer executes Phase 1 when the command is absent.
+        underlying_cli: Some("opencode"),
         cli_install_commands: &["curl -fsSL https://opencode.ai/install | bash"],
         cli_install_commands_windows: &[],
         adapter_install_commands: &[],
@@ -198,7 +200,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         avatar_url: CURSOR_AVATAR_URL,
         mcp_command: None,
         mcp_hooks: false,
-        underlying_cli: None,
+        // Cursor Agent is likewise the native ACP server. This makes its
+        // install command reachable through the CLI-install phase.
+        underlying_cli: Some("agent"),
         cli_install_commands: &["curl https://cursor.com/install -fsS | bash"],
         cli_install_commands_windows: &[],
         adapter_install_commands: &[],
@@ -209,7 +213,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         supports_acp_model_switching: false,
         model_env_var: None,
         provider_env_var: None,
-        provider_locked: true,
+        provider_locked: false,
         default_env: &[],
         config_file_path: None,
         config_file_format: None,
