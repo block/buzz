@@ -180,6 +180,9 @@ pub enum AcpError {
 
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
+
+    #[error("Trusted inbound event refused: {0}")]
+    TrustedInboundEventRefused(&'static str),
 }
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,

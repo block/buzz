@@ -1462,20 +1462,6 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
-    let trusted_inbound_envelope = if ctx.trusted_inbound_envelope {
-        match TrustedInboundEventEnvelope::try_from_prompt_batch(batch.as_ref()) {
-            Ok(envelope) => Some(envelope),
-            Err(reason) => {
-                tracing::warn!(
-                    refusal_code = reason,
-                    "trusted inbound event envelope refused"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
     agent.acp.observe(
         "turn_started",
         serde_json::json!({
@@ -1497,6 +1483,54 @@ pub async fn run_prompt_task(
         observer_channel_id,
         turn_id.clone(),
     );
+
+    // Install reaction cleanup before trusted admission can return. Refused
+    // events are terminal and must not retain a stale seen/typing marker.
+    let reaction_ids: Vec<String> = batch
+        .as_ref()
+        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
+        .unwrap_or_default();
+    let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
+
+    let trusted_inbound_envelope = if ctx.trusted_inbound_envelope {
+        match &source {
+            PromptSource::Heartbeat => None,
+            PromptSource::Channel(_) => {
+                match TrustedInboundEventEnvelope::try_from_prompt_batch(batch.as_ref()) {
+                    Ok(envelope) => Some(envelope),
+                    Err(reason) => {
+                        tracing::warn!(
+                            refusal_code = reason,
+                            "trusted inbound event envelope refused"
+                        );
+                        agent.acp.observe(
+                            "trusted_inbound_event_refused",
+                            serde_json::json!({ "refusalCode": reason }),
+                        );
+                        send_prompt_result(
+                            &result_tx,
+                            &turn_id,
+                            agent,
+                            source,
+                            PromptOutcome::Error(AcpError::TrustedInboundEventRefused(reason)),
+                            None,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    // Trusted turns defer 👀 until signed-event admission succeeds. Awaiting
+    // it here orders the add before ReactionGuard can remove it.
+    if trusted_inbound_envelope.is_some() {
+        for event_id in &reaction_ids {
+            reaction_add(&ctx.rest_client, event_id, REACTION_SEEN).await;
+        }
+    }
 
     // Start liveness with `turn_started`, not the final session/prompt call:
     // session creation, context fetches, and an initial message can themselves
@@ -1525,15 +1559,6 @@ pub async fn run_prompt_task(
     );
     let liveness_handle = tokio::spawn(liveness);
     let liveness_guard = LivenessGuard::new(liveness_handle, liveness_state);
-
-    // Collects event IDs up front. On drop (any exit path — normal, early
-    // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
-    // See `ReactionGuard` docs for ordering guarantees and known edge cases.
-    let reaction_ids: Vec<String> = batch
-        .as_ref()
-        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
-        .unwrap_or_default();
-    let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
     //
     // Core memory is delivered inside the system prompt the harness already
@@ -3367,11 +3392,9 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
 /// 💬 (`react_working`) is fire-and-forget (spawned before the prompt fires).
 /// A brief race where 💬 appears slightly after the agent starts is acceptable.
 ///
-/// 👀 (`react_seen`) is fire-and-forget from `main.rs` at queue-push time.
-/// On rare fast-failure paths (e.g., `session_new` error on an idle agent),
-/// the cleanup spawn may race with the 👀 add, leaving a stale 👀. This is
-/// accepted as a cosmetic edge case — the message will be retried and the
-/// stale 👀 is harmless.
+/// 👀 (`react_seen`) is normally fire-and-forget from `main.rs` at queue-push
+/// time. Trusted-envelope turns defer and await the add after admission so a
+/// terminal authority refusal cannot leave a stale reaction.
 struct ReactionGuard {
     rest: Option<crate::relay::RestClient>,
     ids: Vec<String>,
@@ -4924,6 +4947,61 @@ mod tests {
             cancelled_events: vec![],
             cancel_reason: None,
         }
+    }
+
+    #[tokio::test]
+    async fn trusted_channel_refusal_stops_before_session_prompt() {
+        let marker = std::env::temp_dir().join(format!(
+            "buzz-acp-unexpected-prompt-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let script = format!(
+            "IFS= read -r _line && : > '{}' ; sleep 10",
+            marker.display()
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false, true)
+            .await
+            .expect("spawn test agent");
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let channel_id = Uuid::new_v4();
+        let batch = one_event_batch(channel_id);
+        let mut context = make_prompt_context_no_owner();
+        context.trusted_inbound_envelope = true;
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            Some(batch),
+            Some("must not reach the agent".into()),
+            Arc::new(context),
+            result_tx,
+            None,
+            "trusted-refusal-turn".into(),
+        )
+        .await;
+
+        let result = result_rx.recv().await.expect("terminal prompt result");
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Error(AcpError::TrustedInboundEventRefused(
+                "invalid_channel_binding"
+            ))
+        ));
+        assert!(result.batch.is_none(), "refused authority must not requeue");
+        assert!(
+            !marker.exists(),
+            "session/prompt must not be written after trusted admission refusal"
+        );
     }
 
     #[test]

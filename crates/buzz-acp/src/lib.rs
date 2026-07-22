@@ -2321,10 +2321,10 @@ async fn tokio_main() -> Result<()> {
                             });
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
-                            // Fire-and-forget: on rare fast-failure paths the
-                            // guard's cleanup may race with this add, leaving a
-                            // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
-                            if accepted {
+                            // Trusted-envelope turns add 👀 only after the
+                            // signed event passes admission in run_prompt_task.
+                            // That keeps terminal refusals free of stale state.
+                            if accepted && !ctx.trusted_inbound_envelope {
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
