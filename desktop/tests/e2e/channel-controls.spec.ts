@@ -15,7 +15,9 @@ async function openManagementSheet(page: import("@playwright/test").Page) {
 async function openEditDialog(page: import("@playwright/test").Page) {
   await page.getByTestId("channel-management-edit").click();
   await expect(
-    page.getByRole("dialog", { name: "Edit channel" }),
+    page.getByRole("dialog", {
+      name: /Edit (?:public|private) channel/,
+    }),
   ).toBeVisible();
 }
 
@@ -25,78 +27,153 @@ async function settle(page: import("@playwright/test").Page) {
   );
 }
 
+async function selectTemporaryChannelType(
+  page: import("@playwright/test").Page,
+) {
+  await page.getByTestId("channel-management-channel-type").click();
+  await page.getByLabel("Temporary channel").click();
+}
+
 test.describe("channel controls", () => {
-  test("01 — lifecycle section: Private + Ephemeral switches", async ({
+  test("01 — lifecycle section: permissions + channel type", async ({
     page,
   }) => {
     await installMockBridge(page);
     await openManagementSheet(page);
     await openEditDialog(page);
+    await expect(
+      page.getByRole("dialog", { name: "Edit public channel" }),
+    ).toBeVisible();
+    await expect(page.getByText(/Update settings for/)).toHaveCount(0);
 
     const lifecycle = page.getByTestId("channel-management-lifecycle");
     await lifecycle.scrollIntoViewIfNeeded();
     await expect(
-      page.getByTestId("channel-management-private-toggle"),
+      page.getByTestId("channel-management-permissions-container"),
     ).toBeVisible();
     await expect(
-      page.getByTestId("channel-management-ephemeral-toggle"),
+      page.getByTestId("channel-management-permissions"),
+    ).toHaveAccessibleName("Permissions: Public");
+    await expect(
+      page.getByTestId("channel-management-save-changes"),
+    ).toBeDisabled();
+    await expect(
+      page.getByTestId("channel-management-channel-type"),
     ).toBeVisible();
+    await expect(
+      page.getByTestId("channel-management-channel-type"),
+    ).toContainText("Ongoing");
+    await expect(
+      page.getByTestId("channel-management-ephemeral-settings"),
+    ).toHaveCount(0);
+    await expect(
+      page
+        .getByRole("dialog", {
+          name: /Edit (?:public|private) channel/,
+        })
+        .getByTestId("channel-management-topic"),
+    ).toHaveCount(0);
+    await expect(
+      page
+        .getByRole("dialog", {
+          name: /Edit (?:public|private) channel/,
+        })
+        .getByTestId("channel-management-purpose"),
+    ).toHaveCount(0);
     await settle(page);
   });
 
-  test("02 — Private toggled on", async ({ page }) => {
-    await installMockBridge(page);
+  test("02 — permissions update immediately", async ({ page }) => {
+    await installMockBridge(page, { updateChannelDelayMs: 500 });
     await openManagementSheet(page);
     await openEditDialog(page);
 
     const lifecycle = page.getByTestId("channel-management-lifecycle");
     await lifecycle.scrollIntoViewIfNeeded();
-    await page.getByTestId("channel-management-private-toggle").click();
+    const permissions = page.getByTestId("channel-management-permissions");
+    await permissions.click();
+    await page
+      .getByTestId("channel-management-permissions-option-private")
+      .click();
+    await expect(permissions).toHaveAttribute("aria-busy", "true");
+    await expect(permissions).toContainText("Updating…");
     await expect(
-      page.getByTestId("channel-management-private-toggle"),
-    ).toBeChecked();
+      page.getByRole("dialog", { name: "Edit private channel" }),
+    ).toBeVisible();
+    await expect(permissions).toHaveAccessibleName("Permissions: Private");
     await expect(
       page.getByTestId("channel-management-save-changes"),
-    ).toBeEnabled();
-    await settle(page);
-  });
+    ).toBeDisabled();
 
-  test("03 — Ephemeral on with friendly timeout field", async ({ page }) => {
-    await installMockBridge(page);
-    await openManagementSheet(page);
-    await openEditDialog(page);
-
-    const lifecycle = page.getByTestId("channel-management-lifecycle");
-    await lifecycle.scrollIntoViewIfNeeded();
-    await page.getByTestId("channel-management-ephemeral-toggle").click();
-
-    const ttl = page.getByTestId("channel-management-ttl");
-    await expect(ttl).toBeVisible();
-    await ttl.fill("1d12h");
+    await permissions.click();
+    await page
+      .getByTestId("channel-management-permissions-option-open")
+      .click();
     await expect(
-      page.getByTestId("channel-management-save-changes"),
-    ).toBeEnabled();
-    await settle(page);
-  });
-
-  test("04 — invalid timeout blocks save with inline error", async ({
-    page,
-  }) => {
-    await installMockBridge(page);
-    await openManagementSheet(page);
-    await openEditDialog(page);
-
-    const lifecycle = page.getByTestId("channel-management-lifecycle");
-    await lifecycle.scrollIntoViewIfNeeded();
-    await page.getByTestId("channel-management-ephemeral-toggle").click();
-
-    const ttl = page.getByTestId("channel-management-ttl");
-    await ttl.fill("soon");
-    await expect(ttl).toHaveAttribute("aria-invalid", "true");
+      page.getByRole("dialog", { name: "Edit public channel" }),
+    ).toBeVisible();
+    await expect(permissions).toHaveAccessibleName("Permissions: Public");
     await expect(
       page.getByTestId("channel-management-save-changes"),
     ).toBeDisabled();
     await settle(page);
+  });
+
+  test("03 — Temporary type reveals expiration presets", async ({ page }) => {
+    await installMockBridge(page);
+    await openManagementSheet(page);
+    await openEditDialog(page);
+
+    const lifecycle = page.getByTestId("channel-management-lifecycle");
+    await lifecycle.scrollIntoViewIfNeeded();
+    await selectTemporaryChannelType(page);
+
+    const ephemeralSettings = page.getByTestId(
+      "channel-management-ephemeral-settings",
+    );
+    await expect(ephemeralSettings).toBeVisible();
+    const ttl = ephemeralSettings.getByTestId("channel-management-ttl");
+    await expect(ttl).toBeVisible();
+    await expect(ttl).toHaveAttribute("aria-label", "Expires after");
+    await expect(ttl).toContainText("7 days");
+    await ttl.click();
+    await expect(
+      page.getByTestId("channel-management-ttl-option-1800"),
+    ).toHaveText("30 minutes");
+    await expect(
+      page.getByTestId("channel-management-ttl-option-2592000"),
+    ).toHaveText("30 days");
+    await page.getByTestId("channel-management-ttl-option-86400").click();
+    await expect(ttl).toContainText("1 day");
+    await expect(
+      page.getByTestId("channel-management-save-changes"),
+    ).toBeEnabled();
+    await page.getByTestId("channel-management-channel-type").click();
+    await page.getByLabel("Ongoing channel").click();
+    await expect(ephemeralSettings).toHaveCount(0);
+    await expect(
+      page.getByTestId("channel-management-save-changes"),
+    ).toBeDisabled();
+  });
+
+  test("04 — changing the timeout preset keeps save enabled", async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await openManagementSheet(page);
+    await openEditDialog(page);
+
+    const lifecycle = page.getByTestId("channel-management-lifecycle");
+    await lifecycle.scrollIntoViewIfNeeded();
+    await selectTemporaryChannelType(page);
+
+    const ttl = page.getByTestId("channel-management-ttl");
+    await ttl.click();
+    await page.getByTestId("channel-management-ttl-option-21600").click();
+    await expect(ttl).toContainText("6 hours");
+    await expect(
+      page.getByTestId("channel-management-save-changes"),
+    ).toBeEnabled();
   });
 
   test("05 — sticky footer pins lifecycle buttons", async ({ page }) => {
@@ -123,7 +200,7 @@ test.describe("channel controls", () => {
     await openManagementSheet(page);
     await openEditDialog(page);
 
-    await page.getByTestId("channel-management-ephemeral-toggle").click();
+    await selectTemporaryChannelType(page);
     await expect(
       page.getByTestId("channel-management-save-changes"),
     ).toBeEnabled();
@@ -134,7 +211,9 @@ test.describe("channel controls", () => {
     ).toHaveText("Saving...");
 
     await expect(
-      page.getByRole("dialog", { name: "Edit channel" }),
+      page.getByRole("dialog", {
+        name: /Edit (?:public|private) channel/,
+      }),
     ).toHaveCount(0);
   });
 
@@ -145,11 +224,19 @@ test.describe("channel controls", () => {
     await openManagementSheet(page);
     await openEditDialog(page);
 
-    await page.getByTestId("channel-management-private-toggle").click();
-    await page.getByTestId("channel-management-ephemeral-toggle").click();
+    await page.getByTestId("channel-management-permissions").click();
+    await page
+      .getByTestId("channel-management-permissions-option-private")
+      .click();
+    await expect(
+      page.getByRole("dialog", { name: "Edit private channel" }),
+    ).toBeVisible();
+    await selectTemporaryChannelType(page);
     await page.getByTestId("channel-management-save-changes").click();
     await expect(
-      page.getByRole("dialog", { name: "Edit channel" }),
+      page.getByRole("dialog", {
+        name: /Edit (?:public|private) channel/,
+      }),
     ).toHaveCount(0);
 
     await page.getByTestId("auxiliary-panel-close").click();
@@ -158,16 +245,21 @@ test.describe("channel controls", () => {
     ).not.toBeVisible();
     await page.getByTestId("channel-management-trigger").click();
     await openEditDialog(page);
+    await expect(
+      page.getByRole("dialog", { name: "Edit private channel" }),
+    ).toBeVisible();
 
     const lifecycle = page.getByTestId("channel-management-lifecycle");
     await lifecycle.scrollIntoViewIfNeeded();
     await expect(
-      page.getByTestId("channel-management-private-toggle"),
-    ).toHaveAttribute("data-state", "checked");
+      page.getByTestId("channel-management-permissions"),
+    ).toHaveAccessibleName("Permissions: Private");
     await expect(
-      page.getByTestId("channel-management-ephemeral-toggle"),
-    ).toHaveAttribute("data-state", "checked");
-    await expect(page.getByTestId("channel-management-ttl")).toHaveValue("7d");
+      page.getByTestId("channel-management-channel-type"),
+    ).toContainText("Temporary");
+    await expect(page.getByTestId("channel-management-ttl")).toContainText(
+      "7 days",
+    );
     await settle(page);
   });
 });

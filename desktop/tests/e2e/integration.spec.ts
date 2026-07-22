@@ -36,7 +36,9 @@ async function openChannelManagement(page: import("@playwright/test").Page) {
 async function openChannelEditDialog(page: import("@playwright/test").Page) {
   await page.getByTestId("channel-management-edit").click();
   await expect(
-    page.getByRole("dialog", { name: "Edit channel" }),
+    page.getByRole("dialog", {
+      name: /Edit (?:public|private) channel/,
+    }),
   ).toBeVisible();
 }
 
@@ -454,7 +456,7 @@ test("multiple channels independent", async ({ page }) => {
   );
 });
 
-test("manage sheet updates channel details and context through the relay", async ({
+test("manage sheet updates channel details through the relay", async ({
   page,
 }) => {
   const stamp = Date.now();
@@ -462,8 +464,6 @@ test("manage sheet updates channel details and context through the relay", async
   const renamedChannel = `manage-renamed-${stamp}`;
   const initialDescription = `Initial description ${stamp}`;
   const updatedDescription = `Updated description ${stamp}`;
-  const updatedTopic = `Updated topic ${stamp}`;
-  const updatedPurpose = `Updated purpose ${stamp}`;
 
   await installRelayBridge(page, "tyler");
   await page.goto("/");
@@ -471,16 +471,20 @@ test("manage sheet updates channel details and context through the relay", async
 
   await openChannelManagement(page);
   await openChannelEditDialog(page);
-  const editDialog = page.getByRole("dialog", { name: "Edit channel" });
+  const editDialog = page.getByRole("dialog", {
+    name: /Edit (?:public|private) channel/,
+  });
 
   await editDialog.getByTestId("channel-management-name").fill(renamedChannel);
   await editDialog
     .getByTestId("channel-management-description")
     .fill(updatedDescription);
-  await editDialog.getByTestId("channel-management-topic").fill(updatedTopic);
-  await editDialog
-    .getByTestId("channel-management-purpose")
-    .fill(updatedPurpose);
+  await expect(editDialog.getByTestId("channel-management-topic")).toHaveCount(
+    0,
+  );
+  await expect(
+    editDialog.getByTestId("channel-management-purpose"),
+  ).toHaveCount(0);
   await editDialog.getByTestId("channel-management-save-changes").click();
   await expect(editDialog).toHaveCount(0);
 
@@ -492,16 +496,15 @@ test("manage sheet updates channel details and context through the relay", async
 
   await page.getByTestId(`channel-${renamedChannel}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(renamedChannel);
-  // channelDescription deduplicates by showing only the first non-empty field
   await expect(page.getByTestId("chat-title")).toHaveAttribute(
     "title",
-    updatedTopic,
+    updatedDescription,
   );
 
   await openChannelManagement(page);
   await openChannelEditDialog(page);
   const reopenedEditDialog = page.getByRole("dialog", {
-    name: "Edit channel",
+    name: /Edit (?:public|private) channel/,
   });
 
   await expect(
@@ -512,10 +515,10 @@ test("manage sheet updates channel details and context through the relay", async
   ).toHaveValue(updatedDescription);
   await expect(
     reopenedEditDialog.getByTestId("channel-management-topic"),
-  ).toHaveValue(updatedTopic);
+  ).toHaveCount(0);
   await expect(
     reopenedEditDialog.getByTestId("channel-management-purpose"),
-  ).toHaveValue(updatedPurpose);
+  ).toHaveCount(0);
 });
 
 test("manage sheet archive and unarchive survives a reload through the relay", async ({
