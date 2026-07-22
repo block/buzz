@@ -508,6 +508,7 @@ pub async fn run_probe(writer: PgPool, replica: PgPool, fence: Arc<ReplicaFence>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::SubsecRound;
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
@@ -521,7 +522,7 @@ mod tests {
         assert!(fence.verified_through().is_none(), "must start closed");
         assert!(!fence.covers(Utc::now() - chrono::Duration::days(365)));
 
-        let ts = Utc::now();
+        let ts = Utc::now().trunc_subsecs(6);
         fence.advance(ts);
         assert_eq!(fence.verified_through(), Some(ts));
         assert!(fence.covers(ts - chrono::Duration::seconds(1)));
