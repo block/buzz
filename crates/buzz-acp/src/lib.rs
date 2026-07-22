@@ -3164,10 +3164,15 @@ fn handle_prompt_result(
         PromptSource::Heartbeat => None,
     };
     let turn_id = result.turn_id.clone();
-    let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
+    // `error_class` is a stable, machine-readable failure taxonomy the UI can
+    // branch on (persist a badge, offer a retry, surface provider issues).
+    // It defaults to `outcome_label` so every emit path carries a class; the
+    // application/transport error branches refine it further below (#1659).
+    let emit_turn_error = |error_msg: &str, error_code: Option<i64>, error_class: &str| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
                 "outcome": outcome_label,
+                "error_class": error_class,
                 "error": error_msg,
             });
             if let Some(code) = error_code {
@@ -3215,7 +3220,7 @@ fn handle_prompt_result(
                 }
                 _ => "Agent session timed out due to inactivity".to_string(),
             };
-            emit_turn_error(&death_message, None);
+            emit_turn_error(&death_message, None, outcome_label);
 
             let index = result.agent.index;
             let slot_history = &mut crash_history[index];
@@ -3255,7 +3260,7 @@ fn handle_prompt_result(
             let death_message = format!(
                 "Agent did not stop within {grace:?} after cancellation; the agent process is being replaced."
             );
-            emit_turn_error(&death_message, None);
+            emit_turn_error(&death_message, None, outcome_label);
 
             let index = result.agent.index;
             let slot_history = &mut crash_history[index];
@@ -3320,7 +3325,7 @@ fn handle_prompt_result(
                     error = %e,
                     "transport/protocol error — respawning agent"
                 );
-                emit_turn_error(&e.to_string(), error_code);
+                emit_turn_error(&e.to_string(), error_code, "transport_error");
 
                 let index = result.agent.index;
                 let slot_history = &mut crash_history[index];
@@ -3346,7 +3351,7 @@ fn handle_prompt_result(
                     error = %e,
                     "agent_returned (application error — pipe intact)"
                 );
-                emit_turn_error(&e.to_string(), error_code);
+                emit_turn_error(&e.to_string(), error_code, "application_error");
                 pool.return_agent(result.agent);
             }
         }
@@ -3408,6 +3413,7 @@ fn recover_panicked_agent(
             &observer::context_for(meta.channel_id, None, Some(meta.turn_id)),
             serde_json::json!({
                 "outcome": "panic",
+                "error_class": "panic",
                 "error": format!("Agent task panicked: {join_error}"),
             }),
         );
@@ -5218,9 +5224,89 @@ mod error_outcome_emission_tests {
         turn_errors.len()
     }
 
+    /// Drive one error outcome through `handle_prompt_result` and return the
+    /// `error_class` string carried on the emitted `turn_error` payload (#1659).
+    async fn error_class_emitted_for(outcome: PromptOutcome) -> Option<String> {
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(Uuid::new_v4()),
+            turn_id: "test-turn-id".to_string(),
+            outcome,
+            batch: None,
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+        );
+        observer
+            .snapshot()
+            .into_iter()
+            .find(|e| e.kind == "turn_error")
+            .and_then(|e| {
+                e.payload
+                    .get("error_class")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+    }
+
     #[tokio::test]
     async fn agent_exited_emits_exactly_one_feed_event() {
         assert_eq!(turn_errors_emitted_for(PromptOutcome::AgentExited).await, 1);
+    }
+
+    #[tokio::test]
+    async fn turn_error_carries_stable_error_class() {
+        // Fatal process death classes surface as their outcome label so the UI
+        // can persist a differentiated, actionable badge instead of a generic
+        // transient "Turn error" (#1659).
+        assert_eq!(
+            error_class_emitted_for(PromptOutcome::AgentExited)
+                .await
+                .as_deref(),
+            Some("exited")
+        );
+        assert_eq!(
+            error_class_emitted_for(PromptOutcome::Timeout(TimeoutKind::Idle))
+                .await
+                .as_deref(),
+            Some("idle_timeout")
+        );
     }
 
     #[tokio::test]
