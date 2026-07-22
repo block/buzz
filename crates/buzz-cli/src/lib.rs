@@ -141,8 +141,10 @@ fn parse_private_key_fd(s: &str) -> Result<u32, String> {
 /// `unsafe`, no reconstructing ownership via `FromRawFd`) and is safe to call
 /// here because this guard is the fd's sole owner for the scope of the
 /// function.
+#[cfg(unix)]
 struct FdCloseGuard(std::os::fd::RawFd);
 
+#[cfg(unix)]
 impl Drop for FdCloseGuard {
     fn drop(&mut self) {
         // Best-effort: the fd is being discarded either way, and the error
@@ -167,6 +169,7 @@ impl Drop for FdCloseGuard {
 /// [`nix::unistd::close`] on every return path (success, oversized/empty/
 /// non-UTF-8 key errors, and I/O failure) so the original descriptor never
 /// leaks for the rest of the process's lifetime.
+#[cfg(unix)]
 fn read_key_from_fd(fd: u32) -> Result<zeroize::Zeroizing<String>, CliError> {
     use std::os::fd::RawFd;
 
@@ -179,6 +182,20 @@ fn read_key_from_fd(fd: u32) -> Result<zeroize::Zeroizing<String>, CliError> {
         .map_err(|_| CliError::Auth(format!("failed to read private key from fd {fd}")))?;
 
     read_key_from_reader(file, fd)
+}
+
+/// Non-Unix fallback for [`read_key_from_fd`]. There is no `/dev/fd` (or
+/// portable inherited-fd API) on Windows, so `--private-key-fd` fails closed
+/// here rather than falling back to argv/env — clap's `conflicts_with` on
+/// `private_key`/`private_key_fd` means a caller who reaches this function
+/// has no other key source available in this invocation anyway. The error
+/// carries no fd value or key content, matching the sanitized-error
+/// contract of the Unix implementation.
+#[cfg(not(unix))]
+fn read_key_from_fd(_fd: u32) -> Result<zeroize::Zeroizing<String>, CliError> {
+    Err(CliError::Usage(
+        "--private-key-fd is not supported on this platform (Linux/macOS only); use --private-key or BUZZ_PRIVATE_KEY instead".into(),
+    ))
 }
 
 /// Core read/validate/parse logic shared by [`read_key_from_fd`], factored
@@ -2197,6 +2214,7 @@ mod tests {
     /// helper did) would double-close the descriptor once `read_key_from_fd`
     /// itself closes it — exactly the reuse hazard the fd-close fix guards
     /// against.
+    #[cfg(unix)]
     fn fd_with_contents(contents: &[u8]) -> u32 {
         use std::io::{Seek, SeekFrom, Write};
         use std::os::fd::IntoRawFd;
@@ -2212,11 +2230,13 @@ mod tests {
     /// `FromRawFd`) means we can't hand it to `nix::fcntl::fcntl` (which
     /// requires `AsFd`). Instead, mirror what `read_key_from_fd` itself does:
     /// attempt to open `/dev/fd/<fd>`. A closed fd has no entry to open.
+    #[cfg(unix)]
     fn fd_is_closed(fd: u32) -> bool {
         std::fs::File::open(format!("/dev/fd/{fd}")).is_err()
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_key_from_fd_reads_valid_key() {
         let synthetic_key = "0".repeat(64); // synthetic hex-shaped key, not a real secret
         let fd = fd_with_contents(synthetic_key.as_bytes());
@@ -2226,6 +2246,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_key_from_fd_strips_trailing_newline() {
         let synthetic_key = "1".repeat(64);
         let with_newline = format!("{synthetic_key}\n");
@@ -2236,6 +2257,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_key_from_fd_strips_trailing_crlf() {
         let synthetic_key = "2".repeat(64);
         let with_crlf = format!("{synthetic_key}\r\n");
@@ -2246,6 +2268,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_key_from_fd_missing_fd_is_sanitized_auth_error() {
         // A large fd number, almost certainly not open in this process.
         let fd = MAX_PRIVATE_KEY_FD;
@@ -2261,6 +2284,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_key_from_fd_empty_is_key_error() {
         let fd = fd_with_contents(b"");
         let err = read_key_from_fd(fd).expect_err("expected empty content to error");
@@ -2271,6 +2295,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_key_from_fd_oversized_is_key_error() {
         let oversized = "a".repeat(PRIVATE_KEY_FD_MAX_LEN + 1);
         let fd = fd_with_contents(oversized.as_bytes());
@@ -2285,6 +2310,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_key_from_fd_non_utf8_is_key_error() {
         let invalid_utf8: &[u8] = &[0xff, 0xfe, 0xfd];
         let fd = fd_with_contents(invalid_utf8);
@@ -2298,6 +2324,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_key_from_fd_closes_original_fd_on_success() {
         let synthetic_key = "3".repeat(64);
         // `fd_with_contents` transfers sole ownership of the fd via
@@ -2316,6 +2343,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_key_from_fd_closes_original_fd_on_error() {
         // Oversized content still errors, but the original fd must be closed
         // on this path just as reliably as on success.
@@ -2431,6 +2459,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn errors_do_not_leak_key_material() {
         // Non-UTF8 bytes stand in for "secret-shaped" content that must
         // never surface in Debug/Display output of the resulting error.
