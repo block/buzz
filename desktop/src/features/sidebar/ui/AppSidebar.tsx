@@ -243,8 +243,16 @@ export function AppSidebar({
   const showSidebarUpdateCard =
     canShowSidebarUpdateCard && !isSidebarUpdateCardDismissed;
   const [dmActionsMenuOpen, setDmActionsMenuOpen] = React.useState(false);
+  const [hasScrolledFromTop, setHasScrolledFromTop] = React.useState(false);
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
+
+  const handleSidebarScroll = React.useCallback(
+    (event: React.UIEvent<HTMLDivElement>) => {
+      setHasScrolledFromTop(event.currentTarget.scrollTop > 0);
+    },
+    [],
+  );
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -549,6 +557,7 @@ export function AppSidebar({
     <Sidebar
       className="!border-r-0"
       collapsible="offcanvas"
+      data-scrolled-from-top={hasScrolledFromTop}
       data-testid="app-sidebar"
       variant="sidebar"
     >
@@ -585,6 +594,7 @@ export function AppSidebar({
 
           <SidebarContent
             className="buzz-sidebar-scrollbar overscroll-none"
+            onScroll={handleSidebarScroll}
             ref={scrollRef}
           >
             <div

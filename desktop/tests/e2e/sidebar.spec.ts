@@ -22,6 +22,54 @@ async function storedSidebarWidth(page: Page) {
   );
 }
 
+async function topEdgeFadeOpacity(page: Page) {
+  return page
+    .getByTestId("sidebar-pinned-header")
+    .evaluate((element) => getComputedStyle(element, "::before").opacity);
+}
+
+async function expectTopEdgeFadeTracksSidebarScroll(page: Page) {
+  const scroller = page
+    .getByTestId("app-sidebar")
+    .locator('[data-sidebar="content"]');
+  const pinnedHeader = page.getByTestId("sidebar-pinned-header");
+  const inbox = page
+    .getByTestId("sidebar-primary-menu")
+    .getByRole("button", { name: "Inbox" });
+  const scrollContent = page.getByTestId("sidebar-scroll-content");
+
+  await expect(scroller).toBeVisible();
+  await expect(inbox).toBeVisible();
+  const [headerBottom, inboxTop] = await Promise.all([
+    pinnedHeader.evaluate((element) => element.getBoundingClientRect().bottom),
+    inbox.evaluate((element) => element.getBoundingClientRect().top),
+  ]);
+  expect(inboxTop).toBeCloseTo(headerBottom);
+  await expect(scrollContent).toHaveCSS("padding-top", "0px");
+  await expect.poll(() => topEdgeFadeOpacity(page)).toBe("0");
+
+  await scroller.evaluate((element) => {
+    element.scrollTop = 24;
+  });
+  await expect
+    .poll(() => scroller.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0);
+  await expect.poll(() => topEdgeFadeOpacity(page)).toBe("1");
+
+  await scroller.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect
+    .poll(() => scroller.evaluate((element) => element.scrollTop))
+    .toBe(0);
+  await expect.poll(() => topEdgeFadeOpacity(page)).toBe("0");
+  await expect
+    .poll(() =>
+      inbox.evaluate((element) => element.getBoundingClientRect().top),
+    )
+    .toBeCloseTo(headerBottom);
+}
+
 // Regression guard for the "Leave channel" lockup: with two bundled copies of
 // @radix-ui/react-dismissable-layer, opening a modal AlertDialog from a modal
 // Radix ContextMenu left `pointer-events: none` stuck on <body> after the
@@ -324,6 +372,19 @@ test("fades the pinned sidebar chrome edges outside the Buzz theme", async ({
   expect(fadeStyles.footerZIndex).toBe("5");
   expect(fadeStyles.channelBeforeBackground).toBe("none");
   expect(fadeStyles.channelAfterBackground).toBe("none");
+
+  await expectTopEdgeFadeTracksSidebarScroll(page);
+});
+
+test("shows the dark-theme header fade only after the sidebar scrolls", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "github-dark");
+  });
+  await page.goto("/");
+
+  await expectTopEdgeFadeTracksSidebarScroll(page);
 });
 
 test("aligns the sidebar search with the channel title outside the Buzz theme", async ({
