@@ -88,7 +88,7 @@ if ! compgen -G "$LIBDIR/libwayland-client.so*" > /dev/null; then
   exit 1
 fi
 
-echo "==> Removing infra libs that conflict with system Mesa / GLib / GStreamer"
+echo "==> Removing infra libs that conflict with system Mesa / GLib / GStreamer / systemd"
 rm -f \
   "$LIBDIR"/libwayland-client.so* \
   "$LIBDIR"/libwayland-cursor.so* \
@@ -101,6 +101,7 @@ rm -f \
   "$LIBDIR"/libmount.so* \
   "$LIBDIR"/libblkid.so* \
   "$LIBDIR"/libselinux.so* \
+  "$LIBDIR"/libsystemd.so* \
   "$LIBDIR"/libpcre2-8.so* \
   "$LIBDIR"/libgst*.so* \
   "$LIBDIR"/libzstd.so* \
