@@ -115,7 +115,7 @@ use std::time::Instant;
 
 use buzz_core::kind::{
     KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_TYPING_INDICATOR,
+    KIND_STREAM_MESSAGE, KIND_TYPING_INDICATOR,
 };
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
@@ -418,6 +418,8 @@ pub struct BuzzEvent {
     pub channel_id: Uuid,
     /// The underlying Nostr event.
     pub event: Event,
+    /// Process-local instant when the relay frame was accepted by the harness.
+    pub received_at: Instant,
 }
 
 /// Errors from relay operations.
@@ -586,6 +588,7 @@ impl HarnessRelay {
         keys: &Keys,
         agent_pubkey_hex: &str,
         auth_tag: Option<nostr::Tag>,
+        observe_self_replies: bool,
     ) -> Result<Self, RelayError> {
         // Perform the initial connection and auth handshake, retrying
         // transient failures (dropped handshake, timeout) with bounded
@@ -616,6 +619,7 @@ impl HarnessRelay {
                 bg_relay_url,
                 bg_agent_pubkey_hex,
                 bg_auth_tag,
+                observe_self_replies,
             )
             .await;
         });
@@ -981,6 +985,9 @@ struct BgState {
     membership_sub_active: bool,
     /// Whether the observer control subscription is active.
     observer_control_sub_active: bool,
+    /// Whether channel REQs also include self-authored kind-9 replies so the
+    /// observer can close mention-to-reply traces at relay fanout.
+    observe_self_replies: bool,
     /// Oldest dropped channel-event timestamp per channel, keyed by channel_id.
     /// Mirrors `membership_dropped_since` but for ordinary channel events.
     /// On reconnect resubscribe, `since` = min(last_seen, channel_dropped_since).
@@ -1058,6 +1065,7 @@ impl BgState {
             membership_last_seen: None,
             membership_sub_active: false,
             observer_control_sub_active: false,
+            observe_self_replies: false,
             channel_dropped_since: HashMap::new(),
             proactive_resubscribe_needed: false,
             startup_watermark: None,
@@ -1529,8 +1537,10 @@ async fn run_background_task(
     relay_url: String,
     agent_pubkey_hex: String,
     auth_tag: Option<nostr::Tag>,
+    observe_self_replies: bool,
 ) {
     let mut state = BgState::new();
+    state.observe_self_replies = observe_self_replies;
 
     let handshake_ok = process_handshake_buffer(
         &mut ws,
@@ -2090,6 +2100,7 @@ async fn handle_ws_message(
                         let buzz_event = BuzzEvent {
                             channel_id: channel_uuid,
                             event: *event,
+                            received_at: Instant::now(),
                         };
                         let cap = event_tx.max_capacity();
                         let used = cap - event_tx.capacity();
@@ -2131,6 +2142,7 @@ async fn handle_ws_message(
                             let buzz_event = BuzzEvent {
                                 channel_id,
                                 event: *event,
+                                received_at: Instant::now(),
                             };
                             // Warn at 80% capacity.
                             let cap = event_tx.max_capacity();
@@ -3141,13 +3153,16 @@ async fn wait_for_reconnect(
 /// - `kinds` is included only when `filter.kinds` is `Some`; `None` = wildcard.
 /// - `#p` is included only when `filter.require_mention` is `true`.
 /// - `#h` is always included (channel-scoped subscription).
+/// - When relay observation is enabled, mention-only subscriptions add a
+///   second OR-filter for self-authored kind-9 replies. The harness consumes
+///   those events as telemetry and never dispatches them back to the agent.
 /// - On first subscribe (`since` is `None`) adds `since=now` to avoid replaying
 ///   history. On reconnect (`since` is `Some`) subtracts [`SINCE_SKEW_SECS`].
 ///
 /// Returns `true` if the REQ was successfully written to the WebSocket.
 async fn send_subscribe(
     ws: &mut WsStream,
-    _state: &BgState,
+    state: &BgState,
     channel_id: Uuid,
     agent_pubkey_hex: &str,
     since: Option<u64>,
@@ -3181,7 +3196,16 @@ async fn send_subscribe(
     };
     req_filter.insert("since".into(), json!(since_ts));
 
-    let req = json!(["REQ", sub_id, Value::Object(req_filter)]);
+    let mut req = vec![json!("REQ"), json!(sub_id), Value::Object(req_filter)];
+    if filter.require_mention && state.observe_self_replies {
+        req.push(json!({
+            "kinds": [KIND_STREAM_MESSAGE],
+            "authors": [agent_pubkey_hex],
+            "#h": [channel_id.to_string()],
+            "since": since_ts,
+        }));
+    }
+    let req = Value::Array(req);
 
     match serde_json::to_string(&req) {
         Ok(text) => {
@@ -4344,6 +4368,64 @@ mod tests {
             kinds: Some(vec![9]),
             require_mention: false,
         }
+    }
+
+    #[tokio::test]
+    async fn observer_subscription_adds_self_reply_filter() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        state.observe_self_replies = true;
+        let channel_id = Uuid::new_v4();
+        let filter = ChannelFilter {
+            kinds: Some(vec![KIND_STREAM_MESSAGE]),
+            require_mention: true,
+        };
+
+        assert!(
+            send_subscribe(
+                &mut client,
+                &state,
+                channel_id,
+                "agent-pubkey",
+                Some(1_000),
+                &filter,
+            )
+            .await
+        );
+
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(frame.as_array().map(Vec::len), Some(4));
+        assert_eq!(frame[2]["#p"], json!(["agent-pubkey"]));
+        assert_eq!(frame[3]["authors"], json!(["agent-pubkey"]));
+        assert_eq!(frame[3]["kinds"], json!([KIND_STREAM_MESSAGE]));
+        assert_eq!(frame[3]["#h"], json!([channel_id.to_string()]));
+        assert_eq!(frame[3]["since"], 995);
+    }
+
+    #[tokio::test]
+    async fn ordinary_subscription_does_not_add_self_reply_filter() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let filter = ChannelFilter {
+            kinds: Some(vec![KIND_STREAM_MESSAGE]),
+            require_mention: true,
+        };
+
+        assert!(
+            send_subscribe(
+                &mut client,
+                &state,
+                channel_id,
+                "agent-pubkey",
+                Some(1_000),
+                &filter,
+            )
+            .await
+        );
+
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(frame.as_array().map(Vec::len), Some(3));
     }
 
     fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
