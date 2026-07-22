@@ -706,6 +706,17 @@ export function AgentInstanceEditDialog({
           autoRestartOnConfigChange,
         );
       }
+      if (result.profileSyncError) {
+        // The local save (disk + AGENTS.md) already succeeded, but the relay
+        // still has the old kind:0 profile (e.g. old @mention name). Surface
+        // it instead of silently closing — otherwise the dialog closes as if
+        // the rename fully succeeded and the user never learns the relay is
+        // stale (#1822). Matches the create/persona flows, which already toast
+        // profileSyncError.
+        toast.warning(
+          `${result.agent.name} saved locally, but relay profile sync failed: ${result.profileSyncError}`,
+        );
+      }
       handleOpenChange(false);
       onUpdated?.(result.agent);
       // The auto-restart policy deliberately never fires for a stopped or
