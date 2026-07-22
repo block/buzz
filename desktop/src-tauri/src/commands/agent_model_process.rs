@@ -27,7 +27,12 @@ pub(super) async fn run_agent_models_command(
         if let Some(home) = default_agent_workdir() {
             cmd.current_dir(home);
         }
-        if let Some(ref path) = crate::managed_agents::login_shell_path() {
+        // Same PATH as runtime spawn / CLI probes: managed node + npm bins
+        // ahead of the login-shell PATH so `#!/usr/bin/env node` ACP shims
+        // resolve when Buzz is launched from a GUI (no interactive shell).
+        if let Some(path) =
+            crate::managed_agents::readiness::cli_probe::augmented_path()
+        {
             cmd.env("PATH", path);
         }
         cmd.arg("models")
