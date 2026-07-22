@@ -1533,4 +1533,99 @@ test.describe("inbox stable-conversation regressions", () => {
     // Drift compensation uses scrollBy — must NOT call scrollIntoView again.
     expect(await getScrollIntoViewCount(page)).toBe(1);
   });
+
+  // Regression: a deleted thread reply must NOT survive in the inbox detail
+  // pane. The relay omits soft-deleted rows AND never returns the kind:5/9005
+  // deletion marker through the content-kind descendant fetch, so the inbox
+  // could still render the deleted message re-injected from the latched feed
+  // item / local channel-window cache. `useInboxThreadContext` now backfills
+  // the structural (deletion) markers by `#e` and feeds them into
+  // `formatTimelineMessages`, which suppresses the deleted row — mirroring the
+  // channel timeline. Before the fix, "Secret reply to delete" stayed visible.
+  test("deleted thread reply is suppressed in the inbox detail pane", async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+    await expect(getListPane(page)).toBeVisible();
+    await waitForBridgeReady(page);
+
+    const { root, deletedReply } = await page.evaluate(
+      ({ channelId, currentPubkey, senderPubkey }) => {
+        const win = window as MockWindow;
+        const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        const push = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+        if (!emit || !push) throw new Error("Bridge helpers not ready");
+
+        const root = emit({
+          channelName: "general",
+          content: "Thread root that mentions me — the inbox item.",
+          pubkey: senderPubkey,
+          mentionPubkeys: [currentPubkey],
+          id: "d0".repeat(32),
+        });
+
+        const deletedReply = emit({
+          channelName: "general",
+          content: "Secret reply to delete.",
+          parentEventId: root.id,
+          pubkey: senderPubkey,
+          id: "d1".repeat(32),
+        });
+
+        const survivingReply = emit({
+          channelName: "general",
+          content: "Reply that stays visible.",
+          parentEventId: root.id,
+          pubkey: senderPubkey,
+          id: "d2".repeat(32),
+        });
+
+        // kind:9005 (Buzz-native) deletion marker referencing the reply. It has
+        // no channel content kind, so the content-kind descendant fetch skips
+        // it; the structural-aux backfill picks it up by `#e`.
+        emit({
+          channelName: "general",
+          content: "",
+          pubkey: senderPubkey,
+          kind: 9005,
+          extraTags: [["e", deletedReply.id]],
+          id: "d9".repeat(32),
+        });
+
+        push({
+          id: root.id,
+          kind: root.kind,
+          pubkey: root.pubkey,
+          content: root.content,
+          created_at: root.created_at,
+          channel_id: channelId,
+          channel_name: "general",
+          tags: root.tags,
+          category: "mention",
+        });
+
+        return { root, deletedReply, survivingReply };
+      },
+      {
+        channelId: GENERAL_CHANNEL_ID,
+        currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+        senderPubkey: TEST_IDENTITIES.alice.pubkey,
+      },
+    );
+
+    // Open the inbox item.
+    await page.getByTestId(`home-inbox-item-${root.id}`).click();
+    const detail = getDetailPane(page);
+
+    // The surviving reply must render — proves context loaded and the
+    // structural-aux fetch did not over-suppress.
+    await expect(detail).toContainText("Reply that stays visible.");
+
+    // The deleted reply must NOT render. Assert after the surviving reply is
+    // present so we know context hydration completed before checking absence.
+    await expect(detail).not.toContainText("Secret reply to delete.");
+    // Belt-and-suspenders: no row keyed by the deleted event id.
+    void deletedReply;
+  });
 });

@@ -4,7 +4,10 @@ import { isInboxThreadContextEvent } from "@/features/home/lib/inboxViewHelpers"
 import { relayEventFromFeedItem } from "@/features/home/lib/inbox";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
-import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
+import {
+  buildChannelReactionAuxFilter,
+  buildChannelStructuralAuxFilter,
+} from "@/shared/api/relayChannelFilters";
 import { getEventById } from "@/shared/api/tauri";
 import type { FeedItem, RelayEvent } from "@/shared/api/types";
 import { HOME_MENTION_EVENT_KINDS } from "@/shared/constants/kinds";
@@ -14,6 +17,16 @@ type InboxThreadContextResult = {
   isLoading: boolean;
   /** kind:7 events referencing the context messages, fetched by `#e`. */
   reactionEvents: RelayEvent[];
+  /**
+   * kind:5 / kind:9005 deletion (and kind:40003 edit) markers referencing the
+   * context messages, fetched by `#e`. The relay omits soft-deleted rows and
+   * never returns the deletion markers themselves through the content-kind
+   * descendant fetch, so a deleted message can survive in `events` via the
+   * latched feed item or the local channel-window cache. Feeding these markers
+   * into `formatTimelineMessages` lets its existing suppression pass drop the
+   * deleted rows — matching the channel timeline's structural-aux backfill.
+   */
+  deletionEvents: RelayEvent[];
   /** Re-fetch reaction events (e.g. after a toggle) without reloading context. */
   refreshReactions: () => Promise<void>;
 };
@@ -238,10 +251,57 @@ export function useInboxThreadContext(
     }
   }, [fetchReactions]);
 
+  // The relay never returns kind:5/9005 deletion markers through the
+  // content-kind descendant fetch above, and it omits soft-deleted rows — but
+  // a deleted message can still reach `events` via the latched feed item or the
+  // local channel-window cache. Fetch the structural markers (deletions + edits)
+  // by `#e` over the rendered context ids so `formatTimelineMessages` can apply
+  // them, exactly as the channel timeline does with its structural-aux backfill.
+  const [deletionEvents, setDeletionEvents] = React.useState<RelayEvent[]>([]);
+
+  const fetchDeletions = React.useCallback(async (): Promise<
+    RelayEvent[] | null
+  > => {
+    const eventIds = contextEventIdsKey ? contextEventIdsKey.split(",") : [];
+    if (!selectedChannelId || eventIds.length === 0) {
+      return [];
+    }
+
+    try {
+      return await relayClient.fetchAuxEventsByReference(
+        selectedChannelId,
+        eventIds,
+        buildChannelStructuralAuxFilter,
+      );
+    } catch (error) {
+      console.error(
+        "Failed to hydrate deletion markers for Inbox context messages",
+        selectedChannelId,
+        error,
+      );
+      return null;
+    }
+  }, [contextEventIdsKey, selectedChannelId]);
+
+  React.useEffect(() => {
+    let isCancelled = false;
+
+    void fetchDeletions().then((fetched) => {
+      if (!isCancelled && fetched !== null) {
+        setDeletionEvents(fetched);
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [fetchDeletions]);
+
   return {
     events,
     isLoading,
     reactionEvents,
+    deletionEvents,
     refreshReactions,
   };
 }
