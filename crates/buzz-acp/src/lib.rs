@@ -1301,6 +1301,7 @@ async fn tokio_main() -> Result<()> {
     // spawn under a 60-second timeout; failures are logged and skipped. If ALL
     // agents fail we return an error. A partial pool is valid — the harness
     // continues with reduced capacity and logs a warning.
+    let agent_spawn_env = config.agent_spawn_env();
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(config.agents as usize);
     for i in 0..config.agents as usize {
         // Spawn OUTSIDE the timeout so we always own the child for cleanup.
@@ -1310,7 +1311,7 @@ async fn tokio_main() -> Result<()> {
         let spawn_result = AcpClient::spawn(
             &config.agent_command,
             &config.agent_args,
-            &config.persona_env_vars,
+            &agent_spawn_env,
             config.has_generated_codex_config,
         )
         .await;
@@ -1799,7 +1800,7 @@ async fn tokio_main() -> Result<()> {
                 tracing::info!(agent = idx, "slot refill: spawning background respawn");
                 let cmd = config.agent_command.clone();
                 let args = config.agent_args.clone();
-                let env = config.persona_env_vars.clone();
+                let env = config.agent_spawn_env();
                 let has_codex = config.has_generated_codex_config;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
@@ -3507,7 +3508,7 @@ fn recover_panicked_agent(
     slot.respawn_in_flight = true;
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
-    let env = config.persona_env_vars.clone();
+    let env = config.agent_spawn_env();
     let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
@@ -3685,7 +3686,7 @@ fn spawn_respawn_task(
     // Spawn the actual work (shutdown + sleep + spawn + init) off the main loop.
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
-    let env = config.persona_env_vars.clone();
+    let env = config.agent_spawn_env();
     let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {

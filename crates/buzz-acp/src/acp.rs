@@ -268,6 +268,10 @@ pub struct AcpClient {
     goose_usage: UsageTracker,
 }
 
+fn harness_bound_agent_env(key: &str) -> bool {
+    matches!(key, "BUZZ_RELAY_URL" | "BUZZ_PRIVATE_KEY")
+}
+
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
 /// collisions.  When both sides have an object for the same key, the merge recurses so
 /// unrelated nested keys from `base` are preserved.
@@ -491,7 +495,9 @@ impl AcpClient {
 
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
-        // in the parent environment.
+        // in the parent environment. Harness-bound Buzz credentials are the
+        // exception: they must match the validated relay identity even if the
+        // parent happens to carry credentials for another workspace.
         //
         // CODEX_CONFIG is handled specially via build_codex_config_env:
         //   • has_generated_codex_config=true: merge all CODEX_CONFIG entries + parent
@@ -518,7 +524,7 @@ impl AcpClient {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if std::env::var(key).is_err() {
+            if harness_bound_agent_env(key) || std::env::var(key).is_err() {
                 cmd.env(key, value);
             }
         }
@@ -2119,6 +2125,14 @@ fn kill_process_group(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_buzz_credentials_override_parent_environment() {
+        assert!(harness_bound_agent_env("BUZZ_RELAY_URL"));
+        assert!(harness_bound_agent_env("BUZZ_PRIVATE_KEY"));
+        assert!(!harness_bound_agent_env("GOOSE_PROVIDER"));
+        assert!(!harness_bound_agent_env("CODEX_CONFIG"));
+    }
 
     fn signed_batch(
         channel_id: uuid::Uuid,

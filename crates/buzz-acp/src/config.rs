@@ -1185,6 +1185,23 @@ impl Config {
             allowed_respond_to_detail,
         )
     }
+
+    /// Build the managed agent's runtime environment.
+    ///
+    /// Buzz transport credentials are derived from the already-validated
+    /// harness identity at spawn time. They are never stored in worker
+    /// manifests or supervisor artifacts, and they replace any persona-level
+    /// values for these reserved keys.
+    pub fn agent_spawn_env(&self) -> Vec<(String, String)> {
+        let mut env = self.persona_env_vars.clone();
+        env.retain(|(key, _)| !matches!(key.as_str(), "BUZZ_RELAY_URL" | "BUZZ_PRIVATE_KEY"));
+        env.push(("BUZZ_RELAY_URL".into(), self.relay_url.clone()));
+        env.push((
+            "BUZZ_PRIVATE_KEY".into(),
+            self.keys.secret_key().to_secret_hex(),
+        ));
+        env
+    }
 }
 
 fn receipt_owner_resolves(
@@ -1591,6 +1608,44 @@ mod tests {
             Some("not-a-pubkey"),
             Some("not-an-auth-tag")
         ));
+    }
+
+    #[test]
+    fn managed_agent_env_uses_validated_harness_buzz_identity() {
+        let mut config = test_config(SubscribeMode::All);
+        config.persona_env_vars = vec![
+            ("BUZZ_RELAY_URL".into(), "ws://wrong.invalid".into()),
+            ("BUZZ_PRIVATE_KEY".into(), "wrong-secret".into()),
+            ("SAFE_PERSONA_SETTING".into(), "kept".into()),
+        ];
+
+        let env = config.agent_spawn_env();
+        assert_eq!(
+            env.iter()
+                .filter(|(key, _)| key == "BUZZ_RELAY_URL")
+                .count(),
+            1
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "BUZZ_RELAY_URL")
+                .map(|(_, value)| value.as_str()),
+            Some(config.relay_url.as_str())
+        );
+        assert_eq!(
+            env.iter()
+                .filter(|(key, _)| key == "BUZZ_PRIVATE_KEY")
+                .count(),
+            1
+        );
+        let expected_secret = config.keys.secret_key().to_secret_hex();
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "BUZZ_PRIVATE_KEY")
+                .map(|(_, value)| value.as_str()),
+            Some(expected_secret.as_str())
+        );
+        assert!(env.contains(&("SAFE_PERSONA_SETTING".into(), "kept".into())));
     }
 
     fn make_rule(
