@@ -979,7 +979,7 @@ export function ProfileSettingsCard({
             {isSignOutPending ? (
               <Spinner aria-label="Signing out" className="h-4 w-4 border-2" />
             ) : null}
-            {isSignOutPending ? "Signing out…" : "Sign Out"}
+            {isSignOutPending ? "Signing out…" : "Delete my data"}
           </Button>
         </div>
         <AlertDialog
@@ -1032,7 +1032,7 @@ export function ProfileSettingsCard({
                     });
                 }}
               >
-                {isSignOutPending ? "Signing out…" : "Delete My Data"}
+                {isSignOutPending ? "Signing out…" : "Delete my data"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
