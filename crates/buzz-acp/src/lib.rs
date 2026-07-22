@@ -10,6 +10,7 @@ mod pool_lifecycle;
 mod queue;
 mod relay;
 mod setup_mode;
+mod thread_follow;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -1478,6 +1479,12 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
+    // Thread-following (#2270): track the threads this agent participates in
+    // so untagged replies in them stay audible under mention gating. Disabled
+    // trackers are inert — every call below becomes a no-op.
+    let mut thread_follow =
+        thread_follow::ThreadFollowState::new(config.thread_follow_ttl_secs, config.follow_threads);
+
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
@@ -1693,6 +1700,37 @@ async fn tokio_main() -> Result<()> {
             }
         }
 
+        // #2270: keep followed-thread REQ clauses in sync. take_dirty() is
+        // empty on almost every iteration; when a dispatch records a new
+        // thread (or a root expires) the affected channels get their
+        // subscription re-issued with an updated `#e` clause. The re-REQ
+        // replays from last_seen minus skew, so replies that land between
+        // dispatch and re-subscribe are recovered by replay, not lost.
+        // Runs regardless of pool readiness — this is relay subscription
+        // state; expiry-narrowing must proceed while a lazy pool sleeps.
+        thread_follow.compact_if_due();
+        for ch in thread_follow.take_dirty() {
+            if !subscribed_channel_ids.contains(&ch) {
+                continue;
+            }
+            let base = channel_filters
+                .get(&ch)
+                .cloned()
+                .or_else(|| config::resolve_dynamic_channel_filter(&config, ch, &rules));
+            if let Some(mut filter) = base {
+                if filter.require_mention {
+                    filter.thread_roots = thread_follow.roots_for_filter(ch);
+                    if let Err(e) = relay.subscribe_channel(ch, filter).await {
+                        tracing::warn!(
+                            channel_id = %ch,
+                            error = %e,
+                            "failed to refresh followed-thread subscription"
+                        );
+                    }
+                }
+            }
+        }
+
         if pool_ready && last_maintenance.elapsed() >= maintenance_interval {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
@@ -1727,7 +1765,9 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -1763,7 +1803,9 @@ async fn tokio_main() -> Result<()> {
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+            for (channel_id, thread_tags) in
+                dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
+            {
                 typing_channels.insert(channel_id, thread_tags);
             }
         }
@@ -1945,6 +1987,7 @@ async fn tokio_main() -> Result<()> {
                                     } else {
                                         0
                                     };
+                                    thread_follow.clear_channel(ch);
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
@@ -2116,7 +2159,10 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            let followed_roots = thread_follow
+                                .enabled()
+                                .then(|| thread_follow.live_roots(buzz_event.channel_id));
+                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex, followed_roots.as_ref()).await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
                                 None => {
@@ -2124,6 +2170,15 @@ async fn tokio_main() -> Result<()> {
                                     continue;
                                 }
                             };
+                            // An admitted event in a followed thread is live
+                            // conversation — slide that thread's TTL forward.
+                            if thread_follow.enabled() {
+                                if let Some(root) =
+                                    queue::parse_thread_tags(&buzz_event.event).root_event_id
+                                {
+                                    thread_follow.touch(buzz_event.channel_id, &root);
+                                }
+                            }
                             // Capture author pubkey before queue.push() moves
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
@@ -2204,7 +2259,7 @@ async fn tokio_main() -> Result<()> {
                             }
                             if pool_ready {
                                 for (channel_id, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx)
+                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
                                 {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
@@ -2233,7 +2288,7 @@ async fn tokio_main() -> Result<()> {
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -2331,7 +2386,9 @@ async fn tokio_main() -> Result<()> {
                 {
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2354,7 +2411,9 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2474,7 +2533,9 @@ async fn tokio_main() -> Result<()> {
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2835,6 +2896,7 @@ fn dispatch_pending(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
+    follow: &mut thread_follow::ThreadFollowState,
 ) -> Vec<(Uuid, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
     loop {
@@ -2848,6 +2910,15 @@ fn dispatch_pending(
             .last()
             .map(|event| queue::parse_thread_tags(&event.event))
             .unwrap_or_default();
+        // #2270: the thread this dispatch participates in — the batch's NIP-10
+        // root, or the triggering event itself when the agent's reply will
+        // start a new thread (mirrors resolve_reply_anchor's root resolution).
+        let follow_root = batch.events.last().map(|be| {
+            typing_scope
+                .root_event_id
+                .clone()
+                .unwrap_or_else(|| be.event.id.to_hex())
+        });
         let affinity_hit = pool.has_session_for(channel_id);
         let mut agent = match pool.try_claim(Some(channel_id)) {
             Some(a) => a,
@@ -2913,6 +2984,9 @@ fn dispatch_pending(
                 steer_tx,
             },
         );
+        if let Some(root) = follow_root {
+            follow.record(channel_id, &root);
+        }
         dispatched_channels.push((channel_id, typing_scope));
     }
     tracing::debug!(
@@ -4631,6 +4705,8 @@ mod build_mcp_servers_tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            follow_threads: true,
+            thread_follow_ttl_secs: 86_400,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
@@ -4797,6 +4873,8 @@ mod error_outcome_emission_tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            follow_threads: true,
+            thread_follow_ttl_secs: 86_400,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
