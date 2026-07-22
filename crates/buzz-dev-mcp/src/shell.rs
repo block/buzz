@@ -177,7 +177,7 @@ pub async fn run(
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
     set_process_group(&mut cmd);
-    hide_console_window(&mut cmd);
+    crate::windows_console::hide_tokio(&mut cmd);
 
     let started = Instant::now();
     let mut child = match cmd.spawn() {
@@ -403,6 +403,9 @@ fn resolve_bash(_path_env: &str) -> Result<(PathBuf, String), String> {
 ///   6. `bash.exe` on PATH, excluding System32 (WSL) and WindowsApps (App
 ///      Execution Alias → WSL; hangs #2328).
 ///
+/// KEEP IN SYNC with `desktop/.../git_bash.rs` `resolve_git_bash_inner`
+/// (same order after overrides; Doctor uses a pure inject-env API).
+///
 /// Returns `(resolved_path, display_name)`. The display name is derived from the
 /// resolved path, guaranteeing the dialect hint and the spawned shell agree.
 ///
@@ -416,7 +419,7 @@ fn resolve_bash(path_env: &str) -> Result<(PathBuf, String), String> {
                 let name = shell_name_from_path(&p);
                 return Ok((p, name));
             }
-        } else if let Some(found) = scan_path_for_command(&p, path_env, None) {
+        } else if let Some(found) = scan_path_for_command(&p, path_env, None, false) {
             let name = shell_name_from_path(&found);
             return Ok((found, name));
         }
@@ -429,7 +432,7 @@ fn resolve_bash(path_env: &str) -> Result<(PathBuf, String), String> {
         }
     }
 
-    if let Some(git) = scan_path_for_command(Path::new("git.exe"), path_env, None) {
+    if let Some(git) = scan_path_for_command(Path::new("git.exe"), path_env, None, false) {
         if let Some(bash) = bash_from_git(&git) {
             return Ok((bash, "bash".to_string()));
         }
@@ -584,29 +587,26 @@ fn is_under_dir(dir: &Path, root: &Path) -> bool {
     true
 }
 
-/// Scan the child's PATH for `bash.exe`, skipping the Windows system directory
-/// (`system_root`, normally `%SystemRoot%`) so we never resolve WSL's
-/// `System32\bash.exe`, and skipping `…\Microsoft\WindowsApps` (App Execution
-/// Alias bash → WSL hang, #2328). PATH is parsed with `std::env::split_paths`.
+/// Scan the child's PATH for `bash.exe`, skipping System32 (WSL) and
+/// WindowsApps (App Execution Alias → WSL hang, #2328).
+///
+/// KEEP IN SYNC with `desktop/.../git_bash.rs` (probe order + WindowsApps skip).
 #[cfg(windows)]
 fn scan_path_for_bash(path_env: &str, system_root: Option<&Path>) -> Option<PathBuf> {
-    scan_path_for_command(Path::new("bash.exe"), path_env, system_root)
+    scan_path_for_command(Path::new("bash.exe"), path_env, system_root, true)
 }
 
-/// Scan `path_env` for `name` (or `name.exe` on Windows if `name` has no
-/// extension), skipping any directory under `system_root` to avoid resolving
-/// WSL helpers. For `bash.exe`, also skip WindowsApps. Returns the first
-/// absolute path found.
+/// Scan `path_env` for `name` (or `name.exe` if `name` has no extension).
+/// Skips dirs under `system_root` when set. When `skip_windows_apps`, skips
+/// `…\Microsoft\WindowsApps`.
 #[cfg(windows)]
 fn scan_path_for_command(
     name: &Path,
     path_env: &str,
     system_root: Option<&Path>,
+    skip_windows_apps: bool,
 ) -> Option<PathBuf> {
     let needs_exe = name.extension().is_none();
-    let skip_windows_apps = name
-        .file_name()
-        .is_some_and(|n| n.eq_ignore_ascii_case("bash.exe") || n.eq_ignore_ascii_case("bash"));
     for dir in std::env::split_paths(path_env) {
         if let Some(root) = system_root {
             if is_under_dir(&dir, root) {
@@ -616,12 +616,10 @@ fn scan_path_for_command(
         if skip_windows_apps && path_looks_like_windows_apps(&dir) {
             continue;
         }
-        // Try as-is first.
         let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
         }
-        // On Windows, also try with .exe suffix when the name has no extension.
         if needs_exe {
             let mut with_exe = dir.join(name);
             with_exe.set_extension("exe");
@@ -634,6 +632,7 @@ fn scan_path_for_command(
 }
 
 /// True for `…\Microsoft\WindowsApps` (App Execution Alias dir), any casing.
+/// KEEP IN SYNC with `desktop/.../git_bash.rs`.
 #[cfg(windows)]
 fn path_looks_like_windows_apps(dir: &Path) -> bool {
     let parts: Vec<_> = dir
@@ -652,21 +651,6 @@ fn set_process_group(cmd: &mut Command) {
 
 #[cfg(not(unix))]
 fn set_process_group(_cmd: &mut Command) {}
-
-/// Suppress the console window on Windows GUI hosts (Buzz desktop).
-/// No-op on Unix. Local helper — this crate does not share desktop's util.
-fn hide_console_window(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        // tokio::process::Command exposes creation_flags as an inherent Windows method.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = cmd;
-    }
-}
 
 /// Kill primitive covering the spawned bash AND every descendant it forks,
 /// mirroring the same guarantee across platforms.

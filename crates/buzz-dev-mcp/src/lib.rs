@@ -19,6 +19,7 @@ mod str_replace;
 mod todo;
 mod tree;
 mod view_image;
+mod windows_console;
 
 #[derive(Clone)]
 struct DevMcp {

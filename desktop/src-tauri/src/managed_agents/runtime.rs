@@ -1891,12 +1891,7 @@ pub fn spawn_agent_child(
     // Windows: suppress the harness console window. Without this a bare
     // terminal pops for buzz-acp.exe and lingers (the app itself sets
     // windows_subsystem="windows", but the spawned child does not inherit it).
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    crate::windows_console::hide_console(&mut command);
 
     let child = command.spawn().map_err(|error| {
         format!(

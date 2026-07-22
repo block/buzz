@@ -20,6 +20,19 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Suppress a console window for agent adapter children on Windows (no-op elsewhere).
+fn hide_console(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -466,14 +479,8 @@ impl AcpClient {
         #[cfg(unix)]
         cmd.process_group(0);
 
-        // Desktop launches buzz-acp with CREATE_NO_WINDOW. Without the same flag
-        // here, each adapter (cmd.exe → node, buzz-agent, …) allocates its own
-        // console — one window per agent (#2292).
-        #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        // Desktop launches buzz-acp windowless; adapters must not allocate consoles (#2292).
+        hide_console(&mut cmd);
 
         let mut child = cmd.spawn()?;
 

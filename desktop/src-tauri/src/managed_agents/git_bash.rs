@@ -196,22 +196,19 @@ fn resolve_git_bash_inner(
     local_app_data: Option<PathBuf>,
     check_registry: bool,
 ) -> Option<PathBuf> {
-    // Prefer real Git Bash over a PATH hit on WindowsApps\bash.exe (App
-    // Execution Alias → WSL; hangs #2328). Order: overrides → git.exe sibling →
-    // well-known install dirs → registry → PATH bash (System32 + WindowsApps skipped).
+    // Prefer real Git Bash over WindowsApps\bash.exe (App Execution Alias →
+    // WSL; #2328). Order: overrides → git.exe sibling → well-known dirs →
+    // registry → PATH bash (System32 + WindowsApps skipped).
+    // KEEP IN SYNC with `crates/buzz-dev-mcp/src/shell.rs` `resolve_bash`.
     let result = shell_override
         .and_then(|path| resolve_shell_override(&path, path_env))
         .or_else(|| git_bash_override.filter(|path| path.is_file()))
         .or_else(|| {
-            scan_path_for_command(Path::new("git.exe"), path_env, None)
+            scan_path_for_command(Path::new("git.exe"), path_env, None, false)
                 .and_then(|git| bash_from_git(&git))
         })
         .or_else(|| {
-            git_bash_from_standard_paths([
-                program_files.clone(),
-                program_files_x86.clone(),
-                local_app_data.clone(),
-            ])
+            git_bash_from_standard_paths([program_files, program_files_x86, local_app_data])
         });
     if result.is_some() {
         return result;
@@ -221,7 +218,7 @@ fn resolve_git_bash_inner(
             return Some(bash);
         }
     }
-    scan_path_for_bash(path_env, system_root.as_deref(), local_app_data.as_deref())
+    scan_path_for_bash(path_env, system_root.as_deref())
 }
 
 /// Like `resolve_git_bash` but skips the ambient Windows registry lookup, so
@@ -257,7 +254,7 @@ fn resolve_shell_override(shell: &Path, path_env: &str) -> Option<PathBuf> {
     if shell.components().count() > 1 || shell.has_root() {
         shell.is_file().then(|| shell.to_path_buf())
     } else {
-        scan_path_for_command(shell, path_env, None)
+        scan_path_for_command(shell, path_env, None, false)
     }
 }
 
@@ -268,46 +265,29 @@ fn bash_from_git(git: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn scan_path_for_bash(
-    path_env: &str,
-    system_root: Option<&Path>,
-    local_app_data: Option<&Path>,
-) -> Option<PathBuf> {
-    let windows_apps = local_app_data.map(|base| base.join("Microsoft").join("WindowsApps"));
-    scan_path_for_command_skipping(
-        Path::new("bash.exe"),
-        path_env,
-        system_root,
-        windows_apps.as_deref(),
-    )
+fn scan_path_for_bash(path_env: &str, system_root: Option<&Path>) -> Option<PathBuf> {
+    // Bash-only: also reject WindowsApps App Execution Alias (#2328).
+    scan_path_for_command(Path::new("bash.exe"), path_env, system_root, true)
 }
 
+/// Scan PATH for `name`. When `skip_windows_apps`, reject
+/// `…\Microsoft\WindowsApps` (App Execution Alias → WSL hang for bash).
+///
+/// KEEP IN SYNC with `crates/buzz-dev-mcp/src/shell.rs` (`scan_path_for_command`
+/// + `path_looks_like_windows_apps` + resolve probe order).
 #[cfg(windows)]
 fn scan_path_for_command(
     name: &Path,
     path_env: &str,
     system_root: Option<&Path>,
-) -> Option<PathBuf> {
-    scan_path_for_command_skipping(name, path_env, system_root, None)
-}
-
-#[cfg(windows)]
-fn scan_path_for_command_skipping(
-    name: &Path,
-    path_env: &str,
-    system_root: Option<&Path>,
-    also_skip: Option<&Path>,
+    skip_windows_apps: bool,
 ) -> Option<PathBuf> {
     let needs_exe = name.extension().is_none();
     std::env::split_paths(path_env).find_map(|dir| {
         if system_root.is_some_and(|root| is_under_dir(&dir, root)) {
             return None;
         }
-        if also_skip.is_some_and(|skip| is_under_dir(&dir, skip)) {
-            return None;
-        }
-        // Store App Execution Alias bash launches WSL and can hang (#2328).
-        if path_looks_like_windows_apps(&dir) {
+        if skip_windows_apps && path_looks_like_windows_apps(&dir) {
             return None;
         }
         let candidate = dir.join(name);
