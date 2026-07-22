@@ -826,6 +826,32 @@ test("managed relay agents are visible in channel mentions regardless of relay p
   await expect(dropdown.getByText("agent")).toBeVisible();
 });
 
+test("shared in-channel bot agents are visible to non-owner members", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "Tech Goose",
+        respondTo: "anyone",
+        channelNames: ["general"],
+        memberChannelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@Tech");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("Tech Goose")).toBeVisible();
+  await expect(dropdown.getByText("agent")).toBeVisible();
+});
+
 test("relay-only agents stay hidden from channel mentions even when allowlisted", async ({
   page,
 }) => {
