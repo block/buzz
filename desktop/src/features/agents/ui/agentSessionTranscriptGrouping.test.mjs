@@ -7,7 +7,12 @@ import {
   formatTurnSetupLabel,
   getDisplayBlockKey,
 } from "./agentSessionTranscriptGrouping.ts";
-import { isObserverEventAfter } from "../observerRelayStore.ts";
+import {
+  getLatestLiveSessionIds,
+  isObserverEventAfter,
+  recordLatestLiveSession,
+  resetAgentObserverStore,
+} from "../observerRelayStore.ts";
 
 const baseTimestamp = "2026-06-14T22:20:23.000Z";
 
@@ -1094,6 +1099,120 @@ test("buildTranscriptDisplayBlocks_nonContiguousRunsSameSession_distinctBoundary
     keys.length,
     "all React keys derived from session-boundary blocks are unique",
   );
+});
+
+test("interleaved thread sessions are grouped once instead of fragmenting A-B-A", () => {
+  const rootA = "a".repeat(64);
+  const rootB = "b".repeat(64);
+  const firstA = {
+    ...sessionItem("a-1", "sess-A", "2026-07-08T00:00:01.000Z"),
+    threadRoot: rootA,
+  };
+  const onlyB = {
+    ...sessionItem("b-1", "sess-B", "2026-07-08T00:00:02.000Z"),
+    threadRoot: rootB,
+  };
+  const secondA = {
+    ...sessionItem("a-2", "sess-A", "2026-07-08T00:00:03.000Z"),
+    threadRoot: rootA,
+  };
+
+  const blocks = buildTranscriptDisplayBlocks([firstA, onlyB, secondA]);
+  const flatIds = flattenDisplayBlocks(blocks).map((item) => item.id);
+  assert.deepEqual(
+    flatIds,
+    ["b-1", "a-1", "a-2"],
+    "conversation groups are ordered by last activity and A remains contiguous",
+  );
+  assert.equal(
+    blocks.filter((block) => block.kind === "session-boundary").length,
+    1,
+    "two conversation sessions produce two runs, not A/B/A's three",
+  );
+});
+
+test("each concurrent thread can label its latest session current", () => {
+  const rootA = "a".repeat(64);
+  const rootB = "b".repeat(64);
+  const items = [
+    {
+      ...sessionItem("b-old", "sess-B-old", "2026-07-08T00:00:01.000Z"),
+      threadRoot: rootB,
+    },
+    {
+      ...sessionItem("b-live", "sess-B-live", "2026-07-08T00:00:02.000Z"),
+      threadRoot: rootB,
+    },
+    {
+      ...sessionItem("a-old", "sess-A-old", "2026-07-08T00:00:03.000Z"),
+      threadRoot: rootA,
+    },
+    {
+      ...sessionItem("a-live", "sess-A-live", "2026-07-08T00:00:04.000Z"),
+      threadRoot: rootA,
+    },
+  ];
+  const boundaries = buildTranscriptDisplayBlocks(items, [
+    "sess-A-live",
+    "sess-B-live",
+  ]).filter((block) => block.kind === "session-boundary");
+
+  assert.equal(
+    boundaries.find((block) => block.sessionId === "sess-B-live")?.labelState,
+    "current",
+  );
+  assert.equal(
+    boundaries.find((block) => block.sessionId === "sess-A-live")?.labelState,
+    "current",
+  );
+});
+
+test("latest-live store keeps same-channel conversations independently current", () => {
+  resetAgentObserverStore();
+  const agent = "f".repeat(64);
+  const channelId = "channel-1";
+  const frame = (seq, threadRoot, sessionId, timestamp) => ({
+    seq,
+    timestamp,
+    kind: "session_resolved",
+    agentIndex: 0,
+    channelId,
+    threadRoot,
+    sessionId,
+    turnId: `turn-${seq}`,
+    payload: {},
+  });
+
+  recordLatestLiveSession(
+    agent,
+    frame(1, "a".repeat(64), "sess-A", "2026-07-08T00:00:01.000Z"),
+  );
+  recordLatestLiveSession(
+    agent,
+    frame(2, "b".repeat(64), "sess-B", "2026-07-08T00:00:02.000Z"),
+  );
+  recordLatestLiveSession(
+    agent,
+    frame(3, "a".repeat(64), "stale-A", "2026-07-08T00:00:00.000Z"),
+  );
+
+  const firstSnapshot = getLatestLiveSessionIds(agent, channelId);
+  assert.deepEqual([...firstSnapshot].sort(), ["sess-A", "sess-B"]);
+  assert.equal(
+    getLatestLiveSessionIds(agent, channelId),
+    firstSnapshot,
+    "useSyncExternalStore snapshot stays reference-stable without a change",
+  );
+
+  recordLatestLiveSession(
+    agent,
+    frame(4, "a".repeat(64), "sess-A-2", "2026-07-08T00:00:04.000Z"),
+  );
+  assert.deepEqual([...getLatestLiveSessionIds(agent, channelId)].sort(), [
+    "sess-A-2",
+    "sess-B",
+  ]);
+  resetAgentObserverStore();
 });
 
 // ── session/new run-anchor: restart scenario ──────────────────────────────────

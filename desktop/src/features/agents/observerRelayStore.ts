@@ -58,8 +58,9 @@ const snapshotByAgent = new Map<string, ObserverSnapshot>();
 // TranscriptState once over the combined window.
 const archiveEventsByChannel = new Map<string, ObserverEvent[]>();
 
-// Per-agent, per-channel latest-live-session-id.
-// Key: `${normalizePubkey(agentPubkey)}:${channelId}`.
+// Per-agent, per-channel/thread latest-live-session-id.
+// Key includes canonical threadRoot so concurrent same-channel conversations
+// remain independently current.
 // Set when a live relay observer event with a sessionId arrives.
 // Cleared in resetAgentObserverStore.
 //
@@ -73,24 +74,91 @@ const archiveEventsByChannel = new Map<string, ObserverEvent[]>();
 // the parsed event sorts strictly AFTER the stored one, using the same
 // two-key ordering as `compareObserverEvents`: timestamp first, then seq on a
 // tie — so a higher-seq frame at equal timestamp still advances the entry.
-type LatestLiveEntry = { sessionId: string; timestamp: string; seq: number };
-const latestLiveSessionByAgentChannel = new Map<string, LatestLiveEntry>();
+type LatestLiveEntry = {
+  sessionId: string;
+  timestamp: string;
+  seq: number;
+  agentChannelKey: string;
+  conversationKey: string;
+};
+const latestLiveSessionByConversation = new Map<string, LatestLiveEntry>();
+const latestLiveSessionIdsByAgentChannel = new Map<string, readonly string[]>();
+const EMPTY_LIVE_SESSION_IDS: readonly string[] = Object.freeze([]);
 
-function liveSessionKey(agentPubkey: string, channelId: string | null): string {
-  return `${normalizePubkey(agentPubkey)}:${channelId ?? ""}`;
+function liveAgentChannelKey(
+  agentPubkey: string,
+  channelId: string | null,
+): string {
+  return `${normalizePubkey(agentPubkey)}\u0000${channelId ?? ""}`;
 }
 
-/** Read the latest-live-session-id for a (agent, channel) pair. */
-export function getLatestLiveSessionId(
+function liveConversationKey(
+  agentPubkey: string,
+  channelId: string | null,
+  threadRoot: string | null,
+): string {
+  return `${liveAgentChannelKey(agentPubkey, channelId)}\u0000${threadRoot ?? ""}`;
+}
+
+function refreshLatestLiveSessionIds(agentChannelKey: string) {
+  const next = [...latestLiveSessionByConversation.values()]
+    .filter((entry) => entry.agentChannelKey === agentChannelKey)
+    .sort((left, right) =>
+      left.conversationKey.localeCompare(right.conversationKey),
+    )
+    .map((entry) => entry.sessionId);
+  const current =
+    latestLiveSessionIdsByAgentChannel.get(agentChannelKey) ??
+    EMPTY_LIVE_SESSION_IDS;
+  if (
+    current.length === next.length &&
+    current.every((sessionId, index) => sessionId === next[index])
+  ) {
+    return;
+  }
+  latestLiveSessionIdsByAgentChannel.set(agentChannelKey, next);
+}
+
+/** Read stable latest-live session IDs for every conversation in a channel. */
+export function getLatestLiveSessionIds(
   agentPubkey: string | null | undefined,
   channelId: string | null | undefined,
-): string | null {
-  if (!agentPubkey) return null;
+): readonly string[] {
+  if (!agentPubkey) return EMPTY_LIVE_SESSION_IDS;
   return (
-    latestLiveSessionByAgentChannel.get(
-      liveSessionKey(agentPubkey, channelId ?? null),
-    )?.sessionId ?? null
+    latestLiveSessionIdsByAgentChannel.get(
+      liveAgentChannelKey(agentPubkey, channelId ?? null),
+    ) ?? EMPTY_LIVE_SESSION_IDS
   );
+}
+
+/**
+ * Advance live-session state for one decoded relay frame. Exported from this
+ * module for deterministic store tests; production calls it only after the
+ * observer frame passes signature/ownership/decryption gates.
+ */
+export function recordLatestLiveSession(
+  agentPubkey: string,
+  event: ObserverEvent,
+): void {
+  if (!event.sessionId || !event.channelId) return;
+  const threadRoot = event.threadRoot ?? null;
+  const agentChannelKey = liveAgentChannelKey(agentPubkey, event.channelId);
+  const conversationKey = liveConversationKey(
+    agentPubkey,
+    event.channelId,
+    threadRoot,
+  );
+  const stored = latestLiveSessionByConversation.get(conversationKey);
+  if (stored && !isObserverEventAfter(event, stored)) return;
+  latestLiveSessionByConversation.set(conversationKey, {
+    sessionId: event.sessionId,
+    timestamp: event.timestamp,
+    seq: event.seq,
+    agentChannelKey,
+    conversationKey,
+  });
+  refreshLatestLiveSessionIds(agentChannelKey);
 }
 
 // Per-agent listeners for `control_result` frames. The ModelPicker subscribes
@@ -236,7 +304,7 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
 /**
  * Compose the map key for the channel-scoped archive transcript.
  * Separates agent identity from channel with `:` — the same delimiter used by
- * liveSessionKey so all composite keys in this module are consistently shaped.
+ * liveAgentChannelKey so all composite keys in this module are consistently shaped.
  */
 function archiveChannelKey(agentPubkey: string, channelId: string): string {
   return `${normalizePubkey(agentPubkey)}:${channelId}`;
@@ -372,25 +440,7 @@ async function handleRelayObserverEvent(
     if (activeGeneration !== generation) {
       return;
     }
-    // Track the latest-live-session-id per (agent, channel) on the live path.
-    // Only set when the parsed event carries both a sessionId and channelId,
-    // so we never attribute a session to the wrong channel.
-    if (parsed.sessionId && parsed.channelId) {
-      const key = liveSessionKey(agentPubkey, parsed.channelId);
-      const stored = latestLiveSessionByAgentChannel.get(key);
-      // Advance only when this event sorts strictly AFTER the stored one via
-      // isObserverEventAfter (timestamp then seq — same ordering as
-      // compareObserverEvents). This prevents late-arriving live frames from
-      // older sessions from regressing the latest-live id, while also
-      // correctly advancing on a same-timestamp frame with a higher seq.
-      if (!stored || isObserverEventAfter(parsed, stored)) {
-        latestLiveSessionByAgentChannel.set(key, {
-          sessionId: parsed.sessionId,
-          timestamp: parsed.timestamp,
-          seq: parsed.seq,
-        });
-      }
-    }
+    recordLatestLiveSession(agentPubkey, parsed);
     appendAgentEvent(agentPubkey, parsed);
     const managementRequest = parseAgentManagementRequest(parsed.payload);
     if (managementRequest) {
@@ -748,7 +798,8 @@ export function resetAgentObserverStore() {
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
   pendingUnknownAgentFrames.length = 0;
-  latestLiveSessionByAgentChannel.clear();
+  latestLiveSessionByConversation.clear();
+  latestLiveSessionIdsByAgentChannel.clear();
   agentManagementListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";

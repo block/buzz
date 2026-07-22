@@ -607,29 +607,53 @@ fn sanitize_session_title(raw: &str) -> Option<String> {
 /// U+00B7 MIDDLE DOT, spaces on both sides.
 const SESSION_TITLE_SEPARATOR: &str = " · ";
 
-/// Compose a per-session title as `Agent · #channel`.
+/// Compose a per-session title as `Agent · #channel`, optionally followed by
+/// a short canonical thread identity.
 ///
 /// One agent in five channels gets five sessions; a bare agent name would show
-/// five identical rows in the adapter's thread list. Only the channel part is
-/// truncated to fit [`SESSION_TITLE_MAX_CHARS`], so the agent name always
-/// survives. Returns the bare agent name when there is no channel, the channel
-/// name is blank, or no room is left for it.
-pub(crate) fn compose_session_title(agent: &str, channel_name: Option<&str>) -> String {
+/// five identical rows in the adapter's thread list. Concurrent threads in one
+/// channel also need distinct rows, so thread-scoped sessions append only the
+/// first eight hexadecimal characters of the root — never message content.
+/// Unthreaded and DM titles retain the historical exact format.
+pub(crate) fn compose_session_title(
+    agent: &str,
+    channel_name: Option<&str>,
+    thread_root: Option<&str>,
+) -> String {
+    let thread_suffix = thread_root.and_then(|root| {
+        let short: String = root.chars().take(8).collect();
+        (short.len() == 8 && short.chars().all(|ch| ch.is_ascii_hexdigit())).then(|| {
+            format!(
+                "{SESSION_TITLE_SEPARATOR}thread {}",
+                short.to_ascii_lowercase()
+            )
+        })
+    });
+    let prefix_cap = SESSION_TITLE_MAX_CHARS.saturating_sub(
+        thread_suffix
+            .as_deref()
+            .map(|suffix| suffix.chars().count())
+            .unwrap_or_default(),
+    );
+    let agent: String = agent.chars().take(prefix_cap).collect();
     let Some(channel) = channel_name.and_then(sanitize_session_title) else {
-        return agent.to_string();
+        return format!("{agent}{}", thread_suffix.as_deref().unwrap_or_default());
     };
     // Reserve the separator and the `#` sigil alongside the agent name.
     let reserved = agent.chars().count() + SESSION_TITLE_SEPARATOR.chars().count() + 1;
     let channel: String = channel
         .chars()
-        .take(SESSION_TITLE_MAX_CHARS.saturating_sub(reserved))
+        .take(prefix_cap.saturating_sub(reserved))
         .collect::<String>()
         .trim_end()
         .to_string();
     if channel.is_empty() {
-        return agent.to_string();
+        return format!("{agent}{}", thread_suffix.as_deref().unwrap_or_default());
     }
-    format!("{agent}{SESSION_TITLE_SEPARATOR}#{channel}")
+    format!(
+        "{agent}{SESSION_TITLE_SEPARATOR}#{channel}{}",
+        thread_suffix.as_deref().unwrap_or_default()
+    )
 }
 
 /// Validate and deduplicate allowlist entries: each must be exactly 64 hex chars.
@@ -2899,21 +2923,21 @@ channels = "ALL"
     #[test]
     fn compose_session_title_qualifies_the_agent_name_with_the_channel() {
         assert_eq!(
-            compose_session_title("Fizz", Some("buzz-dev")),
+            compose_session_title("Fizz", Some("buzz-dev"), None),
             "Fizz · #buzz-dev"
         );
     }
 
     #[test]
     fn compose_session_title_falls_back_to_bare_agent_name_without_a_channel() {
-        assert_eq!(compose_session_title("Fizz", None), "Fizz");
-        assert_eq!(compose_session_title("Fizz", Some("   ")), "Fizz");
+        assert_eq!(compose_session_title("Fizz", None, None), "Fizz");
+        assert_eq!(compose_session_title("Fizz", Some("   "), None), "Fizz");
     }
 
     #[test]
     fn compose_session_title_truncates_the_channel_and_keeps_the_agent_name() {
         let channel = "c".repeat(200);
-        let title = compose_session_title("Fizz", Some(&channel));
+        let title = compose_session_title("Fizz", Some(&channel), None);
         assert_eq!(title.chars().count(), SESSION_TITLE_MAX_CHARS);
         assert!(title.starts_with("Fizz · #c"));
     }
@@ -2921,7 +2945,34 @@ channels = "ALL"
     #[test]
     fn compose_session_title_drops_the_channel_when_the_agent_name_fills_the_cap() {
         let agent = "a".repeat(SESSION_TITLE_MAX_CHARS);
-        assert_eq!(compose_session_title(&agent, Some("buzz-dev")), agent);
+        assert_eq!(compose_session_title(&agent, Some("buzz-dev"), None), agent);
+    }
+
+    #[test]
+    fn compose_session_title_distinguishes_threads_with_bounded_safe_roots() {
+        let first = compose_session_title(
+            "Fizz",
+            Some("buzz-dev"),
+            Some("ABCDEF0123456789secret text"),
+        );
+        let second = compose_session_title(
+            "Fizz",
+            Some("buzz-dev"),
+            Some("1234567890abcdefother content"),
+        );
+        assert_eq!(first, "Fizz · #buzz-dev · thread abcdef01");
+        assert_eq!(second, "Fizz · #buzz-dev · thread 12345678");
+        assert_ne!(first, second);
+        assert!(!first.contains("secret"));
+        assert!(first.chars().count() <= SESSION_TITLE_MAX_CHARS);
+    }
+
+    #[test]
+    fn compose_thread_title_preserves_identity_when_channel_is_unresolved() {
+        assert_eq!(
+            compose_session_title("Fizz", None, Some(&"a".repeat(64))),
+            "Fizz · thread aaaaaaaa"
+        );
     }
 
     /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH

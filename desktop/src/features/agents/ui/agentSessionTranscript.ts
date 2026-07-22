@@ -14,6 +14,11 @@ import {
 import { classifyTool } from "./agentSessionToolClassifier";
 import { asRecord, asString, titleCase } from "./agentSessionUtils";
 import {
+  describePermissionOutcome,
+  describePermissionRequest,
+  jsonRpcId,
+} from "./agentSessionPermission";
+import {
   describeTurnStarted,
   describeSessionResolved,
   extractBlockText,
@@ -38,17 +43,20 @@ export type TranscriptState = {
   sealedKeys: Set<string>;
   triggeringEventIdsByTurn: Map<string, string[]>;
   /**
-   * Maps JSON-RPC request id → { itemId, optionNames }.
+   * Maps conversation-scoped JSON-RPC request id → { itemId, optionNames }.
    * Populated when a `session/request_permission` request is ingested so the
    * matching response (which carries the same JSON-RPC id, no `method`) can
-   * correlate and append the outcome to the lifecycle item.
+   * correlate and append the outcome to the lifecycle item. ACP processes
+   * commonly allocate request ids from small local counters, so the canonical
+   * channel/thread scope is part of the key.
    */
   pendingPermissions: Map<
     string,
     { itemId: string; optionNames: Map<string, string> }
   >;
   continuationSeq: number;
-  latestSessionId: string | null;
+  /** Latest resolved session per channel/thread conversation identity. */
+  latestSessionIdByConversation: Map<string, string>;
 };
 
 export function createEmptyTranscriptState(): TranscriptState {
@@ -60,7 +68,7 @@ export function createEmptyTranscriptState(): TranscriptState {
     triggeringEventIdsByTurn: new Map(),
     pendingPermissions: new Map(),
     continuationSeq: 0,
-    latestSessionId: null,
+    latestSessionIdByConversation: new Map(),
   };
 }
 
@@ -80,7 +88,7 @@ type TranscriptDraft = {
     { itemId: string; optionNames: Map<string, string> }
   >;
   continuationSeq: number;
-  latestSessionId: string | null;
+  latestSessionIdByConversation: Map<string, string>;
   changed: boolean;
 };
 
@@ -93,7 +101,7 @@ function draftFrom(state: TranscriptState): TranscriptDraft {
     triggeringEventIdsByTurn: state.triggeringEventIdsByTurn,
     pendingPermissions: state.pendingPermissions,
     continuationSeq: state.continuationSeq,
-    latestSessionId: state.latestSessionId,
+    latestSessionIdByConversation: state.latestSessionIdByConversation,
     changed: false,
   };
 }
@@ -122,9 +130,17 @@ function pushItem(d: TranscriptDraft, item: TranscriptItem) {
   d.itemsById.set(item.id, item);
 }
 
-function sealOpenMessages(d: TranscriptDraft) {
+function sealOpenMessages(d: TranscriptDraft, ctx: TranscriptItemContext) {
   let copied = false;
   for (const [, currentKey] of d.activeMessageKey) {
+    const current = d.itemsById.get(currentKey);
+    if (
+      !current ||
+      current.channelId !== ctx.channelId ||
+      (current.threadRoot ?? null) !== ctx.threadRoot
+    ) {
+      continue;
+    }
     if (!d.sealedKeys.has(currentKey)) {
       if (!copied) {
         d.sealedKeys = new Set(d.sealedKeys);
@@ -171,98 +187,6 @@ function stringifyPayload(value: unknown) {
   }
 }
 
-function describePermissionRequest(payload: Record<string, unknown>) {
-  const params = asRecord(payload.params);
-  const title =
-    asString(params.title) ??
-    asString(params.message) ??
-    asString(params.reason) ??
-    "Permission requested";
-  const toolCallId =
-    asString(params.toolCallId) ?? asString(params.tool_call_id);
-  const options = Array.isArray(params.options)
-    ? params.options
-        .map((option) => {
-          const record = asRecord(option);
-          return (
-            asString(record.name) ??
-            asString(record.kind) ??
-            asString(record.optionId)
-          );
-        })
-        .filter((option): option is string => Boolean(option))
-    : [];
-  const detail: string[] = [];
-  if (title !== "Permission requested") detail.push(title);
-  if (toolCallId) detail.push(`Tool call: ${toolCallId}`);
-  if (options.length > 0) detail.push(`Options: ${options.join(", ")}`);
-
-  // Build optionId → kind map for outcome labeling on the response.
-  const optionNames = new Map<string, string>();
-  if (Array.isArray(params.options)) {
-    for (const option of params.options) {
-      const record = asRecord(option);
-      const optionId = asString(record.optionId);
-      const kind = asString(record.kind);
-      if (optionId && kind) {
-        optionNames.set(optionId, kind);
-      }
-    }
-  }
-
-  return {
-    title,
-    text: detail.join("\n"),
-    optionNames,
-    descriptor: {
-      renderClass: "permission" as const,
-      label: "Permission requested",
-      preview: title,
-      action: { verb: "Requested", object: title },
-      tone: "admin" as const,
-      operation: "session/request_permission",
-      object: title,
-      source: "acp" as const,
-      groupKey: "permission:request",
-    },
-  };
-}
-
-/**
- * Format a human-readable outcome label from a permission response.
- * kind values from ACP: allow_once, allow_always, reject_once, reject_always.
- * "reject_*" kinds are denials; anything else that is selected is an approval.
- */
-function describePermissionOutcome(
-  outcome: string,
-  optionId: string | null,
-  optionNames: Map<string, string>,
-): string {
-  if (outcome === "cancelled") {
-    return "Cancelled";
-  }
-  if (outcome === "selected" && optionId) {
-    const kind = optionNames.get(optionId) ?? optionId;
-    const isDenial = kind.startsWith("reject");
-    const verb = isDenial ? "Denied" : "Approved";
-    return `${verb} (${kind})`;
-  }
-  return outcome;
-}
-
-/**
- * Stable map key for a JSON-RPC id, which may be a string or a finite number
- * per the spec. Using JSON.stringify avoids collisions between the number 1 and
- * the string "1". Returns null for null, undefined, or non-id values (objects,
- * booleans) so callers can gate on presence without a separate type check.
- */
-function jsonRpcId(value: unknown): string | null {
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number" && Number.isFinite(value))
-    return JSON.stringify(value);
-  return null;
-}
-
 function describeFreeformStatus(payload: Record<string, unknown>) {
   const statusType = asString(payload.type) ?? asString(payload.status);
   const title =
@@ -279,9 +203,17 @@ function rawPayloadTitle(payload: unknown) {
 
 type TranscriptItemContext = {
   channelId: string | null;
+  threadRoot: string | null;
   turnId: string | null;
   sessionId: string | null;
 };
+
+function transcriptConversationKey(
+  channelId: string | null,
+  threadRoot: string | null,
+): string {
+  return `${channelId ?? "global"}\u0000${threadRoot ?? ""}`;
+}
 
 function upsertMessage(
   d: TranscriptDraft,
@@ -304,6 +236,7 @@ function upsertMessage(
         ...existing,
         text: existing.text + text,
         channelId: ctx.channelId,
+        threadRoot: ctx.threadRoot ?? existing.threadRoot,
         turnId: ctx.turnId ?? existing.turnId,
         sessionId: ctx.sessionId ?? existing.sessionId,
         authorPubkey: authorPubkey ?? existing.authorPubkey,
@@ -326,6 +259,7 @@ function upsertMessage(
     timestamp,
     messageId,
     channelId: ctx.channelId,
+    threadRoot: ctx.threadRoot,
     turnId: ctx.turnId,
     sessionId: ctx.sessionId,
     authorPubkey,
@@ -354,13 +288,14 @@ function upsertTextItem(
           ? joinLifecycleText(existing.text, text)
           : existing.text + text,
       channelId: ctx.channelId,
+      threadRoot: ctx.threadRoot ?? existing.threadRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
     });
     return;
   }
-  sealOpenMessages(d);
+  sealOpenMessages(d, ctx);
   if (type === "thought") {
     pushItem(d, {
       id,
@@ -370,6 +305,7 @@ function upsertTextItem(
       text,
       timestamp,
       channelId: ctx.channelId,
+      threadRoot: ctx.threadRoot,
       turnId: ctx.turnId,
       sessionId: ctx.sessionId,
       acpSource,
@@ -418,6 +354,7 @@ function upsertLifecycleItem(
       text: joinLifecycleText(existing.text, text),
       descriptor: descriptor ?? existing.descriptor,
       channelId: ctx.channelId,
+      threadRoot: ctx.threadRoot ?? existing.threadRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
@@ -425,7 +362,7 @@ function upsertLifecycleItem(
     return;
   }
 
-  sealOpenMessages(d);
+  sealOpenMessages(d, ctx);
   pushItem(d, {
     id,
     type: "lifecycle",
@@ -435,6 +372,7 @@ function upsertLifecycleItem(
     timestamp,
     descriptor,
     channelId: ctx.channelId,
+    threadRoot: ctx.threadRoot,
     turnId: ctx.turnId,
     sessionId: ctx.sessionId,
     acpSource,
@@ -465,6 +403,7 @@ function replaceLifecycleItem(
       title,
       text,
       channelId: ctx.channelId,
+      threadRoot: ctx.threadRoot ?? existing.threadRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
@@ -472,7 +411,7 @@ function replaceLifecycleItem(
     return;
   }
 
-  sealOpenMessages(d);
+  sealOpenMessages(d, ctx);
   pushItem(d, {
     id,
     type: "lifecycle",
@@ -481,6 +420,7 @@ function replaceLifecycleItem(
     text,
     timestamp,
     channelId: ctx.channelId,
+    threadRoot: ctx.threadRoot,
     turnId: ctx.turnId,
     sessionId: ctx.sessionId,
     acpSource,
@@ -504,6 +444,7 @@ function upsertPlan(
       ...existing,
       text,
       channelId: ctx.channelId,
+      threadRoot: ctx.threadRoot ?? existing.threadRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
@@ -519,6 +460,7 @@ function upsertPlan(
         isUpdate: true,
         targetId: id,
         channelId: ctx.channelId,
+        threadRoot: ctx.threadRoot,
         turnId: ctx.turnId,
         sessionId: ctx.sessionId,
         acpSource,
@@ -526,7 +468,7 @@ function upsertPlan(
     }
     return;
   }
-  sealOpenMessages(d);
+  sealOpenMessages(d, ctx);
   pushItem(d, {
     id,
     type: "plan",
@@ -535,6 +477,7 @@ function upsertPlan(
     text,
     timestamp,
     channelId: ctx.channelId,
+    threadRoot: ctx.threadRoot,
     turnId: ctx.turnId,
     sessionId: ctx.sessionId,
     acpSource,
@@ -571,13 +514,14 @@ function upsertMetadata(
       ...existing,
       sections,
       channelId: ctx.channelId,
+      threadRoot: ctx.threadRoot ?? existing.threadRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
     });
     return;
   }
-  sealOpenMessages(d);
+  sealOpenMessages(d, ctx);
   pushItem(d, {
     id,
     type: "metadata",
@@ -586,6 +530,7 @@ function upsertMetadata(
     sections,
     timestamp,
     channelId: ctx.channelId,
+    threadRoot: ctx.threadRoot,
     turnId: ctx.turnId,
     sessionId: ctx.sessionId,
     acpSource,
@@ -659,6 +604,7 @@ function upsertTool(
           ? timestamp
           : existing.completedAt,
       channelId: ctx.channelId,
+      threadRoot: ctx.threadRoot ?? existing.threadRoot,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
@@ -674,7 +620,7 @@ function upsertTool(
     result,
     isError: isError || status === "failed",
   });
-  sealOpenMessages(d);
+  sealOpenMessages(d, ctx);
   pushItem(d, {
     id,
     type: "tool",
@@ -691,6 +637,7 @@ function upsertTool(
     startedAt: timestamp,
     completedAt: isTerminalToolStatus(status) ? timestamp : null,
     channelId: ctx.channelId,
+    threadRoot: ctx.threadRoot,
     turnId: ctx.turnId,
     sessionId: ctx.sessionId,
     acpSource,
@@ -703,22 +650,35 @@ export function processTranscriptEvent(
 ): TranscriptState {
   const d = draftFrom(state);
 
-  if (event.sessionId && event.sessionId !== d.latestSessionId) {
-    d.latestSessionId = event.sessionId;
-  }
-
   const channelId = event.channelId ?? null;
+  const threadRoot = event.threadRoot ?? null;
+  const conversationKey = transcriptConversationKey(channelId, threadRoot);
+  const latestSessionId =
+    d.latestSessionIdByConversation.get(conversationKey) ?? null;
+  if (event.sessionId && event.sessionId !== latestSessionId) {
+    d.latestSessionIdByConversation = new Map(d.latestSessionIdByConversation);
+    d.latestSessionIdByConversation.set(conversationKey, event.sessionId);
+  }
   const ch = channelId ?? "global";
+  // ACP message/tool IDs are session-local for several adapters. Namespace
+  // every transcript identity by the canonical conversation so sequential
+  // A/B/A turns in one channel cannot merge equal IDs across thread sessions.
+  // Keep the legacy key shape exactly unchanged when threadRoot is absent.
+  const scopeKey = threadRoot ? `${ch}:thread:${threadRoot}` : ch;
   const ctx: TranscriptItemContext = {
     channelId,
+    threadRoot,
     turnId: event.turnId,
-    sessionId: event.sessionId ?? d.latestSessionId,
+    sessionId:
+      event.sessionId ??
+      d.latestSessionIdByConversation.get(conversationKey) ??
+      null,
   };
 
   if (event.kind === "raw_json_rpc") {
     upsertMetadata(
       d,
-      `raw-json-rpc:${ch}:${event.seq}`,
+      `raw-json-rpc:${scopeKey}:${event.seq}`,
       "Raw ACP payload",
       [
         {
@@ -733,13 +693,13 @@ export function processTranscriptEvent(
   } else if (event.kind === "turn_started") {
     rememberTriggeringEventIds(
       d,
-      ch,
+      scopeKey,
       event.turnId ?? event.seq,
       extractTriggeringEventIds(event.payload),
     );
     upsertTextItem(
       d,
-      `turn:${ch}:${event.turnId ?? event.seq}`,
+      `turn:${scopeKey}:${event.turnId ?? event.seq}`,
       "lifecycle",
       "Turn started",
       describeTurnStarted(event.payload),
@@ -750,7 +710,7 @@ export function processTranscriptEvent(
   } else if (event.kind === "session_resolved") {
     upsertTextItem(
       d,
-      `session:${ch}:${event.turnId ?? event.seq}`,
+      `session:${scopeKey}:${event.turnId ?? event.seq}`,
       "lifecycle",
       "Session ready",
       describeSessionResolved(event.payload),
@@ -761,7 +721,7 @@ export function processTranscriptEvent(
   } else if (event.kind === "acp_parse_error") {
     upsertTextItem(
       d,
-      `parse-error:${ch}:${event.seq}`,
+      `parse-error:${scopeKey}:${event.seq}`,
       "lifecycle",
       "Wire parse error",
       extractBlockText(event.payload),
@@ -778,7 +738,7 @@ export function processTranscriptEvent(
       event.kind === "agent_panic" ? "Agent error (crash)" : "Turn error";
     upsertTextItem(
       d,
-      `${event.kind}:${ch}:${event.turnId ?? event.seq}`,
+      `${event.kind}:${scopeKey}:${event.turnId ?? event.seq}`,
       "lifecycle",
       title,
       `${outcome}: ${displayError}`,
@@ -792,7 +752,7 @@ export function processTranscriptEvent(
 
     if (method === "session/request_permission") {
       const request = describePermissionRequest(payload);
-      const itemId = `permission:${ch}:${event.turnId ?? event.seq}`;
+      const itemId = `permission:${scopeKey}:${event.turnId ?? event.seq}`;
       upsertLifecycleItem(
         d,
         itemId,
@@ -809,7 +769,7 @@ export function processTranscriptEvent(
       const requestId = jsonRpcId(payload.id);
       if (requestId) {
         d.pendingPermissions = new Map(d.pendingPermissions);
-        d.pendingPermissions.set(requestId, {
+        d.pendingPermissions.set(`${scopeKey}\u0000${requestId}`, {
           itemId,
           optionNames: request.optionNames,
         });
@@ -819,7 +779,8 @@ export function processTranscriptEvent(
       const responseId = jsonRpcId(payload.id);
       const result = asRecord(asRecord(payload.result).outcome);
       const outcomeKind = asString(result.outcome);
-      const pending = responseId ? d.pendingPermissions.get(responseId) : null;
+      const pendingKey = responseId ? `${scopeKey}\u0000${responseId}` : null;
+      const pending = pendingKey ? d.pendingPermissions.get(pendingKey) : null;
       if (pending && outcomeKind && responseId) {
         const optionId = asString(result.optionId) ?? null;
         const outcomeText = describePermissionOutcome(
@@ -835,7 +796,9 @@ export function processTranscriptEvent(
           });
           // Remove from pending map — the outcome is now recorded.
           d.pendingPermissions = new Map(d.pendingPermissions);
-          d.pendingPermissions.delete(responseId);
+          if (pendingKey) {
+            d.pendingPermissions.delete(pendingKey);
+          }
         }
       }
     } else if (event.kind === "acp_write" && method === "session/prompt") {
@@ -845,7 +808,7 @@ export function processTranscriptEvent(
         if (parsedPrompt.userText) {
           upsertMessage(
             d,
-            `prompt:${ch}:${event.turnId ?? event.seq}`,
+            `prompt:${scopeKey}:${event.turnId ?? event.seq}`,
             "user",
             parsedPrompt.userTitle,
             parsedPrompt.userText,
@@ -854,13 +817,17 @@ export function processTranscriptEvent(
             parsedPrompt.userPubkey,
             "session/prompt:user",
             parsedPrompt.userEventId ??
-              getSingleTriggeringEventId(d, ch, event.turnId ?? event.seq),
+              getSingleTriggeringEventId(
+                d,
+                scopeKey,
+                event.turnId ?? event.seq,
+              ),
           );
         }
         if (parsedPrompt.sections.length > 0) {
           upsertMetadata(
             d,
-            `prompt-context:${ch}:${event.turnId ?? event.seq}`,
+            `prompt-context:${scopeKey}:${event.turnId ?? event.seq}`,
             "Prompt context",
             parsedPrompt.sections,
             event.timestamp,
@@ -885,7 +852,7 @@ export function processTranscriptEvent(
         if (sections.length > 0) {
           upsertMetadata(
             d,
-            `system-prompt:${ch}:${event.seq}:${event.timestamp}`,
+            `system-prompt:${scopeKey}:${event.seq}:${event.timestamp}`,
             "System prompt",
             sections,
             event.timestamp,
@@ -904,7 +871,7 @@ export function processTranscriptEvent(
         if (parsedPrompt.userText) {
           upsertMessage(
             d,
-            `steer:${ch}:${event.turnId ?? event.seq}`,
+            `steer:${scopeKey}:${event.turnId ?? event.seq}`,
             "user",
             parsedPrompt.userTitle,
             parsedPrompt.userText,
@@ -918,7 +885,7 @@ export function processTranscriptEvent(
         if (parsedPrompt.sections.length > 0) {
           upsertMetadata(
             d,
-            `steer-context:${ch}:${event.turnId ?? event.seq}`,
+            `steer-context:${scopeKey}:${event.turnId ?? event.seq}`,
             "Prompt context",
             parsedPrompt.sections,
             event.timestamp,
@@ -937,7 +904,7 @@ export function processTranscriptEvent(
       if (updateType === "agent_message_chunk") {
         upsertMessage(
           d,
-          `assistant:${ch}:${messageId ?? turnKey}`,
+          `assistant:${scopeKey}:${messageId ?? turnKey}`,
           "assistant",
           "Assistant",
           extractContentText(update.content),
@@ -949,13 +916,13 @@ export function processTranscriptEvent(
       } else if (updateType === "user_message_chunk") {
         // Suppress user_message_chunk echo when a steer already rendered
         // the user message for this turn (Goose echoes steered content back).
-        const steerKey = `steer:${ch}:${event.turnId ?? event.seq}`;
+        const steerKey = `steer:${scopeKey}:${event.turnId ?? event.seq}`;
         const authorPubkey = asString(update.authorPubkey);
         if (!d.itemsById.has(steerKey)) {
           const channelMessageId = maybeNostrEventId(messageId);
           upsertMessage(
             d,
-            `user:${ch}:${messageId ?? turnKey}`,
+            `user:${scopeKey}:${messageId ?? turnKey}`,
             "user",
             "User",
             extractContentText(update.content),
@@ -969,7 +936,7 @@ export function processTranscriptEvent(
       } else if (updateType === "agent_thought_chunk") {
         upsertTextItem(
           d,
-          `thinking:${ch}:${messageId ?? turnKey}`,
+          `thinking:${scopeKey}:${messageId ?? turnKey}`,
           "thought",
           "Thinking",
           extractContentText(update.content),
@@ -982,7 +949,7 @@ export function processTranscriptEvent(
         const identity = extractToolIdentity(update);
         upsertTool(
           d,
-          `tool:${ch}:${toolId}`,
+          `tool:${scopeKey}:${toolId}`,
           identity.title,
           identity.toolName,
           identity.buzzToolName,
@@ -1002,7 +969,7 @@ export function processTranscriptEvent(
         const identity = extractToolIdentity(update);
         upsertTool(
           d,
-          `tool:${ch}:${toolId}`,
+          `tool:${scopeKey}:${toolId}`,
           identity.title,
           identity.toolName,
           identity.buzzToolName,
@@ -1017,20 +984,20 @@ export function processTranscriptEvent(
       } else if (updateType === "plan") {
         upsertPlan(
           d,
-          `plan:${ch}:${turnKey}`,
+          `plan:${scopeKey}:${turnKey}`,
           "Plan",
           extractPlanText(update),
           event.timestamp,
           ctx,
           updateType,
-          `plan-update:${ch}:${turnKey}:${event.seq}`,
+          `plan-update:${scopeKey}:${turnKey}:${event.seq}`,
         );
       } else if (updateType === "current_mode_update") {
         const mode = asString(update.currentModeId) ?? "";
         if (mode) {
           upsertLifecycleItem(
             d,
-            `mode:${ch}:${turnKey}`,
+            `mode:${scopeKey}:${turnKey}`,
             "status",
             "Mode",
             mode,
@@ -1053,7 +1020,7 @@ export function processTranscriptEvent(
               : "";
           replaceLifecycleItem(
             d,
-            `usage:${ch}:${turnKey}`,
+            `usage:${scopeKey}:${turnKey}`,
             "status",
             "Usage",
             `Tokens: ${used}/${size}${costStr}`,
@@ -1068,7 +1035,7 @@ export function processTranscriptEvent(
           : [];
         upsertLifecycleItem(
           d,
-          `commands:${ch}:${turnKey}`,
+          `commands:${scopeKey}:${turnKey}`,
           "status",
           "Commands",
           `Commands available: ${cmds.length}`,
@@ -1093,7 +1060,7 @@ export function processTranscriptEvent(
         if (optText) {
           upsertLifecycleItem(
             d,
-            `config:${ch}:${turnKey}`,
+            `config:${scopeKey}:${turnKey}`,
             "status",
             "Config",
             optText,
@@ -1110,7 +1077,7 @@ export function processTranscriptEvent(
         if (status) {
           upsertLifecycleItem(
             d,
-            `status:${ch}:${event.turnId ?? event.seq}:${status.statusType}`,
+            `status:${scopeKey}:${event.turnId ?? event.seq}:${status.statusType}`,
             "status",
             status.title,
             status.text,
@@ -1128,7 +1095,7 @@ export function processTranscriptEvent(
       if (status) {
         upsertLifecycleItem(
           d,
-          `status:${ch}:${event.turnId ?? event.seq}:${status.statusType}`,
+          `status:${scopeKey}:${event.turnId ?? event.seq}:${status.statusType}`,
           "status",
           status.title,
           status.text,
@@ -1140,7 +1107,10 @@ export function processTranscriptEvent(
     }
   }
 
-  if (!d.changed && d.latestSessionId === state.latestSessionId) {
+  if (
+    !d.changed &&
+    d.latestSessionIdByConversation === state.latestSessionIdByConversation
+  ) {
     return state;
   }
 
@@ -1152,7 +1122,7 @@ export function processTranscriptEvent(
     triggeringEventIdsByTurn: d.triggeringEventIdsByTurn,
     pendingPermissions: d.pendingPermissions,
     continuationSeq: d.continuationSeq,
-    latestSessionId: d.latestSessionId,
+    latestSessionIdByConversation: d.latestSessionIdByConversation,
   };
 }
 

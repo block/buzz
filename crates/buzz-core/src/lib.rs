@@ -36,6 +36,8 @@ pub mod presence;
 pub mod relay;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
+/// Canonical marker-based NIP-10 thread parsing.
+pub mod thread;
 /// Schnorr signature and event ID verification.
 pub mod verification;
 

@@ -8,7 +8,7 @@ import {
 } from "@/features/agents/activeAgentTurnsStore";
 import {
   subscribeAgentObserverStore,
-  getLatestLiveSessionId,
+  getLatestLiveSessionIds,
 } from "@/features/agents/observerRelayStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
@@ -141,20 +141,20 @@ export function AgentSessionTranscriptList({
     [activeTurns, channelId],
   );
 
-  // Subscribe to the observer relay store so we read the latest-live-session-id
-  // reactively. We don't need the full snapshot — only the key for boundary labeling.
+  // Subscribe to every live conversation session in this channel. The snapshot
+  // is reference-stable until one conversation advances.
   const getLatestLive = React.useCallback(
-    () => getLatestLiveSessionId(agentPubkey, channelId),
+    () => getLatestLiveSessionIds(agentPubkey, channelId),
     [agentPubkey, channelId],
   );
-  const latestLiveSessionId = React.useSyncExternalStore(
+  const latestLiveSessionIds = React.useSyncExternalStore(
     subscribeAgentObserverStore,
     getLatestLive,
   );
 
   const displayBlocks = React.useMemo(
-    () => buildTranscriptDisplayBlocks(items, latestLiveSessionId),
-    [items, latestLiveSessionId],
+    () => buildTranscriptDisplayBlocks(items, latestLiveSessionIds),
+    [items, latestLiveSessionIds],
   );
   // Derive the same block keys the DOM renders as `data-message-id` so
   // useAnchoredScroll anchors on real DOM rows. Value-stabilized so the

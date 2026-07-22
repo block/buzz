@@ -18,6 +18,7 @@ import type { ControlResultFrame } from "@/shared/api/types";
 export async function awaitLiveSwitchOutcome({
   channelCount,
   modelId,
+  requestId,
   subscribe,
   sendSwitches,
   scheduleTimeout,
@@ -26,6 +27,9 @@ export async function awaitLiveSwitchOutcome({
   channelCount: number;
   /** Model being switched to; frames for any other model are ignored. */
   modelId: string;
+  /** Correlation id echoed by current harnesses. Missing ids remain accepted
+   * for updater compatibility with older running harnesses. */
+  requestId?: string;
   /** Register a control-result listener; returns an unsubscribe function. */
   subscribe: (listener: (frame: ControlResultFrame) => void) => () => void;
   /** Fire the per-channel `switch_model` sends. Resolves when all are sent. */
@@ -33,24 +37,48 @@ export async function awaitLiveSwitchOutcome({
   /** Schedule the no-reply fallback; returns a cancel function. */
   scheduleTimeout: (onTimeout: () => void) => () => void;
 }): Promise<"ok" | "unsupported"> {
+  let abandon = () => {};
   const settled = new Promise<"ok" | "unsupported">((resolve) => {
     let unsubscribe = () => {};
     let cancelTimeout = () => {};
     let remaining = channelCount;
-    const finish = (outcome: "ok" | "unsupported") => {
+    let finished = false;
+    const resolvedChannels = new Set<string>();
+    const cleanup = () => {
+      if (finished) return false;
+      finished = true;
       cancelTimeout();
       unsubscribe();
+      return true;
+    };
+    const finish = (outcome: "ok" | "unsupported") => {
+      if (!cleanup()) return;
       resolve(outcome);
+    };
+    // A failed relay send rejects the caller, but must still detach the
+    // already-installed result listener and timeout.
+    abandon = () => {
+      cleanup();
     };
     cancelTimeout = scheduleTimeout(() => finish("ok"));
     unsubscribe = subscribe((frame) => {
       if (frame.type !== "switch_model" || frame.modelId !== modelId) {
         return;
       }
+      if (requestId && frame.requestId && frame.requestId !== requestId) {
+        return;
+      }
+      if (frame.status === "superseded") {
+        return;
+      }
       if (frame.status === "unsupported_model") {
         // Any single failure rejects the whole pick immediately.
         finish("unsupported");
         return;
+      }
+      if (frame.channelId) {
+        if (resolvedChannels.has(frame.channelId)) return;
+        resolvedChannels.add(frame.channelId);
       }
       // sent / switched / turn_ending — count as success for this channel.
       remaining -= 1;
@@ -60,7 +88,12 @@ export async function awaitLiveSwitchOutcome({
     });
   });
 
-  await sendSwitches();
+  try {
+    await sendSwitches();
+  } catch (error) {
+    abandon();
+    throw error;
+  }
 
   return settled;
 }

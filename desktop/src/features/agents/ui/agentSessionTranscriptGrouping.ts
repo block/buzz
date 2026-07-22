@@ -23,8 +23,8 @@ export type TranscriptDisplayBlock =
        * newer session in reading order).
        *
        * `labelState` encodes three distinct states:
-       *  - `"current"`     — newest-visible session AND matches the live relay
-       *                      session id. Agent is actively running this session.
+       *  - `"current"`     — matches one conversation's live relay session id.
+       *                      Concurrent thread sessions can both be current.
        *  - `"most-recent"` — newest-visible session but no live session match
        *                      (archived-only view or session ended). This is the
        *                      most recently observed session — not current context.
@@ -424,7 +424,7 @@ function getRenderClass(item: TranscriptItem) {
  *
  * A new run begins whenever the sessionId changes to a distinct non-null value.
  */
-function splitIntoSessionRuns(
+function splitConversationIntoSessionRuns(
   items: TranscriptItem[],
 ): Array<{ sessionId: string; items: TranscriptItem[] }> {
   const runs: Array<{ sessionId: string; items: TranscriptItem[] }> = [];
@@ -506,6 +506,63 @@ function splitIntoSessionRuns(
   return runs;
 }
 
+function transcriptConversationKey(item: TranscriptItem): string {
+  // Callers pass a channel-scoped stream, so the optional root is the only
+  // discriminator needed here. Keeping legacy items (which may omit channelId
+  // on individual rows) in one partition preserves pre-thread behavior.
+  return item.threadRoot ?? "";
+}
+
+/**
+ * Keep each channel/thread conversation contiguous before applying the
+ * session-boundary state machine. Concurrent thread sessions can arrive as
+ * A/B/A on one agent observer stream; treating the stream as one conversation
+ * would manufacture two A runs. Conversation groups are ordered by their last
+ * observed item so the globally most-recent conversation remains last.
+ *
+ * A legacy/unthreaded stream has one conversation key and follows the exact
+ * historical contiguous-run path.
+ */
+function splitIntoSessionRuns(
+  items: TranscriptItem[],
+): Array<{ sessionId: string; items: TranscriptItem[] }> {
+  const conversations = new Map<
+    string,
+    { items: TranscriptItem[]; lastIndex: number }
+  >();
+  items.forEach((item, index) => {
+    const key = transcriptConversationKey(item);
+    const conversation = conversations.get(key);
+    if (conversation) {
+      conversation.items.push(item);
+      conversation.lastIndex = index;
+    } else {
+      conversations.set(key, { items: [item], lastIndex: index });
+    }
+  });
+
+  if (conversations.size <= 1) {
+    return splitConversationIntoSessionRuns(items);
+  }
+
+  return [...conversations.values()]
+    .sort((left, right) => left.lastIndex - right.lastIndex)
+    .flatMap((conversation) =>
+      splitConversationIntoSessionRuns(conversation.items),
+    );
+}
+
+type LatestLiveSessionIdentity = string | readonly string[] | null;
+
+function isLatestLiveSession(
+  sessionId: string,
+  latestLiveSessionIds: LatestLiveSessionIdentity,
+): boolean {
+  return typeof latestLiveSessionIds === "string"
+    ? sessionId === latestLiveSessionIds
+    : (latestLiveSessionIds?.includes(sessionId) ?? false);
+}
+
 /**
  * Build presentation-only display blocks from normalized transcript items.
  * Raw observer order is preserved in the source items; this only reorders
@@ -520,16 +577,16 @@ function splitIntoSessionRuns(
  * When items span multiple sessions (archived history + live session), a
  * `session-boundary` block is injected between consecutive session runs.
  * The newest-visible run is labeled distinctly when it equals
- * `latestLiveSessionId`, signalling "current session" vs archived history.
+ * any `latestLiveSessionIds`, signalling "current session" vs archived history.
  * No boundary is emitted when only one session run is present.
  *
- * @param latestLiveSessionId - The session ID that is currently live on the
- *   relay (from `observerRelayStore`). Used to distinguish "current session"
- *   from "most recent observed session". Pass `null` when the relay is idle.
+ * @param latestLiveSessionIds - Session IDs currently live per conversation
+ *   on the relay (from `observerRelayStore`). A single string remains accepted
+ *   for backwards compatibility with callers and archived tests.
  */
 export function buildTranscriptDisplayBlocks(
   items: TranscriptItem[],
-  latestLiveSessionId: string | null = null,
+  latestLiveSessionIds: LatestLiveSessionIdentity = null,
 ): TranscriptDisplayBlock[] {
   const sessionRuns = splitIntoSessionRuns(items);
 
@@ -539,7 +596,7 @@ export function buildTranscriptDisplayBlocks(
       sessionRuns[0]?.items ?? [],
       /* isNewestRun */ true,
       sessionRuns[0]?.sessionId ?? null,
-      latestLiveSessionId,
+      latestLiveSessionIds,
       /* emitBoundary */ false,
     );
   }
@@ -556,9 +613,7 @@ export function buildTranscriptDisplayBlocks(
       const sessionStartTimestamp =
         firstItem?.timestamp ?? new Date(0).toISOString();
       const labelState: "current" | "most-recent" | "earlier" =
-        isNewestRun &&
-        latestLiveSessionId !== null &&
-        run.sessionId === latestLiveSessionId
+        isLatestLiveSession(run.sessionId, latestLiveSessionIds)
           ? "current"
           : isNewestRun
             ? "most-recent"
@@ -582,7 +637,7 @@ export function buildTranscriptDisplayBlocks(
       run.items,
       isNewestRun,
       run.sessionId,
-      latestLiveSessionId,
+      latestLiveSessionIds,
       /* emitBoundary */ false,
     );
     allBlocks.push(...runBlocks);
@@ -600,7 +655,7 @@ function buildBlocksForRun(
   items: TranscriptItem[],
   _isNewestRun: boolean,
   _sessionId: string | null,
-  _latestLiveSessionId: string | null,
+  _latestLiveSessionIds: LatestLiveSessionIdentity,
   _emitBoundary: boolean,
 ): TranscriptDisplayBlock[] {
   const blocks: TranscriptDisplayBlock[] = [];
