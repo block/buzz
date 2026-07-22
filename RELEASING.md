@@ -150,13 +150,37 @@ regenerates `mobile/pubspec.lock`.
 
 ---
 
-## Manual Fallback
+## Signed macOS Canary
 
-If the automated flow isn't suitable (e.g., building from a non-main ref):
+Use the manual **Signed macOS Canary** workflow when you need an Apple Silicon
+build of current `main` for explicit testing without publishing a release:
 
-1. Go to **Actions > Release** in the GitHub UI
-2. Click **Run workflow**
-3. Provide the semver version (no `v` prefix) and the ref to build from
+```sh
+gh workflow run signed-macos-canary.yml --repo block/buzz --ref main
+```
+
+The workflow derives a `-test.<run-number>` version, signs and notarizes the
+DMG, verifies it with Gatekeeper, and uploads it as a private Actions artifact
+with seven-day retention. It has no release permissions, does not create or
+move tags, and cannot update `buzz-desktop-latest` or `latest.json`.
+
+Download the artifact from the completed run:
+
+```sh
+gh run download <run-id> --repo block/buzz --name <artifact-name>
+```
+
+The workflow intentionally accepts only `main`. Use the normal release process
+for distributable builds or builds from an immutable release tag.
+
+---
+
+## Manual Release Retry
+
+The **Release** workflow's manual dispatch is only a retry mechanism for an
+existing immutable `v<version>` tag. Select that tag in the ref picker and
+provide the matching semver version without the `v` prefix. It cannot build
+from `main` or another caller-selected source ref.
 
 ---
 
