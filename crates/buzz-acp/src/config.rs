@@ -288,6 +288,11 @@ pub struct CliArgs {
     )]
     pub system_prompt_file: Option<PathBuf>,
 
+    /// Human display name for ACP session list titles (Codex sidebar, etc.).
+    /// Desktop sets this from the managed agent `display_name` / `name`.
+    #[arg(long, env = "BUZZ_ACP_DISPLAY_NAME")]
+    agent_display_name: Option<String>,
+
     /// Number of parallel agent subprocesses.
     #[arg(long, env = "BUZZ_ACP_AGENTS", default_value_t = 1,
           value_parser = clap::value_parser!(u32).range(1..=32))]
@@ -499,6 +504,8 @@ pub struct Config {
     pub turn_liveness_secs: u64,
     pub heartbeat_prompt: Option<String>,
     pub system_prompt: Option<String>,
+    /// Buzz display name for session titles (#2334).
+    pub agent_display_name: Option<String>,
     /// Team-owned instructions layered separately from the agent system prompt.
     pub team_instructions: Option<String>,
     pub initial_message: Option<String>,
@@ -971,6 +978,11 @@ impl Config {
             turn_liveness_secs,
             heartbeat_prompt,
             system_prompt,
+            agent_display_name: args
+                .agent_display_name
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             team_instructions: args
                 .team_instructions
                 .as_deref()
@@ -1345,6 +1357,7 @@ mod tests {
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
+            agent_display_name: None,
             team_instructions: None,
             initial_message: None,
             subscribe_mode: mode,

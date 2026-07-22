@@ -1560,6 +1560,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        agent_display_name: config.agent_display_name.clone(),
     });
 
     if !config.memory_enabled {
@@ -4153,7 +4154,8 @@ mod heartbeat_base_prompt_tests {
         // protocol_version 1 + Some(base_prompt): heartbeat prompt is prefixed
         // with the [Base] section exactly as the legacy session/new path would.
         let prompt = "[System: Heartbeat]\nrun feed get";
-        let composed = pool::prepend_base_for_legacy(1, Some("you are a helpful agent"), prompt);
+        let composed =
+            pool::prepend_base_for_legacy(1, Some("you are a helpful agent"), prompt, None);
         assert_eq!(
             composed,
             "[Base]\nyou are a helpful agent\n\n[System: Heartbeat]\nrun feed get"
@@ -4166,7 +4168,8 @@ mod heartbeat_base_prompt_tests {
         // protocol_version 2 gets base_prompt via session/new; the heartbeat
         // prompt is sent verbatim.
         let prompt = "[System: Heartbeat]\nrun feed get";
-        let composed = pool::prepend_base_for_legacy(2, Some("you are a helpful agent"), prompt);
+        let composed =
+            pool::prepend_base_for_legacy(2, Some("you are a helpful agent"), prompt, None);
         assert_eq!(composed, prompt);
     }
 }
@@ -4913,6 +4916,7 @@ mod build_mcp_servers_tests {
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
+            agent_display_name: None,
             team_instructions: None,
             initial_message: None,
             subscribe_mode: config::SubscribeMode::All,
@@ -5079,6 +5083,7 @@ mod error_outcome_emission_tests {
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
+            agent_display_name: None,
             team_instructions: None,
             initial_message: None,
             subscribe_mode: config::SubscribeMode::All,
