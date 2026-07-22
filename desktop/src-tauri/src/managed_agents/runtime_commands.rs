@@ -351,6 +351,18 @@ pub fn stop_managed_agent_runtime(
                 return Err(error);
             }
         }
+    } else {
+        // No runtime is tracked at this key, but a valid prior-session
+        // receipt may still point at a live child (e.g. the crash-recovery
+        // window for a non-auto-start agent). Terminate that orphan before
+        // erasing its receipt — otherwise this "stop" leaves the harness
+        // running yet deletes the one artifact sweeps and
+        // terminate_untracked_pair_runtime use to find it, and a follow-up
+        // start would spawn a duplicate harness for the same pair. On
+        // failure the receipt stays on disk (terminate_untracked_pair_runtime
+        // only removes it after the child exits), mirroring the tracked
+        // path's keep-until-success invariant.
+        terminate_untracked_pair_runtime(&app, &key)?;
     }
     super::remove_agent_runtime_receipt(&app, &key);
     state.clear_agent_session_cache(&key);
