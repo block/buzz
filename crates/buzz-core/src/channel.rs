@@ -13,7 +13,8 @@ use std::str::FromStr;
 /// whitespace and user-supplied hash prefixes are removed here to keep the
 /// stored name prefix-free.
 pub fn canonical_channel_name(name: &str) -> &str {
-    name.trim().trim_start_matches('#')
+    name.trim_start_matches(|c: char| c == '#' || c.is_whitespace())
+        .trim_end()
 }
 
 /// Whether a channel is publicly visible or invite-only.
@@ -182,12 +183,16 @@ mod tests {
     use super::canonical_channel_name;
 
     #[test]
-    fn channel_names_trim_whitespace_then_drop_all_leading_hashes() {
+    fn channel_names_trim_whitespace_and_drop_all_leading_hashes() {
         assert_eq!(canonical_channel_name("channel"), "channel");
         assert_eq!(canonical_channel_name("#channel"), "channel");
         assert_eq!(canonical_channel_name("###channel"), "channel");
         assert_eq!(canonical_channel_name("  ###channel  "), "channel");
+        assert_eq!(canonical_channel_name("# channel"), "channel");
+        assert_eq!(canonical_channel_name("### channel  "), "channel");
         assert_eq!(canonical_channel_name("  ###  "), "");
+        assert_eq!(canonical_channel_name("# #"), "");
+        assert_eq!(canonical_channel_name("### ###"), "");
         assert_eq!(canonical_channel_name("channel#topic"), "channel#topic");
     }
 }
