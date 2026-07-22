@@ -172,6 +172,9 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
             return apply_git_config(command, &entries);
         };
         command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
+        // Git before 2.46 never advertises credential authtype support, so let
+        // the helper surface Buzz's actual minimum-version requirement.
+        command.env("BUZZ_NOSTR_GIT_AUTH_REQUIRED", "1");
         entries.push(("credential.helper", cred_helper.display().to_string()));
         entries.push(("credential.useHttpPath", "true".to_string()));
     }
@@ -315,8 +318,8 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_branch, clean_target_ref, git_needs_credentials, git_subcommand, validate_clone_url,
-        validate_clone_url_against_relay,
+        clean_branch, clean_target_ref, configure_git_auth, git_needs_credentials, git_subcommand,
+        validate_clone_url, validate_clone_url_against_relay, GitAuthConfig,
     };
 
     #[test]
@@ -348,6 +351,25 @@ mod tests {
             "HEAD"
         ]));
         assert!(!git_needs_credentials(&["rev-parse", "HEAD"]));
+    }
+
+    #[test]
+    fn remote_git_marks_nostr_auth_as_required() {
+        let auth = GitAuthConfig {
+            git_path: "git".into(),
+            credential_helper: Some("git-credential-nostr".into()),
+            nsec: "nsec1test".into(),
+            allow_file_transport: false,
+        };
+        let mut command = std::process::Command::new("git");
+
+        configure_git_auth(&mut command, &auth, true);
+
+        let required = command
+            .get_envs()
+            .find_map(|(key, value)| (key == "BUZZ_NOSTR_GIT_AUTH_REQUIRED").then_some(value))
+            .flatten();
+        assert_eq!(required, Some(std::ffi::OsStr::new("1")));
     }
 
     #[test]
