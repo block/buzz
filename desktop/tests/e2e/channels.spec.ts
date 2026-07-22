@@ -1507,6 +1507,11 @@ test("empty channel shows intro actions", async ({ page }) => {
   await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
     0,
   );
+  // Horizontal scrolling creates a clipping context. The padded, offset row
+  // leaves space for the cards' focus rings without changing their alignment.
+  const introActions = page.getByTestId("message-channel-intro-actions");
+  await expect(introActions).toHaveCSS("padding-top", "4px");
+  await expect(introActions).toHaveCSS("padding-bottom", "4px");
   await expectIntroActionCardLayout(page, "channel-intro-action-create-agent");
   await expectIntroActionsShareRow(page, [
     "channel-intro-action-create-agent",
