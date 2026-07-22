@@ -97,6 +97,32 @@ fn normalizes_buzz_agent_args_to_empty() {
 }
 
 #[test]
+fn normalizes_grok_args_to_agent_stdio() {
+    let expected = vec![
+        "agent".to_string(),
+        "--always-approve".to_string(),
+        "stdio".to_string(),
+    ];
+    assert_eq!(normalize_agent_args("grok", Vec::new()), expected);
+    assert_eq!(
+        normalize_agent_args("grok", vec!["acp".into()]),
+        expected
+    );
+    assert_eq!(
+        normalize_agent_args("/Users/me/.grok/bin/grok", Vec::new()),
+        expected
+    );
+    assert_eq!(
+        managed_agent_avatar_url("grok"),
+        Some(super::GROK_AVATAR_URL.to_string())
+    );
+    let runtime = super::known_acp_runtime_exact("grok").expect("grok runtime");
+    assert_eq!(runtime.commands, &["grok"]);
+    assert_eq!(runtime.underlying_cli, Some("grok"));
+    assert!(runtime.adapter_install_commands.is_empty());
+}
+
+#[test]
 fn login_shell_lookup_treats_command_as_data() {
     let marker =
         std::env::temp_dir().join(format!("buzz-discovery-marker-{}", uuid::Uuid::new_v4()));

@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), and **Grok Build** (native `grok agent stdio`).
 
 ## Prerequisites
 
@@ -70,6 +70,23 @@ buzz-acp
 ```
 
 > **API key note:** `codex-acp` always attempts a ChatGPT WebSocket login first, which logs a `426 Upgrade Required` error. This is expected and non-fatal — it falls back to `OPENAI_API_KEY` automatically. Set `OPENAI_API_KEY` to ensure it has a working fallback.
+
+## Running with Grok Build
+
+[Grok Build](https://x.ai/) speaks ACP natively — no separate adapter package.
+
+```bash
+# Install: curl -fsSL https://x.ai/cli/install.sh | bash
+# Auth: grok login   OR   export XAI_API_KEY=...
+
+export BUZZ_ACP_AGENT_COMMAND="grok"
+# Default args are: agent,--always-approve,stdio
+export BUZZ_ACP_AGENT_ARGS="agent,--always-approve,stdio"
+
+buzz-acp
+```
+
+Grok discovers skills under `~/.grok/skills` and project `.agents/skills` (including Buzz's generated `buzz-cli` skill).
 
 ## Running with Claude Code
 

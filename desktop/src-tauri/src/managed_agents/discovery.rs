@@ -16,6 +16,7 @@ pub(crate) use runtime_metadata::KnownAcpRuntime;
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const GROK_AVATAR_URL: &str = "https://grok.com/favicon.ico";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
@@ -38,6 +39,8 @@ fn common_binary_paths() -> &'static [PathBuf] {
             paths.extend([
                 home.join(".local/share/mise/shims"),
                 home.join(".local/bin"),
+                // Grok Build installer places the CLI at ~/.grok/bin/grok.
+                home.join(".grok/bin"),
                 home.join(".volta/bin"),
                 home.join(".asdf/shims"),
             ]);
@@ -156,6 +159,42 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "grok",
+        label: "Grok Build",
+        // Native ACP via `grok agent stdio` (no separate *-acp adapter package).
+        commands: &["grok"],
+        aliases: &["grok-build", "grok-acp"],
+        avatar_url: GROK_AVATAR_URL,
+        mcp_command: Some("buzz-dev-mcp"),
+        mcp_hooks: false,
+        underlying_cli: Some("grok"),
+        cli_install_commands: &["curl -fsSL https://x.ai/cli/install.sh | bash"],
+        cli_install_commands_windows: &[
+            "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://x.ai/cli/install.ps1 | iex\"",
+        ],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://docs.x.ai/",
+        cli_install_hint: "Install Grok Build via the official xAI install script.",
+        adapter_install_hint: "",
+        skill_dir: Some(".grok/skills"),
+        supports_acp_model_switching: true,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: Some("~/.grok/config.toml"),
+        config_file_format: Some("toml"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `grok login` or set XAI_API_KEY."),
+        // No stable non-interactive auth-status subcommand yet; availability is
+        // based on finding the binary. Auth failures surface when a turn starts.
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -343,6 +382,14 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        // Grok Build speaks ACP natively over stdio.
+        // `grok agent --always-approve stdio` keeps managed turns unattended.
+        "grok" | "grok-build" | "grok-acp" => Some(vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string(),
+        ]),
+
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -364,8 +411,10 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         return default_args;
     }
 
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
+    // Legacy Goose-oriented callers often pass a bare `acp` arg. Treat that as
+    // "use the runtime default" for zero-arg adapters *and* for multi-arg
+    // native ACP entrypoints (e.g. Grok's `agent stdio`).
+    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") {
         return default_args;
     }
 
