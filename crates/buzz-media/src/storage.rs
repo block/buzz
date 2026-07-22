@@ -230,6 +230,40 @@ impl MediaStorage {
             .ok()
             .map(|m| m.mime_type)
     }
+
+    /// One page of a full-bucket listing, for the storage sweep. Wraps
+    /// rust-s3's manual `list_page` (NOT the auto-paginating `list`, which
+    /// has no cap) and converts the result into the storage-agnostic
+    /// [`crate::bucket_index::Page`] shape the pure fold consumes.
+    ///
+    /// `max_keys` bounds one HTTP response, not the sweep's total object
+    /// cap — the caller (`fold_bucket_listing`) enforces the cumulative cap
+    /// across pages.
+    pub async fn list_page(
+        &self,
+        continuation_token: Option<String>,
+        max_keys: usize,
+    ) -> Result<crate::bucket_index::Page, MediaError> {
+        let (result, _status) = self
+            .bucket
+            .list_page(
+                String::new(),
+                None,
+                continuation_token,
+                None,
+                Some(max_keys),
+            )
+            .await?;
+        Ok(crate::bucket_index::Page {
+            objects: result
+                .contents
+                .into_iter()
+                .map(|obj| (obj.key, obj.size))
+                .collect(),
+            next_continuation_token: result.next_continuation_token,
+            is_truncated: result.is_truncated,
+        })
+    }
 }
 
 #[cfg(test)]

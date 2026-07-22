@@ -1139,6 +1139,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "deadpool-redis",
+ "futures",
  "futures-util",
  "hex",
  "hmac 0.13.0",

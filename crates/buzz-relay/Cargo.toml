@@ -89,3 +89,4 @@ buzz-core = { workspace = true, features = ["test-utils"] }
 buzz-auth = { workspace = true, features = ["dev"] }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
+futures = "0.3"

@@ -146,6 +146,22 @@ fn emit_product_feedback_success(
     );
 }
 
+/// Increment the rejection counter with a bounded reason and transport label.
+///
+/// Shared by the WS `EVENT` handler and the HTTP `POST /events` handler so
+/// both transports feed the same series — `transport` distinguishes them so
+/// existing WS-only dashboards aren't silently diluted by HTTP volume.
+/// `reason` is one of a small closed set ("auth", "invalid", "scope",
+/// "error") — bounded, no cardinality risk.
+pub fn reject_with_transport(transport: &'static str, reason: &'static str) {
+    metrics::counter!(
+        "buzz_events_rejected_total",
+        "transport" => transport,
+        "reason" => reason
+    )
+    .increment(1);
+}
+
 /// Successful ingestion result.
 pub struct IngestResult {
     /// Hex-encoded event ID.
@@ -3611,5 +3627,55 @@ mod tests {
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
         // error comes from validate_engram_nip44_content with label replaced
         assert!(err.contains("agent-turn-metric"), "got: {err}");
+    }
+
+    /// The HTTP bridge's `submit_event` 400 arm and the WS `EVENT` handler's
+    /// reject path must land on the same counter, distinguished only by the
+    /// `transport` label — this is what lets a dashboard tell "server got
+    /// hammered with bad HTTP requests" apart from "a WS client is
+    /// misbehaving" without losing the combined total.
+    #[test]
+    fn reject_with_transport_labels_http_and_ws_as_separate_series() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            reject_with_transport("http", "invalid");
+            reject_with_transport("ws", "invalid");
+            reject_with_transport("http", "invalid");
+        });
+
+        let counts: std::collections::HashMap<(String, String), u64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_events_rejected_total")
+            .map(|(key, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Counter(n) = value else {
+                    panic!("buzz_events_rejected_total must be a counter");
+                };
+                let labels: Vec<_> = key.key().labels().collect();
+                let transport = labels
+                    .iter()
+                    .find(|l| l.key() == "transport")
+                    .map(|l| l.value().to_owned())
+                    .unwrap_or_default();
+                let reason = labels
+                    .iter()
+                    .find(|l| l.key() == "reason")
+                    .map(|l| l.value().to_owned())
+                    .unwrap_or_default();
+                ((transport, reason), n)
+            })
+            .collect();
+
+        assert_eq!(
+            counts.get(&("http".to_owned(), "invalid".to_owned())),
+            Some(&2)
+        );
+        assert_eq!(
+            counts.get(&("ws".to_owned(), "invalid".to_owned())),
+            Some(&1)
+        );
     }
 }

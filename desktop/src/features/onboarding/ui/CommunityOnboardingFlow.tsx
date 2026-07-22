@@ -20,7 +20,7 @@ import {
   parseEmojiAvatarDataUrl,
   ProfileAvatarEditor,
 } from "@/features/profile/ui/ProfileAvatarEditor";
-import { updateProfile } from "@/shared/api/tauriProfiles";
+import { getProfile, updateProfile } from "@/shared/api/tauriProfiles";
 import { getIdentity, importIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { relayClient } from "@/shared/api/relayClient";
@@ -285,6 +285,30 @@ export function CommunityOnboardingFlow({
     transaction?.stage === "team-intro" ||
     transaction?.stage === "finalizing" ||
     transaction?.stage === "entering";
+
+  // Seed display name and avatar from the relay profile when the profile step
+  // is shown. This covers the case where the skip raced or was bypassed (e.g.,
+  // the user navigated Back). Only seeds fields that are still empty so that
+  // any user edits are preserved.
+  React.useEffect(() => {
+    if (!isProfileStage) return;
+    void getProfile()
+      .then((profile) => {
+        if (profile.displayName) {
+          setDisplayName((prev) =>
+            prev === "" ? (profile.displayName ?? "") : prev,
+          );
+        }
+        if (profile.avatarUrl) {
+          setAvatarUrl((prev) =>
+            prev === "" ? (profile.avatarUrl ?? "") : prev,
+          );
+        }
+      })
+      .catch(() => {
+        // Seeding is best-effort; silently ignore failures.
+      });
+  }, [isProfileStage]);
 
   React.useLayoutEffect(() => {
     if (isProfileStage && !isAvatarEditorOpen) {

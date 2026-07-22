@@ -20,6 +20,9 @@ import { useMachineOnboardingState } from "@/features/onboarding/machineOnboardi
 import {
   type FirstCommunityPage,
   useCommunityOnboarding,
+  markCommunityOnboardingComplete,
+  resolveProfileCheckAction,
+  isTransactionStillConnecting,
 } from "@/features/onboarding/communityOnboarding";
 import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboardingFlow";
 import {
@@ -43,6 +46,7 @@ import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityAp
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
+import { getProfile } from "@/shared/api/tauriProfiles";
 import {
   type AddCommunityDeepLinkPayload,
   listenForDeepLinks,
@@ -279,6 +283,14 @@ function CommunityApp({
   } = useCommunities();
   const communityOnboarding = useCommunityOnboarding();
   const connectingTransactionRef = useRef<string | null>(null);
+  // Tracks the ID of the profile-check request that has been launched for the
+  // current connecting transaction. Prevents the effect from launching a
+  // second request if it re-runs while a fetch is in flight.
+  const profileCheckTransactionRef = useRef<string | null>(null);
+  // Always reflects the live transaction object so async callbacks can perform
+  // an atomic check of both ID and stage before mutating state.
+  const transactionRef = useRef(communityOnboarding.transaction);
+  transactionRef.current = communityOnboarding.transaction;
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
   const [resumeFirstCommunityPage, setResumeFirstCommunityPage] =
     useState<FirstCommunityPage | null>(null);
@@ -384,6 +396,7 @@ function CommunityApp({
   useEffect(() => {
     if (transaction?.stage !== "connecting") {
       connectingTransactionRef.current = null;
+      profileCheckTransactionRef.current = null;
     }
   }, [transaction?.stage]);
   const targetIsReady =
@@ -391,10 +404,39 @@ function CommunityApp({
     community.isReady &&
     community.appliedKey === communityKey;
   useEffect(() => {
-    if (transaction?.stage === "connecting" && targetIsReady) {
-      communityOnboarding.update({ stage: "profile", error: undefined });
-    }
-  }, [communityOnboarding.update, targetIsReady, transaction?.stage]);
+    if (transaction?.stage !== "connecting" || !targetIsReady) return;
+    const transactionId = transaction.id;
+    const relayUrl = transaction.relayUrl;
+    if (profileCheckTransactionRef.current === transactionId) return;
+    profileCheckTransactionRef.current = transactionId;
+
+    // resolveProfileCheckAction resolves exactly once (Promise.race + timer
+    // cleared on settle), so no settled flag is needed here.
+    void resolveProfileCheckAction(getProfile, 10_000).then((result) => {
+      // Atomic staleness guard via isTransactionStillConnecting: the
+      // transaction must still be the same one that launched this request
+      // AND still be in connecting. Covers cancel+replacement (B's ID !== A's)
+      // and cancel-without-replacement (transactionRef.current is null).
+      if (!isTransactionStillConnecting(transactionRef.current, transactionId))
+        return;
+
+      if (result.action === "skip") {
+        markCommunityOnboardingComplete(result.profile.pubkey, relayUrl);
+        communityOnboarding.clear();
+      } else {
+        communityOnboarding.update(
+          { stage: "profile", error: undefined },
+          transactionId,
+        );
+      }
+    });
+  }, [
+    communityOnboarding,
+    targetIsReady,
+    transaction?.stage,
+    transaction?.id,
+    transaction?.relayUrl,
+  ]);
   // During "entering" the transaction stays alive as a curtain: the app mounts
   // underneath (already pointed at the Welcome channel route) while the
   // onboarding screen covers it, then fades once Welcome reports ready.

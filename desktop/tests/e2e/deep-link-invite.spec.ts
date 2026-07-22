@@ -113,9 +113,15 @@ test("connect deep link shows a static acknowledgment during setup", async ({
 test("add-community deep link starts onboarding when no community is configured", async ({
   page,
 }) => {
+  // profileReadError forces the fallback path (error → profile step), so the
+  // test asserts pre-existing-profile behavior without the default mock
+  // identity's has_profile_event:true triggering the skip.
   await installMockBridge(
     page,
-    { pendingCommunityDeepLinks: [PENDING_ADD_COMMUNITY_LINK] },
+    {
+      pendingCommunityDeepLinks: [PENDING_ADD_COMMUNITY_LINK],
+      profileReadError: "no-kind-0",
+    },
     { skipCommunitySeed: true },
   );
   await page.goto("/");
@@ -140,6 +146,26 @@ test("add-community deep link starts onboarding when no community is configured"
       ),
     )
     .toContain('"communityName":"Acme Team"');
+});
+
+test("add-community deep link skips profile step when identity has an existing kind:0 profile", async ({
+  page,
+}) => {
+  // The default mock identity (deadbeef...) is pre-seeded with
+  // has_profile_event:true. The skip should fire on connecting → clear the
+  // transaction entirely, never showing the profile step.
+  await installMockBridge(
+    page,
+    { pendingCommunityDeepLinks: [PENDING_ADD_COMMUNITY_LINK] },
+    { skipCommunitySeed: true },
+  );
+  await page.goto("/");
+
+  // Onboarding flow must disappear — the skip cleared the transaction.
+  await expect(page.getByTestId("community-onboarding-flow")).toHaveCount(0);
+  // handleCommunityOnboardingConnect already added the community when the
+  // transaction reached "connecting", so the app lands in the full UI.
+  await expect(page.getByTestId("sidebar-profile-avatar-button")).toBeVisible();
 });
 
 test("add-community deep link opens one editable prefill and acknowledges the queue", async ({
