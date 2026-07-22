@@ -106,6 +106,10 @@ test("LaunchAgent rendering rejects unsafe or relative runtime paths", () => {
     /entries must be absolute/,
   );
   assert.throws(
+    () => renderDisabledLaunchAgent(manifest, identityMap, "nexus", { launcherPath: "usr/bin/env" }),
+    /must be absolute/,
+  );
+  assert.throws(
     () => renderDisabledLaunchAgent(manifest, identityMap, "nexus", { openclawStateDir: "/state" }),
     /must be supplied together/,
   );
@@ -135,6 +139,18 @@ test("Fleet can bind the immutable Node runtime without changing disabled previe
   );
   assert.match(rendered.plist, /<key>OPENCLAW_CONFIG_PATH<\/key><string>\/owned\/state\/openclaw.json<\/string>/);
   assert.match(rendered.plist, /<key>OPENCLAW_STATE_DIR<\/key><string>\/owned\/state<\/string>/);
+});
+
+test("Fleet can use a system launcher while retaining the exact Buzz binary", () => {
+  const rendered = renderDisabledLaunchAgent(manifest, identityMap, "nexus", {
+    buzzAcpPath: "/owned/bin/buzz-acp",
+    launcherPath: "/usr/bin/env",
+  });
+  assert.deepEqual(rendered.argv.slice(0, 2), ["/usr/bin/env", "/owned/bin/buzz-acp"]);
+  assert.match(
+    rendered.plist,
+    /<array>\n    <string>\/usr\/bin\/env<\/string>\n    <string>\/owned\/bin\/buzz-acp<\/string>/,
+  );
 });
 
 test("worker restart renders the identical require-existing Gateway binding", () => {

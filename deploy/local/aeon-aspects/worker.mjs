@@ -115,6 +115,7 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
   const openclawPath = options.openclawPath ?? "/REQUIRES_FLEET/immutable-openclaw/bin/openclaw";
   const tokenFile = options.tokenFile ?? "/REQUIRES_FLEET/owned-token-file";
   const workingDirectory = options.workingDirectory ?? "/Volumes/AEON/Projects/buzz";
+  const launcherPath = options.launcherPath ?? null;
   const executablePath = options.executablePath ?? null;
   const openclawConfigPath = options.openclawConfigPath ?? null;
   const openclawStateDir = options.openclawStateDir ?? null;
@@ -123,6 +124,7 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
     openclawPath,
     tokenFile,
     workingDirectory,
+    ...(launcherPath !== null ? { launcherPath } : {}),
     ...(openclawConfigPath !== null ? { openclawConfigPath } : {}),
     ...(openclawStateDir !== null ? { openclawStateDir } : {}),
   })) {
@@ -143,7 +145,9 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
   rendered.args[agentCommandIndex] = openclawPath;
   const configIndex = rendered.args.indexOf("--config") + 1;
   rendered.args[configIndex] = `${workingDirectory}/${rendered.args[configIndex]}`;
-  const argv = [buzzAcpPath, ...rendered.args];
+  // launchd may reject direct execution of provenance-marked development binaries.
+  // A Fleet-owned system launcher keeps the binary and its digest explicit in argv.
+  const argv = [...(launcherPath ? [launcherPath] : []), buzzAcpPath, ...rendered.args];
   const worker = manifest.workers.find((item) => item.aspect === aspect);
   const stdout = `/Volumes/AEON/Projects/buzz-data/logs/${aspect}.buzz-acp.log`;
   const stderr = `/Volumes/AEON/Projects/buzz-data/logs/${aspect}.buzz-acp.err.log`;
