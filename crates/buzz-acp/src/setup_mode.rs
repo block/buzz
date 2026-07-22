@@ -542,6 +542,8 @@ fn mentions_rule(kinds: Vec<u32>) -> filter::SubscriptionRule {
     filter::SubscriptionRule {
         name: "setup-mentions".into(),
         channels: filter::ChannelScope::All("all".into()),
+        admit_invited_ephemeral: false,
+        require_exact_channel_tag: false,
         kinds,
         require_mention: true,
         filter: None,

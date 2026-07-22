@@ -1,0 +1,16 @@
+[[rules]]
+name = "fontis-private-office"
+channels = ["600cb602-ff2a-422b-bdb2-6353bb81100d"]
+kinds = [9, 40002]
+require_exact_channel_tag = true
+require_mention = false
+filter = 'author == "73ac8798fd9cedcc5d24645d7ed49332d94a28f2c937f4c1b638f92bf6e8e91f"'
+
+[[rules]]
+name = "fontis-invited-huddle"
+channels = []
+admit_invited_ephemeral = true
+kinds = [9, 40002]
+require_exact_channel_tag = true
+require_mention = true
+filter = 'author == "73ac8798fd9cedcc5d24645d7ed49332d94a28f2c937f4c1b638f92bf6e8e91f"'

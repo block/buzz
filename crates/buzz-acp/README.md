@@ -97,14 +97,18 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `BUZZ_PRIVATE_KEY` | **yes** | — | Agent's Nostr private key (`nsec1...`). Used for relay auth and agent identity. |
+| `BUZZ_PRIVATE_KEY` | one key source required | — | Agent's Nostr private key (`nsec1...`). Conflicts with `BUZZ_PRIVATE_KEY_FILE`. |
+| `BUZZ_PRIVATE_KEY_FILE` | one key source required | — | Absolute path to a current-user-owned, regular, non-symlink key file with mode `0600`. |
+| `BUZZ_EXPECTED_PUBLIC_KEY` | with key file in supervised deployments | — | Expected hex pubkey derived from `BUZZ_PRIVATE_KEY_FILE`; startup fails on mismatch. |
 | `BUZZ_RELAY_URL` | no | `ws://localhost:3000` | Relay WebSocket URL. |
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
-| `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
+| `BUZZ_ACP_IDLE_TIMEOUT` | no | `900` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
+| `BUZZ_ACP_TURN_RECEIPTS` | no | `false` | OpenClaw-only opt-in that closes successful channel turns against signed Buzz reply and Gateway lineage evidence. Requires relay observer. |
+| `BUZZ_ACP_EXPECTED_GATEWAY_SESSION_KEY` | with turn receipts | — | Fixed Gateway session key that observed ACP lineage must match. |
 
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
 

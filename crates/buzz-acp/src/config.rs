@@ -4,6 +4,7 @@
 //! Config file (TOML) for complex subscription rules.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -45,6 +46,51 @@ pub enum ConfigError {
 
     #[error("config file error: {0}")]
     ConfigFile(String),
+}
+
+fn read_owned_secret_file(path: &std::path::Path) -> Result<String, ConfigError> {
+    if !path.is_absolute() {
+        return Err(ConfigError::ConfigFile(
+            "--private-key-file must be an absolute path".into(),
+        ));
+    }
+    #[cfg(unix)]
+    let mut file = {
+        use nix::fcntl::{open, OFlag};
+        use nix::sys::stat::Mode;
+
+        let fd = open(path, OFlag::O_RDONLY | OFlag::O_NOFOLLOW, Mode::empty())
+            .map_err(std::io::Error::from)?;
+        std::fs::File::from(fd)
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new().read(true).open(path)?;
+
+    // Validate metadata from the same no-follow handle that supplies the key.
+    // This avoids a validate-then-reopen race where the path could be swapped.
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(ConfigError::ConfigFile(
+            "--private-key-file must be a regular, non-symlink file".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            return Err(ConfigError::ConfigFile(
+                "--private-key-file permissions must be 0600".into(),
+            ));
+        }
+        if metadata.uid() != nix::unistd::getuid().as_raw() {
+            return Err(ConfigError::ConfigFile(
+                "--private-key-file must be owned by the current user".into(),
+            ));
+        }
+    }
+    let mut secret = String::new();
+    file.read_to_string(&mut secret)?;
+    Ok(secret.trim().to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -240,8 +286,26 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
     pub relay_url: String,
 
-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
-    pub private_key: String,
+    #[arg(
+        long,
+        env = "BUZZ_PRIVATE_KEY",
+        conflicts_with = "private_key_file",
+        required_unless_present = "private_key_file"
+    )]
+    pub private_key: Option<String>,
+
+    /// Read the Nostr private key from an operator-owned regular file.
+    #[arg(
+        long,
+        env = "BUZZ_PRIVATE_KEY_FILE",
+        conflicts_with = "private_key",
+        required_unless_present = "private_key"
+    )]
+    pub private_key_file: Option<PathBuf>,
+
+    /// Expected public key derived from `--private-key-file`.
+    #[arg(long, env = "BUZZ_EXPECTED_PUBLIC_KEY", requires = "private_key_file")]
+    pub expected_public_key: Option<String>,
 
     /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
@@ -467,6 +531,24 @@ pub struct CliArgs {
     /// Publish encrypted ACP observer frames over the relay.
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
+
+    /// Close successful OpenClaw turns with request/reply/session/run evidence.
+    /// Default-off because most ACP adapters do not expose Gateway lineage.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_TURN_RECEIPTS",
+        default_value_t = false,
+        requires = "relay_observer"
+    )]
+    pub turn_receipts: bool,
+
+    /// Fixed Gateway session key that observed ACP lineage must match.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_EXPECTED_GATEWAY_SESSION_KEY",
+        requires = "turn_receipts"
+    )]
+    pub expected_gateway_session_key: Option<String>,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -537,6 +619,10 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Whether successful channel turns require closed observer receipt evidence.
+    pub turn_receipts: bool,
+    /// Expected stable Gateway session key for receipt verification.
+    pub expected_gateway_session_key: Option<String>,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -732,13 +818,28 @@ impl Config {
     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
     /// validation path without going through process args.
     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
-        let keys = Keys::parse(&args.private_key)?;
+        let mut private_key = if let Some(value) = args.private_key.take() {
+            value
+        } else if let Some(path) = args.private_key_file.as_ref() {
+            read_owned_secret_file(path)?
+        } else {
+            return Err(ConfigError::ConfigFile(
+                "one of --private-key or --private-key-file is required".into(),
+            ));
+        };
+        let keys = Keys::parse(&private_key)?;
+        if let Some(expected) = args.expected_public_key.as_deref() {
+            if keys.public_key().to_hex() != expected.trim().to_ascii_lowercase() {
+                return Err(ConfigError::ConfigFile(
+                    "private-key file does not derive the expected public key".into(),
+                ));
+            }
+        }
         // Best-effort zeroize: overwrite the raw private key string to reduce
         // exposure via core dumps or heap inspection (#41). Without the `zeroize`
         // crate we can only clear the String — the allocator may retain copies.
-        args.private_key
-            .replace_range(.., &"0".repeat(args.private_key.len()));
-        args.private_key.clear();
+        private_key.replace_range(.., &"0".repeat(private_key.len()));
+        private_key.clear();
 
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
@@ -951,6 +1052,23 @@ impl Config {
             };
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
+        if args.turn_receipts
+            && normalize_agent_command_identity(&agent_command).as_str() != "openclaw"
+        {
+            return Err(ConfigError::ConfigFile(
+                "--turn-receipts currently requires --agent-command=openclaw".into(),
+            ));
+        }
+        if args.turn_receipts
+            && args
+                .expected_gateway_session_key
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(ConfigError::ConfigFile(
+                "--turn-receipts requires a non-empty --expected-gateway-session-key".into(),
+            ));
+        }
 
         let config = Config {
             keys,
@@ -993,6 +1111,8 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            turn_receipts: args.turn_receipts,
+            expected_gateway_session_key: args.expected_gateway_session_key,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1116,11 +1236,50 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
                 )));
             }
         }
+        if rule.admit_invited_ephemeral
+            && !matches!(rule.channels, crate::filter::ChannelScope::List(_))
+        {
+            return Err(ConfigError::ConfigFile(format!(
+                "rule '{}': admit_invited_ephemeral requires channels to be a UUID list",
+                rule.name
+            )));
+        }
+        if rule.admit_invited_ephemeral && !rule.require_mention {
+            return Err(ConfigError::ConfigFile(format!(
+                "rule '{}': admit_invited_ephemeral requires require_mention=true",
+                rule.name
+            )));
+        }
         // Deserialization leaves consecutive_timeouts at its zero default; reset explicitly.
         rule.consecutive_timeouts = Arc::new(AtomicU32::new(0));
     }
 
     Ok(config.rules)
+}
+
+/// Add a metadata-verified ephemeral channel to every opt-in rule.
+pub fn admit_invited_ephemeral_channel(rules: &mut [SubscriptionRule], channel_id: Uuid) -> bool {
+    let channel = channel_id.to_string();
+    let mut admitted = false;
+    for rule in rules.iter_mut().filter(|rule| rule.admit_invited_ephemeral) {
+        if let crate::filter::ChannelScope::List(ids) = &mut rule.channels {
+            if !ids.contains(&channel) {
+                ids.push(channel.clone());
+            }
+            admitted = true;
+        }
+    }
+    admitted
+}
+
+/// Remove a departed ephemeral channel from opt-in rules.
+pub fn remove_invited_ephemeral_channel(rules: &mut [SubscriptionRule], channel_id: Uuid) {
+    let channel = channel_id.to_string();
+    for rule in rules.iter_mut().filter(|rule| rule.admit_invited_ephemeral) {
+        if let crate::filter::ChannelScope::List(ids) = &mut rule.channels {
+            ids.retain(|id| id != &channel);
+        }
+    }
 }
 
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
@@ -1361,6 +1520,8 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            turn_receipts: false,
+            expected_gateway_session_key: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -1375,9 +1536,12 @@ mod tests {
     ) -> SubscriptionRule {
         use std::sync::atomic::AtomicU32;
         use std::sync::Arc;
+
         SubscriptionRule {
             name: name.into(),
             channels,
+            admit_invited_ephemeral: false,
+            require_exact_channel_tag: false,
             kinds,
             require_mention: mention,
             filter: None,
@@ -1385,6 +1549,47 @@ mod tests {
             compiled_filter: None,
             consecutive_timeouts: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_key_file_requires_regular_owned_mode_0600_and_expected_pubkey() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!("buzz-acp-key-test-{}", Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("aspect.sk");
+        let keys = Keys::generate();
+        std::fs::write(&path, keys.secret_key().to_secret_hex()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_owned_secret_file(&path).expect("owned 0600 regular file"),
+            keys.secret_key().to_secret_hex()
+        );
+
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key-file",
+            path.to_str().unwrap(),
+            "--expected-public-key",
+            &"f".repeat(64),
+        ])
+        .unwrap();
+        assert!(matches!(
+            Config::from_args(args),
+            Err(ConfigError::ConfigFile(message))
+                if message == "private-key file does not derive the expected public key"
+        ));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_owned_secret_file(&path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("aspect-link.sk");
+        symlink(&path, &link).unwrap();
+        assert!(read_owned_secret_file(&link).is_err());
+        std::fs::remove_file(link).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]
@@ -1752,6 +1957,169 @@ mod tests {
 
         let result = resolve_channel_filters(&config, &[ch], &rules);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn invited_ephemeral_rule_admits_and_removes_verified_channel() {
+        let private = Uuid::new_v4();
+        let huddle = Uuid::new_v4();
+        let mut private_rule = make_rule(
+            "private-office",
+            ChannelScope::List(vec![private.to_string()]),
+            vec![9],
+            false,
+        );
+        private_rule.admit_invited_ephemeral = false;
+        let mut huddle_rule =
+            make_rule("invited-huddle", ChannelScope::List(vec![]), vec![9], true);
+        huddle_rule.admit_invited_ephemeral = true;
+        let mut rules = vec![private_rule, huddle_rule];
+
+        assert!(admit_invited_ephemeral_channel(&mut rules, huddle));
+        let config = test_config(SubscribeMode::Config);
+        let filters = resolve_channel_filters(&config, &[private, huddle], &rules);
+        assert!(!filters[&private].require_mention);
+        assert!(filters[&huddle].require_mention);
+
+        remove_invited_ephemeral_channel(&mut rules, huddle);
+        let filters = resolve_channel_filters(&config, &[private, huddle], &rules);
+        assert!(filters.contains_key(&private));
+        assert!(!filters.contains_key(&huddle));
+    }
+
+    #[test]
+    fn ordinary_unlisted_channel_is_not_admitted() {
+        let private = Uuid::new_v4();
+        let concilium = Uuid::new_v4();
+        let private_rule = make_rule(
+            "private-office",
+            ChannelScope::List(vec![private.to_string()]),
+            vec![9],
+            false,
+        );
+        let mut huddle_rule =
+            make_rule("invited-huddle", ChannelScope::List(vec![]), vec![9], true);
+        huddle_rule.admit_invited_ephemeral = true;
+        let config = test_config(SubscribeMode::Config);
+
+        let filters =
+            resolve_channel_filters(&config, &[private, concilium], &[private_rule, huddle_rule]);
+        assert!(filters.contains_key(&private));
+        assert!(!filters.contains_key(&concilium));
+    }
+
+    #[test]
+    fn aeon_six_worker_configs_load_through_real_rules_and_clap() {
+        use clap::Parser as _;
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("repository root");
+        let deploy = root.join("deploy/local/aeon-aspects");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(deploy.join("workers.json")).expect("workers manifest"),
+        )
+        .expect("valid workers manifest");
+        let architect = manifest["buzz"]["architectPubkey"]
+            .as_str()
+            .expect("architect pubkey");
+        let concilium = manifest["buzz"]["conciliumChannelId"]
+            .as_str()
+            .expect("concilium id");
+        let workers = manifest["workers"].as_array().expect("worker array");
+        assert_eq!(workers.len(), 6);
+
+        for worker in workers {
+            let aspect = worker["aspect"].as_str().expect("aspect");
+            let session = worker["sessionKey"].as_str().expect("session key");
+            let private = worker["privateChannelId"].as_str().expect("private room");
+            let config_path = deploy.join("config").join(format!("{aspect}.toml"));
+            let rules = load_rules(&config_path).expect("load production rule file");
+            assert_eq!(rules.len(), 2);
+            assert!(!rules[0].admit_invited_ephemeral);
+            assert!(rules[0].require_exact_channel_tag);
+            assert!(!rules[0].require_mention);
+            assert!(rules[1].admit_invited_ephemeral);
+            assert!(rules[1].require_exact_channel_tag);
+            assert!(rules[1].require_mention);
+            assert_eq!(rules[0].kinds, vec![9, 40002]);
+            assert_eq!(rules[1].kinds, vec![9, 40002]);
+            assert!(rules.iter().all(|rule| {
+                rule.filter
+                    .as_deref()
+                    .is_some_and(|filter| filter.contains(architect))
+            }));
+            let source = std::fs::read_to_string(&config_path).expect("config source");
+            assert!(source.contains(private));
+            assert!(!source.contains(concilium));
+
+            let agent_args = format!(
+                "acp,--session,{session},--require-existing,--token-file,/owned/token,--url,ws://127.0.0.1:18806,--provenance,meta+receipt,--no-prefix-cwd"
+            );
+            let cli = CliArgs::try_parse_from([
+                "buzz-acp",
+                "--private-key",
+                &"1".repeat(64),
+                "--agent-owner",
+                architect,
+                "--agent-command",
+                "openclaw",
+                "--agent-args",
+                &agent_args,
+                "--subscribe",
+                "config",
+                "--config",
+                config_path.to_str().expect("utf8 config path"),
+                "--respond-to",
+                "owner-only",
+                "--allowed-respond-to",
+                "owner-only",
+                "--no-memory",
+                "--no-base-prompt",
+                "--dedup",
+                "queue",
+                "--multiple-event-handling",
+                "queue",
+                "--relay-observer",
+                "--permission-mode",
+                "bypass-permissions",
+                "--heartbeat-interval",
+                "0",
+                "--turn-liveness-secs",
+                "10",
+                "--idle-timeout",
+                "900",
+                "--max-turn-duration",
+                "7200",
+                "--context-message-limit",
+                "12",
+                "--max-turns-per-session",
+                "0",
+                "--turn-receipts",
+                "--expected-gateway-session-key",
+                session,
+            ])
+            .expect("real Clap parser accepts rendered worker argv");
+            assert!(cli.no_memory);
+            assert!(cli.no_base_prompt);
+            assert!(cli.turn_receipts);
+            assert_eq!(cli.permission_mode, PermissionMode::BypassPermissions);
+            assert_eq!(cli.heartbeat_interval, 0);
+            assert_eq!(cli.turn_liveness_secs, 10);
+            assert_eq!(cli.idle_timeout, Some(900));
+            assert_eq!(cli.max_turn_duration, 7200);
+            assert_eq!(cli.context_message_limit, 12);
+            assert_eq!(cli.max_turns_per_session, 0);
+            assert!(cli.mcp_command.is_empty());
+            assert!(cli.model.is_none());
+            assert!(!cli.no_ignore_self);
+            assert!(!cli.no_presence);
+            assert!(!cli.no_typing);
+            assert_eq!(cli.expected_gateway_session_key.as_deref(), Some(session));
+            assert!(cli.agent_args.iter().any(|arg| arg == "--require-existing"));
+            assert!(cli.agent_args.iter().any(|arg| arg == "--no-prefix-cwd"));
+        }
     }
 
     #[test]

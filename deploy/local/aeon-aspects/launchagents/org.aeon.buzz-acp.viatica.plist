@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>org.aeon.buzz-acp.viatica</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Volumes/AEON/Projects/buzz/target/release/buzz-acp</string>
+    <string>--relay-url</string>
+    <string>ws://localhost:3000</string>
+    <string>--private-key-file</string>
+    <string>/Volumes/AEON/Projects/buzz-data/keys/viatica.sk</string>
+    <string>--expected-public-key</string>
+    <string>89a2f2679f83cd9033582f023a3b92e01ed2b5950587efae565045ae65bd03cc</string>
+    <string>--agent-owner</string>
+    <string>73ac8798fd9cedcc5d24645d7ed49332d94a28f2c937f4c1b638f92bf6e8e91f</string>
+    <string>--agent-command</string>
+    <string>/REQUIRES_FLEET/immutable-openclaw/bin/openclaw</string>
+    <string>--agent-args</string>
+    <string>acp,--session,agent:viatica:buzz-private,--require-existing,--token-file,/REQUIRES_FLEET/owned-token-file,--url,ws://127.0.0.1:18806,--provenance,meta+receipt,--no-prefix-cwd</string>
+    <string>--agents</string>
+    <string>1</string>
+    <string>--subscribe</string>
+    <string>config</string>
+    <string>--config</string>
+    <string>/Volumes/AEON/Projects/buzz/deploy/local/aeon-aspects/config/viatica.toml</string>
+    <string>--respond-to</string>
+    <string>owner-only</string>
+    <string>--allowed-respond-to</string>
+    <string>owner-only</string>
+    <string>--no-memory</string>
+    <string>--no-base-prompt</string>
+    <string>--dedup</string>
+    <string>queue</string>
+    <string>--multiple-event-handling</string>
+    <string>queue</string>
+    <string>--relay-observer</string>
+    <string>--permission-mode</string>
+    <string>bypass-permissions</string>
+    <string>--heartbeat-interval</string>
+    <string>0</string>
+    <string>--turn-liveness-secs</string>
+    <string>10</string>
+    <string>--idle-timeout</string>
+    <string>900</string>
+    <string>--max-turn-duration</string>
+    <string>7200</string>
+    <string>--context-message-limit</string>
+    <string>12</string>
+    <string>--max-turns-per-session</string>
+    <string>0</string>
+    <string>--turn-receipts</string>
+    <string>--expected-gateway-session-key</string>
+    <string>agent:viatica:buzz-private</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Volumes/AEON/Projects/buzz</string>
+  <key>RunAtLoad</key><false/>
+  <key>KeepAlive</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Volumes/AEON/Projects/buzz-data/logs/viatica.buzz-acp.log</string>
+  <key>StandardErrorPath</key><string>/Volumes/AEON/Projects/buzz-data/logs/viatica.buzz-acp.err.log</string>
+</dict>
+</plist>

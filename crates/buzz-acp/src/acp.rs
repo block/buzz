@@ -187,6 +187,11 @@ pub struct AcpClient {
     /// Other agents may leave this unset — readers must treat `None` as
     /// "no active run to steer into" and fall back to cancel+merge.
     active_run_id: Option<String>,
+    /// Most recent run ID observed during the current prompt, retained after
+    /// adapters clear their active-run marker at turn completion.
+    last_turn_run_id: Option<String>,
+    /// Stable backend session key reported by ACP session lineage metadata.
+    active_session_key: Option<String>,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -490,6 +495,8 @@ impl AcpClient {
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
             active_run_id: None,
+            last_turn_run_id: None,
+            active_session_key: None,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
         })
@@ -764,6 +771,24 @@ impl AcpClient {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn active_run_id(&self) -> Option<&str> {
         self.active_run_id.as_deref()
+    }
+
+    /// Stable backend session key observed from ACP session lineage evidence.
+    pub fn active_session_key(&self) -> Option<&str> {
+        self.active_session_key.as_deref()
+    }
+
+    /// Run ID observed during the current turn, including after active state clears.
+    pub fn turn_run_id(&self) -> Option<&str> {
+        self.active_run_id
+            .as_deref()
+            .or(self.last_turn_run_id.as_deref())
+    }
+
+    /// Reset turn-scoped evidence before issuing a new prompt.
+    pub fn begin_turn_evidence(&mut self) {
+        self.active_run_id = None;
+        self.last_turn_run_id = None;
     }
 
     /// Consume and return the per-turn usage record computed from the most
@@ -1591,19 +1616,30 @@ impl AcpClient {
                 // on the update object itself — nested inside `update`, not
                 // alongside it at the params level. Goose and buzz-agent both
                 // emit it at `params.update._meta.goose.activeRunId`.
-                let meta = msg["params"]["update"]
-                    .get("_meta")
-                    .and_then(|m| m.get("goose"));
-                if let Some(goose_meta) = meta {
-                    match goose_meta.get("activeRunId") {
-                        Some(serde_json::Value::String(run_id)) => {
+                let update_meta = msg["params"]["update"].get("_meta");
+                if let Some(session_key) = update_meta
+                    .and_then(|meta| meta.get("sessionKey"))
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    self.active_session_key = Some(session_key.to_string());
+                }
+                let run_value = update_meta.and_then(|meta| {
+                    meta.get("activeRunId")
+                        .or_else(|| meta.get("runId"))
+                        .or_else(|| meta.get("goose").and_then(|goose| goose.get("activeRunId")))
+                });
+                if let Some(run_value) = run_value {
+                    match run_value {
+                        serde_json::Value::String(run_id) => {
                             tracing::debug!(
                                 target: "acp::update",
                                 "session_info_update: activeRunId={run_id}"
                             );
                             self.active_run_id = Some(run_id.clone());
+                            self.last_turn_run_id = Some(run_id.clone());
                         }
-                        Some(serde_json::Value::Null) => {
+                        serde_json::Value::Null => {
                             tracing::debug!(
                                 target: "acp::update",
                                 "session_info_update: activeRunId cleared"
@@ -3099,6 +3135,37 @@ mod tests {
             client.active_run_id().is_none(),
             "explicit null must clear active_run_id"
         );
+        assert_eq!(
+            client.turn_run_id(),
+            Some("run-xyz"),
+            "turn evidence must retain the completed run id"
+        );
+    }
+
+    #[tokio::test]
+    async fn openclaw_session_lineage_and_flat_run_id_are_captured() {
+        let mut client = spawn_inert_client().await;
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "acp-session",
+                "update": {
+                    "sessionUpdate": "session_info_update",
+                    "_meta": {
+                        "sessionKey": "agent:main:buzz-private",
+                        "runId": "gateway-run-42"
+                    }
+                }
+            }
+        });
+        let _ = client.handle_session_update(&msg);
+        assert_eq!(client.active_session_key(), Some("agent:main:buzz-private"));
+        assert_eq!(client.turn_run_id(), Some("gateway-run-42"));
+
+        client.begin_turn_evidence();
+        assert_eq!(client.active_session_key(), Some("agent:main:buzz-private"));
+        assert!(client.turn_run_id().is_none());
     }
 
     #[tokio::test]
