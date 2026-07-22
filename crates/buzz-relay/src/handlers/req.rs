@@ -271,27 +271,24 @@ pub async fn handle_req(
         .iter()
         .enumerate()
         .map(|(idx, filter)| {
+            let requested_channels = extract_channel_ids_from_filter(filter);
             // Use per-filter #h channel scope when available, falling back to the
             // subscription-level channel_id. This prevents unrelated accessible-channel
             // rows from consuming the LIMIT when filters target specific channels but
             // the subscription is global (multiple distinct #h values across filters).
-            let per_filter_channel = {
-                let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
-                filter
-                    .generic_tags
-                    .get(&h)
-                    .and_then(|vs| {
-                        if vs.len() == 1 {
-                            vs.iter().next()?.parse::<uuid::Uuid>().ok()
-                        } else {
-                            None
-                        }
-                    })
-                    .or(channel_id)
-            };
+            let per_filter_channel = extract_channel_id_from_filter(filter).or(channel_id);
             let mut params =
                 filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
-            apply_access_scope_to_query(&mut params, per_filter_channel, &accessible_channels);
+            if requested_channels.is_empty() {
+                apply_access_scope_to_query(&mut params, per_filter_channel, &accessible_channels);
+            } else {
+                apply_requested_access_scope_to_query(
+                    &mut params,
+                    per_filter_channel,
+                    &accessible_channels,
+                    &requested_channels,
+                );
+            }
             (idx, per_filter_channel, params)
         })
         .collect();
@@ -847,6 +844,18 @@ fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
     extract_channel_id_from_filters(std::slice::from_ref(filter))
 }
 
+/// Extract every valid channel UUID requested by one filter.
+fn extract_channel_ids_from_filter(filter: &Filter) -> Vec<uuid::Uuid> {
+    let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    filter
+        .generic_tags
+        .get(&h)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.parse::<uuid::Uuid>().ok())
+        .collect()
+}
+
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
 ///
 /// Each filter is queried independently so that per-filter `limit` and time
@@ -991,6 +1000,24 @@ pub(crate) fn apply_access_scope_to_query(
 ) {
     if channel_id.is_none() {
         query.channel_ids = Some(accessible_channels.to_vec());
+    }
+}
+
+/// Push only explicitly requested channels that the caller may access.
+fn apply_requested_access_scope_to_query(
+    query: &mut EventQuery,
+    channel_id: Option<uuid::Uuid>,
+    accessible_channels: &[uuid::Uuid],
+    requested_channels: &[uuid::Uuid],
+) {
+    if channel_id.is_none() {
+        query.channel_ids = Some(
+            requested_channels
+                .iter()
+                .copied()
+                .filter(|channel| accessible_channels.contains(channel))
+                .collect(),
+        );
     }
 }
 
@@ -1253,6 +1280,22 @@ mod tests {
 
         assert!(query.channel_ids.is_none());
         assert_eq!(query.channel_id, Some(channel));
+    }
+
+    #[test]
+    fn multi_channel_filters_push_requested_accessible_scope_before_limit() {
+        let requested_accessible = uuid::Uuid::new_v4();
+        let requested_inaccessible = uuid::Uuid::new_v4();
+        let unrelated_accessible = uuid::Uuid::new_v4();
+        let accessible = vec![requested_accessible, unrelated_accessible];
+        let requested = vec![requested_accessible, requested_inaccessible];
+        let mut query = EventQuery::for_community(buzz_core::tenant::CommunityId::from_uuid(
+            uuid::Uuid::new_v4(),
+        ));
+
+        apply_requested_access_scope_to_query(&mut query, None, &accessible, &requested);
+
+        assert_eq!(query.channel_ids, Some(vec![requested_accessible]));
     }
 
     /// S2 invariant: the bounded-concurrency pipeline (phase 2) must yield
