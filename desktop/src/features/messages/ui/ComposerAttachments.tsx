@@ -480,9 +480,11 @@ const MediaAttachmentItem = React.forwardRef<
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <button
+              aria-label={`Remove attachment ${hash}`}
+              data-testid="composer-media-attachment-remove"
               type="button"
               onClick={() => onRemove(attachment.url)}
-              className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
+              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-background opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
             >
               <X className="h-2.5 w-2.5" />
             </button>
@@ -573,9 +575,11 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                   <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <button
+                        aria-label={`Remove ${label}`}
+                        data-testid="composer-file-attachment-remove"
                         type="button"
                         onClick={() => onRemove(attachment.url)}
-                        className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
+                        className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-background opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
                       >
                         <X className="h-2.5 w-2.5" />
                       </button>
