@@ -3148,13 +3148,66 @@ async fn wait_for_reconnect(
     }
 }
 
-/// Send a NIP-01 REQ for a channel, built from a [`ChannelFilter`].
+/// Build the NIP-01 REQ filter clauses for a channel subscription.
 ///
+/// Base clause (always present):
 /// - `kinds` is included only when `filter.kinds` is `Some`; `None` = wildcard.
-/// - `#p` is included only when `filter.require_mention` is `true`.
 /// - `#h` is always included (channel-scoped subscription).
-/// - On first subscribe (`since` is `None`) adds `since=now` to avoid replaying
-///   history. On reconnect (`since` is `Some`) subtracts [`SINCE_SKEW_SECS`].
+/// - `#p` is included only when `filter.require_mention` is `true`.
+///
+/// Followed-threads clause (#2270) — emitted only when `require_mention` is
+/// `true` AND `filter.thread_roots` is non-empty:
+/// - same `kinds` and `#h` scope, plus `#e` limited to the followed roots, so
+///   the relay also delivers untagged replies in threads the agent
+///   participates in. The mention gate stays intact for everything else; when
+///   `require_mention` is `false` the base clause already delivers the whole
+///   channel and no second clause is needed.
+///
+/// Both clauses carry the same `since`.
+fn build_req_filters(
+    channel_id: Uuid,
+    agent_pubkey_hex: &str,
+    since_ts: u64,
+    filter: &ChannelFilter,
+) -> Vec<Value> {
+    let mut base = serde_json::Map::new();
+
+    // kinds — omit entirely for wildcard subscriptions.
+    if let Some(ref kinds) = filter.kinds {
+        base.insert("kinds".into(), json!(kinds));
+    }
+
+    // #h — always present (channel scope).
+    base.insert("#h".into(), json!([channel_id.to_string()]));
+
+    // #p — only when require_mention is true.
+    if filter.require_mention {
+        base.insert("#p".into(), json!([agent_pubkey_hex]));
+    }
+
+    base.insert("since".into(), json!(since_ts));
+
+    let mut clauses = vec![Value::Object(base)];
+
+    if filter.require_mention && !filter.thread_roots.is_empty() {
+        let mut threads = serde_json::Map::new();
+        if let Some(ref kinds) = filter.kinds {
+            threads.insert("kinds".into(), json!(kinds));
+        }
+        threads.insert("#h".into(), json!([channel_id.to_string()]));
+        threads.insert("#e".into(), json!(filter.thread_roots));
+        threads.insert("since".into(), json!(since_ts));
+        clauses.push(Value::Object(threads));
+    }
+
+    clauses
+}
+
+/// Send a NIP-01 REQ for a channel, built from a [`ChannelFilter`] via
+/// [`build_req_filters`].
+///
+/// On first subscribe (`since` is `None`) adds `since=now` to avoid replaying
+/// history. On reconnect (`since` is `Some`) subtracts [`SINCE_SKEW_SECS`].
 ///
 /// Returns `true` if the REQ was successfully written to the WebSocket.
 async fn send_subscribe(
@@ -3167,21 +3220,6 @@ async fn send_subscribe(
 ) -> bool {
     let sub_id = channel_sub_id(channel_id);
 
-    let mut req_filter = serde_json::Map::new();
-
-    // kinds — omit entirely for wildcard subscriptions.
-    if let Some(ref kinds) = filter.kinds {
-        req_filter.insert("kinds".into(), json!(kinds));
-    }
-
-    // #h — always present (channel scope).
-    req_filter.insert("#h".into(), json!([channel_id.to_string()]));
-
-    // #p — only when require_mention is true.
-    if filter.require_mention {
-        req_filter.insert("#p".into(), json!([agent_pubkey_hex]));
-    }
-
     // since — on first subscribe use current time to skip history; on reconnect
     // subtract skew buffer to catch events missed during the disconnect window.
     let since_ts = match since {
@@ -3191,9 +3229,15 @@ async fn send_subscribe(
             .unwrap_or_default()
             .as_secs(),
     };
-    req_filter.insert("since".into(), json!(since_ts));
 
-    let req = json!(["REQ", sub_id, Value::Object(req_filter)]);
+    let mut req = vec![json!("REQ"), json!(sub_id)];
+    req.extend(build_req_filters(
+        channel_id,
+        agent_pubkey_hex,
+        since_ts,
+        filter,
+    ));
+    let req = Value::Array(req);
 
     match serde_json::to_string(&req) {
         Ok(text) => {
@@ -4370,7 +4414,64 @@ mod tests {
         ChannelFilter {
             kinds: Some(vec![9]),
             require_mention: false,
+            thread_roots: Vec::new(),
         }
+    }
+
+    #[test]
+    fn build_req_filters_base_clause_only() {
+        let channel_id = Uuid::new_v4();
+        let filter = ChannelFilter {
+            kinds: Some(vec![9]),
+            require_mention: true,
+            thread_roots: Vec::new(),
+        };
+        let clauses = build_req_filters(channel_id, "agent-pk", 1_000, &filter);
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0]["#h"], json!([channel_id.to_string()]));
+        assert_eq!(clauses[0]["#p"], json!(["agent-pk"]));
+        assert_eq!(clauses[0]["since"], json!(1_000));
+        assert!(clauses[0].get("#e").is_none());
+    }
+
+    #[test]
+    fn build_req_filters_ignores_roots_without_mention_gate() {
+        // require_mention=false already delivers the whole channel — a second
+        // clause would be redundant relay load.
+        let filter = ChannelFilter {
+            kinds: None,
+            require_mention: false,
+            thread_roots: vec!["aa".repeat(32)],
+        };
+        let clauses = build_req_filters(Uuid::new_v4(), "agent-pk", 1_000, &filter);
+        assert_eq!(clauses.len(), 1);
+        assert!(clauses[0].get("#e").is_none());
+        assert!(clauses[0].get("#p").is_none());
+    }
+
+    #[test]
+    fn build_req_filters_adds_followed_threads_clause() {
+        let channel_id = Uuid::new_v4();
+        let roots = vec!["aa".repeat(32), "bb".repeat(32)];
+        let filter = ChannelFilter {
+            kinds: Some(vec![9, 45003]),
+            require_mention: true,
+            thread_roots: roots.clone(),
+        };
+        let clauses = build_req_filters(channel_id, "agent-pk", 2_000, &filter);
+        assert_eq!(clauses.len(), 2);
+
+        // Base clause: mention-gated, no #e.
+        assert_eq!(clauses[0]["#p"], json!(["agent-pk"]));
+        assert!(clauses[0].get("#e").is_none());
+
+        // Followed-threads clause: same channel + kinds + since scope,
+        // #e-limited, and NOT #p-gated.
+        assert_eq!(clauses[1]["#h"], json!([channel_id.to_string()]));
+        assert_eq!(clauses[1]["kinds"], json!([9, 45003]));
+        assert_eq!(clauses[1]["#e"], json!(roots));
+        assert_eq!(clauses[1]["since"], json!(2_000));
+        assert!(clauses[1].get("#p").is_none());
     }
 
     fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
@@ -4840,6 +4941,7 @@ mod tests {
         let filter = ChannelFilter {
             kinds: Some(vec![9]),
             require_mention: true,
+            thread_roots: Vec::new(),
         };
 
         apply_command_to_state(
@@ -4931,6 +5033,7 @@ mod tests {
                 filter: ChannelFilter {
                     kinds: Some(vec![9]),
                     require_mention: false,
+                    thread_roots: Vec::new(),
                 },
                 replay_since: Some(1_000),
             },
@@ -6045,6 +6148,7 @@ mod tests {
                 filter: ChannelFilter {
                     kinds: Some(vec![9]),
                     require_mention: false,
+                    thread_roots: Vec::new(),
                 },
                 replay_since: Some(1_000),
             },
@@ -6136,6 +6240,7 @@ mod tests {
                 filter: ChannelFilter {
                     kinds: Some(vec![9]),
                     require_mention: false,
+                    thread_roots: Vec::new(),
                 },
                 replay_since: None,
             },
@@ -6175,6 +6280,7 @@ mod tests {
                 filter: ChannelFilter {
                     kinds: Some(vec![9]),
                     require_mention: false,
+                    thread_roots: Vec::new(),
                 },
                 replay_since: None,
             },
@@ -6210,6 +6316,7 @@ mod tests {
                 filter: ChannelFilter {
                     kinds: Some(vec![9]),
                     require_mention: false,
+                    thread_roots: Vec::new(),
                 },
                 replay_since: None,
             },

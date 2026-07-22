@@ -5,6 +5,7 @@
 //! - Evaluating boolean filter expressions with a hard timeout
 //! - Matching events against ordered subscription rules (first match wins)
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -351,7 +352,10 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 /// 2. **kinds** — if non-empty, the event kind must be in the list.
 /// 3. **require_mention** — if `true`, a `p` tag matching `agent_pubkey_hex` must
 ///    exist. Tag kind is checked via `tag.as_slice()` for stable, library-independent
-///    access.
+///    access. An unmentioned event still passes this check when its NIP-10
+///    thread root is in `followed_roots` — the agent is participating in that
+///    thread, so untagged replies stay audible (#2270). Following relaxes only
+///    the mention gate; channel scope, kinds, and expression filters still apply.
 /// 4. **filter** — if `Some`, the evalexpr expression must evaluate to `true`.
 ///
 /// # Fail-closed filter error handling
@@ -370,8 +374,17 @@ pub async fn match_event(
     channel_id: uuid::Uuid,
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
+    followed_roots: Option<&HashSet<String>>,
 ) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
+
+    // Resolved once per event: the NIP-10 thread root, iff the caller passed a
+    // followed set and the root is in it. `None` either way otherwise.
+    let followed_thread_root: Option<String> = followed_roots.and_then(|roots| {
+        crate::queue::parse_thread_tags(event)
+            .root_event_id
+            .filter(|root| roots.contains(root))
+    });
 
     for (index, rule) in rules.iter().enumerate() {
         // 1. Channel scope check.
@@ -393,7 +406,7 @@ pub async fn match_event(
                 s.first().map(|k| k.as_str()) == Some("p")
                     && s.get(1).map(|v| v.as_str()) == Some(agent_pubkey_hex)
             });
-            if !mentioned {
+            if !mentioned && followed_thread_root.is_none() {
                 continue;
             }
         }
@@ -482,6 +495,100 @@ mod tests {
             .tags([p_tag])
             .sign_with_keys(&keys)
             .unwrap()
+    }
+
+    /// Build a test event that is an untagged reply in a NIP-10 thread
+    /// (marker-based `e` root tag, no `p` mention).
+    fn make_event_in_thread(kind: u32, content: &str, root_hex: &str) -> nostr::Event {
+        let keys = Keys::generate();
+        let e_tag = Tag::parse(["e", root_hex, "", "root"]).expect("tag parse");
+        EventBuilder::new(Kind::Custom(kind as u16), content)
+            .tags([e_tag])
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_match_event_followed_thread_admits_unmentioned_reply() {
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "mentions",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            None,
+        )];
+        let root = "a".repeat(64);
+        let event = make_event_in_thread(9, "yes, go ahead", &root);
+
+        // Without a followed set the reply is gated (pre-#2270 behavior).
+        assert!(match_event(&event, channel_id, &rules, "agent-pk", None)
+            .await
+            .is_none());
+
+        // With the thread followed, the same unmentioned reply is admitted.
+        let followed: HashSet<String> = [root].into_iter().collect();
+        let matched = match_event(&event, channel_id, &rules, "agent-pk", Some(&followed)).await;
+        assert!(matched.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_match_event_followed_thread_ignores_other_threads() {
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "mentions",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            None,
+        )];
+        let followed: HashSet<String> = [("b".repeat(64))].into_iter().collect();
+
+        // Reply in a different thread stays gated.
+        let other_thread = make_event_in_thread(9, "unrelated", &"c".repeat(64));
+        assert!(match_event(
+            &other_thread,
+            channel_id,
+            &rules,
+            "agent-pk",
+            Some(&followed)
+        )
+        .await
+        .is_none());
+
+        // Top-level message with no thread tags stays gated too.
+        let top_level = make_event(9, "no thread here");
+        assert!(
+            match_event(&top_level, channel_id, &rules, "agent-pk", Some(&followed))
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_match_event_followed_thread_relaxes_only_the_mention_gate() {
+        let channel_id = any_channel();
+        // Rule matches kind 9 only — a followed-thread event of kind 45001
+        // must still be dropped: following bypasses the mention check, not
+        // the kind or channel gates.
+        let rules = vec![make_rule(
+            "mentions",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            None,
+        )];
+        let root = "d".repeat(64);
+        let followed: HashSet<String> = [root.clone()].into_iter().collect();
+        let wrong_kind = make_event_in_thread(45001, "still gated", &root);
+        assert!(
+            match_event(&wrong_kind, channel_id, &rules, "agent-pk", Some(&followed))
+                .await
+                .is_none()
+        );
     }
 
     fn any_channel() -> Uuid {
@@ -601,7 +708,9 @@ mod tests {
             ),
         ];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", None)
+            .await
+            .unwrap();
         assert_eq!(matched.rule_index, 0);
         assert_eq!(matched.prompt_tag, "tag-first");
     }
@@ -630,7 +739,9 @@ mod tests {
             ),
         ];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", None)
+            .await
+            .unwrap();
         assert_eq!(matched.rule_index, 1);
         assert_eq!(matched.prompt_tag, "matched");
     }
@@ -653,11 +764,11 @@ mod tests {
         )];
 
         // Without mention — no match.
-        let result = match_event(&event_no_mention, channel_id, &rules, agent_pubkey).await;
+        let result = match_event(&event_no_mention, channel_id, &rules, agent_pubkey, None).await;
         assert!(result.is_none());
 
         // With mention — matches.
-        let matched = match_event(&event_with_mention, channel_id, &rules, agent_pubkey)
+        let matched = match_event(&event_with_mention, channel_id, &rules, agent_pubkey, None)
             .await
             .unwrap();
         assert_eq!(matched.prompt_tag, "mentioned");
@@ -677,7 +788,7 @@ mod tests {
             None,
         )];
 
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", None).await;
         assert!(result.is_none());
     }
 
@@ -725,7 +836,9 @@ mod tests {
             None, // no explicit tag
         )];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", None)
+            .await
+            .unwrap();
         assert_eq!(matched.prompt_tag, "my-rule");
     }
 
@@ -755,7 +868,7 @@ mod tests {
         ];
 
         // Must return None — not "catch-all".
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", None).await;
         assert!(
             result.is_none(),
             "filter error must fail closed, not fall through to next rule"
@@ -781,7 +894,7 @@ mod tests {
             .store(MAX_CONSECUTIVE_TIMEOUTS, Ordering::Relaxed);
 
         let rules = vec![rule];
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", None).await;
         assert!(result.is_none(), "disabled rule must return None");
     }
 }
