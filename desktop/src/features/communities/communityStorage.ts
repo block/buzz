@@ -108,6 +108,15 @@ export function normalizeRelayUrl(url: string): string {
   return url;
 }
 
+export function shouldAutoConnectDefaultRelay(relayUrl: string): boolean {
+  try {
+    const parsed = new URL(normalizeRelayUrl(relayUrl));
+    return parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
 export function deriveCommunityName(relayUrl: string): string {
   try {
     const url = new URL(

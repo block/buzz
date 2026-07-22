@@ -23,7 +23,10 @@ import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useS
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
-import { initFirstCommunity } from "./communityStorage";
+import {
+  initFirstCommunity,
+  shouldAutoConnectDefaultRelay,
+} from "./communityStorage";
 import type { Community } from "./types";
 
 /**
@@ -94,7 +97,14 @@ export function useCommunityInit(
         try {
           const defaultRelayUrl = await getDefaultRelayUrl();
 
-          if (isSharedIdentity) {
+          // Signed builds carry a reviewed production relay. Treat that as the
+          // user's first community so first-run onboarding proceeds directly
+          // from machine setup into profile/team setup. Local development keeps
+          // the explicit add-a-community flow for ws://localhost defaults.
+          if (
+            isSharedIdentity ||
+            shouldAutoConnectDefaultRelay(defaultRelayUrl)
+          ) {
             const identity = await getIdentity();
             if (cancelled) return;
             initFirstCommunity(defaultRelayUrl, identity.pubkey);

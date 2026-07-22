@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   clearCommunityStorage,
   migrateLegacyCommunityStorage,
+  shouldAutoConnectDefaultRelay,
 } from "./communityStorage.ts";
 
 function createMemoryStorage(initial = {}) {
@@ -44,6 +45,16 @@ test("migrateLegacyCommunityStorage does not overwrite new community state", () 
 
   assert.equal(storage.getItem("buzz-communities"), '[{"id":"new"}]');
   assert.equal(storage.getItem("buzz-active-community-id"), "new");
+});
+
+test("signed-build relay defaults auto-connect during first-run onboarding", () => {
+  assert.equal(
+    shouldAutoConnectDefaultRelay("wss://buzz.block.builderlab.xyz"),
+    true,
+  );
+  assert.equal(shouldAutoConnectDefaultRelay("ws://localhost:3000"), false);
+  assert.equal(shouldAutoConnectDefaultRelay("ws://127.0.0.1:3000"), false);
+  assert.equal(shouldAutoConnectDefaultRelay("not a valid relay"), false);
 });
 
 test("clearCommunityStorage removes new and legacy state", () => {
