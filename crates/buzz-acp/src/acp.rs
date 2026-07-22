@@ -16,6 +16,64 @@ use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use crate::observer::{ObserverContext, ObserverHandle};
 use crate::usage::{TurnUsage, UsageTracker};
 
+/// ACP `_meta` key carrying a Buzz-verified triggering event.
+///
+/// The value is transport metadata, not a prompt content block. Adapters that
+/// do not explicitly consume the extension ignore it per ACP extensibility.
+pub(crate) const TRUSTED_INBOUND_EVENT_META_NAMESPACE: &str = "buzz";
+pub(crate) const TRUSTED_INBOUND_EVENT_META_FIELD: &str = "inboundEvent";
+
+/// Immutable evidence copied from one signature-verified triggering event.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrustedInboundEventEnvelope {
+    schema_version: u8,
+    event_id: String,
+    author_pubkey: String,
+    kind: u16,
+    channel_id: String,
+    tags: Vec<Vec<String>>,
+}
+
+impl TrustedInboundEventEnvelope {
+    /// Build an envelope only for an unambiguous single-event batch whose
+    /// signed `h` tag exactly matches the subscribed channel. Any ambiguity or
+    /// failed signature verification produces no trusted metadata.
+    pub(crate) fn from_prompt_batch(batch: Option<&crate::queue::FlushBatch>) -> Option<Self> {
+        let batch = batch?;
+        if !batch.cancelled_events.is_empty() || batch.events.len() != 1 {
+            return None;
+        }
+        let event = &batch.events[0].event;
+        if event.verify().is_err() {
+            return None;
+        }
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        let expected_channel = batch.channel_id.to_string();
+        let h_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|tag| tag.first().map(String::as_str) == Some("h"))
+            .collect();
+        if h_tags.len() != 1
+            || h_tags[0].get(1).map(String::as_str) != Some(expected_channel.as_str())
+        {
+            return None;
+        }
+        Some(Self {
+            schema_version: 1,
+            event_id: event.id.to_hex(),
+            author_pubkey: event.pubkey.to_hex(),
+            kind: event.kind.as_u16(),
+            channel_id: expected_channel,
+            tags,
+        })
+    }
+}
+
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
@@ -683,7 +741,27 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
-        let params = build_prompt_params(session_id, prompt_blocks);
+        self.session_prompt_blocks_with_idle_timeout_and_meta(
+            session_id,
+            prompt_blocks,
+            None,
+            idle_timeout,
+            max_duration,
+        )
+        .await
+    }
+
+    /// Send `session/prompt`, optionally attaching a verified Buzz event as
+    /// ACP extension metadata outside the model-visible content blocks.
+    pub(crate) async fn session_prompt_blocks_with_idle_timeout_and_meta(
+        &mut self,
+        session_id: &str,
+        prompt_blocks: &[&str],
+        trusted_inbound_event: Option<&TrustedInboundEventEnvelope>,
+        idle_timeout: std::time::Duration,
+        max_duration: std::time::Duration,
+    ) -> Result<StopReason, AcpError> {
+        let params = build_prompt_params(session_id, prompt_blocks, trusted_inbound_event);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
@@ -1797,15 +1875,27 @@ impl AcpClient {
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
-fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
+fn build_prompt_params(
+    session_id: &str,
+    prompt_blocks: &[&str],
+    trusted_inbound_event: Option<&TrustedInboundEventEnvelope>,
+) -> serde_json::Value {
     let blocks: Vec<serde_json::Value> = prompt_blocks
         .iter()
         .map(|text| serde_json::json!({ "type": "text", "text": text }))
         .collect();
-    serde_json::json!({
+    let mut params = serde_json::json!({
         "sessionId": session_id,
         "prompt": blocks,
-    })
+    });
+    if let Some(envelope) = trusted_inbound_event {
+        params["_meta"] = serde_json::json!({
+            TRUSTED_INBOUND_EVENT_META_NAMESPACE: {
+                TRUSTED_INBOUND_EVENT_META_FIELD: envelope,
+            },
+        });
+    }
+    params
 }
 
 /// Build `_goose/unstable/session/steer` params from one or more text
@@ -2026,6 +2116,30 @@ fn kill_process_group(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn signed_batch(
+        channel_id: uuid::Uuid,
+        extra_tags: Vec<nostr::Tag>,
+    ) -> crate::queue::FlushBatch {
+        let keys = nostr::Keys::generate();
+        let mut tags =
+            vec![nostr::Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag")];
+        tags.extend(extra_tags);
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "hello")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .expect("signed event");
+        crate::queue::FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
@@ -2260,6 +2374,7 @@ mod tests {
                 "/goal ship it",
                 "[Buzz event: @mention]\nContent: @Eva /goal ship it",
             ],
+            None,
         );
         let prompt = params["prompt"].as_array().unwrap();
         assert_eq!(prompt.len(), 2);
@@ -2267,6 +2382,83 @@ mod tests {
         assert_eq!(prompt[0]["text"].as_str(), Some("/goal ship it"));
         assert!(prompt[0]["text"].as_str().unwrap().starts_with('/'));
         assert_eq!(prompt[1]["type"].as_str(), Some("text"));
+    }
+
+    #[test]
+    fn trusted_inbound_event_is_verified_and_stays_out_of_prompt_blocks() {
+        let channel_id = uuid::Uuid::new_v4();
+        let p_tag = nostr::Tag::parse(["p", "ab".repeat(32).as_str()]).expect("p tag");
+        let batch = signed_batch(channel_id, vec![p_tag]);
+        let envelope = TrustedInboundEventEnvelope::from_prompt_batch(Some(&batch))
+            .expect("valid signed single event");
+        let params = build_prompt_params("session", &["model-visible body"], Some(&envelope));
+
+        assert_eq!(params["prompt"][0]["text"], "model-visible body");
+        assert_eq!(params["prompt"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            params["_meta"].as_object().map(|value| value.len()),
+            Some(1)
+        );
+        assert_eq!(
+            params["_meta"][TRUSTED_INBOUND_EVENT_META_NAMESPACE]
+                .as_object()
+                .map(|value| value.len()),
+            Some(1)
+        );
+        let metadata = &params["_meta"][TRUSTED_INBOUND_EVENT_META_NAMESPACE]
+            [TRUSTED_INBOUND_EVENT_META_FIELD];
+        assert_eq!(metadata["schemaVersion"], 1);
+        assert_eq!(metadata["eventId"], batch.events[0].event.id.to_hex());
+        assert_eq!(
+            metadata["authorPubkey"],
+            batch.events[0].event.pubkey.to_hex()
+        );
+        assert_eq!(metadata["kind"], 9);
+        assert_eq!(metadata["channelId"], channel_id.to_string());
+        assert_eq!(
+            metadata["tags"],
+            serde_json::json!([["h", channel_id.to_string()], ["p", "ab".repeat(32)],])
+        );
+    }
+
+    #[test]
+    fn trusted_inbound_event_fails_closed_for_tampering_or_ambiguous_room() {
+        let channel_id = uuid::Uuid::new_v4();
+        let mut tampered = signed_batch(channel_id, vec![]);
+        let mut raw = serde_json::to_value(&tampered.events[0].event).expect("serialize");
+        raw["content"] = serde_json::Value::String("tampered".into());
+        tampered.events[0].event = serde_json::from_value(raw).expect("parse tampered event");
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&tampered)).is_none());
+
+        let second_h = nostr::Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag");
+        let duplicate_room = signed_batch(channel_id, vec![second_h]);
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&duplicate_room)).is_none());
+
+        let other_channel = uuid::Uuid::new_v4();
+        let wrong_h =
+            nostr::Tag::parse(["h", other_channel.to_string().as_str()]).expect("wrong h tag");
+        let mut wrong_room = signed_batch(channel_id, vec![]);
+        wrong_room.events[0].event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "hello")
+            .tags([wrong_h])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("signed wrong-room event");
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&wrong_room)).is_none());
+
+        let mut multi = signed_batch(channel_id, vec![]);
+        multi.events.push(multi.events[0].clone());
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&multi)).is_none());
+
+        let mut cancelled = signed_batch(channel_id, vec![]);
+        cancelled.cancelled_events.push(cancelled.events[0].clone());
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&cancelled)).is_none());
+
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(None).is_none());
+    }
+
+    #[test]
+    fn ordinary_prompt_params_have_no_trusted_metadata() {
+        let params = build_prompt_params("session", &["hello"], None);
+        assert!(params.get("_meta").is_none());
     }
 
     #[test]

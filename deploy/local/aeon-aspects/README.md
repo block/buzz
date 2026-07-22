@@ -15,6 +15,13 @@ proactive count-based session rotation are off, thread/DM context is bounded to
 absolute cap. `bypassPermissions` is an explicit canary posture; it does not
 prove that a future interactive approval workflow is preserved.
 
+`--trusted-inbound-envelope` copies one signature-verified triggering event
+into the ACP request as `_meta.buzz.inboundEvent` (`schemaVersion: 1`). The
+envelope carries the signed event ID, author, kind, exact channel ID, and exact
+tag arrays outside the model-visible prompt. It is omitted for invalid,
+multi-event, cancelled/merged, or room-ambiguous batches; OpenClaw must preserve
+this trusted per-turn context before the Nexus reply tool can be enabled.
+
 Room admission uses two config rules per worker:
 
 - the fixed private-office UUID accepts Architect-authored kind-9 and

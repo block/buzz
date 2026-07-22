@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
     resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
+    TrustedInboundEventEnvelope,
 };
 use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
@@ -477,6 +478,8 @@ pub struct PromptContext {
     pub turn_receipts: bool,
     /// Fixed Gateway session key that ACP lineage evidence must match.
     pub expected_gateway_session_key: Option<String>,
+    /// Attach one verified triggering event as non-model ACP metadata.
+    pub trusted_inbound_envelope: bool,
 }
 
 impl AgentPool {
@@ -1403,6 +1406,11 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
+    let trusted_inbound_envelope = if ctx.trusted_inbound_envelope {
+        TrustedInboundEventEnvelope::from_prompt_batch(batch.as_ref())
+    } else {
+        None
+    };
     agent.acp.observe(
         "turn_started",
         serde_json::json!({
@@ -1950,9 +1958,10 @@ pub async fn run_prompt_task(
             // Heartbeat / non-cancellable path.
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
+                result = agent.acp.session_prompt_blocks_with_idle_timeout_and_meta(
                     &session_id,
                     &prompt_blocks,
+                    trusted_inbound_envelope.as_ref(),
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
@@ -1961,9 +1970,10 @@ pub async fn run_prompt_task(
         Some(rx) => {
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
+                result = agent.acp.session_prompt_blocks_with_idle_timeout_and_meta(
                     &session_id,
                     &prompt_blocks,
+                    trusted_inbound_envelope.as_ref(),
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
@@ -5651,6 +5661,7 @@ mod tests {
             harness_name: "goose".to_string(),
             turn_receipts: false,
             expected_gateway_session_key: None,
+            trusted_inbound_envelope: false,
         }
     }
 

@@ -19,6 +19,7 @@ export function validateManifest(manifest, identityMap) {
   if (manifest.posture?.presence !== true) errors.push("presence must remain enabled");
   if (manifest.posture?.typing !== true) errors.push("typing must remain enabled");
   if (manifest.posture?.relayObserver !== true) errors.push("relay observer must remain enabled for receipts");
+  if (manifest.posture?.trustedInboundEnvelope !== true) errors.push("trusted inbound envelope must remain enabled");
   if (manifest.posture?.permissionMode !== "bypass-permissions") errors.push("permission mode must be explicitly bypass-permissions");
   if (manifest.posture?.heartbeatIntervalSecs !== 0) errors.push("ACP heartbeat prompting must be disabled");
   if (manifest.posture?.turnLivenessSecs !== 10) errors.push("turn liveness must be 10 seconds");
@@ -81,7 +82,7 @@ export function renderWorker(manifest, identityMap, aspect, tokenFile = "${AEON_
       "--agent-args", ["acp", "--session", worker.sessionKey, "--require-existing", "--token-file", tokenFile, "--url", manifest.gateway.url, "--provenance", manifest.gateway.provenance, "--no-prefix-cwd"].join(","),
       "--agents", "1", "--subscribe", "config", "--config", configPath,
       "--respond-to", "owner-only", "--allowed-respond-to", "owner-only",
-      "--no-memory", "--no-base-prompt", "--dedup", "queue", "--multiple-event-handling", "queue", "--relay-observer",
+      "--no-memory", "--no-base-prompt", "--dedup", "queue", "--multiple-event-handling", "queue", "--relay-observer", "--trusted-inbound-envelope",
       "--permission-mode", manifest.posture.permissionMode,
       "--heartbeat-interval", String(manifest.posture.heartbeatIntervalSecs),
       "--turn-liveness-secs", String(manifest.posture.turnLivenessSecs),

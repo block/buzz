@@ -1634,6 +1634,7 @@ async fn tokio_main() -> Result<()> {
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         turn_receipts: config.turn_receipts,
         expected_gateway_session_key: config.expected_gateway_session_key.clone(),
+        trusted_inbound_envelope: config.trusted_inbound_envelope,
     });
 
     if !config.memory_enabled {
@@ -4621,6 +4622,7 @@ mod build_mcp_servers_tests {
             relay_observer: false,
             turn_receipts: false,
             expected_gateway_session_key: None,
+            trusted_inbound_envelope: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -4788,6 +4790,7 @@ mod error_outcome_emission_tests {
             relay_observer: false,
             turn_receipts: false,
             expected_gateway_session_key: None,
+            trusted_inbound_envelope: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,

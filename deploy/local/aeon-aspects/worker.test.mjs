@@ -34,6 +34,7 @@ test("every rendered worker is disabled and binds an existing fixed session", ()
     assert.match(argv, /--dedup queue/);
     assert.match(argv, /--multiple-event-handling queue/);
     assert.match(argv, /--relay-observer/);
+    assert.match(argv, /--trusted-inbound-envelope/);
     assert.match(argv, /--permission-mode bypass-permissions/);
     assert.match(argv, /--heartbeat-interval 0/);
     assert.match(argv, /--turn-liveness-secs 10/);

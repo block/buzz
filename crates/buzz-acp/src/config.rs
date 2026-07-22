@@ -549,6 +549,15 @@ pub struct CliArgs {
         requires = "turn_receipts"
     )]
     pub expected_gateway_session_key: Option<String>,
+
+    /// Attach one signature-verified triggering Buzz event to ACP request
+    /// metadata. This is never rendered into model-visible prompt text.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_TRUSTED_INBOUND_ENVELOPE",
+        default_value_t = false
+    )]
+    pub trusted_inbound_envelope: bool,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -623,6 +632,8 @@ pub struct Config {
     pub turn_receipts: bool,
     /// Expected stable Gateway session key for receipt verification.
     pub expected_gateway_session_key: Option<String>,
+    /// Whether to attach a verified, non-model inbound event envelope to ACP prompts.
+    pub trusted_inbound_envelope: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1113,6 +1124,7 @@ impl Config {
             relay_observer: args.relay_observer,
             turn_receipts: args.turn_receipts,
             expected_gateway_session_key: args.expected_gateway_session_key,
+            trusted_inbound_envelope: args.trusted_inbound_envelope,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1522,6 +1534,7 @@ mod tests {
             relay_observer: false,
             turn_receipts: false,
             expected_gateway_session_key: None,
+            trusted_inbound_envelope: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -2082,6 +2095,7 @@ mod tests {
                 "--multiple-event-handling",
                 "queue",
                 "--relay-observer",
+                "--trusted-inbound-envelope",
                 "--permission-mode",
                 "bypass-permissions",
                 "--heartbeat-interval",
@@ -2104,6 +2118,7 @@ mod tests {
             assert!(cli.no_memory);
             assert!(cli.no_base_prompt);
             assert!(cli.turn_receipts);
+            assert!(cli.trusted_inbound_envelope);
             assert_eq!(cli.permission_mode, PermissionMode::BypassPermissions);
             assert_eq!(cli.heartbeat_interval, 0);
             assert_eq!(cli.turn_liveness_secs, 10);
@@ -2749,6 +2764,7 @@ channels = "ALL"
         assert_eq!(args.multiple_event_handling, MultipleEventHandling::Steer);
         // Dedup default must remain `queue` so steering's requirement is met.
         assert!(matches!(args.dedup, DedupMode::Queue));
+        assert!(!args.trusted_inbound_envelope);
     }
 
     #[test]

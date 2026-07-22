@@ -24,6 +24,7 @@
     "presence": true,
     "typing": true,
     "relayObserver": true,
+    "trustedInboundEnvelope": true,
     "permissionMode": "bypass-permissions",
     "heartbeatIntervalSecs": 0,
     "turnLivenessSecs": 10,
