@@ -46,7 +46,12 @@ use huddle::{
     join_huddle, leave_huddle, push_audio_pcm, set_huddle_transcription_enabled, set_tts_enabled,
     set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
-use managed_agents::{backfill_persona_snapshots, ensure_nest, try_regenerate_nest};
+use managed_agents::{
+    backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
+    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
+    restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
+    try_regenerate_nest,
+};
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
@@ -766,6 +771,12 @@ pub fn run() {
             resolve_oa_owner,
             list_relay_agents,
             list_managed_agents,
+            list_managed_agent_runtimes,
+            start_managed_agent_runtime,
+            stop_managed_agent_runtime,
+            restart_managed_agent_runtime,
+            reconcile_managed_agent_runtimes,
+            put_managed_agent_runtime_lifecycle,
             create_managed_agent,
             start_managed_agent,
             stop_managed_agent,

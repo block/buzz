@@ -148,7 +148,7 @@ export function reconcileRefreshedCachedChannel(
   return upsertCachedChannel(refreshed, refreshedChannel ?? channel);
 }
 
-async function invalidateChannelState(
+export async function invalidateChannelState(
   queryClient: ReturnType<typeof useQueryClient>,
   channelId: string | null | undefined,
 ) {

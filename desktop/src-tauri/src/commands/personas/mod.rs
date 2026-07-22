@@ -419,7 +419,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                     save_managed_agents(&app, &agents)?;
                 }
                 for pk in &exited_pubkeys {
-                    state.clear_session_cache(pk);
+                    state.clear_agent_session_caches(pk);
                 }
                 // runtimes drops here (process lock released before Phase 2).
             }
@@ -491,7 +491,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
 
             // Side effects — strictly after records leave disk.
             for pk in &cascade {
-                state.clear_session_cache(pk);
+                state.clear_agent_session_caches(pk);
                 // Remove nsec from keyring after the record is gone.
                 delete_agent_key(pk);
                 super::agents::tombstone_managed_agent_pending(&app, &state, pk);

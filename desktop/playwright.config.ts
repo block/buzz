@@ -135,6 +135,7 @@ export default defineConfig({
         "**/persona-env-vars.spec.ts",
         "**/persona-sync.spec.ts",
         "**/team-snapshot.spec.ts",
+        "**/agents-everywhere.live.spec.ts",
         "**/parity-ancestor-island.spec.ts",
       ],
       use: {

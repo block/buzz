@@ -567,6 +567,10 @@ pub struct CliArgs {
         default_value_t = false
     )]
     pub no_agent_publisher_credentials: bool,
+
+    /// Connect and subscribe before starting the ACP/LLM subprocess pool.
+    #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
+    pub lazy_pool: bool,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -645,6 +649,9 @@ pub struct Config {
     pub trusted_inbound_envelope: bool,
     /// Whether the managed ACP subprocess may receive Buzz publisher credentials.
     pub forward_agent_publisher_credentials: bool,
+
+    /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
+    pub lazy_pool: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1152,6 +1159,7 @@ impl Config {
             expected_gateway_session_key: args.expected_gateway_session_key,
             trusted_inbound_envelope: args.trusted_inbound_envelope,
             forward_agent_publisher_credentials: !args.no_agent_publisher_credentials,
+            lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1610,6 +1618,7 @@ mod tests {
             expected_gateway_session_key: None,
             trusted_inbound_envelope: false,
             forward_agent_publisher_credentials: true,
+            lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -2594,6 +2603,20 @@ require_exact_channel_tag = false
     fn test_turn_liveness_one_rejected() {
         let err = validate_turn_liveness(1).unwrap_err();
         assert!(err.to_string().contains("turn liveness interval must be 0"));
+    }
+
+    #[test]
+    fn lazy_pool_defaults_off() {
+        let key = "0".repeat(64);
+        assert!(!CliArgs::parse_from(["buzz-acp", "--private-key", &key]).lazy_pool);
+    }
+
+    #[test]
+    fn lazy_pool_cli_flag_enables_deferred_startup() {
+        let key = "0".repeat(64);
+        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
+        assert!(args.is_err(), "bool flags do not take an explicit value");
+        assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
     }
 
     #[test]

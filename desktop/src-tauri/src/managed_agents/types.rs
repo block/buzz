@@ -441,6 +441,8 @@ pub struct ManagedAgentProcess {
     /// cached availability and sets `needs_restart` on drift, catching out-of-
     /// band adapter changes that Phase-1 auto-restart doesn't cover.
     pub adapter_availability: Option<AcpAvailabilityStatus>,
+    /// Unpredictable identity shared only with this harness generation.
+    pub start_nonce: String,
     /// Win32 Job Object owning the harness + its entire process tree. Closing
     /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
     /// tree — the Windows mirror of the Unix process-group teardown. `None`

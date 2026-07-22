@@ -2925,18 +2925,22 @@ test("removing a channel-scoped agent preserves the managed agent record", async
   await expect(page.getByTestId(`managed-agent-${agentPubkey}`)).toHaveCount(1);
 });
 
-test("members sidebar can respawn a stopped managed bot", async ({ page }) => {
+test("members sidebar can stop and start a managed bot in this community", async ({
+  page,
+}) => {
   const agentName = `sidebar-agent-${Date.now()}`;
 
   await page.goto("/");
   const agentPubkey = await addGenericAgent(page, "general", agentName);
   const baselineCommands = await readCommandLog(page);
-  const baselineStartCount = baselineCommands.filter(
-    (command) => command === "start_managed_agent",
-  ).length;
-  const baselineStopCount = baselineCommands.filter(
-    (command) => command === "stop_managed_agent",
-  ).length;
+  const baselineLegacyStartCount = commandCount(
+    baselineCommands,
+    "start_managed_agent",
+  );
+  const baselineLegacyStopCount = commandCount(
+    baselineCommands,
+    "stop_managed_agent",
+  );
 
   await openMembersSidebar(page, "general");
 
@@ -2945,30 +2949,108 @@ test("members sidebar can respawn a stopped managed bot", async ({ page }) => {
   );
   const agentAction = page.getByTestId(`sidebar-agent-action-${agentPubkey}`);
 
-  await expect(agentStatus).toContainText("Running");
+  // The badge is pair-scoped: it reports the agent+active-community runtime.
+  await expect(agentStatus).toContainText("Here");
   await openMemberMenu(page, agentPubkey);
   await expect(agentAction).toContainText("Stop");
   await agentAction.click();
 
-  await expect(agentStatus).toContainText("Stopped");
+  await expect(agentStatus).toContainText("Unavailable");
   await openMemberMenu(page, agentPubkey);
-  await expect(agentAction).toContainText("Respawn");
+  await expect(agentAction).toContainText("Start");
   await agentAction.click();
 
-  await expect(agentStatus).toContainText("Running");
+  await expect(agentStatus).toContainText("Here");
   await expect(
     page
       .locator("[data-sonner-toast]")
-      .filter({ hasText: `Respawned ${agentName}.` }),
+      .filter({ hasText: `Started ${agentName} in this community.` }),
   ).toBeVisible();
 
+  // The lifecycle menu item must dispatch the pair-scoped runtime commands,
+  // never the legacy agent-wide start/stop that drains every community.
   const commands = await readCommandLog(page);
+  expect(commandCount(commands, "stop_managed_agent_runtime")).toBe(1);
+  expect(commandCount(commands, "start_managed_agent_runtime")).toBe(1);
+  expect(commandCount(commands, "start_managed_agent")).toBe(
+    baselineLegacyStartCount,
+  );
+  expect(commandCount(commands, "stop_managed_agent")).toBe(
+    baselineLegacyStopCount,
+  );
+});
+
+test("stopping a managed bot in one community leaves its other communities running", async ({
+  page,
+}) => {
+  const agentPubkey = TEST_IDENTITIES.charlie.pubkey;
+  // Must match the relay of the community seeded by the mock bridge
+  // (`seedDefaultCommunity` follows BUZZ_E2E_RELAY_URL); the agent also has a
+  // live runtime in a second community on another relay.
+  const activeRelayUrl = (
+    process.env.BUZZ_E2E_RELAY_URL ?? "http://localhost:3000"
+  ).replace(/^http/, "ws");
+  const otherRelayUrl = "ws://other-community.example";
+
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: agentPubkey,
+        name: "charlie",
+        status: "running",
+        channelNames: ["general"],
+      },
+    ],
+    managedAgentRuntimes: [
+      { pubkey: agentPubkey, relayUrl: activeRelayUrl },
+      { pubkey: agentPubkey, relayUrl: otherRelayUrl },
+    ],
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+
+  const agentStatus = page.getByTestId(
+    `sidebar-managed-agent-status-${agentPubkey}`,
+  );
+  const agentAction = page.getByTestId(`sidebar-agent-action-${agentPubkey}`);
+
+  await expect(agentStatus).toContainText("Here");
+  await openMemberMenu(page, agentPubkey);
+  await expect(agentAction).toContainText("Stop");
+  await agentAction.click();
+
+  await expect(agentStatus).toContainText("Unavailable");
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "Stopped charlie in this community." }),
+  ).toBeVisible();
+
+  // Stop(A) must leave the community-B runtime untouched.
+  const runtimes = await page.evaluate(async () => {
+    const invoke = (
+      window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+        ) => Promise<Array<{ relayUrl: string; lifecycle: string }>>;
+      }
+    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+    if (!invoke) {
+      throw new Error("Mock bridge is not installed.");
+    }
+    return invoke("list_managed_agent_runtimes");
+  });
   expect(
-    commands.filter((command) => command === "start_managed_agent").length,
-  ).toBe(baselineStartCount + 1);
+    runtimes.find((runtime) => runtime.relayUrl === activeRelayUrl)?.lifecycle,
+  ).toBe("stopped");
   expect(
-    commands.filter((command) => command === "stop_managed_agent").length,
-  ).toBe(baselineStopCount + 1);
+    runtimes.find((runtime) => runtime.relayUrl === otherRelayUrl)?.lifecycle,
+  ).toBe("ready");
+
+  // And it must never route through the legacy agent-wide stop.
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "stop_managed_agent_runtime")).toBe(1);
+  expect(commandCount(commands, "stop_managed_agent")).toBe(0);
 });
 
 test("members sidebar omits bulk controls for managed bots", async ({

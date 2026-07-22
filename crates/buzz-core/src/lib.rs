@@ -30,6 +30,8 @@ pub mod observer;
 pub mod pairing;
 /// Presence status types shared across crates.
 pub mod presence;
+/// Canonical relay runtime identities.
+pub mod relay;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
 /// Schnorr signature and event ID verification.

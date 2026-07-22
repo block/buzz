@@ -6,6 +6,7 @@ mod engram_fetch;
 mod filter;
 mod observer;
 mod pool;
+mod pool_lifecycle;
 mod queue;
 mod relay;
 mod setup_mode;
@@ -39,6 +40,7 @@ use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
     PromptResult, PromptSource, SessionState, TimeoutKind,
 };
+use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
 use tokio::sync::{mpsc, watch};
@@ -86,6 +88,30 @@ async fn publish_presence(
         .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
     publisher.publish_event(event).await?;
     Ok(())
+}
+
+fn emit_runtime_lifecycle(
+    observer: Option<&observer::ObserverHandle>,
+    start_nonce: &str,
+    pubkey: &str,
+    relay_url: &str,
+    lifecycle: &str,
+    error: Option<&str>,
+) {
+    if let Some(observer) = observer {
+        observer.emit(
+            "managed_agent_runtime_lifecycle",
+            None,
+            &observer::ObserverContext::default(),
+            serde_json::json!({
+                "pubkey": pubkey,
+                "relayUrl": relay_url,
+                "startNonce": start_nonce,
+                "lifecycle": lifecycle,
+                "error": error,
+            }),
+        );
+    }
 }
 
 /// Resolve the agent's owner pubkey at startup.
@@ -1297,97 +1323,13 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
-    // One agent failing to start must not kill the whole pool. We attempt each
-    // spawn under a 60-second timeout; failures are logged and skipped. If ALL
-    // agents fail we return an error. A partial pool is valid — the harness
-    // continues with reduced capacity and logs a warning.
-    let agent_spawn_env = config.agent_spawn_env();
-    let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(config.agents as usize);
-    for i in 0..config.agents as usize {
-        // Spawn OUTSIDE the timeout so we always own the child for cleanup.
-        // This matches the run_models pattern and prevents zombie leaks on
-        // init timeout (the cancelled future would drop the AcpClient via
-        // Drop which is best-effort only).
-        let spawn_result = AcpClient::spawn(
-            &config.agent_command,
-            &config.agent_args,
-            &agent_spawn_env,
-            config.has_generated_codex_config,
-            config.forward_agent_publisher_credentials,
-        )
-        .await;
-        match spawn_result {
-            Ok(mut acp) => {
-                acp.set_observer(observer.clone(), i);
-                match tokio::time::timeout(Duration::from_secs(60), acp.initialize()).await {
-                    Ok(Ok(init_result)) => {
-                        tracing::info!(agent = i, "agent initialized: {init_result}");
-                        let protocol_version =
-                            init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
-                        tracing::info!(
-                            agent = i,
-                            name = init_result
-                                .get("agentInfo")
-                                .or_else(|| init_result.get("serverInfo"))
-                                .and_then(|info| info.get("name"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown"),
-                            "agent initialized — non-cancelling steer enabled (try-and-tolerate)"
-                        );
-                        acp.observe(
-                            "agent_initialized",
-                            serde_json::json!({
-                                "agentIndex": i,
-                                "initializeResult": init_result,
-                            }),
-                        );
-                        let agent_name = normalized_agent_name(&init_result);
-                        agent_slots.push(Some(OwnedAgent {
-                            index: i,
-                            acp,
-                            state: SessionState::default(),
-                            model_capabilities: None,
-                            desired_model: config.model.clone(),
-                            model_overridden: false,
-                            agent_name,
-                            goose_system_prompt_supported: None,
-                            protocol_version,
-                        }));
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!(agent = i, "agent initialize failed: {e}");
-                        acp.shutdown().await;
-                        agent_slots.push(None);
-                    }
-                    Err(_) => {
-                        tracing::error!(agent = i, "agent timed out during init (60s)");
-                        acp.shutdown().await;
-                        agent_slots.push(None);
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(agent = i, "agent failed to spawn: {e}");
-                agent_slots.push(None);
-            }
-        }
-    }
-    let live_count = agent_slots.iter().filter(|s| s.is_some()).count();
-    if live_count == 0 {
-        return Err(anyhow::anyhow!(
-            "all {} agents failed to start — cannot continue",
-            config.agents
-        ));
-    }
-    if live_count < config.agents as usize {
-        tracing::warn!(
-            "started {}/{} agents — continuing with reduced pool",
-            live_count,
-            config.agents
-        );
-    }
-    tracing::info!("agent_pool_ready agents={}", live_count);
-    let mut pool = AgentPool::from_slots(agent_slots);
+    let mut pool = if config.lazy_pool {
+        AgentPool::from_slots((0..config.agents).map(|_| None).collect())
+    } else {
+        initialize_agent_pool(&PoolStartup::from_config(&config, observer.clone()), None).await?
+    };
+    let mut pool_ready = !config.lazy_pool;
+    let mut pool_lifecycle: PoolLifecycle<AgentPool> = PoolLifecycle::listening();
 
     // Capture a startup watermark BEFORE connecting to the relay. This timestamp
     // is used for membership notification replay (via startup_watermark) and as
@@ -1587,6 +1529,11 @@ async fn tokio_main() -> Result<()> {
         ));
     }
 
+    let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
+    let dedup_mode = config.dedup_mode;
+    let mut queue =
+        EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
     // a durable readiness boundary before they send a startup mention.
@@ -1597,9 +1544,16 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    let dedup_mode = config.dedup_mode;
-    let mut queue =
-        EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+    if config.lazy_pool {
+        emit_runtime_lifecycle(
+            observer.as_ref(),
+            &runtime_start_nonce,
+            &pubkey_hex,
+            &config.relay_url,
+            "listening",
+            None,
+        );
+    }
 
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
@@ -1637,6 +1591,7 @@ async fn tokio_main() -> Result<()> {
         turn_receipts: config.turn_receipts,
         expected_gateway_session_key: config.expected_gateway_session_key.clone(),
         trusted_inbound_envelope: config.trusted_inbound_envelope,
+        relay_url: config.relay_url.clone(),
     });
 
     if !config.memory_enabled {
@@ -1694,6 +1649,8 @@ async fn tokio_main() -> Result<()> {
     let (respawn_tx, mut respawn_rx) = mpsc::channel::<RespawnResult>(config.agents as usize);
     // JoinSet for respawn tasks so shutdown can abort them.
     let mut respawn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    let (wake_tx, mut wake_rx) = mpsc::channel::<(u32, Result<AgentPool, String>)>(1);
+    let mut wake_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     // Channel for non-cancelling steer ack watchers to forward outcomes back
     // to the main loop. Each `pool.send_steer(...) == Ok(())` spawns a
@@ -1780,10 +1737,47 @@ async fn tokio_main() -> Result<()> {
         Result(Box<PromptResult>),
         Panic(tokio::task::JoinError),
         SteerAck(SteerAckEvent),
+        Wake(u32, Result<AgentPool, String>),
     }
 
     loop {
-        if last_maintenance.elapsed() >= maintenance_interval {
+        // Whether buffered work is waiting on a lazy pool. Also gates the
+        // retry-deadline sleep arm below: a `Failed` lifecycle keeps its
+        // (possibly past) `retry_at` until the next wake, so sleeping on it
+        // unconditionally would complete instantly on every iteration — a
+        // busy spin — whenever the queued work drained after a failed wake.
+        let mut lazy_wake_work_pending = false;
+        if config.lazy_pool && !pool_ready {
+            lazy_wake_work_pending = queue.has_flushable_work();
+            if let Some(attempt) = pool_lifecycle
+                .start_wake_if_due(lazy_wake_work_pending, tokio::time::Instant::now())
+            {
+                emit_runtime_lifecycle(
+                    observer.as_ref(),
+                    &runtime_start_nonce,
+                    &pubkey_hex,
+                    &config.relay_url,
+                    "waking",
+                    None,
+                );
+                let startup = PoolStartup::from_config(&config, observer.clone());
+                let wake_tx = wake_tx.clone();
+                let wake_shutdown = shutdown_rx.clone();
+                wake_tasks.spawn(async move {
+                    let result = initialize_agent_pool(&startup, Some(wake_shutdown))
+                        .await
+                        .map_err(|error| error.to_string());
+                    if let Err(error) = wake_tx.send((attempt, result)).await {
+                        let (_attempt, result) = error.0;
+                        if let Ok(mut abandoned_pool) = result {
+                            shutdown_agent_pool(&mut abandoned_pool).await;
+                        }
+                    }
+                });
+            }
+        }
+
+        if pool_ready && last_maintenance.elapsed() >= maintenance_interval {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
 
@@ -1875,7 +1869,7 @@ async fn tokio_main() -> Result<()> {
                 biased;
                 // recv() returning None means all senders dropped (pool was torn down).
                 // Break cleanly instead of panicking.
-                r = result_rx.recv() => match r {
+                r = result_rx.recv(), if pool_ready => match r {
                     Some(result) => Some(PoolEvent::Result(Box::new(result))),
                     None => {
                         tracing::info!("result channel closed — exiting main loop");
@@ -1895,6 +1889,41 @@ async fn tokio_main() -> Result<()> {
                 // locked semantics (Eva + Max + Perci).
                 Some(ack_event) = steer_ack_rx.recv() => {
                     Some(PoolEvent::SteerAck(ack_event))
+                }
+                Some((attempt, result)) = wake_rx.recv(), if config.lazy_pool && !pool_ready => {
+                    Some(PoolEvent::Wake(attempt, result))
+                }
+                // Gated on pending work: with an empty queue there is nothing
+                // for the retry to dispatch, and a past `retry_at` would
+                // otherwise complete instantly on every iteration (busy spin).
+                // The next accepted event re-enables the arm.
+                _ = async {
+                    match pool_lifecycle.retry_at() {
+                        Some(retry_at) if lazy_wake_work_pending => {
+                            tokio::time::sleep_until(retry_at).await
+                        }
+                        _ => std::future::pending().await,
+                    }
+                } => None,
+                Some(Err(error)) = wake_tasks.join_next(), if !wake_tasks.is_empty() => {
+                    if let Some(attempt) = pool_lifecycle.waking_attempt() {
+                        let message = format!("pool wake task failed: {error}");
+                        if pool_lifecycle.cancel_wake(
+                            attempt,
+                            message.clone(),
+                            tokio::time::Instant::now(),
+                        ) {
+                            emit_runtime_lifecycle(
+                                observer.as_ref(),
+                                &runtime_start_nonce,
+                                &pubkey_hex,
+                                &config.relay_url,
+                                "failed",
+                                Some(&message),
+                            );
+                        }
+                    }
+                    None
                 }
                 control_event = async {
                     match relay_observer_control_rx.as_mut() {
@@ -2040,7 +2069,11 @@ async fn tokio_main() -> Result<()> {
                                         ControlSignal::Cancel,
                                     );
                                     let drained_ids = queue.drain_channel(ch);
-                                    let invalidated = pool.invalidate_channel_sessions(ch);
+                                    let invalidated = if pool_ready {
+                                        pool.invalidate_channel_sessions(ch)
+                                    } else {
+                                        0
+                                    };
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
@@ -2342,10 +2375,12 @@ async fn tokio_main() -> Result<()> {
                                     }
                                 }
                             }
-                            for (channel_id, thread_tags) in
-                                dispatch_pending(&mut pool, &mut queue, &ctx)
-                            {
-                                typing_channels.insert(channel_id, thread_tags);
+                            if pool_ready {
+                                for (channel_id, thread_tags) in
+                                    dispatch_pending(&mut pool, &mut queue, &ctx)
+                                {
+                                    typing_channels.insert(channel_id, thread_tags);
+                                }
                             }
                         }
                         None => {
@@ -2366,7 +2401,9 @@ async fn tokio_main() -> Result<()> {
                     }
                 } => {
                     let _ = result_rx;
-                    if queue.has_flushable_work() {
+                    if !pool_ready {
+                        tracing::debug!("heartbeat_skipped_pool_not_ready");
+                    } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
                             dispatch_pending(&mut pool, &mut queue, &ctx)
@@ -2676,7 +2713,72 @@ async fn tokio_main() -> Result<()> {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
+            Some(PoolEvent::Wake(attempt, result)) => {
+                let completion = result.as_ref().map(|_| ()).map_err(|error| error.clone());
+                if let Err(error) =
+                    pool_lifecycle.complete_wake(attempt, result, tokio::time::Instant::now())
+                {
+                    tracing::warn!(attempt, error, "discarding stale pool wake result");
+                    continue;
+                }
+                match completion {
+                    Ok(()) => {
+                        pool = pool_lifecycle
+                            .take_ready()
+                            .expect("successful wake stores a ready pool");
+                        pool_ready = true;
+                        emit_runtime_lifecycle(
+                            observer.as_ref(),
+                            &runtime_start_nonce,
+                            &pubkey_hex,
+                            &config.relay_url,
+                            "ready",
+                            None,
+                        );
+                        for (channel_id, thread_tags) in
+                            dispatch_pending(&mut pool, &mut queue, &ctx)
+                        {
+                            typing_channels.insert(channel_id, thread_tags);
+                        }
+                    }
+                    Err(error) => {
+                        debug_assert_eq!(pool_lifecycle.failed_error(), Some(error.as_str()));
+                        emit_runtime_lifecycle(
+                            observer.as_ref(),
+                            &runtime_start_nonce,
+                            &pubkey_hex,
+                            &config.relay_url,
+                            "failed",
+                            Some(&error),
+                        );
+                    }
+                }
+            }
             None => {} // relay/heartbeat/shutdown branches handled inline above
+        }
+    }
+
+    // Drain wake tasks gracefully rather than aborting: an in-flight
+    // initialize_agent_pool observes the shutdown watch at its biased per-slot
+    // select and reaps its partially-spawned agents itself. `shutdown()` here
+    // would abort the task mid-init and drop those AcpClients via best-effort
+    // Drop — the exact zombie class the eager path's spawn-outside-the-timeout
+    // comment exists to prevent. Fire the watch first so exits that bypass the
+    // signal handlers (result channel closed, LoopAction::Exit) cancel the wake
+    // just as promptly. Timeout is a backstop for a slot stuck outside the
+    // select (e.g. in spawn); only then do we fall back to aborting.
+    let _ = shutdown_tx.send(());
+    let wake_drain = tokio::time::timeout(Duration::from_secs(30), async {
+        while wake_tasks.join_next().await.is_some() {}
+    })
+    .await;
+    if wake_drain.is_err() {
+        tracing::warn!("wake task did not drain within grace period — aborting");
+        wake_tasks.shutdown().await;
+    }
+    while let Ok((_attempt, result)) = wake_rx.try_recv() {
+        if let Ok(mut awakened_pool) = result {
+            shutdown_agent_pool(&mut awakened_pool).await;
         }
     }
 
@@ -3748,6 +3850,155 @@ fn normalized_agent_name(init_result: &serde_json::Value) -> String {
         .to_ascii_lowercase()
 }
 
+async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
+    for slot in slots {
+        if let Some(mut agent) = slot.take() {
+            agent.acp.shutdown().await;
+        }
+    }
+}
+
+async fn shutdown_agent_pool(pool: &mut AgentPool) {
+    pool.join_set.shutdown().await;
+    while let Ok(mut result) = pool.result_rx_try_recv() {
+        result.agent.acp.shutdown().await;
+    }
+    for slot in pool.agents_mut() {
+        if let Some(mut agent) = slot.take() {
+            agent.acp.shutdown().await;
+        }
+    }
+}
+
+struct PoolStartup {
+    agents: u32,
+    command: String,
+    args: Vec<String>,
+    extra_env: Vec<(String, String)>,
+    has_generated_codex_config: bool,
+    forward_buzz_publisher_credentials: bool,
+    model: Option<String>,
+    observer: Option<observer::ObserverHandle>,
+}
+
+impl PoolStartup {
+    fn from_config(config: &Config, observer: Option<observer::ObserverHandle>) -> Self {
+        Self {
+            agents: config.agents,
+            command: config.agent_command.clone(),
+            args: config.agent_args.clone(),
+            extra_env: config.agent_spawn_env(),
+            has_generated_codex_config: config.has_generated_codex_config,
+            forward_buzz_publisher_credentials: config.forward_agent_publisher_credentials,
+            model: config.model.clone(),
+            observer,
+        }
+    }
+}
+
+async fn initialize_agent_pool(
+    startup: &PoolStartup,
+    mut shutdown: Option<watch::Receiver<()>>,
+) -> Result<AgentPool> {
+    // One agent failing to start must not kill the whole pool.
+    // Attempt each spawn under a 60-second timeout; a partial pool is valid.
+    let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
+    for i in 0..startup.agents as usize {
+        let spawn_result = AcpClient::spawn(
+            &startup.command,
+            &startup.args,
+            &startup.extra_env,
+            startup.has_generated_codex_config,
+            startup.forward_buzz_publisher_credentials,
+        )
+        .await;
+        match spawn_result {
+            Ok(mut acp) => {
+                acp.set_observer(startup.observer.clone(), i);
+                let initialize = tokio::time::timeout(Duration::from_secs(60), acp.initialize());
+                let initialize_result = match shutdown.as_mut() {
+                    Some(shutdown) => tokio::select! {
+                        biased;
+                        _ = shutdown.changed() => {
+                            acp.shutdown().await;
+                            shutdown_agent_slots(&mut agent_slots).await;
+                            return Err(anyhow::anyhow!("pool initialization cancelled by shutdown"));
+                        }
+                        result = initialize => result,
+                    },
+                    None => initialize.await,
+                };
+                match initialize_result {
+                    Ok(Ok(init_result)) => {
+                        tracing::info!(agent = i, "agent initialized: {init_result}");
+                        let protocol_version =
+                            init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
+                        tracing::info!(
+                            agent = i,
+                            name = init_result
+                                .get("agentInfo")
+                                .or_else(|| init_result.get("serverInfo"))
+                                .and_then(|info| info.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown"),
+                            "agent initialized — non-cancelling steer enabled (try-and-tolerate)"
+                        );
+                        acp.observe(
+                            "agent_initialized",
+                            serde_json::json!({
+                                "agentIndex": i,
+                                "initializeResult": init_result,
+                            }),
+                        );
+                        let agent_name = normalized_agent_name(&init_result);
+                        agent_slots.push(Some(OwnedAgent {
+                            index: i,
+                            acp,
+                            state: SessionState::default(),
+                            model_capabilities: None,
+                            desired_model: startup.model.clone(),
+                            model_overridden: false,
+                            agent_name,
+                            goose_system_prompt_supported: None,
+                            protocol_version,
+                        }));
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!(agent = i, "agent initialize failed: {e}");
+                        acp.shutdown().await;
+                        agent_slots.push(None);
+                    }
+                    Err(_) => {
+                        tracing::error!(agent = i, "agent timed out during init (60s)");
+                        acp.shutdown().await;
+                        agent_slots.push(None);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(agent = i, "agent failed to spawn: {e}");
+                agent_slots.push(None);
+            }
+        }
+    }
+    let live_count = agent_slots.iter().filter(|slot| slot.is_some()).count();
+    if live_count == 0 {
+        return Err(anyhow::anyhow!(
+            "all {} agents failed to start — cannot continue",
+            startup.agents
+        ));
+    }
+    if live_count < startup.agents as usize {
+        tracing::warn!(
+            "started {}/{} agents — continuing with reduced pool",
+            live_count,
+            startup.agents
+        );
+    }
+    tracing::info!("agent_pool_ready agents={}", live_count);
+    Ok(AgentPool::from_slots(agent_slots))
+}
+
 // ── spawn_and_init ────────────────────────────────────────────────────────────
 /// Spawn an agent subprocess and run the MCP `initialize` handshake.
 ///
@@ -4663,6 +4914,7 @@ mod build_mcp_servers_tests {
             expected_gateway_session_key: None,
             trusted_inbound_envelope: false,
             forward_agent_publisher_credentials: true,
+            lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -4832,6 +5084,7 @@ mod error_outcome_emission_tests {
             expected_gateway_session_key: None,
             trusted_inbound_envelope: false,
             forward_agent_publisher_credentials: true,
+            lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,

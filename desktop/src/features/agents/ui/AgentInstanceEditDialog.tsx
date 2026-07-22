@@ -114,7 +114,6 @@ export function AgentInstanceEditDialog({
   const [name, setName] = React.useState(agent.name);
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
-  const [relayUrl, setRelayUrl] = React.useState(agent.relayUrl);
   const [acpCommand, setAcpCommand] = React.useState(agent.acpCommand);
   const [agentCommand, setAgentCommand] = React.useState(agent.agentCommand);
   const [originalAgentCommand, setOriginalAgentCommand] = React.useState(
@@ -171,7 +170,6 @@ export function AgentInstanceEditDialog({
   React.useEffect(() => {
     if (open) {
       setName(agent.name);
-      setRelayUrl(agent.relayUrl);
       setAcpCommand(agent.acpCommand);
       setAgentCommand(agent.agentCommand);
       setOriginalAgentCommand(agent.agentCommand);
@@ -655,8 +653,8 @@ export function AgentInstanceEditDialog({
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
         name: name.trim() !== agent.name ? name.trim() : undefined,
-        relayUrl:
-          relayUrl.trim() !== agent.relayUrl ? relayUrl.trim() : undefined,
+        // relayUrl deliberately never submitted: the legacy per-record pin is
+        // ignored (#2122) and the stored value is preserved as-is.
         acpCommand:
           acpCommand.trim() !== agent.acpCommand
             ? acpCommand.trim()
@@ -1151,7 +1149,6 @@ export function AgentInstanceEditDialog({
                       modelTuningRuntimeId={prospectiveRuntimeId}
                       parallelism={parallelism}
                       provider={effectiveProvider}
-                      relayUrl={relayUrl}
                       requiredEnvKeys={advancedRequiredEnvKeys}
                       selectedRuntimeId={selectedRuntimeId}
                       systemPrompt={systemPrompt}
@@ -1162,7 +1159,6 @@ export function AgentInstanceEditDialog({
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
                       onParallelismChange={setParallelism}
-                      onRelayUrlChange={setRelayUrl}
                       onSystemPromptChange={setSystemPrompt}
                     />
                   </motion.div>
