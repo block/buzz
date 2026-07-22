@@ -598,8 +598,9 @@ fn agent_pids_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Write a PID file for a spawned agent. The PID equals the PGID since we
-/// spawn with `process_group(0)`.
+/// Write a PID file for a spawned agent. The PID equals the PGID since the
+/// spawn's `pre_exec` calls `setsid()` (making the harness a session and
+/// process-group leader).
 pub fn write_agent_pid_file(app: &AppHandle, pubkey: &str, pid: u32) -> Result<(), String> {
     let path = agent_pids_dir(app)?.join(format!("{pubkey}.pid"));
     fs::write(&path, pid.to_string())
