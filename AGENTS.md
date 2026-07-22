@@ -112,6 +112,7 @@ Additional rules:
 - No `unsafe` code
 - Do not introduce new `unwrap()` or `expect()` in production paths — use `?` and proper error types
 - New public API must have doc comments
+- **DCO Sign-off**: Always sign off your commits (e.g. `git commit -s`) to comply with the Developer Certificate of Origin (DCO) check.
 
 ---
 

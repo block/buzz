@@ -63,6 +63,7 @@ type UserProfilePopoverProps = {
   role?: string;
   /** Value used to generate the BotIdenticon glyph (typically the author name). */
   botIdenticonValue?: string;
+  hideMessageAction?: boolean;
 };
 
 const HOVER_OPEN_DELAY_MS = 500;
@@ -175,6 +176,7 @@ export function UserProfilePopover({
   enableProfilePanel = true,
   role,
   botIdenticonValue,
+  hideMessageAction = false,
 }: UserProfilePopoverProps) {
   const [open, setOpen] = React.useState(false);
   const [pendingAction, setPendingAction] = React.useState<
@@ -260,6 +262,7 @@ export function UserProfilePopover({
   const isCurrentUserOwner = ownsAuthorAgent(profile, currentPubkey);
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
   const showMessageAction =
+    !hideMessageAction &&
     showProfileActions &&
     !isAgentClassificationPending &&
     (!isBotProfile || viewerIsOwner);
