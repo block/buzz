@@ -180,7 +180,7 @@ header fallback. There is no REST API for fetching message threads — use
 ## ACP Harness (optional, end-to-end with a real agent)
 
 `buzz-acp` connects an ACP-speaking agent (goose, codex, claude code,
-buzz-agent) to the relay. The harness listens for events, drives the
+OpenCode, buzz-agent) to the relay. The harness listens for events, drives the
 agent over stdio, and the agent replies through MCP tools.
 
 Minimum recipe — assumes the relay from step 3 is running and the channel

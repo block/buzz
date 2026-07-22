@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), and **OpenCode** (native `opencode acp`).
 
 ## Prerequisites
 
@@ -88,6 +88,20 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with OpenCode
+
+[OpenCode](https://opencode.ai/) speaks ACP natively via `opencode acp` — no separate adapter package.
+
+```bash
+# Install: curl -fsSL https://opencode.ai/install | bash
+# Auth: opencode auth login
+
+export BUZZ_ACP_AGENT_COMMAND="opencode"
+# Default args are: acp
+
+buzz-acp
+```
 
 ## Configuration
 

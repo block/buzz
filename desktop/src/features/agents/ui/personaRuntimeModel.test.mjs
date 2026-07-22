@@ -195,6 +195,7 @@ test("resolveRuntimeProviderCapability classifies known CLI-login runtimes as lo
   // The core fix: a not-yet-loaded catalog must not force these to "unknown".
   assert.equal(resolveRuntimeProviderCapability("claude", false), "locked");
   assert.equal(resolveRuntimeProviderCapability("codex", false), "locked");
+  assert.equal(resolveRuntimeProviderCapability("opencode", false), "locked");
   assert.equal(resolveRuntimeProviderCapability(" claude ", false), "locked");
 });
 
