@@ -1893,7 +1893,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     // specifically so a caller can introspect the CLI's security contract
     // without needing a key or a relay.
     if let Cmd::Capabilities = cli.command {
-        return commands::capabilities::cmd_capabilities();
+        return commands::capabilities::cmd_show();
     }
 
     let relay_url = client::normalize_relay_url(&cli.relay);

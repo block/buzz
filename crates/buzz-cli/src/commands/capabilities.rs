@@ -8,19 +8,26 @@
 //! properties) have something more reliable to check than grepping
 //! `--help` text.
 //!
-//! The emitted JSON is a **stable, versioned contract**: `schema_version`
-//! identifies the shape of the object, and `capability_revision` identifies
-//! the specific set of documented behaviors it attests to. Both fields must
-//! be bumped (and the change called out in review) if the meaning of any
-//! field changes — additive-only schema evolution should bump
-//! `schema_version`, and a change to what `secure_private_key_fd_v1` actually
-//! asserts should get a new `capability_revision` value instead of silently
-//! redefining the old one.
+//! The emitted JSON is a **stable, versioned attestation contract** for
+//! downstream tooling:
+//!
+//! - `schema_version` identifies the *shape* of the object. Bump it (and
+//!   never repurpose or remove an existing field's meaning) if the shape of
+//!   this JSON changes — additive-only evolution should still bump it so
+//!   strict downstream parsers can detect the change.
+//! - `capability_revision` identifies the specific implementation revision of
+//!   the `--private-key-fd` feature being attested to
+//!   (`secure_private_key_fd_v1`). If the underlying security properties
+//!   change (e.g. a guarantee is weakened, removed, or a new one is added),
+//!   mint a new revision string rather than silently redefining what the old
+//!   one means.
+
+use serde::Serialize;
 
 use crate::error::CliError;
 use crate::{MAX_PRIVATE_KEY_FD, MIN_PRIVATE_KEY_FD, PRIVATE_KEY_FD_MAX_LEN};
 
-/// `schema_version` of the JSON object emitted by [`cmd_capabilities`].
+/// `schema_version` of the JSON object emitted by [`cmd_show`].
 const SCHEMA_VERSION: u32 = 1;
 
 /// Stable identifier for the exact set of `--private-key-fd` security
@@ -41,27 +48,75 @@ const PRIVATE_KEY_FD_SUPPORTED: bool = true;
 #[cfg(not(unix))]
 const PRIVATE_KEY_FD_SUPPORTED: bool = false;
 
+/// Security-relevant details of the `--private-key-fd` implementation.
+///
+/// All fields other than `supported` describe the implementation as it
+/// exists in the Unix build and stay fixed regardless of target platform —
+/// `supported` alone is what tells a downstream consumer whether this
+/// platform's build actually backs those properties with a real
+/// implementation.
+#[derive(Serialize)]
+struct PrivateKeyFdCapabilities {
+    /// `true` only on Unix targets, where `--private-key-fd` has a real
+    /// `/dev/fd`-backed implementation. Fails closed on other platforms.
+    supported: bool,
+    /// How the key material is handed to the process.
+    transport: &'static str,
+    /// Minimum accepted file descriptor number (inclusive).
+    min_fd: u32,
+    /// Maximum accepted file descriptor number (inclusive).
+    max_fd: u32,
+    /// Maximum number of bytes read from the fd for the key.
+    max_key_bytes: usize,
+    /// Whether the original fd passed via `--private-key-fd` is closed after
+    /// being read.
+    closes_original_fd: bool,
+    /// Whether the in-memory buffer holding the key is zeroized.
+    zeroizes_input: bool,
+    /// Whether `--help` hides the live `BUZZ_PRIVATE_KEY` env value.
+    help_env_value_redacted: bool,
+}
+
+/// Top-level `buzz capabilities` report.
+#[derive(Serialize)]
+struct CapabilitiesReport {
+    /// Shape version of this JSON object. Bump on any shape change.
+    schema_version: u32,
+    /// Implementation revision identifier for the `--private-key-fd`
+    /// security properties attested to below.
+    capability_revision: &'static str,
+    private_key_fd: PrivateKeyFdCapabilities,
+}
+
+impl Default for CapabilitiesReport {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            capability_revision: CAPABILITY_REVISION,
+            private_key_fd: PrivateKeyFdCapabilities {
+                supported: PRIVATE_KEY_FD_SUPPORTED,
+                transport: "inherited_fd",
+                min_fd: MIN_PRIVATE_KEY_FD,
+                max_fd: MAX_PRIVATE_KEY_FD,
+                max_key_bytes: PRIVATE_KEY_FD_MAX_LEN,
+                closes_original_fd: true,
+                zeroizes_input: true,
+                help_env_value_redacted: true,
+            },
+        }
+    }
+}
+
 /// Run `buzz capabilities`.
 ///
 /// Prints one JSON object to stdout describing the security properties of
 /// the `--private-key-fd` implementation and returns `Ok(())` (exit code 0).
 /// Reads no environment variables and performs no I/O beyond stdout.
-pub fn cmd_capabilities() -> Result<(), CliError> {
-    let report = serde_json::json!({
-        "schema_version": SCHEMA_VERSION,
-        "capability_revision": CAPABILITY_REVISION,
-        "private_key_fd": {
-            "supported": PRIVATE_KEY_FD_SUPPORTED,
-            "transport": "inherited_fd",
-            "min_fd": MIN_PRIVATE_KEY_FD,
-            "max_fd": MAX_PRIVATE_KEY_FD,
-            "max_key_bytes": PRIVATE_KEY_FD_MAX_LEN,
-            "closes_original_fd": true,
-            "zeroizes_input": true,
-            "help_env_value_redacted": true,
-        },
-    });
-    println!("{report}");
+pub fn cmd_show() -> Result<(), CliError> {
+    let report = CapabilitiesReport::default();
+    let json = serde_json::to_string(&report)
+        .map_err(|e| CliError::Other(format!("failed to serialize capabilities report: {e}")))?;
+    println!("{json}");
     Ok(())
 }
 
@@ -83,7 +138,38 @@ mod tests {
     }
 
     #[test]
-    fn cmd_capabilities_succeeds() {
-        assert!(cmd_capabilities().is_ok());
+    fn cmd_show_succeeds() {
+        assert!(cmd_show().is_ok());
+    }
+
+    #[test]
+    fn report_matches_expected_contract() {
+        let report = CapabilitiesReport::default();
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.capability_revision, "secure_private_key_fd_v1");
+        assert_eq!(report.private_key_fd.transport, "inherited_fd");
+        assert_eq!(report.private_key_fd.min_fd, 3);
+        assert_eq!(report.private_key_fd.max_fd, 1024);
+        assert_eq!(report.private_key_fd.max_key_bytes, 256);
+        assert!(report.private_key_fd.closes_original_fd);
+        assert!(report.private_key_fd.zeroizes_input);
+        assert!(report.private_key_fd.help_env_value_redacted);
+        assert_eq!(report.private_key_fd.supported, cfg!(unix));
+    }
+
+    #[test]
+    fn serializes_to_expected_json_shape() {
+        let report = CapabilitiesReport::default();
+        let value: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["capability_revision"], "secure_private_key_fd_v1");
+        assert_eq!(value["private_key_fd"]["transport"], "inherited_fd");
+        assert_eq!(value["private_key_fd"]["min_fd"], 3);
+        assert_eq!(value["private_key_fd"]["max_fd"], 1024);
+        assert_eq!(value["private_key_fd"]["max_key_bytes"], 256);
+        assert_eq!(value["private_key_fd"]["closes_original_fd"], true);
+        assert_eq!(value["private_key_fd"]["zeroizes_input"], true);
+        assert_eq!(value["private_key_fd"]["help_env_value_redacted"], true);
+        assert_eq!(value["private_key_fd"]["supported"], cfg!(unix));
     }
 }
