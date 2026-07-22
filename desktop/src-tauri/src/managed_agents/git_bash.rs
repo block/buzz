@@ -199,7 +199,7 @@ fn resolve_git_bash_inner(
     let result = shell_override
         .and_then(|path| resolve_shell_override(&path, path_env))
         .or_else(|| git_bash_override.filter(|path| path.is_file()))
-        .or_else(|| scan_path_for_bash(path_env, system_root.as_deref()))
+        .or_else(|| scan_path_for_bash(path_env, system_root.as_deref(), local_app_data.as_deref()))
         .or_else(|| {
             scan_path_for_command(Path::new("git.exe"), path_env, None)
                 .and_then(|git| bash_from_git(&git))
@@ -260,8 +260,28 @@ fn bash_from_git(git: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn scan_path_for_bash(path_env: &str, system_root: Option<&Path>) -> Option<PathBuf> {
-    scan_path_for_command(Path::new("bash.exe"), path_env, system_root)
+fn scan_path_for_bash(
+    path_env: &str,
+    system_root: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Option<PathBuf> {
+    let windows_apps = local_app_data.map(|local| local.join("Microsoft").join("WindowsApps"));
+    std::env::split_paths(path_env).find_map(|dir| {
+        if system_root.is_some_and(|root| is_under_dir(&dir, root)) {
+            return None;
+        }
+        // `%LOCALAPPDATA%\Microsoft\WindowsApps\bash.exe` is the WSL launcher
+        // stub, not Git Bash. Preferring it opens visible WSL terminals and
+        // hangs provider discovery / ACP installs (#2328).
+        if windows_apps
+            .as_deref()
+            .is_some_and(|apps| is_under_dir(&dir, apps))
+        {
+            return None;
+        }
+        let candidate = dir.join("bash.exe");
+        candidate.is_file().then_some(candidate)
+    })
 }
 
 #[cfg(windows)]
@@ -574,6 +594,47 @@ mod tests {
             resolve_git_bash(path_str, None, None, None, None, None, None),
             Some(bash),
             "install path must skip BUZZ_SHELL and find bash on PATH"
+        );
+    }
+
+    /// WindowsApps bash.exe is the WSL launcher — skip it and prefer Git Bash.
+    #[test]
+    fn test_skips_windowsapps_bash_prefers_git_bash() {
+        let temp = tempdir().expect("tempdir");
+        let local_app_data = temp.path().join("LocalAppData");
+        let windows_apps_bash = local_app_data
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join("bash.exe");
+        let git_bash = temp
+            .path()
+            .join("Program Files")
+            .join("Git")
+            .join("bin")
+            .join("bash.exe");
+        std::fs::create_dir_all(windows_apps_bash.parent().expect("parent")).expect("mkdir");
+        std::fs::create_dir_all(git_bash.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&windows_apps_bash, []).expect("windowsapps bash");
+        std::fs::write(&git_bash, []).expect("git bash");
+
+        let path = std::env::join_paths([
+            windows_apps_bash.parent().expect("windowsapps dir"),
+            git_bash.parent().expect("git bin"),
+        ])
+        .expect("PATH");
+
+        assert_eq!(
+            resolve_git_bash(
+                path.to_str().expect("utf8"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(local_app_data),
+            ),
+            Some(git_bash),
+            "must skip WindowsApps WSL bash and resolve Git Bash"
         );
     }
 }
