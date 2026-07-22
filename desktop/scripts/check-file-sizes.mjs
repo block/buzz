@@ -378,15 +378,6 @@ const overrides = new Map([
   // observable (propagate real errors); verify_fully_wiped checks all three
   // keychain shapes (main blob, DPK blob, per-key "identity"). +73 lines.
   ["src-tauri/src/secret_store.rs", 1307],
-  // sign-out wipe: Sign Out section (AlertDialog + controlled state) added
-  // at the bottom of the Profile settings page. Load-bearing UX feature;
-  // queued to split when ProfileSettingsCard is broken into sub-components.
-  // +20 lines: scroll-position save/restore across avatar editor open/close
-  // to prevent layout shift from the Sign Out section causing a viewport jump.
-  // +11 lines: signout-dev-webview-state — clear localStorage/sessionStorage
-  // on successful signOut() resolve so dev-build webview state doesn't survive
-  // a reset and vouch for the fresh key. Comment explains the race/redundancy.
-  ["src/features/settings/ui/ProfileSettingsCard.tsx", 1044],
   // keyring-dev-isolation: keyring_service() fn (7 lines) replaces the const
   // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
   // +10 (1042 -> 1052): media_fetch_client with redirect::Policy::none() so a

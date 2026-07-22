@@ -9243,6 +9243,11 @@ export function maybeInstallE2eTauriMocks() {
           sig: "e2e-signed-nostr-binding",
         });
       }
+      case "sign_out":
+        // Production wipes local state and restarts the app. In the browser
+        // harness there is nothing to wipe; resolving is enough — specs
+        // assert invocation via __BUZZ_E2E_COMMANDS__ and the pending UI.
+        return;
       case "get_nsec": {
         const nsecSequence = activeConfig?.mock?.nsecErrors;
         if (nsecSequence && nsecSequence.length > 0) {
