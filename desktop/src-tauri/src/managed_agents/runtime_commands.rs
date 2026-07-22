@@ -446,23 +446,6 @@ fn unkeyable_failed_status(
     }
 }
 
-/// True when `record` may run a pair on `relay_url`: unpinned records run on
-/// every configured community; a record with an explicit `relay_url` pin runs
-/// only on that relay (compared canonically).
-fn record_allows_relay(record: &super::ManagedAgentRecord, relay_url: &str) -> bool {
-    let pinned = record.relay_url.trim();
-    if pinned.is_empty() {
-        return true;
-    }
-    match (
-        buzz_core_pkg::relay::normalize_relay_url(pinned),
-        buzz_core_pkg::relay::normalize_relay_url(relay_url),
-    ) {
-        (Ok(pinned), Ok(requested)) => pinned == requested,
-        _ => false,
-    }
-}
-
 /// Spawn a lazy harness pair for every eligible (agent, community) pair.
 ///
 /// Eligibility is deliberately gated on `start_on_app_launch`: auto-start is
@@ -486,9 +469,9 @@ pub async fn reconcile_managed_agent_runtimes(
         for record in records
             .iter()
             .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
-            // Respect explicit relay pins: a pinned agent runs only on its
-            // pinned relay — never spawn it onto other communities.
-            .filter(|record| record_allows_relay(record, &community.relay_url))
+        // The legacy per-record relay pin is deliberately ignored here — see
+        // `effective_agent_relay_url`. Every local auto-start agent fans out
+        // to every configured community.
         {
             jobs.push((record.clone(), community.relay_url.clone()));
         }
@@ -624,19 +607,19 @@ mod tests {
     }
 
     #[test]
-    fn unpinned_record_allows_every_relay() {
-        let record = record_with_relay("");
-        assert!(record_allows_relay(&record, "wss://one.example"));
-        assert!(record_allows_relay(&record, "wss://two.example"));
-    }
-
-    #[test]
-    fn pinned_record_allows_only_its_canonical_relay() {
-        let record = record_with_relay("wss://one.example");
-        assert!(record_allows_relay(&record, "wss://one.example"));
-        // Canonical comparison: scheme case, default port, trailing slash.
-        assert!(record_allows_relay(&record, "WSS://One.Example:443/"));
-        assert!(!record_allows_relay(&record, "wss://two.example"));
+    fn legacy_relay_pin_is_ignored_for_fan_out() {
+        // Zero-touch cutover (#2122): a record carrying a creation-era
+        // `relay_url` pin must fan out exactly like an unpinned one — the
+        // stored field is parsed but never consulted. See
+        // `effective_agent_relay_url`.
+        let unpinned = record_with_relay("");
+        let pinned = record_with_relay("wss://one.example");
+        for record in [&unpinned, &pinned] {
+            assert_eq!(
+                crate::relay::effective_agent_relay_url(&record.relay_url, "wss://two.example"),
+                "wss://two.example"
+            );
+        }
     }
 
     #[test]

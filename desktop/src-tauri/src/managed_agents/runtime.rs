@@ -1338,9 +1338,10 @@ fn persona_drift_state(
 }
 
 /// Resolve the runtime-pair key this record maps to for the active
-/// workspace: an explicit per-record relay pin wins, otherwise the active
-/// workspace relay. Returns `None` for records that cannot form a valid
-/// pair key yet (e.g. key-less agents that mint keys on first start).
+/// workspace: always the active workspace relay (the legacy per-record relay
+/// pin is ignored — see `effective_agent_relay_url`). Returns `None` for
+/// records that cannot form a valid pair key yet (e.g. key-less agents that
+/// mint keys on first start).
 pub(crate) fn workspace_pair_key(
     app: &AppHandle,
     record: &ManagedAgentRecord,
@@ -1354,9 +1355,9 @@ pub(crate) fn workspace_pair_key(
     )
 }
 
-/// Pure core of [`workspace_pair_key`]: pin-else-workspace relay precedence
-/// plus canonical key construction, kept `AppHandle`-free so summary/stop
-/// scoping semantics are unit-testable.
+/// Pure core of [`workspace_pair_key`]: workspace-relay resolution (legacy
+/// record pins ignored) plus canonical key construction, kept `AppHandle`-free
+/// so summary/stop scoping semantics are unit-testable.
 pub(crate) fn resolve_workspace_pair_key(
     pubkey: &str,
     record_relay_url: &str,
@@ -1375,11 +1376,10 @@ pub fn build_managed_agent_summary(
 ) -> Result<ManagedAgentSummary, String> {
     use crate::managed_agents::BackendKind;
 
-    // Community-scoped truth: this summary describes the pair for the relay
-    // the record resolves to right now (pin, else active workspace). An agent
-    // running only in another community must read as stopped here — matching
-    // by pubkey alone would show every community a green light as long as any
-    // pair anywhere is alive.
+    // Community-scoped truth: this summary describes the pair for the active
+    // workspace relay. An agent running only in another community must read
+    // as stopped here — matching by pubkey alone would show every community a
+    // green light as long as any pair anywhere is alive.
     let pair_key = workspace_pair_key(app, record);
     let pair_runtime = pair_key.as_ref().and_then(|key| runtimes.get(key));
 
