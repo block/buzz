@@ -2,8 +2,6 @@ use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::validate_hex64;
 
-// TODO(phase-4): Replace raw nostr::EventBuilder usage in cmd_set_presence with buzz-sdk builder
-
 /// Get user profiles (kind:0 metadata events).
 ///
 /// - 0 pubkeys, no name → query our own profile
