@@ -696,7 +696,11 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .next()
         .expect("rsplit always yields at least one element");
     let lower = basename.to_ascii_lowercase();
-    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    let stem = if lower == "openclaw.mjs" {
+        "openclaw"
+    } else {
+        lower.strip_suffix(".exe").unwrap_or(&lower)
+    };
     stem.chars()
         .map(|character| match character {
             ' ' | '_' => '-',
@@ -1830,6 +1834,11 @@ mod tests {
             "claude-code"
         );
         assert_eq!(normalize_agent_command_identity("Goose.EXE"), "goose");
+        assert_eq!(
+            normalize_agent_command_identity("/immutable/generation/openclaw.mjs"),
+            "openclaw"
+        );
+        assert_eq!(normalize_agent_command_identity("codex.mjs"), "codex.mjs");
         // Non-ASCII must not panic.
         assert_eq!(normalize_agent_command_identity("my-agënt"), "my-agënt");
         // Edge cases: empty, whitespace-only, bare separators.
