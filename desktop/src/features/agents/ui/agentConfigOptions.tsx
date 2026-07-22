@@ -133,6 +133,7 @@ const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<
   "buzz-agent": [DEFAULT_MODEL_OPTION],
   claude: [DEFAULT_MODEL_OPTION],
   codex: [DEFAULT_MODEL_OPTION],
+  kimi: [DEFAULT_MODEL_OPTION],
 };
 
 export function getRuntimePersonaModelOptions(
@@ -151,7 +152,7 @@ function isKnownLlmProvider(
  * Required credential env keys for the given runtime + provider combination.
  * Derived from PROVIDER_CREDENTIAL_CONFIG — single source of truth.
  *
- * buzz-agent and goose use provider-specific credentials; claude and codex
+ * buzz-agent and goose use provider-specific credentials; claude, codex, and kimi
  * handle auth via CLI login (surfaced separately via the CliLogin surface).
  */
 export function requiredCredentialEnvKeys(
