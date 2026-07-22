@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   CUSTOM_RUNTIME_ID,
+  applyCustomHarnessPreference,
   buildCustomAcpRuntime,
   formatAgentArgsInput,
   isCustomRuntimeId,
@@ -42,10 +43,30 @@ test("resolvePreferredCustomRuntime only resolves the custom sentinel", () => {
   );
   const runtime = resolvePreferredCustomRuntime({
     preferred_runtime: "custom",
-    preferred_agent_command: "yoak",
+    preferred_agent_command: "agent",
     preferred_agent_args: ["acp"],
   });
   assert.ok(runtime);
-  assert.equal(runtime.command, "yoak");
+  assert.equal(runtime.command, "agent");
   assert.equal(isCustomRuntimeId(runtime.id), true);
+});
+
+test("applyCustomHarnessPreference clears provider/model", () => {
+  const next = applyCustomHarnessPreference(
+    {
+      env_vars: { KEEP: "1" },
+      model: "opus",
+      preferred_runtime: "claude",
+      preferred_agent_command: null,
+      preferred_agent_args: null,
+      provider: "anthropic",
+    },
+    { command: " agent ", args: "acp, --x" },
+  );
+  assert.equal(next.preferred_runtime, "custom");
+  assert.equal(next.preferred_agent_command, "agent");
+  assert.deepEqual(next.preferred_agent_args, ["acp", "--x"]);
+  assert.equal(next.provider, null);
+  assert.equal(next.model, null);
+  assert.equal(next.env_vars.KEEP, "1");
 });

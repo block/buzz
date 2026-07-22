@@ -100,16 +100,17 @@ whatever that harness expects:
 export BUZZ_ACP_AGENT_COMMAND="agent"
 export BUZZ_ACP_AGENT_ARGS="acp"
 
-# Absolute path to a custom adapter / harness (yoak, OpenCode, …)
-export BUZZ_ACP_AGENT_COMMAND="/usr/local/bin/yoak"
-export BUZZ_ACP_AGENT_ARGS="acp"
+# Absolute path to your own ACP adapter
+export BUZZ_ACP_AGENT_COMMAND="/usr/local/bin/my-acp-agent"
+export BUZZ_ACP_AGENT_ARGS=""
 
 buzz-acp
 ```
 
 In Buzz Desktop, choose **Bring your own harness** during onboarding (or
 **Custom command** under Settings → Agent defaults / Edit agent) and enter the
-same command + args. No Claude Code or Codex install is required.
+same command + args. No Claude Code or Codex install is required. The harness
+must already speak ACP — Buzz does not wrap arbitrary CLIs.
 
 ## Configuration
 

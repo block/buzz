@@ -17,15 +17,11 @@ import { Card } from "@/shared/ui/card";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { Input } from "@/shared/ui/input";
 import {
   CUSTOM_RUNTIME_ID,
-  parseAgentArgsInput,
+  type ByoHarnessDraft,
 } from "@/features/agents/lib/customHarness";
-import {
-  getGlobalAgentConfig,
-  setGlobalAgentConfig,
-} from "@/shared/api/tauriGlobalAgentConfig";
+import { BringYourOwnHarnessCard } from "./BringYourOwnHarnessCard";
 import {
   getReadyOnboardingRuntimes,
   getVisibleOnboardingRuntimes,
@@ -556,101 +552,6 @@ function RuntimeProvidersLoadingState() {
   );
 }
 
-function BringYourOwnHarnessCard({
-  args,
-  command,
-  onArgsChange,
-  onCommandChange,
-  onSelectedChange,
-  selected,
-}: {
-  args: string;
-  command: string;
-  onArgsChange: (value: string) => void;
-  onCommandChange: (value: string) => void;
-  onSelectedChange: (selected: boolean) => void;
-  selected: boolean;
-}) {
-  const commandReady = command.trim().length > 0;
-  const ready = selected && commandReady;
-
-  return (
-    <Card
-      className={cn(
-        "w-full max-w-[592px] select-none items-stretch px-5 py-5 text-left",
-        ready && "ring-1 ring-[var(--buzz-welcome-chartreuse)]/50",
-      )}
-      data-ready={ready ? "true" : "false"}
-      data-testid="onboarding-runtime-custom"
-      variant="textured"
-    >
-      <label className="flex cursor-pointer items-start gap-3">
-        <input
-          checked={selected}
-          className="mt-1"
-          data-testid="onboarding-runtime-custom-toggle"
-          onChange={(event) => onSelectedChange(event.target.checked)}
-          type="checkbox"
-        />
-        <span className="min-w-0 flex-1 space-y-1">
-          <span className="block text-sm font-medium text-foreground">
-            Bring your own harness
-          </span>
-          <span className="block text-xs leading-5 text-muted-foreground">
-            Any ACP-speaking command works — Cursor{" "}
-            <code className="font-mono text-2xs">agent acp</code>, yoak,
-            OpenCode, or your own adapter.
-          </span>
-        </span>
-      </label>
-
-      {selected ? (
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <div className="space-y-1.5 sm:col-span-1">
-            <label
-              className="text-xs font-medium text-foreground"
-              htmlFor="onboarding-custom-command"
-            >
-              Command
-            </label>
-            <Input
-              autoCorrect="off"
-              className="h-10 rounded-xl border-foreground/15 bg-white"
-              data-testid="onboarding-custom-command"
-              id="onboarding-custom-command"
-              onChange={(event) => onCommandChange(event.target.value)}
-              placeholder="agent"
-              spellCheck={false}
-              value={command}
-            />
-          </div>
-          <div className="space-y-1.5 sm:col-span-1">
-            <label
-              className="text-xs font-medium text-foreground"
-              htmlFor="onboarding-custom-args"
-            >
-              Args
-              <span className="ml-1 font-normal text-muted-foreground">
-                Optional
-              </span>
-            </label>
-            <Input
-              autoCorrect="off"
-              className="h-10 rounded-xl border-foreground/15 bg-white"
-              data-testid="onboarding-custom-args"
-              id="onboarding-custom-args"
-              onChange={(event) => onArgsChange(event.target.value)}
-              placeholder="acp"
-              spellCheck={false}
-              value={args}
-            />
-          </div>
-        </div>
-      ) : null}
-    </Card>
-  );
-}
-
 function RuntimeProvidersSection({
   byoArgs,
   byoCommand,
@@ -713,7 +614,8 @@ function RuntimeProvidersSection({
         </h1>
         <p className="mx-auto mt-3 max-w-[760px] text-sm leading-6 text-foreground/90">
           Install or sign in to Claude Code or Codex, or bring your own ACP
-          harness (Cursor, yoak, OpenCode, and any other stdio ACP server).
+          harness — any stdio ACP server such as Cursor{" "}
+          <code className="font-mono text-2xs">agent acp</code>.
         </p>
       </div>
 
@@ -776,8 +678,6 @@ function SetupStepContent({
   const [byoSelected, setByoSelected] = React.useState(false);
   const [byoCommand, setByoCommand] = React.useState("");
   const [byoArgs, setByoArgs] = React.useState("acp");
-  const [isAdvancing, setIsAdvancing] = React.useState(false);
-  const [advanceError, setAdvanceError] = React.useState<string | null>(null);
 
   const catalogReadyIds = React.useMemo(
     () =>
@@ -802,32 +702,13 @@ function SetupStepContent({
     onReadyRuntimeIdsChange(readyRuntimeIds);
   }, [onReadyRuntimeIdsChange, readyRuntimeIdsKey]);
 
-  const canAdvance = readyRuntimeIds.length > 0 && !isAdvancing;
+  const canAdvance = readyRuntimeIds.length > 0;
 
-  async function handleNext() {
-    setAdvanceError(null);
-    setIsAdvancing(true);
-    try {
-      if (byoIsReady) {
-        const existing = await getGlobalAgentConfig().catch(() => null);
-        await setGlobalAgentConfig({
-          env_vars: existing?.env_vars ?? {},
-          model: existing?.model ?? null,
-          preferred_agent_args: parseAgentArgsInput(byoArgs),
-          preferred_agent_command: byoCommand.trim(),
-          preferred_runtime: CUSTOM_RUNTIME_ID,
-          provider: existing?.provider ?? null,
-        });
-      }
-      actions.next(readyRuntimeIds);
-    } catch (cause) {
-      setAdvanceError(
-        cause instanceof Error
-          ? cause.message
-          : "Couldn't save your custom harness.",
-      );
-      setIsAdvancing(false);
-    }
+  function handleNext() {
+    const draft: ByoHarnessDraft | null = byoIsReady
+      ? { command: byoCommand.trim(), args: byoArgs }
+      : null;
+    actions.next(readyRuntimeIds, draft);
   }
 
   return (
@@ -849,21 +730,15 @@ function SetupStepContent({
         runtimeProviders={runtimeProviders}
       />
 
-      {advanceError ? (
-        <p className="mb-4 max-w-[560px] text-sm text-destructive" role="alert">
-          {advanceError}
-        </p>
-      ) : null}
-
       <OnboardingFooter>
         <Button
           className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
           data-testid="onboarding-setup-next"
           disabled={!canAdvance}
-          onClick={() => void handleNext()}
+          onClick={handleNext}
           type="button"
         >
-          {isAdvancing ? "Saving…" : "Next"}
+          Next
         </Button>
 
         <Button

@@ -29,18 +29,19 @@ import {
 import {
   CUSTOM_RUNTIME_ID,
   CUSTOM_RUNTIME_LABEL,
+  applyCustomHarnessPreference,
+  customHarnessCatalogStub,
   formatAgentArgsInput,
   isCustomRuntimeId,
-  parseAgentArgsInput,
   resolvePreferredCustomRuntime,
 } from "@/features/agents/lib/customHarness";
+import { CustomHarnessFields } from "@/features/agents/ui/CustomHarnessFields";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
 import {
   AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/AgentConfigFields";
 import { Button } from "@/shared/ui/button";
-import { Input } from "@/shared/ui/input";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -135,28 +136,7 @@ export function AgentDefaultsEditor({
   );
   const selectedRuntime = React.useMemo(() => {
     if (isCustomRuntimeId(config.preferred_runtime)) {
-      return (
-        customRuntime ?? {
-          id: CUSTOM_RUNTIME_ID,
-          label: CUSTOM_RUNTIME_LABEL,
-          avatarUrl: "",
-          availability: "available" as const,
-          command: config.preferred_agent_command ?? "",
-          binaryPath: config.preferred_agent_command ?? "",
-          defaultArgs: config.preferred_agent_args ?? [],
-          mcpCommand: null,
-          modelEnvVar: null,
-          providerEnvVar: null,
-          thinkingEnvVar: null,
-          installHint: "",
-          installInstructionsUrl: "https://agentclientprotocol.com/",
-          canAutoInstall: false,
-          underlyingCliPath: null,
-          nodeRequired: false,
-          authStatus: { status: "not_applicable" as const },
-          loginHint: null,
-        }
-      );
+      return customRuntime ?? customHarnessCatalogStub();
     }
     return (
       sortedRuntimes.find(
@@ -165,7 +145,7 @@ export function AgentDefaultsEditor({
       getDefaultPersonaRuntime(sortedRuntimes) ??
       sortedRuntimes[0]
     );
-  }, [config, customRuntime, sortedRuntimes]);
+  }, [config.preferred_runtime, customRuntime, sortedRuntimes]);
   const harnessOptions = React.useMemo(
     () => [
       ...sortedRuntimes.map((runtime) => ({
@@ -277,59 +257,30 @@ export function AgentDefaultsEditor({
             />
           </div>
           {isCustomSelected ? (
-            <div className="space-y-4">
-              <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="global-agent-custom-command"
-                >
-                  Agent command
-                </label>
-                <Input
-                  autoCorrect="off"
-                  data-testid="global-agent-custom-command"
-                  id="global-agent-custom-command"
-                  onChange={(event) =>
-                    handleConfigChange({
-                      ...config,
-                      preferred_agent_command: event.target.value,
-                      preferred_runtime: CUSTOM_RUNTIME_ID,
-                    })
-                  }
-                  placeholder="Full path or shell command (e.g. agent, yoak)"
-                  spellCheck={false}
-                  value={config.preferred_agent_command ?? ""}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="global-agent-custom-args"
-                >
-                  Agent runtime args
-                  <span className="ml-1 text-xs font-normal text-muted-foreground">
-                    Optional
-                  </span>
-                </label>
-                <Input
-                  autoCorrect="off"
-                  data-testid="global-agent-custom-args"
-                  id="global-agent-custom-args"
-                  onChange={(event) =>
-                    handleConfigChange({
-                      ...config,
-                      preferred_agent_args: parseAgentArgsInput(
-                        event.target.value,
-                      ),
-                      preferred_runtime: CUSTOM_RUNTIME_ID,
-                    })
-                  }
-                  placeholder="Comma-separated (e.g. acp)"
-                  spellCheck={false}
-                  value={formatAgentArgsInput(config.preferred_agent_args)}
-                />
-              </div>
-            </div>
+            <CustomHarnessFields
+              args={formatAgentArgsInput(config.preferred_agent_args)}
+              argsId="global-agent-custom-args"
+              argsTestId="global-agent-custom-args"
+              command={config.preferred_agent_command ?? ""}
+              commandId="global-agent-custom-command"
+              commandTestId="global-agent-custom-command"
+              onArgsChange={(value) =>
+                handleConfigChange(
+                  applyCustomHarnessPreference(config, {
+                    command: config.preferred_agent_command ?? "",
+                    args: value,
+                  }),
+                )
+              }
+              onCommandChange={(value) =>
+                handleConfigChange(
+                  applyCustomHarnessPreference(config, {
+                    command: value,
+                    args: formatAgentArgsInput(config.preferred_agent_args),
+                  }),
+                )
+              }
+            />
           ) : (
             <AgentConfigFields
               bakedEnv={bakedEnv}

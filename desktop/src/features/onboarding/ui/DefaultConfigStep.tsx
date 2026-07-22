@@ -10,11 +10,14 @@ import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
 import {
   CUSTOM_RUNTIME_ID,
   CUSTOM_RUNTIME_LABEL,
+  applyCustomHarnessPreference,
   buildCustomAcpRuntime,
+  customHarnessCatalogStub,
   formatAgentArgsInput,
   isCustomRuntimeId,
-  parseAgentArgsInput,
+  type ByoHarnessDraft,
 } from "@/features/agents/lib/customHarness";
+import { CustomHarnessFields } from "@/features/agents/ui/CustomHarnessFields";
 import { createSaveCoalescer } from "./saveCoalescer";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import {
@@ -26,7 +29,6 @@ import type {
   GlobalAgentConfig,
 } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
-import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
@@ -42,6 +44,7 @@ import type { DefaultConfigStepActions } from "./types";
 
 type DefaultConfigStepProps = {
   actions: DefaultConfigStepActions;
+  byoDraft?: ByoHarnessDraft | null;
   direction: OnboardingTransitionDirection;
   readyRuntimeIds: readonly string[];
 };
@@ -53,9 +56,11 @@ function formatHarnessLabel(runtime: AcpRuntimeCatalogEntry | undefined) {
 }
 
 function AgentDefaultsSection({
+  byoDraft,
   onPersistenceStateChange,
   readyRuntimeIds,
 }: {
+  byoDraft?: ByoHarnessDraft | null;
   onPersistenceStateChange: (state: {
     canComplete: boolean;
     flush: () => Promise<void>;
@@ -75,35 +80,12 @@ function AgentDefaultsSection({
     cancel: () => void;
   } | null>(null);
   const [isSaving, setIsSaving] = React.useState(false);
+  const seededByoRef = React.useRef(false);
 
   React.useEffect(() => {
     let unmounted = false;
 
-    async function loadDefaults() {
-      const [configResult, bakedEnvResult] = await Promise.allSettled([
-        getGlobalAgentConfig(),
-        getBakedBuildEnv(),
-      ]);
-
-      if (unmounted) return;
-
-      if (configResult.status === "fulfilled") {
-        setConfig(configResult.value);
-      }
-      if (bakedEnvResult.status === "fulfilled") {
-        setBakedEnv(bakedEnvResult.value);
-      }
-      setIsLoading(false);
-    }
-
-    void loadDefaults();
-
-    // The coalescer serializes autosaves and drains any edit that arrived
-    // while a previous save was in flight. Cancel on unmount so a slow
-    // in-flight request never calls setState on an unmounted component.
     const coalescer = createSaveCoalescer<GlobalAgentConfig>(
-      // set_global_agent_config returns a save result (config + restart
-      // counts); the coalescer round-trips the persisted config only.
       async (next) => (await setGlobalAgentConfig(next)).config,
       (saving) => {
         if (!unmounted) setIsSaving(saving);
@@ -114,11 +96,37 @@ function AgentDefaultsSection({
     );
     coalescerRef.current = coalescer;
 
+    async function loadDefaults() {
+      const [configResult, bakedEnvResult] = await Promise.allSettled([
+        getGlobalAgentConfig(),
+        getBakedBuildEnv(),
+      ]);
+
+      if (unmounted) return;
+
+      let next =
+        configResult.status === "fulfilled"
+          ? configResult.value
+          : EMPTY_GLOBAL_CONFIG;
+      if (byoDraft?.command.trim() && !seededByoRef.current) {
+        next = applyCustomHarnessPreference(next, byoDraft);
+        seededByoRef.current = true;
+        coalescer.enqueue(next);
+      }
+      setConfig(next);
+      if (bakedEnvResult.status === "fulfilled") {
+        setBakedEnv(bakedEnvResult.value);
+      }
+      setIsLoading(false);
+    }
+
+    void loadDefaults();
+
     return () => {
       unmounted = true;
       coalescer.cancel();
     };
-  }, []);
+  }, [byoDraft]);
 
   const customReady = readyRuntimeIds.includes(CUSTOM_RUNTIME_ID);
   const effectiveReadyRuntimeIds = React.useMemo(
@@ -162,30 +170,11 @@ function AgentDefaultsSection({
     const items: AcpRuntimeCatalogEntry[] = [...readyCatalogRuntimes];
     if (customRuntime) {
       items.push(customRuntime);
-    } else if (customReady) {
-      items.push({
-        id: CUSTOM_RUNTIME_ID,
-        label: CUSTOM_RUNTIME_LABEL,
-        avatarUrl: "",
-        availability: "available",
-        command: null,
-        binaryPath: null,
-        defaultArgs: [],
-        mcpCommand: null,
-        modelEnvVar: null,
-        providerEnvVar: null,
-        thinkingEnvVar: null,
-        installHint: "",
-        installInstructionsUrl: "https://agentclientprotocol.com/",
-        canAutoInstall: false,
-        underlyingCliPath: null,
-        nodeRequired: false,
-        authStatus: { status: "not_applicable" },
-        loginHint: null,
-      });
+    } else if (customReady || isCustomRuntimeId(config.preferred_runtime)) {
+      items.push(customHarnessCatalogStub());
     }
     return items;
-  }, [customReady, customRuntime, readyCatalogRuntimes]);
+  }, [config.preferred_runtime, customReady, customRuntime, readyCatalogRuntimes]);
   const selectedRuntime = React.useMemo(
     () =>
       readyRuntimes.find((runtime) => runtime.id === config.preferred_runtime),
@@ -222,11 +211,10 @@ function AgentDefaultsSection({
 
   const handleCustomCommandChange = React.useCallback(
     (command: string) => {
-      const next: GlobalAgentConfig = {
-        ...config,
-        preferred_agent_command: command,
-        preferred_runtime: CUSTOM_RUNTIME_ID,
-      };
+      const next = applyCustomHarnessPreference(config, {
+        command,
+        args: formatAgentArgsInput(config.preferred_agent_args),
+      });
       setConfig(next);
       coalescerRef.current?.enqueue(next);
     },
@@ -235,11 +223,10 @@ function AgentDefaultsSection({
 
   const handleCustomArgsChange = React.useCallback(
     (value: string) => {
-      const next: GlobalAgentConfig = {
-        ...config,
-        preferred_agent_args: parseAgentArgsInput(value),
-        preferred_runtime: CUSTOM_RUNTIME_ID,
-      };
+      const next = applyCustomHarnessPreference(config, {
+        command: config.preferred_agent_command ?? "",
+        args: value,
+      });
       setConfig(next);
       coalescerRef.current?.enqueue(next);
     },
@@ -311,56 +298,17 @@ function AgentDefaultsSection({
           </div>
 
           {isCustomSelected ? (
-            <div className="space-y-4">
-              <div className="space-y-1.5">
-                <label
-                  className="pl-3 text-sm font-medium"
-                  htmlFor="global-agent-custom-command"
-                >
-                  Agent command
-                </label>
-                <Input
-                  autoCorrect="off"
-                  className="h-12 rounded-2xl border-foreground/15 bg-white px-4 text-sm shadow-none"
-                  data-testid="global-agent-custom-command"
-                  id="global-agent-custom-command"
-                  onChange={(event) =>
-                    handleCustomCommandChange(event.target.value)
-                  }
-                  placeholder="agent"
-                  spellCheck={false}
-                  value={config.preferred_agent_command ?? ""}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label
-                  className="pl-3 text-sm font-medium"
-                  htmlFor="global-agent-custom-args"
-                >
-                  Agent args
-                  <span className="ml-1 text-xs font-normal text-muted-foreground">
-                    Optional
-                  </span>
-                </label>
-                <Input
-                  autoCorrect="off"
-                  className="h-12 rounded-2xl border-foreground/15 bg-white px-4 text-sm shadow-none"
-                  data-testid="global-agent-custom-args"
-                  id="global-agent-custom-args"
-                  onChange={(event) =>
-                    handleCustomArgsChange(event.target.value)
-                  }
-                  placeholder="acp"
-                  spellCheck={false}
-                  value={formatAgentArgsInput(config.preferred_agent_args)}
-                />
-                <p className="pl-3 text-xs text-muted-foreground">
-                  Comma-separated. Example:{" "}
-                  <code className="font-mono">acp</code> for Cursor, or leave
-                  blank for zero-arg adapters.
-                </p>
-              </div>
-            </div>
+            <CustomHarnessFields
+              args={formatAgentArgsInput(config.preferred_agent_args)}
+              argsId="global-agent-custom-args"
+              argsTestId="global-agent-custom-args"
+              command={config.preferred_agent_command ?? ""}
+              commandId="global-agent-custom-command"
+              commandTestId="global-agent-custom-command"
+              onArgsChange={handleCustomArgsChange}
+              onCommandChange={handleCustomCommandChange}
+              size="onboarding"
+            />
           ) : (
             <AgentConfigFields
               bakedEnv={bakedEnv}
@@ -369,9 +317,6 @@ function AgentDefaultsSection({
               isCustomModelEditing={isCustomModelEditing}
               isCustomProvider={isCustomProvider}
               onConfigChange={(next) => {
-                // Always apply optimistically so the UI never reverts mid-save,
-                // then enqueue the persist — the coalescer serialises multiple
-                // rapid edits into a single trailing request.
                 setConfig(next);
                 coalescerRef.current?.enqueue(next);
               }}
@@ -397,6 +342,7 @@ function AgentDefaultsSection({
  */
 export function DefaultConfigStep({
   actions,
+  byoDraft = null,
   direction,
   readyRuntimeIds,
 }: DefaultConfigStepProps) {
@@ -408,6 +354,9 @@ export function DefaultConfigStep({
     null,
   );
   const [isCompleting, setIsCompleting] = React.useState(false);
+  const customOnly =
+    readyRuntimeIds.length === 1 &&
+    isCustomRuntimeId(readyRuntimeIds[0] ?? "");
 
   const handleComplete = React.useCallback(async () => {
     setIsCompleting(true);
@@ -430,18 +379,21 @@ export function DefaultConfigStep({
     >
       <div className="w-full max-w-[500px] text-center">
         <h1 className="text-title font-normal text-foreground">
-          Configure your default model settings
+          {customOnly
+            ? "Confirm your custom harness"
+            : "Configure your default model settings"}
         </h1>
         <p className="mx-auto mt-3 max-w-[440px] text-sm leading-5 text-foreground/80">
-          This will be set as your default model configuration across Buzz. You
-          can always change this in your Settings or give specific agents a
-          different configuration.
+          {customOnly
+            ? "Buzz will spawn this ACP command for new agents. Make sure the binary speaks ACP over stdio and is on your PATH."
+            : "This will be set as your default model configuration across Buzz. You can always change this in your Settings or give specific agents a different configuration."}
         </p>
       </div>
 
       <div className="flex w-full flex-1 items-center justify-center py-10">
         <div className="w-full max-w-[328px]">
           <AgentDefaultsSection
+            byoDraft={byoDraft}
             onPersistenceStateChange={setPersistenceState}
             readyRuntimeIds={readyRuntimeIds}
           />

@@ -58,7 +58,10 @@ export type ProfileStepActions = {
 
 export type SetupStepActions = {
   back: () => void;
-  next: (readyRuntimeIds: readonly string[]) => void;
+  next: (
+    readyRuntimeIds: readonly string[],
+    byoDraft?: { command: string; args: string } | null,
+  ) => void;
 };
 
 export type DefaultConfigStepActions = {

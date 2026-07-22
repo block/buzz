@@ -5,12 +5,17 @@ export const CUSTOM_RUNTIME_ID = "custom";
 
 export const CUSTOM_RUNTIME_LABEL = "Custom command";
 
+export type ByoHarnessDraft = {
+  args: string;
+  command: string;
+};
+
 /**
- * Build a synthetic available runtime for a user-supplied ACP command.
+ * Build a synthetic runtime for a user-supplied ACP command.
  *
- * Custom harnesses are outside the Rust `KNOWN_ACP_RUNTIMES` catalog — they
- * have no install/auth/model capability metadata. Spawn still works because
- * buzz-acp accepts any stdio ACP server via `BUZZ_ACP_AGENT_COMMAND`.
+ * Custom harnesses are outside `KNOWN_ACP_RUNTIMES`. `availability: "available"`
+ * means the user configured a command — not that PATH was probed. Spawn resolves
+ * the binary later the same way it does for any `agent_command` pin.
  */
 export function buildCustomAcpRuntime(
   command: string,
@@ -25,6 +30,8 @@ export function buildCustomAcpRuntime(
     avatarUrl: "",
     availability: "available",
     command: trimmed,
+    // Mirror command: spawn uses the command string; absolute paths work as-is,
+    // bare names are resolved on PATH at spawn time.
     binaryPath: trimmed,
     defaultArgs: args.map((arg) => arg.trim()).filter((arg) => arg.length > 0),
     mcpCommand: null,
@@ -32,7 +39,31 @@ export function buildCustomAcpRuntime(
     providerEnvVar: null,
     thinkingEnvVar: null,
     installHint:
-      "Point Buzz at any ACP-speaking binary (Cursor `agent`, yoak, OpenCode, …).",
+      "Any ACP-over-stdio binary. Buzz does not verify PATH until the agent starts.",
+    installInstructionsUrl: "https://agentclientprotocol.com/",
+    canAutoInstall: false,
+    underlyingCliPath: null,
+    nodeRequired: false,
+    authStatus: { status: "not_applicable" },
+    loginHint: null,
+  };
+}
+
+/** Placeholder catalog entry while the custom command field is still empty. */
+export function customHarnessCatalogStub(): AcpRuntime {
+  return {
+    id: CUSTOM_RUNTIME_ID,
+    label: CUSTOM_RUNTIME_LABEL,
+    avatarUrl: "",
+    availability: "available",
+    command: "",
+    binaryPath: "",
+    defaultArgs: [],
+    mcpCommand: null,
+    modelEnvVar: null,
+    providerEnvVar: null,
+    thinkingEnvVar: null,
+    installHint: "",
     installInstructionsUrl: "https://agentclientprotocol.com/",
     canAutoInstall: false,
     underlyingCliPath: null,
@@ -53,8 +84,25 @@ export function parseAgentArgsInput(value: string): string[] {
     .filter((arg) => arg.length > 0);
 }
 
-export function formatAgentArgsInput(args: readonly string[] | null | undefined) {
+export function formatAgentArgsInput(
+  args: readonly string[] | null | undefined,
+) {
   return (args ?? []).join(", ");
+}
+
+export function applyCustomHarnessPreference(
+  config: GlobalAgentConfig,
+  draft: ByoHarnessDraft,
+): GlobalAgentConfig {
+  return {
+    ...config,
+    preferred_runtime: CUSTOM_RUNTIME_ID,
+    preferred_agent_command: draft.command.trim(),
+    preferred_agent_args: parseAgentArgsInput(draft.args),
+    // Custom harnesses don't use Buzz provider/model knobs.
+    model: null,
+    provider: null,
+  };
 }
 
 /** Resolve the effective preferred harness, including a BYO custom command. */

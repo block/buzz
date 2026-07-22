@@ -115,7 +115,13 @@ test("bring-your-own harness enables Next without Claude or Codex", async ({
   await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
     "Custom command",
   );
-  expect(await readSavedRuntime(page)).toBe("custom");
+  await expect(page.getByTestId("global-agent-custom-command")).toHaveValue(
+    "agent",
+  );
+  // Preference is persisted from the config step (not Setup Next).
+  await expect
+    .poll(() => readSavedRuntime(page))
+    .toBe("custom");
   const saved = await page.evaluate(async () => {
     return await (
       window as Window & {
