@@ -21,8 +21,19 @@ if grep -Eq 'contents: write|gh release|buzz-desktop-latest|latest\.json|TAURI_S
   exit 1
 fi
 
-if grep -qE '^  (push|pull_request|schedule):' "$workflow"; then
-  echo "signed canary workflow must remain manual-only" >&2
+on_block=$(
+  awk '
+    /^on:$/ { in_on = 1; next }
+    in_on && /^[^[:space:]#]/ { exit }
+    in_on && NF && $0 !~ /^[[:space:]]*#/ {
+      gsub(/[[:space:]]/, "")
+      print
+    }
+  ' "$workflow"
+)
+if [[ "$on_block" != "workflow_dispatch:" ]]; then
+  echo "signed canary workflow must have workflow_dispatch as its only trigger" >&2
+  printf 'found on block:\n%s\n' "$on_block" >&2
   exit 1
 fi
 

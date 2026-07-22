@@ -160,9 +160,11 @@ gh workflow run signed-macos-canary.yml --repo block/buzz --ref main
 ```
 
 The workflow derives a `-test.<run-number>` version, signs and notarizes the
-DMG, verifies it with Gatekeeper, and uploads it as a private Actions artifact
-with seven-day retention. It has no release permissions, does not create or
-move tags, and cannot update `buzz-desktop-latest` or `latest.json`.
+DMG, verifies it with Gatekeeper, and uploads it as a short-lived Actions
+artifact with seven-day retention. Because this is a public repository, any
+signed-in GitHub user can download that artifact while it exists; it is
+unpublished, not private. The workflow has no release permissions, does not
+create or move tags, and cannot update `buzz-desktop-latest` or `latest.json`.
 
 Download the artifact from the completed run:
 
