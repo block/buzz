@@ -732,6 +732,13 @@ async fn spawn_one(
     #[cfg(unix)]
     cmd.process_group(0);
 
+    // Windowless buzz-acp parent: MCP children must not allocate consoles.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
     let transport = TokioChildProcess::new(cmd)
         .map_err(|e| AgentError::Mcp(format!("spawn {}: {e}", spec.name)))?;
     let pgid = transport.id();

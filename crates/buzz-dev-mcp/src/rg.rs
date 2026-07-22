@@ -21,11 +21,15 @@ fn try_system_rg(args: &[String]) -> Option<i32> {
     let cleaned_path = clean_path(&self_canon);
     let candidate = which_rg(&cleaned_path)?;
 
-    let status = Command::new(&candidate)
-        .args(args)
-        .env("PATH", &cleaned_path)
-        .status()
-        .ok()?;
+    let mut cmd = Command::new(&candidate);
+    cmd.args(args).env("PATH", &cleaned_path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let status = cmd.status().ok()?;
     Some(status.code().unwrap_or(2))
 }
 
