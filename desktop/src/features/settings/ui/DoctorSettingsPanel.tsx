@@ -84,7 +84,8 @@ function RuntimeOverflowMenu({
     runtime.installInstructionsUrl.trim().length > 0 &&
     (runtime.availability !== "available" ||
       runtime.authStatus.status === "logged_out" ||
-      runtime.authStatus.status === "config_invalid");
+      runtime.authStatus.status === "config_invalid" ||
+      runtime.authStatus.status === "probe_failed");
   const hasActions =
     runtime.nodeRequired || hasInstructions || authMethods.length > 0;
 
@@ -200,21 +201,25 @@ function RuntimeActions({
 
 function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   const label =
-    runtime.authStatus.status === "config_invalid"
-      ? "Config error"
-      : runtime.availability === "adapter_missing"
-        ? "Adapter needed"
-        : runtime.availability === "adapter_outdated"
-          ? "Update needed"
-          : runtime.availability === "cli_missing"
-            ? "CLI needed"
-            : null;
+    runtime.authStatus.status === "probe_failed"
+      ? "CLI error"
+      : runtime.authStatus.status === "config_invalid"
+        ? "Config error"
+        : runtime.availability === "adapter_missing"
+          ? "Adapter needed"
+          : runtime.availability === "adapter_outdated"
+            ? "Update needed"
+            : runtime.availability === "cli_missing"
+              ? "CLI needed"
+              : null;
 
   if (!label) {
     return null;
   }
 
-  const isConfigError = runtime.authStatus.status === "config_invalid";
+  const isRuntimeError =
+    runtime.authStatus.status === "config_invalid" ||
+    runtime.authStatus.status === "probe_failed";
 
   return (
     <>
@@ -224,7 +229,7 @@ function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
       <span
         className={cn(
           "inline-flex shrink-0 items-center rounded-md px-2 py-0.5 text-xs font-medium",
-          isConfigError
+          isRuntimeError
             ? "bg-destructive/10 text-destructive"
             : "bg-muted text-muted-foreground",
         )}
@@ -363,6 +368,15 @@ function RuntimeRow({
             data-testid={`doctor-runtime-config-error-${runtime.id}`}
           >
             Config error: {runtime.authStatus.diagnostic}
+          </p>
+        ) : null}
+
+        {runtime.authStatus.status === "probe_failed" ? (
+          <p
+            className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
+            data-testid={`doctor-runtime-probe-error-${runtime.id}`}
+          >
+            CLI check failed: {runtime.authStatus.diagnostic}
           </p>
         ) : null}
 

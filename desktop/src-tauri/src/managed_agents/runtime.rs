@@ -1665,6 +1665,16 @@ pub fn spawn_agent_child(
                             "setup_copy": setup_copy,
                             "diagnostic": diagnostic,
                         }),
+                        Requirement::CliProbeFailed {
+                            probe_args,
+                            setup_copy,
+                            diagnostic,
+                        } => serde_json::json!({
+                            "surface": "cli_probe_failed",
+                            "probe_args": probe_args,
+                            "setup_copy": setup_copy,
+                            "diagnostic": diagnostic,
+                        }),
                         Requirement::GitBash => serde_json::json!({
                             "surface": "git_bash",
                         }),

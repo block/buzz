@@ -50,6 +50,21 @@ test("shouldOpenDoctor_gitBashMixedWithEnvKey_routesToDoctor", () => {
   );
 });
 
+test("shouldOpenDoctor_cliProbeFailure_routesToDoctor", () => {
+  assert.equal(
+    shouldOpenDoctor([
+      {
+        surface: "cli_probe_failed",
+        probe_args: ["codex", "login", "status"],
+        setup_copy: "run `codex login`",
+        diagnostic: "Error: spawn codex ENOENT",
+      },
+    ]),
+    true,
+    "a broken CLI probe must route to Agent runtimes instead of Edit Agent",
+  );
+});
+
 test("shouldOpenDoctor_regularMixedRequirements_routesToEditAgent", () => {
   assert.equal(
     shouldOpenDoctor([

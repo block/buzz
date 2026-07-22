@@ -252,6 +252,20 @@ function RuntimeStatus({
     );
   }
 
+  if (
+    runtime.availability === "available" &&
+    runtime.authStatus.status === "probe_failed"
+  ) {
+    return (
+      <span
+        className="inline-flex h-5 cursor-default items-center rounded-full bg-destructive/10 px-2.5 font-mono text-badge font-normal uppercase text-destructive"
+        data-testid={`onboarding-runtime-probe-failed-${runtime.id}`}
+      >
+        CLI ERROR
+      </span>
+    );
+  }
+
   const installLabel = installError ? "RETRY INSTALL" : "INSTALL";
   if (runtime.canAutoInstall) {
     return (
@@ -438,6 +452,16 @@ function getOnboardingAuthMethods(
 }
 
 function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+  if (runtime.authStatus.status === "probe_failed") {
+    return (
+      <RuntimeErrorTooltip
+        className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
+        detail={runtime.authStatus.diagnostic}
+        label="CLI check failed"
+        testId={`onboarding-runtime-auth-error-${runtime.id}`}
+      />
+    );
+  }
   if (runtime.authStatus.status === "config_invalid") {
     return (
       <RuntimeErrorTooltip
