@@ -177,7 +177,7 @@ async function openReviewWithPostedTimecode(
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
   await expect(
     page.getByTestId("message-composer").getByAltText("Video attachment bbbb"),
   ).toBeVisible();
@@ -232,7 +232,7 @@ test("video upload previews use poster frames and inline videos open review mode
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
 
   const composer = page.getByTestId("message-composer");
   const composerPoster = composer.getByAltText("Video attachment bbbb");
