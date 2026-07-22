@@ -979,6 +979,36 @@ pub async fn execute_run(
         )
     })?;
 
+    // Precheck gate (#2297): evaluate once before any step runs. When false,
+    // short-circuit with zero step actions — a scheduled poller can skip empty
+    // runs at ~no cost (no messages, webhooks, or agent turns). Evaluation
+    // errors are treated as "run" (fail open) so a bad gate never silently
+    // disables a workflow; the error is surfaced in the trace.
+    if let Some(expr) = def.precheck.as_deref() {
+        match evaluate_condition(expr, trigger_ctx, &HashMap::new()).await {
+            Ok(false) => {
+                let trace = vec![serde_json::json!({
+                    "precheck": expr,
+                    "status": "skipped",
+                    "reason": "precheck-false",
+                })];
+                return Ok(ExecutionResult {
+                    approval_token: None,
+                    step_index: 0,
+                    step_outputs: HashMap::new(),
+                    trace,
+                });
+            }
+            Ok(true) => {}
+            Err(e) => {
+                tracing::warn!(
+                    workflow = %def.name,
+                    "precheck evaluation failed; running steps (fail-open): {e}"
+                );
+            }
+        }
+    }
+
     engine
         .db
         .update_workflow_run(
