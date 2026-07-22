@@ -114,6 +114,7 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
   const buzzAcpPath = options.buzzAcpPath ?? "/Volumes/AEON/Projects/buzz/target/release/buzz-acp";
   const openclawPath = options.openclawPath ?? "/REQUIRES_FLEET/immutable-openclaw/bin/openclaw";
   const tokenFile = options.tokenFile ?? "/REQUIRES_FLEET/owned-token-file";
+  const privateKeyFile = options.privateKeyFile ?? identityMap.members[aspect].secret_ref;
   const workingDirectory = options.workingDirectory ?? "/Volumes/AEON/Projects/buzz";
   const configPath = options.configPath ?? null;
   const stdoutPath = options.stdoutPath ?? null;
@@ -139,6 +140,7 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
     buzzAcpPath,
     openclawPath,
     tokenFile,
+    privateKeyFile,
     workingDirectory,
     ...(configPath !== null ? { configPath } : {}),
     ...(stdoutPath !== null ? { stdoutPath } : {}),
@@ -159,7 +161,14 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
     }
     assertArgSafe(executablePath, "executablePath");
   }
-  const rendered = renderWorker(manifest, identityMap, aspect, tokenFile);
+  const launchIdentityMap = {
+    ...identityMap,
+    members: {
+      ...identityMap.members,
+      [aspect]: { ...identityMap.members[aspect], secret_ref: privateKeyFile },
+    },
+  };
+  const rendered = renderWorker(manifest, launchIdentityMap, aspect, tokenFile);
   const agentCommandIndex = rendered.args.indexOf("--agent-command") + 1;
   rendered.args[agentCommandIndex] = openclawPath;
   if (agentCommandPrefixArgs.length > 0) {
@@ -193,7 +202,7 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
     runAtLoad: false,
     keepAlive: false,
     argv,
-    privateKeyFile: identityMap.members[aspect].secret_ref,
+    privateKeyFile,
     tokenFile,
     tokenFileContract: manifest.gateway.tokenFileContract,
     expectedPublicKey: worker.pubkey,

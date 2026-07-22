@@ -171,6 +171,7 @@ test("Fleet can use a system launcher while retaining the exact Buzz binary", ()
 test("Fleet can keep launchd-owned paths local while Buzz reads its canonical config", () => {
   const rendered = renderDisabledLaunchAgent(manifest, identityMap, "nexus", {
     workingDirectory: "/Users/operator",
+    privateKeyFile: "/Users/operator/Library/Application Support/AEON/secrets/nexus.sk",
     configPath: "/Volumes/AEON/Projects/buzz/deploy/local/aeon-aspects/config/nexus.toml",
     stdoutPath: "/Users/operator/Library/Logs/AEON/nexus.buzz-acp.log",
     stderrPath: "/Users/operator/Library/Logs/AEON/nexus.buzz-acp.err.log",
@@ -178,6 +179,10 @@ test("Fleet can keep launchd-owned paths local while Buzz reads its canonical co
   assert.equal(
     rendered.argv[rendered.argv.indexOf("--config") + 1],
     "/Volumes/AEON/Projects/buzz/deploy/local/aeon-aspects/config/nexus.toml",
+  );
+  assert.equal(
+    rendered.argv[rendered.argv.indexOf("--private-key-file") + 1],
+    "/Users/operator/Library/Application Support/AEON/secrets/nexus.sk",
   );
   assert.match(rendered.plist, /<key>WorkingDirectory<\/key><string>\/Users\/operator<\/string>/);
   assert.match(rendered.plist, /<key>StandardOutPath<\/key><string>\/Users\/operator\/Library\/Logs\/AEON\/nexus\.buzz-acp\.log<\/string>/);
